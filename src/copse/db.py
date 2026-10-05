@@ -1304,6 +1304,11 @@ class DB:
                 (int(review), int(escalated), outcome, agent_id),
             )
 
+    def routing_decision_for_agent(self, agent_id: str) -> RoutingDecision | None:
+        row = self.conn.execute("SELECT * FROM routing_decisions WHERE agent_id=? ORDER BY id DESC LIMIT 1",
+                                (agent_id,)).fetchone()
+        return _load(RoutingDecision, row) if row else None
+
     def list_routing_decisions(self, repo_root: str | None = None) -> list[RoutingDecision]:
         where, args = ("WHERE repo_root=?", (repo_root,)) if repo_root else ("", ())
         rows = self.conn.execute(f"SELECT * FROM routing_decisions {where} ORDER BY id", args)
