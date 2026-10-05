@@ -172,6 +172,8 @@ def rescue_sidebar(db: DB, ws: Workspace) -> None:
             if root_ws is None or root_ws.tmux_session == ws.tmux_session:
                 continue
             sidebar = db.get_sidebar_pane(root_id)
+            # If the root's own window is gone, bring_sidebar declines and the
+            # sidebar goes down with this session: nowhere left to show it.
             if _valid_sidebar(sidebar, root_id) and tmux.pane_session(sidebar) == ws.tmux_session:
                 bring_sidebar(db, root_id, root_ws.tmux_session)
     except Exception:  # noqa: BLE001 - cleanup must not fail because of the sidebar

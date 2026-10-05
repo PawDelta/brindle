@@ -132,5 +132,21 @@ def test_prefix_s_pulls_a_sidebar_that_lives_elsewhere(stranded):
     assert "sidebar" in line and "--session" in line and "resize-pane -Z" in line
 
 
+def test_has_sidebar_check_tells_windows_apart(stranded):
+    """Run the prefix S check through tmux itself (which expands formats
+    before the shell sees them) on a window with a sidebar and one without."""
+    db, root_win, _, sidebar = stranded
+
+    def has_sidebar(pane):
+        tmux._tmux("set-option", "-g", "@hs", "unset")
+        tmux._tmux("if-shell", "-t", pane, tmux.HAS_SIDEBAR_SHELL,
+                   "set-option -g @hs yes", "set-option -g @hs no")
+        return tmux._tmux("show-options", "-gv", "@hs").stdout.strip()
+
+    assert has_sidebar(root_win) == "no"
+    sidebar_here(db, ROOT_SESSION)
+    assert has_sidebar(root_win) == "yes"
+
+
 def test_doctor_mentions_the_command(copse_home):
     assert any("copse sidebar" in c.detail for c in doctor.checks(None))

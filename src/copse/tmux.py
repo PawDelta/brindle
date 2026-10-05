@@ -384,6 +384,13 @@ def clipboard_command() -> str | None:
     return None
 
 
+# Whether the key-pressing window holds a sidebar pane. tmux expands formats in
+# an if-shell command before running it, so the inner one is escaped (##) to
+# reach `list-panes` intact and be read per pane; the window is named by id
+# (expanded to the key-pressing window) rather than left to the shell's context.
+HAS_SIDEBAR_SHELL = "tmux list-panes -t '#{window_id}' -F '##{@copse_sidebar}' | grep -q ."
+
+
 def bind_session_keys(session: str) -> None:
     """Chat-friendly mouse selection and the sidebar toggle. Key tables are
     server-wide in tmux, so every binding is guarded on the ``@copse`` session
@@ -403,7 +410,7 @@ def bind_session_keys(session: str) -> None:
     pull = " ".join(shlex.quote(a) for a in [*copse_invocation(), "sidebar", "--session", "#{session_name}"])
     pull = f"run-shell -b {shlex.quote(pull + ' >/dev/null 2>&1 || true')}"
     hide = "if-shell -F '#{@copse_sidebar}' 'select-pane -t :.+'; resize-pane -Z"
-    has_sidebar = "tmux list-panes -F '#{@copse_sidebar}' | grep -q ."
+    has_sidebar = HAS_SIDEBAR_SHELL
     unzoomed = f"if-shell {shlex.quote(has_sidebar)} {shlex.quote(hide)} {shlex.quote(pull)}"
     toggle = f"if-shell -F '#{{window_zoomed_flag}}' 'resize-pane -Z' {shlex.quote(unzoomed)}"
     _tmux("bind-key", "S", "if-shell", "-F", "#{@copse}", toggle, "", check=False)
