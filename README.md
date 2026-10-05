@@ -1333,20 +1333,20 @@ uv sync
 uv run pytest
 ```
 
-### Local CI
+### CI
 
-GitHub Actions minutes cost money on this repo, so CI runs here first:
+GitHub runs the tests on every pull request and every push to `main`: one Ubuntu
+and one macOS job, on Python 3.12. A change that only touches docs runs nothing.
+
+You can also run the same tests locally, on a clean export of the commit:
 
 ```sh
-git config core.hooksPath .githooks   # once: every push runs the quick leg first
 scripts/ci_local.sh                   # Python 3.12 here and on Linux (Docker), tests in parallel
 scripts/ci_local.sh --full            # 3.11, 3.12 and 3.13, here and on Linux
-scripts/ci_local.sh --report          # after pushing a PR branch: post a `local-ci` status on it
 ```
 
-Each leg runs `uv sync && uv run pytest -q` on a clean export of the commit, the
-same as the GitHub workflow. On GitHub, only pushes to `main` run CI (one Linux
-job); the full matrix runs when started by hand or by a release.
+The pre-push hook that ran these before every push is off for now
+(`git config core.hooksPath .githooks` turns it back on).
 
 ### Releasing
 
