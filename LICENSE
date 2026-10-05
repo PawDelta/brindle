@@ -1,0 +1,77 @@
+Required Notice: Copyright 2026 PawDelta LLC (https://pawdelta.com/copse)
+
+# copse License 1.0
+
+## Acceptance
+
+In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
+
+## Use License
+
+The licensor grants you a copyright license to install and use the software for any purpose, including commercial purposes, subject to the limitations and conditions below.
+
+## No Modification
+
+You may not change, adapt, translate or create new works based on the software, except as allowed under **Permitted Changes**, or as the licensor allows you in writing.
+
+## Permitted Changes
+
+You may make these changes without asking:
+
+1. **Contributions.** Changes you make only to submit to the licensor, through the licensor's official repository for the software. By submitting a contribution, you license it to the licensor under any terms the licensor chooses, and you confirm you have the right to do so. Submitting a contribution does not change your standing under these terms: it gives you no further rights to the software, including to any version that includes your contribution, and takes away none of your licenses.
+
+2. **Configuration and plugins.** Settings, agent profiles and plugins that work through the software's documented configuration and extension points, without changing any file of the software itself. A plugin may not include any part of the software.
+
+3. **Private fixes.** Changes to your own installed copy that fix a defect, kept only for your own use and not shared with anyone.
+
+## No Redistribution
+
+Unless PawDelta LLC gives you express written permission, you may not distribute, sublicense, sell, rent, lend or otherwise make the software, or any changed copy of it, available to anyone else. Everyone who uses the software must get it from the licensor's official distribution channels, such as its package on the Python Package Index or its official repository, or from someone PawDelta LLC has permitted in writing to distribute it. You may make copies only as needed to install and use the software yourself, and to keep backups.
+
+A fork of the official repository that a code hosting service's own terms allow is permitted only to view the software and prepare contributions under **Permitted Changes**.
+
+## Noncompete
+
+Any purpose is a permitted purpose, except for providing any product that competes with the software or any product the licensor or any of its affiliates provides using the software.
+
+## Competition
+
+Goods and services compete even when they provide functionality through different kinds of interfaces or for different technical platforms. Applications can compete with services, libraries with plugins, frameworks with development tools, and so on, even if they're written in different programming languages or for different computer architectures. Goods and services compete even when provided free of charge. If you market a product as a practical substitute for the software or another product, it definitely competes.
+
+## Patent License
+
+The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software as these terms allow.
+
+## Notices
+
+You must keep this license and any plain-text lines beginning with `Required Notice:` intact in every copy of the software you make.
+
+## Fair Use
+
+You may have "fair use" rights for the software under the law. These terms do not limit them.
+
+## Excuse
+
+If anyone notifies you in writing that you have not complied with these terms, you can keep your license by taking all practical steps to comply within 30 days after the notice. If you do not do so, your license ends immediately.
+
+## Patent Defense
+
+If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
+
+## No Liability
+
+***As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.***
+
+## Definitions
+
+The **licensor** is PawDelta LLC, the entity offering these terms, and the **software** is the software the licensor makes available under these terms, including any portion of it.
+
+**You** refers to the individual or entity agreeing to these terms.
+
+**Your company** is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization. **Control** means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise. Control can be direct or indirect.
+
+**Your licenses** are all the licenses granted to you for the software under these terms.
+
+**Use** means anything you do with the software requiring one of your licenses.
+
+A **product** is any goods or services, including software and hosted services.

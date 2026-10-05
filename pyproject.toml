@@ -1,0 +1,71 @@
+[project]
+name = "copse-ai"
+version = "0.16.0"
+description = "Run coding agents in parallel, each on its own git branch, with a supervisor that delegates, reviews, and merges"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-copse-1.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Hannah Lerner" }]
+keywords = ["ai", "agents", "claude-code", "codex", "git", "worktree", "tmux", "mcp", "orchestration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = [
+    "typer>=0.12",
+    "mcp>=2.2,<3",
+    "cryptography>=42",
+]
+
+[project.urls]
+Homepage = "https://pawdelta.com/copse/"
+Documentation = "https://pawdelta.com/copse/docs/recommended-use"
+Changelog = "https://pawdelta.com/copse/changelog"
+Repository = "https://github.com/hmlerner/copse-ai"
+Issues = "https://github.com/hmlerner/copse-ai/issues"
+
+[project.scripts]
+copse = "copse.cli:app"
+
+# copse Pro and Team (src/copse/pro): inert without a verified entitlement.
+[project.entry-points."copse.account"]
+pro = "copse.pro.account:make"
+
+[project.entry-points."copse.policy"]
+pro = "copse.pro.team_policy:make"
+
+[project.entry-points."copse.events"]
+pro = "copse.pro.team_events:make"
+audit = "copse.pro.audit_chain:make"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/copse"]
+# Metadata 2.5 is newer than twine/PyPI tooling reliably accepts.
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
+# The source release carries the code, the README and the license only:
+# no tests, CI, scripts or development config.
+only-include = ["src", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]

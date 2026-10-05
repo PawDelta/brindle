@@ -1,0 +1,3 @@
+{
+  "checks": ["uv run pytest -q"]
+}
