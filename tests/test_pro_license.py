@@ -124,11 +124,18 @@ def test_missing_claims_are_rejected(token, claim):
     {"seats": True}, {"seats": -1}, {"seats": "5"}, {"features": "learning"},
     {"features": [1]}, {"sub": ""}, {"status": 3}, {"iat": "0"}, {"exp": 1.5},
     {"role": 5}, {"role": ""}, {"policy_version": -1}, {"policy_version": "3"},
+    {"policy_role": 5}, {"policy_role": ""},
     {"iat": 2_000_000_000, "exp": 1_000_000_000},
 ])
 def test_malformed_claims_are_rejected(token, over):
     with pytest.raises(LicenseError):
         verify(token(**over))
+
+
+def test_policy_role_claim_is_optional(token):
+    assert verify(token()).policy_role is None
+    assert verify(token(policy_role=None)).policy_role is None
+    assert verify(token(policy_role="contractor")).policy_role == "contractor"
 
 
 def test_expired_token_is_rejected_without_grace(token):

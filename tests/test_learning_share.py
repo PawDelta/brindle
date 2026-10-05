@@ -1,4 +1,4 @@
-"""``copse account org learning-share``: the opt-in to the cross-org learning prior."""
+"""``copse account org learning-share``: the opt-in to pooling learning within a company."""
 
 import json
 
@@ -31,7 +31,12 @@ def test_off_by_default_and_says_so(team):
     code, out, _ = run(team, "org", "learning-share", "--org", ORG)
     assert code == 0 and "off" in out and "Off by default" in out
     assert "task text, paths" in out and "own hashes" in out and "own data still wins" in out
-    assert "built-in profile names" in out and "at most 10 tasks" in out and "60-day half-life" in out
+    assert "built-in profile names" in out and "fades out over time" in out
+    flat = " ".join(out.split())
+    assert "only with the other orgs in the same company, never with other companies" in flat
+    assert "cross-org" not in out
+    for number in ("10", "5 orgs", "8 tasks", "60"):
+        assert number not in out
     assert [c[0] for c in team.calls if "learning-sharing" in c[0]] == [f"GET {PATH}"]
 
 
