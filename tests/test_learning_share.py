@@ -31,6 +31,7 @@ def test_off_by_default_and_says_so(team):
     code, out, _ = run(team, "org", "learning-share", "--org", ORG)
     assert code == 0 and "off" in out and "Off by default" in out
     assert "task text, paths" in out and "own hashes" in out and "own data still wins" in out
+    assert "built-in profile names" in out and "at most 10 tasks" in out and "60-day half-life" in out
     assert [c[0] for c in team.calls if "learning-sharing" in c[0]] == [f"GET {PATH}"]
 
 

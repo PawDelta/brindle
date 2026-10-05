@@ -195,11 +195,18 @@ class _OrgCommands:
                   + ".")
         self._say("When on, this org's coarse learning records (task kind, size, weight, profile, "
                   "cost, outcome),")
-        self._say("the same ones already sent for hosted learning and keyed by this org's own "
-                  "hashes, also feed a")
-        self._say("cross-org prior that gives new orgs a starting point. Never task text, paths "
-                  "or names. Your")
-        self._say("org's own data still wins once it has enough. Off by default.")
+        self._say("the same ones already sent for hosted learning, under this org's own hashes, "
+                  "also feed a")
+        self._say("cross-org prior that gives every Pro org a starting point. Never task text, "
+                  "paths or names;")
+        self._say("only copse's built-in profile names are pooled, custom ones never leave the org.")
+        self._say("Each org adds at most 10 tasks per task type, and a type's prior is used once "
+                  "5 orgs have")
+        self._say("contributed. It counts for at most 8 tasks, so your own data still wins "
+                  "soon after.")
+        self._say("Turning it off stops new contributions; what was shared fades out over a "
+                  "60-day half-life.")
+        self._say("Off by default.")
         if not state:
             self._say("Change it (owner/admin): `copse account org learning-share on|off`.")
         return 0
