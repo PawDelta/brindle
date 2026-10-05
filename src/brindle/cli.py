@@ -618,6 +618,13 @@ def default(
         typer.echo(f"brindle {__version__}")
         raise typer.Exit()
     if ctx.invoked_subcommand is None:
+        from brindle import legacy
+
+        try:
+            legacy_root = git.main_repo_root(os.getcwd())
+        except git.GitError:
+            legacy_root = None
+        legacy.warn_once(legacy_root)
         if cont:
             continue_cmd(session_id=None, attach=True)
         else:

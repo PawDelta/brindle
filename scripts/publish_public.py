@@ -2,7 +2,7 @@
 """Publish a release snapshot to the public brindle-ai repository.
 
 Development happens in this (private) repository. The public repository
-hmlerner/brindle-ai only gets one commit per release: the released code, README,
+pawdelta/brindle only gets one commit per release: the released code, README,
 license and pyproject.toml, with no development history, tests, CI or config.
 
     python3 scripts/publish_public.py 0.17.0            # show what would happen
@@ -25,7 +25,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-PUBLIC_REPO = "hmlerner/brindle-ai"
+PUBLIC_REPO = "pawdelta/brindle"
 PUBLIC_PATHS = ["src", "README.md", "LICENSE", "SCHEDULE-A", "pyproject.toml"]
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -39,7 +39,7 @@ def run(args: list[str], cwd: Path, capture: bool = False) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("version")
-    parser.add_argument("--public", default=os.path.expanduser("~/Projects/brindle-ai"),
+    parser.add_argument("--public", default=os.path.expanduser("~/Projects/brindle-public"),
                         help="local clone of the public repo (cloned if missing)")
     parser.add_argument("--push", action="store_true", help="actually commit, tag, push and release")
     args = parser.parse_args()
@@ -56,6 +56,10 @@ def main() -> int:
     if not notes.is_file():
         sys.exit(f"missing {notes.relative_to(ROOT)}")
 
+    origin = run(["git", "remote", "get-url", "origin"], ROOT, capture=True).strip()
+    if origin.removesuffix(".git").endswith(PUBLIC_REPO):
+        sys.exit(f"{PUBLIC_REPO} is this repo's own origin; publishing would overwrite the "
+                 "development repo with a code-only snapshot. Set PUBLIC_REPO to a separate repo.")
     public = Path(args.public)
     if not public.exists():
         print(f"cloning {PUBLIC_REPO} into {public}")

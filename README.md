@@ -62,6 +62,10 @@ brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/
 session shows it too (`brindle 0.11.5`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
+### Upgrading from copse
+
+brindle was called copse until 0.0.1, and it doesn't read anything copse saved. Install `brindle`, then move `~/.copse` to `~/.brindle` and each repo's `.copse/` to `.brindle/`. Until you do, saved permission rules, policy and config there don't apply. `brindle doctor` lists every leftover it finds, including old `copse` entries in `.agents/hooks.json` and `mcp_config.json` to remove.
+
 ## Quick start
 
 ```sh

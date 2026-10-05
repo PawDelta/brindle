@@ -124,6 +124,10 @@ def checks(repo_root: str | None) -> list[Check]:
     out.extend(airgap_checks(repo_root))
     out.extend(pro_checks())
 
+    from brindle import legacy
+
+    out.extend(Check(WARN, "previous name", line) for line in legacy.findings(repo_root))
+
     home = config.brindle_home()
     try:
         home.mkdir(parents=True, exist_ok=True)

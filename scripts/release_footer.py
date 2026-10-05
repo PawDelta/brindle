@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = "hmlerner/brindle-ai"
+REPO = "pawdelta/brindle"
 SITE = "https://pawdelta.com/brindle/"
 FOOTER = f"Docs and install: [pawdelta.com/brindle]({SITE}) · Release notes: [pawdelta.com/brindle/changelog]({SITE}changelog)"
 
