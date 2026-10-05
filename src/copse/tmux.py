@@ -45,6 +45,31 @@ def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
     _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *env_args)
 
 
+# tmux refuses a command over its message size (about 16 KB) with "command
+# too long". An agent's argv carries its whole system prompt and first
+# message, which a supervisor's brief plus a long goal can exceed.
+MAX_COMMAND = 8000
+
+
+def _short(command: list[str]) -> list[str]:
+    """``command``, or, when it is too long for tmux, a private script
+    that runs it: written 0600 under copse's home, it deletes itself as it
+    starts and then execs the original argv, so nothing else changes."""
+    if sum(len(a.encode()) + 1 for a in command) <= MAX_COMMAND:
+        return command
+    import shlex
+    import tempfile
+
+    from copse.config import copse_home
+
+    d = copse_home() / "launch"
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix="launch-", suffix=".sh", dir=d)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f'#!/bin/sh\nrm -f "$0"\nexec {shlex.join(command)}\n')
+    return ["/bin/sh", path]
+
+
 def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[str, str],
                tag: tuple[str, str] | None = None) -> str:
     """Open a window running ``command``. Returns the agent's PANE id (``%<n>``),
@@ -56,7 +81,7 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
-        "-n", name, "-c", cwd, *env_args, "--", *command,
+        "-n", name, "-c", cwd, *env_args, "--", *_short(command),
     )
     target = proc.stdout.strip()
     if tag:

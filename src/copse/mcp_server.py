@@ -11,7 +11,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-from copse import agents, autopilot, codex_hook, git, history, pipeline, policy, quota, sessions, tasks, workspaces
+from copse import agents, autopilot, codex_hook, git, history, pipeline, policy, quota, savings, sessions, tasks, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
@@ -241,9 +241,10 @@ async def handoff(
         if not task.strip():
             return "Give the worker a task."
         why: list[str] = []
+        decision: dict = {}
         try:
             profile, _ = autopilot.choose_profile(
-                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why)
+                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision)
         except autopilot.AutopilotError as e:
             return str(e)
         refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch)
@@ -259,6 +260,7 @@ async def handoff(
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
                 weight=weight,
             )
+            savings.record(db, ws.repo_root, decision, task_id=t.id)
             return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                     + "".join(f"\nprofile: {w}" for w in why))
         warning = tasks.overlap_warning(db, ws, files)
@@ -273,10 +275,11 @@ async def handoff(
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
-        tasks.record_started(
+        started = tasks.record_started(
             db, ws, worker, profile, task,"handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, weight=weight,
         )
+        savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
             return agents.subagent_brief(worker, wws)
         missing = agents.add_dirs_warning(worker, wws)
@@ -346,9 +349,10 @@ async def assign(
         if not task.strip():
             return "Give the worker a task."
         why: list[str] = []
+        decision: dict = {}
         try:
             profile, learned = autopilot.choose_profile(
-                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why)
+                db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision)
         except autopilot.AutopilotError as e:
             return str(e)
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, weight, branch)
@@ -364,6 +368,7 @@ async def assign(
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
                 weight=weight,
             )
+            savings.record(db, ws.repo_root, decision, task_id=t.id)
             return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                     + "".join(f"\nprofile: {w}" for w in why))
         warning = tasks.overlap_warning(db, ws, files)
@@ -378,10 +383,11 @@ async def assign(
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
-        tasks.record_started(
+        started = tasks.record_started(
             db, ws, worker, profile, task,"assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, weight=weight,
         )
+        savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
             return agents.subagent_brief(worker, wws)
         text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."

@@ -33,6 +33,8 @@ USAGE = """usage: copse account [<command>] [--base-url URL]
             show a code to enter in a browser elsewhere instead (SSH, no browser here)
   logout    revoke this device's session and forget its credentials
   status    show your account, plan, features and when the entitlement expires
+  savings   what hosted learning's picks gained in this repo, this month and last
+            (estimates, from this machine's records only)
   upgrade   open the checkout for copse Pro (your personal org); prints the URL too
   upgrade --team --seats N [--org ORG]
             print the checkout URL for copse Team on a team org you administer
@@ -44,7 +46,18 @@ USAGE = """usage: copse account [<command>] [--base-url URL]
   org invite <email> [--admin]  invite someone to the current org; prints the code
   org join <code>   accept an invite code and join that org
   org use <org_id>  work as a member of <org_id> (`personal` for your own)
-  org policy        show the current org's policy (and refresh the cached copy)
+  org policy        show the current org's policy, its per-role overrides and the
+                    policy that applies to you (and refresh the cached copy)
+  org member policy-role <member> <role|none> [--org ORG]
+            give a member (their account id) a policy role, or none (admin+)
+  org company [--org ORG]  show the company this org is linked into
+  org company link <org_id> [--org ORG]
+            link this org and <org_id> into one company (you must own both)
+  org company unlink [--org ORG]  take this org out of its company
+  org learning-share [on|off] [--org ORG]
+            show, or turn on/off, pooling this org's coarse learning records with
+            the other orgs in its company, never with other companies
+            (off by default; owner/admin to change)
   org ci-token create <name> [--org ORG]
                     create a CI token for `copse ci run` (admin+); shown once
   org ci-token list [--org ORG]           list the org's CI tokens
@@ -175,6 +188,94 @@ class _OrgCommands:
         self._say(f"Revoked CI token {rest[0]}; runs using it stop at their next start.")
         return 0
 
+    def cmd_org_learning_share(self, base: str | None, *state: str, org: str | None = None) -> int:
+        from copse import airgap
+
+        if airgap.enabled():
+            raise auth.AuthError(f"air-gap mode is on via {airgap.source()}: nothing is shared and "
+                                 "learning sharing is unavailable", code="airgap")
+        org_id = self._team_org(org) if org else self._current_org_required()
+        client = self._client(base)
+        if state:
+            got = auth.set_learning_sharing(client, self.store, org_id, state[0] == "on")
+        else:
+            got = auth.get_learning_sharing(client, self.store, org_id)
+        self._say(f"Learning sharing for {org_id}: {'ON' if got['enabled'] else 'off'}"
+                  + (f" (changed {_when(got['updated_at'])})" if got["updated_at"] else "")
+                  + ".")
+        self._say("When on, this org's coarse learning records (task kind, size, weight, profile, "
+                  "cost, outcome),")
+        self._say("the same ones already sent for hosted learning, under this org's own hashes, "
+                  "are pooled")
+        self._say("only with the other orgs in the same company, never with other companies. "
+                  "An org that")
+        self._say("is in no company pools with no one (`copse account org company`).")
+        self._say("Never task text, paths or names; only copse's built-in profile names are "
+                  "pooled, custom")
+        self._say("ones never leave the org. The pool only gives a starting point: your own "
+                  "data still wins")
+        self._say("once you have a little of it. Turning it off stops new contributions, and "
+                  "what was")
+        self._say("shared fades out over time.")
+        self._say("Off by default.")
+        if not state:
+            self._say("Change it (owner/admin): `copse account org learning-share on|off`.")
+        return 0
+
+    def cmd_org_company(self, base: str | None, *action: str, org: str | None = None) -> int:
+        org_id = self._team_org(org) if org else self._current_org_required()
+        client = self._client(base)
+        try:
+            if action[:1] == ("link",):
+                got = auth.link_company(client, self.store, org_id, action[1])
+            elif action:
+                got = auth.unlink_company(client, self.store, org_id)
+            else:
+                got = auth.get_company(client, self.store, org_id)
+        except auth.AuthError as e:
+            if action and e.code == "forbidden":
+                raise auth.AuthError(f"{e} (only someone who owns both orgs can change "
+                                     "their company link)", code=e.code) from e
+            raise
+        if got["company_id"]:
+            self._say(f"Org {org_id} is in company {got['company_id']}.")
+        else:
+            self._say(f"Org {org_id} is not linked into a company.")
+        self._say("Learning is pooled only between the orgs of one company, never across "
+                  "companies, and only")
+        self._say("for orgs that turned sharing on (`copse account org learning-share`).")
+        if not action:
+            self._say("Link two orgs you own: `copse account org company link <org_id>`; "
+                      "undo it with `unlink`.")
+        return 0
+
+    def cmd_org_member(self, base: str | None, action: str, member: str, role: str,
+                       org: str | None = None) -> int:
+        org_id = self._team_org(org) if org else self._current_org_required()
+        try:
+            got = auth.set_policy_role(self._client(base), self.store, org_id, member,
+                                       None if role == "none" else role)
+        except auth.AuthError as e:
+            if e.code == "enterprise_required":
+                raise auth.AuthError(f"{e} (policy roles need copse Enterprise: {PRICING_URL})",
+                                     code=e.code) from e
+            raise
+        if got["policy_role"]:
+            self._say(f"Member {got['sub']} of {org_id} now has the policy role "
+                      f"{got['policy_role']}.")
+        else:
+            self._say(f"Member {got['sub']} of {org_id} has no policy role now; "
+                      "their org role's policy applies.")
+        self._say("See what each role gets with `copse account org policy`.")
+        return 0
+
+    def _current_org_required(self) -> str:
+        org = self._current_org()
+        if not org:
+            raise auth.AuthError("no org selected: pass --org ORG or run `copse account login`",
+                                 code="no_team_org")
+        return org
+
     def cmd_org_use(self, base: str | None, org_id: str) -> int:
         target = None if org_id == "personal" else org_id
         ent = auth.switch_org(self._client(base), self.store, target)
@@ -190,7 +291,8 @@ class _OrgCommands:
             self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced.")
             return 0
         try:
-            p = team_policy.fetch_policy(ent.org_id, client, self.store)
+            p = team_policy.fetch_policy(ent.org_id, client, self.store,
+                                         cached_for=(ent.role, ent.policy_role))
             note = ""
         except team_policy.PolicyUnavailable as e:
             p = team_policy.load_cached(ent.org_id)
@@ -200,11 +302,32 @@ class _OrgCommands:
                 return 1
             note = f" (cached; couldn't refresh: {e})"
         fmt = lambda v: "any" if v is None else (", ".join(v) or "none")  # noqa: E731
+        show = {"allowed_providers": ("providers", fmt), "allowed_models": ("models", fmt),
+                "allowed_profiles": ("profiles", fmt),
+                "require_human_review": ("require human review", lambda v: "yes" if v else "no"),
+                "max_parallel_workers": ("max parallel workers", lambda v: v or "no limit")}
+
+        def rules(q) -> None:
+            for key, (label, f) in show.items():
+                self._say(f"  {label:<22} {f(getattr(q, key))}")
+
         self._say(f"Policy for org {p.org_id}, version {p.version}{note}")
-        self._say(f"  providers              {fmt(p.allowed_providers)}")
-        self._say(f"  models                 {fmt(p.allowed_models)}")
-        self._say(f"  require human review   {'yes' if p.require_human_review else 'no'}")
-        self._say(f"  max parallel workers   {p.max_parallel_workers or 'no limit'}")
+        rules(p)
+        if p.roles:
+            self._say("Role overrides (what a role's members get instead):")
+            for role, over in sorted(p.roles.items()):
+                self._say(f"  {role}")
+                for key, v in over.items():
+                    self._say(f"    {show[key][0]:<22} {show[key][1](v)}")
+        else:
+            self._say("Role overrides: none")
+        role, policy_role = p.role or ent.role, p.policy_role or ent.policy_role
+        who = f"role {role or 'member'}" + (f", policy role {policy_role}" if policy_role else "")
+        if p.effective is None:
+            self._say(f"Your policy ({who}): the org policy above.")
+        else:
+            self._say(f"Your effective policy ({who}):")
+            rules(p.effective)
         return 0
 
 
@@ -263,9 +386,13 @@ class ProAccount(_OrgCommands):
             "features": not rest, "login": not rest, "logout": not rest, "status": not rest,
             "upgrade": not rest and (bool(opts["team"]) == (seats is not None)) and (seats or 1) >= 1
             and (opts["org"] is None or bool(opts["team"])),
-            "portal": not rest, "sync": not rest,
+            "portal": not rest, "sync": not rest, "savings": not rest,
             "org": (sub in ("list", "policy") and len(rest) <= 1)
             or (sub in ("use", "invite", "join") and len(rest) == 2)
+            or (sub == "learning-share" and len(rest) <= 2 and rest[1:] in ([], ["on"], ["off"]))
+            or (sub == "company" and (rest[1:] in ([], ["unlink"])
+                                      or (len(rest) == 3 and rest[1] == "link")))
+            or (sub == "member" and len(rest) == 4 and rest[1] == "policy-role")
             or (sub == "create" and len(rest) >= 2)
             or (sub == "ci-token" and len(rest) >= 2 and (
                 (rest[1] == "create" and len(rest) >= 3) or (rest[1] == "list" and len(rest) == 2)
@@ -275,7 +402,8 @@ class ProAccount(_OrgCommands):
         }.get(cmd, False)
         flags_ok = {"upgrade": ("team", "seats", "org"), "portal": ("org",), "login": ("device",),
                     "org": ("org", "admin") if sub == "invite"
-                    else ("org",) if sub == "ci-token" else ()}.get(cmd, ())
+                    else ("org",) if sub in ("ci-token", "learning-share", "company", "member")
+                    else ()}.get(cmd, ())
         if not ok or any(v is not None and k not in flags_ok for k, v in opts.items()):
             print(USAGE, file=self.err)
             return 2
@@ -287,6 +415,10 @@ class ProAccount(_OrgCommands):
                     return self.cmd_org_invite(base, rest[1], opts["org"], bool(opts["admin"]))
                 if sub == "ci-token":
                     return self.cmd_org_ci_token(base, *rest[1:], org=opts["org"])
+                if sub == "learning-share":
+                    return self.cmd_org_learning_share(base, *rest[1:], org=opts["org"])
+                if sub in ("company", "member"):
+                    return getattr(self, "cmd_org_" + sub)(base, *rest[1:], org=opts["org"])
                 return getattr(self, "cmd_org_" + sub)(base, *rest[1:])
             if cmd == "upgrade":
                 return self.cmd_upgrade(base, team=bool(opts["team"]), seats=seats, org=opts["org"])
@@ -354,6 +486,12 @@ class ProAccount(_OrgCommands):
             else:
                 self._say(f"    {feature:<9} {what:<50} needs {plan.capitalize()}")
         self._say("")
+        if ent and "learning" in have and not ent.in_grace:
+            self._learning_share_line(base, ent.org_id)
+            line = self._savings_line()
+            if line:
+                self._say(line)
+        self._say("")
         if ent is None:
             self._say("Next: `copse account login`, then `copse account upgrade`. "
                       f"Plans: {PRICING_URL}")
@@ -367,6 +505,43 @@ class ProAccount(_OrgCommands):
             self._say(f"Enterprise (audit log, air-gap) is sales-led: {PRICING_URL}")
         self._say("More: `copse account status` (your plan), `copse account --help` (all commands).")
         return 0
+
+    def _savings_line(self) -> str | None:
+        """The one-line local savings summary, or None if it can't be read."""
+        if not self.repo_root:
+            return None
+        try:
+            from copse import savings
+            from copse.db import DB
+
+            return savings.summary_line(savings.report(DB(), self.repo_root))
+        except Exception:  # noqa: BLE001 - a side note; never fail `copse account` over it
+            return None
+
+    def cmd_savings(self, base: str | None) -> int:
+        """Local records only: no login, no network."""
+        from copse import savings
+        from copse.db import DB
+
+        if not self.repo_root:
+            self._say("copse account savings: run it inside a repo.")
+            return 1
+        self._say(savings.describe(savings.report(DB(), self.repo_root), self.repo_root))
+        return 0
+
+    def _learning_share_line(self, base: str | None, org_id: str) -> None:
+        """One best-effort line for bare ``copse account``; silent when it can't be read."""
+        from copse import airgap
+
+        if airgap.enabled():
+            return
+        try:
+            got = auth.get_learning_sharing(self._client(base), self.store, org_id)
+        except Exception:  # noqa: BLE001 - offline, logged out or an older backend: skip the line
+            return
+        self._say(f"Learning sharing: {'ON' if got['enabled'] else 'off'} "
+                  "(pool coarse records with the other orgs in your company only; "
+                  "`copse account org learning-share`)")
 
     def cmd_login(self, base: str | None, device: bool = False) -> int:
         """Browser sign-in when a browser can open here (a terminal, not SSH,

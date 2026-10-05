@@ -1570,6 +1570,8 @@ def ci_run(
     max_workers: Optional[int] = typer.Option(None, "--max-workers", help="Cap on workers running at once (sets max_agents in .copse/config.local.json)."),
     base: Optional[str] = typer.Option(None, "--base", help="Branch to cut the work from and open the PR against (default: the repo's base)."),
     no_pr: bool = typer.Option(False, "--no-pr", help="Don't push or open a pull request; just report."),
+    bundle: Optional[str] = typer.Option(None, "--bundle", help="Write the verified branch to this git bundle (and PATH.json) for `copse ci publish`, instead of pushing; implies --no-pr. This run then needs no token that can write to GitHub."),
+    entitlement: Optional[str] = typer.Option(None, "--entitlement", help="Read the entitlement from this file (written by `copse ci entitle`) instead of exchanging COPSE_PRO_TOKEN."),
 ) -> None:
     """Run a supervisor with autopilot on, unattended, until the goal is verified; then open a PR.
 
@@ -1577,11 +1579,51 @@ def ci_run(
     with the PR URL when every milestone's check passes; otherwise exits 1
     with what happened (the supervisor's question, a stall, the timeout).
     Needs the `ci` feature (copse Team); in CI, set COPSE_PRO_TOKEN to an org CI
-    token from `copse account org ci-token create`."""
+    token from `copse account org ci-token create`.
+
+    Agents run the repo's code and can reach what this process holds. Where
+    that code isn't trusted, pass --entitlement and --bundle so neither the CI
+    token nor a push token is on the machine, and publish the bundle from
+    another one with `copse ci publish`."""
     from copse import ci
 
     raise typer.Exit(ci.run_cli(goal=goal, goal_file=goal_file, issue=issue, timeout_min=timeout,
-                                max_workers=max_workers, base=base, pr=not no_pr, echo=typer.echo))
+                                max_workers=max_workers, base=base, pr=not no_pr, echo=typer.echo,
+                                bundle=bundle, entitlement=entitlement))
+
+
+@ci_app.command("entitle")
+def ci_entitle(
+    out: str = typer.Option(..., "--out", help="Where to write the entitlement (mode 0600)."),
+) -> None:
+    """Exchange COPSE_PRO_TOKEN for the short-lived entitlement and write it to a file.
+
+    Run it as its own step before `copse ci run --entitlement FILE`, so the
+    long-lived CI token is never in the process that starts agents."""
+    from copse import ci
+
+    try:
+        path = ci.entitle(out)
+    except ci.CIError as e:
+        _fail(str(e))
+    typer.echo(f"wrote {path}")
+
+
+@ci_app.command("publish")
+def ci_publish(
+    path: str = typer.Argument(..., help="The bundle `copse ci run --bundle` wrote (PATH.json sits next to it)."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="owner/name on github.com (default: $GITHUB_REPOSITORY)."),
+    base: Optional[str] = typer.Option(None, "--base", help="Branch the pull request targets (default: the repository's default branch; never the bundle's say)."),
+) -> None:
+    """Push a bundle from `copse ci run --bundle` and open its pull request.
+
+    This is the step that holds the token that can push, so run it where no
+    agent ran. It verifies the bundle, takes only its `copse/ci-` branch into
+    a fresh bare repo, pushes it and opens the PR with gh. It never checks out
+    or runs repo code, hooks or agents."""
+    from copse import ci
+
+    raise typer.Exit(ci.publish_cli(path, repo, base, echo=typer.echo))
 
 
 @ci_app.command("init")
@@ -1589,7 +1631,7 @@ def ci_init(
     label: str = typer.Option("copse", "--label", help="Issues given this label start a run."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing workflow file."),
 ) -> None:
-    """Write .github/workflows/copse.yml: `copse ci run` on labelled issues and on demand."""
+    """Write .github/workflows/copse.yml: `copse ci run` on labelled issues, publishing from a second job."""
     from copse import ci
 
     root = _run(git.main_repo_root, os.getcwd())

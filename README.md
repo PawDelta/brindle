@@ -646,9 +646,13 @@ how to use them, and the next step to get the rest:
 copse account            # paid features: what you have, how to use them, how to get the rest
 copse account login      # opens your browser to sign in (--device: enter a code instead, e.g. over SSH); copse checks the plan offline from then on
 copse account status     # your plan, features, hosted learning on or off, when the entitlement expires
+copse account savings    # what hosted learning's picks gained in this repo, this month and last: estimates, from this machine's records only
 copse account upgrade    # opens the checkout for copse Pro (and prints its URL)
 copse account portal     # opens the billing portal (invoices, seats, cancellation); --org ORG for a team org
 copse account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
+copse account org policy # the org's policy, its per-role overrides, and the policy that applies to you
+copse account org member policy-role <member> <role|none>   # give a member a policy role (admin; Enterprise)
+copse account org company [link <org_id> | unlink]          # link orgs you own into one company; learning is pooled only within it
 ```
 
 Setting up a team takes no sign-up form:
@@ -761,7 +765,8 @@ copse Team can run copse with nobody at a terminal. `copse ci run` cuts a
 detached tmux session, gives it the goal, and waits until every milestone's
 check passes. Then it pushes the branch and opens the pull request with `gh`
 (the body lists the goal, the milestones and their checks, and `Closes #N`
-for an issue), prints the PR URL and exits 0. It exits 1, with what happened,
+for an issue), prints the PR URL and exits 0; with `--bundle` it writes the
+branch to a file instead, for `copse ci publish` (see below). It exits 1, with what happened,
 when the supervisor asks for a decision (`need_user`: the question is the
 reason), stalls, or runs out of time. The session and its workers are always
 stopped at the end, and a JSON summary goes to `$GITHUB_STEP_SUMMARY` when
@@ -772,6 +777,11 @@ copse ci run --issue 42                      # the goal is the issue's title and
 copse ci run --goal "Add a /health endpoint" # or typed; a goals.md-shaped text brings its milestones
 copse ci run --goal-file .copse/goals.md --timeout 90 --max-workers 2 --base develop --no-pr
 copse ci init --label copse                  # the GitHub Actions workflow (see below)
+
+# The same run in three steps, so no secret worth stealing is near the agents:
+copse ci entitle --out ent.jwt                                      # uses COPSE_PRO_TOKEN, then exits
+copse ci run --issue 42 --entitlement ent.jwt --bundle out/copse.bundle   # no CI token, no push token
+copse ci publish out/copse.bundle --repo acme/api                   # elsewhere: pushes and opens the PR
 ```
 
 With `--issue` and `--goal`, the supervisor derives the milestones and their
@@ -779,13 +789,60 @@ checks itself; a goals.md-shaped goal (`# Goal`, `## Milestone`, `check:`) is
 recorded as written. `--max-workers` sets `max_agents` in the repo's
 `.copse/config.local.json`.
 
+**Who is trusted with what.** Agents run your repo's code: its tests, its
+scripts, and whatever an issue talks them into. They run as the same user as
+copse, so treat everything on that machine as theirs to read: environment
+variables, files, git and `gh` settings. copse does take its tokens out of the
+environment before agents start and pushes from a clean copy of the commits,
+but that only makes theft harder. What actually protects a secret is that it
+isn't on the machine while agents run. So the work can be split:
+
+1. `copse ci entitle --out FILE` exchanges `COPSE_PRO_TOKEN` for the signed,
+   short-lived entitlement and writes it to a file (mode 0600). Run it on a
+   different machine from the agents (the workflow gives it its own job):
+   on hosted runners agents have sudo, and the runner holds every secret of
+   the job they run in. `copse ci run` reads the file and deletes it before
+   any agent starts.
+2. `copse ci run --entitlement FILE --bundle PATH` does the work with no CI
+   token and no token that can write to GitHub (`--issue` needs one that can
+   read). When the goal is verified it writes the new commits to PATH as a git
+   bundle, and `PATH.json` with the branch, base, title and body of the pull
+   request. `--bundle` implies `--no-pr`: nothing is pushed.
+3. `copse ci publish PATH [--repo owner/name]` runs where no agent ever ran,
+   with the token that can push. It verifies the bundle, fetches its one
+   `copse/ci-…` branch into a fresh bare repo, pushes that branch to
+   `https://github.com/<repo>` (default: `$GITHUB_REPOSITORY`) and opens the
+   pull request with `gh`. It never checks out or runs repo code, hooks or
+   agents, and it refuses a bundle whose branch isn't a `copse/ci-` branch, so
+   a run can't publish over `main`. The pull request targets `--base`, else
+   the repository's default branch; the bundle doesn't get to choose. A
+   hostile run can still add commits to an existing `copse/ci-` branch.
+
+The workflow `copse ci init` writes pins copse to the version that wrote it,
+since the publishing job holds a write token. The short-lived entitlement
+passes between jobs as an artifact kept one day. A CI entitlement expires
+three hours after it's issued, so anyone who can download the repo's
+artifacts could use it for that long at most.
+
+`copse ci run` without `--bundle` still pushes and opens the pull request
+itself. Use that only where you trust the repo's code and everyone who can
+steer the agents.
+
 `copse ci init` writes `.github/workflows/copse.yml`, which runs on
 `workflow_dispatch` and whenever an issue gets the label (`copse` by
-default): it installs tmux, copse (`uv tool install copse-ai`) and Claude
-Code, and runs `copse ci run --issue <number>`. It won't overwrite an existing
-file without `--force`. The workflow needs two secrets, `COPSE_PRO_TOKEN` (an
-org CI token, below) and `ANTHROPIC_API_KEY`, and the repo's Actions settings
-must allow GitHub Actions to create pull requests.
+default). It has two jobs. `run` (permissions: `contents: read`,
+`issues: read`) checks the repo out without keeping credentials, installs
+tmux, copse (`uv tool install copse-ai`) and Claude Code, runs
+`copse ci entitle` in a step of its own, then `copse ci run --issue <number>
+--entitlement … --bundle …` with only `ANTHROPIC_API_KEY` and a read-only
+`GH_TOKEN`, and uploads the bundle as an artifact. `publish` (permissions:
+`contents: write`, `pull-requests: write`) starts on a fresh machine, checks
+nothing out, downloads the artifact and runs `copse ci publish`. It won't
+overwrite an existing file without `--force`. The workflow needs two secrets,
+`COPSE_PRO_TOKEN` (an org CI token, below) and `ANTHROPIC_API_KEY`, and the
+repo's Actions settings must allow GitHub Actions to create pull requests.
+The model API key is the one secret agents must have; give it a spending
+limit.
 
 An org admin creates the CI token; it is shown once, so store it straight away:
 
@@ -796,22 +853,24 @@ copse account org ci-token list --org org_...                         # names, s
 copse account org ci-token revoke ct_... --org org_...                # CI stops at its next run
 ```
 
-On every run `copse ci run` presents the token to the backend, which checks
-it and the org's live plan and returns a signed entitlement; copse verifies it
-in memory and writes nothing to disk. The token doesn't rotate, so one secret
+On every run the token is presented to the backend, which checks it and the
+org's live plan and returns a signed entitlement. `copse ci run` verifies it in
+memory and writes nothing to disk; `copse ci entitle` writes only the signed
+entitlement, which expires soon, never the token. The token doesn't rotate, so one secret
 keeps working until it is revoked or the org's plan no longer includes CI. A
 refresh token from `copse account login` won't do: it rotates on use.
 
 Two things to know before you add the label to your repo:
 
-- **Who can apply the label.** The issue body steers an unattended agent that
-  can push to the repo (`contents: write`). Only people you trust with write
-  access should be able to apply the trigger label; on a public repo, anyone
-  who can write the issue text is choosing what the agent is told to do.
+- **Who can apply the label.** The issue body steers an unattended agent
+  whose work becomes a pull request on a `copse/ci-` branch. Only people you
+  trust with write access should be able to apply the trigger label; on a
+  public repo, anyone who can write the issue text is choosing what the agent
+  is told to do. Review the pull request like any other before merging it.
 - **CI on the pull request.** A PR opened with the workflow's own
   `GITHUB_TOKEN` doesn't trigger the repo's other workflows. If you want your
-  checks to run on copse's PRs, set `GH_TOKEN` to a GitHub App installation
-  token or a personal access token instead.
+  checks to run on copse's PRs, set `GH_TOKEN` in the `publish` job to a
+  GitHub App installation token or a personal access token instead.
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `copse close <id>` to stop it and hide it. Stopping means

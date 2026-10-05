@@ -682,6 +682,95 @@ def accept_invite(client: Client, store, code: str) -> dict:
     return {k: _sanitize(body.get(k, ""), 64) for k in ("org_id", "role")}
 
 
+def _learning_sharing(client: Client, store, method: str, org_id: str, body: dict | None) -> dict:
+    if not ORG_ID_RE.match(org_id):
+        raise AuthError("invalid org id", code="bad_request")
+    status, got = authed(client, store, method,
+                         f"/orgs/{urllib.parse.quote(org_id, safe='')}/learning-sharing",
+                         JSONBody(body) if body is not None else None)
+    if status != 200:
+        raise _error(status, got)
+    if not isinstance(got.get("enabled"), bool):
+        raise AuthError("backend returned no learning-sharing state", code="bad_response")
+    updated = got.get("updated_at")
+    return {"org_id": _sanitize(got.get("org_id", org_id), 64), "enabled": got["enabled"],
+            "updated_at": updated if isinstance(updated, int) and not isinstance(updated, bool) else None}
+
+
+def get_learning_sharing(client: Client, store, org_id: str) -> dict:
+    """Whether ``org_id`` pools its learning data with the other orgs in its
+    company (``GET /orgs/{org_id}/learning-sharing``); off unless an admin
+    turned it on."""
+    return _learning_sharing(client, store, "GET", org_id, None)
+
+
+def set_learning_sharing(client: Client, store, org_id: str, enabled: bool) -> dict:
+    """Turn learning sharing on or off (``PUT /orgs/{org_id}/learning-sharing``,
+    owner/admin only: the backend answers 403 otherwise)."""
+    return _learning_sharing(client, store, "PUT", org_id, {"enabled": enabled})
+
+
+def _company(client: Client, store, method: str, org_id: str, body: dict | None) -> dict:
+    if not ORG_ID_RE.match(org_id):
+        raise AuthError("invalid org id", code="bad_request")
+    status, got = authed(client, store, method,
+                         f"/orgs/{urllib.parse.quote(org_id, safe='')}/company",
+                         JSONBody(body) if body is not None else None)
+    if status != 200:
+        raise _error(status, got)
+    company = got.get("company_id")
+    if "company_id" not in got or not (company is None or (isinstance(company, str) and company)):
+        raise AuthError("backend returned no company state", code="bad_response")
+    return {"org_id": _sanitize(got.get("org_id", org_id), 64),
+            "company_id": None if company is None else _sanitize(company, 64)}
+
+
+def get_company(client: Client, store, org_id: str) -> dict:
+    """The company ``org_id`` is linked into, if any (``GET /orgs/{org_id}/company``).
+    Learning is pooled only between the orgs of one company."""
+    return _company(client, store, "GET", org_id, None)
+
+
+def link_company(client: Client, store, org_id: str, other_org_id: str) -> dict:
+    """Link ``org_id`` and ``other_org_id`` into one company (``PUT
+    /orgs/{org_id}/company``); the backend answers 403 unless the caller owns both."""
+    if not ORG_ID_RE.match(other_org_id):
+        raise AuthError("invalid org id", code="bad_request")
+    return _company(client, store, "PUT", org_id, {"link_with": other_org_id})
+
+
+def unlink_company(client: Client, store, org_id: str) -> dict:
+    """Take ``org_id`` out of its company (``PUT /orgs/{org_id}/company``)."""
+    return _company(client, store, "PUT", org_id, {"unlink": True})
+
+
+POLICY_ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+MEMBER_RE = re.compile(r"^[\x21-\x7e]{1,128}$")
+
+
+def set_policy_role(client: Client, store, org_id: str, sub: str, policy_role: str | None) -> dict:
+    """Give member ``sub`` of ``org_id`` a policy role, or none (``PUT
+    /orgs/{org_id}/members/{sub}/policy-role``, admin+; the backend answers
+    403 ``enterprise_required`` below Enterprise)."""
+    if not ORG_ID_RE.match(org_id):
+        raise AuthError("invalid org id", code="bad_request")
+    if not MEMBER_RE.match(sub):
+        raise AuthError("invalid member id", code="bad_request")
+    if policy_role is not None and not POLICY_ROLE_RE.match(policy_role):
+        raise AuthError("invalid policy role: a lowercase letter, then up to 31 lowercase "
+                        "letters, digits, _ or -", code="bad_request")
+    status, got = authed(client, store, "PUT",
+                         f"/orgs/{urllib.parse.quote(org_id, safe='')}/members/"
+                         f"{urllib.parse.quote(sub, safe='')}/policy-role",
+                         JSONBody({"policy_role": policy_role}))
+    if status != 200:
+        raise _error(status, got)
+    if got.get("policy_role", ...) != policy_role:
+        raise AuthError("backend didn't confirm the policy role", code="bad_response")
+    return {"org_id": _sanitize(got.get("org_id", org_id), 64),
+            "sub": _sanitize(got.get("sub", sub), 128), "policy_role": policy_role}
+
+
 def _ci_tokens_path(org_id: str) -> str:
     return f"/orgs/{urllib.parse.quote(org_id, safe='')}/ci-tokens"
 

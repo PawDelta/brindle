@@ -1,9 +1,16 @@
 """``copse ci``: goal sources, the headless run (with fakes for tmux, the
-supervisor, git push and gh), the entitlement gate, and ``copse ci init``."""
+supervisor, git push and gh), the entitlement gate, ``copse ci init``, and
+the trust split (``entitle``, ``run --bundle``, ``publish``)."""
 
 import functools
 import json
+import os
+import re
+import subprocess
 import time
+import types
+
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -33,7 +40,7 @@ class FakeSession:
         monkeypatch.setattr(ci, "_spawn", self.spawn)
         monkeypatch.setattr(ci, "_alive", lambda db, root_id: self.alive)
         monkeypatch.setattr(ci, "_stop", self.stop)
-        monkeypatch.setattr(ci, "_push", lambda ws: self.pushed.append(ws.branch))
+        monkeypatch.setattr(ci, "_push", lambda ws, secrets=None, remote=None: self.pushed.append(ws.branch))
         monkeypatch.setattr(ci, "_create_pr", self.create_pr)
 
     def spawn(self, db, ws, prompt):
@@ -48,7 +55,7 @@ class FakeSession:
     def stop(self, db, root_id):
         self.stopped.append(root_id)
 
-    def create_pr(self, ws, base, title, body):
+    def create_pr(self, ws, base, title, body, secrets=None, remote=None):
         self.prs.append((ws.branch, base, title, body))
         return "https://github.com/o/r/pull/7"
 
@@ -181,6 +188,21 @@ def test_a_rerun_reuses_the_branch_worktree(db, repo, monkeypatch):
     assert git.worktree_for_branch(str(repo), "copse/ci-42") == first
 
 
+def test_a_rerun_survives_a_deleted_worktree_folder(db, repo, monkeypatch):
+    import shutil
+    s = FakeSession(db, monkeypatch, script=finish_goal)
+    goal = ci.Goal("Add health", issue=42)
+    run(db, repo, goal, s)
+    first = git.worktree_for_branch(str(repo), "copse/ci-42")
+    tip = git.out(["rev-parse", "copse/ci-42"], str(repo))
+    shutil.rmtree(first)                      # a wiped copse home or a cleaned runner
+    db.delete_agent("sup1")
+    run(db, repo, goal, FakeSession(db, monkeypatch, script=finish_goal))
+    again = git.worktree_for_branch(str(repo), "copse/ci-42")
+    assert again and Path(again).is_dir()
+    assert git.ok(["merge-base", "--is-ancestor", tip, "copse/ci-42"], str(repo))
+
+
 def test_shaped_goal_records_the_milestones_up_front(db, repo, monkeypatch):
     def verify(session, root_id):
         for m in session.db.milestones(root_id):
@@ -267,7 +289,7 @@ def test_cleanup_runs_when_the_run_itself_breaks(db, repo, monkeypatch):
 def test_pr_failure_is_reported_as_a_failure(db, repo, monkeypatch):
     s = FakeSession(db, monkeypatch, script=finish_goal)
 
-    def refuse(ws, base, title, body):
+    def refuse(ws, base, title, body, secrets=None, remote=None):
         raise ci.CIError("gh pr create failed: no commits between main and copse/ci-add-health")
 
     monkeypatch.setattr(ci, "_create_pr", refuse)
@@ -489,3 +511,441 @@ def test_real_seams_exist():
     for name in ("_spawn", "_alive", "_stop", "_push", "_create_pr", "_gh_json", "_checkout"):
         assert callable(getattr(ci, name)), name
     assert workspaces.create and pilot.set_goal
+
+
+# -- secrets are withheld from agents ------------------------------------------
+
+
+def test_withhold_secrets_removes_tokens_and_keeps_the_model_key():
+    env = {"COPSE_PRO_TOKEN": "cpc_x", "GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghs_y",
+           "ANTHROPIC_API_KEY": "sk-ant-x", "PATH": "/bin"}
+    taken = ci.withhold_secrets(env)
+    assert taken == {"COPSE_PRO_TOKEN": "cpc_x", "GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghs_y"}
+    assert env == {"ANTHROPIC_API_KEY": "sk-ant-x", "PATH": "/bin"}
+
+
+def _recording_run(seen, real=subprocess.run):
+    def fake(cmd, **kw):
+        seen.append((cmd, kw.get("env") or {}, kw.get("cwd")))
+        if cmd[:2] == ["gh", "pr"]:
+            return subprocess.CompletedProcess(cmd, 0, "https://github.com/o/r/pull/1\n", "")
+        if "push" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return real(cmd, **kw)
+    return fake
+
+
+def test_push_goes_through_a_fresh_bare_repo_not_the_agents_worktree(monkeypatch, repo):
+    # The agents' worktree plants a pre-push hook and repoints origin.
+    hooks = Path(repo) / ".git" / "hooks"
+    (hooks / "pre-push").write_text("#!/bin/sh\necho stolen > /tmp/copse-test-stolen\n")
+    (hooks / "pre-push").chmod(0o755)
+    subprocess.run(["git", "remote", "add", "origin", "https://evil.example/x.git"], cwd=repo, check=False)
+    subprocess.run(["git", "checkout", "-q", "-b", "copse/ci-x"], cwd=repo, check=True)
+    seen = []
+    monkeypatch.setattr(ci.subprocess, "run", _recording_run(seen))
+    ws = types.SimpleNamespace(path=str(repo), branch="copse/ci-x", repo_root=str(repo))
+    ci._push(ws, {"GH_TOKEN": "ghs_secret", "COPSE_PRO_TOKEN": "cpc_secret"},
+             "https://github.com/acme/app")
+    push = next(cmd for cmd, _, _ in seen if "push" in cmd)
+    assert push[-2] == "https://github.com/acme/app.git" and "--no-verify" in push
+    assert "core.hooksPath=/dev/null" in push and str(repo) not in push[2]
+    fetch = next(cmd for cmd, _, _ in seen if "fetch" in cmd)
+    assert fetch[2].endswith("push.git")   # a bare repo copse made, not the worktree
+    for _, env, _ in seen:
+        assert env.get("GH_TOKEN") == "ghs_secret" and "COPSE_PRO_TOKEN" not in env
+
+
+def test_pr_names_the_repo_and_never_runs_in_the_worktree(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(ci.subprocess, "run", _recording_run(seen))
+    ws = types.SimpleNamespace(path=str(tmp_path), branch="copse/ci-x", repo_root=str(tmp_path))
+    url = ci._create_pr(ws, "main", "t", "b", {"GH_TOKEN": "ghs_secret", "COPSE_PRO_TOKEN": "cpc_s"},
+                        "https://github.com/acme/app")
+    cmd, env, cwd = seen[0]
+    assert url.endswith("/pull/1") and cmd[cmd.index("--repo") + 1] == "acme/app"
+    assert cwd != str(tmp_path) and "COPSE_PRO_TOKEN" not in env
+    assert all("ghs_secret" not in " ".join(c) for c, _, _ in seen)
+
+
+def test_no_push_or_pr_without_a_github_origin(tmp_path):
+    ws = types.SimpleNamespace(path=str(tmp_path), branch="b", repo_root=str(tmp_path))
+    with pytest.raises(ci.CIError):
+        ci._push(ws, {"GH_TOKEN": "x"}, "https://evil.example/acme/app")
+    with pytest.raises(ci.CIError):
+        ci._create_pr(ws, "main", "t", "b", {"GH_TOKEN": "x"}, None)
+
+
+def test_run_withholds_secrets_even_when_called_directly(db, repo, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "ghs_direct")
+    monkeypatch.setenv("COPSE_PRO_TOKEN", "cpc_direct")
+    seen_env = {}
+
+    def spawn(db_, ws, prompt):
+        seen_env.update(os.environ)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(ci, "_spawn", spawn)
+    with pytest.raises(RuntimeError):
+        ci.run(db, str(repo), ci.goal_from_text("x"))
+    assert "GH_TOKEN" not in seen_env and "COPSE_PRO_TOKEN" not in seen_env
+
+
+def test_the_workflow_does_not_persist_checkout_credentials(tmp_path):
+    assert "persist-credentials: false" in ci.workflow_text()
+
+
+# -- the trust split: entitle, run --bundle, publish ---------------------------
+
+
+def test_entitle_writes_the_entitlement_and_run_needs_no_token(backend, monkeypatch, tmp_path):
+    client = auth.Client(BASE, transport=backend)
+    token = backend.issue_ci_token()
+    monkeypatch.setenv("COPSE_PRO_TOKEN", token)
+    out = ci.entitle(tmp_path / "sub" / "ent.jwt", client)
+    assert out.stat().st_mode & 0o777 == 0o600
+    assert token not in out.read_text() and out.read_text().count(".") == 2
+    # An existing, world-readable file is replaced, not written through.
+    out.chmod(0o644)
+    ci.entitle(out, client)
+    assert out.stat().st_mode & 0o777 == 0o600
+
+    # The run step: no token in the environment, no call to the backend.
+    monkeypatch.delenv("COPSE_PRO_TOKEN")
+    calls = len(backend.calls)
+    ent = ci.require_ci(client, entitlement_file=out)
+    assert "ci" in ent.features and ent.plan == "team"
+    assert len(backend.calls) == calls
+
+
+def test_entitle_failures(backend, monkeypatch, tmp_path):
+    client = auth.Client(BASE, transport=backend)
+    monkeypatch.delenv("COPSE_PRO_TOKEN", raising=False)
+    with pytest.raises(ci.CIError, match="COPSE_PRO_TOKEN"):
+        ci.entitle(tmp_path / "ent.jwt", client)
+    token = backend.issue_ci_token()
+    backend.ci_tokens[token] = "revoked"
+    monkeypatch.setenv("COPSE_PRO_TOKEN", token)
+    with pytest.raises(ci.CIError) as e:
+        ci.entitle(tmp_path / "ent.jwt", client)
+    assert "invalid_token" in str(e.value) and token not in str(e.value)
+    backend.ci_features = ["learning"]
+    monkeypatch.setenv("COPSE_PRO_TOKEN", backend.issue_ci_token())
+    with pytest.raises(ci.CIError, match="copse Team"):
+        ci.entitle(tmp_path / "ent.jwt", client)
+    assert not (tmp_path / "ent.jwt").exists()
+
+
+def test_entitlement_file_is_verified_like_a_fresh_one(signing_key, tmp_path):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    f = tmp_path / "ent.jwt"
+    with pytest.raises(ci.CIError, match="cannot read"):
+        ci.require_ci(entitlement_file=f)
+    f.write_text(sign(Ed25519PrivateKey.generate(), claims(plan="team", features=["ci"])))
+    with pytest.raises(ci.CIError, match="signature"):
+        ci.require_ci(entitlement_file=f)
+    now = int(time.time())
+    f.write_text(sign(signing_key, claims(plan="team", features=["ci"], iat=now - 7200, exp=now - 3600)))
+    with pytest.raises(ci.CIError, match="refused"):   # expired: no offline grace in CI
+        ci.require_ci(entitlement_file=f)
+    f.write_text(sign(signing_key, claims(plan="pro", features=["learning"])))
+    with pytest.raises(ci.CIError, match="copse Team"):
+        ci.require_ci(entitlement_file=f)
+    f.write_text(sign(signing_key, claims(plan="team", features=["ci"])) + "\n")
+    assert "ci" in ci.require_ci(entitlement_file=f).features
+
+
+def _working_supervisor(repo, branch, text="def health():\n    return 200\n"):
+    """A supervisor that commits to the run's branch, then gets the goal verified."""
+    from conftest import sh
+
+    def script(session, root_id):
+        wt = Path(git.worktree_for_branch(str(repo), branch))
+        if not (wt / "health.py").exists():
+            (wt / "health.py").write_text(text)
+            sh("git add -A && git commit -qm 'Add health'", wt)
+        finish_goal(session, root_id)
+
+    return script
+
+
+def _bundled_run(db, repo, monkeypatch, tmp_path, goal=None):
+    goal = goal or ci.Goal("Add a /health endpoint", "Return 200.", issue=42, source="issue")
+    s = FakeSession(db, monkeypatch, script=_working_supervisor(repo, goal.branch))
+    bundle = tmp_path / "out" / "copse.bundle"
+    out = run(db, repo, goal, s, bundle=bundle)
+    return s, out, bundle
+
+
+def test_bundle_round_trip_into_a_bare_origin(db, repo, monkeypatch, tmp_path):
+    from conftest import sh
+
+    origin = tmp_path / "origin.git"
+    s, out, bundle = _bundled_run(db, repo, monkeypatch, tmp_path)
+
+    # The run pushed nothing and opened nothing: it only wrote the two files.
+    assert out.ok and out.pr_url is None and out.bundle == str(bundle.resolve())
+    assert s.pushed == [] and s.prs == []
+    assert "copse/ci-42" not in sh("git branch --list 'copse/*'", origin)
+    assert out.summary()["bundle"] == out.bundle and "copse ci publish" in out.describe()
+    meta = json.loads(Path(str(bundle) + ".json").read_text())
+    assert set(meta) == {"branch", "base", "title", "body", "status"}
+    assert (meta["branch"], meta["base"], meta["title"], meta["status"]) == (
+        "copse/ci-42", "main", "Add a /health endpoint", "done")
+    assert "Closes #42" in meta["body"] and "- [x] Endpoint" in meta["body"]
+    assert "Built in parallel" in meta["body"]     # the footer, from the repo's config
+
+    # Publishing, somewhere else: only the bundle and its JSON are needed.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for f in (bundle, Path(str(bundle) + ".json")):
+        (elsewhere / f.name).write_bytes(f.read_bytes())
+    prs = []
+
+    def open_pr(slug, base, branch, title, body, env):
+        prs.append((slug, base, branch, title, body))
+        return "https://github.com/acme/app/pull/3"
+
+    monkeypatch.setattr(ci, "_open_pr", open_pr)
+    main_before = sh("git rev-parse refs/heads/main", origin)
+    url = ci.publish(elsewhere / "copse.bundle", "acme/app", remote=str(origin))
+    assert url == "https://github.com/acme/app/pull/3"
+    assert prs == [("acme/app", "main", "copse/ci-42", "Add a /health endpoint", meta["body"])]
+    wt = git.worktree_for_branch(str(repo), "copse/ci-42")
+    assert sh("git rev-parse refs/heads/copse/ci-42", origin) == sh("git rev-parse HEAD", wt)
+    assert "return 200" in sh("git show refs/heads/copse/ci-42:health.py", origin)
+    assert sh("git rev-parse refs/heads/main", origin) == main_before
+
+
+def test_publish_runs_git_outside_any_worktree_and_takes_the_repo_from_the_environment(
+        db, repo, monkeypatch, tmp_path):
+    _, _, bundle = _bundled_run(db, repo, monkeypatch, tmp_path)
+    wt = git.worktree_for_branch(str(repo), "copse/ci-42")
+    seen = []
+    record, real = _recording_run(seen), subprocess.run
+    github, origin = "https://github.com/acme/app.git", str(tmp_path / "origin.git")
+
+    def no_network(cmd, **kw):
+        """Records the command as written; the base comes from the local origin instead."""
+        if github in cmd and "fetch" in cmd:
+            seen.append((cmd, kw.get("env") or {}, kw.get("cwd")))
+            return real([origin if a == github else a for a in cmd], **kw)
+        return record(cmd, **kw)
+
+    monkeypatch.setattr(ci.subprocess, "run", no_network)
+    url = ci.publish(bundle, base="main", environ={**os.environ, "GITHUB_REPOSITORY": "acme/app",
+                                                   "GH_TOKEN": "ghs_write"})
+    assert url.endswith("/pull/1")
+    push = next(cmd for cmd, _, _ in seen if "push" in cmd)
+    assert push[-2] == "https://github.com/acme/app.git"
+    assert push[-1] == "refs/heads/copse/ci-42:refs/heads/copse/ci-42"   # not forced
+    assert "--no-verify" in push and "core.hooksPath=/dev/null" in push
+    gh = next(cmd for cmd, _, _ in seen if cmd[:2] == ["gh", "pr"])
+    assert gh[gh.index("--repo") + 1] == "acme/app" and gh[gh.index("--head") + 1] == "copse/ci-42"
+    for cmd, env, cwd in seen:
+        assert cwd and not str(cwd).startswith((str(repo), wt)), cmd
+        assert "ghs_write" not in " ".join(cmd)
+    # The bundle is verified before anything is taken from it.
+    names = [next(w for w in ("init", "verify", "fetch", "push", "pr") if w in cmd) for cmd, _, _ in seen]
+    assert names == ["init", "fetch", "verify", "fetch", "push", "pr"]
+
+
+def test_publish_refuses_what_it_should_not_push(db, repo, monkeypatch, tmp_path):
+    origin = tmp_path / "origin.git"
+    _, _, bundle = _bundled_run(db, repo, monkeypatch, tmp_path)
+    meta_path = Path(str(bundle) + ".json")
+    good = json.loads(meta_path.read_text())
+    opened = []
+    monkeypatch.setattr(ci, "_open_pr", lambda *a: opened.append(a) or "url")
+
+    def publish_with(**over):
+        meta_path.write_text(json.dumps({**good, **over}))
+        return ci.publish(bundle, "acme/app", remote=str(origin))
+
+    for over, why in [({"branch": "main"}, "copse/ci-"),
+                      ({"branch": "copse/ci-42:refs/heads/main"}, "copse/ci-"),
+                      ({"branch": "copse/ci-../../main"}, "copse/ci-"),
+                      ({"branch": "--force"}, "copse/ci-"),
+                      ({"base": "--upload-pack=evil"}, "base"),
+                      ({"base": "copse/ci-42"}, "base"),
+                      ({"status": "timeout"}, "status"),
+                      ({"title": ""}, "title"),
+                      ({"body": None}, "body")]:
+        with pytest.raises(ci.CIError, match=why):
+            publish_with(**over)
+    meta_path.write_text("[]")
+    with pytest.raises(ci.CIError, match="JSON object"):
+        ci.publish(bundle, "acme/app", remote=str(origin))
+    meta_path.write_text(json.dumps(good))
+
+    with pytest.raises(ci.CIError, match="--repo"):
+        ci.publish(bundle, None, remote=str(origin), environ={})
+    with pytest.raises(ci.CIError, match="--repo"):
+        ci.publish(bundle, "https://evil.example/x", remote=str(origin))
+    with pytest.raises(ci.CIError, match="no bundle"):
+        ci.publish(tmp_path / "missing.bundle", "acme/app", remote=str(origin))
+
+    # A bundle that isn't one, and one whose base the repository doesn't have.
+    real = bundle.read_bytes()
+    bundle.write_bytes(b"not a bundle\n")
+    with pytest.raises(ci.CIError, match="bundle verify"):
+        ci.publish(bundle, "acme/app", remote=str(origin))
+    bundle.write_bytes(real)
+    with pytest.raises(ci.CIError, match="base branch"):
+        ci.publish(bundle, "acme/app", base="release", remote=str(origin))
+    with pytest.raises(ci.CIError, match="--base"):
+        ci.publish(bundle, "acme/app", base="--upload-pack=evil", remote=str(origin))
+    empty = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(empty)], check=True)
+    other = subprocess.run(
+        ["git", "--git-dir", str(empty), "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree",
+         "-m", "other", "4b825dc642cb6eb9a060e54bf8d69288fbee4904"],
+        check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "--git-dir", str(empty), "update-ref", "refs/heads/main", other], check=True)
+    meta_path.write_text(json.dumps(good))
+    with pytest.raises(ci.CIError, match="bundle verify"):
+        ci.publish(bundle, "acme/app", remote=str(empty))
+
+    assert opened == []
+    assert "copse/ci-42" not in subprocess.run(["git", "--git-dir", str(origin), "branch", "--list"],
+                                               capture_output=True, text=True).stdout
+
+
+def test_bundle_failure_is_a_failed_run(db, repo, monkeypatch, tmp_path):
+    """Nothing committed past the base: there is nothing to bundle, and the run says so."""
+    s = FakeSession(db, monkeypatch, script=finish_goal)
+    bundle = tmp_path / "copse.bundle"
+    out = run(db, repo, ci.Goal("Add health"), s, bundle=bundle)
+    assert out.status == "done" and not out.ok and out.bundle is None and out.note
+    assert not Path(str(bundle) + ".json").exists()
+    assert s.pushed == [] and s.prs == []
+
+
+def test_cli_run_with_entitlement_and_bundle_then_publish(db, repo, monkeypatch, tmp_path, signing_key):
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("COPSE_PRO_TOKEN", raising=False)
+    ent = tmp_path / "ent.jwt"
+    ent.write_text(sign(signing_key, claims(plan="team", features=["ci"])))
+    s = FakeSession(db, monkeypatch, script=_working_supervisor(repo, "copse/ci-add-health"))
+    monkeypatch.setattr(ci, "run", functools.partial(ci.run, clock=s.now, sleep=s.sleep))
+    bundle = tmp_path / "out" / "copse.bundle"
+
+    res = CliRunner().invoke(app, ["ci", "run", "--goal", "Add health", "--timeout", "5",
+                                   "--entitlement", str(ent), "--bundle", str(bundle)])
+    assert res.exit_code == 0, res.output
+    assert bundle.exists() and "copse ci publish" in res.output
+    assert s.pushed == [] and s.prs == []      # --bundle implies --no-pr
+
+    # A refused entitlement stops the run before anything is spawned.
+    ent.write_text("not.a.jwt")
+    res = CliRunner().invoke(app, ["ci", "run", "--goal", "Other", "--entitlement", str(ent)])
+    assert res.exit_code == 1 and "refused" in res.output and len(s.prompts) == 1
+
+    seen = []
+    monkeypatch.setattr(ci, "publish", lambda path, repo=None, base=None: seen.append((path, repo, base))
+                        or "https://github.com/o/r/pull/9")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    res = CliRunner().invoke(app, ["ci", "publish", str(bundle), "--repo", "o/r", "--base", "main"])
+    assert res.exit_code == 0 and res.output.strip() == "https://github.com/o/r/pull/9"
+    assert seen == [(str(bundle), "o/r", "main")] and "pull/9" in summary.read_text()
+
+    def refuse(path, repo=None, base=None):
+        raise ci.CIError("copse ci publish: git bundle verify failed: bad")
+
+    monkeypatch.setattr(ci, "publish", refuse)
+    res = CliRunner().invoke(app, ["ci", "publish", str(bundle)])
+    assert res.exit_code == 1 and "bundle verify" in res.output
+
+
+def test_cli_entitle(backend, monkeypatch, tmp_path):
+    client = auth.Client(BASE, transport=backend)
+    monkeypatch.setattr(auth, "Client", lambda *a, **k: client)
+    monkeypatch.setenv("COPSE_PRO_TOKEN", backend.issue_ci_token())
+    out = tmp_path / "ent.jwt"
+    res = CliRunner().invoke(app, ["ci", "entitle", "--out", str(out)])
+    assert res.exit_code == 0, res.output
+    assert "wrote" in res.output and "cpc_" not in res.output
+    assert "ci" in ci.require_ci(entitlement_file=out).features
+    monkeypatch.delenv("COPSE_PRO_TOKEN")
+    res = CliRunner().invoke(app, ["ci", "entitle", "--out", str(out)])
+    assert res.exit_code == 1 and "COPSE_PRO_TOKEN" in res.output
+
+
+def _job(text, name):
+    """The lines of one job in the workflow."""
+    jobs = text.split("\njobs:\n", 1)[1]
+    start = jobs.index(f"  {name}:\n")
+    nxt = [m.start() for m in re.finditer(r"(?m)^  \w+:\n", jobs) if m.start() > start]
+    return jobs[start:nxt[0] if nxt else len(jobs)]
+
+
+def test_the_workflow_keeps_the_push_token_away_from_the_agents():
+    text = ci.workflow_text()
+    assert "\npermissions: {}\n" in text       # nothing unless a job asks for it
+    entitle_job, run_job, publish_job = _job(text, "entitle"), _job(text, "run"), _job(text, "publish")
+
+    # The CI token: only in its own job, which checks out and runs nothing from the repo.
+    assert "COPSE_PRO_TOKEN" in entitle_job and "copse ci entitle --out" in entitle_job
+    assert "actions/checkout" not in entitle_job and "claude-code" not in entitle_job
+    assert "permissions: {}" in entitle_job and "retention-days: 1" in entitle_job
+    assert text.count("secrets.COPSE_PRO_TOKEN") == 1
+
+    # The job where agents run: read-only, the model key, and the entitlement file only.
+    assert "needs: entitle" in run_job
+    assert "permissions:\n      contents: read\n      issues: read\n" in run_job
+    assert "write" not in run_job.replace("write access", "")
+    assert "secrets.GITHUB_TOKEN" not in run_job and "COPSE_PRO_TOKEN" not in run_job
+    download = run_job.index("actions/download-artifact")
+    work = run_job.index("copse ci run --issue")
+    upload = run_job.index("actions/upload-artifact")
+    assert download < work < upload
+    run_step = next(s for s in run_job.split("\n      - ") if "copse ci run --issue" in s)
+    assert "ANTHROPIC_API_KEY" in run_step and "GH_TOKEN: ${{ github.token }}" in run_step
+    assert "--entitlement" in run_step and "--bundle" in run_step
+
+    # The job that can push: after the run, on its own machine, with no checkout,
+    # and the pull request's base comes from the repository, not the bundle.
+    assert "needs: run" in publish_job
+    assert "permissions:\n      contents: write\n      pull-requests: write\n" in publish_job
+    assert "actions/checkout" not in publish_job and "claude-code" not in publish_job
+    assert "actions/download-artifact" in publish_job and "copse ci publish" in publish_job
+    assert "--base \"${{ github.event.repository.default_branch }}\"" in publish_job
+    assert "COPSE_PRO_TOKEN" not in publish_job and "ANTHROPIC_API_KEY" not in publish_job
+
+
+def test_the_workflow_pins_the_copse_that_wrote_it(monkeypatch):
+    import copse
+    monkeypatch.setattr(copse, "__version__", "1.2.3")
+    text = ci.workflow_text()
+    assert text.count("uv tool install copse-ai==1.2.3") == 3 and "install copse-ai\n" not in text
+
+
+def test_publish_takes_the_base_from_the_repository_not_the_bundle(db, repo, monkeypatch, tmp_path):
+    origin = tmp_path / "origin.git"
+    _, _, bundle = _bundled_run(db, repo, monkeypatch, tmp_path)
+    meta_path = Path(str(bundle) + ".json")
+    meta = json.loads(meta_path.read_text())
+    meta_path.write_text(json.dumps({**meta, "base": "release"}))   # the run asks for another base
+    opened = []
+    monkeypatch.setattr(ci, "_open_pr", lambda slug, base, *a: opened.append(base) or "url")
+    ci.publish(bundle, "acme/app", remote=str(origin))
+    assert opened == ["main"]
+
+
+def test_the_entitlement_file_is_gone_before_agents_start(tmp_path, signing_key):
+    ent = tmp_path / "ent.jwt"
+    ent.write_text(sign(signing_key, claims(plan="team", features=["ci"])))
+    ci.require_ci(entitlement_file=ent)
+    assert not ent.exists()
+
+def test_file_remotes_are_for_tests_only():
+    """`remote` is a keyword of ci.publish alone: not a CLI option, not a config key."""
+    import inspect
+
+    from copse import cli, config
+
+    assert "remote" not in inspect.signature(ci.publish_cli).parameters
+    assert "remote" not in inspect.signature(cli.ci_publish).parameters
+    assert "ci.publish" not in inspect.getsource(config)

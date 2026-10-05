@@ -98,6 +98,7 @@ class Entitlement:
     grace_until: int | None = None
     role: str | None = None          # the caller's role in org_id (owner|admin|member)
     policy_version: int = 0          # the org policy version current when issued
+    policy_role: str | None = None   # the caller's policy role in org_id, when one is set
 
 
 # -- keys ----------------------------------------------------------------------------
@@ -222,8 +223,10 @@ def verify(token: str, *, issuer: str | None, now: float | None = None,
             and claims["exp"] > claims["iat"]):
         raise LicenseError("entitlement claims are malformed")
     role, policy_version = claims.get("role"), claims.get("policy_version", 0)
+    policy_role = claims.get("policy_role")
     if not ((role is None or (isinstance(role, str) and role)) and _is_int(policy_version)
-            and policy_version >= 0):
+            and policy_version >= 0
+            and (policy_role is None or (isinstance(policy_role, str) and policy_role))):
         raise LicenseError("entitlement claims are malformed")
     iat, exp = claims["iat"], claims["exp"]
     if iat > now + LEEWAY:
@@ -238,7 +241,8 @@ def verify(token: str, *, issuer: str | None, now: float | None = None,
     return Entitlement(
         sub=claims["sub"], org_id=claims["org_id"], plan=claims["plan"], status=claims["status"],
         features=frozenset(feats), seats=claims["seats"], iat=iat, exp=exp, kid=kid,
-        in_grace=in_grace, grace_until=grace_until, role=role, policy_version=policy_version)
+        in_grace=in_grace, grace_until=grace_until, role=role, policy_version=policy_version,
+        policy_role=policy_role)
 
 
 def needs_refresh(ent: Entitlement, now: float | None = None) -> bool:
