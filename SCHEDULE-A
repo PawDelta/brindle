@@ -1,0 +1,28 @@
+copse License 1.0 -- SCHEDULE-A
+
+This schedule is part of the copse License (see LICENSE) for the release of
+the software it ships with. It lists the Protected Services for that release.
+A later release may change this list; a change does not affect releases
+already made.
+
+Protected Services:
+
+1. Hosted service: providing the software to third parties as a hosted or
+   managed service, where the service provides users with access to any
+   substantial set of the features or functionality of the software.
+
+2. Cross-installation coordination: coordinating agents, work, policies or
+   state across installations of the software that belong to different
+   people or organizations.
+
+3. Commercial registries and marketplaces: operating a commercial registry or
+   marketplace that distributes or sells agent profiles, plugins or policies
+   for the software made by others.
+
+4. Entitlement compatibility: issuing, verifying or emulating the software's
+   license keys or entitlements.
+
+Licensor Lines of Business:
+
+Licensor Line of Business: copse Team (cross-installation coordination)
+Licensor Line of Business: copse license keys and entitlements

@@ -5,7 +5,7 @@ description = "Run coding agents in parallel, each on its own git branch, with a
 readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-copse-1.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "SCHEDULE-A"]
 authors = [{ name = "Hannah Lerner" }]
 keywords = ["ai", "agents", "claude-code", "codex", "git", "worktree", "tmux", "mcp", "orchestration"]
 classifiers = [
@@ -63,7 +63,7 @@ core-metadata-version = "2.4"
 core-metadata-version = "2.4"
 # The source release carries the code, the README and the license only:
 # no tests, CI, scripts or development config.
-only-include = ["src", "README.md", "LICENSE", "pyproject.toml"]
+only-include = ["src", "README.md", "LICENSE", "SCHEDULE-A", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
