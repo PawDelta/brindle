@@ -40,7 +40,7 @@ work is split into three steps, and the dangerous token is in the last one:
 ``copse ci run`` without ``--bundle`` still pushes and opens the pull request
 itself, as before; use it only where the repo's code is trusted.
 
-``copse ci init`` writes the two-job workflow that does this when an issue
+``copse ci init`` writes the three-job workflow that does this when an issue
 gets a label.
 
 Entitlement: ``ci`` must be in the copse Pro entitlement. In CI there is no
@@ -807,10 +807,11 @@ WORKFLOW = """\
 # `copse account org ci-token create`) and ANTHROPIC_API_KEY (for Claude Code).
 # In the repo's Actions settings, allow GitHub Actions to create pull requests.
 #
-# Two jobs, because agents run the repo's own code and can reach anything on
-# their machine. `run` does the work with a read-only token and hands over a
-# git bundle; `publish` holds the token that can push, and never checks out
-# or runs anything from the repo.
+# Three jobs, because agents run the repo's own code and can reach anything on
+# their machine. `entitle` alone holds the CI token and runs nothing from the
+# repo; `run` does the work with a read-only token and hands over a git
+# bundle; `publish` holds the token that can push, and never checks out or
+# runs anything from the repo.
 #
 # The issue body steers an unattended agent whose work becomes a pull request:
 # only people you trust with write access should be able to apply the label.
