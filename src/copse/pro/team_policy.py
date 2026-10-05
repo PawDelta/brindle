@@ -128,7 +128,8 @@ def _roles(v) -> dict:
     for role, over in v.items():
         if not (isinstance(role, str) and ROLE_RE.match(role) and isinstance(over, dict)):
             raise PolicyUnavailable("malformed roles")
-        out[role] = {k: _rule(k, over[k]) for k in RULES if k in over}
+        # A null field is an override left unset (the base value applies).
+        out[role] = {k: _rule(k, over[k]) for k in RULES if over.get(k) is not None}
     return out
 
 

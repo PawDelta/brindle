@@ -290,3 +290,15 @@ def test_bad_arguments_print_usage(team):
                 ("org", "member", "policy-role", SUB, "ops", "--admin")):
         code, _, err = run(team, *bad)
         assert code == 2 and "policy-role" in err, bad
+
+
+def test_unset_role_override_fields_arrive_as_null_and_mean_not_set():
+    # The backend's real answer: every override field present, unset ones null.
+    body = {"org_id": ORG, "version": 1, "policy": {**POLICY, "allowed_profiles": None, "roles": {
+        "member": {"allowed_providers": None, "allowed_models": None, "allowed_profiles": ["developer"],
+                   "require_human_review": None, "max_parallel_workers": None}}}}
+    p = team_policy.parse_policy(ORG, body, 0)
+    assert p.roles == {"member": {"allowed_profiles": ("developer",)}} or \
+        p.roles == {"member": {"allowed_profiles": ["developer"]}}
+    eff = team_policy.with_role_overrides(p, "member", None).enforced
+    assert eff.allowed_profiles == ("developer",) and eff.require_human_review == POLICY["require_human_review"]
