@@ -1323,16 +1323,26 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
             db.enqueue(root_id, text, None)   # handed over at the supervisor's next Stop
         close_later(caller.id)
         return "Audit recorded and sent to the supervisor. You're done."
-    sha = gates.head(ws)
-    db.add_review(ws.id, sha, caller.id, approved, summary)
-    if approved:
-        db.bump_progress(autopilot.root_of(db, caller.id))
-    pipeline.note_review(db, ws, approved, reviewer=caller)
-    verdict = "APPROVED" if approved else "CHANGES REQUESTED"
-    text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
-    handled = pipeline.on_review(db, caller, ws, approved, summary)
-    # A merge the pipeline just made removes this reviewer's own record.
-    report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
+    # One verdict at a time per workspace: a second one (the same reviewer
+    # calling twice, or another reviewer of the same branch) waits here, then
+    # finds what the first one did instead of merging alongside it.
+    with pipeline.merge_lock(ws.id):
+        caller = db.get_agent(caller_id)
+        if caller is None or caller.result is not None or db.get_workspace(ws.id) is None \
+                or not os.path.isdir(ws.path):
+            # Already recorded, or the branch merged (or was removed) meanwhile.
+            close_later(caller_id)
+            return "Your review was already recorded, or the branch is already merged. You're done."
+        sha = gates.head(ws)
+        db.add_review(ws.id, sha, caller.id, approved, summary)
+        if approved:
+            db.bump_progress(autopilot.root_of(db, caller.id))
+        pipeline.note_review(db, ws, approved, reviewer=caller)
+        verdict = "APPROVED" if approved else "CHANGES REQUESTED"
+        text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
+        handled = pipeline.on_review(db, caller, ws, approved, summary)
+        # A merge the pipeline just made removes this reviewer's own record.
+        report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
     close_later(caller.id)
     if handled:
         return f"Review recorded ({verdict}); copse takes it from here. You're done."
@@ -1650,12 +1660,13 @@ def _late_check_summary(db: DB, ws: Workspace, sha: str, summary: str, reviewer_
     the supervisor when the branch was approved (or has no verdict at this
     commit), the worker when changes were requested anyway (the supervisor
     if it's gone). Dropped
-    only when there's nothing left to act on: the workspace was removed, or
-    the branch has new commits, which get their own run."""
+    only when there's nothing left to act on: the workspace was removed, the
+    branch merged at this commit (its worktree may be going away under the
+    run), or the branch has new commits, which get their own run."""
     from copse import gates
 
     try:
-        if db.get_workspace(ws.id) is None or gates.head(ws) != sha:
+        if db.get_workspace(ws.id) is None or db.merged_sha(ws.id) == sha or gates.head(ws) != sha:
             return
     except git.GitError:
         return

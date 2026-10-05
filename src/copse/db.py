@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 -- The sidebar reads each workspace's latest review on every refresh (last_review).
 CREATE INDEX IF NOT EXISTS reviews_workspace_id ON reviews(workspace_id, id);
+-- The commit a workspace's branch was merged into its base at, so a repeated
+-- merge of the same commit is a no-op (see pipeline.merge).
+CREATE TABLE IF NOT EXISTS merges (
+    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    merged_at REAL NOT NULL
+);
 -- A check command's PASSING result at one commit, so gates.run and
 -- request_review don't re-run the same command against the same tree. Only
 -- written when the tree was clean before and after the run (see
@@ -987,6 +994,23 @@ class DB:
             (workspace_id,),
         ).fetchone()
         return _load(Review, row) if row else None
+
+    # -- merges --------------------------------------------------------------
+
+    def set_merged(self, workspace_id: str, sha: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO merges (workspace_id, sha, merged_at) VALUES (?,?,?) "
+                "ON CONFLICT(workspace_id) DO UPDATE SET sha=excluded.sha, "
+                "merged_at=excluded.merged_at",
+                (workspace_id, sha, time.time()),
+            )
+
+    def merged_sha(self, workspace_id: str) -> str | None:
+        """The commit ``workspace_id``'s branch was last merged at, if it was."""
+        row = self.conn.execute(
+            "SELECT sha FROM merges WHERE workspace_id=?", (workspace_id,)).fetchone()
+        return row[0] if row else None
 
     # -- check cache -----------------------------------------------------------
 
