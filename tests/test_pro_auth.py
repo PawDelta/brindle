@@ -451,12 +451,6 @@ def test_non_json_response(server):
         post(f"http://127.0.0.1:{port}/html")
 
 
-def test_dev_jwks_fetch_over_the_real_transport(server, signing_key):
-    routes, port = server
-    routes[("GET", "/api/copse/v1/keys")] = (200, {}, b'{"keys": []}')
-    assert auth.fetch_jwks(f"http://127.0.0.1:{port}/api/copse/v1") == {"keys": []}
-
-
 def test_unreachable_backend():
     with pytest.raises(TransportError):
         auth.UrllibTransport(timeout=2).request("POST", "https://127.0.0.1:1/x", {}, {})

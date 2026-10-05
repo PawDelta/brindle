@@ -194,14 +194,10 @@ def test_entitlement_fetch_and_authed_calls_are_refused(on, backend):
     assert backend.calls == []
 
 
-def test_jwks_fetch_is_refused_even_in_dev_mode(on, backend, monkeypatch):
+def test_dev_mode_trusts_no_unpinned_key(on, monkeypatch):
     monkeypatch.setenv("COPSE_PRO_DEV", "1")
-    with pytest.raises(auth.AirGapped):
-        auth.fetch_jwks(BASE, backend)
-    assert backend.calls == []
-    # and so the dev-key path can't trust anything it didn't pin
     with pytest.raises(license.LicenseError, match="unknown key"):
-        license._trusted_key("some-other-kid", "http://localhost:8000")
+        license._trusted_key("some-other-kid")
 
 
 def test_license_current_never_refreshes(on, backend):

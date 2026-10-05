@@ -374,71 +374,14 @@ def test_expired_past_grace_offline_is_rejected(backend, token):
 # -- development keys (JWKS from a localhost backend) ------------------------------------------
 
 
-@pytest.fixture
-def dev_key(monkeypatch):
-    """A backend key served only by a JWKS endpoint, never pinned."""
-    from cryptography.hazmat.primitives import serialization
-
+def test_no_environment_makes_an_unpinned_key_trusted(monkeypatch):
+    # Dev mode and a localhost issuer once let the client trust keys a local
+    # server served; nothing outside keys.py may add a trusted key.
     key = Ed25519PrivateKey.generate()
-    x = b64(key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))
-    kid = license.jwk_thumbprint(x)
-    fetched = []
-
-    def fetch(base, transport=None):
-        fetched.append(base)
-        return {"keys": [{"kty": "OKP", "crv": "Ed25519", "x": x, "kid": kid, "alg": "EdDSA"}]}
-
-    monkeypatch.setattr(auth, "fetch_jwks", fetch)
-    return key, kid, fetched
-
-
-LOCAL = "http://localhost:8000/api/copse/v1"
-
-
-def test_dev_keys_are_trusted_for_a_localhost_issuer_in_dev_mode(dev_key, monkeypatch):
-    key, kid, fetched = dev_key
     monkeypatch.setenv("COPSE_PRO_DEV", "1")
-    t = sign(key, claims(kid=kid, iss=LOCAL))
-    assert license.verify(t, issuer=LOCAL).kid == kid
-    assert fetched == [LOCAL]
-
-
-def test_dev_keys_are_never_used_outside_dev_mode(dev_key):
-    key, kid, fetched = dev_key
+    local = "http://localhost:8000/api/copse/v1"
     with pytest.raises(LicenseError, match="unknown key"):
-        license.verify(sign(key, claims(kid=kid, iss=LOCAL)), issuer=LOCAL)
-    assert fetched == []
-
-
-def test_dev_keys_are_never_used_for_a_remote_issuer(dev_key, monkeypatch):
-    key, kid, fetched = dev_key
-    monkeypatch.setenv("COPSE_PRO_DEV", "1")
-    with pytest.raises(LicenseError, match="unknown key"):
-        license.verify(sign(key, claims(kid=kid)), issuer=ISS)
-    assert fetched == []
-
-
-def test_dev_keys_are_scoped_to_their_host(dev_key, monkeypatch):
-    key, kid, fetched = dev_key
-    monkeypatch.setenv("COPSE_PRO_DEV", "1")
-    t = sign(key, claims(kid=kid, iss=LOCAL))
-    license.verify(t, issuer=LOCAL)
-    # the same token presented against the production issuer finds no key
-    with pytest.raises(LicenseError):
-        license.verify(t, issuer=ISS)
-
-
-def test_jwks_entries_must_carry_their_own_thumbprint():
-    from cryptography.hazmat.primitives import serialization
-
-    raw = Ed25519PrivateKey.generate().public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    x = b64(raw)
-    good = {"kty": "OKP", "crv": "Ed25519", "x": x, "kid": license.jwk_thumbprint(x)}
-    assert list(license.parse_jwks({"keys": [good]})) == [good["kid"]]
-    assert license.parse_jwks({"keys": [{**good, "kid": "chosen-by-attacker"}]}) == {}
-    assert license.parse_jwks({"keys": [{**good, "crv": "P-256"}]}) == {}
-    assert license.parse_jwks({"nope": 1}) == {}
+        license.verify(sign(key, claims(kid="unpinned", iss=local)), issuer=local)
 
 
 def test_errors_never_contain_the_token(token, caplog):

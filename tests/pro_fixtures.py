@@ -58,13 +58,11 @@ def token(signing_key):
 @pytest.fixture(autouse=True)
 def pro_env(monkeypatch, copse_home):
     """A private home, the file credential store, a test base URL, no dev
-    mode, and no cached entitlement or dev keys (see also tests/conftest.py)."""
+    mode, and no cached entitlement (see also tests/conftest.py)."""
     monkeypatch.setenv("COPSE_PRO_BASE_URL", BASE)
     license.clear_cache()
-    license.clear_dev_keys()
     yield
     license.clear_cache()
-    license.clear_dev_keys()
 
 
 class FakeTransport:

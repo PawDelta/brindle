@@ -241,15 +241,6 @@ def _error(status: int, body: dict) -> AuthError:
     return AuthError(msg, code=code, revoked=code == "invalid_grant")
 
 
-def fetch_jwks(base: str, transport: Transport | None = None) -> dict:
-    """The server's JWKS. Only :mod:`license` calls this, and only in dev mode
-    for a localhost issuer."""
-    status, body = Client(base, transport).get("/keys")
-    if status != 200:
-        raise _error(status, body)
-    return body
-
-
 # -- device flow ----------------------------------------------------------------------------------
 
 
