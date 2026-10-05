@@ -415,13 +415,31 @@ def _retry_transient(args: list[str], cwd: str | Path) -> subprocess.CompletedPr
     return proc
 
 
+# A merge takes seconds; a holder this slow is hung, and waiting on it forever
+# would stall every later merge into the checkout.
+LOCK_TIMEOUT = 300.0
+
+
 @contextlib.contextmanager
-def checkout_lock(path: str | Path):
+def checkout_lock(path: str | Path, timeout: float | None = None):
     """Serialize merges into one checkout with an exclusive file lock kept in
-    that checkout's own git dir (shared across processes, released if we die)."""
+    that checkout's own git dir (shared across processes, released if we die).
+    Raises GitError if the lock isn't free within ``timeout`` seconds."""
+    timeout = LOCK_TIMEOUT if timeout is None else timeout
     git_dir = Path(out(["rev-parse", "--absolute-git-dir"], path))
     with open(git_dir / "copse-merge.lock", "a") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise GitError(
+                        f"another merge into {path} has held its lock for over "
+                        f"{timeout:.0f}s; it may be hung"
+                    ) from None
+                time.sleep(0.1)
         try:
             yield
         finally:

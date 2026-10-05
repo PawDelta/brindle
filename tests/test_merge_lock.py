@@ -39,6 +39,26 @@ def test_checkout_lock_serializes_holders(repo):
         assert events[i + 1] == events[i].replace("in-", "out-")
 
 
+def test_checkout_lock_gives_up_on_a_hung_holder(repo):
+    held, release = threading.Event(), threading.Event()
+
+    def hang():
+        with git.checkout_lock(repo):
+            held.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hang)
+    t.start()
+    held.wait(5)
+    try:
+        with pytest.raises(git.GitError, match="may be hung"):
+            with git.checkout_lock(repo, timeout=0.3):
+                pass
+    finally:
+        release.set()
+        t.join()
+
+
 def test_transient_index_failure_is_retried(db, repo, monkeypatch):
     ws = _feature(db, repo)
     monkeypatch.setattr(git, "RETRY_DELAYS", (0, 0, 0))
@@ -95,7 +115,7 @@ def test_non_transient_failure_is_not_retried(db, repo, monkeypatch):
     assert calls["n"] == 1
 
 
-def test_uncommitted_changes_in_target_survive_a_retried_merge(db, repo, monkeypatch):
+def test_merge_refuses_a_target_with_uncommitted_changes(db, repo, monkeypatch):
     (repo / "README.md").write_text("base\n")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "readme"], cwd=repo, check=True)
