@@ -53,7 +53,9 @@ def guidance(repo_root: str) -> str | None:
         "lives or what calls what, ask it before listing folders, grepping or reading "
         f"whole files: `graphify query \"<question>\" --graph {path} --budget 1500` lists "
         "the relevant functions and classes with file and line (`graphify explain "
-        f"\"<name>\" --graph {path}` for one symbol). Then read just those lines. The map "
+        f"\"<name>\" --graph {path}` for one symbol). Then read just those lines. File "
+        "paths it prints are relative to the repo root: open them in your own working "
+        f"directory, not under {repo_root}, which may be a different checkout. The map "
         "can lag behind the code a little, so trust the files when they differ."
     )
 
