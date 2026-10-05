@@ -62,6 +62,8 @@ class LearningPlugin(ABC):
 
     # why the last ``suggest`` overrode ``default``; None when it kept it
     last_reason: str | None = None
+    # whether the last ``suggest``'s evidence included other orgs' shared results
+    last_prior: bool = False
 
     @abstractmethod
     def record(self, task: TaskInfo, outcome: Outcome) -> None:
@@ -188,6 +190,7 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
         if p is None:
             return None, None
         p.last_reason = None
+        p.last_prior = False
         pick = p.suggest(TaskInfo(repo_root=repo_root, task=task or "",
                                   files=tuple(files or ()), weight=weight), names, default)
         if pick not in names or pick == default:
@@ -206,4 +209,15 @@ def choose(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
     return choose_why(db, cfg, repo_root, task, files, candidates, weight, default)[0]
 
 
-__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "note", "plugin", "reset"]
+def used_prior(cfg: RepoConfig, repo_root: str) -> bool:
+    """Whether the learner's last override (see ``choose_why``) drew on other
+    orgs' shared results. False without a learner or when it didn't say."""
+    try:
+        p = plugin(cfg, repo_root)
+        return p is not None and p.last_prior is True
+    except Exception:
+        return False
+
+
+__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "note", "plugin", "reset",
+           "used_prior"]
