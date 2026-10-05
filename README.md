@@ -820,8 +820,9 @@ isn't on the machine while agents run. So the work can be split:
 
 The workflow `copse ci init` writes pins copse to the version that wrote it,
 since the publishing job holds a write token. The short-lived entitlement
-passes between jobs as an artifact kept one day; anyone who can download the
-repo's artifacts could use it until it expires.
+passes between jobs as an artifact kept one day. A CI entitlement expires
+three hours after it's issued, so anyone who can download the repo's
+artifacts could use it for that long at most.
 
 `copse ci run` without `--bundle` still pushes and opens the pull request
 itself. Use that only where you trust the repo's code and everyone who can
