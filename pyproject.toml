@@ -31,8 +31,7 @@ dependencies = [
 Homepage = "https://pawdelta.com/copse/"
 Documentation = "https://pawdelta.com/copse/docs/recommended-use"
 Changelog = "https://pawdelta.com/copse/changelog"
-Repository = "https://github.com/hmlerner/copse-ai"
-Issues = "https://github.com/hmlerner/copse-ai/issues"
+Support = "mailto:support@pawdelta.com"
 
 [project.scripts]
 copse = "copse.cli:app"
