@@ -201,12 +201,52 @@ class _Screen:
 STYLES = {"accent": 1, "bold": 2, "dim": 3, "coat": 4, "streak": 5}
 
 
+PAW_7B = [
+    "...XX.XX...",
+    "...XX.XX...",
+    "XX.......XX",
+    "XX..PPP..XX",
+    "...PPPPP...",
+    "..PPPPPPP..",
+    "..PPPPPPP..",
+    "...PP.PP...",
+]
+
+
 def test_logo_is_a_brindle_paw_with_the_wordmark():
     screen = _Screen(40)
-    assert watch._draw_logo(screen, 40, STYLES) == len(watch.LOGO) + 1
-    assert "brindle" in screen.row(2)
-    colours = {attr for (y, _), (ch, attr) in screen.cells.items() if y < len(watch.LOGO) and ch in "▄▀█"}
-    assert colours == {STYLES["coat"], STYLES["streak"]}  # fawn, with dark stripes
+    assert watch._draw_logo(screen, 40, STYLES) == 5  # 8 pixel rows → 4 terminal rows, then a rule
+    assert len(watch.LOGO) == 4
+    assert [screen.row(y)[:30].rstrip() for y in range(4)] == [  # left of the clock
+        "    ██ ██",
+        " ██  ▄▄▄  ██",
+        "   ▄█████▄    brindle",
+        "   ▀██▀██▀",
+    ]
+
+
+def test_logo_matches_the_7b_bitmap():
+    screen = _Screen(40)
+    watch._draw_logo(screen, 40, STYLES)
+    for y in range(4):
+        for x in range(11):
+            top, bottom = PAW_7B[2 * y][x], PAW_7B[2 * y + 1][x]
+            want = " " if top == bottom == "." else "▀" if bottom == "." else "▄" if top == "." else "█"
+            ch, attr = screen.cells.get((y, 1 + x), (" ", 0))
+            assert ch == want, (y, x)
+            if want != " ":
+                pad = "P" in (top, bottom)
+                assert attr == STYLES["streak" if pad and x % 2 == 1 else "coat"], (y, x)
+
+
+def test_logo_stripes_only_odd_pad_columns():
+    screen = _Screen(40)
+    watch._draw_logo(screen, 40, STYLES)
+    streaks = {x - 1 for (y, x), (_, attr) in screen.cells.items() if y < 4 and attr == STYLES["streak"]}
+    assert streaks == {3, 5, 7}  # fawn coat, dark stripes down every other pad column
+    toes = [(y, x) for y in range(4) for x in range(11)
+            if "X" in (PAW_7B[2 * y][x], PAW_7B[2 * y + 1][x])]
+    assert all(screen.cells[(y, 1 + x)][1] == STYLES["coat"] for y, x in toes)
 
 
 def test_logo_fits_narrow_panes():

@@ -700,19 +700,35 @@ def _peek(stdscr, agent: dict, styles: dict[str, int]) -> None:
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
 
 
-LOGO = [  # a paw print; the wordmark sits beside its middle row
-    ("   ▄▄  ▄▄   ", ""),
-    ("▄▄ ▀▀  ▀▀ ▄▄", ""),
-    ("▀▀  ▄▄▄▄  ▀▀  ", "brindle"),
-    ("   ██████", ""),
-    ("    ▀▀▀▀", ""),
+# The paw as pixels, one cell wide and two tall: X is a toe, P the pad, . empty.
+PAW = [
+    "...XX.XX...",
+    "...XX.XX...",
+    "XX.......XX",
+    "XX..PPP..XX",
+    "...PPPPP...",
+    "..PPPPPPP..",
+    "..PPPPPPP..",
+    "...PP.PP...",
 ]
+HALF_BLOCKS = {(False, False): " ", (True, False): "▀", (False, True): "▄", (True, True): "█"}
+WORDMARK_ROW = 2  # the wordmark sits beside this terminal row of the paw
+
+
+def _paw_row(y: int) -> str:
+    """Terminal row y of the paw: pixel rows 2y and 2y+1 as half blocks."""
+    top, bottom = PAW[2 * y], PAW[2 * y + 1]
+    return "".join(HALF_BLOCKS[(t != ".", b != ".")] for t, b in zip(top, bottom))
+
+
+LOGO = [(_paw_row(y), "brindle" if y == WORDMARK_ROW else "") for y in range(len(PAW) // 2)]
 COMPACT_LOGO = "▀▄▀"  # two toes over the pad, for one-line headers
 
 
 def _coat(x: int, y: int) -> str:
-    """Brindle: a fawn coat, with dark stripes down the pad."""
-    return "streak" if y >= 2 and 3 <= x <= 8 and x % 2 == 0 else "coat"
+    """Brindle: a fawn coat, with dark stripes down every other column of the pad."""
+    pad = "P" in (PAW[2 * y][x], PAW[2 * y + 1][x])
+    return "streak" if pad and x % 2 == 1 else "coat"
 
 
 def _draw_logo(stdscr, w: int, styles: dict[str, int]) -> int:
@@ -722,8 +738,8 @@ def _draw_logo(stdscr, w: int, styles: dict[str, int]) -> int:
         for x, ch in enumerate(paw):
             if ch != " " and x < w - 2:
                 stdscr.addstr(y, 1 + x, ch, styles.get(_coat(x, y), styles["accent"]))
-        if word and w > len(paw) + len(word) + 2:
-            stdscr.addnstr(y, 1 + len(paw), word, len(word), styles["bold"])
+        if word and w > len(paw) + len(word) + 4:
+            stdscr.addnstr(y, 3 + len(paw), word, len(word), styles["bold"])
     if w > len(clock) + 16:
         stdscr.addnstr(0, w - 1 - len(clock), clock, len(clock), styles["dim"])
     stdscr.addnstr(len(LOGO), 1, "─" * max(0, w - 3), w - 2, styles["dim"])
