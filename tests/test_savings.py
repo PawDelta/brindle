@@ -120,7 +120,7 @@ def test_the_shared_prior_flag_is_kept_and_counted(db, repo, boss, monkeypatch):
         (1, 1), (1, 0), (0, 0)]
     periods = savings.report(db, str(repo), cost=cost)
     assert periods[0].learned.prior == 1
-    assert "2 by learning (1 from the shared prior) · 1 baseline" in savings.describe(
+    assert "2 by learning (1 helped by your company's other orgs) · 1 baseline" in savings.describe(
         periods, str(repo))
 
 
@@ -328,3 +328,18 @@ def test_bare_account_has_one_savings_line_when_learning_is_active(db, repo, sto
     login_as(backend, store, features=())
     code, text = run_account(repo, store, backend)
     assert code == 0 and "Learning" not in text
+
+
+def test_the_first_outcome_sticks(db):
+    db.add_routing_decision(task_id=None, agent_id="w1", repo_root="/r", weight="medium",
+                            baseline_profile="developer", profile="developer", learned=False)
+    db.note_routing_outcome("w1", outcome="merged")
+    db.note_routing_outcome("w1", outcome="removed_unmerged")
+    assert db.list_routing_decisions()[0].outcome == "merged"
+
+
+def test_a_local_model_is_cheapest_not_free(monkeypatch):
+    from copse import savings
+    from copse.pro import learning
+    monkeypatch.setattr(learning, "cost_rank", lambda name, root=None: 0)
+    assert savings._default_cost("/r")("developer-local") == 1

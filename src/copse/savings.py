@@ -119,9 +119,11 @@ class Period:
 
 
 def _default_cost(repo_root: str) -> Callable[[str], int]:
+    """Relative cost per token: cost_rank + 1, so a local model (rank 0)
+    counts as the cheapest rather than free, and never reads as 100% saved."""
     from copse.pro.learning import cost_rank
 
-    return lambda name: cost_rank(name, repo_root)
+    return lambda name: cost_rank(name, repo_root) + 1
 
 
 def _month_start(now: float, back: int = 0) -> float:
@@ -220,7 +222,7 @@ def describe(periods: list[Period], repo_root: str) -> str:
         if not p.learned.tasks + p.baseline.tasks:
             lines.append("  no delegated tasks")
             continue
-        shared = f" ({p.learned.prior} from the shared prior)" if p.learned.prior else ""
+        shared = f" ({p.learned.prior} helped by your company's other orgs)" if p.learned.prior else ""
         lines.append(f"  picks                {p.learned.tasks} by learning{shared} · "
                      f"{p.baseline.tasks} baseline")
         lines.append(f"  review rounds/task   {_per_task(p.learned)} learning · "

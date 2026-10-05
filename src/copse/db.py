@@ -1296,10 +1296,11 @@ class DB:
 
     def note_routing_outcome(self, agent_id: str, *, review: bool = False, escalated: bool = False,
                              outcome: str | None = None) -> None:
+        """Count a review or an escalation; the first outcome recorded sticks."""
         with self.tx() as c:
             c.execute(
                 "UPDATE routing_decisions SET review_rounds=review_rounds+?, "
-                "escalations=escalations+?, outcome=COALESCE(?, outcome) WHERE agent_id=?",
+                "escalations=escalations+?, outcome=COALESCE(outcome, ?) WHERE agent_id=?",
                 (int(review), int(escalated), outcome, agent_id),
             )
 
