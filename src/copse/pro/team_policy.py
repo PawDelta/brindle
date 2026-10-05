@@ -206,6 +206,22 @@ def fetch_policy(org_id: str, client=None, store=None, cached_for=None) -> OrgPo
     return p
 
 
+def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None) -> OrgPolicy:
+    """``p`` with its ``effective`` policy filled in from its per-role
+    overrides, by the backend's rule (orgs.effective_policy): the base, then
+    the built-in role's overrides, then the custom policy role's, each only
+    where set. Unchanged when ``p`` already has one or has no overrides."""
+    if p.effective is not None or not p.roles:
+        return p
+    merged = p.rules()
+    for name in (role, policy_role):
+        for k, v in (p.roles.get(name) or {}).items():
+            if v is not None and k in RULES:
+                merged[k] = list(v) if isinstance(v, tuple) else v
+    return replace(p, effective=OrgPolicy(org_id=p.org_id, version=p.version,
+                                          fetched_at=p.fetched_at, **_rules(merged)))
+
+
 def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
     """The offline policy file (``.copse/policy.json``, the org policy's
     schema) for air-gap mode; raises :class:`PolicyUnavailable` when it is
@@ -238,7 +254,8 @@ def current_policy(ent, client=None, store=None, repo_root: str | None = None) -
     from copse import airgap
 
     if airgap.enabled():
-        return load_offline(repo_root, ent.org_id)
+        return with_role_overrides(load_offline(repo_root, ent.org_id), ent.role,
+                                   getattr(ent, "policy_role", None))
     cached = load_cached(ent.org_id)
     want = (ent.role, ent.policy_role)
     if (cached is not None and cached.version >= ent.policy_version
@@ -247,7 +264,10 @@ def current_policy(ent, client=None, store=None, repo_root: str | None = None) -
     try:
         return fetch_policy(ent.org_id, client, store, cached_for=want)
     except Exception as e:  # noqa: BLE001
-        if cached is not None:
+        # A stale version of this member's own policy is a fair fallback; a
+        # copy fetched for another role is not: after a demotion it would
+        # keep the old, looser rules while the backend is unreachable.
+        if cached is not None and cached.cached_for == want:
             log.warning("team policy v%s unavailable (%s); using cached v%s",
                         ent.policy_version, e, cached.version)
             return cached

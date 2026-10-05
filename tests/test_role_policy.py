@@ -153,12 +153,42 @@ def test_a_cache_from_before_roles_is_refetched_once(team):
     assert fetches(team) == 1
 
 
-def test_the_last_good_copy_is_used_when_the_role_refetch_fails(team):
+def test_a_copy_cached_for_another_role_is_never_a_fallback(team):
+    # After a role change, a failed refetch must not fall back to the old
+    # role's (possibly looser) rules: it fails closed.
     role_policy(team)
-    plugin(team).check_assign(assign())
+    assert plugin(team).check_assign(assign()).allowed
     login(team, team_claims(policy_role="contractor"))
     team.routes[GET] = [auth.TransportError("down")]
-    assert not plugin(team).check_assign(assign(provider="codex", model="gpt-5")).allowed
+    assert not plugin(team).check_assign(assign()).allowed
+
+
+def test_a_stale_copy_for_the_same_role_is_still_a_fallback(team):
+    role_policy(team)
+    assert plugin(team).check_assign(assign()).allowed
+    login(team, team_claims(policy_version=4))      # newer version, same role
+    team.routes[GET] = [auth.TransportError("down")]
+    assert plugin(team).check_assign(assign()).allowed
+
+
+# -- offline (air-gap) policy files ----------------------------------------------------------------
+
+
+def test_offline_files_apply_role_overrides_by_the_backends_rule():
+    base = team_policy.parse_policy(ORG, {"version": 1, "policy": {
+        **POLICY, "allowed_profiles": None, "max_parallel_workers": 8, "roles": ROLES}}, 0)
+    member = team_policy.with_role_overrides(base, "member", None).enforced
+    assert member.allowed_providers == ("claude",) and member.max_parallel_workers == 2
+    contractor = team_policy.with_role_overrides(base, "member", "contractor").enforced
+    assert contractor.allowed_profiles == ("developer",) and contractor.require_human_review is True
+    assert contractor.max_parallel_workers == 2                     # member's override still applies
+    assert team_policy.with_role_overrides(base, "owner", None).enforced.max_parallel_workers == 8
+
+
+def test_an_offline_effective_policy_is_kept_as_is():
+    p = team_policy.parse_policy(ORG, {"version": 1, "policy": {**POLICY, "roles": ROLES},
+                                       "effective": MEMBER}, 0)
+    assert team_policy.with_role_overrides(p, "member", "contractor") is p
 
 
 # -- copse account org policy ----------------------------------------------------------------------
