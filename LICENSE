@@ -4,11 +4,11 @@ Required Notice: Copyright 2026 PawDelta LLC (https://pawdelta.com/copse)
 
 ## Acceptance
 
-In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
+By installing or using the software, you agree to these terms. In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
 
 ## Use License
 
-The licensor grants you a copyright license to install and use the software for any purpose, including commercial purposes, except as **Noncompete** limits it, and subject to the other limitations and conditions below.
+The licensor grants you a non-exclusive, royalty-free, worldwide, non-sublicensable, non-transferable copyright license to install and use the software for any purpose, including commercial purposes, other than a **Competing Use**, and subject to the other limitations and conditions below. A Competing Use is outside this license. If you make one, you are using the software without a license.
 
 ## No Modification
 
@@ -24,7 +24,7 @@ You may make these changes without asking:
 
 3. **Private fixes.** Changes to your own installed copies that fix a defect, kept only for use by you and your company and not shared with anyone else.
 
-No change permitted here, including a plugin, may do anything **License Keys and Paid Features** forbids.
+No change permitted here, including a plugin, may do anything **License Keys and Paid Features** forbids, or be a Competing Use.
 
 ## No Redistribution
 
@@ -34,41 +34,80 @@ If you are an entity, you may also copy the software, unchanged except as **Perm
 
 A fork of the official repository that a code hosting service's own terms allow is permitted only to view the software and prepare contributions under **Permitted Changes**.
 
-## Noncompete
+## Competing Use
 
-You may not use the software to provide any product that competes with the software.
+A **Competing Use** is any use of the software, or of any part of it (including its code, prompts, agent profiles, schemas and documentation), to build, provide or support a **Protected Service** to others, meaning to anyone other than your company.
+
+A **Protected Service** is a product that does any of the following, as listed in the file `SCHEDULE-A` shipped with the version of the software you use:
+
+1. **Hosted service.** Provides the software to third parties as a hosted or managed service, where the service provides users with access to any substantial set of the features or functionality of the software.
+2. **Cross-installation coordination.** Coordinates agents, work, policies or state across installations of the software that belong to different people or organizations.
+3. **Commercial registries and marketplaces.** Operates a commercial registry or marketplace that distributes or sells agent profiles, plugins or policies for the software made by others. Sharing or selling agent profiles, plugins or policies you made yourself is not a Protected Service.
+4. **Entitlement compatibility.** Issues, verifies or emulates the software's license keys or entitlements.
+
+The list in `SCHEDULE-A` is fixed for each release. The licensor may change it for later releases, and a change does not affect versions already released.
+
+**Existing non-competing products.** If you are using the software to provide a product that is not a Protected Service when you start, and the licensor later adds a new Protected Service that brings your product into competition, you may keep using the versions released before that change for your product, but not later versions.
+
+**Discontinued services.** If the licensor and its affiliates have stopped providing a Protected Service for twelve months, you may use the software to provide a similar product, unless `SCHEDULE-A` names that service as a Licensor Line of Business.
+
+## Allowed Uses
+
+None of the following is a Competing Use:
+
+1. **Internal use.** Any use for you and your company, including coordinating your company's own people and installations with tools that you or your company control.
+2. **Services for a customer's own use.** Installing, configuring or supporting the software for a customer who uses it under these terms and who gets the software from the licensor's official channels.
+3. **Products built on the software.** Products or agents that run on the software or use its documented extension points and do not provide a Protected Service.
+4. **Interoperability.** Tools that use the software's documented command line or protocols to read its status or send it work.
+5. **Education and research.** Teaching, study and research that do not provide a Protected Service.
+
+## Competition
+
+Whether something is a Protected Service depends on what it does, not on its price, its interface, its platform or the language it is written in.
 
 ## License Keys and Paid Features
 
-Some features of the software work only with a paid plan, an entitlement or a license file from the licensor. These terms do not license those features without one. You may not move, change, disable, bypass or circumvent the software's license key, entitlement or account checks, or any functionality those checks protect, and you may not remove or hide any licensing, copyright or other notices of the licensor in the software. A plugin or configuration that does any of these things is not a permitted change.
+Some features of the software work only with a paid plan, an entitlement or a license file from the licensor. These terms do not license those features without one. You may not move, change, disable, bypass or circumvent the software's license key, entitlement or account checks, or any functionality those checks protect, and you may not remove or obscure any functionality the license key protects. You also may not reverse engineer or reimplement the software's license-check or entitlement protocol, or issue or accept keys or entitlements of your own, to obtain or provide paid features without a license from the licensor. You may not remove or hide any licensing, copyright or other notices of the licensor in the software. A plugin or configuration that does any of these things is not a permitted change.
+
+## Violations
+
+Use of the software in violation of these terms, or beyond your licenses, is not licensed, and your licenses end automatically. If the licensor notifies you of a violation in writing and you stop all violation within 30 days after you receive the notice, your licenses are reinstated retroactively. For a Competing Use, stopping means ending it and deleting everything you built from the software for it. If you violate these terms after a reinstatement, your licenses end permanently.
+
+## No Other Rights
+
+These terms do not allow you to sublicense or transfer any of your licenses to anyone else, or prevent the licensor from granting licenses to anyone else. These terms do not imply any other licenses.
+
+If you are an entity, you may transfer all of your licenses to an organization that acquires all or substantially all of your business or assets, if that organization agrees to these terms.
+
+## Successors and Affiliates
+
+The licensor's rights under these terms, including to enforce **Competing Use**, also belong to its affiliates, and to anyone who buys the line of business developing or offering the software, or a Protected Service, from the licensor or its affiliates.
+
+## Severability and Remedies
+
+If a court finds any part of **Competing Use** unenforceable as written, it applies to the greatest extent the law allows, and the rest of these terms are unaffected.
+
+A Competing Use causes harm that money cannot fully repair. You agree that the licensor may seek an injunction and specific performance without proving actual damages.
 
 ## Trademarks
 
 These terms do not grant you any right to use the names, logos or trademarks of the licensor or its affiliates, including "copse" and "PawDelta", except to accurately identify the software and its origin.
 
-## Competition
-
-Goods and services compete even when they provide functionality through different kinds of interfaces or for different technical platforms. Applications can compete with services, libraries with plugins, frameworks with development tools, and so on, even if they're written in different programming languages or for different computer architectures. Goods and services compete even when provided free of charge. If you market a product as a practical substitute for the software, it definitely competes.
-
 ## Patent License
 
-The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software as these terms allow.
+The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software as these terms allow. This license does not cover patent claims that you cause to be infringed by changes or additions to the software.
 
-## Notices
+## Patent Defense
 
-You must keep this license and any plain-text lines beginning with `Required Notice:` intact in every copy of the software you make.
+If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
 
 ## Fair Use
 
 You may have "fair use" rights for the software under the law. These terms do not limit them.
 
-## Excuse
+## Notices
 
-If anyone notifies you in writing that you have not complied with these terms, you can keep your license by taking all practical steps to comply within 30 days after the notice. If you do not do so, your license ends immediately.
-
-## Patent Defense
-
-If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
+You must keep this license, the file `SCHEDULE-A`, and any plain-text lines beginning with `Required Notice:` intact in every copy of the software you make.
 
 ## No Liability
 
@@ -85,6 +124,8 @@ The **licensor** is PawDelta LLC, the entity offering these terms, and the **sof
 **You** refers to the individual or entity agreeing to these terms.
 
 **Your company** is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization. **Control** means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise. Control can be direct or indirect.
+
+**Affiliates** are the organizations that an organization has control over, is under the control of, or is under common control with.
 
 **Your licenses** are all the licenses granted to you for the software under these terms.
 
