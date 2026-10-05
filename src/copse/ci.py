@@ -170,6 +170,29 @@ def require_ci(client=None):
     return ent
 
 
+# -- secrets ----------------------------------------------------------------------
+
+# Taken out of the environment before any agent starts: agents run the repo's
+# own code (tests, scripts, whatever a prompt talks them into), so they must
+# not inherit the org's CI token or a token that can push. copse's own push and
+# `gh pr create` get them back explicitly. The model API key stays: the agents
+# need it.
+WITHHELD_ENV = (TOKEN_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN")
+
+
+def withhold_secrets(environ=None) -> dict[str, str]:
+    """Remove the WITHHELD_ENV variables from ``environ`` (default: this
+    process's environment, which tmux and so every agent inherits) and
+    return them."""
+    environ = os.environ if environ is None else environ
+    return {k: environ.pop(k) for k in WITHHELD_ENV if k in environ}
+
+
+def _with(secrets: dict[str, str] | None) -> dict[str, str]:
+    return {**os.environ, **(secrets or {})}
+
+
 # -- the run ----------------------------------------------------------------------
 
 
@@ -259,15 +282,24 @@ def _stop(db: DB, root_id: str) -> None:
     agents.pause(db, root_id)
 
 
-def _push(ws: Workspace) -> None:
-    git.push(ws.path, ws.branch)
+def _push(ws: Workspace, secrets: dict[str, str] | None = None) -> None:
+    # gh answers git's credential request from GH_TOKEN, which only this
+    # process holds: nothing is written to .git/config.
+    helper = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"] \
+        if secrets and (secrets.get("GH_TOKEN") or secrets.get("GITHUB_TOKEN")) else []
+    proc = subprocess.run(["git", *helper, "push", "--set-upstream", "origin", ws.branch],
+                          cwd=ws.path, capture_output=True, text=True, timeout=git.TIMEOUT,
+                          env=_with(secrets))
+    if proc.returncode != 0:
+        raise git.GitError(f"git push failed: {proc.stderr.strip() or proc.stdout.strip()}")
 
 
-def _create_pr(ws: Workspace, base: str, title: str, body: str) -> str:
+def _create_pr(ws: Workspace, base: str, title: str, body: str,
+               secrets: dict[str, str] | None = None) -> str:
     proc = subprocess.run(
         ["gh", "pr", "create", "--base", base, "--head", ws.branch, "--title", title,
          "--body", workspaces.with_footer(body, ws.repo_root)],
-        cwd=ws.path, capture_output=True, text=True)
+        cwd=ws.path, capture_output=True, text=True, env=_with(secrets))
     if proc.returncode != 0:
         raise CIError(f"gh pr create failed: {proc.stderr.strip() or proc.stdout.strip()}")
     url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
@@ -326,7 +358,8 @@ def _poll(db: DB, root_id: str) -> tuple[str, str | None] | None:
 
 def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIMEOUT_MIN,
         max_workers: int | None = None, base: str | None = None, pr: bool = True,
-        poll_seconds: float = POLL_SECONDS, clock=time.time, sleep=time.sleep) -> Outcome:
+        poll_seconds: float = POLL_SECONDS, clock=time.time, sleep=time.sleep,
+        secrets: dict[str, str] | None = None) -> Outcome:
     """Run ``goal`` to a verified end (or not) and, with ``pr``, open the pull
     request. The session is always stopped before this returns."""
     from copse import autopilot as pilot
@@ -369,8 +402,8 @@ def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIME
             outcome.note = (outcome.note + "; " if outcome.note else "") + f"stopping the session failed: {e}"
     if outcome.status == "done" and pr:
         try:
-            _push(ws)
-            outcome.pr_url = _create_pr(ws, base_branch, goal.title, pr_body(outcome))
+            _push(ws, secrets)
+            outcome.pr_url = _create_pr(ws, base_branch, goal.title, pr_body(outcome), secrets)
         except (git.GitError, CIError) as e:
             outcome.note = str(e)
     return outcome
@@ -408,9 +441,10 @@ def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
     try:
         g = resolve_goal(goal, goal_file, issue, cwd)
         require_ci()
+        secrets = withhold_secrets()
         db = DB()
         outcome = run(db, cwd, g, timeout_min=timeout_min, max_workers=max_workers,
-                      base=base, pr=pr)
+                      base=base, pr=pr, secrets=secrets)
     except (CIError, git.GitError, workspaces.WorkspaceError, agents.AgentError) as e:
         echo(str(e))
         return 1
@@ -466,6 +500,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Agents run the repo's code: don't leave a push token in .git/config.
+          # copse pushes with GH_TOKEN itself, after the agents have stopped.
+          persist-credentials: false
       - name: Install tmux
         run: sudo apt-get update -q && sudo apt-get install -yq tmux
       - uses: astral-sh/setup-uv@v10.2.0

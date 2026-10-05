@@ -3,7 +3,9 @@ supervisor, git push and gh), the entitlement gate, and ``copse ci init``."""
 
 import functools
 import json
+import subprocess
 import time
+import types
 
 import pytest
 from typer.testing import CliRunner
@@ -33,7 +35,7 @@ class FakeSession:
         monkeypatch.setattr(ci, "_spawn", self.spawn)
         monkeypatch.setattr(ci, "_alive", lambda db, root_id: self.alive)
         monkeypatch.setattr(ci, "_stop", self.stop)
-        monkeypatch.setattr(ci, "_push", lambda ws: self.pushed.append(ws.branch))
+        monkeypatch.setattr(ci, "_push", lambda ws, secrets=None: self.pushed.append(ws.branch))
         monkeypatch.setattr(ci, "_create_pr", self.create_pr)
 
     def spawn(self, db, ws, prompt):
@@ -48,7 +50,7 @@ class FakeSession:
     def stop(self, db, root_id):
         self.stopped.append(root_id)
 
-    def create_pr(self, ws, base, title, body):
+    def create_pr(self, ws, base, title, body, secrets=None):
         self.prs.append((ws.branch, base, title, body))
         return "https://github.com/o/r/pull/7"
 
@@ -267,7 +269,7 @@ def test_cleanup_runs_when_the_run_itself_breaks(db, repo, monkeypatch):
 def test_pr_failure_is_reported_as_a_failure(db, repo, monkeypatch):
     s = FakeSession(db, monkeypatch, script=finish_goal)
 
-    def refuse(ws, base, title, body):
+    def refuse(ws, base, title, body, secrets=None):
         raise ci.CIError("gh pr create failed: no commits between main and copse/ci-add-health")
 
     monkeypatch.setattr(ci, "_create_pr", refuse)
@@ -489,3 +491,35 @@ def test_real_seams_exist():
     for name in ("_spawn", "_alive", "_stop", "_push", "_create_pr", "_gh_json", "_checkout"):
         assert callable(getattr(ci, name)), name
     assert workspaces.create and pilot.set_goal
+
+
+# -- secrets are withheld from agents ------------------------------------------
+
+
+def test_withhold_secrets_removes_tokens_and_keeps_the_model_key():
+    env = {"COPSE_PRO_TOKEN": "cpc_x", "GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghs_y",
+           "ANTHROPIC_API_KEY": "sk-ant-x", "PATH": "/bin"}
+    taken = ci.withhold_secrets(env)
+    assert taken == {"COPSE_PRO_TOKEN": "cpc_x", "GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghs_y"}
+    assert env == {"ANTHROPIC_API_KEY": "sk-ant-x", "PATH": "/bin"}
+
+
+def test_push_and_pr_get_the_withheld_tokens_back(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append((cmd, kw.get("env") or {}))
+        return subprocess.CompletedProcess(cmd, 0, "https://github.com/o/r/pull/1\n", "")
+
+    monkeypatch.setattr(ci.subprocess, "run", fake_run)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    ws = types.SimpleNamespace(path=str(tmp_path), branch="copse/ci-x", repo_root=str(tmp_path))
+    ci._push(ws, {"GH_TOKEN": "ghs_secret"})
+    ci._create_pr(ws, "main", "t", "b", {"GH_TOKEN": "ghs_secret"})
+    assert all(env.get("GH_TOKEN") == "ghs_secret" for _, env in seen)
+    assert "credential.helper=!gh auth git-credential" in seen[0][0]
+    assert all("ghs_secret" not in " ".join(cmd) for cmd, _ in seen)
+
+
+def test_the_workflow_does_not_persist_checkout_credentials(tmp_path):
+    assert "persist-credentials: false" in ci.workflow_text()
