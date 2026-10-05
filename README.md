@@ -1325,8 +1325,8 @@ GitHub Actions minutes cost money on this repo, so CI runs here first:
 
 ```sh
 git config core.hooksPath .githooks   # once: every push runs the quick leg first
-scripts/ci_local.sh                   # Python 3.11, 3.12, 3.13 here, plus Linux 3.12 in Docker
-scripts/ci_local.sh --full            # plus Linux 3.11 and 3.13
+scripts/ci_local.sh                   # Python 3.12 here and on Linux (Docker), tests in parallel
+scripts/ci_local.sh --full            # 3.11, 3.12 and 3.13, here and on Linux
 scripts/ci_local.sh --report          # after pushing a PR branch: post a `local-ci` status on it
 ```
 

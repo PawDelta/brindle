@@ -4,13 +4,15 @@
 # Each leg is what .github/workflows/ci.yml runs: `uv sync && uv run pytest -q`,
 # on a clean export of the commit (uncommitted edits can't make it pass).
 #
-#   scripts/ci_local.sh            host legs (3.11, 3.12, 3.13) + Linux 3.12 in Docker
+#   scripts/ci_local.sh            host 3.12 + Linux 3.12 in Docker
 #   scripts/ci_local.sh --quick    host, the project's default Python only
-#   scripts/ci_local.sh --full     host legs + Linux 3.11, 3.12, 3.13
+#   scripts/ci_local.sh --full     host and Linux, each on 3.11, 3.12, 3.13
 #   scripts/ci_local.sh --report   also post a `local-ci` commit status to GitHub
 #                                  (gh api; costs no Actions minutes)
 #   --rev REV                      test REV instead of HEAD
-#   --jobs N                       legs at once (default 2: a full suite is heavy)
+#   --jobs N                       legs at once (default 4)
+#   --serial                       run each leg's tests one at a time (default: pytest-xdist,
+#                                  the cores shared out between the legs running at once)
 #   --force                        test even a docs-only change
 #
 # A change that only touches docs (*.md, docs/, assets/, LICENSE, CLA.md),
@@ -21,7 +23,7 @@
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
-MODE=default REPORT=0 REV=HEAD JOBS=2 FORCE=0
+MODE=default REPORT=0 REV=HEAD JOBS=4 FORCE=0 SERIAL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --quick) MODE=quick ;;
@@ -30,7 +32,8 @@ while [ $# -gt 0 ]; do
     --rev) REV="$2"; shift ;;
     --jobs) JOBS="$2"; shift ;;
     --force) FORCE=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --serial) SERIAL=1 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -81,7 +84,7 @@ git -C "$ROOT" archive "$SHA" | tar -x -C "$WORK/src"
 case "$MODE" in
   quick) LEGS=("host:default") ;;
   full) LEGS=("host:3.11" "host:3.12" "host:3.13" "linux:3.11" "linux:3.12" "linux:3.13") ;;
-  *) LEGS=("host:3.11" "host:3.12" "host:3.13" "linux:3.12") ;;
+  *) LEGS=("host:3.12" "linux:3.12") ;;
 esac
 
 if printf '%s\n' "${LEGS[@]}" | grep -q '^linux:'; then
@@ -94,6 +97,15 @@ if printf '%s\n' "${LEGS[@]}" | grep -q '^linux:'; then
   fi
 fi
 
+# Each leg's tests run in parallel unless --serial;
+# pytest-xdist comes in for the run only, the project doesn't depend on it.
+# The legs share the machine: each gets cores / legs-at-once workers.
+NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+AT_ONCE=$(( ${#LEGS[@]} < JOBS ? ${#LEGS[@]} : JOBS ))
+WORKERS=$(( NCPU / (AT_ONCE > 0 ? AT_ONCE : 1) )); [ "$WORKERS" -lt 2 ] && WORKERS=2
+PYTEST="pytest -q"
+[ "$SERIAL" = 0 ] && PYTEST="--with pytest-xdist pytest -q -n $WORKERS"
+
 leg() {   # leg host:3.12 | linux:3.12 -> runs the suite, exit status is the result
   local where="${1%%:*}" py="${1#*:}" dir="$WORK/${1/:/-}" log="$WORK/logs/${1/:/-}.log"
   cp -R "$WORK/src" "$dir"
@@ -101,17 +113,18 @@ leg() {   # leg host:3.12 | linux:3.12 -> runs the suite, exit status is the res
     local pyarg=(); [ "$py" != default ] && pyarg=(--python "$py")
     # The tests give tmux sockets of their own; TMUX= keeps them out of the caller's session.
     (cd "$dir" && export UV_PROJECT_ENVIRONMENT="$dir/.venv" TMUX= \
-       && uv sync -q ${pyarg[@]+"${pyarg[@]}"} && uv run -q ${pyarg[@]+"${pyarg[@]}"} pytest -q) >"$log" 2>&1
+       && uv sync -q ${pyarg[@]+"${pyarg[@]}"} \
+       && uv run -q ${pyarg[@]+"${pyarg[@]}"} $PYTEST) >"$log" 2>&1
   else
     # The export is copied inside, so the runner-like user owns its checkout;
     # uv's cache (Pythons, wheels) persists in a volume between runs.
     docker run --rm -v "$dir:/src:ro" -v copse-ci-uv-cache:/home/ci/.cache/uv copse-ci-linux \
-      sh -c "cp -R /src /home/ci/work && cd /home/ci/work && uv sync -q --python $py && uv run -q --python $py pytest -q" \
+      sh -c "cp -R /src /home/ci/work && cd /home/ci/work && uv sync -q --python $py && uv run -q --python $py $PYTEST" \
       >"$log" 2>&1
   fi
 }
 
-echo "==> local CI for $SHORT: ${LEGS[*]} ($JOBS at a time)"
+echo "==> local CI for $SHORT: ${LEGS[*]} ($AT_ONCE at a time, $([ "$SERIAL" = 0 ] && echo "$WORKERS test workers each" || echo serial))"
 pids=() names=() failed=()
 for l in "${LEGS[@]}"; do
   # macOS ships bash 3.2 (no `wait -n`): poll the running jobs instead.
