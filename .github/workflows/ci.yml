@@ -1,21 +1,16 @@
 name: CI
 
-# Actions minutes cost money on this private repo, so the paid matrix runs only
-# where it earns its keep. Test before pushing with scripts/ci_local.sh (the
-# pre-push hook runs its quick leg; --report posts a free `local-ci` status on a
-# PR's commit). Here: one Linux job per push to main, and the whole matrix
-# (macOS minutes count ten times) only when run by hand or by a release.
-# A push that only changes docs runs nothing.
+# One Linux and one macOS job on every pull request and push to main (a push
+# or PR that only changes docs runs nothing). The local pre-push tests are off
+# for now; scripts/ci_local.sh still works by hand.
 on:
   push:
     branches: [main]
     paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md"]
+  pull_request:
+    paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md"]
   workflow_dispatch:
-  workflow_call:   # a release: always the full matrix, whatever event started it
-    inputs:
-      full:
-        type: boolean
-        default: true
+  workflow_call:   # a release runs the same two jobs
 
 permissions:
   contents: read
@@ -25,8 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && !inputs.full && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
-        python: ${{ fromJSON(github.event_name == 'push' && !inputs.full && '["3.12"]' || '["3.11", "3.12", "3.13"]') }}
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
