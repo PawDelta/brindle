@@ -25,6 +25,11 @@
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
+# Run from a git hook (pre-push), git exports GIT_DIR and friends for this repo.
+# Left set, the `git init` below and every git call the tests make would act on
+# this repo instead: `git init` re-initializes it as bare (core.bare=true).
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH
 MODE=default REPORT=0 REV=HEAD JOBS=4 FORCE=0 SERIAL=0 HOST_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
