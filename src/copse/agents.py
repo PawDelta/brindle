@@ -217,6 +217,7 @@ def spawn(
     done_when: str | None = None,
     autopilot: bool = False,
     plan_first: bool = False,
+    review_sha: str | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
@@ -252,7 +253,7 @@ def spawn(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
-        done_when=done_when,
+        done_when=done_when, review_sha=review_sha,
     )
     db.add_agent(agent)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
@@ -1540,6 +1541,13 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     from copse.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
+    sha = gates.head(ws)
+    for old in db.list_agents(ws.id):
+        if old.mode != "review" or old.result is not None or not is_alive(old):
+            continue
+        if old.review_sha == sha:
+            return old   # one reviewer per workspace and commit
+        close(db, old.id)   # a new commit replaces the reviewer of the old one
     worker = workspace_worker(db, ws)
     profile = profile or default_review_profile(cfg, worker, db, ws.repo_root,
                                                 worker.task if worker else None)
@@ -1578,7 +1586,6 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
                  "yourself to compensate.")
 
     prev = db.last_review(ws.id)
-    sha = gates.head(ws)
     if prev and prev.sha != sha:
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
         if is_linear_since(ws, prev.sha):
@@ -1593,7 +1600,7 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     if focus:
         task += f"\n\nFocus: {focus}"
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                 mode="review", background_setup=True)
+                 mode="review", background_setup=True, review_sha=sha)
 
 
 def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConfig) -> None:
@@ -2055,15 +2062,24 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
     if db.get_agent(agent.parent_id) is None:
         return
     ws = db.get_workspace(agent.workspace_id)
+    if agent.mode == "review" and ws is not None:
+        from copse import gates
+
+        if db.latest_review(ws.id, gates.head(ws)):
+            return  # its verdict for the current commit is already recorded
+    if agent.unreported_noted:
+        return  # the supervisor was told once; no repeats
+    db.update_agent(agent.id, unreported_noted=1)
     where = f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
     tool = "submit_review" if agent.mode == "review" else "report_result"
+    who = "Reviewer" if agent.mode == "review" else "Worker"
     body = (
-        f"Worker {agent.id}{where} stopped without calling {tool}, and won't be reminded "
+        f"{who} {agent.id}{where} stopped without calling {tool}, and won't be reminded "
         f"again on its own. Check on it: workspace_diff to see what it did, send_message to "
         f"ask it to finish or report, or remove_workspace if the work is abandoned."
     )
     try:
-        send_message(db, agent.parent_id, body, agent.id)
+        send_message(db, agent.parent_id, body)
     except (AgentError, tmux.TmuxError):
         # The parent isn't running (or can't take messages): the notice is
         # deliberately dropped here, since there's nothing left to tell.

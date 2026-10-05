@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS agents (
     inbox_token TEXT,
     pipeline TEXT,                 -- a worker's branch in copse's hands: 'reviewing' or 'fixing'
     pipeline_rounds INTEGER,
-    stuck_noted REAL               -- status_since of the 'waiting' spell its supervisor was told about (copse.cull)
+    stuck_noted REAL,              -- status_since of the 'waiting' spell its supervisor was told about (copse.cull)
+    review_sha TEXT,               -- the commit a reviewer was started on (agents.request_review)
+    unreported_noted INTEGER       -- its supervisor was told it stopped without reporting (agents.tell_parent_unreported)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,6 +321,8 @@ class Agent:
     pipeline: str | None = None
     pipeline_rounds: int | None = None
     stuck_noted: float | None = None
+    review_sha: str | None = None
+    unreported_noted: int | None = None
     plan_first: int | None = None      # must get its plan approved before editing (copse.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
 
@@ -484,6 +488,9 @@ class DB:
                           ("dismissed_at", "REAL"), ("stuck_noted", "REAL"),
                           ("inbox_socket", "TEXT"), ("inbox_token", "TEXT"),
                           ("pipeline", "TEXT"), ("pipeline_rounds", "INTEGER")):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        for col, kind in (("review_sha", "TEXT"), ("unreported_noted", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT")):
@@ -678,12 +685,12 @@ class DB:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
-                "headless, transcript_path, done_when, inbox_socket, inbox_token) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "headless, transcript_path, done_when, inbox_socket, inbox_token, review_sha) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
                  a.status_since or a.created_at, a.task, a.session_ref, a.headless,
-                 a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token),
+                 a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:
