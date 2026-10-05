@@ -1570,11 +1570,15 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
         task += f"\n\nIts finish line: {worker.done_when.strip()}"
 
     if cfg and cfg.checks:
-        task += ("\n\nThe repo's checks are running now; a pass/fail summary will arrive as a "
-                 "message shortly. Review the diff meanwhile, and don't call submit_review "
-                 "until you've received it. If about 10 minutes pass with no such message, "
-                 "submit anyway and say in your summary that the check results never arrived; "
-                 "don't run the whole suite yourself to compensate.")
+        task += ("\n\nThe repo's checks are still running (or queued behind other branches' "
+                 "runs): you don't have their results yet. A pass/fail summary will arrive as a "
+                 "message. Review the diff meanwhile, and don't call submit_review until you've "
+                 "received it. If about 10 minutes pass after you've finished reviewing with no "
+                 "such message, submit anyway and say plainly in your summary that the checks "
+                 "were still running when you submitted, so your verdict rests on the diff "
+                 "alone: the merge gate runs them before anything merges, and a failure that "
+                 "arrives after your verdict goes to the supervisor. Don't run the whole suite "
+                 "yourself to compensate.")
 
     prev = db.last_review(ws.id)
     sha = gates.head(ws)
@@ -1602,26 +1606,77 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
     Meant to run from a detached process started by request_review, so it
     outlives the MCP server call that kicked it off. Always delivers
     something, even if a check crashes, since the reviewer was told to wait
-    for this before approving -- unless the reviewer is no longer there to
-    receive it by the time the checks finish."""
+    for this before approving. If the reviewer is no longer there to receive
+    it by the time the checks finish, a failing summary isn't dropped: see
+    ``_late_check_summary``."""
     from copse import gates
 
-    if db.get_agent(reviewer_id) is None:
+    reviewer = db.get_agent(reviewer_id)
+    if reviewer is None:
         return
+    supervisor_id = reviewer.parent_id
     sha = gates.head(ws)  # label with the commit the checks ran on
     try:
         summary = gates.check_summary(db, ws, cfg)
+        failed = gates.summary_failed(summary)
     except Exception as e:
-        summary = f"(running the checks crashed: {e})"
+        summary, failed = f"(running the checks crashed: {e})", True
 
     reviewer = db.get_agent(reviewer_id)
     if reviewer is None or reviewer.result is not None or reviewer.status == "done":
-        return  # it submitted its review, was closed, or was removed while the checks ran
+        # It submitted its review, was closed, or was removed while the checks ran.
+        if failed:
+            _late_check_summary(db, ws, sha, summary, reviewer_id, supervisor_id)
+        return
 
     text = (f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary
             else "No checks are configured for this repo.")
     db.enqueue(reviewer_id, text, None)
     flush(db, reviewer_id)
+
+
+def _late_check_summary(db: DB, ws: Workspace, sha: str, summary: str, reviewer_id: str,
+                        supervisor_id: str | None) -> None:
+    """The checks for ``ws`` at ``sha`` finished after its reviewer was done,
+    and failed (or crashed), so the verdict was given without them (a late
+    pass changes nothing). The failure must reach someone who can act on it:
+    the supervisor when the branch was approved (or has no verdict at this
+    commit), the worker when changes were requested anyway (the supervisor
+    if it's gone). Dropped
+    only when there's nothing left to act on: the workspace was removed, or
+    the branch has new commits, which get their own run."""
+    from copse import gates
+
+    try:
+        if db.get_workspace(ws.id) is None or gates.head(ws) != sha:
+            return
+    except git.GitError:
+        return
+    worker = workspace_worker(db, ws)
+    supervisor_id = supervisor_id or (worker.parent_id if worker else None)
+    review = db.latest_review(ws.id, sha)
+    checks = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}"
+    if review is not None and not review.approved and worker and is_alive(worker):
+        try:
+            send_message(db, worker.id,
+                         "The repo's checks finished after the review of your branch, and "
+                         f"failed. Fix this along with the review's findings.\n\n{checks}")
+            return
+        except (AgentError, tmux.TmuxError):
+            pass   # the supervisor hears instead
+    if supervisor_id is None or db.get_agent(supervisor_id) is None:
+        return
+    if review is not None and review.approved:
+        lead = (f"[copse] The checks on `{ws.branch}` (workspace {ws.id}) FAILED, and the result "
+                f"arrived after reviewer {reviewer_id} had approved it: the approval rests on "
+                "the diff alone. The merge gate runs the checks again, so the branch won't "
+                "merge while they fail. Send this to the worker to fix, then have it reviewed "
+                "again.")
+    else:
+        lead = (f"[copse] The checks on `{ws.branch}` (workspace {ws.id}) FAILED, and the result "
+                f"arrived after reviewer {reviewer_id} had finished, so the review didn't "
+                "take it into account. Send this to the worker to fix.")
+    gates.tell(db, supervisor_id, f"{lead}\n\n{checks}")
 
 
 # -- hook entry point --------------------------------------------------------

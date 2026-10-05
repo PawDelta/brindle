@@ -138,6 +138,15 @@ CREATE TABLE IF NOT EXISTS check_cache (
     created_at REAL NOT NULL,
     PRIMARY KEY (workspace_id, sha, command)
 );
+-- How long a check command's last passing run took in a repo, so a run that
+-- goes far past it can be reported to the supervisor (see gates.run_checked).
+CREATE TABLE IF NOT EXISTS check_durations (
+    repo_root TEXT NOT NULL,
+    command TEXT NOT NULL,
+    seconds REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, command)
+);
 -- Claude Code's own built-in subagents (its Agent tool), reported by the
 -- SubagentStart/SubagentStop hooks. Purely informational for the sidebar:
 -- kept out of `agents` so they never affect message delivery, is_alive,
@@ -458,6 +467,7 @@ class DB:
             from pathlib import Path
 
             Path(p).parent.mkdir(parents=True, exist_ok=True)
+        self.path = p
         self.conn = sqlite3.connect(p, timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -987,6 +997,23 @@ class DB:
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id, sha, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
                 (workspace_id, sha, command, int(ok), output, time.time()),
+            )
+
+    def check_duration(self, repo_root: str, command: str) -> float | None:
+        """Seconds the last passing run of ``command`` took in ``repo_root``."""
+        row = self.conn.execute(
+            "SELECT seconds FROM check_durations WHERE repo_root=? AND command=?",
+            (repo_root, command),
+        ).fetchone()
+        return row["seconds"] if row else None
+
+    def set_check_duration(self, repo_root: str, command: str, seconds: float) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO check_durations (repo_root, command, seconds, updated_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(repo_root, command) DO UPDATE SET "
+                "seconds=excluded.seconds, updated_at=excluded.updated_at",
+                (repo_root, command, seconds, time.time()),
             )
 
     # -- native subagents ----------------------------------------------------
