@@ -35,6 +35,7 @@ from copse.sidebar_follow import (
     _sidebar_lock,
     _sidebar_position,
     _valid_sidebar,
+    bring_sidebar,
     root_of,
     sidebar_follow,
 )
@@ -429,7 +430,9 @@ def sidebar_come_home(db: DB, root_id: str, pane: str | None) -> bool:
     for name in sessions:
         if name != here and tmux.session_attached(name):
             _note_sidebar_move(f"come home from {here}", pane, pane)
-            sidebar_follow(db, name)
+            # Straight into the attached session, not through sidebar_follow's
+            # window-to-agent lookup, which can come up empty and leave it stranded.
+            bring_sidebar(db, root_id, name)
             return tmux.pane_session(pane) == name
     return False
 

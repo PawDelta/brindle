@@ -293,6 +293,14 @@ def session_attached(session: str) -> bool:
     return proc.stdout.strip() not in ("", "0")
 
 
+def current_session() -> str | None:
+    """The tmux session this process runs in (from its pane), or None."""
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    return pane_session(pane)
+
+
 def active_window(session: str) -> str | None:
     """The id of ``session``'s currently active window, or None if the
     session doesn't exist."""
@@ -388,9 +396,16 @@ def bind_session_keys(session: str) -> None:
         ours = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)}" if clip else default
         _tmux("bind-key", "-T", table, "MouseDragEnd1Pane",
               "if-shell", "-F", "#{@copse}", ours, default, check=False)
-    # prefix S: hide/show the sidebar (unbound in stock tmux).
-    toggle = ("if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z' "
-              "\"if-shell -F '#{@copse_sidebar}' 'select-pane -t :.+'; resize-pane -Z\"")
+    # prefix S: hide/show the sidebar (unbound in stock tmux); if this window
+    # has none (it lives in another session), pull it here instead.
+    from copse.providers import copse_invocation
+
+    pull = " ".join(shlex.quote(a) for a in [*copse_invocation(), "sidebar", "--session", "#{session_name}"])
+    pull = f"run-shell -b {shlex.quote(pull + ' >/dev/null 2>&1 || true')}"
+    hide = "if-shell -F '#{@copse_sidebar}' 'select-pane -t :.+'; resize-pane -Z"
+    has_sidebar = "tmux list-panes -F '#{@copse_sidebar}' | grep -q ."
+    unzoomed = f"if-shell {shlex.quote(has_sidebar)} {shlex.quote(hide)} {shlex.quote(pull)}"
+    toggle = f"if-shell -F '#{{window_zoomed_flag}}' 'resize-pane -Z' {shlex.quote(unzoomed)}"
     _tmux("bind-key", "S", "if-shell", "-F", "#{@copse}", toggle, "", check=False)
 
 
