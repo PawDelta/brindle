@@ -103,6 +103,83 @@ def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> st
     return pane
 
 
+def root_for_session(db: DB, session: str) -> str | None:
+    """The session root whose chat or worker is in tmux ``session``'s active
+    window (or, failing that, any of its agents)."""
+    ws = db.workspace_by_tmux_session(session)
+    if ws is None:
+        return None
+    window = tmux.active_window(session)
+    agent = _agent_for_window(db, ws, window) if window else None
+    return root_of(db, agent.id) if agent else None
+
+
+def bring_sidebar(db: DB, root_id: str, session: str, *, revive: bool = False) -> bool:
+    """Put ``root_id``'s sidebar in ``session``'s active window, wherever it
+    is now and whether or not anyone is attached to either session. With
+    ``revive`` (the person asked for it), a sidebar that's dead or was quit
+    is created fresh. True when the sidebar ends up there."""
+    with _sidebar_lock(root_id):
+        window = tmux.active_window(session)
+        root = db.get_agent(root_id)
+        if not window or root is None:
+            return False
+        sidebar = db.get_sidebar_pane(root_id)
+        valid = _valid_sidebar(sidebar, root_id)
+        if valid and tmux.pane_window(sidebar) == window:
+            return True
+        root_ws = db.get_workspace(root.workspace_id)
+        if valid:
+            target_pane = tmux.agent_pane_in_window(window, sidebar)
+            if not target_pane:
+                return False
+            _note_sidebar_move(f"bring to {session}", sidebar, target_pane)
+            tmux.move_pane(sidebar, target_pane, SIDEBAR_COLUMNS,
+                           _sidebar_position(root_ws) if root_ws else "left")
+            return True
+        if revive and root_ws:
+            target_pane = tmux.agent_pane_in_window(window, None)
+            if target_pane:
+                _create_sidebar(db, root_id, root_ws, target_pane)
+                return True
+        return False
+
+
+def sidebar_here(db: DB, session: str) -> str:
+    """`copse sidebar`: bring the sidebar of the root ``session`` belongs to
+    into ``session``. Returns what happened; raises ValueError if it can't."""
+    root_id = root_for_session(db, session)
+    if root_id is None:
+        raise ValueError(f"tmux session {session} doesn't belong to a copse session")
+    root = db.get_agent(root_id)
+    if root is not None and root.status == "paused":
+        raise ValueError("this copse session is paused: resume it first")
+    before = db.get_sidebar_pane(root_id)
+    was_there = _valid_sidebar(before, root_id) and tmux.pane_session(before) == session
+    if not bring_sidebar(db, root_id, session, revive=True):
+        raise ValueError("couldn't place the sidebar here (is this window just the sidebar?)")
+    return "the sidebar is already here" if was_there else "sidebar brought here"
+
+
+def rescue_sidebar(db: DB, ws: Workspace) -> None:
+    """Call before ``ws``'s tmux session goes away: if a root's sidebar lives
+    in it, move it back to that root's own session first. Never raises."""
+    try:
+        for agent in db.list_agents(ws.id):
+            root_id = root_of(db, agent.id)
+            root = db.get_agent(root_id)
+            root_ws = db.get_workspace(root.workspace_id) if root else None
+            if root_ws is None or root_ws.tmux_session == ws.tmux_session:
+                continue
+            sidebar = db.get_sidebar_pane(root_id)
+            # If the root's own window is gone, bring_sidebar declines and the
+            # sidebar goes down with this session: nowhere left to show it.
+            if _valid_sidebar(sidebar, root_id) and tmux.pane_session(sidebar) == ws.tmux_session:
+                bring_sidebar(db, root_id, root_ws.tmux_session)
+    except Exception:  # noqa: BLE001 - cleanup must not fail because of the sidebar
+        pass
+
+
 def sidebar_follow(db: DB, session: str) -> None:
     ws = db.workspace_by_tmux_session(session)
     if ws is None:

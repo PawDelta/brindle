@@ -27,6 +27,13 @@ def test_guidance_points_at_the_main_checkouts_graph(mapped):
     assert f"--graph {mapped / 'graphify-out' / 'graph.json'}" in text and "graphify query" in text
 
 
+def test_guidance_says_to_open_paths_in_the_agents_own_checkout(mapped):
+    # Workers live in other worktrees; reading the main checkout's files
+    # gives them stale code and a permission prompt.
+    text = codemap.guidance(str(mapped))
+    assert "relative to the repo root" in text and "own working directory" in text
+
+
 def test_config_can_turn_it_off(mapped):
     (mapped / ".copse").mkdir()
     (mapped / ".copse" / "config.json").write_text(json.dumps({"graphify": False}))

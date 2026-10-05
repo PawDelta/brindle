@@ -27,7 +27,12 @@ result directly, as before.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import os
 import subprocess
+import threading
+from contextlib import contextmanager
 
 from copse import agents, autopilot, codemap, events, gates, git, history, learning, policy, tasks, workspaces
 from copse.config import RepoConfig, load_repo_config
@@ -39,6 +44,71 @@ PIPED_MODES = ("assign", "handoff_detached")
 def enabled(cfg: RepoConfig, worker: Agent, ws: Workspace) -> bool:
     return bool(cfg.pipeline) and worker.mode in PIPED_MODES and ws.kind == "worktree" \
         and bool(worker.parent_id)
+
+
+# -- one merge at a time ----------------------------------------------------------
+
+ALREADY_MERGED = "Already merged"
+GONE = "Nothing to merge"
+
+_held = threading.local()
+
+
+@contextmanager
+def _file_lock(name: str):
+    from copse.config import copse_home
+
+    lock_dir = copse_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"{name}.lock", "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def merge_lock(ws_id: str):
+    """Hold workspace ``ws_id`` for a verdict or a merge, from the first look
+    at its state to the removal of its worktree. Two reviewers of one branch,
+    a reviewer calling submit_review twice, and the supervisor's
+    merge_workspace are separate processes: without this they each run the
+    gates and the merge, one of them in a worktree the other is removing. A
+    lock file under the copse home, so it holds across processes and is given
+    back if its holder dies; re-entrant within a thread."""
+    held = getattr(_held, "ids", None)
+    if held is None:
+        held = _held.ids = set()
+    if ws_id in held:
+        yield
+        return
+    with _file_lock("merge-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16]):
+        held.add(ws_id)
+        try:
+            yield
+        finally:
+            held.discard(ws_id)
+
+
+def _settled(db: DB, ws: Workspace) -> str | None:
+    """Why no gate or merge may run on ``ws`` any more: it is gone (removed,
+    or being removed), or its branch already merged at its current commit.
+    None while it can still be merged. The reply starts with ``GONE`` or
+    ``ALREADY_MERGED``."""
+    if db.get_workspace(ws.id) is None or not os.path.isdir(ws.path):
+        return (f"{GONE}: the worktree of {ws.branch} is gone (already merged and removed, "
+                "or removed).")
+    merged = db.merged_sha(ws.id)
+    if not merged:
+        return None
+    try:
+        if gates.head(ws) != merged:
+            return None   # new commits since: those can merge
+    except git.GitError:
+        return f"{GONE}: the worktree of {ws.branch} is gone (already merged and removed)."
+    return (f"{ALREADY_MERGED}: {ws.branch} is in {ws.base_branch} at {merged[:8]}; "
+            "nothing more to merge.")
 
 
 def _detach(args: list[str]) -> None:
@@ -151,7 +221,20 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
 def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: str) -> bool:
     """Act on a verdict for a piped branch. Returns whether the pipeline
     handled it (so the verdict isn't forwarded to the supervisor as a
-    message)."""
+    message). A verdict that arrives after its branch merged (a second
+    reviewer of the same commit, a repeated submit_review) is dropped."""
+    with merge_lock(ws.id):
+        return _on_review(db, reviewer, ws, approved, summary)
+
+
+def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: str) -> bool:
+    # Read under the lock: an earlier verdict may have merged the branch, or
+    # handed it to the supervisor, while this one waited.
+    if _settled(db, ws):
+        worker = agents.workspace_worker(db, ws)
+        if worker is not None and worker.pipeline:
+            db.update_agent(worker.id, pipeline=None)
+        return True
     worker = agents.workspace_worker(db, ws)
     if worker is None or not worker.pipeline:
         return False
@@ -176,7 +259,9 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
                   f"Review ({reviewer.id}): approved.\n{summary}", worker.id)
             return True
         text = merge(db, parent, ws)
-        if text.startswith("Merged"):
+        if text.startswith((ALREADY_MERGED, GONE)):
+            db.update_agent(worker.id, pipeline=None)   # reported when it merged; nothing to add
+        elif text.startswith("Merged"):
             # This runs inside the reviewer's own process, and removing its
             # workspace must not take that process down half way: record and
             # announce everything first, then remove without killing the
@@ -258,7 +343,18 @@ def busy_worker(db: DB, ws: Workspace, exclude_id: str | None) -> Agent | None:
 
 def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False) -> str:
     """Sync the branch with its base, run the merge gates, and merge. The
-    reply starts with "Merged" on success, else "Not merged: ..."."""
+    reply starts with "Merged" on success, else "Not merged: ...". Merging is
+    idempotent: a branch that already merged at its current commit gets
+    "Already merged: ...", and one whose worktree is gone "Nothing to merge:
+    ...", without a gate or a merge being run."""
+    with merge_lock(ws.id):
+        return _merge(db, caller, ws, squash)
+
+
+def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool) -> str:
+    settled = _settled(db, ws)
+    if settled:
+        return settled
     cfg = load_repo_config(ws.repo_root)
     pilot = autopilot.for_agent(db, caller.id) if caller else None
     review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
@@ -275,7 +371,7 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False) -> 
                         "retry once it reports.")
         sync_result = workspaces.sync_with_base(ws)
     except git.GitError as e:
-        return f"Not merged: {e}"
+        return _settled(db, ws) or f"Not merged: {e}"
     if sync_result.status == "conflict":
         files = ", ".join(sync_result.conflicts) or "?"
         return (f"Not merged: {ws.branch} conflicts with {ws.base_branch} in: {files}. "
@@ -294,16 +390,21 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False) -> 
             return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
                     f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
 
-    report = gates.run(db, ws, cfg, review_required=review)
-    if not report.ok:
-        return f"Not merged. {report.problem}"
-    if gates.head(ws) != report.sha:
-        return (f"Not merged: {ws.branch} got new commits while the gates ran. "
-                "Call merge_workspace again to check the new commits.")
+    # A worktree removed while the gates ran in it (remove_workspace doesn't
+    # wait for this lock) fails them for no reason of the branch's: that is
+    # "gone", not a failed check.
     try:
+        report = gates.run(db, ws, cfg, review_required=review)
+        if not report.ok:
+            return _settled(db, ws) or f"Not merged. {report.problem}"
+        if gates.head(ws) != report.sha:
+            return (f"Not merged: {ws.branch} got new commits while the gates ran. "
+                    "Call merge_workspace again to check the new commits.")
+        # git.merge_into serializes merges into one checkout (checkout_lock).
         target = workspaces.merge_back(db, ws, squash=squash)
     except git.GitError as e:
-        return f"Not merged: {e}"
+        return _settled(db, ws) or f"Not merged: {e}"
+    db.set_merged(ws.id, report.sha)
     text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
     history.record_safely(
         db, ws.repo_root, "merge", agent=caller, with_usage=True, branch=ws.branch,

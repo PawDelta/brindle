@@ -431,6 +431,14 @@ class Removed:
     teardown: SetupResult | None
 
 
+def _rescue_sidebar(db: DB, ws: Workspace) -> None:
+    """A root's sidebar may be sitting in ``ws``'s session: move it back to
+    the root's own session before that session is killed."""
+    from copse.sidebar_follow import rescue_sidebar
+
+    rescue_sidebar(db, ws)
+
+
 def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | None = None,
            keep_session: bool = False) -> Removed:
     """``delete_branch``: True deletes the branch (only if merged, unless
@@ -442,6 +450,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
     the session would take down mid-cleanup."""
     if ws.kind == "main":
         if not keep_session:
+            _rescue_sidebar(db, ws)
             tmux.kill_session(ws.tmux_session)
         db.delete_workspace(ws.id)
         return Removed(False, "existing checkout left untouched", None)
@@ -465,6 +474,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 
     services.down(ws, cfg)
     if not keep_session:
+        _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)
     if exists:
         git.remove_worktree(ws.repo_root, ws.path, force=force)

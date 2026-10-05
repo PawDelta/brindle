@@ -193,6 +193,14 @@ def test_sidebar_follow_is_a_noop_in_the_window_it_already_holds(db, tmp_path, s
     assert width_after == width_before == "30"
 
 
+def _window_of(pane, timeout=5.0):
+    deadline = time.time() + timeout
+    while (win := tmux.pane_window(pane)) is None and time.time() < deadline:
+        time.sleep(0.1)
+    assert win is not None, f"tmux never reported a window for {pane}"
+    return win
+
+
 def test_window_resized_hook_moves_with_the_sidebar(db, tmp_path, session):
     win_a = make_window(session, "winA")
     win_b = make_window(session, "winB")
@@ -202,8 +210,9 @@ def test_window_resized_hook_moves_with_the_sidebar(db, tmp_path, session):
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
 
-    win_a_id = tmux.pane_window(win_a)
-    win_b_id = tmux.pane_window(win_b)
+    # A loaded machine can leave tmux briefly unable to answer for a new pane.
+    win_a_id = _window_of(win_a)
+    win_b_id = _window_of(win_b)
     assert f'-t "{sidebar}"' in tmux._tmux("show-hooks", "-w", "-t", win_a_id).stdout
 
     tmux._tmux("select-window", "-t", f"{session}:winB")

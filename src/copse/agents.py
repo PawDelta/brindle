@@ -35,6 +35,7 @@ from copse.sidebar_follow import (
     _sidebar_lock,
     _sidebar_position,
     _valid_sidebar,
+    bring_sidebar,
     root_of,
     sidebar_follow,
 )
@@ -217,6 +218,7 @@ def spawn(
     done_when: str | None = None,
     autopilot: bool = False,
     plan_first: bool = False,
+    review_sha: str | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
@@ -252,7 +254,7 @@ def spawn(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
-        done_when=done_when,
+        done_when=done_when, review_sha=review_sha,
     )
     db.add_agent(agent)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
@@ -429,7 +431,9 @@ def sidebar_come_home(db: DB, root_id: str, pane: str | None) -> bool:
     for name in sessions:
         if name != here and tmux.session_attached(name):
             _note_sidebar_move(f"come home from {here}", pane, pane)
-            sidebar_follow(db, name)
+            # Straight into the attached session, not through sidebar_follow's
+            # window-to-agent lookup, which can come up empty and leave it stranded.
+            bring_sidebar(db, root_id, name)
             return tmux.pane_session(pane) == name
     return False
 
@@ -1319,16 +1323,26 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
             db.enqueue(root_id, text, None)   # handed over at the supervisor's next Stop
         close_later(caller.id)
         return "Audit recorded and sent to the supervisor. You're done."
-    sha = gates.head(ws)
-    db.add_review(ws.id, sha, caller.id, approved, summary)
-    if approved:
-        db.bump_progress(autopilot.root_of(db, caller.id))
-    pipeline.note_review(db, ws, approved, reviewer=caller)
-    verdict = "APPROVED" if approved else "CHANGES REQUESTED"
-    text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
-    handled = pipeline.on_review(db, caller, ws, approved, summary)
-    # A merge the pipeline just made removes this reviewer's own record.
-    report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
+    # One verdict at a time per workspace: a second one (the same reviewer
+    # calling twice, or another reviewer of the same branch) waits here, then
+    # finds what the first one did instead of merging alongside it.
+    with pipeline.merge_lock(ws.id):
+        caller = db.get_agent(caller_id)
+        if caller is None or caller.result is not None or db.get_workspace(ws.id) is None \
+                or not os.path.isdir(ws.path):
+            # Already recorded, or the branch merged (or was removed) meanwhile.
+            close_later(caller_id)
+            return "Your review was already recorded, or the branch is already merged. You're done."
+        sha = gates.head(ws)
+        db.add_review(ws.id, sha, caller.id, approved, summary)
+        if approved:
+            db.bump_progress(autopilot.root_of(db, caller.id))
+        pipeline.note_review(db, ws, approved, reviewer=caller)
+        verdict = "APPROVED" if approved else "CHANGES REQUESTED"
+        text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
+        handled = pipeline.on_review(db, caller, ws, approved, summary)
+        # A merge the pipeline just made removes this reviewer's own record.
+        report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
     close_later(caller.id)
     if handled:
         return f"Review recorded ({verdict}); copse takes it from here. You're done."
@@ -1540,6 +1554,13 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     from copse.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
+    sha = gates.head(ws)
+    for old in db.list_agents(ws.id):
+        if old.mode != "review" or old.result is not None or not is_alive(old):
+            continue
+        if old.review_sha == sha:
+            return old   # one reviewer per workspace and commit
+        close(db, old.id)   # a new commit replaces the reviewer of the old one
     worker = workspace_worker(db, ws)
     profile = profile or default_review_profile(cfg, worker, db, ws.repo_root,
                                                 worker.task if worker else None)
@@ -1567,14 +1588,17 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
         task += f"\n\nIts finish line: {worker.done_when.strip()}"
 
     if cfg and cfg.checks:
-        task += ("\n\nThe repo's checks are running now; a pass/fail summary will arrive as a "
-                 "message shortly. Review the diff meanwhile, and don't call submit_review "
-                 "until you've received it. If about 10 minutes pass with no such message, "
-                 "submit anyway and say in your summary that the check results never arrived; "
-                 "don't run the whole suite yourself to compensate.")
+        task += ("\n\nThe repo's checks are still running (or queued behind other branches' "
+                 "runs): you don't have their results yet. A pass/fail summary will arrive as a "
+                 "message. Review the diff meanwhile, and don't call submit_review until you've "
+                 "received it. If about 10 minutes pass after you've finished reviewing with no "
+                 "such message, submit anyway and say plainly in your summary that the checks "
+                 "were still running when you submitted, so your verdict rests on the diff "
+                 "alone: the merge gate runs them before anything merges, and a failure that "
+                 "arrives after your verdict goes to the supervisor. Don't run the whole suite "
+                 "yourself to compensate.")
 
     prev = db.last_review(ws.id)
-    sha = gates.head(ws)
     if prev and prev.sha != sha:
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
         if is_linear_since(ws, prev.sha):
@@ -1589,7 +1613,7 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     if focus:
         task += f"\n\nFocus: {focus}"
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                 mode="review", background_setup=True)
+                 mode="review", background_setup=True, review_sha=sha)
 
 
 def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConfig) -> None:
@@ -1599,26 +1623,78 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
     Meant to run from a detached process started by request_review, so it
     outlives the MCP server call that kicked it off. Always delivers
     something, even if a check crashes, since the reviewer was told to wait
-    for this before approving -- unless the reviewer is no longer there to
-    receive it by the time the checks finish."""
+    for this before approving. If the reviewer is no longer there to receive
+    it by the time the checks finish, a failing summary isn't dropped: see
+    ``_late_check_summary``."""
     from copse import gates
 
-    if db.get_agent(reviewer_id) is None:
+    reviewer = db.get_agent(reviewer_id)
+    if reviewer is None:
         return
+    supervisor_id = reviewer.parent_id
     sha = gates.head(ws)  # label with the commit the checks ran on
     try:
         summary = gates.check_summary(db, ws, cfg)
+        failed = gates.summary_failed(summary)
     except Exception as e:
-        summary = f"(running the checks crashed: {e})"
+        summary, failed = f"(running the checks crashed: {e})", True
 
     reviewer = db.get_agent(reviewer_id)
     if reviewer is None or reviewer.result is not None or reviewer.status == "done":
-        return  # it submitted its review, was closed, or was removed while the checks ran
+        # It submitted its review, was closed, or was removed while the checks ran.
+        if failed:
+            _late_check_summary(db, ws, sha, summary, reviewer_id, supervisor_id)
+        return
 
     text = (f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary
             else "No checks are configured for this repo.")
     db.enqueue(reviewer_id, text, None)
     flush(db, reviewer_id)
+
+
+def _late_check_summary(db: DB, ws: Workspace, sha: str, summary: str, reviewer_id: str,
+                        supervisor_id: str | None) -> None:
+    """The checks for ``ws`` at ``sha`` finished after its reviewer was done,
+    and failed (or crashed), so the verdict was given without them (a late
+    pass changes nothing). The failure must reach someone who can act on it:
+    the supervisor when the branch was approved (or has no verdict at this
+    commit), the worker when changes were requested anyway (the supervisor
+    if it's gone). Dropped
+    only when there's nothing left to act on: the workspace was removed, the
+    branch merged at this commit (its worktree may be going away under the
+    run), or the branch has new commits, which get their own run."""
+    from copse import gates
+
+    try:
+        if db.get_workspace(ws.id) is None or db.merged_sha(ws.id) == sha or gates.head(ws) != sha:
+            return
+    except git.GitError:
+        return
+    worker = workspace_worker(db, ws)
+    supervisor_id = supervisor_id or (worker.parent_id if worker else None)
+    review = db.latest_review(ws.id, sha)
+    checks = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}"
+    if review is not None and not review.approved and worker and is_alive(worker):
+        try:
+            send_message(db, worker.id,
+                         "The repo's checks finished after the review of your branch, and "
+                         f"failed. Fix this along with the review's findings.\n\n{checks}")
+            return
+        except (AgentError, tmux.TmuxError):
+            pass   # the supervisor hears instead
+    if supervisor_id is None or db.get_agent(supervisor_id) is None:
+        return
+    if review is not None and review.approved:
+        lead = (f"[copse] The checks on `{ws.branch}` (workspace {ws.id}) FAILED, and the result "
+                f"arrived after reviewer {reviewer_id} had approved it: the approval rests on "
+                "the diff alone. The merge gate runs the checks again, so the branch won't "
+                "merge while they fail. Send this to the worker to fix, then have it reviewed "
+                "again.")
+    else:
+        lead = (f"[copse] The checks on `{ws.branch}` (workspace {ws.id}) FAILED, and the result "
+                f"arrived after reviewer {reviewer_id} had finished, so the review didn't "
+                "take it into account. Send this to the worker to fix.")
+    gates.tell(db, supervisor_id, f"{lead}\n\n{checks}")
 
 
 # -- hook entry point --------------------------------------------------------
@@ -2000,15 +2076,24 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
     if db.get_agent(agent.parent_id) is None:
         return
     ws = db.get_workspace(agent.workspace_id)
+    if agent.mode == "review" and ws is not None:
+        from copse import gates
+
+        if db.latest_review(ws.id, gates.head(ws)):
+            return  # its verdict for the current commit is already recorded
+    if agent.unreported_noted:
+        return  # the supervisor was told once; no repeats
+    db.update_agent(agent.id, unreported_noted=1)
     where = f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
     tool = "submit_review" if agent.mode == "review" else "report_result"
+    who = "Reviewer" if agent.mode == "review" else "Worker"
     body = (
-        f"Worker {agent.id}{where} stopped without calling {tool}, and won't be reminded "
+        f"{who} {agent.id}{where} stopped without calling {tool}, and won't be reminded "
         f"again on its own. Check on it: workspace_diff to see what it did, send_message to "
         f"ask it to finish or report, or remove_workspace if the work is abandoned."
     )
     try:
-        send_message(db, agent.parent_id, body, agent.id)
+        send_message(db, agent.parent_id, body)
     except (AgentError, tmux.TmuxError):
         # The parent isn't running (or can't take messages): the notice is
         # deliberately dropped here, since there's nothing left to tell.

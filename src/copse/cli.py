@@ -1728,6 +1728,26 @@ def statusline_cmd() -> None:
         typer.echo(out)
 
 
+@app.command("sidebar")
+def sidebar_cmd(session: Optional[str] = typer.Option(None, "--session", hidden=True)) -> None:
+    """Bring this copse session's sidebar into the tmux session you're in.
+
+    The sidebar follows you between copse windows and sessions, but it can be
+    left behind in another session (say a worker's that has since been
+    removed). Run this from the chat's tmux session to pull it back; if it was
+    closed it is started again. In tmux, `prefix S` does the same when this
+    window has no sidebar, and otherwise hides/shows it."""
+    from copse.sidebar_follow import sidebar_here
+
+    name = session or tmux.current_session()
+    if not name:
+        _fail("not inside a copse tmux session: run this from the chat's window")
+    try:
+        typer.echo(sidebar_here(DB(), name))
+    except ValueError as e:
+        _fail(str(e))
+
+
 @app.command("_sidebar-follow", hidden=True)
 def sidebar_follow_cmd(session: str) -> None:
     """Run from the session-window-changed / client-session-changed hooks
