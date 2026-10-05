@@ -682,6 +682,33 @@ def accept_invite(client: Client, store, code: str) -> dict:
     return {k: _sanitize(body.get(k, ""), 64) for k in ("org_id", "role")}
 
 
+def _learning_sharing(client: Client, store, method: str, org_id: str, body: dict | None) -> dict:
+    if not ORG_ID_RE.match(org_id):
+        raise AuthError("invalid org id", code="bad_request")
+    status, got = authed(client, store, method,
+                         f"/orgs/{urllib.parse.quote(org_id, safe='')}/learning-sharing",
+                         JSONBody(body) if body is not None else None)
+    if status != 200:
+        raise _error(status, got)
+    if not isinstance(got.get("enabled"), bool):
+        raise AuthError("backend returned no learning-sharing state", code="bad_response")
+    updated = got.get("updated_at")
+    return {"org_id": _sanitize(got.get("org_id", org_id), 64), "enabled": got["enabled"],
+            "updated_at": updated if isinstance(updated, int) and not isinstance(updated, bool) else None}
+
+
+def get_learning_sharing(client: Client, store, org_id: str) -> dict:
+    """Whether ``org_id`` shares its learning data into the cross-org prior
+    (``GET /orgs/{org_id}/learning-sharing``); off unless an admin turned it on."""
+    return _learning_sharing(client, store, "GET", org_id, None)
+
+
+def set_learning_sharing(client: Client, store, org_id: str, enabled: bool) -> dict:
+    """Turn learning sharing on or off (``PUT /orgs/{org_id}/learning-sharing``,
+    owner/admin only: the backend answers 403 otherwise)."""
+    return _learning_sharing(client, store, "PUT", org_id, {"enabled": enabled})
+
+
 def _ci_tokens_path(org_id: str) -> str:
     return f"/orgs/{urllib.parse.quote(org_id, safe='')}/ci-tokens"
 
