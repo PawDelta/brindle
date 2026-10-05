@@ -17,7 +17,7 @@
 # compared with where it branched from origin/main, isn't tested: like the
 # GitHub workflow's paths-ignore. With --report it still gets a green status.
 #
-# Logs go to $TMPDIR/copse-ci-local/<sha>/. Exit 0 only if every leg passed.
+# Logs go to a fresh private directory, printed at the start. Exit 0 only if every leg passed.
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
@@ -68,8 +68,11 @@ if [ "$FORCE" = 0 ]; then
     fi
   fi
 fi
-WORK="${TMPDIR:-/tmp}/copse-ci-local/$SHORT"
-rm -rf "$WORK" && mkdir -p "$WORK/src" "$WORK/logs"
+# A fresh private directory per run (mktemp: unpredictable name, mode 0700),
+# never a fixed path someone else could have planted a symlink at.
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/copse-ci-local-$SHORT.XXXXXX")" || exit 1
+mkdir -p "$WORK/src" "$WORK/logs"
+echo "==> work and logs: $WORK"
 git -C "$ROOT" archive "$SHA" | tar -x -C "$WORK/src"
 # A one-commit repo, like a CI checkout: some tests need the project to be one.
 (cd "$WORK/src" && git init -q && git add -A && git -c user.name=ci -c user.email=ci@localhost \
