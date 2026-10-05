@@ -73,6 +73,7 @@ class RepoConfig:
     pre_commit: bool = True            # run pre-commit (the framework) over a branch before merging
     max_agents: int = 4                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
+    check_concurrency: int = 2         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
@@ -169,6 +170,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
+                "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
                 "review_rounds", "goal_audit", "overlap", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "sidebar", "pr_footer", "plan_first", "learning",
