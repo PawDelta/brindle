@@ -63,7 +63,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from copse import agents, git, workspaces
+from copse import agents, git, tmux, workspaces
 from copse.db import DB, Agent, Workspace
 
 CI_FEATURE = "ci"
@@ -766,7 +766,7 @@ def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
         kw = {"bundle": Path(bundle).resolve()} if bundle is not None else {}
         outcome = run(db, cwd, g, timeout_min=timeout_min, max_workers=max_workers,
                       base=base, pr=pr and bundle is None, secrets=secrets, **kw)
-    except (CIError, git.GitError, workspaces.WorkspaceError, agents.AgentError) as e:
+    except (CIError, git.GitError, workspaces.WorkspaceError, agents.AgentError, tmux.TmuxError) as e:
         echo(str(e))
         return 1
     echo(outcome.describe())
