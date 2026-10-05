@@ -6,8 +6,11 @@ git's own stderr, and a hung git process can't hang the orchestrator.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -370,17 +373,59 @@ def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: b
     ``.DS_Store``, ...) sitting in the target checkout shouldn't stop a
     merge. If the merge would actually overwrite one, git itself refuses and
     that failure surfaces below as a GitError."""
-    if dirty_files(target_path, tracked_only=True):
-        raise GitError(f"{target_path} has uncommitted changes; commit or stash them first")
-    if squash:
-        proc = run(["merge", "--squash", branch], target_path, check=False)
-        if proc.returncode == 0:
-            run(["commit", "--no-edit", "-m", f"Squash merge {branch}"], target_path)
-    else:
-        proc = run(["merge", "--no-ff", "--no-edit", branch], target_path, check=False)
-    if proc.returncode != 0:
-        run(["merge", "--abort"], target_path, check=False)
-        raise GitError(f"merging {branch} failed (aborted): {proc.stderr.strip() or proc.stdout.strip()}")
+    with checkout_lock(target_path):
+        if dirty_files(target_path, tracked_only=True):
+            raise GitError(f"{target_path} has uncommitted changes; commit or stash them first")
+        if squash:
+            proc = _retry_transient(["merge", "--squash", branch], target_path)
+            if proc.returncode == 0:
+                proc = _retry_transient(
+                    ["commit", "--no-edit", "-m", f"Squash merge {branch}"], target_path
+                )
+        else:
+            proc = _retry_transient(["merge", "--no-ff", "--no-edit", branch], target_path)
+        if proc.returncode != 0:
+            run(["merge", "--abort"], target_path, check=False)
+            raise GitError(
+                f"merging {branch} failed (aborted): {proc.stderr.strip() or proc.stdout.strip()}"
+            )
+
+
+# A merge that fails only because another git process held the index for a
+# moment (the supervisor's own git, a status refresh) is retried, not reported.
+TRANSIENT_MARKERS = ("index.lock", "Unable to write index")
+RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0)
+
+
+def _is_transient(proc: subprocess.CompletedProcess) -> bool:
+    text = f"{proc.stderr}\n{proc.stdout}"
+    return any(m in text for m in TRANSIENT_MARKERS)
+
+
+def _retry_transient(args: list[str], cwd: str | Path) -> subprocess.CompletedProcess:
+    """Run a git command, retrying with backoff while it fails on the index
+    lock. A merge that failed that way never started, so a retry can't touch
+    the checkout's uncommitted changes; any other failure returns at once."""
+    proc = run(args, cwd, check=False)
+    for delay in RETRY_DELAYS:
+        if proc.returncode == 0 or not _is_transient(proc):
+            break
+        time.sleep(delay)
+        proc = run(args, cwd, check=False)
+    return proc
+
+
+@contextlib.contextmanager
+def checkout_lock(path: str | Path):
+    """Serialize merges into one checkout with an exclusive file lock kept in
+    that checkout's own git dir (shared across processes, released if we die)."""
+    git_dir = Path(out(["rev-parse", "--absolute-git-dir"], path))
+    with open(git_dir / "copse-merge.lock", "a") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def push(path: str | Path, branch: str) -> None:
