@@ -649,6 +649,9 @@ copse account status     # your plan, features, hosted learning on or off, when 
 copse account upgrade    # opens the checkout for copse Pro (and prints its URL)
 copse account portal     # opens the billing portal (invoices, seats, cancellation); --org ORG for a team org
 copse account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
+copse account org policy # the org's policy, its per-role overrides, and the policy that applies to you
+copse account org member policy-role <member> <role|none>   # give a member a policy role (admin; Enterprise)
+copse account org company [link <org_id> | unlink]          # link orgs you own into one company; learning is pooled only within it
 ```
 
 Setting up a team takes no sign-up form:

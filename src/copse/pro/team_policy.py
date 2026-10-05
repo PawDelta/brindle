@@ -9,8 +9,12 @@ policy on delegations and merges.
   from ``GET /orgs/{org_id}/policy`` and cached. If the fetch fails, the last
   good copy is used; if there has never been one, everything is denied with
   a message saying how to fix it.
-* ``check_assign`` denies a provider or model outside the allowed lists (and
-  an undeclared one when a list is set), and a new worker once the repo
+* The answer may carry per-role overrides and ``effective``: the flat policy
+  for the calling member after theirs. That one is enforced when present,
+  else the base policy. A role change bumps no version, so the cached copy
+  is also keyed by the entitlement's ``role`` and ``policy_role``.
+* ``check_assign`` denies a provider, model or profile outside the allowed
+  lists (and an undeclared one when a list is set), and a new worker once the repo
   already has ``max_parallel_workers`` at work (or when copse couldn't
   count them). ``check_merge`` denies a merge that
   wasn't asked for by the user (the pipeline's auto-merge, a supervisor or
@@ -25,7 +29,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 from copse.policy import AssignInfo, Decision, MergeInfo, PolicyPlugin, allow, deny
 
@@ -37,10 +41,15 @@ FEATURE = "team"
 FETCH_TIMEOUT = 5.0
 MAX_CACHE = 64 * 1024
 ORG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 class PolicyUnavailable(Exception):
     pass
+
+
+LISTS = ("allowed_providers", "allowed_models", "allowed_profiles")
+RULES = LISTS + ("require_human_review", "max_parallel_workers")
 
 
 @dataclass(frozen=True)
@@ -52,13 +61,34 @@ class OrgPolicy:
     require_human_review: bool = False
     max_parallel_workers: int | None = None
     fetched_at: float = 0.0
+    allowed_profiles: tuple[str, ...] | None = None
+    roles: dict = field(default_factory=dict)      # role -> the rules it overrides
+    effective: OrgPolicy | None = None             # the calling member's policy, overrides applied
+    role: str | None = None                        # the caller's role and policy role,
+    policy_role: str | None = None                 # as the backend answered them
+    # The entitlement's (role, policy_role) this copy was fetched for: the
+    # cache key next to ``version``, since a role change bumps no version.
+    cached_for: tuple[str | None, str | None] | None = None
+
+    @property
+    def enforced(self) -> OrgPolicy:
+        """The policy to enforce: the member's effective one, else the base."""
+        return self.effective or self
+
+    def rules(self) -> dict:
+        return {k: _list(getattr(self, k)) if k in LISTS else getattr(self, k) for k in RULES}
 
     def to_json(self) -> dict:
-        return {"org_id": self.org_id, "version": self.version, "fetched_at": self.fetched_at,
-                "policy": {"allowed_providers": _list(self.allowed_providers),
-                           "allowed_models": _list(self.allowed_models),
-                           "require_human_review": self.require_human_review,
-                           "max_parallel_workers": self.max_parallel_workers}}
+        out = {"org_id": self.org_id, "version": self.version, "fetched_at": self.fetched_at,
+               "policy": {**self.rules(), "roles": {r: {k: _list(v) if k in LISTS else v
+                                                        for k, v in o.items()}
+                                                    for r, o in self.roles.items()}},
+               "role": self.role, "policy_role": self.policy_role}
+        if self.effective is not None:
+            out["effective"] = self.effective.rules()
+        if self.cached_for is not None:
+            out["cached_for"] = list(self.cached_for)
+        return out
 
 
 def _list(v):
@@ -73,9 +103,44 @@ def _names(v, what: str) -> tuple[str, ...] | None:
     return tuple(v)
 
 
+def _rule(name: str, v):
+    if name in LISTS:
+        return _names(v, name)
+    if name == "require_human_review":
+        if not isinstance(v, bool):
+            raise PolicyUnavailable("malformed policy")
+        return v
+    if not (v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 1)):
+        raise PolicyUnavailable("malformed policy")
+    return v
+
+
+def _rules(p: dict) -> dict:
+    return {k: _rule(k, p.get(k, False if k == "require_human_review" else None)) for k in RULES}
+
+
+def _roles(v) -> dict:
+    if v is None:
+        return {}
+    if not isinstance(v, dict) or len(v) > 256:
+        raise PolicyUnavailable("malformed roles")
+    out = {}
+    for role, over in v.items():
+        if not (isinstance(role, str) and ROLE_RE.match(role) and isinstance(over, dict)):
+            raise PolicyUnavailable("malformed roles")
+        out[role] = {k: _rule(k, over[k]) for k in RULES if k in over}
+    return out
+
+
+def _role_name(v) -> str | None:
+    return v if isinstance(v, str) and ROLE_RE.match(v) else None
+
+
 def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> OrgPolicy:
     """An :class:`OrgPolicy` from the backend's answer: either flat
-    ``{allowed_providers, ..., version}`` or ``{version, policy: {...}}``."""
+    ``{allowed_providers, ..., version}`` or ``{version, policy: {...}}``,
+    with the calling member's ``effective`` policy next to it when the
+    backend gives one."""
     if not isinstance(body, dict):
         raise PolicyUnavailable("malformed policy")
     p = body.get("policy") if isinstance(body.get("policy"), dict) else body
@@ -84,16 +149,20 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
         raise PolicyUnavailable("malformed policy version")
     if body.get("org_id") not in (None, org_id):
         raise PolicyUnavailable("policy is for another org")
-    review = p.get("require_human_review", False)
-    mpw = p.get("max_parallel_workers")
-    if not isinstance(review, bool) or not (mpw is None or (isinstance(mpw, int)
-                                                            and not isinstance(mpw, bool) and mpw >= 1)):
-        raise PolicyUnavailable("malformed policy")
-    return OrgPolicy(org_id=org_id, version=version,
-                     allowed_providers=_names(p.get("allowed_providers"), "allowed_providers"),
-                     allowed_models=_names(p.get("allowed_models"), "allowed_models"),
-                     require_human_review=review, max_parallel_workers=mpw,
-                     fetched_at=float(body.get("fetched_at") or fetched_at or time.time()))
+    at = float(body.get("fetched_at") or fetched_at or time.time())
+    eff = body.get("effective")
+    if not (eff is None or isinstance(eff, dict)):
+        raise PolicyUnavailable("malformed effective policy")
+    key = body.get("cached_for")
+    ok_key = isinstance(key, list) and len(key) == 2 and all(k is None or isinstance(k, str)
+                                                             for k in key)
+    return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p),
+                     roles=_roles(p.get("roles")),
+                     effective=None if eff is None else OrgPolicy(
+                         org_id=org_id, version=version, fetched_at=at, **_rules(eff)),
+                     role=_role_name(body.get("role")),
+                     policy_role=_role_name(body.get("policy_role")),
+                     cached_for=tuple(key) if ok_key else None)
 
 
 def cache_path(org_id: str):
@@ -115,7 +184,9 @@ def save_cached(p: OrgPolicy) -> None:
     write_private(cache_path(p.org_id), json.dumps(p.to_json()).encode())
 
 
-def fetch_policy(org_id: str, client=None, store=None) -> OrgPolicy:
+def fetch_policy(org_id: str, client=None, store=None, cached_for=None) -> OrgPolicy:
+    """Fetch and cache the org's policy. ``cached_for`` is the entitlement's
+    ``(role, policy_role)`` the answer is for (see :func:`current_policy`)."""
     from copse.pro import auth, credentials
 
     store = store or credentials.default_store()
@@ -130,7 +201,7 @@ def fetch_policy(org_id: str, client=None, store=None) -> OrgPolicy:
         raise PolicyUnavailable(e.code) from e
     if status != 200:
         raise PolicyUnavailable(f"HTTP {status}")
-    p = parse_policy(org_id, body, time.time())
+    p = replace(parse_policy(org_id, body, time.time()), cached_for=cached_for)
     save_cached(p)
     return p
 
@@ -158,8 +229,10 @@ def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
 
 
 def current_policy(ent, client=None, store=None, repo_root: str | None = None) -> OrgPolicy:
-    """The policy for ``ent``'s org at (at least) ``ent.policy_version``, else
-    the last good copy; raises :class:`PolicyUnavailable` if there is none.
+    """The policy for ``ent``'s org at (at least) ``ent.policy_version`` and
+    for ``ent``'s role and policy role (changing those bumps no version, and
+    the member's effective policy depends on them), else the last good copy;
+    raises :class:`PolicyUnavailable` if there is none.
     In air-gap mode, the offline policy file (:func:`load_offline`) and
     nothing else: nothing is fetched and the cache is not consulted."""
     from copse import airgap
@@ -167,10 +240,12 @@ def current_policy(ent, client=None, store=None, repo_root: str | None = None) -
     if airgap.enabled():
         return load_offline(repo_root, ent.org_id)
     cached = load_cached(ent.org_id)
-    if cached is not None and cached.version >= ent.policy_version:
+    want = (ent.role, ent.policy_role)
+    if (cached is not None and cached.version >= ent.policy_version
+            and cached.cached_for == want):
         return cached
     try:
-        return fetch_policy(ent.org_id, client, store)
+        return fetch_policy(ent.org_id, client, store, cached_for=want)
     except Exception as e:  # noqa: BLE001
         if cached is not None:
             log.warning("team policy v%s unavailable (%s); using cached v%s",
@@ -200,15 +275,17 @@ class ProPolicy(PolicyPlugin):
         return ent if FEATURE in ent.features else None
 
     def policy(self) -> OrgPolicy | Decision:
-        """The org policy to enforce, ``allow()`` with no team entitlement, or
-        a denial when a policy is required but has never been fetched."""
+        """The policy to enforce (this member's effective one when the backend
+        gives it, else the org's base policy), ``allow()`` with no team
+        entitlement, or a denial when a policy is required but has never
+        been fetched."""
         ent = self._team_entitlement()
         if ent is None:
             return allow()
         from copse import airgap
 
         try:
-            return current_policy(ent, self._client, self._store, self.repo_root)
+            return current_policy(ent, self._client, self._store, self.repo_root).enforced
         except PolicyUnavailable as e:
             if airgap.enabled():
                 return deny(f"air-gap mode: no usable offline team policy for org {ent.org_id} "
@@ -230,6 +307,10 @@ class ProPolicy(PolicyPlugin):
             got = f"model {info.model!r}" if info.model else "no declared model"
             return deny(f"{who} uses {got}; org {p.org_id} allows only "
                         f"{', '.join(p.allowed_models) or 'no models'} (set `model` in the profile)")
+        if p.allowed_profiles is not None and info.profile not in p.allowed_profiles:
+            got = who if info.profile else "a delegation with no profile"
+            return deny(f"{got} is not allowed; org {p.org_id} allows only "
+                        f"{', '.join(p.allowed_profiles) or 'no profiles'} for you")
         cap = p.max_parallel_workers
         if cap is not None and (info.running_workers is None or info.running_workers >= cap):
             now = "an unknown number" if info.running_workers is None else str(info.running_workers)
