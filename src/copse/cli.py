@@ -1613,6 +1613,7 @@ def ci_entitle(
 def ci_publish(
     path: str = typer.Argument(..., help="The bundle `copse ci run --bundle` wrote (PATH.json sits next to it)."),
     repo: Optional[str] = typer.Option(None, "--repo", help="owner/name on github.com (default: $GITHUB_REPOSITORY)."),
+    base: Optional[str] = typer.Option(None, "--base", help="Branch the pull request targets (default: the repository's default branch; never the bundle's say)."),
 ) -> None:
     """Push a bundle from `copse ci run --bundle` and open its pull request.
 
@@ -1622,7 +1623,7 @@ def ci_publish(
     or runs repo code, hooks or agents."""
     from copse import ci
 
-    raise typer.Exit(ci.publish_cli(path, repo, echo=typer.echo))
+    raise typer.Exit(ci.publish_cli(path, repo, base, echo=typer.echo))
 
 
 @ci_app.command("init")

@@ -19,8 +19,10 @@ protection is that a secret is not on the machine while agents run. So the
 work is split into three steps, and the dangerous token is in the last one:
 
 1. ``copse ci entitle --out FILE`` exchanges ``COPSE_PRO_TOKEN`` for the
-   signed, short-lived entitlement and writes it to a file. This process has
-   ended before any agent starts.
+   signed, short-lived entitlement and writes it to a file, on another
+   machine than the agents (in the workflow, its own job: on hosted runners
+   agents have sudo and the runner holds the secrets of the job they run in).
+   ``copse ci run`` reads the file and deletes it before any agent starts.
 2. ``copse ci run --entitlement FILE --bundle PATH`` does the work. It needs
    no CI token and no token that can write to GitHub. When the goal is
    verified it writes a git bundle of the new commits to PATH, and PATH.json
@@ -28,7 +30,9 @@ work is split into three steps, and the dangerous token is in the last one:
    pushed.
 3. ``copse ci publish PATH`` runs somewhere no agent ever ran (in the
    workflow: a second job, on a fresh machine, with no checkout). It holds
-   the token that can push. It treats the bundle as data: verifies it,
+   the token that can push. The pull request targets ``--base`` or the
+   repository's default branch, never what the bundle names. It treats the
+   bundle as data: verifies it,
    fetches the one ``copse/ci-`` branch into a fresh bare repo, pushes that
    branch and opens the pull request with ``gh``. It never checks out or
    runs repo code, hooks or agents.
@@ -243,7 +247,13 @@ def require_ci(client=None, entitlement_file: str | Path | None = None):
     from copse.pro import auth, license
 
     if entitlement_file is not None:
-        return entitlement_from_file(entitlement_file, client)
+        ent = entitlement_from_file(entitlement_file, client)
+        # Read once, before any agent starts; gone before they could look.
+        try:
+            Path(entitlement_file).unlink()
+        except OSError:
+            pass
+        return ent
     token = os.environ.get(TOKEN_ENV, "").strip()
     try:
         if token:
@@ -525,8 +535,23 @@ def read_bundle_meta(path: str | Path) -> dict:
             "status": BUNDLE_STATUS}
 
 
-def publish(path: str | Path, repo: str | None = None, *, remote: str | None = None,
-            environ=None) -> str:
+def _default_branch(url: str, env: dict, cwd: str) -> str:
+    """The repository's default branch, asked of the repository itself."""
+    proc = subprocess.run(["git", "-c", "credential.helper=", "-c",
+                           "credential.helper=!gh auth git-credential",
+                           "ls-remote", "--symref", "--", url, "HEAD"],
+                          capture_output=True, text=True, timeout=git.TIMEOUT, env=env, cwd=cwd)
+    m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", proc.stdout, re.M)
+    if proc.returncode != 0 or not m or not _BRANCH_NAME.fullmatch(m.group(1)):
+        raise CIError("copse ci publish: can't tell the repository's default branch; pass --base")
+    return m.group(1)
+
+
+_BRANCH_NAME = re.compile(r"[A-Za-z0-9._/-]{1,100}")
+
+
+def publish(path: str | Path, repo: str | None = None, *, base: str | None = None,
+            remote: str | None = None, environ=None) -> str:
     """``copse ci publish``: push the bundle's branch to github.com/``repo``
     and open the pull request; returns its URL.
 
@@ -548,7 +573,12 @@ def publish(path: str | Path, repo: str | None = None, *, remote: str | None = N
     url = remote or f"https://github.com/{slug}.git"
     ref = f"refs/heads/{meta['branch']}"
     env = dict(environ)
+    if base is not None and (not _BRANCH_NAME.fullmatch(base) or ".." in base or base.startswith("-")):
+        raise CIError("copse ci publish: --base is not a valid branch name")
     with tempfile.TemporaryDirectory(prefix="copse-publish-") as tmp:
+        # The bundle's metadata comes from the run, so it doesn't get to choose
+        # the branch the pull request targets: the caller or the repo does.
+        meta = {**meta, "base": base or _default_branch(url, env, tmp)}
         bare = str(Path(tmp) / "publish.git")
         git_bare = ["git", "-C", bare, "-c", "core.hooksPath=/dev/null"]
         as_gh = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"]
@@ -746,10 +776,10 @@ def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
     return 0 if outcome.ok else 1
 
 
-def publish_cli(path: str, repo: str | None = None, echo=print) -> int:
+def publish_cli(path: str, repo: str | None = None, base: str | None = None, echo=print) -> int:
     """``copse ci publish``: 0 with the pull request's URL, 1 with what failed."""
     try:
-        url = publish(path, repo)
+        url = publish(path, repo, base=base)
     except CIError as e:
         echo(str(e))
         return 1
@@ -801,8 +831,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  run:
+  # The CI token lives only in this job, which checks out and runs nothing
+  # from the repo: on hosted runners agents have sudo and the runner holds a
+  # job's secrets in memory, so it must never be in the agents' job.
+  entitle:
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == '{label}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {{}}
+    steps:
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Install copse
+        run: uv tool install {package}
+      - name: Entitlement
+        env:
+          COPSE_PRO_TOKEN: ${{{{ secrets.COPSE_PRO_TOKEN }}}}
+        run: copse ci entitle --out "$RUNNER_TEMP/copse-entitlement/entitlement.jwt"
+      # A short-lived signed entitlement, not the CI token; kept one day.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copse-entitlement
+          path: ${{{{ runner.temp }}}}/copse-entitlement/
+          if-no-files-found: error
+          retention-days: 1
+
+  run:
+    needs: entitle
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -818,24 +872,24 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -yq tmux
       - uses: astral-sh/setup-uv@v10.2.0
       - name: Install copse
-        run: uv tool install copse-ai
+        run: uv tool install {package}
       - name: Install the agent CLI
         run: npm install -g @anthropic-ai/claude-code
       - name: Git identity for the agents' commits
         run: |
           git config --global user.name "copse[bot]"
           git config --global user.email "copse@users.noreply.github.com"
-      # The CI token is used here, in a step that has ended before any agent starts.
-      - name: Entitlement
-        env:
-          COPSE_PRO_TOKEN: ${{{{ secrets.COPSE_PRO_TOKEN }}}}
-        run: copse ci entitle --out "$RUNNER_TEMP/copse-entitlement"
+      - uses: actions/download-artifact@v4
+        with:
+          name: copse-entitlement
+          path: ${{{{ runner.temp }}}}/copse-entitlement
       # No push token and no CI token here: GH_TOKEN can only read (the issue).
+      # copse reads the entitlement and deletes it before any agent starts.
       - name: Run copse
         env:
           ANTHROPIC_API_KEY: ${{{{ secrets.ANTHROPIC_API_KEY }}}}
           GH_TOKEN: ${{{{ github.token }}}}
-        run: copse ci run --issue ${{{{ github.event.issue.number || inputs.issue }}}} --timeout 100 --entitlement "$RUNNER_TEMP/copse-entitlement" --bundle "$RUNNER_TEMP/copse-out/copse.bundle"
+        run: copse ci run --issue ${{{{ github.event.issue.number || inputs.issue }}}} --timeout 100 --entitlement "$RUNNER_TEMP/copse-entitlement/entitlement.jwt" --bundle "$RUNNER_TEMP/copse-out/copse.bundle"
       - uses: actions/upload-artifact@v4
         with:
           name: copse-bundle
@@ -854,22 +908,28 @@ jobs:
       # No checkout: nothing from the repo runs in the job that can push.
       - uses: astral-sh/setup-uv@v10.2.0
       - name: Install copse
-        run: uv tool install copse-ai
+        run: uv tool install {package}
       - uses: actions/download-artifact@v4
         with:
           name: copse-bundle
           path: ${{{{ runner.temp }}}}/copse-out
+      # The base comes from the repository, not from the run's bundle.
       - name: Open the pull request
         env:
           GH_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
-        run: copse ci publish "$RUNNER_TEMP/copse-out/copse.bundle"
+        run: copse ci publish "$RUNNER_TEMP/copse-out/copse.bundle" --base "${{{{ github.event.repository.default_branch }}}}"
 """
 
 
 def workflow_text(label: str = "copse") -> str:
+    """The workflow, with copse pinned to the version writing it: the publish
+    job holds a write token, so it must not take whatever is newest on PyPI."""
+    from copse import __version__
+
     if not re.fullmatch(r"[A-Za-z0-9 _.:/-]{1,50}", label):
         raise CIError("the label may use letters, digits, spaces and _ . : / -")
-    return WORKFLOW.format(label=label)
+    pinned = re.fullmatch(r"[0-9]+(\.[0-9]+)*([ab]|rc|\.post|\.dev)?[0-9]*", __version__ or "")
+    return WORKFLOW.format(label=label, package=f"copse-ai=={__version__}" if pinned else "copse-ai")
 
 
 def init(repo_root: str | Path, label: str = "copse", force: bool = False) -> Path:

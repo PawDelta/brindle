@@ -719,8 +719,8 @@ def test_publish_runs_git_outside_any_worktree_and_takes_the_repo_from_the_envir
         return record(cmd, **kw)
 
     monkeypatch.setattr(ci.subprocess, "run", no_network)
-    url = ci.publish(bundle, environ={**os.environ, "GITHUB_REPOSITORY": "acme/app",
-                                      "GH_TOKEN": "ghs_write"})
+    url = ci.publish(bundle, base="main", environ={**os.environ, "GITHUB_REPOSITORY": "acme/app",
+                                                   "GH_TOKEN": "ghs_write"})
     assert url.endswith("/pull/1")
     push = next(cmd for cmd, _, _ in seen if "push" in cmd)
     assert push[-2] == "https://github.com/acme/app.git"
@@ -778,7 +778,9 @@ def test_publish_refuses_what_it_should_not_push(db, repo, monkeypatch, tmp_path
         ci.publish(bundle, "acme/app", remote=str(origin))
     bundle.write_bytes(real)
     with pytest.raises(ci.CIError, match="base branch"):
-        publish_with(base="release")
+        ci.publish(bundle, "acme/app", base="release", remote=str(origin))
+    with pytest.raises(ci.CIError, match="--base"):
+        ci.publish(bundle, "acme/app", base="--upload-pack=evil", remote=str(origin))
     empty = tmp_path / "empty.git"
     subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(empty)], check=True)
     other = subprocess.run(
@@ -826,14 +828,15 @@ def test_cli_run_with_entitlement_and_bundle_then_publish(db, repo, monkeypatch,
     assert res.exit_code == 1 and "refused" in res.output and len(s.prompts) == 1
 
     seen = []
-    monkeypatch.setattr(ci, "publish", lambda path, repo=None: seen.append((path, repo)) or "https://github.com/o/r/pull/9")
+    monkeypatch.setattr(ci, "publish", lambda path, repo=None, base=None: seen.append((path, repo, base))
+                        or "https://github.com/o/r/pull/9")
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    res = CliRunner().invoke(app, ["ci", "publish", str(bundle), "--repo", "o/r"])
+    res = CliRunner().invoke(app, ["ci", "publish", str(bundle), "--repo", "o/r", "--base", "main"])
     assert res.exit_code == 0 and res.output.strip() == "https://github.com/o/r/pull/9"
-    assert seen == [(str(bundle), "o/r")] and "pull/9" in summary.read_text()
+    assert seen == [(str(bundle), "o/r", "main")] and "pull/9" in summary.read_text()
 
-    def refuse(path, repo=None):
+    def refuse(path, repo=None, base=None):
         raise ci.CIError("copse ci publish: git bundle verify failed: bad")
 
     monkeypatch.setattr(ci, "publish", refuse)
@@ -866,32 +869,61 @@ def _job(text, name):
 def test_the_workflow_keeps_the_push_token_away_from_the_agents():
     text = ci.workflow_text()
     assert "\npermissions: {}\n" in text       # nothing unless a job asks for it
-    run_job, publish_job = _job(text, "run"), _job(text, "publish")
+    entitle_job, run_job, publish_job = _job(text, "entitle"), _job(text, "run"), _job(text, "publish")
 
-    # The job where agents run: read-only, and no secret but the model key in the run step.
+    # The CI token: only in its own job, which checks out and runs nothing from the repo.
+    assert "COPSE_PRO_TOKEN" in entitle_job and "copse ci entitle --out" in entitle_job
+    assert "actions/checkout" not in entitle_job and "claude-code" not in entitle_job
+    assert "permissions: {}" in entitle_job and "retention-days: 1" in entitle_job
+    assert text.count("secrets.COPSE_PRO_TOKEN") == 1
+
+    # The job where agents run: read-only, the model key, and the entitlement file only.
+    assert "needs: entitle" in run_job
     assert "permissions:\n      contents: read\n      issues: read\n" in run_job
     assert "write" not in run_job.replace("write access", "")
-    assert "secrets.GITHUB_TOKEN" not in run_job
-    entitle = run_job.index("copse ci entitle --out")
+    assert "secrets.GITHUB_TOKEN" not in run_job and "COPSE_PRO_TOKEN" not in run_job
+    download = run_job.index("actions/download-artifact")
     work = run_job.index("copse ci run --issue")
     upload = run_job.index("actions/upload-artifact")
-    assert entitle < work < upload
-    steps = run_job.split("\n      - ")
-    run_step = next(s for s in steps if "copse ci run --issue" in s)
-    assert "COPSE_PRO_TOKEN" not in run_step and "ANTHROPIC_API_KEY" in run_step
-    assert "GH_TOKEN: ${{ github.token }}" in run_step
+    assert download < work < upload
+    run_step = next(s for s in run_job.split("\n      - ") if "copse ci run --issue" in s)
+    assert "ANTHROPIC_API_KEY" in run_step and "GH_TOKEN: ${{ github.token }}" in run_step
     assert "--entitlement" in run_step and "--bundle" in run_step
-    entitle_step = next(s for s in steps if "copse ci entitle" in s)
-    assert "COPSE_PRO_TOKEN" in entitle_step and "ANTHROPIC_API_KEY" not in entitle_step
-    assert sum("COPSE_PRO_TOKEN" in s for s in steps) == 1
 
-    # The job that can push: after the run, on its own machine, with no checkout.
+    # The job that can push: after the run, on its own machine, with no checkout,
+    # and the pull request's base comes from the repository, not the bundle.
     assert "needs: run" in publish_job
     assert "permissions:\n      contents: write\n      pull-requests: write\n" in publish_job
     assert "actions/checkout" not in publish_job and "claude-code" not in publish_job
     assert "actions/download-artifact" in publish_job and "copse ci publish" in publish_job
+    assert "--base \"${{ github.event.repository.default_branch }}\"" in publish_job
     assert "COPSE_PRO_TOKEN" not in publish_job and "ANTHROPIC_API_KEY" not in publish_job
 
+
+def test_the_workflow_pins_the_copse_that_wrote_it(monkeypatch):
+    import copse
+    monkeypatch.setattr(copse, "__version__", "1.2.3")
+    text = ci.workflow_text()
+    assert text.count("uv tool install copse-ai==1.2.3") == 3 and "install copse-ai\n" not in text
+
+
+def test_publish_takes_the_base_from_the_repository_not_the_bundle(db, repo, monkeypatch, tmp_path):
+    origin = tmp_path / "origin.git"
+    _, _, bundle = _bundled_run(db, repo, monkeypatch, tmp_path)
+    meta_path = Path(str(bundle) + ".json")
+    meta = json.loads(meta_path.read_text())
+    meta_path.write_text(json.dumps({**meta, "base": "release"}))   # the run asks for another base
+    opened = []
+    monkeypatch.setattr(ci, "_open_pr", lambda slug, base, *a: opened.append(base) or "url")
+    ci.publish(bundle, "acme/app", remote=str(origin))
+    assert opened == ["main"]
+
+
+def test_the_entitlement_file_is_gone_before_agents_start(tmp_path, signing_key):
+    ent = tmp_path / "ent.jwt"
+    ent.write_text(sign(signing_key, claims(plan="team", features=["ci"])))
+    ci.require_ci(entitlement_file=ent)
+    assert not ent.exists()
 
 def test_file_remotes_are_for_tests_only():
     """`remote` is a keyword of ci.publish alone: not a CLI option, not a config key."""

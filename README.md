@@ -798,8 +798,11 @@ but that only makes theft harder. What actually protects a secret is that it
 isn't on the machine while agents run. So the work can be split:
 
 1. `copse ci entitle --out FILE` exchanges `COPSE_PRO_TOKEN` for the signed,
-   short-lived entitlement and writes it to a file (mode 0600). That process
-   has ended before any agent starts.
+   short-lived entitlement and writes it to a file (mode 0600). Run it on a
+   different machine from the agents (the workflow gives it its own job):
+   on hosted runners agents have sudo, and the runner holds every secret of
+   the job they run in. `copse ci run` reads the file and deletes it before
+   any agent starts.
 2. `copse ci run --entitlement FILE --bundle PATH` does the work with no CI
    token and no token that can write to GitHub (`--issue` needs one that can
    read). When the goal is verified it writes the new commits to PATH as a git
@@ -811,7 +814,14 @@ isn't on the machine while agents run. So the work can be split:
    `https://github.com/<repo>` (default: `$GITHUB_REPOSITORY`) and opens the
    pull request with `gh`. It never checks out or runs repo code, hooks or
    agents, and it refuses a bundle whose branch isn't a `copse/ci-` branch, so
-   a run can't publish over `main`.
+   a run can't publish over `main`. The pull request targets `--base`, else
+   the repository's default branch; the bundle doesn't get to choose. A
+   hostile run can still add commits to an existing `copse/ci-` branch.
+
+The workflow `copse ci init` writes pins copse to the version that wrote it,
+since the publishing job holds a write token. The short-lived entitlement
+passes between jobs as an artifact kept one day; anyone who can download the
+repo's artifacts could use it until it expires.
 
 `copse ci run` without `--bundle` still pushes and opens the pull request
 itself. Use that only where you trust the repo's code and everyone who can
