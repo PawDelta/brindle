@@ -116,6 +116,9 @@ def checks(repo_root: str | None) -> list[Check]:
                      f"{clip.split()[0]}: dragging in the chat copies to the clipboard" if clip else
                      "no pbcopy, wl-copy or xclip: mouse selection copies only within tmux"))
 
+    out.append(Check(OK, "sidebar",
+                     "`copse sidebar` (or prefix S in tmux) brings a lost sidebar back to the session you're in"))
+
     out.extend(native_checks(repo_root))
     out.extend(quota_checks(repo_root))
     out.extend(airgap_checks(repo_root))
