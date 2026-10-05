@@ -1,9 +1,16 @@
 name: CI
 
+# Actions minutes cost money on this private repo, so the paid matrix runs only
+# where it earns its keep. Test before pushing with scripts/ci_local.sh (the
+# pre-push hook runs its quick leg; --report posts a free `local-ci` status on a
+# PR's commit). Here: one Linux job per push to main, and the whole matrix
+# (macOS minutes count ten times) only when run by hand or by a release.
+# A push that only changes docs runs nothing.
 on:
   push:
     branches: [main]
-  pull_request:
+    paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md"]
+  workflow_dispatch:
   workflow_call:
 
 permissions:
@@ -14,8 +21,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        python: ["3.11", "3.12", "3.13"]
+        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
+        python: ${{ fromJSON(github.event_name == 'push' && '["3.12"]' || '["3.11", "3.12", "3.13"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Run the quick local CI leg on each commit being pushed, so a broken commit
+# never reaches GitHub (where every CI minute costs money).
+# Enable once per clone:  git config core.hooksPath .githooks
+# Skip once:              SKIP_LOCAL_CI=1 git push
+# After pushing a PR branch, `scripts/ci_local.sh --report` runs the full set
+# and puts a green or red `local-ci` status on the commit.
+[ "${SKIP_LOCAL_CI:-}" = 1 ] && exit 0
+root="$(git rev-parse --show-toplevel)"
+zero=0000000000000000000000000000000000000000
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue          # deleting a branch: nothing to test
+  echo "pre-push: local CI (quick) on ${local_sha:0:12}; SKIP_LOCAL_CI=1 to skip" >&2
+  "$root/scripts/ci_local.sh" --quick --rev "$local_sha" >&2 || {
+    echo "pre-push: local CI failed; not pushing" >&2; exit 1; }
+done
+exit 0
