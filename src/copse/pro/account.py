@@ -527,6 +527,8 @@ class ProAccount(_OrgCommands):
             self._say("copse account savings: run it inside a repo.")
             return 1
         self._say(savings.describe(savings.report(DB(), self.repo_root), self.repo_root))
+        self._say("Org admins can see org-wide totals on the copse account page "
+                  "(pawdelta.com/copse/account).")
         return 0
 
     def _learning_share_line(self, base: str | None, org_id: str) -> None:
