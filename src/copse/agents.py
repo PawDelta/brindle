@@ -217,6 +217,7 @@ def spawn(
     done_when: str | None = None,
     autopilot: bool = False,
     plan_first: bool = False,
+    review_sha: str | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
@@ -252,7 +253,7 @@ def spawn(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
-        done_when=done_when,
+        done_when=done_when, review_sha=review_sha,
     )
     db.add_agent(agent)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
@@ -1594,10 +1595,8 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
 
     if focus:
         task += f"\n\nFocus: {focus}"
-    reviewer = spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                     mode="review", background_setup=True)
-    db.update_agent(reviewer.id, review_sha=sha)
-    return reviewer
+    return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
+                 mode="review", background_setup=True, review_sha=sha)
 
 
 def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConfig) -> None:

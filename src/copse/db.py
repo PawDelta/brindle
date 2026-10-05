@@ -675,12 +675,12 @@ class DB:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
-                "headless, transcript_path, done_when, inbox_socket, inbox_token) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "headless, transcript_path, done_when, inbox_socket, inbox_token, review_sha) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
                  a.status_since or a.created_at, a.task, a.session_ref, a.headless,
-                 a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token),
+                 a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:

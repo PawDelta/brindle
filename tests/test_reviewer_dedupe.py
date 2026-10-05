@@ -51,9 +51,10 @@ def add_reviewer(db, ws, agent_id="rev1", sha=None):
 def fake_spawn(monkeypatch):
     started = []
 
-    def spawn(db_, ws_, profile, *, prompt=None, parent_id=None, mode="review", **kw):
+    def spawn(db_, ws_, profile, *, prompt=None, parent_id=None, mode="review",
+              review_sha=None, **kw):
         a = Agent(f"new{len(started)}", ws_.id, profile, "claude", parent_id, mode,
-                  "starting", "@0", None, time.time())
+                  "starting", "@0", None, time.time(), review_sha=review_sha)
         db_.add_agent(a)
         started.append(a)
         return a
