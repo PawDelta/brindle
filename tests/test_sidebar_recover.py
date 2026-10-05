@@ -1,4 +1,4 @@
-"""Getting a stranded sidebar back (copse-agents #54): `copse sidebar`,
+"""Getting a stranded sidebar back: `copse sidebar`,
 rescuing it before a worker's session goes away, and the come-home net."""
 
 import time
