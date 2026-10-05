@@ -8,7 +8,7 @@ In order to get any license under these terms, you must agree to them as both st
 
 ## Use License
 
-The licensor grants you a copyright license to install and use the software for any purpose, including commercial purposes, subject to the limitations and conditions below.
+The licensor grants you a copyright license to install and use the software for any purpose, including commercial purposes, except as **Noncompete** limits it, and subject to the other limitations and conditions below.
 
 ## No Modification
 
@@ -22,17 +22,29 @@ You may make these changes without asking:
 
 2. **Configuration and plugins.** Settings, agent profiles and plugins that work through the software's documented configuration and extension points, without changing any file of the software itself. A plugin may not include any part of the software.
 
-3. **Private fixes.** Changes to your own installed copy that fix a defect, kept only for your own use and not shared with anyone.
+3. **Private fixes.** Changes to your own installed copies that fix a defect, kept only for use by you and your company and not shared with anyone else.
+
+No change permitted here, including a plugin, may do anything **License Keys and Paid Features** forbids.
 
 ## No Redistribution
 
 Unless PawDelta LLC gives you express written permission, you may not distribute, sublicense, sell, rent, lend or otherwise make the software, or any changed copy of it, available to anyone else. Everyone who uses the software must get it from the licensor's official distribution channels, such as its package on the Python Package Index or its official repository, or from someone PawDelta LLC has permitted in writing to distribute it. You may make copies only as needed to install and use the software yourself, and to keep backups.
 
+If you are an entity, you may also copy the software, unchanged except as **Permitted Changes** allows, within your company: to internal package mirrors and caches, to build and container images, and onto computers and networks your company controls, including networks not connected to the internet, as long as only your company and individuals working for it can get the copies, and only to use them as these terms allow.
+
 A fork of the official repository that a code hosting service's own terms allow is permitted only to view the software and prepare contributions under **Permitted Changes**.
 
 ## Noncompete
 
-Any purpose is a permitted purpose, except for providing any product that competes with the software or any product the licensor or any of its affiliates provides using the software.
+You may not use the software to provide any product that competes with the software or any product the licensor or any of its affiliates provides using the software.
+
+## License Keys and Paid Features
+
+Some features of the software work only with a paid plan, an entitlement or a license file from the licensor. These terms do not license those features without one. You may not move, change, disable, bypass or circumvent the software's license key, entitlement or account checks, or any functionality those checks protect, and you may not remove or hide any licensing, copyright or other notices of the licensor in the software. A plugin or configuration that does any of these things is not a permitted change.
+
+## Trademarks
+
+These terms do not grant you any right to use the names, logos or trademarks of the licensor or its affiliates, including "copse" and "PawDelta", except to accurately identify the software and its origin.
 
 ## Competition
 
