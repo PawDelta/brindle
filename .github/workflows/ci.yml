@@ -11,7 +11,11 @@ on:
     branches: [main]
     paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md"]
   workflow_dispatch:
-  workflow_call:
+  workflow_call:   # a release: always the full matrix, whatever event started it
+    inputs:
+      full:
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -21,8 +25,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
-        python: ${{ fromJSON(github.event_name == 'push' && '["3.12"]' || '["3.11", "3.12", "3.13"]') }}
+        os: ${{ fromJSON(github.event_name == 'push' && !inputs.full && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
+        python: ${{ fromJSON(github.event_name == 'push' && !inputs.full && '["3.12"]' || '["3.11", "3.12", "3.13"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

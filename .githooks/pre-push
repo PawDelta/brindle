@@ -3,8 +3,9 @@
 # never reaches GitHub (where every CI minute costs money).
 # Enable once per clone:  git config core.hooksPath .githooks
 # Skip once:              SKIP_LOCAL_CI=1 git push
-# After pushing a PR branch, `scripts/ci_local.sh --report` runs the full set
-# and puts a green or red `local-ci` status on the commit.
+# After pushing a PR branch, `scripts/ci_local.sh --report` runs the default
+# legs (host and Linux on 3.12; --full for 3.11-3.13 too) and puts a green or
+# red `local-ci` status on the commit, naming the legs it ran.
 [ "${SKIP_LOCAL_CI:-}" = 1 ] && exit 0
 root="$(git rev-parse --show-toplevel)"
 zero=0000000000000000000000000000000000000000

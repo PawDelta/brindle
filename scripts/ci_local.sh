@@ -5,7 +5,7 @@
 # on a clean export of the commit (uncommitted edits can't make it pass).
 #
 #   scripts/ci_local.sh            host 3.12 + Linux 3.12 in Docker
-#   scripts/ci_local.sh --quick    host, the project's default Python only
+#   scripts/ci_local.sh --quick    host 3.12 only (what the pre-push hook runs)
 #   scripts/ci_local.sh --full     host and Linux, each on 3.11, 3.12, 3.13
 #   scripts/ci_local.sh --report   also post a `local-ci` commit status to GitHub
 #                                  (gh api; costs no Actions minutes)
@@ -14,6 +14,8 @@
 #   --serial                       run each leg's tests one at a time (default: pytest-xdist,
 #                                  the cores shared out between the legs running at once)
 #   --force                        test even a docs-only change
+#   --host-only                    skip the Linux legs on purpose (without it, a Linux leg
+#                                  that can't run because Docker is down fails the run)
 #
 # A change that only touches docs (*.md, docs/, assets/, LICENSE, CLA.md),
 # compared with where it branched from origin/main, isn't tested: like the
@@ -23,7 +25,7 @@
 set -uo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
-MODE=default REPORT=0 REV=HEAD JOBS=4 FORCE=0 SERIAL=0
+MODE=default REPORT=0 REV=HEAD JOBS=4 FORCE=0 SERIAL=0 HOST_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --quick) MODE=quick ;;
@@ -33,7 +35,8 @@ while [ $# -gt 0 ]; do
     --jobs) JOBS="$2"; shift ;;
     --force) FORCE=1 ;;
     --serial) SERIAL=1 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    --host-only) HOST_ONLY=1 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -82,14 +85,18 @@ git -C "$ROOT" archive "$SHA" | tar -x -C "$WORK/src"
    commit -qm "local ci $SHORT") || exit 1
 
 case "$MODE" in
-  quick) LEGS=("host:default") ;;
+  quick) LEGS=("host:3.12") ;;
   full) LEGS=("host:3.11" "host:3.12" "host:3.13" "linux:3.11" "linux:3.12" "linux:3.13") ;;
   *) LEGS=("host:3.12" "linux:3.12") ;;
 esac
 
+SKIPPED=""
 if printf '%s\n' "${LEGS[@]}" | grep -q '^linux:'; then
-  if ! docker info >/dev/null 2>&1; then
-    echo "Docker isn't running: skipping the Linux legs" >&2
+  if [ "$HOST_ONLY" = 1 ] || ! docker info >/dev/null 2>&1; then
+    # A skipped Linux leg is never a pass: it fails the run unless --host-only
+    # asked for it, and the status says so either way.
+    [ "$HOST_ONLY" = 1 ] || echo "Docker isn't running: the Linux legs can't run (--host-only to skip them)" >&2
+    SKIPPED="$(printf '%s\n' "${LEGS[@]}" | grep '^linux:' | tr '\n' ' ')"
     LEGS=($(printf '%s\n' "${LEGS[@]}" | grep -v '^linux:'))
   else
     docker build -q -t copse-ci-linux -f "$ROOT/scripts/ci_local.Dockerfile" "$ROOT/scripts" >/dev/null \
@@ -104,7 +111,7 @@ NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 AT_ONCE=$(( ${#LEGS[@]} < JOBS ? ${#LEGS[@]} : JOBS ))
 WORKERS=$(( NCPU / (AT_ONCE > 0 ? AT_ONCE : 1) )); [ "$WORKERS" -lt 2 ] && WORKERS=2
 PYTEST="pytest -q"
-[ "$SERIAL" = 0 ] && PYTEST="--with pytest-xdist pytest -q -n $WORKERS"
+[ "$SERIAL" = 0 ] && PYTEST="--with pytest-xdist~=3.6 pytest -q -n $WORKERS"
 
 leg() {   # leg host:3.12 | linux:3.12 -> runs the suite, exit status is the result
   local where="${1%%:*}" py="${1#*:}" dir="$WORK/${1/:/-}" log="$WORK/logs/${1/:/-}.log"
@@ -140,8 +147,12 @@ for i in "${!pids[@]}"; do
   fi
 done
 
-STATE=success; DESC="${#LEGS[@]} legs passed: ${LEGS[*]}"
+STATE=success; DESC="passed: ${LEGS[*]}"
 [ ${#failed[@]} -gt 0 ] && STATE=failure DESC="failed: ${failed[*]}"
+if [ -n "$SKIPPED" ]; then
+  DESC="$DESC; skipped: ${SKIPPED% }"
+  [ "$HOST_ONLY" = 1 ] || STATE=failure
+fi
 post_status "$STATE" "$DESC"
 echo "==> $STATE"
 [ "$STATE" = success ]
