@@ -420,9 +420,11 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str) -> str | None:
 
 
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
-                     files: list[str] | None) -> tuple[str | None, bool, str]:
+                     files: list[str] | None,
+                     decision: dict | None = None) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
-    every candidate for the tier is out."""
+    every candidate for the tier is out. ``decision`` gets the ``baseline``
+    (the pick without learning)."""
     from copse import learning
 
     skipped: list[str] = []
@@ -438,6 +440,8 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
                                        weight=weight, default=remaining[0])
     name = pick or remaining[0]
+    if decision is not None:
+        decision["baseline"] = remaining[0]
     why = f"weight {weight} -> {name}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
     detail = [picked if pick else "", *skipped]
@@ -449,16 +453,20 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
 
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
-                   weight: str | None = None, why: list[str] | None = None) -> tuple[str, bool]:
+                   weight: str | None = None, why: list[str] | None = None,
+                   decision: dict | None = None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else the first unverified milestone's profile in
     the caller's session, else the repo's routing for ``weight`` (available
     candidates only, the hosted learner choosing among them), else the hosted
     learner's pick among ``learning_candidates``, else the repo's
     ``default_agent``. Raises AutopilotError if it doesn't exist. An
-    explanation of a routed pick is appended to ``why``."""
+    explanation of a routed pick is appended to ``why``. ``decision`` is
+    filled with what ``copse.savings`` records: the ``profile``, the
+    ``baseline`` (the pick without learning), ``learned`` and the ``weight``."""
     name = (requested or "").strip()
     learned = False
+    routed: dict = {}
     if not name:
         pending = next((m for m in db.milestones(root_of(db, caller_id)) if m.status != "passed"), None)
         name = (pending.profile if pending else None) or ""
@@ -469,7 +477,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         if weight:
             if weight not in WEIGHTS:
                 raise AutopilotError(f"weight must be one of {', '.join(WEIGHTS)}, not {weight!r}")
-            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files)
+            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed)
             if picked:
                 name = picked
             else:
@@ -481,6 +489,10 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                                    default=cfg.default_agent) or ""
             learned = bool(name)
             name = name or cfg.default_agent
+            routed["baseline"] = cfg.default_agent
+    if decision is not None:
+        decision.update(profile=name, learned=learned, weight=weight,
+                        baseline=routed.get("baseline", name) if learned else name)
     try:
         load_profile(name, repo_root)
     except KeyError:

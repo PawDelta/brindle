@@ -33,6 +33,8 @@ USAGE = """usage: copse account [<command>] [--base-url URL]
             show a code to enter in a browser elsewhere instead (SSH, no browser here)
   logout    revoke this device's session and forget its credentials
   status    show your account, plan, features and when the entitlement expires
+  savings   what hosted learning's picks gained in this repo, this month and last
+            (estimates, from this machine's records only)
   upgrade   open the checkout for copse Pro (your personal org); prints the URL too
   upgrade --team --seats N [--org ORG]
             print the checkout URL for copse Team on a team org you administer
@@ -263,7 +265,7 @@ class ProAccount(_OrgCommands):
             "features": not rest, "login": not rest, "logout": not rest, "status": not rest,
             "upgrade": not rest and (bool(opts["team"]) == (seats is not None)) and (seats or 1) >= 1
             and (opts["org"] is None or bool(opts["team"])),
-            "portal": not rest, "sync": not rest,
+            "portal": not rest, "sync": not rest, "savings": not rest,
             "org": (sub in ("list", "policy") and len(rest) <= 1)
             or (sub in ("use", "invite", "join") and len(rest) == 2)
             or (sub == "create" and len(rest) >= 2)
@@ -354,6 +356,10 @@ class ProAccount(_OrgCommands):
             else:
                 self._say(f"    {feature:<9} {what:<50} needs {plan.capitalize()}")
         self._say("")
+        if ent and "learning" in have and not ent.in_grace:
+            line = self._savings_line()
+            if line:
+                self._say(line)
         if ent is None:
             self._say("Next: `copse account login`, then `copse account upgrade`. "
                       f"Plans: {PRICING_URL}")
@@ -366,6 +372,29 @@ class ProAccount(_OrgCommands):
         elif "audit" not in have:
             self._say(f"Enterprise (audit log, air-gap) is sales-led: {PRICING_URL}")
         self._say("More: `copse account status` (your plan), `copse account --help` (all commands).")
+        return 0
+
+    def _savings_line(self) -> str | None:
+        """The one-line local savings summary, or None if it can't be read."""
+        if not self.repo_root:
+            return None
+        try:
+            from copse import savings
+            from copse.db import DB
+
+            return savings.summary_line(savings.report(DB(), self.repo_root))
+        except Exception:  # noqa: BLE001 - a side note; never fail `copse account` over it
+            return None
+
+    def cmd_savings(self, base: str | None) -> int:
+        """Local records only: no login, no network."""
+        from copse import savings
+        from copse.db import DB
+
+        if not self.repo_root:
+            self._say("copse account savings: run it inside a repo.")
+            return 1
+        self._say(savings.describe(savings.report(DB(), self.repo_root), self.repo_root))
         return 0
 
     def cmd_login(self, base: str | None, device: bool = False) -> int:

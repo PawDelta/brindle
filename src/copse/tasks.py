@@ -18,7 +18,7 @@ import os
 import time
 from pathlib import PurePath
 
-from copse import agents, git
+from copse import agents, git, savings
 from copse.db import DB, Agent, Task, Workspace
 
 
@@ -276,6 +276,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         plan_first=None if task.plan_first is None else bool(task.plan_first),
     )
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
+    savings.attach_agent(db, task.id, worker.id)
     return worker
 
 

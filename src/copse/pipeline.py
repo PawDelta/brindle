@@ -34,7 +34,7 @@ import subprocess
 import threading
 from contextlib import contextmanager
 
-from copse import agents, autopilot, codemap, events, gates, git, history, learning, policy, tasks, workspaces
+from copse import agents, autopilot, codemap, events, gates, git, history, learning, policy, savings, tasks, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 
@@ -140,6 +140,7 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
         learning.note(db, cfg, worker, ws, **event)
     except Exception:
         pass
+    savings.note_outcome(db, worker, **event)
     if event.get("approved") is not None:
         events.emit(cfg, "review", ws, worker, actor=actor, approved=event["approved"])
     if event.get("escalated"):

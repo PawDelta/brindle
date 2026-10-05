@@ -286,6 +286,26 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     created_at REAL NOT NULL,
     PRIMARY KEY (agent_id, tool_use_id)
 );
+-- One row per delegation: which profile copse would have used without
+-- learning, which it used, and how the task went (see copse.savings). Local
+-- only, and like history it has no foreign keys, so it survives session
+-- pruning.
+CREATE TABLE IF NOT EXISTS routing_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_root TEXT NOT NULL,
+    ts REAL NOT NULL,
+    task_id TEXT,
+    agent_id TEXT,                  -- the worker, once started
+    weight TEXT,                    -- light | medium | heavy, or NULL
+    baseline_profile TEXT NOT NULL, -- what copse would have used without learning
+    profile TEXT NOT NULL,          -- what it used
+    learned INTEGER NOT NULL DEFAULT 0,        -- 1 when learning made the pick
+    review_rounds INTEGER NOT NULL DEFAULT 0,
+    escalations INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT                    -- merged | removed_unmerged, once it's over
+);
+CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
+CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
 """
 
 
@@ -395,6 +415,22 @@ class HistoryEntry:
     task: str | None
     result: str | None
     tokens: str | None
+
+
+@dataclass
+class RoutingDecision:
+    id: int
+    repo_root: str
+    ts: float
+    task_id: str | None
+    agent_id: str | None
+    weight: str | None
+    baseline_profile: str
+    profile: str
+    learned: int
+    review_rounds: int = 0
+    escalations: int = 0
+    outcome: str | None = None
 
 
 @dataclass
@@ -1222,6 +1258,49 @@ class DB:
             self._prune_usage_marks(c)
             after = c.execute("SELECT COUNT(*) FROM history_usage_mark").fetchone()[0]
             return before - after
+
+    def history_tokens(self, repo_root: str, agent_ids: list[str]) -> dict[str, list[str]]:
+        """The tokens JSON of every history row of each of ``agent_ids``."""
+        out: dict[str, list[str]] = {}
+        for i in range(0, len(agent_ids), 500):
+            chunk = agent_ids[i:i + 500]
+            rows = self.conn.execute(
+                "SELECT agent_id, tokens FROM history WHERE repo_root=? AND tokens IS NOT NULL "
+                f"AND agent_id IN ({','.join('?' * len(chunk))})", (repo_root, *chunk))
+            for r in rows:
+                out.setdefault(r["agent_id"], []).append(r["tokens"])
+        return out
+
+    # -- routing decisions (copse.savings) --------------------------------------
+
+    def add_routing_decision(self, repo_root: str, *, task_id: str | None, agent_id: str | None,
+                             weight: str | None, baseline_profile: str, profile: str,
+                             learned: bool, ts: float | None = None) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO routing_decisions (repo_root, ts, task_id, agent_id, weight, "
+                "baseline_profile, profile, learned) VALUES (?,?,?,?,?,?,?,?)",
+                (repo_root, time.time() if ts is None else ts, task_id, agent_id, weight,
+                 baseline_profile, profile, int(learned)),
+            )
+
+    def set_routing_agent(self, task_id: str, agent_id: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE routing_decisions SET agent_id=? WHERE task_id=?", (agent_id, task_id))
+
+    def note_routing_outcome(self, agent_id: str, *, review: bool = False, escalated: bool = False,
+                             outcome: str | None = None) -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE routing_decisions SET review_rounds=review_rounds+?, "
+                "escalations=escalations+?, outcome=COALESCE(?, outcome) WHERE agent_id=?",
+                (int(review), int(escalated), outcome, agent_id),
+            )
+
+    def list_routing_decisions(self, repo_root: str | None = None) -> list[RoutingDecision]:
+        where, args = ("WHERE repo_root=?", (repo_root,)) if repo_root else ("", ())
+        rows = self.conn.execute(f"SELECT * FROM routing_decisions {where} ORDER BY id", args)
+        return [_load(RoutingDecision, r) for r in rows]
 
     # -- tasks (copse.tasks) ---------------------------------------------------
 
