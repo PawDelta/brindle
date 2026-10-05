@@ -6,10 +6,10 @@ import time
 
 from typer.testing import CliRunner
 
-from copse import agents, workspaces
-from copse.cli import app
-from copse.config import set_user, user_config_path
-from copse.db import Agent
+from brindle import agents, workspaces
+from brindle.cli import app
+from brindle.config import set_user, user_config_path
+from brindle.db import Agent
 
 
 def _prompt(db, ws, aid="s1", profile="supervisor", parent=None, mode="interactive"):
@@ -24,17 +24,17 @@ def test_supervisor_defaults_to_balanced(db, repo):
 
 
 def test_repo_can_choose_fast_or_conservative(db, repo):
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text(json.dumps({"delegation": "fast"}))
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"delegation": "fast"}))
     ws = workspaces.adopt_root(db, str(repo))
     assert "Delegation rule: fast" in _prompt(db, ws)
-    (repo / ".copse" / "config.local.json").write_text(json.dumps({"delegation": "conservative"}))
+    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"delegation": "conservative"}))
     assert "Delegation rule: conservative" in _prompt(db, ws, aid="s2")  # local wins
 
 
 def test_unknown_level_falls_back_to_balanced(db, repo):
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text(json.dumps({"delegation": "turbo"}))
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"delegation": "turbo"}))
     ws = workspaces.adopt_root(db, str(repo))
     assert "Delegation rule: balanced" in _prompt(db, ws)
 
@@ -54,7 +54,7 @@ def test_cli_saves_it_for_every_repo_and_tells_a_running_supervisor(db, repo, mo
     result = CliRunner().invoke(app, ["delegation", "fast"])
     assert result.exit_code == 0, result.output
     assert json.loads(user_config_path().read_text())["delegation"] == "fast"
-    assert not (repo / ".copse" / "config.local.json").exists()
+    assert not (repo / ".brindle" / "config.local.json").exists()
     assert told and told[0][0] == "s1" and "Delegation rule: fast" in told[0][1]
     assert "delegation: fast" in CliRunner().invoke(app, ["delegation"]).output
     assert CliRunner().invoke(app, ["delegation", "turbo"]).exit_code != 0

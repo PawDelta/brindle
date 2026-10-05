@@ -5,12 +5,12 @@ import time
 
 import pytest
 
-from copse import tmux
+from brindle import tmux
 
 
 @pytest.fixture
 def session(tmp_path):
-    name = "copse_longcmd"
+    name = "brindle_longcmd"
     tmux.ensure_session(name, str(tmp_path), {})
     yield name
     tmux.kill_session(name)
@@ -27,14 +27,14 @@ def test_a_command_too_long_for_tmux_still_runs(session, tmp_path):
     assert out.read_text() == big            # the argument arrived intact
 
 
-def test_the_launch_script_is_private_and_gone_once_started(session, tmp_path, copse_home):
+def test_the_launch_script_is_private_and_gone_once_started(session, tmp_path, brindle_home):
     out = tmp_path / "done"
     tmux.new_window(session, "long", str(tmp_path), ["/bin/sh", "-c", 'touch "$1"', "sh", str(out),
                                                      "y" * 20_000], {})
     deadline = time.time() + 10
     while time.time() < deadline and not out.exists():
         time.sleep(0.1)
-    assert out.exists() and list((copse_home / "launch").iterdir()) == []
+    assert out.exists() and list((brindle_home / "launch").iterdir()) == []
 
 
 def test_short_commands_are_passed_as_they_are():

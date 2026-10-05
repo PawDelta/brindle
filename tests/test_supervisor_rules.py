@@ -1,12 +1,12 @@
 """The supervisor's rules for acting on findings (#44, #45), and the person's
-standing ``rules`` from copse config, in every supervisor's brief."""
+standing ``rules`` from brindle config, in every supervisor's brief."""
 
 import json
 import time
 
-from copse import agents, autopilot, workspaces
-from copse.config import load_repo_config, user_config_path
-from copse.db import Agent
+from brindle import agents, autopilot, workspaces
+from brindle.config import load_repo_config, user_config_path
+from brindle.db import Agent
 
 
 def write(path, data):
@@ -16,13 +16,13 @@ def write(path, data):
 
 def test_rules_add_up_from_user_repo_and_local(repo):
     write(user_config_path(), {"rules": ["Mine", "Shared"]})
-    write(repo / ".copse" / "config.json", {"rules": ["Shared", "  Repo  ", 3, ""]})
-    write(repo / ".copse" / "config.local.json", {"rules": ["Local"]})
+    write(repo / ".brindle" / "config.json", {"rules": ["Shared", "  Repo  ", 3, ""]})
+    write(repo / ".brindle" / "config.local.json", {"rules": ["Local"]})
     assert load_repo_config(repo).rules == ["Mine", "Shared", "Repo", "Local"]
 
 
 def test_no_rules_is_an_empty_list(repo):
-    write(repo / ".copse" / "config.json", {"rules": "not a list"})
+    write(repo / ".brindle" / "config.json", {"rules": "not a list"})
     assert load_repo_config(repo).rules == []
 
 
@@ -39,7 +39,7 @@ def brief(db, ws, profile="supervisor", mode="interactive"):
 
 
 def test_supervisor_brief_carries_the_rules(db, repo):
-    write(repo / ".copse" / "config.json", {"rules": ["Never touch the vendored code"]})
+    write(repo / ".brindle" / "config.json", {"rules": ["Never touch the vendored code"]})
     ws = workspaces.create(db, str(repo), "feature").workspace
     prompt = brief(db, ws)
     assert "verify each finding" in prompt
@@ -48,7 +48,7 @@ def test_supervisor_brief_carries_the_rules(db, repo):
 
 
 def test_workers_dont_get_the_supervisor_rules(db, repo):
-    write(repo / ".copse" / "config.json", {"rules": ["Never touch the vendored code"]})
+    write(repo / ".brindle" / "config.json", {"rules": ["Never touch the vendored code"]})
     ws = workspaces.create(db, str(repo), "feature").workspace
     prompt = brief(db, ws, profile="developer", mode="assign")
     assert "Never touch the vendored code" not in prompt

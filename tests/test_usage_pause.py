@@ -2,8 +2,8 @@ import time
 
 import pytest
 
-from copse import agents, autopilot, cull, quota, watch, workspaces
-from copse.db import Agent
+from brindle import agents, autopilot, cull, quota, watch, workspaces
+from brindle.db import Agent
 
 NOW = time.time()
 # quota drops windows already past their reset, so RESET must stay ahead of

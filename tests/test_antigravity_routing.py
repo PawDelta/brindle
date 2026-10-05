@@ -9,9 +9,9 @@ import time
 
 import pytest
 
-from copse import agents, antigravity, inbox, mcp_server, workspaces
-from copse.db import Agent
-from copse.providers import Antigravity
+from brindle import agents, antigravity, inbox, mcp_server, workspaces
+from brindle.db import Agent
+from brindle.providers import Antigravity
 
 IDLE_SCREEN = "Accept-edits mode\n> \n? for shortcuts\n"
 PROFILE = "---\nname: developer-antigravity\nprovider: antigravity\npermission_mode: acceptEdits\n---\nYou are a developer agent.\n"
@@ -19,15 +19,15 @@ PROFILE = "---\nname: developer-antigravity\nprovider: antigravity\npermission_m
 
 @pytest.fixture
 def ws(db, repo):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"pipeline": false}')
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
     return workspaces.adopt_root(db, str(repo))
 
 
 @pytest.fixture
 def launcher_inbox(tmp_path, monkeypatch):
     """The launcher is a Claude Code session: its inbox is in the environment
-    of everything it runs (the copse CLI, copse's MCP server). Returns what
+    of everything it runs (the brindle CLI, brindle's MCP server). Returns what
     was sent to any inbox."""
     sock = tmp_path / "supervisor.sock"
     sock.write_text("")
@@ -35,7 +35,7 @@ def launcher_inbox(tmp_path, monkeypatch):
     monkeypatch.setenv(inbox.TOKEN_VAR, "supervisor-token")
     sent = []
     monkeypatch.setattr(inbox, "send",
-                        lambda agent, text, sender="copse", timeout=3.0: sent.append((agent.id, text)) or True)
+                        lambda agent, text, sender="brindle", timeout=3.0: sent.append((agent.id, text)) or True)
     return sent
 
 
@@ -54,7 +54,7 @@ def fake_tmux(monkeypatch):
 
 @pytest.fixture
 def helpers(monkeypatch):
-    """copse's detached helpers (_flush, _after-launch) aren't started; git
+    """brindle's detached helpers (_flush, _after-launch) aren't started; git
     and everything else runs as usual. Returns their command lines."""
     started = []
     real = subprocess.Popen
@@ -80,7 +80,7 @@ def test_launch_does_not_take_the_launchers_inbox(db, ws, launcher_inbox, fake_t
     monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)
     a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
     a = db.get_agent(a.id)
-    # agy has no start hook, so copse marks it ready from the launcher's own process.
+    # agy has no start hook, so brindle marks it ready from the launcher's own process.
     assert a.status == "idle" and not a.inbox_socket and not a.inbox_token
     assert any("_flush" in argv and a.id in argv for argv in helpers)
     # The warm-up (its profile) and then the task are typed into its pane.
@@ -106,7 +106,7 @@ def test_send_message_is_typed_into_the_agy_pane(db, ws, launcher_inbox, fake_tm
     assert launcher_inbox == []
 
 
-def test_an_inbox_recorded_by_an_older_copse_is_ignored(db, ws, launcher_inbox, fake_tmux, tmp_path,
+def test_an_inbox_recorded_by_an_older_brindle_is_ignored(db, ws, launcher_inbox, fake_tmux, tmp_path,
                                                         monkeypatch):
     add_agy(db, ws)
     db.update_agent("g1", inbox_socket=str(tmp_path / "supervisor.sock"), inbox_token="supervisor-token")
@@ -144,7 +144,7 @@ def test_agents_are_launched_without_the_launchers_inbox(db, ws, launcher_inbox,
 
 
 def test_the_sweep_forgets_a_launchers_inbox(db, ws, tmp_path):
-    from copse import cull
+    from brindle import cull
 
     for aid, provider in (("g1", "antigravity"), ("x1", "codex"), ("c1", "claude")):
         db.add_agent(Agent(aid, ws.id, "developer", provider, "boss", "assign", "done", "@9", "ok",
@@ -162,16 +162,16 @@ def test_the_sweep_forgets_a_launchers_inbox(db, ws, tmp_path):
 
 @pytest.fixture
 def boss(db, ws, repo, monkeypatch, tmp_path):
-    agents_dir = repo / ".copse" / "agents"
+    agents_dir = repo / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / "developer-antigravity.md").write_text(PROFILE)
     agy = tmp_path / "agy"
     agy.write_text("#!/bin/sh\n")
     agy.chmod(0o755)
-    monkeypatch.setenv("COPSE_AGY_BIN", str(agy))
+    monkeypatch.setenv("BRINDLE_AGY_BIN", str(agy))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 

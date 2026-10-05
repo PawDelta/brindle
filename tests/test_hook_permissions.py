@@ -1,4 +1,4 @@
-"""The PreToolUse hook: copse approves a shell command whose every part the
+"""The PreToolUse hook: brindle approves a shell command whose every part the
 profile's allowed_tools cover, so a worker isn't stuck on a prompt for
 `cd sub && git status`. Everything else is left to Claude Code."""
 
@@ -8,11 +8,11 @@ from dataclasses import replace
 
 import pytest
 
-from copse import agents, cull, workspaces
-from copse.db import Agent
-from copse.native.permissions import uncovered_part
-from copse.profiles import load_profile
-from copse.providers import ClaudeCode, LaunchContext
+from brindle import agents, cull, workspaces
+from brindle.db import Agent
+from brindle.native.permissions import uncovered_part
+from brindle.profiles import load_profile
+from brindle.providers import ClaudeCode, LaunchContext
 
 
 @pytest.fixture
@@ -117,11 +117,11 @@ def test_stuck_message_says_when_auto_mode_should_have_answered(db, ws, monkeypa
     is told, and a profile without auto mode gets no such note."""
     from dataclasses import replace
 
-    from copse.profiles import load_profile
+    from brindle.profiles import load_profile
 
     a = Agent("w1", ws.id, "developer", "claude", "boss", "assign", "waiting", "%w1", None, time.time())
     assert "auto mode" in cull.auto_mode_note(a, ws)
-    monkeypatch.setattr("copse.profiles.load_profile",
+    monkeypatch.setattr("brindle.profiles.load_profile",
                         lambda name, root=None: replace(load_profile("developer"), permission_mode="acceptEdits"))
     assert cull.auto_mode_note(a, ws) == ""
     assert cull.auto_mode_note(replace(a, provider="native"), ws) == ""

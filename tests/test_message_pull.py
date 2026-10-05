@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from copse import agents, workspaces
-from copse.db import Agent
+from brindle import agents, workspaces
+from brindle.db import Agent
 
 REAL_PULLS = agents.pulls_messages  # conftest patches it off for the other tests
 
@@ -20,7 +20,7 @@ def boss(db, repo, monkeypatch):
                        "@0", None, time.time()))
     db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing",
                        "@1", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     monkeypatch.setattr(agents, "is_alive", lambda a, *_: True)
     monkeypatch.setattr(agents, "pulls_messages", REAL_PULLS)
     return ws
@@ -42,7 +42,7 @@ def pushed(monkeypatch):
 
 def _bare(notice: str) -> str:
     """A notice without the time that keeps notices from reading the same."""
-    return re.sub(r"^copse \(\d\d:\d\d:\d\d\): ", "copse: ", notice)
+    return re.sub(r"^brindle \(\d\d:\d\d:\d\d\): ", "brindle: ", notice)
 
 
 def test_notices_never_read_the_same(db, boss, pushed, monkeypatch):
@@ -53,19 +53,19 @@ def test_notices_never_read_the_same(db, boss, pushed, monkeypatch):
     agents.send_message(db, "boss", "one", sender_id="w1")
     _age_notices(db, db.NOTICE_TTL + 1)
     agents.send_message(db, "boss", "two", sender_id="w1")
-    assert pushed == ["copse (16:25:03): 1 new message (from w1). Call read_messages.",
-                      "copse (16:27:04): 2 new messages (from w1). Call read_messages."]
+    assert pushed == ["brindle (16:25:03): 1 new message (from w1). Call read_messages.",
+                      "brindle (16:27:04): 2 new messages (from w1). Call read_messages."]
 
 
 def set_delivery(repo, value):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text(json.dumps({"message_delivery": value}))
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"message_delivery": value}))
 
 
 def test_notice_instead_of_body(db, boss, pushed):
     agents.send_message(db, "boss", "the secret result", sender_id="w1")
     assert len(pushed) == 1
-    assert _bare(pushed[0]) == "copse: 1 new message (from w1). Call read_messages."
+    assert _bare(pushed[0]) == "brindle: 1 new message (from w1). Call read_messages."
     assert "secret" not in pushed[0]
     assert db.unread_count("boss") == 1
 
@@ -83,14 +83,14 @@ def test_single_notice_for_several_messages(db, boss, pushed):
 
 
 def test_read_messages_returns_and_marks_read(db, boss, pushed):
-    from copse import mcp_server
+    from brindle import mcp_server
 
     agents.send_message(db, "boss", "the result", sender_id="w1")
     agents.send_message(db, "boss", "queued task started")
     text = mcp_server.read_messages()
-    assert "[Message from developer agent w1. Reply with the copse send_message tool, to_agent_id=w1]" in text
+    assert "[Message from developer agent w1. Reply with the brindle send_message tool, to_agent_id=w1]" in text
     assert "the result" in text
-    assert "[Message from copse]" in text and "queued task started" in text
+    assert "[Message from brindle]" in text and "queued task started" in text
     assert db.unread_count("boss") == 0
     assert mcp_server.read_messages() == "No unread messages."
 
@@ -137,7 +137,7 @@ def test_stale_notice_is_resent_on_new_message(db, boss, pushed):
     _age_notices(db, db.NOTICE_TTL + 1)  # the first notice was lost
     agents.send_message(db, "boss", "three", sender_id="w1")
     assert len(pushed) == 2
-    assert _bare(pushed[1]) == "copse: 3 new messages (from w1). Call read_messages."
+    assert _bare(pushed[1]) == "brindle: 3 new messages (from w1). Call read_messages."
 
 
 def test_stop_hook_resends_stale_notice_once(db, boss, pushed):
@@ -154,7 +154,7 @@ def test_stop_hook_hands_over_lost_notice(db, boss, monkeypatch):
     db.enqueue_held("boss", "body", "w1")
     out = agents.handle_hook(db, "boss", "stop", {})
     assert out["decision"] == "block"
-    assert _bare(out["reason"]) == "copse: 1 new message (from w1). Call read_messages."
+    assert _bare(out["reason"]) == "brindle: 1 new message (from w1). Call read_messages."
     # The notice is now outstanding: a second stop doesn't repeat it.
     assert not agents.handle_hook(db, "boss", "stop", {})
 
@@ -162,7 +162,7 @@ def test_stop_hook_hands_over_lost_notice(db, boss, monkeypatch):
 @pytest.fixture
 def via_inbox(monkeypatch):
     """The supervisor has a Claude Code inbox; texts sent to it are recorded."""
-    from copse import inbox
+    from brindle import inbox
 
     sent = []
     monkeypatch.setattr(inbox, "usable", lambda a: True)
@@ -191,7 +191,7 @@ def test_queued_message_goes_through_the_inbox_at_stop(db, boss, via_inbox):
 
 
 def test_inbox_failure_falls_back_to_blocking(db, boss, monkeypatch):
-    from copse import inbox
+    from brindle import inbox
 
     monkeypatch.setattr(inbox, "usable", lambda a: True)
     monkeypatch.setattr(inbox, "send", lambda *a, **k: False)

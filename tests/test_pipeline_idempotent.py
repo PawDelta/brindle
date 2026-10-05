@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from copse import agents, gates, pipeline, workspaces
-from copse.db import DB, Agent
+from brindle import agents, gates, pipeline, workspaces
+from brindle.db import DB, Agent
 
 
 def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle", **kw):
@@ -22,8 +22,8 @@ def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle",
 def approved(db, repo, monkeypatch):
     """A piped worker's branch with two reviewers that both approved its
     commit (what a duplicate review looks like), and a count of gate runs."""
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text(json.dumps(
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps(
         {"review": True, "auto_merge_default_branch": True}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
@@ -189,7 +189,7 @@ def test_a_failed_merge_is_reported_once_and_not_retried_by_a_second_verdict(db,
 def test_submitting_the_same_review_twice_records_it_once(db, approved, monkeypatch):
     ws, runs = approved
     keep_worktree(monkeypatch)
-    assert "copse takes it from here" in agents.submit_review(db, "rev0", True, "lgtm")
+    assert "brindle takes it from here" in agents.submit_review(db, "rev0", True, "lgtm")
     merged = [b for b in drain(db) if "Merged feat" in b]
     assert len(merged) == 1
     reviews = db.conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0]

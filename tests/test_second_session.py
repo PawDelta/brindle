@@ -1,12 +1,12 @@
-"""A second `copse` in a checkout where a session is running asks what to
+"""A second `brindle` in a checkout where a session is running asks what to
 do instead of always pausing the first one."""
 
 import time
 
 import pytest
 
-from copse import agents, cli, workspaces
-from copse.db import Agent
+from brindle import agents, cli, workspaces
+from brindle.db import Agent
 
 from conftest import sh
 
@@ -51,7 +51,7 @@ def test_new_runs_in_its_own_worktree_and_keeps_the_first(db, running, repo, mon
                               None, time.time()))
     _start()
     (ws,) = spawned
-    assert ws.branch == "copse/session-2" and ws.id != running.id
+    assert ws.branch == "brindle/session-2" and ws.id != running.id
     assert db.get_agent("sup1").status == "idle"            # the first keeps running
     assert sh("git rev-parse HEAD", ws.path) == head
 
@@ -83,6 +83,6 @@ def test_any_number_of_sessions_each_get_their_own_worktree(db, running, monkeyp
                               "idle", "%6", None, time.time()))
     for _ in range(3):
         _start()
-    assert [ws.branch for ws in spawned] == ["copse/session-2", "copse/session-3", "copse/session-4"]
+    assert [ws.branch for ws in spawned] == ["brindle/session-2", "brindle/session-3", "brindle/session-4"]
     assert len({ws.path for ws in spawned}) == 3
     assert db.get_agent("sup1").status == "idle"            # the first keeps running

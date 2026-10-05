@@ -1,5 +1,5 @@
 """The backend client (device-flow login, refresh-token rotation, transport
-rules) and the ``copse account`` plugin."""
+rules) and the ``brindle account`` plugin."""
 import io
 import json
 import ssl
@@ -11,10 +11,10 @@ from importlib.metadata import entry_points
 import pytest
 from typer.testing import CliRunner
 
-from copse import plugins
-from copse.cli import app
-from copse.pro import account, auth, credentials, license
-from copse.pro.auth import AuthError, TransportError
+from brindle import plugins
+from brindle.cli import app
+from brindle.pro import account, auth, credentials, license
+from brindle.pro.auth import AuthError, TransportError
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, ISS, FakeBackend, FakeTransport, backend, claims, pro_env, sign, signing_key, token,
 )
@@ -35,9 +35,9 @@ class Clock:
 
 def authorize(interval=5, expires_in=600, **extra):
     return 200, {"device_code": "dev-123", "user_code": "BCDF-GHJK",
-                 "verification_uri": "https://pawdelta.com/api/copse/v1/device/approve",
+                 "verification_uri": "https://pawdelta.com/api/brindle/v1/device/approve",
                  "verification_uri_complete":
-                     "https://pawdelta.com/api/copse/v1/device/approve?user_code=BCDF-GHJK",
+                     "https://pawdelta.com/api/brindle/v1/device/approve?user_code=BCDF-GHJK",
                  "expires_in": expires_in, "interval": interval, **extra}
 
 
@@ -51,7 +51,7 @@ def device_backend(backend, token_responses, authorize_response=None):
     queue = list(token_responses)
 
     def device_token(form, headers):
-        assert form["grant_type"] == auth.DEVICE_GRANT and form["client_id"] == "copse-cli"
+        assert form["grant_type"] == auth.DEVICE_GRANT and form["client_id"] == "brindle-cli"
         r = queue.pop(0) if len(queue) > 1 else queue[0]
         if isinstance(r, Exception):
             raise r
@@ -90,10 +90,10 @@ def test_device_flow_logs_in_and_fetches_the_entitlement(store, backend):
     assert license.verify(creds["entitlement"], issuer=ISS).sub == "user_1"
     assert backend.paths()[-1] == "GET /entitlement"
     assert backend.calls[-1][2] == {"Authorization": "Bearer at_1"}
-    assert backend.calls[0][1] == {"client_id": "copse-cli"}
+    assert backend.calls[0][1] == {"client_id": "brindle-cli"}
     token_call = [c for c in backend.calls if c[0] == "POST /device/token"][0]
     assert token_call[1] == {"grant_type": auth.DEVICE_GRANT, "device_code": "dev-123",
-                             "client_id": "copse-cli"}
+                             "client_id": "brindle-cli"}
 
 
 def test_slow_down_uses_the_servers_new_interval(store, backend):
@@ -188,7 +188,7 @@ def test_refresh_rotates_and_saves_the_new_pair(store, backend):
     assert creds["refresh_token"] == "cpr_2" and creds["access_token"] == "at_2"
     assert backend.refresh_tokens == {"cpr_1": "used", "cpr_2": "active"}
     assert backend.calls[0][1] == {"grant_type": "refresh_token", "refresh_token": "cpr_1",
-                                   "client_id": "copse-cli"}
+                                   "client_id": "brindle-cli"}
 
 
 def test_rotated_tokens_are_saved_even_if_the_entitlement_fetch_fails(store, backend):
@@ -348,7 +348,7 @@ def test_bad_urls_are_rejected(url):
 
 
 def test_http_localhost_only_in_dev_mode(monkeypatch):
-    monkeypatch.setenv("COPSE_PRO_DEV", "1")
+    monkeypatch.setenv("BRINDLE_PRO_DEV", "1")
     for ok in ("http://localhost:8000/api", "http://127.0.0.1/api", "http://[::1]:9/api"):
         auth.check_url(ok)
     with pytest.raises(AuthError):
@@ -358,11 +358,11 @@ def test_http_localhost_only_in_dev_mode(monkeypatch):
 
 
 def test_default_and_env_base_url(monkeypatch):
-    monkeypatch.delenv("COPSE_PRO_BASE_URL")
-    assert auth.base_url() == "https://pawdelta.com/api/copse/v1"
-    monkeypatch.setenv("COPSE_PRO_BASE_URL", "https://staging.pawdelta.com/api/copse/v1/")
-    assert auth.base_url() == "https://staging.pawdelta.com/api/copse/v1"
-    monkeypatch.setenv("COPSE_PRO_BASE_URL", "http://staging.pawdelta.com")
+    monkeypatch.delenv("BRINDLE_PRO_BASE_URL")
+    assert auth.base_url() == "https://pawdelta.com/api/brindle/v1"
+    monkeypatch.setenv("BRINDLE_PRO_BASE_URL", "https://staging.pawdelta.com/api/brindle/v1/")
+    assert auth.base_url() == "https://staging.pawdelta.com/api/brindle/v1"
+    monkeypatch.setenv("BRINDLE_PRO_BASE_URL", "http://staging.pawdelta.com")
     with pytest.raises(AuthError):
         auth.Client()
 
@@ -378,7 +378,7 @@ def test_tls_verification_is_always_on():
 
 @pytest.fixture
 def server(monkeypatch):
-    monkeypatch.setenv("COPSE_PRO_DEV", "1")
+    monkeypatch.setenv("BRINDLE_PRO_DEV", "1")
     routes = {}
 
     class H(BaseHTTPRequestHandler):
@@ -466,8 +466,8 @@ def run(args, **kw):
 
 
 def test_account_entry_point_is_registered():
-    eps = [e for e in entry_points(group="copse.account") if e.name == "pro"]
-    assert [e.value for e in eps] == ["copse.pro.account:make"]
+    eps = [e for e in entry_points(group="brindle.account") if e.name == "pro"]
+    assert [e.value for e in eps] == ["brindle.pro.account:make"]
     assert isinstance(eps[0].load()("/repo"), account.ProAccount)
 
 
@@ -504,7 +504,7 @@ def test_bare_account_shows_paid_features_when_logged_out(store, backend):
     code, out, err = run([], store=store, transport=backend)
     assert code == 0 and not err
     assert "not logged in" in out and "needs Pro" in out and "needs Team" in out
-    assert "copse account login" in out and "#pricing" in out
+    assert "brindle account login" in out and "#pricing" in out
     assert run(["features"], store=store, transport=backend)[1] == out
 
 
@@ -512,7 +512,7 @@ def test_account_features_marks_what_the_plan_includes(store, backend, token):
     seed(store, backend, access_valid=True,
          entitlement=token(features=["learning", "services"], exp=int(time.time()) + 3600))
     code, out, _ = run([], store=store, transport=backend)
-    assert code == 0 and "copse Pro: org org_1" in out
+    assert code == 0 and "brindle Pro: org org_1" in out
     assert "✓ learning" in out and "✓ services" in out and "needs Team" in out
     assert "upgrade --team" in out
 
@@ -537,7 +537,7 @@ def test_account_usage(store):
     assert code == 1 and "https" in err
 
 
-# -- `copse account` out of the box ------------------------------------------------------------------
+# -- `brindle account` out of the box ------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -547,21 +547,21 @@ def fresh_plugins():
     plugins.reset()
 
 
-def test_copse_account_status_is_the_pro_plugin_by_default(repo, monkeypatch):
-    """No login, nothing installed besides copse itself: `copse account status`
+def test_brindle_account_status_is_the_pro_plugin_by_default(repo, monkeypatch):
+    """No login, nothing installed besides brindle itself: `brindle account status`
     reports that you're not logged in rather than that Pro is missing."""
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["account", "status"])
     assert res.exit_code == 1, res.output
-    assert "not logged in" in res.output and "copse account login" in res.output
+    assert "not logged in" in res.output and "brindle account login" in res.output
     assert "isn't installed" not in res.output
 
 
-def test_copse_account_can_still_be_turned_off(repo, monkeypatch):
-    from copse import account as account_mod
+def test_brindle_account_can_still_be_turned_off(repo, monkeypatch):
+    from brindle import account as account_mod
 
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text('{"plugins": {"account": "off"}}')
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text('{"plugins": {"account": "off"}}')
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["account", "status"])
     assert res.exit_code == 0, res.output

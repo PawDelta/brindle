@@ -1,9 +1,9 @@
-"""The one sidebar pane following the user between copse windows and
+"""The one sidebar pane following the user between brindle windows and
 sessions (see agents.sidebar_follow, agents._ensure_sidebar,
 tmux.set_follow_hooks, tmux.move_pane).
 
 Uses real tmux on the private socket the test suite already runs on
-(COPSE_TMUX_SOCKET, see conftest.py's private_tmux_server fixture), since
+(BRINDLE_TMUX_SOCKET, see conftest.py's private_tmux_server fixture), since
 the behaviour under test is genuine tmux pane/hook plumbing.
 """
 
@@ -13,12 +13,12 @@ import time
 
 import pytest
 
-from copse import agents, tmux
-from copse.db import DB, Agent, Workspace
+from brindle import agents, tmux
+from brindle.db import DB, Agent, Workspace
 
 
 @pytest.fixture
-def db(copse_home):
+def db(brindle_home):
     return DB()
 
 
@@ -52,7 +52,7 @@ def make_window(session, name):
 
 @pytest.fixture
 def session(tmp_path):
-    name = "copse_followtest"
+    name = "brindle_followtest"
     tmux.ensure_session(name, str(tmp_path), {})
     yield name
     tmux.kill_session(name)
@@ -70,12 +70,12 @@ def test_apply_theme_sets_follow_hooks_on_the_session_only(session):
 
 
 def test_plain_tmux_session_is_never_hooked():
-    tmux._tmux("new-session", "-d", "-s", "not_a_copse_session")
+    tmux._tmux("new-session", "-d", "-s", "not_a_brindle_session")
     try:
-        out = tmux._tmux("show-hooks", "-t", "not_a_copse_session").stdout
+        out = tmux._tmux("show-hooks", "-t", "not_a_brindle_session").stdout
         assert "_sidebar-follow" not in out
     finally:
-        tmux.kill_session("not_a_copse_session")
+        tmux.kill_session("not_a_brindle_session")
 
 
 def test_sidebar_follow_never_creates_one(db, tmp_path, session):
@@ -138,7 +138,7 @@ def test_sidebar_follow_stays_with_the_person_when_an_unwatched_session_changes_
     placeholder shell window closes once the agent's window is up) and the
     follow hook fires with nobody attached to it. The sidebar must stay in
     the session the person is actually looking at."""
-    worker_session = "copse_followtest_worker"
+    worker_session = "brindle_followtest_worker"
     tmux.ensure_session(worker_session, str(tmp_path), {})
     try:
         root_win = make_window(session, "root")
@@ -249,7 +249,7 @@ def test_sidebar_follow_does_not_recreate_a_sidebar_the_user_quit(db, tmp_path, 
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
 
-    # What `copse watch --sidebar` does when the user presses q.
+    # What `brindle watch --sidebar` does when the user presses q.
     agents.dismiss_sidebar(db, sidebar)
     tmux.kill_pane(sidebar)
     deadline = time.time() + 5
@@ -293,7 +293,7 @@ def test_stale_pane_id_after_reuse_is_not_trusted(db, tmp_path, session):
 
 def test_plain_shell_window_gets_the_sidebar_too(db, tmp_path):
     """ensure_session's own first window (named 'shell') is a normal target."""
-    name = "copse_followtest_shell"
+    name = "brindle_followtest_shell"
     tmux.ensure_session(name, str(tmp_path), {})
     try:
         ws = make_workspace(db, tmp_path, "shellws", name)
@@ -310,7 +310,7 @@ def test_second_supervisor_in_the_same_repo_gets_its_own_sidebar(db, tmp_path):
     """Keyed by session root, not repo_root: a second supervisor working in
     the same repo must not steal the first one's sidebar."""
     repo_root = str(tmp_path)
-    session_a, session_b = "copse_followtest_a", "copse_followtest_b"
+    session_a, session_b = "brindle_followtest_a", "brindle_followtest_b"
     tmux.ensure_session(session_a, str(tmp_path), {})
     tmux.ensure_session(session_b, str(tmp_path), {})
     try:
@@ -350,7 +350,7 @@ def test_pause_never_kills_an_untagged_pane_it_mistakes_for_the_sidebar(db, tmp_
     Put the imposter in a wholly separate session so pausing root1's own
     session (which always closes entirely) can't kill it for that reason
     instead of proving the tag check."""
-    session_a, session_b = "copse_followtest_pause_a", "copse_followtest_pause_b"
+    session_a, session_b = "brindle_followtest_pause_a", "brindle_followtest_pause_b"
     tmux.ensure_session(session_a, str(tmp_path), {})
     tmux.ensure_session(session_b, str(tmp_path), {})
     try:
@@ -428,27 +428,27 @@ def test_move_pane_takes_a_lone_pane_along(db, tmp_path, session):
     assert tmux._tmux("display-message", "-p", "-t", sidebar, "#{pane_left}").stdout.strip() == "0"
 
 
-def test_sidebar_follow_hook_command_exits_zero_on_a_bogus_session(copse_home):
+def test_sidebar_follow_hook_command_exits_zero_on_a_bogus_session(brindle_home):
     proc = subprocess.run(
-        [sys.executable, "-m", "copse", "_sidebar-follow", "no-such-session"],
+        [sys.executable, "-m", "brindle", "_sidebar-follow", "no-such-session"],
         capture_output=True, text=True,
     )
     assert proc.returncode == 0
 
 
 def test_apply_theme_shows_the_version_in_the_status_bar(session):
-    from copse import __version__
+    from brindle import __version__
 
     tmux.apply_theme(session)
     left = tmux._tmux("show-options", "-v", "-t", session, "status-left").stdout
-    assert "copse" in left and __version__ in left
+    assert "brindle" in left and __version__ in left
 
 
 def test_a_stranded_sidebar_comes_home_on_its_own(db, tmp_path, session, monkeypatch):
     """The sidebar followed the person into a worker's session, and the hook
     that should have brought it back was missed: its own loop moves it back
     to the session the person is attached to."""
-    worker_session = "copse_followtest_worker"
+    worker_session = "brindle_followtest_worker"
     tmux.ensure_session(worker_session, str(tmp_path), {})
     try:
         root_win = make_window(session, "root")
@@ -480,7 +480,7 @@ def test_session_attached_reads_a_real_tmux_session(tmp_path, monkeypatch):
     "=name" target, so a session someone was attached to also read as
     unattached and the sidebar wandered off to any worker session that
     changed windows."""
-    name = "copse_attached_probe"
+    name = "brindle_attached_probe"
     tmux.ensure_session(name, str(tmp_path), {})
     real, answers = tmux._tmux, []
 
@@ -494,6 +494,6 @@ def test_session_attached_reads_a_real_tmux_session(tmp_path, monkeypatch):
     try:
         assert tmux.session_attached(name) is False
         assert answers == ["0"]
-        assert tmux.session_attached("copse_no_such_session") is False
+        assert tmux.session_attached("brindle_no_such_session") is False
     finally:
         real("kill-session", "-t", f"={name}", check=False)

@@ -1,9 +1,9 @@
-"""Air-gap mode (copse Enterprise): no outbound traffic, local models only.
+"""Air-gap mode (brindle Enterprise): no outbound traffic, local models only.
 
-Every copse Pro path that would leave the machine refuses (the fake
+Every brindle Pro path that would leave the machine refuses (the fake
 transport is never called), delegation reaches only local profiles, the team
 policy comes from an offline file, the entitlement from an offline license
-installed and verified without a network, and ``copse doctor`` says so."""
+installed and verified without a network, and ``brindle doctor`` says so."""
 import io
 import json
 import stat
@@ -11,18 +11,18 @@ import time
 
 import pytest
 
-from copse import airgap, doctor, policy
-from copse.config import RepoConfig, load_repo_config
-from copse.events import Event
-from copse.learning import Outcome, TaskInfo
-from copse.policy import AssignInfo
-from copse.pro import auth, credentials, license, team_policy
-from copse.pro.account import ProAccount
-from copse.pro.learning import CloudLearner
-from copse.pro.orgkey import OrgKeyUnavailable, OrgKeys
-from copse.pro.team_events import ProEvents, Spool
-from copse.pro.team_policy import ProPolicy
-from copse.profiles import Profile, _parse
+from brindle import airgap, doctor, policy
+from brindle.config import RepoConfig, load_repo_config
+from brindle.events import Event
+from brindle.learning import Outcome, TaskInfo
+from brindle.policy import AssignInfo
+from brindle.pro import auth, credentials, license, team_policy
+from brindle.pro.account import ProAccount
+from brindle.pro.learning import CloudLearner
+from brindle.pro.orgkey import OrgKeyUnavailable, OrgKeys
+from brindle.pro.team_events import ProEvents, Spool
+from brindle.pro.team_policy import ProPolicy
+from brindle.profiles import Profile, _parse
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, backend, claims, fixed_identity, pro_env, sign, signing_key, token,
 )
@@ -77,13 +77,13 @@ def hosted(provider, name="dev", **kw) -> Profile:
 
 
 def add_profile(repo, name, text):
-    d = repo / ".copse" / "agents"
+    d = repo / ".brindle" / "agents"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.md").write_text(text)
 
 
 def write_config(repo, **cfg):
-    d = repo / ".copse"
+    d = repo / ".brindle"
     d.mkdir(exist_ok=True)
     (d / "config.json").write_text(json.dumps(cfg))
 
@@ -116,11 +116,11 @@ def test_on_from_the_repo_config_arms_the_process(tmp_path):
 
 def test_local_config_can_turn_it_on_but_not_off(tmp_path):
     write_config(tmp_path, airgap=True)
-    (tmp_path / ".copse" / "config.local.json").write_text('{"airgap": false}')
+    (tmp_path / ".brindle" / "config.local.json").write_text('{"airgap": false}')
     assert load_repo_config(tmp_path).airgap
     airgap.reset()
     write_config(tmp_path, airgap=False)
-    (tmp_path / ".copse" / "config.local.json").write_text('{"airgap": true}')
+    (tmp_path / ".brindle" / "config.local.json").write_text('{"airgap": true}')
     assert load_repo_config(tmp_path).airgap
 
 
@@ -160,12 +160,12 @@ def test_local_urls():
 def test_guard_refuses_only_when_on(on):
     airgap.guard("http://127.0.0.1:11434/v1/models")             # local: fine
     with pytest.raises(airgap.AirGapError, match="pawdelta.com"):
-        airgap.guard("https://pawdelta.com/api/copse/v1/token/refresh")
+        airgap.guard("https://pawdelta.com/api/brindle/v1/token/refresh")
     with pytest.raises(airgap.AirGapError):
         airgap.guard(None)
 
 
-# -- every copse Pro path refuses: the transport is never called ----------------------------------------
+# -- every brindle Pro path refuses: the transport is never called ----------------------------------------
 
 
 def test_refresh_is_refused(on, backend):
@@ -195,14 +195,14 @@ def test_entitlement_fetch_and_authed_calls_are_refused(on, backend):
 
 
 def test_dev_mode_trusts_no_unpinned_key(on, monkeypatch):
-    monkeypatch.setenv("COPSE_PRO_DEV", "1")
+    monkeypatch.setenv("BRINDLE_PRO_DEV", "1")
     with pytest.raises(license.LicenseError, match="unknown key"):
         license._trusted_key("some-other-kid")
 
 
 def test_license_current_never_refreshes(on, backend):
     now = int(time.time())
-    # A stored entitlement that is expired but in grace: online, copse would refresh it.
+    # A stored entitlement that is expired but in grace: online, brindle would refresh it.
     store = login(backend, claims(iat=now - 3000, exp=now - 100))
     ent = license.current(store=store, client=client(backend), now=now)
     assert ent.in_grace and ent.org_id == "org_1"
@@ -274,10 +274,10 @@ def test_learning_sends_nothing_and_suggests_nothing(on, backend, tmp_path, fixe
 
 
 def test_ci_token_exchange_and_ci_token_commands_are_refused(on, backend, monkeypatch):
-    """copse ci's POST /ci/entitlement and the org ci-token helpers are Pro
+    """brindle ci's POST /ci/entitlement and the org ci-token helpers are Pro
     paths like any other: refused before the transport, with a message that
     points at the offline license."""
-    from copse import ci
+    from brindle import ci
 
     with pytest.raises(auth.AirGapped):
         ci.entitlement_from_token("cpc_" + "x" * 40, client(backend))
@@ -357,28 +357,28 @@ def test_check_assign_refuses_hosted_profiles_in_air_gap_mode(on, repo):
     assert not d.allowed and "couldn't be loaded" in d.reason
 
 
-def test_air_gap_denials_are_audited_like_any_other(on, repo, copse_home, monkeypatch):
+def test_air_gap_denials_are_audited_like_any_other(on, repo, brindle_home, monkeypatch):
     """A delegation air-gap mode refuses reaches the events plugins as a
     deny_assign with the reason, so the audit chain records it."""
-    from copse import plugins
-    from copse.pro import audit_chain
-    from copse.pro.audit_chain import AuditChain
+    from brindle import plugins
+    from brindle.pro import audit_chain
+    from brindle.pro.audit_chain import AuditChain
     from test_plugins import Recorder, install
 
     plugins.reset()
-    audit = AuditChain(str(repo), home=copse_home, entitled=lambda: True)
+    audit = AuditChain(str(repo), home=brindle_home, entitled=lambda: True)
     recorder = Recorder()
     install(monkeypatch, {plugins.EVENTS: [("audit", lambda r: audit), ("rec", lambda r: recorder)]})
     try:
         d = policy.check_assign(RepoConfig(), str(repo), "developer", "secret task", "assign",
                                 branch="feat/x")
         assert not d.allowed and "air-gap mode" in d.reason
-        recs = audit_chain.read_records(audit_chain.log_path(str(repo), copse_home))
+        recs = audit_chain.read_records(audit_chain.log_path(str(repo), brindle_home))
         assert [r["event"]["kind"] for r in recs] == ["deny_assign"]
         assert recs[0]["event"]["reason"] == d.reason
         assert recs[0]["event"]["profile"] == "developer" and recs[0]["event"]["provider"] == "claude"
         assert [e.kind for e in recorder.events] == ["deny_assign"]
-        assert audit_chain.verify(str(repo), home=copse_home).ok
+        assert audit_chain.verify(str(repo), home=brindle_home).ok
     finally:
         plugins.reset()
 
@@ -410,13 +410,13 @@ LOCAL_PROFILE = ("---\nname: local\nprovider: native\napi: openai\n"
 
 @pytest.fixture
 def ws(db, repo):
-    from copse import workspaces
+    from brindle import workspaces
 
     return workspaces.create(db, str(repo), "feature").workspace
 
 
 def test_spawn_refuses_a_hosted_profile_in_air_gap_mode(on, db, ws):
-    from copse import agents
+    from brindle import agents
 
     with pytest.raises(agents.AgentError, match="air-gap mode.*'developer'.*'claude'"):
         agents.spawn(db, ws, "developer", provider_name="shell", mode="assign")
@@ -427,9 +427,9 @@ def test_spawn_refuses_a_hosted_profile_in_air_gap_mode(on, db, ws):
 
 
 def test_spawn_reads_air_gap_from_the_repo_config(db, ws, repo):
-    """The gate holds in a process that never saw COPSE_AIRGAP: the repo
+    """The gate holds in a process that never saw BRINDLE_AIRGAP: the repo
     config is enough (and arms the process)."""
-    from copse import agents
+    from brindle import agents
 
     write_config(repo, airgap=True)
     with pytest.raises(agents.AgentError, match="air-gap mode"):
@@ -440,7 +440,7 @@ def test_spawn_reads_air_gap_from_the_repo_config(db, ws, repo):
 def test_request_review_refuses_a_hosted_reviewer(on, db, ws):
     """The default reviewers (reviewer-codex, reviewer) are hosted: in air-gap
     mode no reviewer starts and the diff never leaves the machine."""
-    from copse import agents
+    from brindle import agents
 
     with pytest.raises(agents.AgentError, match="air-gap mode.*hosted service"):
         agents.request_review(db, None, ws)
@@ -452,7 +452,7 @@ def test_request_review_refuses_a_hosted_reviewer(on, db, ws):
 
 
 def test_request_review_passes_a_local_reviewer_to_the_launch(on, db, ws, repo, monkeypatch):
-    from copse import agents
+    from brindle import agents
 
     add_profile(repo, "local", LOCAL_PROFILE)
     launched = []
@@ -466,8 +466,8 @@ def test_resume_of_a_hosted_agent_is_refused(on, db, ws):
     brought back either: every launch goes through the same gate."""
     import time as _time
 
-    from copse import agents
-    from copse.db import Agent
+    from brindle import agents
+    from brindle.db import Agent
 
     a = Agent(id="old1", workspace_id=ws.id, profile="developer", provider="claude", parent_id=None,
               mode="interactive", status="paused", tmux_window="", result=None,
@@ -480,7 +480,7 @@ def test_resume_of_a_hosted_agent_is_refused(on, db, ws):
 def test_native_client_refuses_a_non_local_endpoint(on):
     """Defence in depth: even a native profile that slipped through (marked
     local, or with its base_url overridden) can't reach a hosted endpoint."""
-    from copse.native import client as native_client
+    from brindle.native import client as native_client
 
     hosted_ep = native_client.Endpoint("https://api.together.xyz/v1", "m", retries=0)
     with pytest.raises(native_client.ClientError, match="air-gap mode"):
@@ -505,7 +505,7 @@ def assign(provider, model="qwen", running=0):
 
 
 def test_offline_policy_file_is_enforced_instead_of_a_fetch(on, backend, repo):
-    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".brindle").mkdir(exist_ok=True)
     airgap.policy_path(str(repo)).write_text(json.dumps(POLICY))
     p = team_plugin(backend, repo)
     assert p.check_assign(assign("native")).allowed
@@ -513,7 +513,7 @@ def test_offline_policy_file_is_enforced_instead_of_a_fetch(on, backend, repo):
     assert not d.allowed and f"org {ORG} allows only native" in d.reason
     d = p.check_assign(assign("native", running=1))
     assert not d.allowed and "at most 1 parallel" in d.reason
-    from copse.policy import MergeInfo
+    from brindle.policy import MergeInfo
 
     d = p.check_merge(MergeInfo(repo_root=str(repo), workspace_id="w", branch="b",
                                 base_branch="main", actor="supervisor-1"))
@@ -522,7 +522,7 @@ def test_offline_policy_file_is_enforced_instead_of_a_fetch(on, backend, repo):
 
 
 def test_offline_policy_wins_over_the_cached_copy(on, backend, repo):
-    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".brindle").mkdir(exist_ok=True)
     airgap.policy_path(str(repo)).write_text(json.dumps(POLICY))
     team_policy.save_cached(team_policy.parse_policy(ORG, {
         "org_id": ORG, "version": 9, "policy": {"allowed_providers": ["claude", "native"]}}))
@@ -544,7 +544,7 @@ def test_missing_offline_policy_refuses_everything(on, backend, repo):
     json.dumps({"version": 1, "policy": {"allowed_providers": "native"}}),
 ])
 def test_bad_offline_policy_refuses_everything(on, backend, repo, body):
-    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".brindle").mkdir(exist_ok=True)
     airgap.policy_path(str(repo)).write_text(body)
     p = team_plugin(backend, repo)
     assert not p.check_assign(assign("native")).allowed
@@ -552,7 +552,7 @@ def test_bad_offline_policy_refuses_everything(on, backend, repo, body):
 
 
 def test_flat_policy_schema_is_accepted(on, backend, repo):
-    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".brindle").mkdir(exist_ok=True)
     airgap.policy_path(str(repo)).write_text(json.dumps(
         {"version": 3, "allowed_providers": ["native"], "require_human_review": False}))
     p = team_plugin(backend, repo)
@@ -563,7 +563,7 @@ def test_flat_policy_schema_is_accepted(on, backend, repo):
 def test_without_a_team_entitlement_the_pro_policy_stays_inert(on, backend, repo):
     store = login(backend, claims(features=["learning"]))
     p = ProPolicy(str(repo), store=store, client=client(backend))
-    assert p.check_assign(assign("claude")).allowed   # copse.policy.check_assign refuses it instead
+    assert p.check_assign(assign("claude")).allowed   # brindle.policy.check_assign refuses it instead
     assert backend.calls == []
 
 
@@ -664,7 +664,7 @@ def test_air_gap_mode_without_the_feature_still_blocks_and_warns(on, token):
     assert not airgap.licensed()
     assert "doesn't include it" in airgap.warning()
     with pytest.raises(airgap.AirGapError):
-        airgap.guard("https://pawdelta.com/api/copse/v1/entitlement")
+        airgap.guard("https://pawdelta.com/api/brindle/v1/entitlement")
 
 
 def test_uninstall(on, token):
@@ -721,20 +721,20 @@ def test_doctor_is_quiet_when_off(repo):
 def test_doctor_shows_air_gap_status_and_hosted_profiles(on, repo, token):
     checks = by_name(doctor.airgap_checks(str(repo)))
     assert checks["air-gap"].level == doctor.WARN
-    assert "on via COPSE_AIRGAP=1" in checks["air-gap"].detail
+    assert "on via BRINDLE_AIRGAP=1" in checks["air-gap"].detail
     assert "doesn't include it" in checks["air-gap"].detail
     assert checks["hosted profiles"].level == doctor.WARN
     assert "developer" in checks["hosted profiles"].detail
     assert "refused in air-gap mode" in checks["hosted profiles"].detail
     assert checks["offline license"].level == doctor.WARN
     assert checks["offline policy"].level == doctor.WARN and "policy.json" in checks["offline policy"].detail
-    # The chat is a hosted agent too: copse itself can't start on the default developer.
+    # The chat is a hosted agent too: brindle itself can't start on the default developer.
     assert checks["default agent"].level == doctor.FAIL
     assert "developer" in checks["default agent"].detail
-    assert "`copse` won't start" in checks["default agent"].detail
+    assert "`brindle` won't start" in checks["default agent"].detail
 
     license.install(enterprise(token))
-    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".brindle").mkdir(exist_ok=True)
     airgap.policy_path(str(repo)).write_text(json.dumps(POLICY))
     add_profile(repo, "local", LOCAL_PROFILE)
     write_config(repo, default_agent="local")
@@ -758,17 +758,17 @@ def test_doctor_renders_the_air_gap_lines(on, repo):
 
 
 def test_a_broken_config_fails_closed_at_launch(tmp_path):
-    from copse import agents
+    from brindle import agents
 
-    (tmp_path / ".copse").mkdir()
-    (tmp_path / ".copse" / "config.json").write_text("{not json")
+    (tmp_path / ".brindle").mkdir()
+    (tmp_path / ".brindle" / "config.json").write_text("{not json")
     with pytest.raises(agents.AgentError, match="air-gap mode can't be ruled out"):
         agents._airgap_check(None, str(tmp_path))
 
 
 def test_arming_drops_a_cached_entitlement(monkeypatch):
-    from copse import airgap
-    from copse.pro import license
+    from brindle import airgap
+    from brindle.pro import license
 
     cleared = []
     monkeypatch.setattr(license, "clear_cache", lambda: cleared.append(1))

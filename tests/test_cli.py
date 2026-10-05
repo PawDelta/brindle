@@ -3,9 +3,9 @@ import time
 
 from typer.testing import CliRunner
 
-from copse import workspaces
-from copse.cli import app
-from copse.db import Agent
+from brindle import workspaces
+from brindle.cli import app
+from brindle.db import Agent
 
 from conftest import sh
 
@@ -58,9 +58,9 @@ def test_rm_survives_a_missing_base_branch(db, repo, monkeypatch):
 def test_version_flag_prints_the_installed_version():
     from typer.testing import CliRunner
 
-    from copse import __version__
-    from copse.cli import app
+    from brindle import __version__
+    from brindle.cli import app
 
     out = CliRunner().invoke(app, ["--version"])
-    assert out.exit_code == 0 and out.output.strip() == f"copse {__version__}"
+    assert out.exit_code == 0 and out.output.strip() == f"brindle {__version__}"
     assert __version__ != "unknown"

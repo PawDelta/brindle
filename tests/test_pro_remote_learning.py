@@ -10,14 +10,14 @@ from importlib.metadata import entry_points
 
 import pytest
 
-from copse import learning as copse_learning
-from copse import plugins
-from copse.config import RepoConfig
-from copse.learning import Outcome, TaskInfo
-from copse.pro import auth, credentials
-from copse.pro import learning as cloud
-from copse.pro.learning import CloudLearner
-from copse.pro.orgkey import OrgKey
+from brindle import learning as brindle_learning
+from brindle import plugins
+from brindle.config import RepoConfig
+from brindle.learning import Outcome, TaskInfo
+from brindle.pro import auth, credentials
+from brindle.pro import learning as cloud
+from brindle.pro.learning import CloudLearner
+from brindle.pro.orgkey import OrgKey
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, backend, claims, fixed_identity, pro_env, sign, signing_key, token,
 )
@@ -200,13 +200,13 @@ def test_the_record_queue_is_bounded(parts, remote, monkeypatch):
 
 
 def test_cost_rank_guesses_from_the_profile(tmp_path):
-    from copse.profiles import load_profile
+    from brindle.profiles import load_profile
 
     assert cloud.cost_rank("no-such-profile", str(tmp_path)) == 2
     for name in ("developer", "developer-heavy", "developer-local"):
         try:
             p = load_profile(name, str(tmp_path))
-        except Exception:  # noqa: BLE001 - not a built-in on this copse
+        except Exception:  # noqa: BLE001 - not a built-in on this brindle
             continue
         rank = cloud.cost_rank(name, str(tmp_path))
         assert 0 <= rank <= 3
@@ -272,7 +272,7 @@ def test_no_org_key_means_nothing_is_sent(parts, remote):
 
 def fallback_case(parts, remote):
     lr = make(parts, remote)
-    assert lr.suggest(task(), ["developer", "reviewer"]) is None   # copse routes by weight
+    assert lr.suggest(task(), ["developer", "reviewer"]) is None   # brindle routes by weight
     lr.record(task(), Outcome("merged"))
     lr.flush()
     return lr
@@ -326,7 +326,7 @@ def test_a_profile_outside_the_candidates_is_ignored(parts, remote):
     assert make(parts, remote).suggest(task(), ["developer", "reviewer"]) is None
 
 
-def test_errors_never_reach_copse(parts, remote, monkeypatch):
+def test_errors_never_reach_brindle(parts, remote, monkeypatch):
     lr = make(parts, remote)
 
     def boom(*a, **k):
@@ -373,8 +373,8 @@ def fresh_plugins():
 
 
 def test_cloud_learner_is_built_in_not_an_entry_point():
-    assert list(entry_points(group="copse.learning")) == []
-    p = copse_learning.plugin(RepoConfig(learning="cloud"), REPO)
+    assert list(entry_points(group="brindle.learning")) == []
+    p = brindle_learning.plugin(RepoConfig(learning="cloud"), REPO)
     assert isinstance(p, CloudLearner)
 
 
@@ -382,41 +382,41 @@ def test_learning_defaults_to_auto_which_is_off_until_entitled(remote, tmp_path)
     cfg = RepoConfig()
     assert cfg.learning == "auto"
     assert plugins.learning_name(cfg) == "off"
-    assert copse_learning.plugin(cfg, str(tmp_path)) is None
-    from copse.pro import license
+    assert brindle_learning.plugin(cfg, str(tmp_path)) is None
+    from brindle.pro import license
 
     store = credentials.default_store()
     login_as(remote, store, features=("autopilot",))
-    license.clear_cache()          # as `copse account login` does
+    license.clear_cache()          # as `brindle account login` does
     assert plugins.learning_name(cfg) == "off"           # logged in, but no hosted learning
     login_as(remote, store)
     license.clear_cache()
     assert plugins.learning_name(cfg) == "cloud"
-    p = copse_learning.plugin(cfg, str(tmp_path))
+    p = brindle_learning.plugin(cfg, str(tmp_path))
     assert isinstance(p, CloudLearner)
-    assert copse_learning.plugin(RepoConfig(learning="off"), str(tmp_path)) is None
+    assert brindle_learning.plugin(RepoConfig(learning="off"), str(tmp_path)) is None
     assert plugins.learning_name(RepoConfig(learning="other")) == "off"
-    assert copse_learning.plugin(RepoConfig(learning="other"), str(tmp_path)) is None
+    assert brindle_learning.plugin(RepoConfig(learning="other"), str(tmp_path)) is None
 
 
-def test_copse_learning_command_explains_auto(repo, monkeypatch):
+def test_brindle_learning_command_explains_auto(repo, monkeypatch):
     from typer.testing import CliRunner
 
-    from copse.cli import app
+    from brindle.cli import app
 
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["learning"])
     assert res.exit_code == 0, res.output
-    assert "copse Pro" in res.output and "copse account upgrade" in res.output
+    assert "brindle Pro" in res.output and "brindle account upgrade" in res.output
 
 
-def test_copse_learning_command_rejects_unsupported_value(repo, monkeypatch):
+def test_brindle_learning_command_rejects_unsupported_value(repo, monkeypatch):
     from typer.testing import CliRunner
 
-    from copse.cli import app
+    from brindle.cli import app
 
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"learning": "myplugin"}')
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"learning": "myplugin"}')
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["learning"])
     assert res.exit_code == 0, res.output
@@ -424,7 +424,7 @@ def test_copse_learning_command_rejects_unsupported_value(repo, monkeypatch):
 
 
 def test_account_status_shows_cloud_learning(parts, remote):
-    from copse.pro import account
+    from brindle.pro import account
 
     out = io.StringIO()
     account.ProAccount(REPO, store=parts[0], transport=remote, out=out).run(["status"])

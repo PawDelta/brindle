@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from copse import config, tmux, watch
+from brindle import config, tmux, watch
 
 
 @pytest.fixture
@@ -39,15 +39,15 @@ def _bindings(table: str) -> str:
     return tmux._tmux("list-keys", "-T", table).stdout
 
 
-def test_mouse_drag_copies_to_clipboard_only_for_copse_sessions(session, monkeypatch):
+def test_mouse_drag_copies_to_clipboard_only_for_brindle_sessions(session, monkeypatch):
     monkeypatch.setattr(tmux, "clipboard_command", lambda: "pbcopy")
     tmux.bind_session_keys(session)
     for table in ("copy-mode", "copy-mode-vi"):
         line = next(ln for ln in _bindings(table).splitlines() if "MouseDragEnd1Pane" in ln)
-        assert "#{@copse}" in line and "pbcopy" in line
+        assert "#{@brindle}" in line and "pbcopy" in line
         assert "copy-pipe-and-cancel" in line  # the fallback keeps tmux's own default
-    got = tmux._tmux("show-options", "-t", session, "@copse").stdout
-    assert "@copse 1" in got
+    got = tmux._tmux("show-options", "-t", session, "@brindle").stdout
+    assert "@brindle 1" in got
 
 
 def test_no_clipboard_tool_keeps_default_binding(session, monkeypatch):
@@ -74,10 +74,10 @@ def test_toggle_sidebar_hides_and_restores(session, tmp_path):
     assert tmux.window_alive(side)  # still running the whole time
 
 
-def test_prefix_s_binding_is_guarded_to_copse_sessions(session):
+def test_prefix_s_binding_is_guarded_to_brindle_sessions(session):
     tmux.bind_session_keys(session)
     cmd = next(ln for ln in _bindings("prefix").splitlines() if " S " in ln)
-    assert "#{@copse}" in cmd and "resize-pane -Z" in cmd
+    assert "#{@brindle}" in cmd and "resize-pane -Z" in cmd
 
 
 def test_bottom_layout_puts_sidebar_under_the_chat(session, tmp_path):
@@ -94,8 +94,8 @@ def test_bottom_layout_puts_sidebar_under_the_chat(session, tmp_path):
 
 def test_sidebar_option_is_read_from_config(tmp_path):
     assert config.load_repo_config(tmp_path).sidebar == "left"
-    (tmp_path / ".copse").mkdir()
-    (tmp_path / ".copse" / "config.json").write_text(json.dumps({"sidebar": "bottom"}))
+    (tmp_path / ".brindle").mkdir()
+    (tmp_path / ".brindle" / "config.json").write_text(json.dumps({"sidebar": "bottom"}))
     assert config.load_repo_config(tmp_path).sidebar == "bottom"
 
 

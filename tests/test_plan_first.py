@@ -8,10 +8,10 @@ import time
 
 import pytest
 
-from copse import agents, autopilot, mcp_server, workspaces
-from copse.config import RepoConfig
-from copse.db import Agent, Autopilot
-from copse.providers import get_provider
+from brindle import agents, autopilot, mcp_server, workspaces
+from brindle.config import RepoConfig
+from brindle.db import Agent, Autopilot
+from brindle.providers import get_provider
 
 
 def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None,
@@ -32,12 +32,12 @@ def no_real_spawn(monkeypatch):
 
 @pytest.fixture
 def boss(db, repo, monkeypatch):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"pipeline": false}')
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 
@@ -72,7 +72,7 @@ def test_assign_plan_first_is_stored(db, repo, boss):
 
 
 def test_assign_defaults_to_the_repo_config(db, repo, boss):
-    (repo / ".copse" / "config.json").write_text('{"pipeline": false, "plan_first": true}')
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "plan_first": true}')
     on = worker_id(asyncio.run(mcp_server.assign("developer", "job one")))
     off = worker_id(asyncio.run(mcp_server.assign("developer", "job two", plan_first=False)))
     assert db.get_agent(on).plan_first == 1
@@ -154,10 +154,10 @@ def test_approve_needs_a_proposed_plan(db, repo, boss, sent):
 
 def test_mcp_tools_report_errors_as_text(db, repo, boss, monkeypatch, sent):
     planner(db, boss, plan_state="proposed")
-    monkeypatch.setenv("COPSE_AGENT_ID", "w1")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "w1")
     assert "supervisor" in mcp_server.approve_plan("w1")
     assert "Plan sent" in mcp_server.submit_plan("again")
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     assert "Approved" in mcp_server.approve_plan("w1")
 
 

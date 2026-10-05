@@ -7,10 +7,10 @@ import time
 
 import pytest
 
-from copse.learning import Outcome, TaskInfo
-from copse.pro import auth, credentials, orgkey
-from copse.pro.learning import CloudLearner
-from copse.pro.orgkey import OrgKey, OrgKeys, normalize_remote, repo_identity
+from brindle.learning import Outcome, TaskInfo
+from brindle.pro import auth, credentials, orgkey
+from brindle.pro.learning import CloudLearner
+from brindle.pro.orgkey import OrgKey, OrgKeys, normalize_remote, repo_identity
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, backend, claims, pro_env, sign, signing_key,
 )
@@ -102,9 +102,9 @@ def test_repo_agent_and_ref_keys_are_domain_separated():
     def mac(prefix):
         return hmac.new(k.key, prefix + x.encode(), hashlib.sha256).hexdigest()
 
-    assert k.repo_key(x) == mac(b"copse-repo-v1:")
-    assert k.agent_ref(x) == mac(b"copse-agent-v1:")[:32]
-    assert k.ref(x) == mac(b"copse-ref-v1:")
+    assert k.repo_key(x) == mac(b"brindle-repo-v1:")
+    assert k.agent_ref(x) == mac(b"brindle-agent-v1:")[:32]
+    assert k.ref(x) == mac(b"brindle-ref-v1:")
     assert len({k.repo_key(x), k.agent_ref(x), k.ref(x), k.ref(x)[:32], k.repo_key(x)[:32]}) == 5
 
 

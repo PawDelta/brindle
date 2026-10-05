@@ -1,15 +1,15 @@
-"""copse's learning is hosted only: outcomes go to the built-in cloud learner,
+"""brindle's learning is hosted only: outcomes go to the built-in cloud learner,
 suggestions come back, nothing breaks when there is none, and an installed
-``copse.learning`` entry point is never loaded."""
+``brindle.learning`` entry point is never loaded."""
 
 import time
 
 import pytest
 
-from copse import autopilot, learning, plugins, workspaces
-from copse.config import RepoConfig
-from copse.db import Agent
-from copse.pro import learning as pro_learning
+from brindle import autopilot, learning, plugins, workspaces
+from brindle.config import RepoConfig
+from brindle.db import Agent
+from brindle.pro import learning as pro_learning
 
 
 class Recorder(learning.LearningPlugin):
@@ -160,7 +160,7 @@ def test_an_installed_learning_entry_point_is_never_used(db, ws, monkeypatch):
             return lambda repo_root: Recorder(pick="developer")
 
     monkeypatch.setattr(plugins, "entry_points",
-                        lambda group: [EP("test"), EP("cloud")] if group == "copse.learning" else [])
+                        lambda group: [EP("test"), EP("cloud")] if group == "brindle.learning" else [])
     monkeypatch.setattr(plugins, "auto_learning", lambda: plugins.OFF)
     for value in ("test", "auto", "off", "cloud"):
         cfg = RepoConfig(learning=value, learning_candidates=["developer"])
@@ -169,7 +169,7 @@ def test_an_installed_learning_entry_point_is_never_used(db, ws, monkeypatch):
         learning.note(db, cfg, worker(db, ws), ws, merged=True)
     assert calls == []
     assert plugins.learning_name(RepoConfig(learning="test")) == "off"
-    assert "copse.learning" not in plugins.GROUPS
+    assert "brindle.learning" not in plugins.GROUPS
 
 
 def test_unsupported_value_means_off(ws):
@@ -178,8 +178,8 @@ def test_unsupported_value_means_off(ws):
 
 def test_resolve_profile_precedence(db, ws, monkeypatch):
     install(monkeypatch, Recorder(pick="developer-local"))
-    (__import__("pathlib").Path(ws.repo_root) / ".copse").mkdir(exist_ok=True)
-    (__import__("pathlib").Path(ws.repo_root) / ".copse" / "config.json").write_text(
+    (__import__("pathlib").Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
+    (__import__("pathlib").Path(ws.repo_root) / ".brindle" / "config.json").write_text(
         '{"learning": "cloud", "learning_candidates": ["developer-local"], "default_agent": "developer"}')
     boss = Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "", None,
                  time.time())

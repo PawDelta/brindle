@@ -6,8 +6,8 @@ against ``render`` and ``handle_key``, so no curses screen is needed."""
 import curses
 import time
 
-from copse import autopilot, view, watch, workspaces
-from copse.db import Agent
+from brindle import autopilot, view, watch, workspaces
+from brindle.db import Agent
 
 # The sidebar pane is 30 columns; text starts after the selection bar and
 # stops one short of the edge (see watch._loop).

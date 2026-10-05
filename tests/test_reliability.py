@@ -9,9 +9,9 @@ import time
 
 import pytest
 
-from copse import agents, autopilot, tmux, workspaces
-from copse.config import RepoConfig
-from copse.db import Agent
+from brindle import agents, autopilot, tmux, workspaces
+from brindle.config import RepoConfig
+from brindle.db import Agent
 from test_agents import CLAUDE_BUSY_REAL_CAPTURE
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
@@ -315,7 +315,7 @@ def test_flaky_pass_at_the_same_commit_is_not_progress(db, root, repo):
 
 
 def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
-    from copse import view
+    from brindle import view
 
     _, ws = root
     with_goal(db)

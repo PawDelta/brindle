@@ -1,6 +1,6 @@
 """The permission policy for Codex and Antigravity (agy) workers: their hook
-payloads as copse Requests, their answers, the one-time Codex hook trust, and
-the copy of copse's rules kept in agy's own settings."""
+payloads as brindle Requests, their answers, the one-time Codex hook trust, and
+the copy of brindle's rules kept in agy's own settings."""
 
 import json
 import os
@@ -9,11 +9,11 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from copse import agents, antigravity, codex_hook, permissions, workspaces
-from copse.cli import app
-from copse.config import set_local
-from copse.db import Agent
-from copse.permissions import Decision, Rule, decide_all, from_agy, from_codex
+from brindle import agents, antigravity, codex_hook, permissions, workspaces
+from brindle.cli import app
+from brindle.config import set_local
+from brindle.db import Agent
+from brindle.permissions import Decision, Rule, decide_all, from_agy, from_codex
 
 
 @pytest.fixture
@@ -85,9 +85,9 @@ def test_codex_patch_is_a_request_per_file(ws):
     "*** Begin Patch\n*** Update File: a.py\n***Update File: b.py\n*** End Patch\n",
     "*** Begin Patch\n*** Update File: a.py\n*** Rename File: b.py\n*** End Patch\n",
 ])
-def test_a_patch_with_a_header_copse_cant_account_for_is_ask(ws, patch):
-    # Codex's patch reader may accept a header copse's doesn't (indented, other
-    # case, no space): then copse can't know every file it touches.
+def test_a_patch_with_a_header_brindle_cant_account_for_is_ask(ws, patch):
+    # Codex's patch reader may accept a header brindle's doesn't (indented, other
+    # case, no space): then brindle can't know every file it touches.
     reqs = from_codex(codex_payload("apply_patch", {"command": patch}, ws.path), ws.path, ws.repo_root)
     allow_all = [Rule("edit", "*", "glob", "allow"), Rule("write", "*", "glob", "allow")]
     assert decide_all(reqs, rules=allow_all).decision == "ask"
@@ -111,7 +111,7 @@ def test_codex_output_shape():
                                             "decision": {"behavior": "allow"}}}
     deny = permissions.codex_output(Decision("deny", "no"))
     assert deny["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
-    assert deny["hookSpecificOutput"]["decision"] == {"behavior": "deny", "message": "copse: no"}
+    assert deny["hookSpecificOutput"]["decision"] == {"behavior": "deny", "message": "brindle: no"}
     assert permissions.codex_output(Decision("ask", "?")) is None
 
 
@@ -153,7 +153,7 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
 def test_codex_hook_cli_finds_its_agent_in_the_environment(db, ws, monkeypatch):
     a = worker(db, ws)
     turn_on(ws)
-    monkeypatch.setenv("COPSE_AGENT_ID", a.id)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
     res = CliRunner().invoke(app, ["_hook", "codex-permission-request"],
                              input=json.dumps(codex_payload("Bash", {"command": "git push"}, ws.path)))
     assert res.exit_code == 0
@@ -166,7 +166,7 @@ def test_codex_hook_cli_finds_its_agent_in_the_environment(db, ws, monkeypatch):
 
 
 class FakeAppServer:
-    """Stands in for `codex app-server`: lists copse's hook, and stores trust
+    """Stands in for `codex app-server`: lists brindle's hook, and stores trust
     the way Codex does (config.toml hooks.state)."""
     calls: list = []
 
@@ -218,8 +218,8 @@ def test_install_codex_hook_dry_run_then_yes(monkeypatch):
 
 
 def launch_argv(ws):
-    from copse.profiles import load_profile
-    from copse.providers import Codex, LaunchContext
+    from brindle.profiles import load_profile
+    from brindle.providers import Codex, LaunchContext
 
     return Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path))
 
@@ -230,7 +230,7 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert flag not in launch_argv(ws)  # off: nothing trusted, nothing passed
     assert codex_hook.status() == codex_hook.NEW
     turn_on(ws)
-    a = launch_argv(ws)  # on: copse trusts its own hook the first time
+    a = launch_argv(ws)  # on: brindle trusts its own hook the first time
     assert a[a.index(flag) - 1] == "-c"
     assert "--agent" not in flag  # one command for every agent: one trust
     assert codex_hook.status() == codex_hook.TRUSTED
@@ -243,23 +243,23 @@ def test_a_removed_trust_stays_removed(ws, monkeypatch):
     (codex_hook.codex_home() / "config.toml").write_text("")  # the person took it out
     assert codex_hook.status() == codex_hook.REMOVED
     assert codex_hook.config_flags()[1] not in launch_argv(ws)
-    move_copse(monkeypatch)  # not even after a reinstall
+    move_brindle(monkeypatch)  # not even after a reinstall
     assert codex_hook.launch_flags(ws.path) == []
     assert "sha256:abc" not in (codex_hook.codex_home() / "config.toml").read_text()
     assert "removed" in codex_hook.launch_warning("codex", ws.path)
 
 
-def move_copse(monkeypatch):
-    """A reinstall: copse's interpreter elsewhere, so a new hook command."""
+def move_brindle(monkeypatch):
+    """A reinstall: brindle's interpreter elsewhere, so a new hook command."""
     monkeypatch.setattr(codex_hook, "_stable_invocation",
-                        lambda: ["/new/venv/bin/python", "-m", "copse"])
+                        lambda: ["/new/venv/bin/python", "-m", "brindle"])
 
 
-def test_a_moved_copse_carries_the_trust_over(ws, monkeypatch):
+def test_a_moved_brindle_carries_the_trust_over(ws, monkeypatch):
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
     turn_on(ws)
     codex_hook.trust("codex", codex_hook.inspect("codex"))
-    move_copse(monkeypatch)
+    move_brindle(monkeypatch)
     assert codex_hook.status() == codex_hook.MOVED
     assert codex_hook.config_flags()[1] in codex_hook.launch_flags(ws.path)
     assert permissions.load_store().codex_hook["command"] == codex_hook.hook_command()
@@ -277,9 +277,9 @@ def test_launch_warning_only_when_codex_runs_without_the_hook(ws, monkeypatch):
 
 
 def test_doctor_reports_the_codex_hook(ws, monkeypatch):
-    from copse import doctor
+    from brindle import doctor
 
-    monkeypatch.setattr("copse.providers.codex_binary", lambda: "/bin/sh")
+    monkeypatch.setattr("brindle.providers.codex_binary", lambda: "/bin/sh")
     assert doctor.codex_hook_checks(ws.repo_root) == []  # policy off
     turn_on(ws)
     [c] = doctor.codex_hook_checks(ws.repo_root)
@@ -294,16 +294,16 @@ def test_doctor_reports_the_codex_hook(ws, monkeypatch):
 
 
 def test_start_trusts_the_hook_and_says_so_once(ws, monkeypatch, capsys):
-    from copse import cli
+    from brindle import cli
 
-    monkeypatch.setattr("copse.providers.codex_binary", lambda: "/bin/sh")
+    monkeypatch.setattr("brindle.providers.codex_binary", lambda: "/bin/sh")
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
     cli._trust_codex_hook(ws.repo_root)
     assert codex_hook.status() == codex_hook.NEW  # policy off: left alone
     turn_on(ws)
     cli._trust_codex_hook(ws.repo_root)
     assert codex_hook.status() == codex_hook.TRUSTED
-    assert "trusted copse's Codex permission hook" in capsys.readouterr().out
+    assert "trusted brindle's Codex permission hook" in capsys.readouterr().out
     cli._trust_codex_hook(ws.repo_root)
     assert capsys.readouterr().out == ""
 
@@ -329,14 +329,14 @@ def test_agy_mapping(ws):
     assert (r.kind, r.url) == ("fetch", "https://example.com/a")
     r = from_agy(agy_payload("call_mcp_tool", {"ServerName": '"github"', "ToolName": '"create_issue"'}))
     assert (r.kind, r.tool) == ("mcp", "mcp__github__create_issue")
-    assert from_agy(agy_payload("mcp_copse_get_progress", {})).kind == "mcp"
+    assert from_agy(agy_payload("mcp_brindle_get_progress", {})).kind == "mcp"
     assert from_agy(agy_payload("browser_click", {})).kind == "other"
     assert from_agy({"stepIdx": 1}) is None
     assert from_agy({"toolCall": "x"}) is None
 
 
 def test_agy_output_is_deny_or_ask():
-    assert permissions.agy_output(Decision("deny", "no")) == {"decision": "deny", "reason": "copse: no"}
+    assert permissions.agy_output(Decision("deny", "no")) == {"decision": "deny", "reason": "brindle: no"}
     for d in (Decision("allow", "ok"), Decision("ask", "?"), None):
         out = permissions.agy_output(d)
         assert out["decision"] == "ask" and out["reason"]
@@ -348,7 +348,7 @@ def test_agy_output_is_deny_or_ask():
 def test_agy_pre_tool_denies_and_otherwise_asks(db, ws, monkeypatch):
     a = worker(db, ws, provider="antigravity", id_="g1")
     turn_on(ws)
-    monkeypatch.setenv("COPSE_AGENT_ID", a.id)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
     push = json.dumps(agy_payload("run_command", {"CommandLine": "git push", "Cwd": ws.path}, ws.path))
     out = json.loads(antigravity.pre_tool_main(push, db_factory=lambda: db))
     assert out["decision"] == "deny" and "git push" in out["reason"]
@@ -362,7 +362,7 @@ def test_agy_pre_tool_denies_and_otherwise_asks(db, ws, monkeypatch):
 def test_agy_pre_tool_never_answers_nothing(db, ws, monkeypatch, stdin):
     a = worker(db, ws, provider="antigravity", id_="g1")
     turn_on(ws)
-    monkeypatch.setenv("COPSE_AGENT_ID", a.id)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
     assert json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db))["decision"] == "ask"
 
 
@@ -373,10 +373,10 @@ def test_agy_pre_tool_failures_are_ask(db, monkeypatch):
     out = antigravity.pre_tool_main(json.dumps(agy_payload("run_command", {"CommandLine": "x"})),
                                     db_factory=broken_db)
     assert json.loads(out)["decision"] == "ask"
-    # No agent (agy outside copse, in a checkout copse set up): ask, never empty.
+    # No agent (agy outside brindle, in a checkout brindle set up): ask, never empty.
     monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
     assert json.loads(antigravity.pre_tool_main("{}", db_factory=lambda: db))["decision"] == "ask"
-    # Even copse's own answer-maker failing still answers ask.
+    # Even brindle's own answer-maker failing still answers ask.
     monkeypatch.setattr(permissions, "agy_output", lambda d: (_ for _ in ()).throw(RuntimeError()))
     assert json.loads(antigravity.pre_tool_main("{}", db_factory=lambda: db))["decision"] == "ask"
 
@@ -392,10 +392,10 @@ def test_agy_pre_tool_cli_always_prints_json(monkeypatch):
 def test_agy_install_adds_the_pre_tool_hook_only_with_the_policy(ws, monkeypatch):
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
     antigravity.install(ws.path)
-    hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["copse"]
+    hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
     assert "PreToolUse" not in hooks
     antigravity.install(ws.path, permission_policy=True)
-    hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["copse"]
+    hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
     [entry] = hooks["PreToolUse"]
     # File and web tools too, so every deny applies to them.
     for tool in ("run_command", "view_file", "write_to_file", "read_url_content", "call_mcp_tool"):
@@ -405,11 +405,11 @@ def test_agy_install_adds_the_pre_tool_hook_only_with_the_policy(ws, monkeypatch
 
 def test_agy_pre_tool_answers_what_agy_would_do_except_a_deny(db, ws, monkeypatch, tmp_path):
     # agy reads and writes files in its workspace without asking, and its
-    # "ask" would add a prompt there; so inside the workspace copse answers
+    # "ask" would add a prompt there; so inside the workspace brindle answers
     # allow (agy's default), a deny anywhere, and ask for anything else.
     a = worker(db, ws, provider="antigravity", id_="g1")
     turn_on(ws)
-    monkeypatch.setenv("COPSE_AGENT_ID", a.id)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
     outside = tmp_path / "elsewhere.txt"
     outside.write_text("x")
     os.symlink(outside, os.path.join(ws.path, "link.txt"))
@@ -429,7 +429,7 @@ def test_agy_pre_tool_answers_what_agy_would_do_except_a_deny(db, ws, monkeypatc
     assert answer("run_command", {"CommandLine": "git status"}) == "ask"
 
 
-# -- agy: mirroring copse's rules into its settings --------------------------------------------
+# -- agy: mirroring brindle's rules into its settings --------------------------------------------
 
 
 ORIGINAL = """{
@@ -453,7 +453,7 @@ def test_agy_sync_adds_and_removes_only_its_own_entries(agy_settings, monkeypatc
     set_local(ws.repo_root, "checks", ["uv run pytest -q"])
     r = CliRunner()
 
-    # Policy off and nothing of copse's there: nothing changes.
+    # Policy off and nothing of brindle's there: nothing changes.
     res = r.invoke(app, ["permissions", "sync-agy"])
     assert res.exit_code == 0 and "already in sync" in res.output
     assert agy_settings.read_text() == ORIGINAL
@@ -466,11 +466,11 @@ def test_agy_sync_adds_and_removes_only_its_own_entries(agy_settings, monkeypatc
     assert allow[:2] == ["command(regex:^git status$)", "command(npm)"]  # the person's, first, untouched
     assert "command(regex:^git diff$)" in allow
     assert not any("pytest" in e for e in allow)  # a repo's checks stay out of agy's global settings
-    assert allow.count("command(regex:^git status$)") == 1  # theirs already; not copse's
+    assert allow.count("command(regex:^git status$)") == 1  # theirs already; not brindle's
     assert "command(git push)" in deny and f"read_file({os.path.expanduser('~/.ssh')})" in deny
     assert data["colorScheme"] == "tokyo night" and data["permissions"]["ask"] == ["command(*)"]
     assert agy_settings.read_text().startswith('{\n    "colorScheme"')  # same indentation
-    backup = agy_settings.with_name("settings.json.copse-backup")
+    backup = agy_settings.with_name("settings.json.brindle-backup")
     assert backup.read_text() == ORIGINAL
     managed = permissions.load_store().agy_managed
     assert "command(regex:^git status$)" not in managed["allow"]
@@ -480,7 +480,7 @@ def test_agy_sync_adds_and_removes_only_its_own_entries(agy_settings, monkeypatc
     assert "already in sync" in r.invoke(app, ["permissions", "sync-agy"]).output
     assert agy_settings.read_text() == before
 
-    # Changing copse's rules re-syncs; the backup is made only once.
+    # Changing brindle's rules re-syncs; the backup is made only once.
     res = r.invoke(app, ["permissions", "allow", "bash", "make lint"])
     rule_id = res.output.split(":")[0]
     assert "command(regex:^make lint$)" in json.loads(agy_settings.read_text())["permissions"]["allow"]
@@ -495,7 +495,7 @@ def test_agy_sync_adds_and_removes_only_its_own_entries(agy_settings, monkeypatc
     data["permissions"]["allow"].append("command(ls)")
     agy_settings.write_text(json.dumps(data, indent=4) + "\n")
 
-    # Off: copse's entries go; everything else is as it was.
+    # Off: brindle's entries go; everything else is as it was.
     set_local(ws.repo_root, "permission_policy", "off")
     res = r.invoke(app, ["permissions", "sync-agy"])
     assert res.exit_code == 0 and "removed" in res.output
@@ -509,7 +509,7 @@ def test_agy_sync_adds_and_removes_only_its_own_entries(agy_settings, monkeypatc
 def test_agy_sync_creates_and_removes_its_own_file(agy_settings, ws):
     antigravity.sync_permissions(ws.repo_root, on=True, checks=[])
     assert json.loads(agy_settings.read_text())["permissions"]["allow"]
-    assert not agy_settings.with_name("settings.json.copse-backup").exists()
+    assert not agy_settings.with_name("settings.json.brindle-backup").exists()
     antigravity.sync_permissions(ws.repo_root, on=False)
     assert not agy_settings.exists()
 
@@ -523,8 +523,8 @@ def test_agy_sync_leaves_a_file_it_cannot_read(agy_settings, ws):
 
 
 def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
-    from copse.profiles import load_profile
-    from copse.providers import Antigravity, LaunchContext
+    from brindle.profiles import load_profile
+    from brindle.providers import Antigravity, LaunchContext
 
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
     ctx = LaunchContext("g1", load_profile("developer"), "hi", cwd=ws.path)
@@ -539,7 +539,7 @@ def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
 
 
 def test_agy_mirror_never_widens_an_allow():
-    rules = [Rule("bash", "echo $(id)", "exact", "allow"),     # copse never allows it
+    rules = [Rule("bash", "echo $(id)", "exact", "allow"),     # brindle never allows it
              Rule("bash", "npm *", "glob", "allow"),           # agy can't say it as narrowly
              Rule("bash", "a;b", "prefix", "allow"),
              Rule("read", "src/*.py", "glob", "allow"),
@@ -552,7 +552,7 @@ def test_agy_mirror_never_widens_an_allow():
     assert out["allow"] == ["read_file(docs/)", "mcp(gh/*)", "command(regex:^npm test$)"]
     out = permissions.mirror_agy([*permissions.DEFAULT_RULES], ["make check", "a && b"])
     # agy's settings apply to every project, and a repo's check runs what
-    # that repo defines: allowed for copse workers in that repo, never
+    # that repo defines: allowed for brindle workers in that repo, never
     # everywhere agy runs.
     assert not any("make check" in e or "a && b" in e for e in out["allow"])
     assert "command(regex:^git status$)" in out["allow"]

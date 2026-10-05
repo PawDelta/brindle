@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from copse import git, scratch
+from brindle import git, scratch
 
 
 
@@ -31,14 +31,14 @@ def test_transfer_replays_commits_and_snapshots_uncommitted_work(db, elsewhere, 
     t = scratch.transfer(db, s, str(repo))
     ws = t.workspace
     assert (t.commits, t.snapshot) == (2, True)
-    assert ws.branch.startswith("copse/from-") and ws.base_branch == "main"
+    assert ws.branch.startswith("brindle/from-") and ws.base_branch == "main"
     assert open(os.path.join(ws.path, "notes.md")).read() == "plan\n"
     assert os.path.exists(os.path.join(ws.path, "tool.py"))
     log = git.out(["log", "--format=%s", "main..HEAD"], ws.path).splitlines()
-    assert log == ["Work in progress from copse scratch session", "Add notes"]
-    assert "Start copse scratch session" not in git.out(["log", "--format=%s"], ws.path)
+    assert log == ["Work in progress from brindle scratch session", "Add notes"]
+    assert "Start brindle scratch session" not in git.out(["log", "--format=%s"], ws.path)
     assert scratch.transferred_to(s.path) and s.id not in [p.id for p in scratch.pending(db)]
-    assert scratch.for_origin(db, str(elsewhere)) is None  # next copse run starts fresh
+    assert scratch.for_origin(db, str(elsewhere)) is None  # next brindle run starts fresh
 
 
 def test_transfer_refuses_non_repos_and_empty_sessions(db, elsewhere, tmp_path, repo):
@@ -60,11 +60,11 @@ def test_transfer_conflict_names_the_file(db, elsewhere, repo):
         scratch.transfer(db, s, str(repo))
 
 
-def test_bare_copse_outside_git_uses_a_scratch_session(db, elsewhere, monkeypatch):
-    from copse import cli
+def test_bare_brindle_outside_git_uses_a_scratch_session(db, elsewhere, monkeypatch):
+    from brindle import cli
 
     monkeypatch.chdir(elsewhere)
     ws = cli._here_or_scratch(db, reuse_scratch=False)
     assert scratch.is_scratch(ws.path)
     assert cli._here_or_scratch(db, reuse_scratch=True).id == ws.id  # continue: same session
-    assert cli._here_or_scratch(db, reuse_scratch=False).id != ws.id  # plain copse: fresh
+    assert cli._here_or_scratch(db, reuse_scratch=False).id != ws.id  # plain brindle: fresh

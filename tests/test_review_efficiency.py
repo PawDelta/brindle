@@ -7,11 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from copse import agents, autopilot, gates, mcp_server, workspaces
-from copse.config import RepoConfig
-from copse.db import Agent
-from copse.profiles import load_profile
-from copse.providers import get_provider
+from brindle import agents, autopilot, gates, mcp_server, workspaces
+from brindle.config import RepoConfig
+from brindle.db import Agent
+from brindle.profiles import load_profile
+from brindle.providers import get_provider
 
 
 @pytest.fixture
@@ -25,11 +25,11 @@ def worker_ws(db, repo):
 @pytest.fixture
 def boss(db, repo, monkeypatch):
     """A caller for the MCP tools: an interactive agent in the repo's root
-    workspace, addressed via COPSE_AGENT_ID like a real one would be."""
+    workspace, addressed via BRINDLE_AGENT_ID like a real one would be."""
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 
@@ -200,10 +200,10 @@ def test_deliver_check_summary_skips_a_reviewer_removed_mid_run(db, worker_ws, m
 
 def test_request_review_launches_the_detached_deliver_checks_command(db, boss, worker_ws, monkeypatch):
     """request_review must not run checks itself or wait on them in-process:
-    it hands off to a detached `copse _deliver-checks` process (like the
+    it hands off to a detached `brindle _deliver-checks` process (like the
     existing _flush/_after-launch/_close calls) that survives even if this
     MCP server exits."""
-    config_dir = Path(worker_ws.repo_root) / ".copse"
+    config_dir = Path(worker_ws.repo_root) / ".brindle"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps({"checks": ["true"]}))
 
@@ -234,7 +234,7 @@ def test_request_review_launches_the_detached_deliver_checks_command(db, boss, w
 def test_deliver_checks_cli_command_delivers_to_reviewer(db, worker_ws):
     from typer.testing import CliRunner
 
-    from copse.cli import app
+    from brindle.cli import app
 
     add_worker(db, worker_ws, "rev5", task="Review", mode="review", status="processing", result=None)
     res = CliRunner().invoke(app, ["_deliver-checks", "rev5", worker_ws.id])

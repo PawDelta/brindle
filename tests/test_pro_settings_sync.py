@@ -1,4 +1,4 @@
-"""Settings sync: ~/.copse/config.json's user-wide keys follow a Pro person
+"""Settings sync: ~/.brindle/config.json's user-wide keys follow a Pro person
 across machines through /me/settings."""
 
 import io
@@ -7,16 +7,16 @@ import time
 
 import pytest
 
-from copse import config
-from copse.pro import account, auth, credentials, settings_sync
+from brindle import config
+from brindle.pro import account, auth, credentials, settings_sync
 from pro_fixtures import (  # noqa: F401 -- fixtures
     BASE, backend, claims, pro_env, sign, signing_key, token,
 )
 
 
 @pytest.fixture
-def store(backend, copse_home):
-    s = credentials.FileStore(copse_home / "pro")
+def store(backend, brindle_home):
+    s = credentials.FileStore(brindle_home / "pro")
     login(backend, s)
     return s
 
@@ -95,10 +95,10 @@ def test_push_from_a_fresh_machine_keeps_the_servers_other_keys(backend, store):
     assert read_cfg() == {"sidebar": "bottom", "delegation": "fast"}
 
 
-def test_state_file_is_private(backend, store, copse_home):
+def test_state_file_is_private(backend, store, brindle_home):
     write_cfg(delegation="fast")
     settings_sync.push(client(backend), store)
-    f = copse_home / "pro" / "settings-sync.json"
+    f = brindle_home / "pro" / "settings-sync.json"
     assert f.stat().st_mode & 0o777 == 0o600
 
 
@@ -119,7 +119,7 @@ def test_server_403_is_skipped_quietly(backend, store):
 
 
 def test_airgap_sends_nothing(backend, store, monkeypatch):
-    from copse import airgap
+    from brindle import airgap
 
     monkeypatch.setattr(airgap, "enabled", lambda: True)
     write_cfg(delegation="fast")
@@ -137,7 +137,7 @@ def test_offline_never_raises_and_catches_up_later(backend, store):
     assert read_cfg() == {"delegation": "fast"}
 
 
-def test_not_logged_in_never_raises(copse_home):
+def test_not_logged_in_never_raises(brindle_home):
     write_cfg(delegation="fast")
     assert settings_sync.pull().action == "skipped"
     assert settings_sync.push().action == "skipped"
@@ -152,7 +152,7 @@ def test_set_user_pushes_when_entitled(backend, store, monkeypatch):
     assert sent == [1]
 
 
-def test_set_user_survives_a_failing_sync(copse_home, monkeypatch):
+def test_set_user_survives_a_failing_sync(brindle_home, monkeypatch):
     def boom():
         raise RuntimeError("x")
 

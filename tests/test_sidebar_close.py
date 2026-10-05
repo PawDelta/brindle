@@ -1,4 +1,4 @@
-"""Closing agents from the sidebar (`x` in `copse watch`, `copse close`):
+"""Closing agents from the sidebar (`x` in `brindle watch`, `brindle close`):
 closed agents are hidden for good and stopped if running, and nothing on
 disk is removed."""
 
@@ -8,9 +8,9 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from copse import agents, tmux, view, watch, workspaces
-from copse.cli import app
-from copse.db import Agent
+from brindle import agents, tmux, view, watch, workspaces
+from brindle.cli import app
+from brindle.db import Agent
 
 
 def add_agent(db, ws, agent_id, *, mode="assign", status="idle", window="", parent=None,
@@ -42,7 +42,7 @@ def test_dismissed_agents_are_left_out_of_the_snapshot(db, repo, worker_ws):
     add_agent(db, worker_ws, "gone")
     db.update_agent("gone", dismissed_at=time.time())
     assert shown_ids(db, str(repo)) == ["keep"]
-    # `copse ls` still lists everything.
+    # `brindle ls` still lists everything.
     assert [a["id"] for a in view.workspace_entry(db, worker_ws)["agents"]] == ["keep", "gone"]
 
 
@@ -177,7 +177,7 @@ def test_watch_sidebar_flag_reaches_the_loop(db, repo, monkeypatch):
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(agents, "dismiss_sidebar", lambda *a: None)
     monkeypatch.chdir(repo)
-    from copse.cli import watch as watch_cmd
+    from brindle.cli import watch as watch_cmd
 
     watch_cmd(all_repos=False, once=False, sidebar=True)
     assert seen["sidebar"] is True
@@ -248,7 +248,7 @@ def test_cli_close_exited_skips_a_pane_reused_by_a_live_agent(db, repo, worker_w
 
 
 def test_culling_a_stale_worker_leaves_the_newer_agents_pane(db, worker_ws):
-    from copse import cull
+    from brindle import cull
 
     # Reported and idle for two hours, past stale_after, on a pane that's now
     # someone else's: closed as stopped, without touching that pane.
@@ -260,9 +260,9 @@ def test_culling_a_stale_worker_leaves_the_newer_agents_pane(db, worker_ws):
     assert tmux.window_alive(pane)
 
 
-def test_quitting_copse_from_the_sidebar_takes_two_presses():
+def test_quitting_brindle_from_the_sidebar_takes_two_presses():
     go, armed, notice = watch.quit_request(None, 100.0)
-    assert not go and armed == ("quit", 100.0) and "q again to quit copse" in notice
+    assert not go and armed == ("quit", 100.0) and "q again to quit brindle" in notice
     go, armed, notice = watch.quit_request(armed, 102.0)
     assert go and armed is None and "paused" in notice
     # Too slow: it arms again instead.
@@ -273,17 +273,17 @@ def test_quitting_copse_from_the_sidebar_takes_two_presses():
     assert not go
 
 
-def test_sidebar_help_says_q_quits_copse():
+def test_sidebar_help_says_q_quits_brindle():
     text = "\n".join(ln.text for ln in watch.help_lines(30, in_tmux=True, sidebar=True))
-    assert "quit copse" in text
-    assert "quit copse" not in "\n".join(ln.text for ln in watch.help_lines(30))
+    assert "quit brindle" in text
+    assert "quit brindle" not in "\n".join(ln.text for ln in watch.help_lines(30))
 
 
 def test_quit_pauses_the_session(db, repo, monkeypatch):
     from typer.testing import CliRunner
 
-    from copse import cli
-    from copse.db import Agent
+    from brindle import cli
+    from brindle.db import Agent
 
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0",

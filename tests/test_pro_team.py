@@ -1,5 +1,5 @@
-"""copse Team: the org policy plugin, the audit-event plugin, and the
-``copse account org`` commands. Both plugins are always installed and must do
+"""brindle Team: the org policy plugin, the audit-event plugin, and the
+``brindle account org`` commands. Both plugins are always installed and must do
 nothing without a verified team entitlement."""
 import io
 import json
@@ -11,16 +11,16 @@ from importlib.metadata import entry_points
 
 import pytest
 
-from copse import plugins
-from copse.config import RepoConfig
-from copse.events import Event
-from copse.policy import AssignInfo, MergeInfo
-from copse.pro import account, auth, credentials
-from copse.pro import team_events
-from copse.pro._files import private_dir
-from copse.pro.orgkey import OrgKey
-from copse.pro.team_events import ProEvents, Spool
-from copse.pro.team_policy import ProPolicy
+from brindle import plugins
+from brindle.config import RepoConfig
+from brindle.events import Event
+from brindle.policy import AssignInfo, MergeInfo
+from brindle.pro import account, auth, credentials
+from brindle.pro import team_events
+from brindle.pro._files import private_dir
+from brindle.pro.orgkey import OrgKey
+from brindle.pro.team_events import ProEvents, Spool
+from brindle.pro.team_policy import ProPolicy
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, ROOT_SHA, backend, claims, fixed_identity, pro_env, sign, signing_key,
 )
@@ -232,7 +232,7 @@ def test_fail_closed_when_no_policy_was_ever_fetched(team):
     p = plugin(team)
     for d in (p.check_assign(assign()), p.check_merge(merge("user"))):
         assert not d.allowed
-        assert "never been fetched" in d.reason and "copse account org policy" in d.reason
+        assert "never been fetched" in d.reason and "brindle account org policy" in d.reason
 
 
 @pytest.mark.parametrize("body", [
@@ -470,16 +470,16 @@ def test_entry_points_are_registered():
     def value(group):
         return [e.value for e in entry_points(group=group) if e.name == "pro"]
 
-    assert value("copse.policy") == ["copse.pro.team_policy:make"]
-    assert value("copse.events") == ["copse.pro.team_events:make"]
+    assert value("brindle.policy") == ["brindle.pro.team_policy:make"]
+    assert value("brindle.events") == ["brindle.pro.team_events:make"]
 
 
 def test_the_installed_plugins_are_inert_without_an_entitlement(tmp_path):
-    """Out of the box: copse's own policy plugin is selected (the only one
+    """Out of the box: brindle's own policy plugin is selected (the only one
     installed), both of its events plugins hear every event (the group fans
     out), and they allow everything, send nothing, write nothing."""
-    from copse import events, policy
-    from copse.pro.audit_chain import AuditChain, audit_dir
+    from brindle import events, policy
+    from brindle.pro.audit_chain import AuditChain, audit_dir
 
     plugins.reset()
     try:
@@ -553,7 +553,7 @@ def test_invite_and_join(team):
     team.routes["POST /invites/accept"] = lambda f, h: (
         (200, {"org_id": ORG, "role": "member"}) if f == {"invite_code": code_} else (400, {}))
     code, out, _ = run(team, "org", "invite", "dev@acme.test", "--admin", "--org", ORG)
-    assert code == 0 and "as admin" in out and f"copse account org join {code_}" in out
+    assert code == 0 and "as admin" in out and f"brindle account org join {code_}" in out
     code, out, _ = run(team, "org", "join", code_)
     assert code == 0 and f"Joined {ORG} as member" in out
 
@@ -587,7 +587,7 @@ def test_ci_token_create_list_revoke(team):
     code, out, err = run(team, "org", "ci-token", "create", "github", "actions", "--org", ORG)
     assert code == 0, err
     assert seen == [{"name": "github actions"}]
-    assert secret in out and "COPSE_PRO_TOKEN" in out and "shown once" in out
+    assert secret in out and "BRINDLE_PRO_TOKEN" in out and "shown once" in out
     assert team.store.load().get("ci_token") is None and secret not in json.dumps(team.store.load())
 
     code, out, _ = run(team, "org", "ci-token", "list", "--org", ORG)

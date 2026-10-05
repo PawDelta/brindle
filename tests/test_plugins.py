@@ -1,6 +1,6 @@
-"""copse's extension points: the guarded plugin loader, events at every
+"""brindle's extension points: the guarded plugin loader, events at every
 call site, a policy plugin's deny blocking assign and merge, and the
-``copse account`` passthrough."""
+``brindle account`` passthrough."""
 
 import asyncio
 import json
@@ -11,10 +11,10 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
-from copse import account, agents, events, mcp_server, pipeline, plugins, policy, quota, workspaces
-from copse.cli import app
-from copse.config import RepoConfig, load_repo_config
-from copse.db import Agent
+from brindle import account, agents, events, mcp_server, pipeline, plugins, policy, quota, workspaces
+from brindle.cli import app
+from brindle.config import RepoConfig, load_repo_config
+from brindle.db import Agent
 
 
 # -- fakes ------------------------------------------------------------------------------
@@ -95,8 +95,8 @@ def everything_available(monkeypatch):
 
 
 def config(repo, **kw):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text(json.dumps(kw))
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps(kw))
 
 
 @pytest.fixture
@@ -105,7 +105,7 @@ def boss(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 
@@ -147,7 +147,7 @@ def test_several_installed_need_the_config_to_choose(repo, monkeypatch):
 
 def test_plugins_config_is_read_per_group(repo):
     config(repo, plugins={"events": "x", "policy": "off"})
-    (repo / ".copse" / "config.local.json").write_text(json.dumps({"plugins": {"policy": "y"}}))
+    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"plugins": {"policy": "y"}}))
     assert load_repo_config(repo).plugins == {"events": "x", "policy": "y"}
 
 
@@ -216,7 +216,7 @@ def test_a_queued_task_emits_when_it_starts(db, repo, boss, monkeypatch):
     out = asyncio.run(mcp_server.assign(task="second", branch="feat-b", depends_on=["feat-a"]))
     assert out.startswith("Queued")
     assert rec.kinds() == ["assign"]
-    from copse import tasks
+    from brindle import tasks
 
     [queued] = db.list_tasks(str(repo), state="pending")
     tasks.start_queued(db, queued)
@@ -225,7 +225,7 @@ def test_a_queued_task_emits_when_it_starts(db, repo, boss, monkeypatch):
 
 @pytest.fixture
 def piped(db, repo, monkeypatch):
-    """A supervisor, a worker on a branch with a commit, and a reviewer copse
+    """A supervisor, a worker on a branch with a commit, and a reviewer brindle
     can start without a process (as in tests/test_pipeline.py)."""
     config(repo, review=True, auto_merge_default_branch=True)
     root = workspaces.adopt_root(db, str(repo))
@@ -255,7 +255,7 @@ def piped(db, repo, monkeypatch):
 def verdict(db, ws, approved, summary="fine"):
     """A reviewer's verdict, the way agents.submit_review records and hands
     it to the pipeline (without the reviewer's own report and close)."""
-    from copse import gates
+    from brindle import gates
 
     reviewer = db.get_agent("rev0")
     db.add_review(ws.id, gates.head(ws), reviewer.id, approved, summary)
@@ -291,7 +291,7 @@ def test_changes_requested_is_a_review_event_too(db, piped, monkeypatch):
 def test_removing_an_unmerged_worktree_emits_remove(db, piped, monkeypatch):
     rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
     root, ws = piped
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     out = mcp_server.remove_workspace(ws.id)
     assert out.startswith("Removed")
     [e] = rec.events
@@ -302,7 +302,7 @@ def test_merge_workspace_emits_merge(db, piped, monkeypatch):
     rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
     root, ws = piped
     config(Path(root.repo_root), review=False, pipeline=False)
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
     assert out.startswith("Merged"), out
     assert rec.kinds() == ["merge"] and rec.events[0].actor == "boss"
@@ -338,7 +338,7 @@ def test_policy_deny_blocks_merge_workspace(db, piped, monkeypatch):
     gate = install_one(monkeypatch, plugins.POLICY, Gate(merge="needs two approvals"))
     root, ws = piped
     config(Path(root.repo_root), review=False, pipeline=False)
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
     assert out == "Not merged: the repo's policy refused it: needs two approvals"
     assert sh("git log --oneline main", Path(root.repo_root)).count("\n") == 0  # still one commit
@@ -373,8 +373,8 @@ def test_a_broken_policy_plugin_refuses(db, repo, boss, monkeypatch):
 
 
 def test_a_configured_policy_that_wont_load_refuses(repo, monkeypatch):
-    from copse import policy
-    from copse.config import RepoConfig
+    from brindle import policy
+    from brindle.config import RepoConfig
 
     install(monkeypatch, {})
     cfg = RepoConfig()
@@ -385,7 +385,7 @@ def test_a_configured_policy_that_wont_load_refuses(repo, monkeypatch):
     assert policy.check_assign(cfg, str(repo), "dev", "do A", "assign").allowed
 
 
-# -- copse account ----------------------------------------------------------------------
+# -- brindle account ----------------------------------------------------------------------
 
 
 def test_account_without_a_plugin_says_so_and_exits_0(repo, monkeypatch):
@@ -393,7 +393,7 @@ def test_account_without_a_plugin_says_so_and_exits_0(repo, monkeypatch):
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["account", "status"])
     assert res.exit_code == 0, res.output
-    assert "copse Pro isn't installed" in res.output
+    assert "brindle Pro isn't installed" in res.output
 
 
 def test_account_passes_its_arguments_through(repo, monkeypatch):

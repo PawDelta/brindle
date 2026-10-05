@@ -1,4 +1,4 @@
-"""Milestone status is written back to .copse/goals.md, and nothing else."""
+"""Milestone status is written back to .brindle/goals.md, and nothing else."""
 
 import os
 import re
@@ -7,8 +7,8 @@ import time
 import pytest
 
 from conftest import sh
-from copse import agents, autopilot, sessions, workspaces
-from copse.db import Agent
+from brindle import agents, autopilot, sessions, workspaces
+from brindle.db import Agent
 
 GOALS = """# Settings page
 
@@ -35,8 +35,8 @@ def add_agent(db, ws, agent_id, status="processing"):
 
 def load(db, repo, agent_id="boss", text=GOALS, status="processing"):
     """A session whose goal was loaded from ``repo``'s goals.md."""
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "goals.md").write_text(text)
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "goals.md").write_text(text)
     ws = workspaces.adopt_root(db, str(repo))
     add_agent(db, ws, agent_id, status)
     autopilot.enable(db, agent_id, ws)
@@ -44,7 +44,7 @@ def load(db, repo, agent_id="boss", text=GOALS, status="processing"):
 
 
 def goals(repo):
-    return (repo / ".copse" / "goals.md").read_text()
+    return (repo / ".brindle" / "goals.md").read_text()
 
 
 def pass_first(db, agent_id="boss", sha=SHA):
@@ -69,9 +69,9 @@ def test_status_is_written_after_a_check_and_the_rest_is_preserved(db, repo):
     assert autopilot.parse_goals(new) == autopilot.parse_goals(GOALS)
     # The status goes after the check/profile lines, and rewriting is idempotent.
     assert new.index("profile: reviewer") < new.index("status: passed")
-    before = os.stat(repo / ".copse" / "goals.md").st_mtime_ns
+    before = os.stat(repo / ".brindle" / "goals.md").st_mtime_ns
     autopilot.sync_goals_file(db, "boss")
-    assert goals(repo) == new and os.stat(repo / ".copse" / "goals.md").st_mtime_ns == before
+    assert goals(repo) == new and os.stat(repo / ".brindle" / "goals.md").st_mtime_ns == before
 
 
 def test_status_updates_in_place(db, repo):
@@ -86,14 +86,14 @@ def test_status_updates_in_place(db, repo):
 
 def test_crlf_and_missing_final_newline_survive(db, repo):
     text = GOALS.replace("\n", "\r\n").rstrip()
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "goals.md").write_bytes(text.encode())
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "goals.md").write_bytes(text.encode())
     ws = workspaces.adopt_root(db, str(repo))
     add_agent(db, ws, "boss")
     autopilot.enable(db, "boss", ws)
     pass_first(db)
     autopilot.sync_goals_file(db, "boss")
-    raw = (repo / ".copse" / "goals.md").read_bytes().decode()
+    raw = (repo / ".brindle" / "goals.md").read_bytes().decode()
     assert "\r\nstatus: passed" in raw and not re.search(r"(?<!\r)\n", raw)
     assert raw.replace("\r\nstatus: passed at abc1234 (" + time.strftime("%Y-%m-%d") + ")", "").count("status") == 1
 
@@ -159,8 +159,8 @@ def test_sessions_in_different_checkouts_write_their_own_file(db, repo, tmp_path
     other = tmp_path / "other"
     other.mkdir()
     sh("git init -q && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init", other)
-    (other / ".copse").mkdir()
-    (other / ".copse" / "goals.md").write_text(GOALS)
+    (other / ".brindle").mkdir()
+    (other / ".brindle" / "goals.md").write_text(GOALS)
     load(db, repo, "a")
     ws = workspaces.adopt_root(db, str(other))
     add_agent(db, ws, "b")
@@ -168,34 +168,34 @@ def test_sessions_in_different_checkouts_write_their_own_file(db, repo, tmp_path
     pass_first(db, "a")
     autopilot.sync_goals_file(db, "a")
     assert "status: passed" in goals(repo)
-    assert (other / ".copse" / "goals.md").read_text() == GOALS
+    assert (other / ".brindle" / "goals.md").read_text() == GOALS
     pass_first(db, "b", "1111111")
     autopilot.sync_goals_file(db, "b")
-    assert "status: passed at 1111111" in (other / ".copse" / "goals.md").read_text()
+    assert "status: passed at 1111111" in (other / ".brindle" / "goals.md").read_text()
     assert "1111111" not in goals(repo)
 
 
 def test_a_linked_worktree_writes_the_main_checkouts_file(db, repo, tmp_path):
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "goals.md").write_text(GOALS)
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "goals.md").write_text(GOALS)
     linked = tmp_path / "linked"
     sh(f"git worktree add -q -b other {linked}", repo)
     ws = workspaces.adopt_root(db, str(linked))
     add_agent(db, ws, "boss")
     autopilot.enable(db, "boss", ws)
-    assert not (linked / ".copse").exists()
+    assert not (linked / ".brindle").exists()
     pass_first(db)
     autopilot.sync_goals_file(db, "boss")
     assert "status: passed" in goals(repo)
-    assert not (linked / ".copse").exists()
+    assert not (linked / ".brindle").exists()
 
 
 def test_a_goal_set_from_the_chat_never_touches_a_file(db, repo):
     ws = workspaces.adopt_root(db, str(repo))
     add_agent(db, ws, "boss")
     db.add_autopilot("boss")
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "goals.md").write_text(GOALS)
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "goals.md").write_text(GOALS)
     autopilot.set_goal(db, "boss", "Settings page", [("Settings API", "true", None), ("Settings UI", "true", None)])
     pass_first(db)
     autopilot.sync_goals_file(db, "boss")
@@ -217,7 +217,7 @@ def test_a_write_failure_never_fails_the_check(db, repo, monkeypatch):
     out = autopilot.check_milestones(db, "boss", ws, cfg=autopilot.RepoConfig())
     assert db.milestones("boss")[0].status == "passed" and out
     assert goals(repo) == GOALS
-    assert not [p for p in (repo / ".copse").iterdir() if p.name != "goals.md"]   # no tmp left behind
+    assert not [p for p in (repo / ".brindle").iterdir() if p.name != "goals.md"]   # no tmp left behind
 
 
 def test_check_milestones_syncs(db, repo):

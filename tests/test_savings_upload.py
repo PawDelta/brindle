@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from copse.learning import Outcome, TaskInfo
-from copse.pro import learning as cloud
-from copse.pro.learning import CloudLearner, record_payload
-from copse.pro.orgkey import OrgKey
+from brindle.learning import Outcome, TaskInfo
+from brindle.pro import learning as cloud
+from brindle.pro.learning import CloudLearner, record_payload
+from brindle.pro.orgkey import OrgKey
 
 REPO = "/work/secret-client-project"
 TEXT = "Fix the crash in src/zebra_module.py on branch feat/zebra-hotfix"

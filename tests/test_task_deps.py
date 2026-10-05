@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from copse import agents, mcp_server, tasks, workspaces
-from copse.db import Agent
+from brindle import agents, mcp_server, tasks, workspaces
+from brindle.db import Agent
 
 
 def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None, **kw):
@@ -34,12 +34,12 @@ def boss(db, repo, monkeypatch):
     """A supervisor caller adopted on the main checkout, so mcp_server tools
     that need `_caller` resolve without touching the real process cwd."""
     # These tests exercise overlap *warnings*; the default now refuses overlaps.
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"overlap": "warn", "pipeline": false}')
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"overlap": "warn", "pipeline": false}')
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 
@@ -334,7 +334,7 @@ def test_cancel_task_refuses_someone_elses_task(db, repo, boss, monkeypatch):
     _, b, _ = _queue_chain(db, repo)
     db.add_agent(Agent("other", boss.id, "supervisor", "claude", None, "interactive",
                        "processing", "@1", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "other")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "other")
 
     out = mcp_server.cancel_task(b.id)
 
@@ -347,7 +347,7 @@ def test_cancel_task_unknown_id(db, repo, boss):
 
 
 def _missing_add_dir(repo):
-    (repo / ".copse" / "config.json").write_text(
+    (repo / ".brindle" / "config.json").write_text(
         '{"overlap": "warn", "pipeline": false, "add_dirs": ["/no/such/cache"]}')
 
 

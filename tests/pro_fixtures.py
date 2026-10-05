@@ -1,4 +1,4 @@
-"""Shared fixtures and fakes for the copse Pro client tests
+"""Shared fixtures and fakes for the brindle Pro client tests
 (``tests/test_pro_*.py``): a test signing key, signed entitlements, a fake
 backend, and an isolated credential store. Test modules import what they
 use; importing ``pro_env`` (autouse) applies the isolation to the module.
@@ -14,10 +14,10 @@ import time
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from copse.pro import license
+from brindle.pro import license
 
 TEST_KID = "test-kid-1"
-ISS = "https://pawdelta.test/api/copse/v1"
+ISS = "https://pawdelta.test/api/brindle/v1"
 BASE = ISS
 
 
@@ -27,7 +27,7 @@ def b64(data: bytes) -> str:
 
 def claims(**over):
     now = int(time.time())
-    c = {"iss": ISS, "aud": "copse-pro", "sub": "user_1", "org_id": "org_1", "plan": "pro",
+    c = {"iss": ISS, "aud": "brindle-pro", "sub": "user_1", "org_id": "org_1", "plan": "pro",
          "status": "active", "features": ["learning", "autopilot"], "seats": 5, "iat": now,
          "exp": now + 3600, "kid": TEST_KID, "jti": "j1", "token_use": "entitlement"}
     c.update(over)
@@ -35,7 +35,7 @@ def claims(**over):
 
 
 def sign(key: Ed25519PrivateKey, payload: dict, header: dict | None = None) -> str:
-    h = {"alg": "EdDSA", "typ": "copse-entitlement+jwt", "kid": payload.get("kid", TEST_KID)}
+    h = {"alg": "EdDSA", "typ": "brindle-entitlement+jwt", "kid": payload.get("kid", TEST_KID)}
     h.update(header or {})
     signing_input = f"{b64(json.dumps(h).encode())}.{b64(json.dumps(payload).encode())}"
     return f"{signing_input}.{b64(key.sign(signing_input.encode()))}"
@@ -56,10 +56,10 @@ def token(signing_key):
 
 
 @pytest.fixture(autouse=True)
-def pro_env(monkeypatch, copse_home):
+def pro_env(monkeypatch, brindle_home):
     """A private home, the file credential store, a test base URL, no dev
     mode, and no cached entitlement (see also tests/conftest.py)."""
-    monkeypatch.setenv("COPSE_PRO_BASE_URL", BASE)
+    monkeypatch.setenv("BRINDLE_PRO_BASE_URL", BASE)
     license.clear_cache()
     yield
     license.clear_cache()
@@ -168,7 +168,7 @@ class FakeBackend(FakeTransport):
                      "features": self.ci_features, "expires_at": int(time.time()) + 3600}
 
     def _refresh(self, form, headers):
-        assert form.get("client_id") == "copse-cli" and form.get("grant_type") == "refresh_token"
+        assert form.get("client_id") == "brindle-cli" and form.get("grant_type") == "refresh_token"
         r = form.get("refresh_token")
         with self.state:
             st = self.refresh_tokens.get(r)
@@ -229,7 +229,7 @@ class FakeBackend(FakeTransport):
         return 200, {"url": "https://billing.stripe.test/p/xyz"}
 
     def _revoke(self, form, headers):
-        assert form.get("client_id") == "copse-cli"
+        assert form.get("client_id") == "brindle-cli"
         self.revoked = True
         return 200, {}
 
@@ -245,9 +245,9 @@ ROOT_SHA = "a" * 40
 @pytest.fixture
 def fixed_identity(monkeypatch):
     """Every repo path gets the same root-commit identity (no git needed)."""
-    from copse.pro import orgkey
+    from brindle.pro import orgkey
 
     monkeypatch.setattr(orgkey, "repo_identity", lambda root: ROOT_SHA)
-    for mod in ("copse.pro.learning", "copse.pro.team_events"):
+    for mod in ("brindle.pro.learning", "brindle.pro.team_events"):
         monkeypatch.setattr(f"{mod}.repo_identity", lambda root: ROOT_SHA)
     return ROOT_SHA

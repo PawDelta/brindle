@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from copse import agents, tmux, workspaces
-from copse.db import Agent
-from copse.providers import ClaudeCode, LaunchContext
-from copse.profiles import load_profile
+from brindle import agents, tmux, workspaces
+from brindle.db import Agent
+from brindle.providers import ClaudeCode, LaunchContext
+from brindle.profiles import load_profile
 
 
 def fake_agent(db, ws, status="processing", mode="interactive", parent=None, agent_id="a1"):
@@ -57,8 +57,8 @@ def test_report_result_forwards_to_parent_on_assign(db, ws, monkeypatch):
     # The manual flow: with the pipeline off, the report goes to the parent.
     from pathlib import Path
 
-    (Path(ws.repo_root) / ".copse").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".copse" / "config.json").write_text('{"pipeline": false}')
+    (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
+    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
     fake_agent(db, ws, status="processing", agent_id="boss")
     fake_agent(db, ws, mode="assign", parent="boss", agent_id="w1")
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
@@ -75,7 +75,7 @@ def test_claude_command_wires_hooks_mcp_and_profile():
     assert argv[0] == "claude" and argv[-1] == "do the thing"
     settings = argv[argv.index("--settings") + 1]
     assert "_hook" in settings and "Stop" in settings
-    assert '"COPSE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
+    assert '"BRINDLE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
     assert argv[argv.index("--permission-mode") + 1] == "auto"
     # Agent view (background sessions) is where a pasted message can land in
     # the wrong conversation or start a brand-new one; disable it outright.
@@ -83,8 +83,8 @@ def test_claude_command_wires_hooks_mcp_and_profile():
 
 
 def test_disable_agent_view_follows_mode_not_profile_name():
-    """disableAgentView is about how copse drives the pane (a human's own
-    interactive chat vs. one copse pastes messages into), not the profile's
+    """disableAgentView is about how brindle drives the pane (a human's own
+    interactive chat vs. one brindle pastes messages into), not the profile's
     name -- a custom-named profile run interactively must still get the
     agent view, and a non-interactive one must still lose it."""
     from dataclasses import replace
@@ -105,11 +105,11 @@ def test_shell_agent_in_tmux_end_to_end(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell")
     try:
         assert agents.is_alive(a)
-        assert agents.send_message(db, a.id, "echo copse-says-hi-$COPSE_AGENT_ID") == "delivered"
+        assert agents.send_message(db, a.id, "echo brindle-says-hi-$BRINDLE_AGENT_ID") == "delivered"
         deadline = time.time() + 5
-        while time.time() < deadline and f"copse-says-hi-{a.id}" not in tmux.capture(a.tmux_window):
+        while time.time() < deadline and f"brindle-says-hi-{a.id}" not in tmux.capture(a.tmux_window):
             time.sleep(0.2)
-        assert f"copse-says-hi-{a.id}" in tmux.capture(a.tmux_window)
+        assert f"brindle-says-hi-{a.id}" in tmux.capture(a.tmux_window)
     finally:
         tmux.kill_session(ws.tmux_session)
 
@@ -117,7 +117,7 @@ def test_shell_agent_in_tmux_end_to_end(db, ws):
 def test_developer_may_run_tests_and_builds_but_not_everything():
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), None))
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
-    assert "mcp__copse" in allowed
+    assert "mcp__brindle" in allowed
     assert "Bash(pytest:*)" in allowed and "Bash(npm run:*)" in allowed
     assert "Bash(git push:*)" not in allowed
     assert not any(t in ("Bash", "Bash(*)") for t in allowed)
@@ -374,9 +374,9 @@ def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch)
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     from pathlib import Path
 
-    (Path(ws.repo_root) / ".copse").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".copse" / "config.json").write_text('{"pipeline": false}')
-    from copse import mcp_server
+    (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
+    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    from brindle import mcp_server
 
     fake_agent(db, ws, status="processing", agent_id="boss")
     fake_agent(db, ws, mode="handoff", parent="boss", agent_id="w1")
@@ -404,7 +404,7 @@ def test_result_arriving_during_detach_is_not_lost(db, ws, monkeypatch):
 
 
 def test_wait_for_worker_leaves_assign_workers_running(db, ws, monkeypatch):
-    from copse import mcp_server
+    from brindle import mcp_server
 
     fake_agent(db, ws, mode="assign", agent_id="w2")
     db.set_result("w2", "ok")
@@ -415,14 +415,14 @@ def test_wait_for_worker_leaves_assign_workers_running(db, ws, monkeypatch):
     assert killed == []
 
 
-def test_codex_command_preapproves_only_copse_tools(monkeypatch):
-    from copse.providers import Codex
+def test_codex_command_preapproves_only_brindle_tools(monkeypatch):
+    from brindle.providers import Codex
 
-    monkeypatch.setenv("COPSE_CODEX_BIN", "/opt/codex")
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", "/opt/codex")
     argv = Codex().command(LaunchContext("abc", load_profile("developer"), "do it"))
     assert argv[0] == "/opt/codex"
-    assert 'mcp_servers.copse.default_tools_approval_mode="approve"' in argv
-    assert any('COPSE_AGENT_ID = "abc"' in a for a in argv)
+    assert 'mcp_servers.brindle.default_tools_approval_mode="approve"' in argv
+    assert any('BRINDLE_AGENT_ID = "abc"' in a for a in argv)
     assert argv[-1].endswith("do it")  # profile prompt leads the first message
     assert not any("dangerously" in a or "full-auto" in a for a in argv)
 
@@ -437,7 +437,7 @@ def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
         # Even with the dashboard pane focused, messages go to the agent's pane.
         other = next(p for p in panes if p != a.tmux_window)
         tmux._tmux("select-pane", "-t", other)
-        agents.send_message(db, a.id, "echo reached-$COPSE_AGENT_ID")
+        agents.send_message(db, a.id, "echo reached-$BRINDLE_AGENT_ID")
         deadline = time.time() + 5
         while time.time() < deadline and f"reached-{a.id}" not in tmux.capture(a.tmux_window):
             time.sleep(0.2)
@@ -529,7 +529,7 @@ def test_claude_command_emits_lightweight_flags():
     assert argv[argv.index("--setting-sources") + 1] == "project,local"
     assert argv[argv.index("--effort") + 1] == "low"
     assert "-p" not in argv and argv[-1] == "do the thing"
-    # copse's own hooks and MCP server are still passed explicitly.
+    # brindle's own hooks and MCP server are still passed explicitly.
     assert "--settings" in argv and "--mcp-config" in argv
 
 
@@ -550,9 +550,9 @@ def test_headless_claude_command_runs_one_turn_with_print():
 def test_lightweight_fields_are_ignored_by_other_providers(monkeypatch):
     from dataclasses import replace
 
-    from copse.providers import Codex
+    from brindle.providers import Codex
 
-    monkeypatch.setenv("COPSE_CODEX_BIN", "codex")
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", "codex")
     profile = replace(load_profile("developer"), strict_mcp=True, setting_sources=["project"],
                       effort="low", headless=True)
     argv = Codex().command(LaunchContext("abc", profile, "do it"))
@@ -561,13 +561,13 @@ def test_lightweight_fields_are_ignored_by_other_providers(monkeypatch):
 
 
 def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
-    from copse.providers import get_provider
+    from brindle.providers import get_provider
 
     prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
     assert "run only the tests that cover your change" in prompt
     assert "Run the full suite once, just before you commit." in prompt
-    (Path(ws.repo_root) / ".copse").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".copse" / "config.json").write_text('{"checks": ["uv run pytest -q"]}')
+    (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
+    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"checks": ["uv run pytest -q"]}')
     prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
     assert "Don't run the full suite yourself" in prompt and "`uv run pytest -q`" in prompt
     sub = agents.subagent_prompt("You are a subagent.", "add a flag", ws, None)
@@ -575,7 +575,7 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
 
 
 def test_flush_types_a_lead_naming_the_sender(db, ws, monkeypatch):
-    """Agent CLIs distrust pasted text, so copse vouches for its delivery by
+    """Agent CLIs distrust pasted text, so brindle vouches for its delivery by
     typing (not pasting) a line naming the sender."""
     fake_agent(db, ws, status="processing", agent_id="sup1")
     fake_agent(db, ws, status="idle", mode="assign", parent="sup1")
@@ -586,7 +586,7 @@ def test_flush_types_a_lead_naming_the_sender(db, ws, monkeypatch):
     assert agents.flush(db, "a1") is True
     (body, lead), = calls
     assert "fix the test" in body
-    assert lead == "copse delivered this message from developer agent sup1:"
+    assert lead == "brindle delivered this message from developer agent sup1:"
 
 
 def test_no_lead_is_typed_into_a_plain_shell(db, ws):
@@ -596,8 +596,8 @@ def test_no_lead_is_typed_into_a_plain_shell(db, ws):
 
 
 def test_claude_agents_are_told_what_vouches_for_a_message():
-    from copse.profiles import load_profile
-    from copse.providers import DELIVERY_NOTE, LaunchContext
+    from brindle.profiles import load_profile
+    from brindle.providers import DELIVERY_NOTE, LaunchContext
 
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "hi", mode="assign"))
     prompt = argv[argv.index("--append-system-prompt") + 1]
@@ -629,13 +629,13 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     def stop(*a, **k):
         raise Launched
 
-    config = Path(ws.repo_root) / ".copse" / "config.json"
+    config = Path(ws.repo_root) / ".brindle" / "config.json"
     config.parent.mkdir(exist_ok=True)
     config.write_text('{"add_dirs": ["/no/such/cache"]}')
     # Stopped at the window, so every profile load on the way (spawn's own and
     # _profile_for's) has happened.
     monkeypatch.setattr(agents, "_open_window", stop)
-    monkeypatch.setattr("copse.providers.trust_folder", lambda path: None)
+    monkeypatch.setattr("brindle.providers.trust_folder", lambda path: None)
 
     with pytest.raises(Launched):
         agents.spawn(db, ws, "developer", prompt="hi", mode="assign")
@@ -653,11 +653,11 @@ def test_resume_reports_a_missing_add_dir_too(db, ws, monkeypatch, capsys):
     def stop(*a, **k):
         raise Launched
 
-    config = Path(ws.repo_root) / ".copse" / "config.json"
+    config = Path(ws.repo_root) / ".brindle" / "config.json"
     config.parent.mkdir(exist_ok=True)
     config.write_text('{"add_dirs": ["/no/such/cache"]}')
     monkeypatch.setattr(agents, "_open_window", stop)
-    monkeypatch.setattr("copse.providers.trust_folder", lambda path: None)
+    monkeypatch.setattr("brindle.providers.trust_folder", lambda path: None)
     fake_agent(db, ws, status="paused")
 
     with pytest.raises(Launched):

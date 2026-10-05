@@ -1,0 +1,429 @@
+"""The hosted learner client: hosted learning for brindle Pro.
+
+``"learning": "cloud"`` in a repo's ``.brindle/config.json`` selects it, and
+the default ``"auto"`` selects it when the verified entitlement includes the
+``learning`` feature (see ``brindle.plugins``). It is built in, not loaded from
+an entry point. It answers ``suggest`` from the
+hosted learner and, whenever that can't be used -- no ``learning`` feature in
+the verified entitlement, offline, rate-limited, slow (more than
+``SUGGEST_TIMEOUT``), or any error at all -- with no suggestion (None, so
+brindle routes by weight as it would without a plugin). The learner itself only
+ever runs on the server: nothing is learned on this machine. It never raises
+into brindle.
+
+What leaves the machine is fixed by :func:`record_payload` and
+:func:`suggest_payload`: kind/size one-hots from :mod:`brindle.pro.features`,
+the declared weight, profile names and their relative cost, outcome counters,
+an opaque ``repo_key`` and ``agent_ref``. On a terminal event ("merged",
+"removed_unmerged") also, when this machine recorded a routing decision for
+the worker, four coarse savings fields: ``baseline_profile`` (the profile brindle
+would have used without learning), ``learned`` (whether learning made the
+pick), ``cost_rank`` and ``baseline_cost_rank`` (0-16, the relative cost of
+the profile used and of the baseline). Never task text, file paths, repo
+paths, branch names, provider or model.
+
+``repo_key`` and ``agent_ref`` are HMACs under the active org's learning key
+over the repo's identity (root commit, else normalized origin URL) and the
+agent id; see :mod:`brindle.pro.orgkey`. Without an org key or a repo
+identity, nothing is sent.
+
+Records are sent from a small bounded queue by one background thread, so
+brindle never waits on the network to record; when the queue is full, remote
+records are dropped.
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
+import queue
+import re
+import threading
+import time
+from typing import Callable
+
+from brindle.learning import LearningPlugin, Outcome, TaskInfo
+from brindle.pro.features import KIND_WORDS, SIZES, featurize
+from brindle.pro.orgkey import OrgKey, OrgKeys, repo_identity
+
+log = logging.getLogger(__name__)
+
+FEATURE = "learning"
+SUGGEST_TIMEOUT = 2.0
+RECORD_TIMEOUT = 5.0
+QUEUE_SIZE = 256
+FLUSH_AT_EXIT = 2.0
+FORBIDDEN_BACKOFF = 600.0      # after a 403, don't ask again for this long
+ERROR_BACKOFF = 60.0           # after a transport error or a 429
+DAILY_LIMIT_BACKOFF = 3600.0   # after the repo's daily event cap
+WEIGHTS = ("light", "medium", "heavy")
+EVENTS = ("review", "escalated", "merged", "removed_unmerged")
+PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+MAX_CANDIDATES = 16
+
+TERMINAL = ("merged", "removed_unmerged")
+
+RECORD_KEYS = frozenset({"org_id", "key_id", "repo_key", "agent_ref", "profile", "weight", "features", "event",
+                         "approved", "checks_passed", "review_rounds", "escalations", "tokens",
+                         "wall_seconds", "baseline_profile", "learned", "cost_rank",
+                         "baseline_cost_rank"})
+
+
+# -- keys -----------------------------------------------------------------------------------------
+
+
+def install_secret(store=None) -> bytes | None:
+    """Deprecated: the pre-org-key per-install secret, read-only (never
+    created, never used for remote calls). Kept for migration tooling."""
+    from brindle.pro.orgkey import legacy_install_secret
+
+    return legacy_install_secret(store)
+
+
+# -- cost ------------------------------------------------------------------------------------------
+
+
+def cost_rank(name: str, repo_root: str) -> int:
+    """0 (free/local) to 3 (frontier), guessed from the profile's model: the
+    relative cost sent alongside the candidates so close calls can go to the
+    cheaper profile."""
+    from brindle.profiles import load_profile
+
+    try:
+        p = load_profile(name, repo_root)
+    except Exception:  # noqa: BLE001 - an unknown profile is an average one
+        return 2
+    model = (p.model or "").lower()
+    if p.base_url and any(h in p.base_url for h in ("localhost", "127.0.0.1")):
+        return 0
+    if any(s in model for s in ("haiku", "mini", "flash", "small")):
+        return 1
+    if any(s in model for s in ("opus", "fable", "gpt-5", "pro")):
+        return 3
+    return 2
+
+
+# -- payloads ---------------------------------------------------------------------------------------
+
+
+def one_hot(task: TaskInfo) -> dict[str, bool]:
+    f = featurize(task.task, task.files)
+    return {**{f"kind_{k}": f.kind == k for k in KIND_WORDS},
+            **{f"size_{s}": f.size == s for s in SIZES}}
+
+
+def _weight(task: TaskInfo) -> str | None:
+    return task.weight if task.weight in WEIGHTS else None
+
+
+def _count(v, hi: int) -> int:
+    try:
+        return max(0, min(int(v), hi))
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_payload(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
+                   review_rounds: int = 0, escalations: int = 0, decision=None,
+                   cost=None) -> dict | None:
+    """The exact body of ``POST /learning/record``, or None if it can't be
+    sent without leaking (e.g. a profile name that isn't a plain identifier).
+    On a terminal event, ``decision`` (this worker's local routing decision:
+    ``baseline_profile`` and ``learned``) and ``cost`` (profile name -> rank)
+    add the four coarse savings fields; without either they are omitted."""
+    if not task.profile or not PROFILE_RE.match(task.profile) or outcome.event not in EVENTS:
+        return None
+    body = {
+        "org_id": key.org_id,
+        "key_id": key.key_id,
+        "repo_key": key.repo_key(identity),
+        "profile": task.profile,
+        "weight": _weight(task),
+        "features": one_hot(task),
+        "event": outcome.event,
+        "checks_passed": bool(outcome.checks_passed),
+        "review_rounds": _count(review_rounds, 50),
+        "escalations": _count(escalations, 50),
+        "tokens": _count(outcome.tokens, 1_000_000_000),
+        "wall_seconds": float(max(0.0, min(float(outcome.wall_seconds or 0), 7 * 86400))),
+    }
+    if task.agent_id:
+        body["agent_ref"] = key.agent_ref(task.agent_id)
+    if outcome.event == "review" and isinstance(outcome.approved, bool):
+        body["approved"] = outcome.approved
+    if outcome.event in TERMINAL and decision is not None and cost is not None:
+        baseline = getattr(decision, "baseline_profile", None)
+        if isinstance(baseline, str) and PROFILE_RE.match(baseline):
+            try:
+                ranks = (_count(cost(task.profile), 16), _count(cost(baseline), 16))
+            except Exception:  # noqa: BLE001 - no savings fields rather than a failed record
+                return body
+            body.update(baseline_profile=baseline, learned=bool(getattr(decision, "learned", False)),
+                        cost_rank=ranks[0], baseline_cost_rank=ranks[1])
+    return body
+
+
+def suggest_payload(key: OrgKey, identity: str, task: TaskInfo, candidates: list[str],
+                    cost=None, default: str | None = None) -> dict | None:
+    """The exact body of ``POST /learning/suggest``, or None to send nothing.
+    ``default`` is the profile brindle would use without learning (the first
+    candidate when not given)."""
+    if not candidates or len(candidates) > MAX_CANDIDATES or len(set(candidates)) != len(candidates):
+        return None
+    if not all(isinstance(c, str) and PROFILE_RE.match(c) for c in candidates):
+        return None
+    default = default or candidates[0]
+    if default not in candidates:
+        return None
+    body = {"org_id": key.org_id, "key_id": key.key_id,
+            "repo_key": key.repo_key(identity), "weight": _weight(task),
+            "features": one_hot(task), "candidates": list(candidates), "default": default}
+    if cost is not None:
+        costs = {}
+        for c in candidates:
+            try:
+                costs[c] = _count(cost(c), 16)
+            except Exception:  # noqa: BLE001
+                return body
+        body["candidate_cost"] = costs
+    return body
+
+
+# -- the plugin ---------------------------------------------------------------------------------------
+
+
+class _Unavailable(Exception):
+    pass
+
+
+def _local_decision(agent_id: str):
+    """The routing decision this machine recorded for ``agent_id`` (brindle.savings)."""
+    from brindle.db import DB
+
+    db = DB()
+    try:
+        return db.routing_decision_for_agent(agent_id)
+    finally:
+        db.conn.close()
+
+
+class CloudLearner(LearningPlugin):
+    def __init__(self, repo_root: str, *, client=None,
+                 store=None, key_store=None, org=None, cost: Callable[[str], int] | None = None,
+                 start_thread: bool = True, decision_for=None) -> None:
+        self.repo_root = repo_root
+        self.decision_for = decision_for or _local_decision
+        self.cost = cost or (lambda name: cost_rank(name, repo_root))
+        self._client, self._store = client, store
+        self.keys = OrgKeys(store=store, client=client, key_store=key_store)
+        self._org_override = org
+        self._identity: str | None = None
+        self._backoff_until = 0.0
+        self._lock = threading.Lock()
+        self._counts: dict[str, list[int]] = {}      # agent id -> [review rounds, escalations]
+        self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_SIZE)
+        self.dropped = 0
+        self._thread = None
+        if start_thread:
+            self._thread = threading.Thread(target=self._sender, name="brindle-pro-learning",
+                                            daemon=True)
+            self._thread.start()
+            atexit.register(self.flush, FLUSH_AT_EXIT)
+
+    # -- plumbing ----------------------------------------------------------------------
+
+    def _deps(self):
+        from brindle.pro import auth, credentials
+
+        if self._store is None:
+            self._store = credentials.default_store()
+        if self._client is None:
+            creds = self._store.load() or {}
+            self._client = auth.Client(creds.get("base_url"),
+                                       auth.UrllibTransport(timeout=RECORD_TIMEOUT))
+        return self._client, self._store
+
+    def identity(self) -> str | None:
+        if self._identity is None:
+            self._identity = repo_identity(self.repo_root)
+        return self._identity
+
+    def org(self) -> str | None:
+        """The active org when the verified entitlement includes hosted
+        learning, else None (always None in air-gap mode, so nothing is
+        sent). Offline verification only."""
+        from brindle import airgap
+
+        if airgap.enabled() or time.time() < self._backoff_until:
+            return None
+        try:
+            if self._org_override is not None:
+                return self._org_override()
+            from brindle.pro import license
+
+            ent = license.current(refresh=False, store=self._store)
+            return ent.org_id if FEATURE in ent.features and not ent.in_grace else None
+        except Exception:  # noqa: BLE001 - fail closed: send nothing
+            return None
+
+    def active(self) -> bool:
+        return self.org() is not None
+
+    def key(self, org: str) -> OrgKey:
+        return self.keys.get(org)
+
+    def _post(self, org: str, path: str, body: dict) -> dict:
+        from brindle.pro import auth
+
+        client, store = self._deps()
+        try:
+            status, resp = auth.authed(client, store, "POST", path, auth.JSONBody(body))
+        except auth.TransportError:
+            self._backoff_until = time.time() + ERROR_BACKOFF
+            raise _Unavailable("offline")
+        if isinstance(resp, dict) and "key_id" in resp:
+            self.keys.note_key_id(org, resp.get("key_id"))
+        if status == 200:
+            return resp
+        if status == 409 and resp.get("error") in ("stale_key", "key_rotated"):
+            self.keys.note_key_id(org, resp.get("key_id") or "")
+        elif status == 403:
+            self._backoff_until = time.time() + FORBIDDEN_BACKOFF
+        elif status == 429:
+            daily = resp.get("error") == "daily_limit"
+            self._backoff_until = time.time() + (DAILY_LIMIT_BACKOFF if daily else ERROR_BACKOFF)
+        raise _Unavailable(f"HTTP {status}")
+
+    # -- recording -------------------------------------------------------------------------
+
+    def _rounds(self, task: TaskInfo, outcome: Outcome) -> tuple[int, int]:
+        """(review rounds, escalations) so far for ``task``'s agent, this
+        outcome included, counted here for the life of this process."""
+        if not task.agent_id:
+            return 0, 0
+        counts = self._counts.setdefault(task.agent_id, [0, 0])
+        if outcome.event == "review":
+            counts[0] += 1
+        elif outcome.event == "escalated":
+            counts[1] += 1
+        return counts[0], counts[1]
+
+    def record(self, task: TaskInfo, outcome: Outcome) -> None:
+        try:
+            rounds, escalations = self._rounds(task, outcome)
+            if not self.active():
+                return
+            item = (task, outcome, rounds, escalations)
+            try:
+                self.queue.put_nowait(item)      # the payload is built by the sender
+            except queue.Full:
+                self.dropped += 1
+        except Exception:  # noqa: BLE001
+            log.info("hosted learning record skipped", exc_info=True)
+
+    def _send_one(self, item) -> None:
+        try:
+            org = self.org()
+            identity = self.identity() if org else None
+            if org is None or identity is None:
+                return
+            task, outcome, rounds, escalations = item
+            decision = None
+            if outcome.event in TERMINAL and task.agent_id:
+                try:
+                    decision = self.decision_for(task.agent_id)
+                except Exception:  # noqa: BLE001 - no decision on record: omit the savings fields
+                    decision = None
+            body = record_payload(self.key(org), identity, task, outcome, rounds, escalations,
+                                  decision=decision, cost=self.cost)
+            if body is not None:
+                self._post(org, "/learning/record", body)
+        except Exception as e:  # noqa: BLE001
+            log.info("hosted learning record not sent (%s)", type(e).__name__)
+
+    def _sender(self) -> None:
+        while True:
+            body = self.queue.get()
+            try:
+                self._send_one(body)
+            finally:
+                self.queue.task_done()
+
+    def flush(self, timeout: float = FLUSH_AT_EXIT) -> bool:
+        """Wait up to ``timeout`` for queued records to be sent (or, with no
+        sender thread, send them inline). True when the queue drained."""
+        if self._thread is None:
+            while True:
+                try:
+                    body = self.queue.get_nowait()
+                except queue.Empty:
+                    return True
+                self._send_one(body)
+                self.queue.task_done()
+        deadline = time.monotonic() + timeout
+        while self.queue.unfinished_tasks and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return not self.queue.unfinished_tasks
+
+    # -- suggesting ---------------------------------------------------------------------------
+
+    def _remote_pick(self, task: TaskInfo, candidates: list[str],
+                     default: str) -> tuple[str, str | None, bool] | None:
+        """(profile, reason, prior): ``default`` with no reason when the
+        server kept it, the override and its reason otherwise. ``prior`` is
+        the server's word that shared results were part of the evidence
+        (older servers don't say: False)."""
+        org = self.org()
+        identity = self.identity() if org else None
+        if org is None or identity is None:
+            return None
+        body = suggest_payload(self.key(org), identity, task, candidates, self.cost, default)
+        if body is None:
+            return None
+        resp = self._post(org, "/learning/suggest", body)
+        pick = resp.get("profile")
+        if pick not in candidates:
+            return None
+        if resp.get("overrode") is not True or pick == default:
+            return default, None, False
+        reason = resp.get("reason")
+        return (pick, (reason[:200] if isinstance(reason, str) and reason else None),
+                resp.get("prior") is True)
+
+    def suggest(self, task: TaskInfo, candidates: list[str],
+                default: str | None = None) -> str | None:
+        """The server's pick (``default`` when it keeps it; ``last_reason``
+        says why when it overrides), or None when it can't be asked."""
+        self.last_reason = None
+        self.last_prior = False
+        default = default or (candidates[0] if candidates else "")
+        pick = None
+        try:
+            if candidates and default in candidates and self.active():
+                result: list = []
+                th = threading.Thread(
+                    target=lambda: result.append(self._safe_remote(task, candidates, default)),
+                    daemon=True)
+                th.start()
+                th.join(SUGGEST_TIMEOUT)
+                got = result[0] if result else None
+                if got:
+                    pick, self.last_reason, self.last_prior = got
+        except Exception:  # noqa: BLE001
+            pick = None
+        return pick
+
+    def _safe_remote(self, task, candidates, default):
+        try:
+            return self._remote_pick(task, candidates, default)
+        except Exception as e:  # noqa: BLE001
+            log.info("hosted suggest unavailable (%s)", type(e).__name__)
+            return None
+
+    # -- reporting ------------------------------------------------------------------------------
+
+    def report(self) -> str:
+        state = ("active" if self.active() else
+                 "inactive (not logged in, offline, or your plan lacks hosted learning)")
+        return (f"cloud learning: {state}\n"
+                "The learner runs on the server; nothing is learned on this machine.")

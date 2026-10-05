@@ -1,11 +1,11 @@
-"""`copse init`: detect a repo's setup and checks, write the config, check tools."""
+"""`brindle init`: detect a repo's setup and checks, write the config, check tools."""
 
 import json
 
 from typer.testing import CliRunner
 
-from copse import detect, doctor
-from copse.cli import app
+from brindle import detect, doctor
+from brindle.cli import app
 
 from conftest import sh
 
@@ -59,15 +59,15 @@ def test_init_writes_detected_config_and_keeps_existing(repo, monkeypatch):
     monkeypatch.setattr(doctor, "checks", lambda root: [])
     res = CliRunner().invoke(app, ["init"])
     assert res.exit_code == 0, res.output
-    cfg = json.loads((repo / ".copse" / "config.json").read_text())
+    cfg = json.loads((repo / ".brindle" / "config.json").read_text())
     assert cfg["setup"] == ["go mod download"] and cfg["checks"] == ["go test ./..."]
     assert "Ready" in res.output
 
-    (repo / ".copse" / "config.json").write_text('{"checks": ["mine"]}\n')
+    (repo / ".brindle" / "config.json").write_text('{"checks": ["mine"]}\n')
     res = CliRunner().invoke(app, ["init"])
     assert res.exit_code == 0, res.output
     assert "kept" in res.output
-    assert json.loads((repo / ".copse" / "config.json").read_text()) == {"checks": ["mine"]}
+    assert json.loads((repo / ".brindle" / "config.json").read_text()) == {"checks": ["mine"]}
 
 
 def test_init_fails_on_doctor_failure(repo, monkeypatch):
@@ -86,19 +86,19 @@ def test_init_outside_git_points_at_scratch(tmp_path, monkeypatch):
 
 
 def test_preflight_names_missing_cli(monkeypatch):
-    monkeypatch.setenv("COPSE_CLAUDE_BIN", "/nonexistent/claude")
+    monkeypatch.setenv("BRINDLE_CLAUDE_BIN", "/nonexistent/claude")
     problems = doctor.preflight("claude")
     assert any("Claude Code" in p and "npm install" in p for p in problems)
     assert not any("Claude Code" in p for p in doctor.preflight("shell"))
 
 
 def test_pr_footer_on_by_default_and_opt_out(repo):
-    from copse import workspaces
+    from brindle import workspaces
 
     assert workspaces.with_footer("Fixes #1", str(repo)).endswith(workspaces.PR_FOOTER)
     assert workspaces.with_footer("", str(repo)) == workspaces.PR_FOOTER
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text('{"pr_footer": false}')
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text('{"pr_footer": false}')
     assert workspaces.with_footer("Fixes #1", str(repo)) == "Fixes #1"
 
 
@@ -111,8 +111,8 @@ def test_doctor_lists_optional_tools_apart():
 
 
 def test_autopilot_guide_asks_for_checks_when_none(tmp_path):
-    from copse import autopilot
-    from copse.config import RepoConfig
+    from brindle import autopilot
+    from brindle.config import RepoConfig
 
     (tmp_path / "go.mod").write_text("module x\n")
     text = autopilot.guide(RepoConfig(), str(tmp_path))
@@ -123,8 +123,8 @@ def test_autopilot_guide_asks_for_checks_when_none(tmp_path):
 def test_history_share_card(db, repo):
     import time
 
-    from copse import history, workspaces
-    from copse.db import Agent, Task
+    from brindle import history, workspaces
+    from brindle.db import Agent, Task
 
     ws = workspaces.adopt_root(db, str(repo))
     now = time.time()
@@ -153,14 +153,14 @@ def test_history_share_card(db, repo):
     assert "✓ 2/2 milestones verified" in card
     assert "2 workers · 2 branches merged · 1 review (1 by a different model)" in card
     assert "1.5× parallel" in card
-    assert card.endswith("https://pawdelta.com/copse/")
+    assert card.endswith("https://pawdelta.com/brindle/")
 
 
-def test_demo_repo_has_failing_goal(copse_home):
+def test_demo_repo_has_failing_goal(brindle_home):
     import subprocess
 
-    from copse import autopilot, demo
-    from copse.config import load_repo_config
+    from brindle import autopilot, demo
+    from brindle.config import load_repo_config
 
     root = demo.create()
     plan = autopilot.load_goals_file(str(root))

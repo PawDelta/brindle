@@ -9,14 +9,14 @@ spec.loader.exec_module(release_footer)
 
 def test_footer_links_the_site_once(tmp_path):
     notes = tmp_path / "notes.md"
-    notes.write_text("copse 1.2.3 fixes things.\n")
+    notes.write_text("brindle 1.2.3 fixes things.\n")
     assert release_footer.footer_file(notes)
     text = notes.read_text()
-    assert text.startswith("copse 1.2.3 fixes things.") and "pawdelta.com/copse" in text
+    assert text.startswith("brindle 1.2.3 fixes things.") and "pawdelta.com/brindle" in text
     assert not release_footer.footer_file(notes)
     assert notes.read_text() == text
 
 
 def test_notes_already_linking_the_site_are_left_alone():
-    body = "See https://pawdelta.com/copse/ for docs."
+    body = "See https://pawdelta.com/brindle/ for docs."
     assert release_footer.with_footer(body) == body

@@ -10,8 +10,8 @@ import time
 
 import pytest
 
-from copse import agents, sessions, tmux, view, workspaces
-from copse.db import Agent
+from brindle import agents, sessions, tmux, view, workspaces
+from brindle.db import Agent
 
 LONG_AGO = 3600.0
 
@@ -63,7 +63,7 @@ def test_a_supervisor_that_just_stopped_lingers_briefly(db, repo, root):
 
 
 def test_a_new_launch_hides_the_session_it_just_paused(db, repo, root):
-    # `copse` pauses the chat running here and starts a new one: the old one
+    # `brindle` pauses the chat running here and starts a new one: the old one
     # mustn't linger beside it, paused or stopped without being paused.
     add(db, root, "older", window="%99997", age=5)
     add(db, root, "old", status="paused", window="%99999", age=2)
@@ -125,7 +125,7 @@ def test_a_reused_pane_id_only_counts_for_the_newest_agent(db, repo, root):
 # -- hooks must reach the agent that launched them ------------------------------
 #
 # Claude Code can run a session in a process its background daemon started for
-# an earlier launch, so the environment its hooks inherit (COPSE_AGENT_ID) can
+# an earlier launch, so the environment its hooks inherit (BRINDLE_AGENT_ID) can
 # name an older supervisor: that one was then marked busy and nudged with its
 # old autopilot goal, while the real session looked idle.
 
@@ -133,8 +133,8 @@ def test_a_reused_pane_id_only_counts_for_the_newest_agent(db, repo, root):
 def _claude_settings(agent_id):
     import json
 
-    from copse.profiles import load_profile
-    from copse.providers import ClaudeCode, LaunchContext
+    from brindle.profiles import load_profile
+    from brindle.providers import ClaudeCode, LaunchContext
 
     argv = ClaudeCode().command(LaunchContext(agent_id, load_profile("supervisor"), None,
                                               mode="interactive"))
@@ -142,22 +142,22 @@ def _claude_settings(agent_id):
 
 
 def test_claude_hook_commands_name_their_agent(monkeypatch):
-    monkeypatch.setenv("COPSE_TMUX_SOCKET", "sock")
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", "sock")
     settings = _claude_settings("new12345")
     for event, entries in settings["hooks"].items():
         cmd = entries[0]["hooks"][0]["command"]
         assert "--agent new12345" in cmd, event
-        assert "COPSE_TMUX_SOCKET=sock" in cmd
+        assert "BRINDLE_TMUX_SOCKET=sock" in cmd
 
 
 def test_the_hook_command_wins_over_a_stale_environment(db, repo, root, monkeypatch):
     from typer.testing import CliRunner
 
-    from copse.cli import app
+    from brindle.cli import app
 
     add(db, root, "old", status="idle", age=LONG_AGO)
     add(db, root, "new", status="idle")
-    monkeypatch.setenv("COPSE_AGENT_ID", "old")  # what the daemon's process carries
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "old")  # what the daemon's process carries
     res = CliRunner().invoke(app, ["_hook", "prompt-submit", "--agent", "new"],
                              input='{"session_id": "s-new", "prompt": "hi"}')
     assert res.exit_code == 0, res.output
@@ -169,12 +169,12 @@ def test_the_hook_command_wins_over_a_stale_environment(db, repo, root, monkeypa
 def test_an_env_only_hook_prefers_the_agent_that_owns_the_session(db, repo, root, monkeypatch):
     from typer.testing import CliRunner
 
-    from copse.cli import app
+    from brindle.cli import app
 
     add(db, root, "old", status="idle", age=LONG_AGO)
     add(db, root, "new", status="idle")
     db.update_agent("new", session_ref="s-new")
-    monkeypatch.setenv("COPSE_AGENT_ID", "old")  # a session launched by an older copse
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "old")  # a session launched by an older brindle
     res = CliRunner().invoke(app, ["_hook", "prompt-submit"],
                              input='{"session_id": "s-new", "prompt": "hi"}')
     assert res.exit_code == 0, res.output
@@ -209,7 +209,7 @@ def test_the_sidebar_pane_is_no_agents(db, repo, root):
 
 
 def test_an_untagged_pane_still_goes_by_the_db(db, repo, root):
-    """Panes from before tagging (an older copse's sessions) keep working."""
+    """Panes from before tagging (an older brindle's sessions) keep working."""
     pane = running_window(root)
     add(db, root, "stale", window=pane, age=LONG_AGO)
     assert agents.owns_pane(db, db.get_agent("stale"))

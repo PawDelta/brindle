@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 
-from copse.pro.keys import PINNED_KEYS
+from brindle.pro.keys import PINNED_KEYS
 
 
 def _thumbprint(raw_hex: str) -> str:
