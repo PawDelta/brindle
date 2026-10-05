@@ -17,8 +17,7 @@ Values are the raw 32-byte public keys, hex-encoded.
 from __future__ import annotations
 
 PINNED_KEYS: dict[str, str] = {
-    # pawdelta-web production signing key (KMS alias/pawdelta-web-copse-signing,
-    # ECC_NIST_EDWARDS25519), created 2026-09-30. kid is its RFC 7638 thumbprint.
+    # Production signing key, created 2026-09-30. kid is its RFC 7638 thumbprint.
     "sQ88-LFjWYgISL3A6CcjMe9BEzThVtgGgKpbXH9vCIk":
         "370e58a97ce3c85fcacf18693ed1607addefbcb63794e0fea4e615eee310fba0",
 }
