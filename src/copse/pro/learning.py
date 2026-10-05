@@ -328,9 +328,11 @@ class CloudLearner(LearningPlugin):
     # -- suggesting ---------------------------------------------------------------------------
 
     def _remote_pick(self, task: TaskInfo, candidates: list[str],
-                     default: str) -> tuple[str, str | None] | None:
-        """(profile, reason): ``default`` with no reason when the server kept
-        it, the override and its reason otherwise."""
+                     default: str) -> tuple[str, str | None, bool] | None:
+        """(profile, reason, prior): ``default`` with no reason when the
+        server kept it, the override and its reason otherwise. ``prior`` is
+        the server's word that shared results were part of the evidence
+        (older servers don't say: False)."""
         org = self.org()
         identity = self.identity() if org else None
         if org is None or identity is None:
@@ -343,15 +345,17 @@ class CloudLearner(LearningPlugin):
         if pick not in candidates:
             return None
         if resp.get("overrode") is not True or pick == default:
-            return default, None
+            return default, None, False
         reason = resp.get("reason")
-        return pick, (reason[:200] if isinstance(reason, str) and reason else None)
+        return (pick, (reason[:200] if isinstance(reason, str) and reason else None),
+                resp.get("prior") is True)
 
     def suggest(self, task: TaskInfo, candidates: list[str],
                 default: str | None = None) -> str | None:
         """The server's pick (``default`` when it keeps it; ``last_reason``
         says why when it overrides), or None when it can't be asked."""
         self.last_reason = None
+        self.last_prior = False
         default = default or (candidates[0] if candidates else "")
         pick = None
         try:
@@ -364,7 +368,7 @@ class CloudLearner(LearningPlugin):
                 th.join(SUGGEST_TIMEOUT)
                 got = result[0] if result else None
                 if got:
-                    pick, self.last_reason = got
+                    pick, self.last_reason, self.last_prior = got
         except Exception:  # noqa: BLE001
             pick = None
         return pick

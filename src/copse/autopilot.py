@@ -490,8 +490,10 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             learned = bool(name)
             name = name or cfg.default_agent
             routed["baseline"] = cfg.default_agent
+        routed["prior"] = learned and learning.used_prior(cfg, repo_root)
     if decision is not None:
         decision.update(profile=name, learned=learned, weight=weight,
+                        prior=bool(routed.get("prior")),
                         baseline=routed.get("baseline", name) if learned else name)
     try:
         load_profile(name, repo_root)

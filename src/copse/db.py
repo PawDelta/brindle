@@ -300,6 +300,7 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
     baseline_profile TEXT NOT NULL, -- what copse would have used without learning
     profile TEXT NOT NULL,          -- what it used
     learned INTEGER NOT NULL DEFAULT 0,        -- 1 when learning made the pick
+    prior INTEGER NOT NULL DEFAULT 0,          -- 1 when that pick drew on other orgs' shared results
     review_rounds INTEGER NOT NULL DEFAULT 0,
     escalations INTEGER NOT NULL DEFAULT 0,
     outcome TEXT                    -- merged | removed_unmerged, once it's over
@@ -428,6 +429,7 @@ class RoutingDecision:
     baseline_profile: str
     profile: str
     learned: int
+    prior: int = 0
     review_rounds: int = 0
     escalations: int = 0
     outcome: str | None = None
@@ -584,6 +586,9 @@ class DB:
         for col, kind in (("port_base", "INTEGER"), ("ready", "INTEGER NOT NULL DEFAULT 1")):
             if col not in pool_cols:
                 self.conn.execute(f"ALTER TABLE pool_entries ADD COLUMN {col} {kind}")
+        routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
+        if "prior" not in routing_cols:
+            self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -1275,13 +1280,14 @@ class DB:
 
     def add_routing_decision(self, repo_root: str, *, task_id: str | None, agent_id: str | None,
                              weight: str | None, baseline_profile: str, profile: str,
-                             learned: bool, ts: float | None = None) -> None:
+                             learned: bool, prior: bool = False,
+                             ts: float | None = None) -> None:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO routing_decisions (repo_root, ts, task_id, agent_id, weight, "
-                "baseline_profile, profile, learned) VALUES (?,?,?,?,?,?,?,?)",
+                "baseline_profile, profile, learned, prior) VALUES (?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time() if ts is None else ts, task_id, agent_id, weight,
-                 baseline_profile, profile, int(learned)),
+                 baseline_profile, profile, int(learned), int(learned and prior)),
             )
 
     def set_routing_agent(self, task_id: str, agent_id: str) -> None:

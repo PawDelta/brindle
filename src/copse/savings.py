@@ -55,6 +55,7 @@ def record(db: DB, repo_root: str, decision: dict | None, *, task_id: str | None
             repo_root, task_id=task_id, agent_id=agent_id, weight=decision.get("weight"),
             baseline_profile=decision.get("baseline") or decision["profile"],
             profile=decision["profile"], learned=bool(decision.get("learned")),
+            prior=decision.get("prior") is True,
         )
     except Exception:
         log.exception("copse: couldn't record the routing decision")
@@ -91,6 +92,7 @@ class Picks:
     tasks: int = 0
     review_rounds: int = 0
     troubled: int = 0      # removed unmerged, or escalated to the supervisor
+    prior: int = 0         # picks whose evidence included other orgs' shared results
 
 
 @dataclass
@@ -143,6 +145,7 @@ def _period(label: str, rows: list[RoutingDecision], tokens: dict[str, int],
         rerouted = bool(r.learned) and r.profile != r.baseline_profile
         picks = p.learned if rerouted else p.baseline
         picks.tasks += 1
+        picks.prior += int(rerouted and bool(r.prior))
         picks.review_rounds += r.review_rounds
         picks.troubled += int(r.outcome == FAILED or r.escalations > 0)
         used = tokens.get(r.agent_id or "", 0)
@@ -217,7 +220,8 @@ def describe(periods: list[Period], repo_root: str) -> str:
         if not p.learned.tasks + p.baseline.tasks:
             lines.append("  no delegated tasks")
             continue
-        lines.append(f"  picks                {p.learned.tasks} by learning · "
+        shared = f" ({p.learned.prior} from the shared prior)" if p.learned.prior else ""
+        lines.append(f"  picks                {p.learned.tasks} by learning{shared} · "
                      f"{p.baseline.tasks} baseline")
         lines.append(f"  review rounds/task   {_per_task(p.learned)} learning · "
                      f"{_per_task(p.baseline)} baseline")

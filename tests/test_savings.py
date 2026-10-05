@@ -22,13 +22,14 @@ def cost(name):
 
 
 class Picker(learning.LearningPlugin):
-    def __init__(self, prefer=None):
-        self.prefer = prefer
+    def __init__(self, prefer=None, prior=False):
+        self.prefer, self.prior = prefer, prior
 
     def record(self, task, outcome):
         pass
 
     def suggest(self, task, candidates, default=None):
+        self.last_prior = self.prior
         return self.prefer if self.prefer in candidates else None
 
 
@@ -74,11 +75,12 @@ def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", 
 
 
 def decide(db, repo, n, *, ts=NOW, weight="medium", baseline="developer", profile="developer",
-           learned=False, tokens=0, outcome="merged", reviews=0, escalated=False):
+           learned=False, tokens=0, outcome="merged", reviews=0, escalated=False, prior=False):
     """One recorded decision for worker ``n``, with its usage and outcome."""
     agent = f"w{n}"
     db.add_routing_decision(str(repo), task_id=f"t{n}", agent_id=agent, weight=weight,
-                            baseline_profile=baseline, profile=profile, learned=learned, ts=ts)
+                            baseline_profile=baseline, profile=profile, learned=learned,
+                            prior=prior, ts=ts)
     for _ in range(reviews):
         db.note_routing_outcome(agent, review=True)
     db.note_routing_outcome(agent, escalated=escalated, outcome=outcome)
@@ -103,6 +105,42 @@ def test_a_learned_pick_is_recorded_with_its_baseline(db, repo, boss, monkeypatc
     [d] = db.list_routing_decisions(str(repo))
     assert (d.task_id, d.agent_id, d.weight) == (t.id, t.agent_id, "medium")
     assert (d.baseline_profile, d.profile, d.learned) == ("developer", "developer-codex", 1)
+
+
+def test_the_shared_prior_flag_is_kept_and_counted(db, repo, boss, monkeypatch):
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    config(repo, pipeline=False, learning="cloud")
+    install(monkeypatch, Picker(prefer="developer-codex", prior=True))
+    asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
+    install(monkeypatch, Picker(prefer="developer-codex"))          # an older server: no flag
+    asyncio.run(mcp_server.assign(task="do B", branch="feat-b", weight="medium"))
+    install(monkeypatch, Picker(prefer="developer", prior=True))    # kept the default: not a pick
+    asyncio.run(mcp_server.assign(task="do C", branch="feat-c", weight="medium"))
+    assert [(d.learned, d.prior) for d in db.list_routing_decisions(str(repo))] == [
+        (1, 1), (1, 0), (0, 0)]
+    periods = savings.report(db, str(repo), cost=cost)
+    assert periods[0].learned.prior == 1
+    assert "2 by learning (1 from the shared prior) · 1 baseline" in savings.describe(
+        periods, str(repo))
+
+
+def test_the_cloud_learner_reads_prior_and_defaults_it_to_false(monkeypatch):
+    from copse.pro import learning as pro_learning
+
+    lr = pro_learning.CloudLearner("/repo", org=lambda: "org_1", start_thread=False)
+    replies = [{"profile": "b", "overrode": True, "prior": True},
+               {"profile": "b", "overrode": True},                    # an older server
+               {"profile": "b", "overrode": True, "prior": "yes"},
+               {"profile": "a", "overrode": False, "prior": True}]    # kept the default
+    monkeypatch.setattr(lr, "identity", lambda: "id")
+    monkeypatch.setattr(lr, "key", lambda org: None)
+    monkeypatch.setattr(lr, "_post", lambda org, path, body: replies.pop(0))
+    monkeypatch.setattr(pro_learning, "suggest_payload", lambda *a, **k: {})
+    seen = []
+    for _ in range(4):
+        lr.suggest(None, ["a", "b"], "a")
+        seen.append(lr.last_prior)
+    assert seen == [True, False, False, False]
 
 
 def test_a_baseline_pick_is_recorded_too(db, repo, boss, monkeypatch):
