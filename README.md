@@ -1267,4 +1267,6 @@ uv run pytest
 
 ## License
 
-[copse License 1.0](LICENSE)
+copse is source-available, not open source: you may install and use it under the
+[copse License 1.0](LICENSE), which does not allow changing or redistributing it,
+providing a competing product, or getting around paid-feature checks.

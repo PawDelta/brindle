@@ -8,7 +8,7 @@ In order to get any license under these terms, you must agree to them as both st
 
 ## Use License
 
-The licensor grants you a copyright license to install and use the software for any purpose, including commercial purposes, subject to the limitations and conditions below.
+The licensor grants you a copyright license to install and use the software for any purpose, including commercial purposes, except as **Noncompete** limits it, and subject to the other limitations and conditions below.
 
 ## No Modification
 
@@ -18,25 +18,37 @@ You may not change, adapt, translate or create new works based on the software, 
 
 You may make these changes without asking:
 
-1. **Contributions.** Changes you make only to submit to the licensor, through the licensor's official repository for the software. By submitting a contribution, you license it to the licensor under any terms the licensor chooses, and you confirm you have the right to do so. Submitting a contribution does not change your standing under these terms: it gives you no further rights to the software, including to any version that includes your contribution, and takes away none of your licenses.
+1. **Contributions.** Changes you make only to submit to the licensor, through the licensor's official repository for the software or another channel the licensor designates in writing. The licensor accepts contributions only from people who have signed its contributor license agreement, which governs the rights granted in those contributions. If you submit a contribution without one, you license it to the licensor under any terms the licensor chooses, and you confirm you have the right to do so. Submitting a contribution does not change your standing under these terms: it gives you no further rights to the software, including to any version that includes your contribution, and takes away none of your licenses.
 
 2. **Configuration and plugins.** Settings, agent profiles and plugins that work through the software's documented configuration and extension points, without changing any file of the software itself. A plugin may not include any part of the software.
 
-3. **Private fixes.** Changes to your own installed copy that fix a defect, kept only for your own use and not shared with anyone.
+3. **Private fixes.** Changes to your own installed copies that fix a defect, kept only for use by you and your company and not shared with anyone else.
+
+No change permitted here, including a plugin, may do anything **License Keys and Paid Features** forbids.
 
 ## No Redistribution
 
-Unless PawDelta LLC gives you express written permission, you may not distribute, sublicense, sell, rent, lend or otherwise make the software, or any changed copy of it, available to anyone else. Everyone who uses the software must get it from the licensor's official distribution channels, such as its package on the Python Package Index or its official repository, or from someone PawDelta LLC has permitted in writing to distribute it. You may make copies only as needed to install and use the software yourself, and to keep backups.
+Unless PawDelta LLC gives you express written permission, you may not distribute, sublicense, sell, rent, lend or otherwise make the software, or any changed copy of it, available to anyone else. Everyone who uses the software must get it from the licensor's official distribution channels, such as its package on the Python Package Index or its official repository, from someone PawDelta LLC has permitted in writing to distribute it, or from within their own company as the next paragraph allows. You may make copies only as needed to install and use the software yourself, and to keep backups.
+
+If you are an entity, you may also copy the software, unchanged except as **Permitted Changes** allows, within your company: to internal package mirrors and caches, to build and container images, and onto computers and networks your company controls, including networks not connected to the internet, as long as only your company and individuals working for it can get the copies, and only to use them as these terms allow.
 
 A fork of the official repository that a code hosting service's own terms allow is permitted only to view the software and prepare contributions under **Permitted Changes**.
 
 ## Noncompete
 
-Any purpose is a permitted purpose, except for providing any product that competes with the software or any product the licensor or any of its affiliates provides using the software.
+You may not use the software to provide any product that competes with the software.
+
+## License Keys and Paid Features
+
+Some features of the software work only with a paid plan, an entitlement or a license file from the licensor. These terms do not license those features without one. You may not move, change, disable, bypass or circumvent the software's license key, entitlement or account checks, or any functionality those checks protect, and you may not remove or hide any licensing, copyright or other notices of the licensor in the software. A plugin or configuration that does any of these things is not a permitted change.
+
+## Trademarks
+
+These terms do not grant you any right to use the names, logos or trademarks of the licensor or its affiliates, including "copse" and "PawDelta", except to accurately identify the software and its origin.
 
 ## Competition
 
-Goods and services compete even when they provide functionality through different kinds of interfaces or for different technical platforms. Applications can compete with services, libraries with plugins, frameworks with development tools, and so on, even if they're written in different programming languages or for different computer architectures. Goods and services compete even when provided free of charge. If you market a product as a practical substitute for the software or another product, it definitely competes.
+Goods and services compete even when they provide functionality through different kinds of interfaces or for different technical platforms. Applications can compete with services, libraries with plugins, frameworks with development tools, and so on, even if they're written in different programming languages or for different computer architectures. Goods and services compete even when provided free of charge. If you market a product as a practical substitute for the software, it definitely competes.
 
 ## Patent License
 
@@ -61,6 +73,10 @@ If you make any written claim that the software infringes or contributes to infr
 ## No Liability
 
 ***As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.***
+
+## Governing Law
+
+These terms are governed by the laws of the State of New York, without regard to its conflict-of-laws rules. Any dispute arising out of these terms or the software will be heard only in the state or federal courts located in the State of New York, and you and the licensor consent to their jurisdiction.
 
 ## Definitions
 
