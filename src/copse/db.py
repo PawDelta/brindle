@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS agents (
     inbox_token TEXT,
     pipeline TEXT,                 -- a worker's branch in copse's hands: 'reviewing' or 'fixing'
     pipeline_rounds INTEGER,
-    stuck_noted REAL               -- status_since of the 'waiting' spell its supervisor was told about (copse.cull)
+    stuck_noted REAL,              -- status_since of the 'waiting' spell its supervisor was told about (copse.cull)
+    review_sha TEXT,               -- the commit a reviewer was started on (agents.request_review)
+    unreported_noted INTEGER       -- its supervisor was told it stopped without reporting (agents.tell_parent_unreported)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,6 +312,8 @@ class Agent:
     pipeline: str | None = None
     pipeline_rounds: int | None = None
     stuck_noted: float | None = None
+    review_sha: str | None = None
+    unreported_noted: int | None = None
     plan_first: int | None = None      # must get its plan approved before editing (copse.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
 
@@ -474,6 +478,9 @@ class DB:
                           ("dismissed_at", "REAL"), ("stuck_noted", "REAL"),
                           ("inbox_socket", "TEXT"), ("inbox_token", "TEXT"),
                           ("pipeline", "TEXT"), ("pipeline_rounds", "INTEGER")):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        for col, kind in (("review_sha", "TEXT"), ("unreported_noted", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT")):
