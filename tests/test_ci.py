@@ -3,9 +3,12 @@ supervisor, git push and gh), the entitlement gate, and ``copse ci init``."""
 
 import functools
 import json
+import os
 import subprocess
 import time
 import types
+
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -35,7 +38,7 @@ class FakeSession:
         monkeypatch.setattr(ci, "_spawn", self.spawn)
         monkeypatch.setattr(ci, "_alive", lambda db, root_id: self.alive)
         monkeypatch.setattr(ci, "_stop", self.stop)
-        monkeypatch.setattr(ci, "_push", lambda ws, secrets=None: self.pushed.append(ws.branch))
+        monkeypatch.setattr(ci, "_push", lambda ws, secrets=None, remote=None: self.pushed.append(ws.branch))
         monkeypatch.setattr(ci, "_create_pr", self.create_pr)
 
     def spawn(self, db, ws, prompt):
@@ -50,7 +53,7 @@ class FakeSession:
     def stop(self, db, root_id):
         self.stopped.append(root_id)
 
-    def create_pr(self, ws, base, title, body, secrets=None):
+    def create_pr(self, ws, base, title, body, secrets=None, remote=None):
         self.prs.append((ws.branch, base, title, body))
         return "https://github.com/o/r/pull/7"
 
@@ -269,7 +272,7 @@ def test_cleanup_runs_when_the_run_itself_breaks(db, repo, monkeypatch):
 def test_pr_failure_is_reported_as_a_failure(db, repo, monkeypatch):
     s = FakeSession(db, monkeypatch, script=finish_goal)
 
-    def refuse(ws, base, title, body, secrets=None):
+    def refuse(ws, base, title, body, secrets=None, remote=None):
         raise ci.CIError("gh pr create failed: no commits between main and copse/ci-add-health")
 
     monkeypatch.setattr(ci, "_create_pr", refuse)
@@ -504,21 +507,71 @@ def test_withhold_secrets_removes_tokens_and_keeps_the_model_key():
     assert env == {"ANTHROPIC_API_KEY": "sk-ant-x", "PATH": "/bin"}
 
 
-def test_push_and_pr_get_the_withheld_tokens_back(monkeypatch, tmp_path):
+def _recording_run(seen, real=subprocess.run):
+    def fake(cmd, **kw):
+        seen.append((cmd, kw.get("env") or {}, kw.get("cwd")))
+        if cmd[:2] == ["gh", "pr"]:
+            return subprocess.CompletedProcess(cmd, 0, "https://github.com/o/r/pull/1\n", "")
+        if "push" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return real(cmd, **kw)
+    return fake
+
+
+def test_push_goes_through_a_fresh_bare_repo_not_the_agents_worktree(monkeypatch, repo):
+    # The agents' worktree plants a pre-push hook and repoints origin.
+    hooks = Path(repo) / ".git" / "hooks"
+    (hooks / "pre-push").write_text("#!/bin/sh\necho stolen > /tmp/copse-test-stolen\n")
+    (hooks / "pre-push").chmod(0o755)
+    subprocess.run(["git", "remote", "add", "origin", "https://evil.example/x.git"], cwd=repo, check=False)
+    subprocess.run(["git", "checkout", "-q", "-b", "copse/ci-x"], cwd=repo, check=True)
     seen = []
+    monkeypatch.setattr(ci.subprocess, "run", _recording_run(seen))
+    ws = types.SimpleNamespace(path=str(repo), branch="copse/ci-x", repo_root=str(repo))
+    ci._push(ws, {"GH_TOKEN": "ghs_secret", "COPSE_PRO_TOKEN": "cpc_secret"},
+             "https://github.com/acme/app")
+    push = next(cmd for cmd, _, _ in seen if "push" in cmd)
+    assert push[-2] == "https://github.com/acme/app.git" and "--no-verify" in push
+    assert "core.hooksPath=/dev/null" in push and str(repo) not in push[2]
+    fetch = next(cmd for cmd, _, _ in seen if "fetch" in cmd)
+    assert fetch[2].endswith("push.git")   # a bare repo copse made, not the worktree
+    for _, env, _ in seen:
+        assert env.get("GH_TOKEN") == "ghs_secret" and "COPSE_PRO_TOKEN" not in env
 
-    def fake_run(cmd, **kw):
-        seen.append((cmd, kw.get("env") or {}))
-        return subprocess.CompletedProcess(cmd, 0, "https://github.com/o/r/pull/1\n", "")
 
-    monkeypatch.setattr(ci.subprocess, "run", fake_run)
-    monkeypatch.delenv("GH_TOKEN", raising=False)
+def test_pr_names_the_repo_and_never_runs_in_the_worktree(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(ci.subprocess, "run", _recording_run(seen))
     ws = types.SimpleNamespace(path=str(tmp_path), branch="copse/ci-x", repo_root=str(tmp_path))
-    ci._push(ws, {"GH_TOKEN": "ghs_secret"})
-    ci._create_pr(ws, "main", "t", "b", {"GH_TOKEN": "ghs_secret"})
-    assert all(env.get("GH_TOKEN") == "ghs_secret" for _, env in seen)
-    assert "credential.helper=!gh auth git-credential" in seen[0][0]
-    assert all("ghs_secret" not in " ".join(cmd) for cmd, _ in seen)
+    url = ci._create_pr(ws, "main", "t", "b", {"GH_TOKEN": "ghs_secret", "COPSE_PRO_TOKEN": "cpc_s"},
+                        "https://github.com/acme/app")
+    cmd, env, cwd = seen[0]
+    assert url.endswith("/pull/1") and cmd[cmd.index("--repo") + 1] == "acme/app"
+    assert cwd != str(tmp_path) and "COPSE_PRO_TOKEN" not in env
+    assert all("ghs_secret" not in " ".join(c) for c, _, _ in seen)
+
+
+def test_no_push_or_pr_without_a_github_origin(tmp_path):
+    ws = types.SimpleNamespace(path=str(tmp_path), branch="b", repo_root=str(tmp_path))
+    with pytest.raises(ci.CIError):
+        ci._push(ws, {"GH_TOKEN": "x"}, "https://evil.example/acme/app")
+    with pytest.raises(ci.CIError):
+        ci._create_pr(ws, "main", "t", "b", {"GH_TOKEN": "x"}, None)
+
+
+def test_run_withholds_secrets_even_when_called_directly(db, repo, monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "ghs_direct")
+    monkeypatch.setenv("COPSE_PRO_TOKEN", "cpc_direct")
+    seen_env = {}
+
+    def spawn(db_, ws, prompt):
+        seen_env.update(os.environ)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(ci, "_spawn", spawn)
+    with pytest.raises(RuntimeError):
+        ci.run(db, str(repo), ci.goal_from_text("x"))
+    assert "GH_TOKEN" not in seen_env and "COPSE_PRO_TOKEN" not in seen_env
 
 
 def test_the_workflow_does_not_persist_checkout_credentials(tmp_path):
