@@ -26,6 +26,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -170,6 +171,51 @@ def require_ci(client=None):
     return ent
 
 
+# -- secrets ----------------------------------------------------------------------
+
+# Taken out of the environment before any agent starts: agents run the repo's
+# own code (tests, scripts, whatever a prompt talks them into), so they must
+# not inherit the org's CI token or a token that can push. copse's own push and
+# `gh pr create` get them back explicitly. The model API key stays: the agents
+# need it.
+WITHHELD_ENV = (TOKEN_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                "GITHUB_ENTERPRISE_TOKEN")
+
+
+def withhold_secrets(environ=None) -> dict[str, str]:
+    """Remove the WITHHELD_ENV variables from ``environ`` (default: this
+    process's environment, which tmux and so every agent inherits) and
+    return them."""
+    environ = os.environ if environ is None else environ
+    return {k: environ.pop(k) for k in WITHHELD_ENV if k in environ}
+
+
+def _github_env(secrets: dict[str, str] | None) -> dict[str, str]:
+    """This environment plus only the GitHub token(s): push and gh need
+    nothing else, least of all the org's CI token."""
+    gh = {k: v for k, v in (secrets or {}).items() if k != TOKEN_ENV}
+    return {**os.environ, **gh}
+
+
+def _clear_tmux_env() -> None:
+    """A tmux server that was already running keeps the environment it
+    started with, and new sessions inherit it: drop the withheld variables
+    from its global environment too."""
+    from copse import tmux
+
+    for k in WITHHELD_ENV:
+        try:
+            tmux._tmux("set-environment", "-g", "-u", k, check=False)
+        except Exception:  # noqa: BLE001 - no server yet: nothing to clear
+            pass
+
+
+def _repo_slug(remote: str | None) -> str | None:
+    """owner/name from https://github.com/owner/name."""
+    m = re.match(r"^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$", remote or "")
+    return m.group(1) if m else None
+
+
 # -- the run ----------------------------------------------------------------------
 
 
@@ -259,15 +305,45 @@ def _stop(db: DB, root_id: str) -> None:
     agents.pause(db, root_id)
 
 
-def _push(ws: Workspace) -> None:
-    git.push(ws.path, ws.branch)
+def _push(ws: Workspace, secrets: dict[str, str] | None = None, remote: str | None = None) -> None:
+    """Push the branch without trusting the worktree the agents worked in:
+    its hooks and git config are theirs to edit. The commits are fetched into
+    a fresh bare repo copse made (no hooks, no config of theirs) and pushed
+    from there to ``remote``, the origin recorded before any agent started,
+    with gh answering git's credential request from GH_TOKEN."""
+    if not _repo_slug(remote):
+        raise CIError("can't push: origin isn't a github.com repository")
+    env = _github_env(secrets)
+    ref = f"refs/heads/{ws.branch}"
+    with tempfile.TemporaryDirectory(prefix="copse-push-") as tmp:
+        bare = str(Path(tmp) / "push.git")
+        steps = [
+            ["git", "init", "--bare", "--quiet", bare],
+            ["git", "-C", bare, "fetch", "--no-tags", "--quiet", "--", ws.path, f"+{ref}:{ref}"],
+            ["git", "-C", bare, "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+             "-c", "credential.helper=!gh auth git-credential",
+             "push", "--no-verify", "--quiet", "--", f"{remote}.git", f"{ref}:{ref}"],
+        ]
+        for cmd in steps:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=git.TIMEOUT, env=env,
+                                  cwd=tmp)
+            if proc.returncode != 0:
+                raise git.GitError(f"git {cmd[3] if cmd[1] == '-C' else cmd[1]} failed: "
+                                   f"{proc.stderr.strip() or proc.stdout.strip()}")
 
 
-def _create_pr(ws: Workspace, base: str, title: str, body: str) -> str:
-    proc = subprocess.run(
-        ["gh", "pr", "create", "--base", base, "--head", ws.branch, "--title", title,
-         "--body", workspaces.with_footer(body, ws.repo_root)],
-        cwd=ws.path, capture_output=True, text=True)
+def _create_pr(ws: Workspace, base: str, title: str, body: str,
+               secrets: dict[str, str] | None = None, remote: str | None = None) -> str:
+    slug = _repo_slug(remote)
+    if not slug:
+        raise CIError("can't open a pull request: origin isn't a github.com repository")
+    # --repo, and not the worktree as cwd: gh would otherwise read the
+    # agents' git config to decide where the pull request goes.
+    with tempfile.TemporaryDirectory(prefix="copse-pr-") as tmp:
+        proc = subprocess.run(
+            ["gh", "pr", "create", "--repo", slug, "--base", base, "--head", ws.branch,
+             "--title", title, "--body", workspaces.with_footer(body, ws.repo_root)],
+            cwd=tmp, capture_output=True, text=True, env=_github_env(secrets))
     if proc.returncode != 0:
         raise CIError(f"gh pr create failed: {proc.stderr.strip() or proc.stdout.strip()}")
     url = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
@@ -326,15 +402,20 @@ def _poll(db: DB, root_id: str) -> tuple[str, str | None] | None:
 
 def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIMEOUT_MIN,
         max_workers: int | None = None, base: str | None = None, pr: bool = True,
-        poll_seconds: float = POLL_SECONDS, clock=time.time, sleep=time.sleep) -> Outcome:
+        poll_seconds: float = POLL_SECONDS, clock=time.time, sleep=time.sleep,
+        secrets: dict[str, str] | None = None) -> Outcome:
     """Run ``goal`` to a verified end (or not) and, with ``pr``, open the pull
     request. The session is always stopped before this returns."""
     from copse import autopilot as pilot
 
     if timeout_min <= 0:
         raise CIError("--timeout must be a positive number of minutes")
+    if secrets is None:   # however run() is reached, agents never get the tokens
+        secrets = withhold_secrets()
+    _clear_tmux_env()
     branch = goal.branch
     ws = _checkout(db, repo_path, branch, base)
+    remote = git.remote_web_url(ws.repo_root)   # recorded before any agent can edit it
     base_branch = base or ws.base_branch or git.default_branch(ws.repo_root)
     if max_workers is not None:
         set_max_workers(ws.repo_root, max_workers)
@@ -369,8 +450,8 @@ def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIME
             outcome.note = (outcome.note + "; " if outcome.note else "") + f"stopping the session failed: {e}"
     if outcome.status == "done" and pr:
         try:
-            _push(ws)
-            outcome.pr_url = _create_pr(ws, base_branch, goal.title, pr_body(outcome))
+            _push(ws, secrets, remote)
+            outcome.pr_url = _create_pr(ws, base_branch, goal.title, pr_body(outcome), secrets, remote)
         except (git.GitError, CIError) as e:
             outcome.note = str(e)
     return outcome
@@ -408,9 +489,10 @@ def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
     try:
         g = resolve_goal(goal, goal_file, issue, cwd)
         require_ci()
+        secrets = withhold_secrets()
         db = DB()
         outcome = run(db, cwd, g, timeout_min=timeout_min, max_workers=max_workers,
-                      base=base, pr=pr)
+                      base=base, pr=pr, secrets=secrets)
     except (CIError, git.GitError, workspaces.WorkspaceError, agents.AgentError) as e:
         echo(str(e))
         return 1
@@ -466,6 +548,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Agents run the repo's code: don't leave a push token in .git/config.
+          # copse pushes with GH_TOKEN itself, after the agents have stopped.
+          persist-credentials: false
       - name: Install tmux
         run: sudo apt-get update -q && sudo apt-get install -yq tmux
       - uses: astral-sh/setup-uv@v10.2.0

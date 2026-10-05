@@ -646,6 +646,7 @@ how to use them, and the next step to get the rest:
 copse account            # paid features: what you have, how to use them, how to get the rest
 copse account login      # opens your browser to sign in (--device: enter a code instead, e.g. over SSH); copse checks the plan offline from then on
 copse account status     # your plan, features, hosted learning on or off, when the entitlement expires
+copse account savings    # what hosted learning's picks gained in this repo, this month and last: estimates, from this machine's records only
 copse account upgrade    # opens the checkout for copse Pro (and prints its URL)
 copse account portal     # opens the billing portal (invoices, seats, cancellation); --org ORG for a team org
 copse account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
