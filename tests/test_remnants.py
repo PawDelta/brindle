@@ -1,4 +1,4 @@
-"""frith leaves nothing behind: test tmux servers, merged worktrees, stale
+"""brindle leaves nothing behind: test tmux servers, merged worktrees, stale
 locks, orphan sessions and servers, empty worktree folders."""
 
 import os
@@ -11,10 +11,10 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
-from frith import cull, procs, tmux, view, workspaces
-from frith.cli import app
-from frith.config import frith_home, worktrees_dir
-from frith.db import Agent
+from brindle import cull, procs, tmux, view, workspaces
+from brindle.cli import app
+from brindle.config import brindle_home, worktrees_dir
+from brindle.db import Agent
 
 OLD = time.time() - 3600
 
@@ -49,8 +49,8 @@ def dead_pid() -> int:
 
 
 def start_server(name: str, home: str) -> None:
-    subprocess.run(["tmux", "-L", name, "new-session", "-d", "-s", "frith_x_y",
-                    "-e", f"FRITH_HOME={home}"], check=True)
+    subprocess.run(["tmux", "-L", name, "new-session", "-d", "-s", "brindle_x_y",
+                    "-e", f"BRINDLE_HOME={home}"], check=True)
 
 
 def server_up(name: str) -> bool:
@@ -61,15 +61,15 @@ def server_up(name: str) -> bool:
 
 
 def test_killing_a_private_server_removes_its_socket():
-    tmux.ensure_session("frith_sock_test", "/tmp", {})
-    sock = tmux.socket_dir() / os.environ["FRITH_TMUX_SOCKET"]
+    tmux.ensure_session("brindle_sock_test", "/tmp", {})
+    sock = tmux.socket_dir() / os.environ["BRINDLE_TMUX_SOCKET"]
     assert sock.exists()
     tmux.kill_server()
     assert not sock.exists()
 
 
 def test_a_dead_test_runs_server_is_reaped(tmp_path):
-    name = f"frith-test-{dead_pid()}"
+    name = f"brindle-test-{dead_pid()}"
     start_server(name, str(tmp_path))  # its home still exists: the pid decides
     try:
         assert any(name in line for line in cull.orphan_servers())
@@ -82,7 +82,7 @@ def test_a_dead_test_runs_server_is_reaped(tmp_path):
 def test_conftest_reaps_dead_runs_left_over_from_earlier(tmp_path):
     from conftest import _reap_dead_test_servers
 
-    name = f"frith-test-{dead_pid()}"
+    name = f"brindle-test-{dead_pid()}"
     start_server(name, str(tmp_path))
     try:
         _reap_dead_test_servers()
@@ -93,7 +93,7 @@ def test_conftest_reaps_dead_runs_left_over_from_earlier(tmp_path):
 
 
 def test_a_live_test_runs_server_is_left_alone(tmp_path):
-    name = f"frith-test-{os.getpid()}-other"  # not a pid suffix, home exists
+    name = f"brindle-test-{os.getpid()}-other"  # not a pid suffix, home exists
     start_server(name, str(tmp_path))
     try:
         cull.orphan_servers()
@@ -102,8 +102,8 @@ def test_a_live_test_runs_server_is_left_alone(tmp_path):
         tmux.reap_server(name)
 
 
-def test_a_server_whose_frith_home_is_gone_is_reaped(tmp_path):
-    name = f"frith-e2e-remnant-{os.getpid()}"
+def test_a_server_whose_brindle_home_is_gone_is_reaped(tmp_path):
+    name = f"brindle-e2e-remnant-{os.getpid()}"
     start_server(name, str(tmp_path / "deleted-home"))
     try:
         assert any(name in line for line in cull.orphan_servers())
@@ -113,7 +113,7 @@ def test_a_server_whose_frith_home_is_gone_is_reaped(tmp_path):
 
 
 def test_a_dead_servers_socket_file_is_removed():
-    name = f"frith-e2e-stale-{os.getpid()}"
+    name = f"brindle-e2e-stale-{os.getpid()}"
     sock = tmux.socket_dir() / name
     tmux.socket_dir().mkdir(parents=True, exist_ok=True)
     sock.touch()
@@ -121,9 +121,9 @@ def test_a_dead_servers_socket_file_is_removed():
     assert not sock.exists()
 
 
-def test_detached_helpers_stop_when_their_frith_home_is_gone(tmp_path, monkeypatch):
+def test_detached_helpers_stop_when_their_brindle_home_is_gone(tmp_path, monkeypatch):
     gone = tmp_path / "gone-home"
-    monkeypatch.setenv("FRITH_HOME", str(gone))
+    monkeypatch.setenv("BRINDLE_HOME", str(gone))
     runner = CliRunner()
     for args in (["_after-launch", "abc"], ["_cull"], ["_deliver-checks", "abc", "p/w"],
                  ["_pool-fill", str(tmp_path)], ["_flush", "abc"], ["_close", "abc"]):
@@ -133,11 +133,11 @@ def test_detached_helpers_stop_when_their_frith_home_is_gone(tmp_path, monkeypat
 
 
 def test_real_spawn_sessions_end_with_the_test(db, repo):
-    from frith import agents
+    from brindle import agents
 
     ws = workspaces.create(db, str(repo), "feat-leak").workspace
     # No prompt: a shell worker's prompt is pasted into a real shell and run
-    # (its worker footer's `frith` would start a supervisor in this session).
+    # (its worker footer's `brindle` would start a supervisor in this session).
     agents.spawn(db, ws, "developer", provider_name="shell", mode="handoff")
     assert tmux.has_session(ws.tmux_session)
     # conftest's pytest_runtest_teardown kills it after this test; the next test
@@ -199,8 +199,8 @@ def test_prune_removes_merged_worktrees_and_their_branches(db, repo):
 
 
 def test_prune_keeps_merged_branches_when_the_repo_says_so(db, repo):
-    (repo / ".frith").mkdir(exist_ok=True)
-    (repo / ".frith" / "config.json").write_text('{"delete_merged_branches": false}')
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"delete_merged_branches": false}')
     done = merged_worker(db, repo)
     add_agent(db, done, "a1")
     lines = cull.prune_retired(db)
@@ -234,7 +234,7 @@ def test_stale_sidebar_locks_are_removed(db, repo):
     ws = workspaces.adopt_root(db, str(repo))
     add_agent(db, ws, "live", status="processing", result=None, mode="interactive")
     add_agent(db, ws, "over", status="done", mode="interactive")
-    locks = frith_home() / "locks"
+    locks = brindle_home() / "locks"
     locks.mkdir(parents=True)
     for aid in ("live", "over", "gone", "fresh"):
         (locks / f"sidebar-{aid}.lock").write_text("")
@@ -245,7 +245,7 @@ def test_stale_sidebar_locks_are_removed(db, repo):
 
 
 def test_the_periodic_sweep_cleans_locks(db):
-    locks = frith_home() / "locks"
+    locks = brindle_home() / "locks"
     locks.mkdir(parents=True)
     (locks / "sidebar-gone.lock").write_text("")
     os.utime(locks / "sidebar-gone.lock", (OLD, OLD))
@@ -256,23 +256,23 @@ def test_the_periodic_sweep_cleans_locks(db):
 # -- orphan tmux sessions, empty folders -----------------------------------------------
 
 
-def test_orphan_frith_sessions_are_killed(db, repo):
+def test_orphan_brindle_sessions_are_killed(db, repo):
     ws = workspaces.create(db, str(repo), "feat-live").workspace
     tmux.ensure_session(ws.tmux_session, ws.path, {})
     pane = tmux.new_window(ws.tmux_session, "agent", ws.path, ["sleep", "60"], {})
     add_agent(db, ws, "live", status="processing", result=None, window=pane)
-    tmux.ensure_session("frith_proj_feat-orphan", str(repo), {})
-    tmux.ensure_session("not-frith", str(repo), {})
-    tmux.ensure_session("frith_proj_devserver", str(repo), {})
-    tmux.new_window("frith_proj_devserver", "server", str(repo), ["sleep", "60"], {})
+    tmux.ensure_session("brindle_proj_feat-orphan", str(repo), {})
+    tmux.ensure_session("not-brindle", str(repo), {})
+    tmux.ensure_session("brindle_proj_devserver", str(repo), {})
+    tmux.new_window("brindle_proj_devserver", "server", str(repo), ["sleep", "60"], {})
     time.sleep(0.3)  # let the shells start
 
     lines = cull.orphan_sessions(db)
-    assert any("frith_proj_feat-orphan" in line for line in lines)
-    assert not tmux.has_session("frith_proj_feat-orphan")
+    assert any("brindle_proj_feat-orphan" in line for line in lines)
+    assert not tmux.has_session("brindle_proj_feat-orphan")
     assert tmux.has_session(ws.tmux_session)
-    assert tmux.has_session("not-frith")
-    assert tmux.has_session("frith_proj_devserver")  # something the person runs
+    assert tmux.has_session("not-brindle")
+    assert tmux.has_session("brindle_proj_devserver")  # something the person runs
 
 
 def test_empty_worktree_folders_are_removed(db, repo):
@@ -300,7 +300,7 @@ def _fake_gh(tmp_path, monkeypatch, answer):
 
 
 def test_first_pr_offers_to_delete_merged_branches_on_github(repo, tmp_path, monkeypatch):
-    from frith import cli
+    from brindle import cli
 
     log = _fake_gh(tmp_path, monkeypatch, "false")
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
@@ -313,7 +313,7 @@ def test_first_pr_offers_to_delete_merged_branches_on_github(repo, tmp_path, mon
 
 
 def test_no_offer_when_github_already_deletes_them(repo, tmp_path, monkeypatch):
-    from frith import cli
+    from brindle import cli
 
     log = _fake_gh(tmp_path, monkeypatch, "true")
     monkeypatch.setattr(cli.typer, "confirm", lambda *a, **k: pytest.fail("nothing to ask"))

@@ -6,9 +6,9 @@ import stat
 
 import pytest
 
-from frith import services, workspaces
-from frith.config import PORT_BLOCK_SIZE, load_repo_config
-from frith.pro import license
+from brindle import services, workspaces
+from brindle.config import PORT_BLOCK_SIZE, load_repo_config
+from brindle.pro import license
 
 
 @pytest.fixture
@@ -33,8 +33,8 @@ def entitled(monkeypatch):
 
 
 def configure(repo, services_cfg):
-    (repo / ".frith").mkdir(exist_ok=True)
-    (repo / ".frith" / "config.json").write_text(json.dumps({"services": services_cfg}))
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"services": services_cfg}))
 
 
 def test_presets_and_env_rendering(db, repo):
@@ -48,10 +48,10 @@ def test_presets_and_env_rendering(db, repo):
     svcs = services.resolve(ws, cfg)
     assert svcs[0].image.startswith("postgres:") and svcs[0].port == 5432
     assert svcs[0].env["DATABASE_URL"] == (
-        f"postgres://postgres:frith@127.0.0.1:{ws.port_base + 1}/app")
-    assert svcs[0].env["FRITH_SVC_DB_PORT"] == str(ws.port_base + 1)
+        f"postgres://postgres:brindle@127.0.0.1:{ws.port_base + 1}/app")
+    assert svcs[0].env["BRINDLE_SVC_DB_PORT"] == str(ws.port_base + 1)
     assert svcs[1].env["CACHE"] == f"my-cache@{ws.name}:{ws.port_base + 2}"
-    assert svcs[1].env["FRITH_SVC_MY_CACHE_PORT"] == str(ws.port_base + 2)
+    assert svcs[1].env["BRINDLE_SVC_MY_CACHE_PORT"] == str(ws.port_base + 2)
 
 
 def test_ports_come_from_the_block_after_the_apps_own(db, repo):
@@ -67,13 +67,13 @@ def test_started_on_create_and_in_workspace_env(db, repo, fake_docker, entitled)
     ws = workspaces.create(db, str(repo), "feat-a").workspace
     clear, call = fake_docker()
     assert clear == f"rm -f {services.container_name(ws, 'db')}"  # a leftover never blocks `up`
-    assert call.startswith("run -d --rm --name frith-")
-    assert f"--label frith.workspace={ws.id}" in call
+    assert call.startswith("run -d --rm --name brindle-")
+    assert f"--label brindle.workspace={ws.id}" in call
     assert f"-p 127.0.0.1:{ws.port_base + 1}:5432" in call
-    assert "-e POSTGRES_PASSWORD=frith" in call
+    assert "-e POSTGRES_PASSWORD=brindle" in call
     env = workspaces.workspace_env(ws)
     assert env["DATABASE_URL"].endswith(f":{ws.port_base + 1}/app")
-    assert env["FRITH_SVC_DB_PORT"] == str(ws.port_base + 1)
+    assert env["BRINDLE_SVC_DB_PORT"] == str(ws.port_base + 1)
 
 
 def test_removed_on_remove(db, repo, fake_docker, entitled):
@@ -81,7 +81,7 @@ def test_removed_on_remove(db, repo, fake_docker, entitled):
     ws = workspaces.create(db, str(repo), "feat-a").workspace
     configure(repo, [])  # removal goes by label, even after the config changed
     workspaces.remove(db, ws)
-    assert fake_docker()[-2:] == [f"ps -aq --filter label=frith.workspace={ws.id}", "rm -f c0ffee"]
+    assert fake_docker()[-2:] == [f"ps -aq --filter label=brindle.workspace={ws.id}", "rm -f c0ffee"]
 
 
 def test_not_entitled_runs_nothing(db, repo, fake_docker, monkeypatch, capsys):
@@ -89,7 +89,7 @@ def test_not_entitled_runs_nothing(db, repo, fake_docker, monkeypatch, capsys):
     configure(repo, [{"name": "db", "preset": "postgres"}])
     ws = workspaces.create(db, str(repo), "feat-a").workspace
     assert fake_docker() == []
-    assert "need frith Pro" in capsys.readouterr().err
+    assert "need brindle Pro" in capsys.readouterr().err
     assert "DATABASE_URL" not in workspaces.workspace_env(ws)
 
 

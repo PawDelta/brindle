@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Publish a release snapshot to the public frith-ai repository.
+"""Publish a release snapshot to the public brindle-ai repository.
 
 Development happens in this (private) repository. The public repository
-hmlerner/frith-ai only gets one commit per release: the released code, README,
+hmlerner/brindle-ai only gets one commit per release: the released code, README,
 license and pyproject.toml, with no development history, tests, CI or config.
 
     python3 scripts/publish_public.py 0.17.0            # show what would happen
     python3 scripts/publish_public.py 0.17.0 --push     # commit, tag, push, release
 
 It reads the files at this repo's tag ``v<version>``, replaces the public
-checkout's contents with them, commits "frith <version>", tags it, pushes, and
-creates the GitHub release there with ``.frith/release-notes-<version>.md``.
+checkout's contents with them, commits "brindle <version>", tags it, pushes, and
+creates the GitHub release there with ``.brindle/release-notes-<version>.md``.
 PyPI publishing stays with this repo's Publish workflow.
 """
 
@@ -25,7 +25,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-PUBLIC_REPO = "hmlerner/frith-ai"
+PUBLIC_REPO = "hmlerner/brindle-ai"
 PUBLIC_PATHS = ["src", "README.md", "LICENSE", "SCHEDULE-A", "pyproject.toml"]
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -39,13 +39,13 @@ def run(args: list[str], cwd: Path, capture: bool = False) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("version")
-    parser.add_argument("--public", default=os.path.expanduser("~/Projects/frith-ai"),
+    parser.add_argument("--public", default=os.path.expanduser("~/Projects/brindle-ai"),
                         help="local clone of the public repo (cloned if missing)")
     parser.add_argument("--push", action="store_true", help="actually commit, tag, push and release")
     args = parser.parse_args()
 
     tag = f"v{args.version}"
-    notes = ROOT / ".frith" / f"release-notes-{args.version}.md"
+    notes = ROOT / ".brindle" / f"release-notes-{args.version}.md"
     try:
         run(["git", "rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}"], ROOT, capture=True)
     except subprocess.CalledProcessError:
@@ -70,7 +70,7 @@ def main() -> int:
     names = tarfile.open(fileobj=io.BytesIO(archive)).getnames()
     print(f"{tag}: {len(names)} entries from {', '.join(PUBLIC_PATHS)}")
     if not args.push:
-        print(f"dry run: would replace {public}'s files, commit \"frith {args.version}\", "
+        print(f"dry run: would replace {public}'s files, commit \"brindle {args.version}\", "
               f"tag {tag}, push, and create the release on {PUBLIC_REPO}")
         return 0
 
@@ -80,10 +80,10 @@ def main() -> int:
         shutil.rmtree(entry) if entry.is_dir() and not entry.is_symlink() else entry.unlink()
     tarfile.open(fileobj=io.BytesIO(archive)).extractall(public, filter="data")
     run(["git", "add", "-A"], public)
-    run(["git", "commit", "-q", "-m", f"frith {args.version}"], public)
+    run(["git", "commit", "-q", "-m", f"brindle {args.version}"], public)
     run(["git", "tag", tag], public)
     run(["git", "push", "-q", "origin", "HEAD", tag], public)
-    run(["gh", "release", "create", tag, "-R", PUBLIC_REPO, "--title", f"frith {args.version}",
+    run(["gh", "release", "create", tag, "-R", PUBLIC_REPO, "--title", f"brindle {args.version}",
          "--notes-file", str(notes)], ROOT)
     print(f"published {tag} to {PUBLIC_REPO}")
     return 0

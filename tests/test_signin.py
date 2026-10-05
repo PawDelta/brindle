@@ -1,12 +1,12 @@
 """A CLI that isn't signed in stops a launch with how to sign in, instead of
-opening on its login screen with frith's prompt typed into it."""
+opening on its login screen with brindle's prompt typed into it."""
 
 import json
 
 import pytest
 
-from frith import agents, autopilot, doctor, providers, workspaces
-from frith.config import load_repo_config
+from brindle import agents, autopilot, doctor, providers, workspaces
+from brindle.config import load_repo_config
 
 
 def fake_probe(monkeypatch, replies):
@@ -84,7 +84,7 @@ def test_chat_preflight_and_doctor_say_how_to_sign_in(monkeypatch):
 
 
 def test_signed_out_profiles_are_not_offered(db, repo, monkeypatch):
-    from frith import mcp_server
+    from brindle import mcp_server
 
     fake_probe(monkeypatch, {"login": CODEX_OUT, "auth": CLAUDE_IN})
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")

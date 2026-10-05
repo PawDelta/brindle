@@ -1,4 +1,4 @@
-from frith.profiles import _parse, list_profiles, load_profile
+from brindle.profiles import _parse, list_profiles, load_profile
 
 
 def test_frontmatter_values_drop_trailing_comments():
@@ -65,14 +65,14 @@ def test_repo_add_dirs_apply_to_every_profile_and_a_profile_adds_to_them(tmp_pat
     launch's job, once; loading a profile, which happens several times per
     launch and on every resume, says nothing.
     """
-    from frith.profiles import load_profile, missing_add_dirs
+    from brindle.profiles import load_profile, missing_add_dirs
 
     repo = tmp_path / "proj"
-    (repo / ".frith" / "agents").mkdir(parents=True)
+    (repo / ".brindle" / "agents").mkdir(parents=True)
     (repo / "cache").mkdir()
     (repo / "refs").mkdir()
-    (repo / ".frith" / "config.json").write_text('{"add_dirs": ["cache", "/opt/shared"]}')
-    (repo / ".frith" / "agents" / "worker.md").write_text(
+    (repo / ".brindle" / "config.json").write_text('{"add_dirs": ["cache", "/opt/shared"]}')
+    (repo / ".brindle" / "agents" / "worker.md").write_text(
         "---\nname: worker\ndescription: d\nprovider: claude\nadd_dirs: refs\n---\nbody\n"
     )
 
@@ -82,7 +82,7 @@ def test_repo_add_dirs_apply_to_every_profile_and_a_profile_adds_to_them(tmp_pat
     assert missing_add_dirs(p) == ["/opt/shared"]
 
     # A profile with none of its own still gets the repo's, and so does a built-in.
-    (repo / ".frith" / "agents" / "plain.md").write_text(
+    (repo / ".brindle" / "agents" / "plain.md").write_text(
         "---\nname: plain\ndescription: d\nprovider: claude\n---\nbody\n"
     )
     assert load_profile("plain", str(repo)).add_dirs[0] == str(repo / "cache")
@@ -91,14 +91,14 @@ def test_repo_add_dirs_apply_to_every_profile_and_a_profile_adds_to_them(tmp_pat
 
 def test_repo_add_dirs_expand_a_leading_tilde(tmp_path, monkeypatch):
     """``~/cache`` means the home directory's cache, not ``<repo>/~/cache``."""
-    from frith.profiles import load_profile
+    from brindle.profiles import load_profile
 
     home = tmp_path / "home"
     (home / "cache").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
     repo = tmp_path / "proj"
-    (repo / ".frith").mkdir(parents=True)
-    (repo / ".frith" / "config.json").write_text('{"add_dirs": ["~/cache"]}')
+    (repo / ".brindle").mkdir(parents=True)
+    (repo / ".brindle" / "config.json").write_text('{"add_dirs": ["~/cache"]}')
 
     assert load_profile("developer", str(repo)).add_dirs == [str(home / "cache")]
 
@@ -107,12 +107,12 @@ def test_an_unknown_user_in_add_dirs_is_reported_not_raised(tmp_path):
     """``~typo/cache`` makes expanduser raise. Kept as written instead, so
     loading the profile (and every launch with it) still works and launch
     reports the entry as missing."""
-    from frith.profiles import load_profile, missing_add_dirs
+    from brindle.profiles import load_profile, missing_add_dirs
 
     repo = tmp_path / "proj"
-    (repo / ".frith").mkdir(parents=True)
-    (repo / ".frith" / "config.json").write_text('{"add_dirs": ["~no-such-user-frith/cache"]}')
+    (repo / ".brindle").mkdir(parents=True)
+    (repo / ".brindle" / "config.json").write_text('{"add_dirs": ["~no-such-user-brindle/cache"]}')
 
     p = load_profile("developer", str(repo))
-    assert p.add_dirs == ["~no-such-user-frith/cache"]
-    assert missing_add_dirs(p) == ["~no-such-user-frith/cache"]
+    assert p.add_dirs == ["~no-such-user-brindle/cache"]
+    assert missing_add_dirs(p) == ["~no-such-user-brindle/cache"]

@@ -3,12 +3,12 @@ import time
 
 from typer.testing import CliRunner
 
-from frith import permissions
-from frith.cli import app
-from frith.config import set_local
-from frith.db import Agent
-from frith.profiles import _parse, profile_rules_for
-from frith import agents, antigravity, workspaces
+from brindle import permissions
+from brindle.cli import app
+from brindle.config import set_local
+from brindle.db import Agent
+from brindle.profiles import _parse, profile_rules_for
+from brindle import agents, antigravity, workspaces
 
 
 def test_profile_permission_denies_parse_and_only_deny():
@@ -47,23 +47,23 @@ def test_missing_profile_has_no_override(tmp_path):
 
 
 def test_permissions_check_reports_provider_capability(monkeypatch):
-    from frith.profiles import Profile
+    from brindle.profiles import Profile
 
     profile = Profile("reviewer", "", "claude", "", permission_denies=["fetch glob https://private/*"])
-    monkeypatch.setattr("frith.cli._here_repo", lambda: None)
-    monkeypatch.setattr("frith.cli.load_profile", lambda name, repo: profile)
+    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
+    monkeypatch.setattr("brindle.cli.load_profile", lambda name, repo: profile)
     result = CliRunner().invoke(app, ["permissions", "check", "--profile", "reviewer"])
     assert result.exit_code == 0, result.output
-    assert "Claude Code (frith hook):" in result.output
-    assert "Codex (frith hook):" in result.output
+    assert "Claude Code (brindle hook):" in result.output
+    assert "Codex (brindle hook):" in result.output
     assert "Antigravity:" in result.output
     assert "deny  fetch" in result.output
-    assert "deny  fetch fetch glob 'https://private/*' (profile; frith hook only)" in result.output
+    assert "deny  fetch fetch glob 'https://private/*' (profile; brindle hook only)" in result.output
     assert "hook allow is ignored" in result.output
 
 
 def test_permissions_check_unknown_profile_and_default_all_profiles(monkeypatch):
-    monkeypatch.setattr("frith.cli._here_repo", lambda: None)
+    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
     unknown = CliRunner().invoke(app, ["permissions", "check", "--profile", "no-such-profile"])
     assert unknown.exit_code == 2
     all_profiles = CliRunner().invoke(app, ["permissions", "check"])
@@ -74,8 +74,8 @@ def test_permissions_check_unknown_profile_and_default_all_profiles(monkeypatch)
 def test_permission_hooks_enforce_profile_deny(db, repo):
     ws = workspaces.create(db, str(repo), "feature").workspace
     set_local(ws.repo_root, "permission_policy", "on")
-    (repo / ".frith" / "agents").mkdir(parents=True, exist_ok=True)
-    (repo / ".frith" / "agents" / "reviewer.md").write_text(
+    (repo / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
+    (repo / ".brindle" / "agents" / "reviewer.md").write_text(
         '---\nname: reviewer\npermission_denies: ["read prefix /secret"]\n---\nreview\n'
     )
     agent = Agent("reviewer-worker", ws.id, "reviewer", "claude", "boss", "assign", "processing",
@@ -94,21 +94,21 @@ def test_permission_hooks_enforce_profile_deny(db, repo):
 
 
 def test_dropped_overrides_show_in_check(monkeypatch):
-    from frith.profiles import Profile
+    from brindle.profiles import Profile
 
     profile = Profile("reviewer", "", "claude", "", permission_denies=["unknown matcher x"])
-    monkeypatch.setattr("frith.cli._here_repo", lambda: None)
-    monkeypatch.setattr("frith.cli.load_profile", lambda name, repo: profile)
+    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
+    monkeypatch.setattr("brindle.cli.load_profile", lambda name, repo: profile)
     result = CliRunner().invoke(app, ["permissions", "check", "--profile", "reviewer"])
     assert "dropped invalid permission_denies entry" in result.output
 
 
 def test_permissions_check_shows_agy_settings_as_they_are(monkeypatch, tmp_path):
-    """Antigravity's own settings.json, read as agy reads it: frith's mirror
+    """Antigravity's own settings.json, read as agy reads it: brindle's mirror
     entries and the person's own, told apart; a profile's denies are never
     claimed to be in it (that file is shared by every agy agent)."""
-    from frith import antigravity, permissions
-    from frith.profiles import Profile
+    from brindle import antigravity, permissions
+    from brindle.profiles import Profile
 
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({"permissions": {
@@ -119,27 +119,27 @@ def test_permissions_check_shows_agy_settings_as_they_are(monkeypatch, tmp_path)
         store.agy_managed = {"allow": ["command(git status)"], "deny": ["command(git push)"]}
         store.agy_repos = {"/repo": []}
     profile = Profile("reviewer", "", "claude", "", permission_denies=["bash prefix rm"])
-    monkeypatch.setattr("frith.cli._here_repo", lambda: None)
-    monkeypatch.setattr("frith.cli.load_profile", lambda name, repo: profile)
+    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
+    monkeypatch.setattr("brindle.cli.load_profile", lambda name, repo: profile)
 
     out = CliRunner().invoke(app, ["permissions", "check", "--profile", "reviewer"]).output
 
     assert f"Antigravity settings ({settings})" in out
-    assert "frith mirror: on for /repo" in out
-    assert "allow command(git status) (frith mirror)" in out
-    assert "allow command(make lint) (yours, not managed by frith)" in out
-    assert "deny  command(git push) (frith mirror)" in out
-    assert "(profile; frith hook only)" in out
+    assert "brindle mirror: on for /repo" in out
+    assert "allow command(git status) (brindle mirror)" in out
+    assert "allow command(make lint) (yours, not managed by brindle)" in out
+    assert "deny  command(git push) (brindle mirror)" in out
+    assert "(profile; brindle hook only)" in out
     assert "settings + hook" in out
 
 
 def test_permissions_check_with_unreadable_agy_settings(monkeypatch, tmp_path):
-    from frith import antigravity
+    from brindle import antigravity
 
     settings = tmp_path / "settings.json"
     settings.write_text("{not json")
     monkeypatch.setattr(antigravity, "settings_path", lambda: settings)
-    monkeypatch.setattr("frith.cli._here_repo", lambda: None)
+    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
     out = CliRunner().invoke(app, ["permissions", "check"]).output
     assert "couldn't read it" in out
-    assert "frith mirror: off" in out
+    assert "brindle mirror: off" in out

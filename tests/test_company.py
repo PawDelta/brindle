@@ -1,7 +1,7 @@
-"""``frith account org company``: linking orgs into one company, the only
+"""``brindle account org company``: linking orgs into one company, the only
 group learning is pooled within."""
 
-from frith.pro import auth
+from brindle.pro import auth
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
 from test_pro_team import ORG, run, team  # noqa: F401 - fixtures/helpers
 

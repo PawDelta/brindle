@@ -1,6 +1,6 @@
 """One reviewer per workspace and commit (a new commit replaces it), and the
 "stopped without calling submit_review" notice: none once a verdict is
-recorded for the current commit, at most once otherwise, from frith, and
+recorded for the current commit, at most once otherwise, from brindle, and
 naming a reviewer rather than a worker."""
 
 from __future__ import annotations
@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from frith import agents, gates, tmux, workspaces
-from frith.db import Agent
-from frith.profiles import Profile
+from brindle import agents, gates, tmux, workspaces
+from brindle.db import Agent
+from brindle.profiles import Profile
 
 
 @pytest.fixture(autouse=True)
@@ -100,7 +100,7 @@ def test_no_notice_once_the_reviewer_submitted_for_the_current_commit(db, ws, bo
     assert sent == []
 
 
-def test_notice_once_from_frith_naming_a_reviewer(db, ws, boss, monkeypatch):
+def test_notice_once_from_brindle_naming_a_reviewer(db, ws, boss, monkeypatch):
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda *a, **k: sent.append(a))
     rev = add_reviewer(db, ws)
@@ -108,7 +108,7 @@ def test_notice_once_from_frith_naming_a_reviewer(db, ws, boss, monkeypatch):
     agents.tell_parent_unreported(db, db.get_agent(rev.id))
     assert len(sent) == 1
     _, to_id, body = sent[0][:3]
-    assert to_id == "boss" and len(sent[0]) == 3   # no sender: it comes from frith
+    assert to_id == "boss" and len(sent[0]) == 3   # no sender: it comes from brindle
     assert body.startswith("Reviewer rev1") and "Worker" not in body
 
 

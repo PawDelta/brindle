@@ -1,10 +1,10 @@
 [project]
-name = "frith"
+name = "brindle"
 version = "0.0.1"
 description = "Run coding agents in parallel, each on its own git branch, with a supervisor that delegates, reviews, and merges"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "LicenseRef-frith-1.0"
+license = "LicenseRef-brindle-1.0"
 license-files = ["LICENSE", "SCHEDULE-A"]
 authors = [{ name = "Hannah Lerner" }]
 keywords = ["ai", "agents", "claude-code", "codex", "git", "worktree", "tmux", "mcp", "orchestration"]
@@ -28,24 +28,24 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://pawdelta.com/frith/"
-Documentation = "https://pawdelta.com/frith/docs/recommended-use"
-Changelog = "https://pawdelta.com/frith/changelog"
+Homepage = "https://pawdelta.com/brindle/"
+Documentation = "https://pawdelta.com/brindle/docs/recommended-use"
+Changelog = "https://pawdelta.com/brindle/changelog"
 Support = "mailto:support@pawdelta.com"
 
 [project.scripts]
-frith = "frith.cli:app"
+brindle = "brindle.cli:app"
 
-# frith Pro and Team (src/frith/pro): inert without a verified entitlement.
-[project.entry-points."frith.account"]
-pro = "frith.pro.account:make"
+# brindle Pro and Team (src/brindle/pro): inert without a verified entitlement.
+[project.entry-points."brindle.account"]
+pro = "brindle.pro.account:make"
 
-[project.entry-points."frith.policy"]
-pro = "frith.pro.team_policy:make"
+[project.entry-points."brindle.policy"]
+pro = "brindle.pro.team_policy:make"
 
-[project.entry-points."frith.events"]
-pro = "frith.pro.team_events:make"
-audit = "frith.pro.audit_chain:make"
+[project.entry-points."brindle.events"]
+pro = "brindle.pro.team_events:make"
+audit = "brindle.pro.audit_chain:make"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -55,7 +55,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/frith"]
+packages = ["src/brindle"]
 # Metadata 2.5 is newer than twine/PyPI tooling reliably accepts.
 core-metadata-version = "2.4"
 

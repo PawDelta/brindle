@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from frith import agents, gates, pipeline, tmux, workspaces
-from frith.db import Agent
+from brindle import agents, gates, pipeline, tmux, workspaces
+from brindle.db import Agent
 
 
 def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle", **kw):
@@ -17,8 +17,8 @@ def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle",
 
 
 def setup(db, repo, monkeypatch, config):
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "config.json").write_text(json.dumps({"review": True, **config}))
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True, **config}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     ws = workspaces.create(db, str(repo), "feat").workspace
@@ -73,8 +73,8 @@ def test_default_branch_is_not_merged_into_without_opt_in(db, repo, monkeypatch)
 
 def test_merge_into_puts_workers_on_that_branch_and_is_merged_there(db, repo, monkeypatch):
     sh("git branch integration", repo)
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "config.json").write_text(json.dumps({"merge_into": "integration"}))
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"merge_into": "integration"}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     monkeypatch.setattr(agents, "spawn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
@@ -87,8 +87,8 @@ def test_merge_into_puts_workers_on_that_branch_and_is_merged_there(db, repo, mo
 def test_merge_into_leaves_a_workers_own_sub_workers_on_its_branch(db, repo, monkeypatch):
     sh("git branch integration", repo)
     sh("git branch topic", repo)
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "config.json").write_text(json.dumps({"merge_into": "integration"}))
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"merge_into": "integration"}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     mine = workspaces.create(db, str(repo), "topic", apply_prefix=False).workspace

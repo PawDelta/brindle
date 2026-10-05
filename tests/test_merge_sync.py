@@ -10,13 +10,13 @@ import time
 import pytest
 
 from conftest import sh
-from frith import agents, git, mcp_server, tmux, workspaces
-from frith.db import Agent
+from brindle import agents, git, mcp_server, tmux, workspaces
+from brindle.db import Agent
 
 
 def write_config(repo, **cfg):
-    (repo / ".frith").mkdir(exist_ok=True)
-    (repo / ".frith" / "config.json").write_text(json.dumps(cfg))
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps(cfg))
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def boss(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))
-    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 
@@ -226,7 +226,7 @@ def test_merge_workspace_does_not_block_a_worker_merging_its_own_branch(db, repo
     git.commit_all(ws.path, "work")
     db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "processing",
                         "@1", None, time.time()))
-    monkeypatch.setenv("FRITH_AGENT_ID", "w1")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "w1")
 
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
 

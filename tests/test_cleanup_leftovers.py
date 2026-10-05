@@ -1,10 +1,10 @@
-"""Regression coverage for stale frith workspaces and task claims."""
+"""Regression coverage for stale brindle workspaces and task claims."""
 
 import time
 from pathlib import Path
 
-from frith import cull, tasks, workspaces
-from frith.db import Agent
+from brindle import cull, tasks, workspaces
+from brindle.db import Agent
 
 
 def _agent(db, ws, agent_id, *, status="paused", result=None, old=True):
@@ -43,7 +43,7 @@ def test_prune_closes_old_paused_agent_on_merged_workspace(db, repo, monkeypatch
     _commit(Path(ws.path), repo, "change.py")
     workspaces.merge_back(db, ws)
     agent = _agent(db, ws, "old-paused")
-    monkeypatch.setattr("frith.cull.tmux.list_panes", lambda: {})
+    monkeypatch.setattr("brindle.cull.tmux.list_panes", lambda: {})
 
     lines = cull.prune_stale_agents(db, now=time.time())
 
@@ -66,10 +66,10 @@ def test_prune_leaves_an_idle_agent_with_a_live_pane(db, repo, monkeypatch):
     old merged worktree must not be closed (and its process stopped)."""
     ws = _merged_workspace(db, repo, "feat-live-idle")
     agent = _agent(db, ws, "live-idle", status="idle")
-    monkeypatch.setattr("frith.cull.tmux.list_panes", lambda: {})
-    monkeypatch.setattr("frith.cull.agents.is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr("brindle.cull.tmux.list_panes", lambda: {})
+    monkeypatch.setattr("brindle.cull.agents.is_alive", lambda a, panes=None: True)
     closed = []
-    monkeypatch.setattr("frith.cull.agents.close", lambda db, aid, panes=None: closed.append(aid))
+    monkeypatch.setattr("brindle.cull.agents.close", lambda db, aid, panes=None: closed.append(aid))
 
     lines = cull.prune_stale_agents(db, now=time.time())
 
@@ -79,8 +79,8 @@ def test_prune_leaves_an_idle_agent_with_a_live_pane(db, repo, monkeypatch):
 def test_prune_closes_an_idle_agent_whose_process_exited(db, repo, monkeypatch):
     ws = _merged_workspace(db, repo, "feat-dead-idle")
     agent = _agent(db, ws, "dead-idle", status="idle")
-    monkeypatch.setattr("frith.cull.tmux.list_panes", lambda: {})
-    monkeypatch.setattr("frith.cull.agents.is_alive", lambda a, panes=None: False)
+    monkeypatch.setattr("brindle.cull.tmux.list_panes", lambda: {})
+    monkeypatch.setattr("brindle.cull.agents.is_alive", lambda a, panes=None: False)
 
     lines = cull.prune_stale_agents(db, now=time.time())
 

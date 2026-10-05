@@ -3,10 +3,10 @@ import time
 
 import pytest
 
-from frith import agents, codemap, workspaces
-from frith.db import Agent
-from frith.profiles import load_profile
-from frith.providers import ClaudeCode, LaunchContext, get_provider
+from brindle import agents, codemap, workspaces
+from brindle.db import Agent
+from brindle.profiles import load_profile
+from brindle.providers import ClaudeCode, LaunchContext, get_provider
 
 
 @pytest.fixture
@@ -35,8 +35,8 @@ def test_guidance_says_to_open_paths_in_the_agents_own_checkout(mapped):
 
 
 def test_config_can_turn_it_off(mapped):
-    (mapped / ".frith").mkdir()
-    (mapped / ".frith" / "config.json").write_text(json.dumps({"graphify": False}))
+    (mapped / ".brindle").mkdir()
+    (mapped / ".brindle" / "config.json").write_text(json.dumps({"graphify": False}))
     assert codemap.guidance(str(mapped)) is None
 
 

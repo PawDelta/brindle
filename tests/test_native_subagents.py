@@ -1,4 +1,4 @@
-"""Claude Code's own built-in subagents (its Agent tool), surfaced in frith's
+"""Claude Code's own built-in subagents (its Agent tool), surfaced in brindle's
 sidebar via the SubagentStart/SubagentStop hooks."""
 
 import sqlite3
@@ -7,10 +7,10 @@ from dataclasses import replace
 
 import pytest
 
-from frith import agents, tmux, view, watch
-from frith.db import DB, Agent
-from frith.profiles import load_profile
-from frith.providers import ClaudeCode, LaunchContext
+from brindle import agents, tmux, view, watch
+from brindle.db import DB, Agent
+from brindle.profiles import load_profile
+from brindle.providers import ClaudeCode, LaunchContext
 
 
 def fake_agent(db, ws, status="processing", mode="assign", parent=None, agent_id="a1"):
@@ -21,7 +21,7 @@ def fake_agent(db, ws, status="processing", mode="assign", parent=None, agent_id
 
 @pytest.fixture
 def ws(db, repo):
-    from frith import workspaces
+    from brindle import workspaces
 
     return workspaces.create(db, str(repo), "feature").workspace
 
@@ -134,7 +134,7 @@ def test_native_subagents_are_invisible_to_agent_listings(db, ws):
 
 
 def test_native_subagents_are_invisible_to_autopilot_worker_counts(db, ws):
-    from frith import autopilot
+    from brindle import autopilot
 
     fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
     db.add_autopilot("boss")

@@ -1,10 +1,10 @@
 #!/bin/sh
-# Install frith: curl -fsSL pawdelta.com/frith/install | sh
+# Install brindle: curl -fsSL pawdelta.com/brindle/install | sh
 #
 # Installs uv (if missing) and tmux (with Homebrew on macOS; prints the
-# command elsewhere), then frith itself with `uv tool install`, then runs
-# `frith doctor`. Safe to run again: it upgrades frith in place.
-# FRITH_VERSION=0.14.3 pins a version.
+# command elsewhere), then brindle itself with `uv tool install`, then runs
+# `brindle doctor`. Safe to run again: it upgrades brindle in place.
+# BRINDLE_VERSION=0.14.3 pins a version.
 set -eu
 
 say() { printf '%s\n' "$*"; }
@@ -15,7 +15,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 case "$(uname -s)" in
   Darwin) os=mac ;;
   Linux) os=linux ;;
-  *) say "frith runs on macOS and Linux (on Windows, use WSL)."; exit 1 ;;
+  *) say "brindle runs on macOS and Linux (on Windows, use WSL)."; exit 1 ;;
 esac
 
 if ! have uv; then
@@ -34,12 +34,12 @@ if ! have tmux; then
   elif have dnf; then
     warn "tmux is missing. Install it with: sudo dnf install -y tmux"
   else
-    warn "tmux is missing: frith runs every agent in a tmux window. Install it with your package manager."
+    warn "tmux is missing: brindle runs every agent in a tmux window. Install it with your package manager."
   fi
 fi
 
-spec="frith"
-[ -n "${FRITH_VERSION:-}" ] && spec="frith==$FRITH_VERSION"
+spec="brindle"
+[ -n "${BRINDLE_VERSION:-}" ] && spec="brindle==$BRINDLE_VERSION"
 step "installing $spec"
 uv tool install --upgrade --python '>=3.11' "$spec"
 
@@ -55,9 +55,9 @@ if ! have claude; then
 fi
 
 say ""
-frith doctor || true
+brindle doctor || true
 say ""
-step "frith $(frith --version 2>/dev/null | cut -d' ' -f2) is installed. Next:"
+step "brindle $(brindle --version 2>/dev/null | cut -d' ' -f2) is installed. Next:"
 say "    cd your/repo"
-say "    frith init     # detects your setup and test commands"
-say "    frith          # opens the supervisor; tell it what to build"
+say "    brindle init     # detects your setup and test commands"
+say "    brindle          # opens the supervisor; tell it what to build"

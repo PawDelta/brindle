@@ -5,8 +5,8 @@ import time
 
 import pytest
 
-from frith import agents, autopilot, config, git, sessions, workspaces
-from frith.db import Agent, Task
+from brindle import agents, autopilot, config, git, sessions, workspaces
+from brindle.db import Agent, Task
 
 from conftest import sh
 
@@ -19,11 +19,11 @@ def add(db, ws, aid, mode="interactive", parent=None, status="running"):
 
 
 def test_config_is_found_from_a_linked_worktree_via_the_main_one(repo, tmp_path):
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "config.local.json").write_text(json.dumps({"max_agents": 7}))
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"max_agents": 7}))
     linked = tmp_path / "linked"
     sh(f"git worktree add -q -b other {linked}", repo)
-    assert not (linked / ".frith").exists()
+    assert not (linked / ".brindle").exists()
     assert config.load_repo_config(linked).max_agents == 7
     assert config.config_root(linked) == repo
 

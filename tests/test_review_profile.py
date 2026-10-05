@@ -1,16 +1,16 @@
 """default_review_profile: which reviewer request_review picks by default.
-The baseline reviewer, unless frith Pro's learner picks another that can run
-here; frith never reaches for a different model on its own."""
+The baseline reviewer, unless brindle Pro's learner picks another that can run
+here; brindle never reaches for a different model on its own."""
 
 import shutil
 import time
 
 import pytest
 
-from frith import agents
-from frith.config import RepoConfig
-from frith.db import Agent
-from frith.native import runner
+from brindle import agents
+from brindle.config import RepoConfig
+from brindle.db import Agent
+from brindle.native import runner
 
 
 def worker(provider="claude"):
@@ -52,7 +52,7 @@ class FakeLearner:
 
 @pytest.fixture
 def learner(monkeypatch):
-    from frith import learning
+    from brindle import learning
 
     box = {"learner": None}
     monkeypatch.setattr(learning, "plugin", lambda cfg, repo_root: box["learner"])

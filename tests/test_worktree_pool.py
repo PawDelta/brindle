@@ -8,21 +8,21 @@ from pathlib import Path
 
 import pytest
 
-from frith import git, pool, sessions, view, workspaces
-from frith.config import load_repo_config
-from frith.db import DB, PoolEntry
+from brindle import git, pool, sessions, view, workspaces
+from brindle.config import load_repo_config
+from brindle.db import DB, PoolEntry
 
 from conftest import sh
 
 
 def write_config(repo, **cfg):
-    (repo / ".frith").mkdir(exist_ok=True)
-    (repo / ".frith" / "config.json").write_text(json.dumps(cfg))
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps(cfg))
 
 
 @pytest.fixture(autouse=True)
 def no_background_fill(monkeypatch):
-    # create()/start() launch a detached `frith _pool-fill` subprocess after a
+    # create()/start() launch a detached `brindle _pool-fill` subprocess after a
     # claim; that would race these tests' own counter-file assertions since it
     # runs against the same test DB. Refilling itself is covered directly via
     # pool.fill()/fill_locked().
@@ -212,8 +212,8 @@ def test_venv_from_setup_survives_a_claim(db, repo):
     working after a claim, with no `git worktree move` in between."""
     write_config(repo, setup=[
         "python3 -m venv .venv",
-        'echo "$FRITH_WORKSPACE_PATH" > seen_path.txt',
-        'echo "$FRITH_PORT_BASE" > seen_port.txt',
+        'echo "$BRINDLE_WORKSPACE_PATH" > seen_path.txt',
+        'echo "$BRINDLE_PORT_BASE" > seen_port.txt',
     ])
     entry = pool.fill_one(db, str(repo))
     assert entry is not None
@@ -252,7 +252,7 @@ def test_sweep_removes_a_crashed_fills_leftovers(db, repo, tmp_path):
     # before setup finished -- so it never flipped ready=1.
     base_sha = git.out(["rev-parse", "main"], str(repo))
     token = "deadbeef"
-    branch = f"frith-pool/{token}"
+    branch = f"brindle-pool/{token}"
     path = str(pool.pool_dir(str(repo)) / token)
     entry = PoolEntry(
         path=path, repo_root=str(repo), base_branch="main", base_sha=base_sha,
@@ -318,7 +318,7 @@ def test_sweep_never_deletes_a_worktree_claimed_by_a_workspace(db, repo):
     """CRITICAL regression: once a pool entry is claimed, its pool_entries row
     is gone but its directory stays right where it was, inside the pool dir.
     sweep must recognize it as a live workspace (by path, and by its branch
-    no longer being a frith-pool/* placeholder) and leave it alone."""
+    no longer being a brindle-pool/* placeholder) and leave it alone."""
     write_config(repo, setup=["true"])
     pool.fill(db, str(repo))
     assert db.count_pool_entries(str(repo), "main") == 1

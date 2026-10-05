@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from frith.native import (Client, Endpoint, NativeAgent, Permissions, Toolbox, ToolSpec, core_tools)
+from brindle.native import (Client, Endpoint, NativeAgent, Permissions, Toolbox, ToolSpec, core_tools)
 
 
 class Sse:

@@ -4,7 +4,7 @@ agents._sidebar_lock, tmux.move_pane).
 
 Regression tests for the sidebar going missing and staying gone: it follows
 the person into workers' sessions and dies when one of those closes (or
-`frith watch` crashes), and before this only a relaunch ever started it
+`brindle watch` crashes), and before this only a relaunch ever started it
 again; a launch that met another process's sidebar lock skipped its sidebar
 outright; and a sidebar left alone in its window was never moved out of it.
 
@@ -21,13 +21,13 @@ import pytest
 
 from test_sidebar_follow import fake_agent, make_window, make_workspace, window_panes
 
-from frith import agents, cli, tmux
-from frith.config import frith_home
+from brindle import agents, cli, tmux
+from brindle.config import brindle_home
 
 
 @pytest.fixture
 def session(tmp_path):
-    name = "frith_persisttest"
+    name = "brindle_persisttest"
     tmux.ensure_session(name, str(tmp_path), {})
     yield name
     tmux.kill_session(name)
@@ -49,7 +49,7 @@ def test_follow_restarts_a_crashed_sidebar_in_the_active_window(db, tmp_path, se
     agents._ensure_sidebar(db, "root1", ws, win_a)
     old = db.get_sidebar_pane("root1")
 
-    tmux.kill_pane(old)  # `frith watch` crashed, or its pane was killed
+    tmux.kill_pane(old)  # `brindle watch` crashed, or its pane was killed
     wait_dead(old)
     tmux._tmux("select-window", "-t", f"{session}:winB")
     agents.sidebar_follow(db, session)
@@ -71,7 +71,7 @@ def test_sidebar_killed_with_a_workers_session_comes_back_in_the_root_session(db
     """The sidebar follows the person into a worker's session; closing that
     session (remove_workspace, a finished worker) takes the sidebar with it.
     Coming back to the supervisor's session must bring it back."""
-    root_s, worker_s = "frith_persist_root", "frith_persist_worker"
+    root_s, worker_s = "brindle_persist_root", "brindle_persist_worker"
     tmux.ensure_session(root_s, str(tmp_path), {})
     tmux.ensure_session(worker_s, str(tmp_path), {})
     try:
@@ -118,7 +118,7 @@ def test_a_dismissed_sidebar_stays_gone_until_a_relaunch(db, tmp_path, session):
     agents.sidebar_follow(db, session)
     assert window_panes(session, "winA") == [win_a]
 
-    # `frith` / `frith continue` launches it again.
+    # `brindle` / `brindle continue` launches it again.
     agents._ensure_sidebar(db, "root1", ws, win_a)
     new = db.get_sidebar_pane("root1")
     assert new != agents.SIDEBAR_DISMISSED and tmux.window_alive(new)
@@ -132,8 +132,8 @@ def test_dismiss_ignores_panes_that_are_not_the_recorded_sidebar(db, tmp_path, s
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
 
-    agents.dismiss_sidebar(db, None)  # a plain `frith watch` outside tmux
-    agents.dismiss_sidebar(db, win_a)  # a plain `frith watch` in some pane
+    agents.dismiss_sidebar(db, None)  # a plain `brindle watch` outside tmux
+    agents.dismiss_sidebar(db, win_a)  # a plain `brindle watch` in some pane
     # An old sidebar pane still tagged for root1 but since replaced.
     stale = make_window(session, "stale")
     tmux.set_pane_tag(stale, agents.SIDEBAR_TAG, "root1")
@@ -143,7 +143,7 @@ def test_dismiss_ignores_panes_that_are_not_the_recorded_sidebar(db, tmp_path, s
 
 
 def test_follow_never_starts_one_for_a_root_that_never_had_one(db, tmp_path, session):
-    """`frith --no-watch`: no sidebars row at all, so nothing to restore."""
+    """`brindle --no-watch`: no sidebars row at all, so nothing to restore."""
     win_a = make_window(session, "winA")
     ws = make_workspace(db, tmp_path, "winA", session)
     fake_agent(db, ws, win_a, "root1")
@@ -196,7 +196,7 @@ def test_follow_moves_a_sidebar_left_alone_in_its_window(db, tmp_path, session):
 
 
 def _hold_lock(root_id, seconds, held):
-    lock = frith_home() / "locks" / f"sidebar-{root_id}.lock"
+    lock = brindle_home() / "locks" / f"sidebar-{root_id}.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "w") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -250,7 +250,7 @@ def test_quitting_watch_sidebar_dismisses_it(db, tmp_path, session, monkeypatch)
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
 
-    from frith import watch as watch_mod
+    from brindle import watch as watch_mod
 
     monkeypatch.setattr(watch_mod, "run", lambda repo_root, sidebar=False: None)  # pressed q
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
@@ -267,7 +267,7 @@ def test_crashing_watch_sidebar_does_not_dismiss_it(db, tmp_path, session, monke
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
 
-    from frith import watch as watch_mod
+    from brindle import watch as watch_mod
 
     def crash(repo_root, sidebar=False):
         raise RuntimeError("boom")

@@ -1,4 +1,4 @@
-"""The subagent provider: frith manages the workspace, the supervisor's own
+"""The subagent provider: brindle manages the workspace, the supervisor's own
 Agent tool does the work."""
 
 import asyncio
@@ -8,9 +8,9 @@ import time
 import pytest
 
 from conftest import sh
-from frith import agents, mcp_server, tmux, view, workspaces
-from frith.db import Agent
-from frith.profiles import load_profile
+from brindle import agents, mcp_server, tmux, view, workspaces
+from brindle.db import Agent
+from brindle.profiles import load_profile
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def boss(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
-    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 
@@ -56,7 +56,7 @@ def test_handoff_makes_a_workspace_and_starts_nothing(db, boss, monkeypatch):
     assert prompt == worker.task
     assert "Add a greeting to app.py" in prompt and "python app.py prints hello" in prompt
     assert f"cd {ws.path} && " in prompt and "commit" in prompt.lower()
-    assert "report_result" not in prompt  # the subagent shares the supervisor's frith tools
+    assert "report_result" not in prompt  # the subagent shares the supervisor's brindle tools
 
 
 def test_subagent_is_working_until_completed_then_merges_and_removes(db, boss, repo):
@@ -71,7 +71,7 @@ def test_subagent_is_working_until_completed_then_merges_and_removes(db, boss, r
     assert entry["status"] == "processing" and entry["provider"] == "subagent"
     assert "complete_subagent" in mcp_server._await_worker(db, worker.id, wait_seconds=0)
 
-    # frith can't message it; say so rather than fail obscurely.
+    # brindle can't message it; say so rather than fail obscurely.
     with pytest.raises(agents.AgentError, match="Agent tool"):
         agents.send_message(db, worker.id, "hello")
 

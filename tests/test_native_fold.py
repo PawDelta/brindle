@@ -1,11 +1,11 @@
-"""Folding context asks the model for the summary, and falls back to frith's own."""
+"""Folding context asks the model for the summary, and falls back to brindle's own."""
 
 from __future__ import annotations
 
 import json
 
-from frith.native import LoopConfig
-from frith.native.loop import SUMMARY_SYSTEM
+from brindle.native import LoopConfig
+from brindle.native.loop import SUMMARY_SYSTEM
 
 from test_native_loop import agent, fake, openai_reply  # noqa: F401  (fake is a fixture)
 
@@ -54,7 +54,7 @@ def test_the_models_text_becomes_the_summary(fake, tmp_path):
     assert "tools" not in asks[0] or not asks[0]["tools"]
     # The text went into the summary message of the requests that followed.
     summary = a.messages[1]["content"]
-    assert "summarized by frith" in summary
+    assert "summarized by brindle" in summary
     assert "nothing changed yet" in summary and "remaining: answer" in summary
     assert "you ran Read" not in summary
     later = fake.requests[fake.requests.index(asks[0]) + 1]
@@ -71,7 +71,7 @@ def test_an_endpoint_error_falls_back_to_the_deterministic_summary(fake, tmp_pat
     assert a.run("the task") == "done"
     assert summary_requests(fake)
     assert "you ran Read big.txt" in a.messages[1]["content"]
-    assert "summarized by frith" in notes.read_text()
+    assert "summarized by brindle" in notes.read_text()
 
 
 def test_an_empty_reply_falls_back(fake, tmp_path):
@@ -88,7 +88,7 @@ def test_a_second_fold_extends_the_first_summary(fake, tmp_path):
     assert a.run("the task") == "done"
     assert len(summary_requests(fake)) >= 2
     summary = a.messages[1]["content"]
-    assert summary.count("summarized by frith") == 1
+    assert summary.count("summarized by brindle") == 1
     assert "first fold notes" in summary and "second fold notes" in summary
     assert summary.index("first fold notes") < summary.index("second fold notes")
     # The second request saw the earlier summary, not the messages it replaced.

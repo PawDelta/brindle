@@ -1,4 +1,4 @@
-"""The pipeline: frith reviews and merges a reported branch itself."""
+"""The pipeline: brindle reviews and merges a reported branch itself."""
 import asyncio
 import json
 import time
@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from frith import agents, autopilot, gates, mcp_server, pipeline, workspaces
-from frith.db import Agent
+from brindle import agents, autopilot, gates, mcp_server, pipeline, workspaces
+from brindle.db import Agent
 
 
 def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle", **kw):
@@ -19,9 +19,9 @@ def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle",
 @pytest.fixture
 def piped(db, repo, monkeypatch):
     """A supervisor in the checkout, a worker on a branch with a commit, and a
-    reviewer that frith can start without a real process."""
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "config.json").write_text(json.dumps(
+    reviewer that brindle can start without a real process."""
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps(
         {"review": True, "auto_merge_default_branch": True}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
@@ -49,7 +49,7 @@ def piped(db, repo, monkeypatch):
 def test_a_report_starts_the_review_instead_of_going_to_the_supervisor(db, piped):
     root, ws, started = piped
     out = agents.report_result(db, "w1", "added new.py")
-    assert "frith is having your branch reviewed" in out
+    assert "brindle is having your branch reviewed" in out
     assert started == [ws.id] and db.get_agent("w1").pipeline == "reviewing"
     assert db.pending_count("boss") == 0
 
@@ -71,7 +71,7 @@ def test_a_reviewer_submitting_an_approval_survives_the_removal(db, piped, repo)
     root, ws, started = piped
     agents.report_result(db, "w1", "added new.py")
     out = agents.submit_review(db, "rev0", True, "lgtm")
-    assert "frith takes it from here" in out
+    assert "brindle takes it from here" in out
     assert "new.py" in sh("git ls-tree --name-only HEAD", repo)
     assert db.get_workspace(ws.id) is None and db.get_agent("rev0") is None
 
@@ -102,15 +102,15 @@ def test_changes_requested_go_back_to_the_worker_then_to_the_supervisor(db, pipe
 def test_verdicts_on_piped_branches_are_not_forwarded(db, piped, monkeypatch):
     root, ws, started = piped
     agents.report_result(db, "w1", "added new.py")
-    monkeypatch.setenv("FRITH_AGENT_ID", "rev0")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "rev0")
     monkeypatch.setattr(mcp_server, "_caller", lambda db_: (db_.get_agent("rev0"), ws))
     out = mcp_server.submit_review(False, "missing a test")
-    assert "frith takes it from here" in out
+    assert "brindle takes it from here" in out
     assert db.pending_count("boss") == 0 and db.pending_count("w1") == 1
 
 
 def test_pipeline_off_keeps_the_old_flow(db, piped, repo):
-    (repo / ".frith" / "config.json").write_text(json.dumps({"review": True, "pipeline": False}))
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True, "pipeline": False}))
     root, ws, started = piped
     out = agents.report_result(db, "w1", "added new.py")
     assert "sent to your supervisor" in out and started == [] and db.pending_count("boss") == 1
@@ -131,11 +131,11 @@ def test_a_branch_in_the_pipeline_counts_as_work_in_progress(db, piped):
 
 
 def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
-    from frith import tasks
+    from brindle import tasks
 
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor")
-    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     monkeypatch.setattr(tasks, "overlap_warning", lambda db_, ws_, files: "overlaps with w0 (feat/a) on ledger.py")
     delegated = []
     monkeypatch.setattr(agents, "delegate", lambda *a, **k: delegated.append(a))

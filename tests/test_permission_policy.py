@@ -1,4 +1,4 @@
-"""The permission policy (frith.permissions): frith answers a worker's
+"""The permission policy (brindle.permissions): brindle answers a worker's
 tool-permission request from the structured request its CLI hands the hook,
 allow / deny / ask, and learns only suggestions from what the person approves."""
 
@@ -9,12 +9,12 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from frith import agents, cull, permissions, workspaces
-from frith.cli import app
-from frith.config import set_local
-from frith.db import Agent
-from frith.permissions import Request, Rule, decide
-from frith.providers import ClaudeCode, LaunchContext
+from brindle import agents, cull, permissions, workspaces
+from brindle.cli import app
+from brindle.config import set_local
+from brindle.db import Agent
+from brindle.permissions import Request, Rule, decide
+from brindle.providers import ClaudeCode, LaunchContext
 
 from conftest import sh
 
@@ -240,7 +240,7 @@ def test_hook_maps_stdin_to_a_decision(db, ws):
     out = json.loads(agents.hook_main(db, a.id, "permission-request", json.dumps(
         claude_payload("Bash", {"command": "git push --force"}))))
     assert out["hookSpecificOutput"]["decision"]["behavior"] == "deny"
-    assert out["hookSpecificOutput"]["decision"]["message"].startswith("frith: denied")
+    assert out["hookSpecificOutput"]["decision"]["message"].startswith("brindle: denied")
     # Ask prints nothing and remembers the request for the supervisor.
     assert agents.hook_main(db, a.id, "permission-request", json.dumps(
         claude_payload("Bash", {"command": "make deploy"}, "toolu_9"))) == ""
@@ -297,7 +297,7 @@ def test_decisions_are_recorded_in_history(db, ws):
 
 
 def test_launch_settings_register_the_hook(ws):
-    from frith.profiles import load_profile
+    from brindle.profiles import load_profile
 
     ctx = LaunchContext("w1", load_profile("developer"), None, cwd=ws.path, mode="assign")
     argv = ClaudeCode().command(ctx)

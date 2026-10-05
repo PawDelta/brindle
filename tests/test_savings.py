@@ -1,4 +1,4 @@
-"""Routing decisions are recorded locally, and `frith account savings` turns
+"""Routing decisions are recorded locally, and `brindle account savings` turns
 them into an honest, clearly labelled estimate."""
 import asyncio
 import io
@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from frith import agents, learning, mcp_server, pipeline, plugins, quota, savings, tasks, workspaces
-from frith.db import Agent
-from frith.pro import account, credentials, license
+from brindle import agents, learning, mcp_server, pipeline, plugins, quota, savings, tasks, workspaces
+from brindle.db import Agent
+from brindle.pro import account, credentials, license
 from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # noqa: F401 - fixtures
 
 COSTS = {"developer": 3, "developer-codex": 1, "developer-heavy": 3}
@@ -48,20 +48,20 @@ def everything_available(monkeypatch):
 
 @pytest.fixture
 def boss(db, repo, monkeypatch):
-    (repo / ".frith").mkdir(exist_ok=True)
+    (repo / ".brindle").mkdir(exist_ok=True)
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
-    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     return ws
 
 
 def config(repo, **kw):
-    (repo / ".frith" / "config.json").write_text(json.dumps(kw))
+    (repo / ".brindle" / "config.json").write_text(json.dumps(kw))
 
 
 def install(monkeypatch, plugin):
-    from frith.pro import learning as pro_learning
+    from brindle.pro import learning as pro_learning
 
     plugins.reset()
     monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: plugin)
@@ -125,7 +125,7 @@ def test_the_shared_prior_flag_is_kept_and_counted(db, repo, boss, monkeypatch):
 
 
 def test_the_cloud_learner_reads_prior_and_defaults_it_to_false(monkeypatch):
-    from frith.pro import learning as pro_learning
+    from brindle.pro import learning as pro_learning
 
     lr = pro_learning.CloudLearner("/repo", org=lambda: "org_1", start_thread=False)
     replies = [{"profile": "b", "overrode": True, "prior": True},
@@ -283,7 +283,7 @@ def test_other_repos_are_not_counted(db, repo, tmp_path):
     assert report(db, repo)[2].learned.tasks == 0
 
 
-# -- frith account --------------------------------------------------------------------------------
+# -- brindle account --------------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -323,7 +323,7 @@ def test_bare_account_has_one_savings_line_when_learning_is_active(db, repo, sto
     code, text = run_account(repo, store, backend)
     assert code == 0
     assert len([line for line in text.splitlines() if line.startswith("Learning")]) == 1
-    assert "not enough data yet" in text and "`frith account savings`" in text
+    assert "not enough data yet" in text and "`brindle account savings`" in text
     license.clear_cache()
     login_as(backend, store, features=())
     code, text = run_account(repo, store, backend)
@@ -339,7 +339,7 @@ def test_the_first_outcome_sticks(db):
 
 
 def test_a_local_model_is_cheapest_not_free(monkeypatch):
-    from frith import savings
-    from frith.pro import learning
+    from brindle import savings
+    from brindle.pro import learning
     monkeypatch.setattr(learning, "cost_rank", lambda name, root=None: 0)
     assert savings._default_cost("/r")("developer-local") == 1

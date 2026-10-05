@@ -8,10 +8,10 @@ import time
 
 import pytest
 
-from frith import agents, cull, watch
-from frith.config import set_local
-from frith.db import Agent
-from frith.providers import get_provider
+from brindle import agents, cull, watch
+from brindle.config import set_local
+from brindle.db import Agent
+from brindle.providers import get_provider
 
 from test_agents import CLAUDE_PROMPT
 from test_launch_health import root, screens  # noqa: F401 - fixtures

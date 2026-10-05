@@ -1,4 +1,4 @@
-"""Headless workers: `claude -p` turn by turn, under frith's runner."""
+"""Headless workers: `claude -p` turn by turn, under brindle's runner."""
 
 import json
 import shutil
@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from frith import agents, tmux, workspaces
-from frith.db import Agent
+from brindle import agents, tmux, workspaces
+from brindle.db import Agent
 
 FAKE_CLAUDE = """#!/bin/sh
 # Stands in for `claude -p`: logs its argv, reports like Claude Code's hooks.
@@ -20,13 +20,13 @@ for a in "$@"; do
   prev="$a"
 done
 for a in "$@"; do last="$a"; done
-echo "{{\\"session_id\\": \\"$sid\\"}}" | "{py}" -m frith _hook session-start
-echo "{{\\"session_id\\": \\"$sid\\"}}" | "{py}" -m frith _hook prompt-submit
+echo "{{\\"session_id\\": \\"$sid\\"}}" | "{py}" -m brindle _hook session-start
+echo "{{\\"session_id\\": \\"$sid\\"}}" | "{py}" -m brindle _hook prompt-submit
 case "$last" in
   *FAIL*) echo "API Error: overloaded" >&2; exit 3;;
 esac
 echo "did: $last"
-echo "{{\\"session_id\\": \\"$sid\\"}}" | "{py}" -m frith _hook stop > /dev/null
+echo "{{\\"session_id\\": \\"$sid\\"}}" | "{py}" -m brindle _hook stop > /dev/null
 """
 
 
@@ -41,7 +41,7 @@ def fake_claude(tmp_path, monkeypatch):
     script = tmp_path / "fake-claude"
     script.write_text(FAKE_CLAUDE.format(py=sys.executable, log=log))
     script.chmod(0o755)
-    monkeypatch.setenv("FRITH_CLAUDE_BIN", str(script))
+    monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(script))
 
     def calls() -> list[list[str]]:
         if not log.exists():
@@ -53,7 +53,7 @@ def fake_claude(tmp_path, monkeypatch):
 
 @pytest.fixture
 def cheap_profile(repo):
-    d = repo / ".frith" / "agents"
+    d = repo / ".brindle" / "agents"
     d.mkdir(parents=True)
     (d / "cheap.md").write_text(
         "---\nname: cheap\ndescription: cheap worker\nprovider: claude\n"
@@ -72,7 +72,7 @@ def headless_agent(db, ws, *, status="idle", mode="assign", agent_id="h1", windo
 
 def test_runner_starts_a_session_then_resumes_it(db, ws, fake_claude, monkeypatch):
     headless_agent(db, ws, status="processing")
-    monkeypatch.setenv("FRITH_AGENT_ID", "h1")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "h1")
     db.enqueue("h1", "first task", None)
     assert agents.run_headless(db, "h1", exit_when_idle=True) == 0
     sid = db.get_agent("h1").session_ref
@@ -90,7 +90,7 @@ def test_runner_starts_a_session_then_resumes_it(db, ws, fake_claude, monkeypatc
 
 def test_runner_stops_when_claude_fails(db, ws, fake_claude, monkeypatch, capfd):
     headless_agent(db, ws)
-    monkeypatch.setenv("FRITH_AGENT_ID", "h1")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "h1")
     db.enqueue("h1", "please FAIL", None)
     db.enqueue("h1", "never run", None)
     assert agents.run_headless(db, "h1", exit_when_idle=True) == 3

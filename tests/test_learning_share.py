@@ -1,9 +1,9 @@
-"""``frith account org learning-share``: the opt-in to pooling learning within a company."""
+"""``brindle account org learning-share``: the opt-in to pooling learning within a company."""
 
 import json
 
-from frith import airgap
-from frith.pro import auth
+from brindle import airgap
+from brindle.pro import auth
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
 from test_pro_team import ORG, run, team  # noqa: F401 - fixtures/helpers
 

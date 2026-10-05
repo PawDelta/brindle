@@ -2,11 +2,11 @@
 a prompt is visible.
 
 - A profile's permission_mode (and allowed_tools) reaches the CLI on every
-  launch path: a fresh spawn, a handoff/assign worker, a resume via `frith
+  launch path: a fresh spawn, a handoff/assign worker, a resume via `brindle
   continue` (with and without a saved conversation), and a reviewer.
 - The worktree a Claude worker starts in is pre-trusted, so Claude Code's
   first-run folder-trust dialog never waits on nobody.
-- The foreground launch paths (`frith start`, handoff/assign) never wait on
+- The foreground launch paths (`brindle start`, handoff/assign) never wait on
   slow work: retention, culling, pool refills and startup dialogs happen in
   detached helpers.
 - A pane showing a permission or trust prompt reads as 'waiting', and a
@@ -24,16 +24,16 @@ import time
 
 import pytest
 
-from frith import agents, cli, cull, pool, procs, sessions, tmux, workspaces
-from frith.db import Agent
-from frith.providers import ClaudeCode, trust_folder
+from brindle import agents, cli, cull, pool, procs, sessions, tmux, workspaces
+from brindle.db import Agent
+from brindle.providers import ClaudeCode, trust_folder
 
 from test_agents import CLAUDE_PROMPT
 from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
 TRUST_SCREEN = (
     " Do you trust the files in this folder?\n\n"
-    " /Users/me/.frith/worktrees/proj/feature\n\n"
+    " /Users/me/.brindle/worktrees/proj/feature\n\n"
     " ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to exit\n"
 )
 
@@ -44,7 +44,7 @@ def flag(argv: list[str], name: str) -> str | None:
 
 @pytest.fixture
 def launches(monkeypatch):
-    """Record each CLI command line frith would run, without running it."""
+    """Record each CLI command line brindle would run, without running it."""
     seen: list[list[str]] = []
 
     def fake_open(db, agent, ws, name, argv, watch_pane):
@@ -61,13 +61,13 @@ def launches(monkeypatch):
 
 @pytest.fixture
 def detached(monkeypatch):
-    """Record frith's detached helpers (`frith _after-launch`, `_cull`,
+    """Record brindle's detached helpers (`brindle _after-launch`, `_cull`,
     `_pool-fill`) instead of starting them; every other process runs."""
     started: list[list[str]] = []
     real = subprocess.Popen
 
     def popen(args, *a, **k):
-        if isinstance(args, list) and args[1:3] == ["-m", "frith"] and str(args[3]).startswith("_"):
+        if isinstance(args, list) and args[1:3] == ["-m", "brindle"] and str(args[3]).startswith("_"):
             started.append([str(x) for x in args])
             return real(["true"])
         return real(args, *a, **k)
@@ -136,7 +136,7 @@ def test_profile_named_differently_inside_still_resumes_with_its_own_permissions
     must record the file it was started from, or a resume loads another
     profile (here the built-in developer) with other permissions."""
     boss, ws = root
-    agents_dir = os.path.join(ws.repo_root, ".frith", "agents")
+    agents_dir = os.path.join(ws.repo_root, ".brindle", "agents")
     os.makedirs(agents_dir)
     with open(os.path.join(agents_dir, "careful.md"), "w") as f:
         f.write("---\nname: developer\nprovider: claude\npermission_mode: auto\n---\nBe careful.\n")
@@ -240,7 +240,7 @@ def slow_background(monkeypatch):
     monkeypatch.setattr(ClaudeCode, "after_launch", lambda self, target: slow())
 
 
-def test_frith_start_returns_within_budget(db, repo, monkeypatch, detached, slow_background):
+def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, slow_background):
     monkeypatch.chdir(repo)
     ws = workspaces.adopt_root(db, str(repo))
     # A session still running here, which start must pause first.

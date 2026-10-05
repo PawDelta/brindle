@@ -3,8 +3,8 @@ import time
 
 import pytest
 
-from frith import agents, git, sessions, tmux, workspaces
-from frith.db import Agent
+from brindle import agents, git, sessions, tmux, workspaces
+from brindle.db import Agent
 
 
 def add(db, ws, aid, mode="interactive", parent=None, status="paused", since=None, result=None):
@@ -109,7 +109,7 @@ def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, 
 
 # -- dropping a session must never touch a newer session's windows ----------------
 #
-# Regression: the first `frith` after a tmux server restart (a reboot, or the
+# Regression: the first `brindle` after a tmux server restart (a reboot, or the
 # previous session's end taking the server with it) got the chat's pane as %1
 # and the sidebar as %2, the same ids every earlier session's chat had. The
 # detached cull's retention then dropped the oldest paused session and closed
@@ -154,11 +154,11 @@ def test_dropping_a_session_still_closes_its_own_leftover_window(db, root):
 
 
 def test_sessions_cmd_lists_a_session_with_workers(db, root, repo, monkeypatch):
-    # Issue #34: a paused session with workers crashed `frith sessions`
+    # Issue #34: a paused session with workers crashed `brindle sessions`
     # (workspaces went into a set, and Workspace isn't hashable).
     from typer.testing import CliRunner
 
-    from frith.cli import app
+    from brindle.cli import app
 
     sup = add(db, root, "sup")
     ws = workspaces.create(db, str(repo), "feat/x").workspace

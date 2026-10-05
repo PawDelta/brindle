@@ -3,8 +3,8 @@ import os
 import pytest
 from typer.testing import CliRunner
 
-from frith import git, workspaces
-from frith.cli import app
+from brindle import git, workspaces
+from brindle.cli import app
 
 from conftest import sh
 
@@ -49,8 +49,8 @@ def test_create_from_pr_checks_out_remote_head(db, pr_repo, monkeypatch):
 
 
 def test_create_from_pr_ignores_branch_prefix(db, pr_repo, monkeypatch):
-    (pr_repo / ".frith").mkdir()
-    (pr_repo / ".frith" / "config.json").write_text('{"branch_prefix": "me/"}')
+    (pr_repo / ".brindle").mkdir()
+    (pr_repo / ".brindle" / "config.json").write_text('{"branch_prefix": "me/"}')
     fake_gh(monkeypatch)
     ws = workspaces.create_from_pr(db, str(pr_repo), 1).workspace
     assert ws.branch == "fix/typo"

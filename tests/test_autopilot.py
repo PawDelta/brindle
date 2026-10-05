@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from frith import agents, autopilot, gates, watch, workspaces
-from frith.config import RepoConfig
-from frith.db import Agent
-from frith.providers import ClaudeCode, LaunchContext, status_line
-from frith.profiles import load_profile
+from brindle import agents, autopilot, gates, watch, workspaces
+from brindle.config import RepoConfig
+from brindle.db import Agent
+from brindle.providers import ClaudeCode, LaunchContext, status_line
+from brindle.profiles import load_profile
 
 GOALS = """# Settings page
 
@@ -55,8 +55,8 @@ def test_parse_goals_file():
 
 
 def test_enable_loads_goals_md(db, repo):
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "goals.md").write_text(GOALS)
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "goals.md").write_text(GOALS)
     ws = workspaces.adopt_root(db, str(repo))
     add_agent(db, ws, "boss")
     plan = autopilot.enable(db, "boss", ws)
@@ -146,8 +146,8 @@ def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     out = autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
     assert "goal is reached" in out
     assert db.get_autopilot("boss").state == "done"
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "config.json").write_text('{"goal_audit": false}')
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text('{"goal_audit": false}')
     assert autopilot.on_stop(db, agent, {}) is None
 
 
@@ -296,7 +296,7 @@ def test_stop_hook_runs_autopilot_for_the_supervisor(db, root, monkeypatch):
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
     out = agents.handle_hook(db, "boss", "stop", {})
-    assert out and "[frith autopilot]" in out["reason"]
+    assert out and "[brindle autopilot]" in out["reason"]
     assert db.get_agent("boss").status == "processing"
 
 

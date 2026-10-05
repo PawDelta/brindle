@@ -1,7 +1,7 @@
 import pytest
 
-from frith import autopilot
-from frith.config import RepoConfig
+from brindle import autopilot
+from brindle.config import RepoConfig
 from test_autopilot import add_agent, root  # noqa: F401  (the `root` fixture)
 
 

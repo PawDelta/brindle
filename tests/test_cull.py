@@ -6,24 +6,24 @@ import time
 
 import pytest
 
-from frith import agents, cull, procs, workspaces
-from frith.db import Agent
+from brindle import agents, cull, procs, workspaces
+from brindle.db import Agent
 
 SLEEPER = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
 
 
 def launch_as(agent_id, *, argv_config=True, env_only=False):
-    """A stand-in for an agent's CLI: named in its command line the way frith
+    """A stand-in for an agent's CLI: named in its command line the way brindle
     launches Claude Code (unless env_only), with a child process of its own."""
     args = [sys.executable, "-c", SLEEPER]
     if argv_config:
-        env_block = {"FRITH_AGENT_ID": agent_id}
-        if os.environ.get("FRITH_HOME"):
-            env_block["FRITH_HOME"] = os.environ["FRITH_HOME"]
-        args.append(json.dumps({"mcpServers": {"frith": {"env": env_block}}}))
+        env_block = {"BRINDLE_AGENT_ID": agent_id}
+        if os.environ.get("BRINDLE_HOME"):
+            env_block["BRINDLE_HOME"] = os.environ["BRINDLE_HOME"]
+        args.append(json.dumps({"mcpServers": {"brindle": {"env": env_block}}}))
     env = {**os.environ}
     if env_only:
-        env["FRITH_AGENT_ID"] = agent_id
+        env["BRINDLE_AGENT_ID"] = agent_id
     proc = subprocess.Popen(args, env=env, start_new_session=True)
     time.sleep(0.5)
     return proc
@@ -73,7 +73,7 @@ def test_an_inherited_environment_alone_is_not_enough(proc_cleanup):
 
 
 def test_the_daemon_is_never_included():
-    config = json.dumps({"FRITH_AGENT_ID": "abc12345", "FRITH_HOME": os.environ["FRITH_HOME"]})
+    config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
     t = {1: procs.Proc(1, 0, "init"),
          10: procs.Proc(10, 1, f"/usr/bin/claude daemon run --spawned-by {config}"),
          11: procs.Proc(11, 10, f"claude --mcp-config {config}")}
@@ -125,8 +125,8 @@ def test_sweep_closes_idle_reported_workers(db, ws, monkeypatch):
 
 
 def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
-    (repo / ".frith").mkdir()
-    (repo / ".frith" / "config.json").write_text('{"stale_after": 0}')
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text('{"stale_after": 0}')
     add(db, ws, "w1", result="done")
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     cull.sweep(db)
@@ -142,9 +142,9 @@ def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     assert db.get_agent("w2").dismissed_at is not None
 
 
-def test_another_frith_homes_agents_are_left_alone(proc_cleanup, monkeypatch):
-    # The person's own frith (no FRITH_HOME) while a test run uses its own.
-    other = json.dumps({"mcpServers": {"frith": {"env": {"FRITH_AGENT_ID": "fedcba98"}}}})
+def test_another_brindle_homes_agents_are_left_alone(proc_cleanup, monkeypatch):
+    # The person's own brindle (no BRINDLE_HOME) while a test run uses its own.
+    other = json.dumps({"mcpServers": {"brindle": {"env": {"BRINDLE_AGENT_ID": "fedcba98"}}}})
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", other],
                          start_new_session=True)
     proc_cleanup.append(p)

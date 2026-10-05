@@ -1,4 +1,4 @@
-"""The native provider in frith's pipeline: spawn, the pane runner, frith's
+"""The native provider in brindle's pipeline: spawn, the pane runner, brindle's
 tools in-process, reminders to report, messages, resume, usage."""
 
 import shutil
@@ -8,11 +8,11 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from frith import agents, tmux, usage, workspaces
-from frith.db import Agent
-from frith.native import runner
-from frith.native.runner import run_native
-from frith.profiles import load_profile
+from brindle import agents, tmux, usage, workspaces
+from brindle.db import Agent
+from brindle.native import runner
+from brindle.native.runner import run_native
+from brindle.profiles import load_profile
 from test_native_loop import FakeEndpoint, anthropic_reply, openai_reply
 
 
@@ -30,7 +30,7 @@ def ws(db, repo):
 
 @pytest.fixture
 def local_profile(repo, fake):
-    d = repo / ".frith" / "agents"
+    d = repo / ".brindle" / "agents"
     d.mkdir(parents=True, exist_ok=True)
     (d / "local.md").write_text(
         f"---\nname: local\ndescription: a local model\nprovider: native\napi: openai\n"
@@ -94,7 +94,7 @@ def test_spawn_runs_native_workers_headless_through_the_runner(db, ws, local_pro
 # -- the runner ------------------------------------------------------------------------
 
 def test_runner_does_the_task_and_reports(db, ws, local_profile, fake, monkeypatch):
-    monkeypatch.setenv("FRITH_AGENT_ID", "n1")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "n1")
     native_agent(db, ws)
     db.enqueue("n1", "make hello.txt say hi, commit, report", None)
     fake.replies = [
@@ -111,10 +111,10 @@ def test_runner_does_the_task_and_reports(db, ws, local_profile, fake, monkeypat
     assert a.status == "idle"
     assert (Path(ws.path) / "hello.txt").read_text() == "hi\n"
     assert "add hello" in sh("git log -1 --format=%s", Path(ws.path))
-    # The system prompt is the profile plus the harness note; the tools include frith's.
+    # The system prompt is the profile plus the harness note; the tools include brindle's.
     first = fake.requests[0]
     assert first["messages"][0]["content"].startswith("You are a local worker.")
-    assert "frith delivered this message" in first["messages"][0]["content"]
+    assert "brindle delivered this message" in first["messages"][0]["content"]
     names = {t["function"]["name"] for t in first["tools"]}
     assert {"Read", "Edit", "Bash", "report_result", "send_message", "workspace_diff"} <= names
     assert "submit_review" not in names
@@ -147,7 +147,7 @@ def test_messages_sent_mid_turn_arrive_between_model_calls(db, ws, local_profile
     db.enqueue("n1", "start", None)
 
     def first(req):
-        from frith.db import DB
+        from brindle.db import DB
 
         DB().enqueue("n1", "also bump the version", None)  # the server thread's own connection
         return openai_reply(calls=[("c1", "Bash", {"command": "echo working"})])
@@ -157,7 +157,7 @@ def test_messages_sent_mid_turn_arrive_between_model_calls(db, ws, local_profile
     second = fake.requests[1]["messages"]
     assert second[-2]["role"] == "tool"
     assert second[-1]["role"] == "user" and "bump the version" in second[-1]["content"]
-    assert second[-1]["content"].startswith("frith delivered this message")
+    assert second[-1]["content"].startswith("brindle delivered this message")
 
 
 def test_send_message_to_a_native_worker_goes_through_its_inbox(db, ws, local_profile, monkeypatch):
@@ -181,7 +181,7 @@ def test_reviewer_submits_its_verdict_in_process(db, ws, local_profile, fake, mo
         anthropic_reply("Submitted."),
     ]
     # Reviewers may talk to an Anthropic-style endpoint too.
-    (Path(ws.repo_root) / ".frith/agents/local.md").write_text(
+    (Path(ws.repo_root) / ".brindle/agents/local.md").write_text(
         f"---\nname: local\nprovider: native\napi: anthropic\nbase_url: {fake.base_url}\nmodel: tiny\n"
         "permission_mode: dontAsk\n---\nYou review.\n")
     assert run_native(db, "n1", exit_when_idle=True) == 0
@@ -198,7 +198,7 @@ def test_reviewer_submits_its_verdict_in_process(db, ws, local_profile, fake, mo
 
 def test_reviewer_cannot_edit_under_dontask(db, ws, local_profile, fake, monkeypatch):
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    (Path(ws.repo_root) / ".frith/agents/local.md").write_text(
+    (Path(ws.repo_root) / ".brindle/agents/local.md").write_text(
         f"---\nname: local\nprovider: native\nbase_url: {fake.base_url}/v1\nmodel: tiny\n"
         "permission_mode: dontAsk\n---\nYou review.\n")
     native_agent(db, ws, mode="review")
@@ -217,7 +217,7 @@ def test_conversation_survives_a_restart(db, ws, local_profile, fake):
     fake.replies = [openai_reply(calls=[("c1", "report_result", {"result": "did it"})]), openai_reply("done")]
     assert run_native(db, "n1", exit_when_idle=True) == 0
     saved = db.get_agent("n1").session_ref
-    from frith.providers import get_provider
+    from brindle.providers import get_provider
     assert get_provider("native").can_resume(saved)
 
     db.enqueue("n1", "and now the docs", None)
@@ -249,8 +249,8 @@ def test_endpoint_failure_stops_the_runner(db, ws, local_profile, fake, capfd):
 
 
 def test_profile_without_an_endpoint_is_a_clear_error(db, ws, repo, capfd):
-    (repo / ".frith/agents").mkdir(parents=True)
-    (repo / ".frith/agents/bare.md").write_text("---\nname: bare\nprovider: native\n---\nhi\n")
+    (repo / ".brindle/agents").mkdir(parents=True)
+    (repo / ".brindle/agents/bare.md").write_text("---\nname: bare\nprovider: native\n---\nhi\n")
     native_agent(db, ws, profile="bare")
     db.enqueue("n1", "go", None)
     assert run_native(db, "n1", exit_when_idle=True) == 2
@@ -258,12 +258,12 @@ def test_profile_without_an_endpoint_is_a_clear_error(db, ws, repo, capfd):
 
 
 def test_mcp_submit_review_uses_the_shared_function(db, ws, monkeypatch):
-    from frith import mcp_server
+    from brindle import mcp_server
 
     seen = {}
     monkeypatch.setattr(agents, "submit_review", lambda db_, cid, ok, s: seen.update(cid=cid, ok=ok, s=s) or "rec")
     native_agent(db, ws, mode="review", agent_id="r1")
-    monkeypatch.setenv("FRITH_AGENT_ID", "r1")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "r1")
     assert mcp_server.submit_review(True, "fine") == "rec"
     assert seen == {"cid": "r1", "ok": True, "s": "fine"}
 

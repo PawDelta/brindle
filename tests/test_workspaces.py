@@ -3,15 +3,15 @@ import os
 
 import pytest
 
-from frith import git, workspaces
-from frith.config import load_repo_config
+from brindle import git, workspaces
+from brindle.config import load_repo_config
 
 from conftest import sh
 
 
 def write_config(repo, **cfg):
-    (repo / ".frith").mkdir(exist_ok=True)
-    (repo / ".frith" / "config.json").write_text(json.dumps(cfg))
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps(cfg))
 
 
 def test_create_branches_from_fetched_base(db, repo, tmp_path):
@@ -26,13 +26,13 @@ def test_create_branches_from_fetched_base(db, repo, tmp_path):
     assert created.how == "new"
     assert created.start_point == "origin/main"
     assert ws.branch == "feat/login" and ws.base_branch == "main"
-    assert (tmp_path / "frith-home" / "worktrees" / "proj" / "feat" / "login" / "new.txt").exists()
+    assert (tmp_path / "brindle-home" / "worktrees" / "proj" / "feat" / "login" / "new.txt").exists()
     assert git.get_base(str(repo), "feat/login") == "main"
     assert ws.name == "feat-login"
 
 
 def test_copy_setup_env_and_ports(db, repo):
-    write_config(repo, copy=[".env"], setup=['echo "$FRITH_BRANCH $FRITH_PORT_BASE" > setup.out'])
+    write_config(repo, copy=[".env"], setup=['echo "$BRINDLE_BRANCH $BRINDLE_PORT_BASE" > setup.out'])
     a = workspaces.create(db, str(repo), "one").workspace
     b = workspaces.create(db, str(repo), "two").workspace
     assert (os.path.join(a.path, ".env"))
@@ -51,7 +51,7 @@ def test_failed_setup_keeps_workspace(db, repo):
 
 def test_local_config_wraps_shared(repo):
     write_config(repo, setup=["b"])
-    (repo / ".frith" / "config.local.json").write_text(json.dumps({"setup": {"before": ["a"], "after": ["c"]}, "branch_prefix": "me/"}))
+    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"setup": {"before": ["a"], "after": ["c"]}, "branch_prefix": "me/"}))
     cfg = load_repo_config(repo)
     assert cfg.setup == ["a", "b", "c"]
     assert cfg.branch_prefix == "me/"

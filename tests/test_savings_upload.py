@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from frith.learning import Outcome, TaskInfo
-from frith.pro import learning as cloud
-from frith.pro.learning import CloudLearner, record_payload
-from frith.pro.orgkey import OrgKey
+from brindle.learning import Outcome, TaskInfo
+from brindle.pro import learning as cloud
+from brindle.pro.learning import CloudLearner, record_payload
+from brindle.pro.orgkey import OrgKey
 
 REPO = "/work/secret-client-project"
 TEXT = "Fix the crash in src/zebra_module.py on branch feat/zebra-hotfix"

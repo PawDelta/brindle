@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add the docs link to frith release notes.
+"""Add the docs link to brindle release notes.
 
     scripts/release_footer.py NOTES.md          append the footer to a notes file
     scripts/release_footer.py --github [--dry-run]
@@ -15,14 +15,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = "hmlerner/frith-ai"
-SITE = "https://pawdelta.com/frith/"
-FOOTER = f"Docs and install: [pawdelta.com/frith]({SITE}) · Release notes: [pawdelta.com/frith/changelog]({SITE}changelog)"
+REPO = "hmlerner/brindle-ai"
+SITE = "https://pawdelta.com/brindle/"
+FOOTER = f"Docs and install: [pawdelta.com/brindle]({SITE}) · Release notes: [pawdelta.com/brindle/changelog]({SITE}changelog)"
 
 
 def with_footer(body: str) -> str:
     """``body`` ending with FOOTER, unless it already links the site."""
-    if "pawdelta.com/frith" in body:
+    if "pawdelta.com/brindle" in body:
         return body
     return body.rstrip() + "\n\n---\n\n" + FOOTER + "\n"
 

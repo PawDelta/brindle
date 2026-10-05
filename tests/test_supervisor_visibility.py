@@ -3,7 +3,7 @@ import os
 import time
 from types import SimpleNamespace
 
-from frith import git, mcp_server
+from brindle import git, mcp_server
 
 
 def test_untracked_summary_collapses_noise_and_dirs():

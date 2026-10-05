@@ -3,10 +3,10 @@ import time
 
 import pytest
 
-from frith import agents, tmux, workspaces
-from frith.db import Agent
-from frith.profiles import load_profile
-from frith.providers import Codex, LaunchContext
+from brindle import agents, tmux, workspaces
+from brindle.db import Agent
+from brindle.profiles import load_profile
+from brindle.providers import Codex, LaunchContext
 
 
 @pytest.fixture
@@ -21,7 +21,7 @@ def codex_agent(db, ws, status="processing"):
 
 
 def test_command_passes_notify_hook_with_agent_id(monkeypatch):
-    monkeypatch.setenv("FRITH_CODEX_BIN", "/opt/codex")
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", "/opt/codex")
     argv = Codex().command(LaunchContext("abc", load_profile("developer"), "do it"))
     setting = next(a for a in argv if a.startswith("notify="))
     notify = json.loads(setting[len("notify="):])
@@ -66,7 +66,7 @@ def test_hook_main_parses_notify_payload(db, ws):
 
 def test_autopilot_codex_supervisor_is_told_to_keep_going(db, ws, monkeypatch):
     """No Stop hook on Codex: a finished turn is where autopilot nudges it."""
-    from frith import autopilot
+    from brindle import autopilot
 
     codex_agent(db, ws)
     db.add_autopilot("c1")
@@ -85,7 +85,7 @@ def test_autopilot_codex_supervisor_is_told_to_keep_going(db, ws, monkeypatch):
 def test_supervisor_refuses_a_provider_that_cant_supervise(repo, monkeypatch):
     from typer.testing import CliRunner
 
-    from frith.cli import app
+    from brindle.cli import app
 
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["--provider", "native"])

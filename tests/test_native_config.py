@@ -1,13 +1,13 @@
 """Configuring native workers: profile fields and env lines, the built-in
-local profiles, and what `frith doctor` says about their endpoints."""
+local profiles, and what `brindle doctor` says about their endpoints."""
 
 import pytest
 
-from frith import agents, doctor, workspaces
-from frith.db import Agent
-from frith.native.client import Endpoint
-from frith.native.runner import probe
-from frith.profiles import list_profiles, load_profile
+from brindle import agents, doctor, workspaces
+from brindle.db import Agent
+from brindle.native.client import Endpoint
+from brindle.native.runner import probe
+from brindle.profiles import list_profiles, load_profile
 from test_native_loop import FakeEndpoint
 
 
@@ -32,7 +32,7 @@ def test_builtin_local_profiles_are_native_and_complete():
 
 
 def test_profile_env_lines_and_context_sizes(tmp_path):
-    d = tmp_path / ".frith" / "agents"
+    d = tmp_path / ".brindle" / "agents"
     d.mkdir(parents=True)
     (d / "glm.md").write_text(
         "---\nname: glm\nprovider: claude\nmodel: glm-4.7-flash\n"
@@ -52,14 +52,14 @@ def test_profile_env_lines_and_context_sizes(tmp_path):
 
 def test_profile_env_reaches_the_agents_process(db, repo):
     ws = workspaces.create(db, str(repo), "feat").workspace
-    d = repo / ".frith" / "agents"
+    d = repo / ".brindle" / "agents"
     d.mkdir(parents=True)
     (d / "glm.md").write_text("---\nname: glm\nprovider: claude\nenv.ANTHROPIC_BASE_URL: http://h\n"
-                              "env.FRITH_AGENT_ID: nope\n---\nhi\n")
+                              "env.BRINDLE_AGENT_ID: nope\n---\nhi\n")
     a = Agent("a1", ws.id, "glm", "claude", None, "assign", "starting", "", None, 0.0)
     env = agents.agent_env(ws, "a1", a)
     assert env["ANTHROPIC_BASE_URL"] == "http://h"
-    assert env["FRITH_AGENT_ID"] == "a1"  # frith's own variables win
+    assert env["BRINDLE_AGENT_ID"] == "a1"  # brindle's own variables win
     plain = agents.agent_env(ws, "a1", Agent("a1", ws.id, "developer", "claude", None, "assign", "starting", "", None, 0.0))
     assert "ANTHROPIC_BASE_URL" not in plain
 
@@ -77,14 +77,14 @@ def test_probe_reports_reachability_and_the_model(fake):
 
 
 def test_doctor_checks_each_native_endpoint_once(repo, fake, monkeypatch):
-    d = repo / ".frith" / "agents"
+    d = repo / ".brindle" / "agents"
     d.mkdir(parents=True)
     common = f"provider: native\nbase_url: {fake.base_url}/v1\nmodel: tiny\n"
     (d / "one.md").write_text(f"---\nname: one\n{common}---\nhi\n")
     (d / "two.md").write_text(f"---\nname: two\n{common}---\nhi\n")
     (d / "bare.md").write_text("---\nname: bare\nprovider: native\n---\nhi\n")
     # The built-in local profiles point at Ollama, which isn't running here.
-    monkeypatch.setattr("frith.native.runner.probe",
+    monkeypatch.setattr("brindle.native.runner.probe",
                         lambda ep, timeout=3.0: (False, "not reachable: refused") if "11434" in ep.base_url
                         else probe(ep, timeout))
     checks = {c.name: c for c in doctor.native_checks(str(repo))}
