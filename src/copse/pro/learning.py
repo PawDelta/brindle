@@ -200,7 +200,11 @@ def _local_decision(agent_id: str):
     """The routing decision this machine recorded for ``agent_id`` (copse.savings)."""
     from copse.db import DB
 
-    return DB().routing_decision_for_agent(agent_id)
+    db = DB()
+    try:
+        return db.routing_decision_for_agent(agent_id)
+    finally:
+        db.conn.close()
 
 
 class CloudLearner(LearningPlugin):

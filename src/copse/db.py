@@ -1309,7 +1309,7 @@ class DB:
                                 (agent_id,)).fetchone()
         return _load(RoutingDecision, row) if row else None
 
-    def list_routing_decisions(self,repo_root: str | None = None) -> list[RoutingDecision]:
+    def list_routing_decisions(self, repo_root: str | None = None) -> list[RoutingDecision]:
         where, args = ("WHERE repo_root=?", (repo_root,)) if repo_root else ("", ())
         rows = self.conn.execute(f"SELECT * FROM routing_decisions {where} ORDER BY id", args)
         return [_load(RoutingDecision, r) for r in rows]
