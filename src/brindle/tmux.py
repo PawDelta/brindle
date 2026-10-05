@@ -96,12 +96,12 @@ def windows(session: str) -> list[str]:
     return proc.stdout.split() if proc.returncode == 0 else []
 
 
-# The brindle window as pawdelta.com/brindle draws it (Canopy, night): a dark
-# forest ground, canopy-green accent, grey-green text.
+# The brindle window as pawdelta.com/brindle draws it (Brindle palette, night):
+# a dark brown ground, brindle-brown and fawn accents, warm grey text.
 THEME = {
-    "bg": "#121915", "bg2": "#1a221d", "line": "#2a342e",
-    "accent": "#2d6a47", "accent_light": "#86c99c",
-    "text": "#e3e9e2", "muted": "#7f8c84", "muted2": "#b4c0b8",
+    "bg": "#17130f", "bg2": "#1f1a15", "line": "#2f2821",
+    "accent": "#8a5a2b", "accent_light": "#d7af87",
+    "text": "#ece4d9", "muted": "#8f8173", "muted2": "#c4b8aa",
 }
 
 

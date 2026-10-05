@@ -618,20 +618,20 @@ def _next_needing(state: NavState, lines: list[Line]) -> None:
     state.follow = True
 
 
-# The site's brindle window (pawdelta.com/brindle, Canopy night) as xterm-256
-# colours (closest matches): canopy-green accent, lavender for working,
-# amber for needs you, grey-green for secondary text.
+# The site's brindle window (pawdelta.com/brindle, Brindle palette) as
+# xterm-256 colours (closest matches): a fawn accent, sage for idle, lavender
+# for working, coral for needs you, warm grey for secondary text.
 PALETTE_256 = {
-    "accent": 115,    # ~#86c99c canopy green
-    "busy": 147,      # ~#c3a6ff lavender: working
-    "ok": 115,        # canopy green: idle / done
-    "alert": 179,     # ~#e9b45e amber: needs you
-    "bad": 174,       # dusty rose: stopped
-    "dim": 102,       # ~#7f8c84 grey-green
+    "accent": 180,    # ~#d7af87 fawn
+    "busy": 147,      # ~#afafff lavender: working
+    "ok": 108,        # ~#87af87 sage: idle / done
+    "alert": 209,     # ~#ff875f coral: needs you
+    "bad": 131,       # ~#af5f5f brick: stopped
+    "dim": 245,       # ~#8a8a8a warm grey
     "coat": 180,      # ~#d7af87 fawn: the paw's coat
     "streak": 94,     # ~#875f00 dark brown: the paw's brindle streaks
-    "text": 254,      # ~#e3e9e2
-    "select_bg": 235, # ~#1f2a23 subtle row highlight
+    "text": 254,      # ~#e4e4e4
+    "select_bg": 236, # ~#303030 subtle row highlight
 }
 
 
