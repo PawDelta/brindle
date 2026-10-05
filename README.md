@@ -120,6 +120,8 @@ a dim ◇ instead, because the supervisor reviews it.
 that pane and is copied to the system clipboard (`pbcopy`, `wl-copy` or `xclip`;
 `copse doctor` shows which). `h` in the sidebar hides it without quitting copse
 (the chat zooms; `Ctrl-b S` brings it back), and `Ctrl-b z` zooms the chat by hand.
+If the sidebar got left behind in another tmux session, `Ctrl-b S` in a window
+without one pulls it here, as does `copse sidebar` (it restarts a sidebar that was closed).
 To keep the dashboard below the chat instead, set `"sidebar": "bottom"` in
 `.copse/config.json`.
 
@@ -317,6 +319,7 @@ your own status line prints, so what you see doesn't change.
 | `copse account [login\|logout\|status\|upgrade\|portal\|org]` | paid features: bare `copse account` shows what your plan has and how to get the rest (see "copse Pro and Team" below) |
 | `copse audit verify\|export\|pubkey` | the local tamper-evident audit log (copse Enterprise; see "Audit log" below) |
 | `copse watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks, `x` closes |
+| `copse sidebar` | bring this session's sidebar into the tmux session you're in (also `Ctrl-b S` in a window without one); restarts it if it was closed |
 | `copse attach / cd / open [WS]` | tmux session (at the agent waiting on you, else the busiest or newest) / path / editor |
 | `copse status / diff [--stat] [WS]` | compared with the base branch (committed + uncommitted) |
 | `copse sync [--merge] [WS]` | rebase (or merge) the latest base into the branch |
