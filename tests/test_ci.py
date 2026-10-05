@@ -188,6 +188,21 @@ def test_a_rerun_reuses_the_branch_worktree(db, repo, monkeypatch):
     assert git.worktree_for_branch(str(repo), "copse/ci-42") == first
 
 
+def test_a_rerun_survives_a_deleted_worktree_folder(db, repo, monkeypatch):
+    import shutil
+    s = FakeSession(db, monkeypatch, script=finish_goal)
+    goal = ci.Goal("Add health", issue=42)
+    run(db, repo, goal, s)
+    first = git.worktree_for_branch(str(repo), "copse/ci-42")
+    tip = git.out(["rev-parse", "copse/ci-42"], str(repo))
+    shutil.rmtree(first)                      # a wiped copse home or a cleaned runner
+    db.delete_agent("sup1")
+    run(db, repo, goal, FakeSession(db, monkeypatch, script=finish_goal))
+    again = git.worktree_for_branch(str(repo), "copse/ci-42")
+    assert again and Path(again).is_dir()
+    assert git.ok(["merge-base", "--is-ancestor", tip, "copse/ci-42"], str(repo))
+
+
 def test_shaped_goal_records_the_milestones_up_front(db, repo, monkeypatch):
     def verify(session, root_id):
         for m in session.db.milestones(root_id):

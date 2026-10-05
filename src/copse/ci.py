@@ -393,6 +393,11 @@ def _checkout(db: DB, repo_path: str, branch: str, base: str | None) -> Workspac
     the repo's base), or the existing one on a re-run."""
     repo_root = git.main_repo_root(repo_path)
     existing = git.worktree_for_branch(repo_root, branch)
+    if existing and not Path(existing).is_dir():
+        # Its folder was deleted (a wiped copse home, a cleaned runner): forget
+        # the stale worktree and check the branch out afresh, keeping its commits.
+        git.run(["worktree", "prune"], repo_root, check=False)
+        existing = git.worktree_for_branch(repo_root, branch)
     if existing:
         return workspaces.adopt_root(db, existing)
     return workspaces.create(db, repo_path, branch, base, apply_prefix=False).workspace
