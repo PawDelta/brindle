@@ -628,7 +628,8 @@ PALETTE_256 = {
     "alert": 179,     # ~#e9b45e amber: needs you
     "bad": 174,       # dusty rose: stopped
     "dim": 102,       # ~#7f8c84 grey-green
-    "trunk": 137,     # ~#a37a4c bark: the logo's trunk
+    "coat": 180,      # ~#d7af87 fawn: the paw's coat
+    "streak": 94,     # ~#875f00 dark brown: the paw's brindle streaks
     "text": 254,      # ~#e3e9e2
     "select_bg": 235, # ~#1f2a23 subtle row highlight
 }
@@ -647,14 +648,14 @@ def _styles() -> dict[str, int]:
         pairs = [("accent", p["accent"], -1), ("busy", p["busy"], -1), ("ok", p["ok"], -1),
                  ("alert", p["alert"], -1), ("bad", p["bad"], -1), ("dim", p["dim"], -1),
                  ("normal", p["text"], -1), ("select", p["text"], p["select_bg"]),
-                 ("trunk", p["trunk"], -1),
+                 ("coat", p["coat"], -1), ("streak", p["streak"], -1),
                  ("bar", p["accent"], p["select_bg"])]
     else:
         pairs = [("accent", curses.COLOR_GREEN, -1), ("busy", curses.COLOR_MAGENTA, -1),
                  ("ok", curses.COLOR_GREEN, -1), ("alert", curses.COLOR_YELLOW, -1),
                  ("bad", curses.COLOR_RED, -1), ("dim", -1, -1), ("normal", -1, -1),
                  ("select", curses.COLOR_WHITE, curses.COLOR_BLACK),
-                 ("trunk", curses.COLOR_YELLOW, -1),
+                 ("coat", curses.COLOR_YELLOW, -1), ("streak", curses.COLOR_RED, -1),
                  ("bar", curses.COLOR_GREEN, curses.COLOR_BLACK)]
     for i, (name, fg, bg) in enumerate(pairs, start=1):
         curses.init_pair(i, fg, bg)
@@ -699,22 +700,30 @@ def _peek(stdscr, agent: dict, styles: dict[str, int]) -> None:
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
 
 
-LOGO = [  # one solid pine; the wordmark sits beside its widest row
-    ("   ◢◣", ""),
-    ("  ◢██◣", ""),
-    (" ◢████◣  ", "brindle"),
-    ("   ██", ""),
+LOGO = [  # a paw print; the wordmark sits beside its middle row
+    ("   ▄▄  ▄▄   ", ""),
+    ("▄▄ ▀▀  ▀▀ ▄▄", ""),
+    ("▀▀  ▄▄▄▄  ▀▀  ", "brindle"),
+    ("   ██████", ""),
+    ("    ▀▀▀▀", ""),
 ]
+COMPACT_LOGO = "▀▄▀"  # two toes over the pad, for one-line headers
+
+
+def _coat(x: int, y: int) -> str:
+    """Brindle: a fawn coat, with dark stripes down the pad."""
+    return "streak" if y >= 2 and 3 <= x <= 8 and x % 2 == 0 else "coat"
 
 
 def _draw_logo(stdscr, w: int, styles: dict[str, int]) -> int:
-    """The pine-and-wordmark header. Returns the first free row."""
+    """The paw-and-wordmark header. Returns the first free row."""
     clock = time.strftime("%H:%M")
-    for y, (tree, word) in enumerate(LOGO):
-        trunk = y == len(LOGO) - 1
-        stdscr.addnstr(y, 1, tree, w - 2, styles.get("trunk", styles["accent"]) if trunk else styles["accent"])
-        if word and w > len(tree) + len(word) + 2:
-            stdscr.addnstr(y, 1 + len(tree), word, len(word), styles["bold"])
+    for y, (paw, word) in enumerate(LOGO):
+        for x, ch in enumerate(paw):
+            if ch != " " and x < w - 2:
+                stdscr.addstr(y, 1 + x, ch, styles.get(_coat(x, y), styles["accent"]))
+        if word and w > len(paw) + len(word) + 2:
+            stdscr.addnstr(y, 1 + len(paw), word, len(word), styles["bold"])
     if w > len(clock) + 16:
         stdscr.addnstr(0, w - 1 - len(clock), clock, len(clock), styles["dim"])
     stdscr.addnstr(len(LOGO), 1, "─" * max(0, w - 3), w - 2, styles["dim"])
@@ -723,8 +732,9 @@ def _draw_logo(stdscr, w: int, styles: dict[str, int]) -> int:
 
 def _draw_compact_logo(stdscr, w: int, styles: dict[str, int]) -> int:
     """One-line header for short panes."""
-    stdscr.addnstr(0, 1, "◢◣", w - 2, styles["accent"])
-    stdscr.addnstr(0, 4, "brindle", max(0, w - 5), styles["bold"])
+    stdscr.addnstr(0, 1, COMPACT_LOGO, w - 2, styles.get("coat", styles["accent"]))
+    if w > 6:
+        stdscr.addnstr(0, 5, "brindle", w - 6, styles["bold"])
     stdscr.addnstr(1, 1, "─" * max(0, w - 3), w - 2, styles["dim"])
     return 2
 

@@ -178,3 +178,38 @@ def test_older_brindle_ignores_columns_from_a_newer_one(tmp_path):
     assert db.get_agent("a").status == "idle"
     assert [a.id for a in db.list_agents("w")] == ["a"]
     assert db.get_workspace("w").name == "n"
+
+
+class _Screen:
+    """Records what the header draws; like curses, refuses to write past the right edge."""
+
+    def __init__(self, w: int):
+        self.w, self.cells = w, {}
+
+    def addstr(self, y, x, s, attr=0):
+        assert x + len(s) <= self.w, (x, s, self.w)
+        for i, ch in enumerate(s):
+            self.cells[(y, x + i)] = (ch, attr)
+
+    def addnstr(self, y, x, s, n, attr=0):
+        self.addstr(y, x, s[:max(0, n)], attr)
+
+    def row(self, y):
+        return "".join(self.cells.get((y, x), (" ", 0))[0] for x in range(self.w)).rstrip()
+
+
+STYLES = {"accent": 1, "bold": 2, "dim": 3, "coat": 4, "streak": 5}
+
+
+def test_logo_is_a_brindle_paw_with_the_wordmark():
+    screen = _Screen(40)
+    assert watch._draw_logo(screen, 40, STYLES) == len(watch.LOGO) + 1
+    assert "brindle" in screen.row(2)
+    colours = {attr for (y, _), (ch, attr) in screen.cells.items() if y < len(watch.LOGO) and ch in "▄▀█"}
+    assert colours == {STYLES["coat"], STYLES["streak"]}  # fawn, with dark stripes
+
+
+def test_logo_fits_narrow_panes():
+    for w in range(3, 30):
+        watch._draw_logo(_Screen(w), w, STYLES)
+        watch._draw_compact_logo(_Screen(w), w, STYLES)
