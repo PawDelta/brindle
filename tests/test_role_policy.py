@@ -5,8 +5,8 @@ import json
 
 import pytest
 
-from copse.pro import auth, team_policy
-from copse.pro._files import private_dir
+from frith.pro import auth, team_policy
+from frith.pro._files import private_dir
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
 from test_pro_team import (  # noqa: F401 - fixtures/helpers
     ORG, POLICY, assign, login, merge, plugin, run, team, team_claims,
@@ -191,7 +191,7 @@ def test_an_offline_effective_policy_is_kept_as_is():
     assert team_policy.with_role_overrides(p, "member", "contractor") is p
 
 
-# -- copse account org policy ----------------------------------------------------------------------
+# -- frith account org policy ----------------------------------------------------------------------
 
 
 def test_org_policy_shows_base_overrides_and_effective(team):
@@ -222,7 +222,7 @@ def test_org_policy_caches_under_the_members_key(team):
     assert fetches(team) == 1
 
 
-# -- copse account org member policy-role -----------------------------------------------------------
+# -- frith account org member policy-role -----------------------------------------------------------
 
 SUB = "user_2"
 ROLE_PATH = f"/orgs/{ORG}/members/{SUB}/policy-role"
@@ -252,7 +252,7 @@ def test_set_and_clear_a_policy_role(team):
 def test_policy_role_below_enterprise(team):
     team.routes[f"PUT {ROLE_PATH}"] = [(403, {"error": "enterprise_required"})]
     code, _, err = run(team, "org", "member", "policy-role", SUB, "contractor", "--org", ORG)
-    assert code == 1 and "enterprise_required" in err and "copse Enterprise" in err
+    assert code == 1 and "enterprise_required" in err and "frith Enterprise" in err
 
 
 def test_policy_role_for_a_non_admin(team):

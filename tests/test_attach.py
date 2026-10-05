@@ -1,13 +1,13 @@
-"""Issue #35: `copse attach` opens the agent that needs you, and the errors
+"""Issue #35: `frith attach` opens the agent that needs you, and the errors
 around it say what happened."""
 
 import time
 
 from typer.testing import CliRunner
 
-from copse import agents, mcp_server, workspaces
-from copse.cli import app
-from copse.db import Agent
+from frith import agents, mcp_server, workspaces
+from frith.cli import app
+from frith.db import Agent
 
 
 def add(db, ws, aid, status, window, created):
@@ -46,9 +46,9 @@ def test_attach_without_a_terminal_explains(db, repo, monkeypatch):
 def test_send_message_to_a_paused_agent_says_why(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("p1", ws.id, "supervisor", "claude", None, "interactive", "paused", "%9", None, time.time()))
-    monkeypatch.delenv("COPSE_AGENT_ID", raising=False)
+    monkeypatch.delenv("FRITH_AGENT_ID", raising=False)
     out = mcp_server.send_message("p1", "hello")
-    assert out.startswith("Not sent: agent p1 is paused") and "copse continue" in out
+    assert out.startswith("Not sent: agent p1 is paused") and "frith continue" in out
 
 
 def test_workers_are_told_not_to_enter_another_worktree(db, repo):

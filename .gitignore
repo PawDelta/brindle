@@ -3,9 +3,9 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 graphify-out/
-# copse local state that is not part of the repo
-.copse/*.log
-.copse/agents/
+# frith local state that is not part of the repo
+.frith/*.log
+.frith/agents/
 # private, kept local for now
 docs/
-.copse/config.local.json
+.frith/config.local.json

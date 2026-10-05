@@ -8,13 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from copse import sidebar_follow
+from frith import sidebar_follow
 
-ENTRY = Path(__file__).parents[1] / "src" / "copse" / "__main__.py"
+ENTRY = Path(__file__).parents[1] / "src" / "frith" / "__main__.py"
 
 
 def _run(code, tmp_path):
-    env = {**os.environ, "COPSE_HOME": str(tmp_path / "copse-home")}
+    env = {**os.environ, "FRITH_HOME": str(tmp_path / "frith-home")}
     return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
 
 
@@ -23,7 +23,7 @@ def test_sidebar_follow_entry_does_not_import_heavy_modules(tmp_path):
 import runpy, sys
 sys.argv = [{str(ENTRY)!r}, '_sidebar-follow', 'missing-session']
 runpy.run_path(sys.argv[0], run_name='__main__')
-for name in ('copse.cli', 'copse.mcp_server', 'typer', 'copse.providers', 'copse.workspaces'):
+for name in ('frith.cli', 'frith.mcp_server', 'typer', 'frith.providers', 'frith.workspaces'):
     assert name not in sys.modules, name
 """
     result = _run(code, tmp_path)
@@ -75,15 +75,15 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
     else:
         with pytest.raises(AssertionError, match="slow path reached"):
             sidebar_follow.sidebar_follow(FakeDB(), "session")
-    assert calls == [("%sidebar", "@copse_sidebar")]
+    assert calls == [("%sidebar", "@frith_sidebar")]
 
 
 def test_main_argv_falls_through_for_normal_command_and_swallows_hook_errors(tmp_path):
     code = f"""
 import runpy, sys, types
-cli = types.ModuleType('copse.cli')
+cli = types.ModuleType('frith.cli')
 cli.app = lambda: print('cli-called')
-sys.modules['copse.cli'] = cli
+sys.modules['frith.cli'] = cli
 sys.argv = [{str(ENTRY)!r}, 'version']
 runpy.run_path(sys.argv[0], run_name='__main__')
 """
@@ -93,13 +93,13 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 
     code = f"""
 import runpy, sys, types
-db = types.ModuleType('copse.db')
+db = types.ModuleType('frith.db')
 db.DB = lambda: object()
-follow = types.ModuleType('copse.sidebar_follow')
+follow = types.ModuleType('frith.sidebar_follow')
 def fail(db, session): raise RuntimeError('hook failure')
 follow.sidebar_follow = fail
-sys.modules['copse.db'] = db
-sys.modules['copse.sidebar_follow'] = follow
+sys.modules['frith.db'] = db
+sys.modules['frith.sidebar_follow'] = follow
 sys.argv = [{str(ENTRY)!r}, '_sidebar-follow', 'session']
 runpy.run_path(sys.argv[0], run_name='__main__')
 """

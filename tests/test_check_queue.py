@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from copse import agents, autopilot, gates, workspaces
-from copse.config import RepoConfig, load_repo_config
-from copse.db import DB, Agent
+from frith import agents, autopilot, gates, workspaces
+from frith.config import RepoConfig, load_repo_config
+from frith.db import DB, Agent
 
 
 def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle", result=None, **kw):
@@ -32,8 +32,8 @@ def inbox(db, agent_id):
 
 
 def configure(repo, **values):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text(json.dumps(values))
+    (repo / ".frith").mkdir(exist_ok=True)
+    (repo / ".frith" / "config.json").write_text(json.dumps(values))
 
 
 @pytest.fixture
@@ -85,7 +85,7 @@ def test_check_concurrency_defaults_low_and_is_read_from_the_repo_config(repo):
 
 
 @pytest.mark.parametrize("limit", [1, 2])
-def test_at_most_limit_runs_hold_a_slot_at_once(copse_home, monkeypatch, limit):
+def test_at_most_limit_runs_hold_a_slot_at_once(frith_home, monkeypatch, limit):
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
     meter = Meter(hold=0.1)
 
@@ -97,7 +97,7 @@ def test_at_most_limit_runs_hold_a_slot_at_once(copse_home, monkeypatch, limit):
     assert meter.peak == limit
 
 
-def test_no_cap_takes_no_slot(copse_home, monkeypatch):
+def test_no_cap_takes_no_slot(frith_home, monkeypatch):
     meter = Meter(hold=0.1)
 
     def run(_i):
@@ -108,7 +108,7 @@ def test_no_cap_takes_no_slot(copse_home, monkeypatch):
     assert meter.peak == 3
 
 
-def test_a_slot_is_given_back_when_the_run_raises(copse_home, monkeypatch):
+def test_a_slot_is_given_back_when_the_run_raises(frith_home, monkeypatch):
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
     with pytest.raises(RuntimeError):
         with gates._check_slot(1):

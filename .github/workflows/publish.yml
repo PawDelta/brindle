@@ -1,6 +1,6 @@
 # Publishes to PyPI when a GitHub release is published, via Trusted Publishing
 # (no API token). PyPI must list this repo, workflow file "publish.yml", and
-# environment "pypi" as a trusted publisher for the copse-ai project.
+# environment "pypi" as a trusted publisher for the frith project.
 name: Publish
 
 on:
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/copse-ai
+      url: https://pypi.org/p/frith
     permissions:
       id-token: write
     steps:

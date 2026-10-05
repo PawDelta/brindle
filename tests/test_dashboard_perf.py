@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from copse import agents, git, status_cache, tmux, view, workspaces
+from frith import agents, git, status_cache, tmux, view, workspaces
 
 from conftest import sh
 
@@ -254,7 +254,7 @@ def test_list_panes_empty_when_tmux_not_installed(monkeypatch):
 
 
 def test_list_panes_empty_when_no_server_running(monkeypatch):
-    monkeypatch.setenv("COPSE_TMUX_SOCKET", f"copse-test-no-server-{os.getpid()}")
+    monkeypatch.setenv("FRITH_TMUX_SOCKET", f"frith-test-no-server-{os.getpid()}")
     assert tmux.list_panes() == {}
 
 

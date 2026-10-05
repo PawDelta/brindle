@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add the docs link to copse release notes.
+"""Add the docs link to frith release notes.
 
     scripts/release_footer.py NOTES.md          append the footer to a notes file
     scripts/release_footer.py --github [--dry-run]
@@ -15,14 +15,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = "hmlerner/copse-ai"
-SITE = "https://pawdelta.com/copse/"
-FOOTER = f"Docs and install: [pawdelta.com/copse]({SITE}) · Release notes: [pawdelta.com/copse/changelog]({SITE}changelog)"
+REPO = "hmlerner/frith-ai"
+SITE = "https://pawdelta.com/frith/"
+FOOTER = f"Docs and install: [pawdelta.com/frith]({SITE}) · Release notes: [pawdelta.com/frith/changelog]({SITE}changelog)"
 
 
 def with_footer(body: str) -> str:
     """``body`` ending with FOOTER, unless it already links the site."""
-    if "pawdelta.com/copse" in body:
+    if "pawdelta.com/frith" in body:
         return body
     return body.rstrip() + "\n\n---\n\n" + FOOTER + "\n"
 

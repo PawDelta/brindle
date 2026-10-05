@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from copse import git, workspaces
+from frith import git, workspaces
 
 
 def _feature(db, repo, name="feature", fname="new.py"):

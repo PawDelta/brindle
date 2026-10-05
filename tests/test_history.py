@@ -3,10 +3,10 @@ import time
 
 from typer.testing import CliRunner
 
-from copse import cli, agents, autopilot, history, mcp_server, sessions, workspaces
-from copse.cli import app
-from copse.db import Agent
-from copse.usage import Usage
+from frith import cli, agents, autopilot, history, mcp_server, sessions, workspaces
+from frith.cli import app
+from frith.db import Agent
+from frith.usage import Usage
 
 
 def add(db, ws, aid, mode="interactive", parent=None, status="processing", since=None):
@@ -52,11 +52,11 @@ def test_report_result_writes_worker_result_and_review_rows(db, repo, monkeypatc
 
 
 def test_merge_workspace_writes_a_merge_row(db, repo, monkeypatch):
-    from copse import git
+    from frith import git
 
     root_ws = workspaces.adopt_root(db, str(repo))
     add(db, root_ws, "boss")
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     ws = workspaces.create(db, str(repo), "feature").workspace
     with open(ws.path + "/new.py", "w") as f:
         f.write("x = 1\n")
@@ -76,7 +76,7 @@ def test_check_milestone_writes_check_and_milestone_rows(db, repo, monkeypatch):
     add(db, root_ws, "boss")
     db.add_autopilot("boss")
     autopilot.set_goal(db, "boss", "Goal", [("M1", "test -f done.txt", None)])
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     (repo / "done.txt").write_text("x")
 
     # The tool starts the check in the background; the helper it starts
@@ -177,9 +177,9 @@ def test_history_cli_empty(db, repo, monkeypatch):
 
 
 def test_history_failure_does_not_block_merge_or_forward(db, repo, monkeypatch):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards
-    from copse import git
+    (repo / ".frith").mkdir(exist_ok=True)
+    (repo / ".frith" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards
+    from frith import git
 
     def boom(*a, **k):
         raise RuntimeError("history is broken")
@@ -189,7 +189,7 @@ def test_history_failure_does_not_block_merge_or_forward(db, repo, monkeypatch):
 
     root_ws = workspaces.adopt_root(db, str(repo))
     add(db, root_ws, "boss")
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     ws = workspaces.create(db, str(repo), "feature").workspace
     add(db, ws, "w1", mode="assign", parent="boss")
 
@@ -218,7 +218,7 @@ def _usage_line(msg_id, n):
 
 
 def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, monkeypatch):
-    from copse import git
+    from frith import git
 
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     boss_t, w_t = tmp_path / "boss.jsonl", tmp_path / "w1.jsonl"
@@ -228,7 +228,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
     root_ws = workspaces.adopt_root(db, str(repo))
     add(db, root_ws, "boss")
     db.update_agent("boss", transcript_path=str(boss_t))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     ws = workspaces.create(db, str(repo), "feature").workspace
     add(db, ws, "w1", mode="assign", parent="boss")
     db.update_agent("w1", transcript_path=str(w_t))
@@ -264,7 +264,7 @@ def test_check_and_milestone_rows_carry_no_tokens(db, repo, tmp_path, monkeypatc
     db.update_agent("boss", transcript_path=str(t))
     db.add_autopilot("boss")
     autopilot.set_goal(db, "boss", "Goal", [("M1", "test -f done.txt", None)])
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     (repo / "done.txt").write_text("x")
 
     cli.check_milestones_cmd("boss", root_ws.id, position=None)
@@ -284,7 +284,7 @@ def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db, repo, tm
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     root_ws = workspaces.adopt_root(db, str(repo))
     add(db, root_ws, "boss")
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     ws = workspaces.create(db, str(repo), "feature").workspace
     add(db, ws, "w1", mode="assign", parent="boss")
 

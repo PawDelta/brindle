@@ -1,7 +1,7 @@
-"""The docs cover every command and tool copse actually has.
+"""The docs cover every command and tool frith actually has.
 
-Checks README.md always, and the pawdelta.com/copse page too when
-COPSE_SITE_PAGE points at its HTML source.
+Checks README.md always, and the pawdelta.com/frith page too when
+FRITH_SITE_PAGE points at its HTML source.
 """
 
 import asyncio
@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 import typer
 
-from copse.cli import app
-from copse.mcp_server import mcp
+from frith.cli import app
+from frith.mcp_server import mcp
 
 README = Path(__file__).resolve().parent.parent / "README.md"
 
@@ -48,17 +48,17 @@ def _text(path: Path) -> str:
 
 def _pages() -> list[Path]:
     pages = [README]
-    site = os.environ.get("COPSE_SITE_PAGE")
+    site = os.environ.get("FRITH_SITE_PAGE")
     if site:
         pages.append(Path(site))
     return pages
 
 
 def _mentions_command(text: str, cmd: str) -> bool:
-    """`copse ls`, or a grouped form like `copse attach / cd / open` or
-    `copse agent spawn/kill/peek`."""
+    """`frith ls`, or a grouped form like `frith attach / cd / open` or
+    `frith agent spawn/kill/peek`."""
     *group, name = cmd.split()
-    prefix = "copse " + "".join(f"{g} " for g in group)
+    prefix = "frith " + "".join(f"{g} " for g in group)
     for m in re.finditer(rf"{prefix}[\w-]+(?: ?/ ?[\w-]+)*", text):
         if name in re.split(r" ?/ ?", m.group(0)[len(prefix):]):
             return True
@@ -104,7 +104,7 @@ def test_command_help_has_no_hard_wraps():
 
 @pytest.mark.parametrize("page", _pages(), ids=lambda p: p.name)
 def test_every_sidebar_key_is_documented(page):
-    from copse.watch import KEYS
+    from frith.watch import KEYS
 
     text = _text(page)
     missing = [k for k, _ in KEYS if k not in text]

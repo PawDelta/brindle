@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from copse import agents, mcp_server, workspaces
-from copse.config import RepoConfig, load_repo_config
-from copse.db import Agent
-from copse.profiles import Profile, load_profile
+from frith import agents, mcp_server, workspaces
+from frith.config import RepoConfig, load_repo_config
+from frith.db import Agent
+from frith.profiles import Profile, load_profile
 
 
 @pytest.fixture
@@ -65,7 +65,7 @@ def codex_present(monkeypatch, present: bool):
 
 def test_default_profile_never_forces_another_model(monkeypatch):
     # Codex installed and a Claude worker: still the baseline reviewer. Only
-    # copse Pro's learner may pick another model (see test_review_profile).
+    # frith Pro's learner may pick another model (see test_review_profile).
     codex_present(monkeypatch, True)
     worker = Agent("w1", "ws1", "developer", "claude", None, "handoff", "done", "@0", "ok", time.time())
     assert agents.default_review_profile(RepoConfig(), worker) == "reviewer"
@@ -189,7 +189,7 @@ def test_mcp_request_review_returns_a_message_instead_of_raising_when_codex_miss
 
 
 def test_repo_config_reads_review_profile(tmp_path):
-    cfg_dir = tmp_path / ".copse"
+    cfg_dir = tmp_path / ".frith"
     cfg_dir.mkdir()
     (cfg_dir / "config.json").write_text('{"review_profile": "custom-reviewer"}')
     cfg = load_repo_config(tmp_path)

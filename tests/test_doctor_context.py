@@ -1,4 +1,4 @@
-"""copse doctor warns when an Ollama server's context is smaller than a
+"""frith doctor warns when an Ollama server's context is smaller than a
 native profile's context_tokens."""
 
 import json
@@ -7,8 +7,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from copse import doctor
-from copse.native import runner
+from frith import doctor
+from frith.native import runner
 
 
 class FakeOllama:
@@ -76,7 +76,7 @@ def serve():
 
 
 def add_profile(repo, fake, context="8k"):
-    d = repo / ".copse" / "agents"
+    d = repo / ".frith" / "agents"
     d.mkdir(parents=True, exist_ok=True)
     (d / "local.md").write_text(
         f"---\nname: local\ndescription: a local model\nprovider: native\napi: openai\n"
@@ -137,7 +137,7 @@ def test_two_profiles_same_endpoint_no_context(repo, serve):
     fake = serve(parameters="stop")  # No num_ctx parameter, so context is None
     
     # Add two profiles using the same endpoint 
-    d = repo / ".copse" / "agents"
+    d = repo / ".frith" / "agents"
     d.mkdir(parents=True, exist_ok=True)
     
     # First custom profile
@@ -175,7 +175,7 @@ def test_two_profiles_same_endpoint_small_context(repo, serve):
     fake = serve(parameters="num_ctx 4096\nstop")  # Small context but has num_ctx parameter
     
     # Add two profiles using the same endpoint
-    d = repo / ".copse" / "agents"
+    d = repo / ".frith" / "agents"
     d.mkdir(parents=True, exist_ok=True)
     
     # First custom profile

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from copse.native import (Client, Endpoint, NativeAgent, Permissions, Toolbox, ToolSpec, core_tools)
+from frith.native import (Client, Endpoint, NativeAgent, Permissions, Toolbox, ToolSpec, core_tools)
 
 
 class Sse:

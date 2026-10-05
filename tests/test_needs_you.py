@@ -8,10 +8,10 @@ import time
 
 import pytest
 
-from copse import agents, cull, watch
-from copse.config import set_local
-from copse.db import Agent
-from copse.providers import get_provider
+from frith import agents, cull, watch
+from frith.config import set_local
+from frith.db import Agent
+from frith.providers import get_provider
 
 from test_agents import CLAUDE_PROMPT
 from test_launch_health import root, screens  # noqa: F401 - fixtures

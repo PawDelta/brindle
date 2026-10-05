@@ -7,8 +7,8 @@ import time
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from copse.pro import auth, credentials, keys, license
-from copse.pro.license import LicenseError, NotEntitled
+from frith.pro import auth, credentials, keys, license
+from frith.pro.license import LicenseError, NotEntitled
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, ISS, TEST_KID, b64, backend, claims, pro_env, sign, signing_key, token,
 )
@@ -32,14 +32,14 @@ def test_valid_token(token):
 
 
 def test_audience_may_be_a_list(token):
-    assert verify(token(aud=["other", "copse-pro"])).plan == "pro"
+    assert verify(token(aud=["other", "frith-pro"])).plan == "pro"
 
 
 def test_issuer_must_match_the_backend(token):
     with pytest.raises(LicenseError, match="issuer"):
-        verify(token(iss="https://evil.test/api/copse/v1"))
+        verify(token(iss="https://evil.test/api/frith/v1"))
     with pytest.raises(LicenseError, match="issuer"):
-        verify(token(), issuer="https://other.pawdelta.test/api/copse/v1")
+        verify(token(), issuer="https://other.pawdelta.test/api/frith/v1")
     assert verify(token(), issuer=ISS + "/").sub == "user_1"
 
 
@@ -107,7 +107,7 @@ def test_crit_header_is_rejected(signing_key):
         verify(sign(signing_key, claims(), {"crit": ["exp"]}))
 
 
-@pytest.mark.parametrize("aud", ["copse", "copse-pro-evil", ["other"], None, ""])
+@pytest.mark.parametrize("aud", ["frith", "frith-pro-evil", ["other"], None, ""])
 def test_wrong_audience_is_rejected(token, aud):
     with pytest.raises(LicenseError, match="audience"):
         verify(token(aud=aud))
@@ -263,7 +263,7 @@ def test_file_store_rejects_corrupt_contents(tmp_path):
 
 def test_default_store_honours_the_override(monkeypatch):
     assert isinstance(credentials.default_store(), credentials.FileStore)
-    monkeypatch.setenv("COPSE_PRO_CREDENTIAL_STORE", "bogus")
+    monkeypatch.setenv("FRITH_PRO_CREDENTIAL_STORE", "bogus")
     with pytest.raises(credentials.CredentialError):
         credentials.default_store()
 
@@ -385,8 +385,8 @@ def test_no_environment_makes_an_unpinned_key_trusted(monkeypatch):
     # Dev mode and a localhost issuer once let the client trust keys a local
     # server served; nothing outside keys.py may add a trusted key.
     key = Ed25519PrivateKey.generate()
-    monkeypatch.setenv("COPSE_PRO_DEV", "1")
-    local = "http://localhost:8000/api/copse/v1"
+    monkeypatch.setenv("FRITH_PRO_DEV", "1")
+    local = "http://localhost:8000/api/frith/v1"
     with pytest.raises(LicenseError, match="unknown key"):
         license.verify(sign(key, claims(kid="unpinned", iss=local)), issuer=local)
 

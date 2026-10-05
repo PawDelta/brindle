@@ -1,10 +1,10 @@
 [project]
-name = "copse-ai"
-version = "0.16.0"
+name = "frith"
+version = "0.0.1"
 description = "Run coding agents in parallel, each on its own git branch, with a supervisor that delegates, reviews, and merges"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "LicenseRef-copse-1.0"
+license = "LicenseRef-frith-1.0"
 license-files = ["LICENSE", "SCHEDULE-A"]
 authors = [{ name = "Hannah Lerner" }]
 keywords = ["ai", "agents", "claude-code", "codex", "git", "worktree", "tmux", "mcp", "orchestration"]
@@ -28,24 +28,24 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://pawdelta.com/copse/"
-Documentation = "https://pawdelta.com/copse/docs/recommended-use"
-Changelog = "https://pawdelta.com/copse/changelog"
+Homepage = "https://pawdelta.com/frith/"
+Documentation = "https://pawdelta.com/frith/docs/recommended-use"
+Changelog = "https://pawdelta.com/frith/changelog"
 Support = "mailto:support@pawdelta.com"
 
 [project.scripts]
-copse = "copse.cli:app"
+frith = "frith.cli:app"
 
-# copse Pro and Team (src/copse/pro): inert without a verified entitlement.
-[project.entry-points."copse.account"]
-pro = "copse.pro.account:make"
+# frith Pro and Team (src/frith/pro): inert without a verified entitlement.
+[project.entry-points."frith.account"]
+pro = "frith.pro.account:make"
 
-[project.entry-points."copse.policy"]
-pro = "copse.pro.team_policy:make"
+[project.entry-points."frith.policy"]
+pro = "frith.pro.team_policy:make"
 
-[project.entry-points."copse.events"]
-pro = "copse.pro.team_events:make"
-audit = "copse.pro.audit_chain:make"
+[project.entry-points."frith.events"]
+pro = "frith.pro.team_events:make"
+audit = "frith.pro.audit_chain:make"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -55,7 +55,7 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/copse"]
+packages = ["src/frith"]
 # Metadata 2.5 is newer than twine/PyPI tooling reliably accepts.
 core-metadata-version = "2.4"
 

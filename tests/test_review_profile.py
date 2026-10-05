@@ -1,16 +1,16 @@
 """default_review_profile: which reviewer request_review picks by default.
-The baseline reviewer, unless copse Pro's learner picks another that can run
-here; copse never reaches for a different model on its own."""
+The baseline reviewer, unless frith Pro's learner picks another that can run
+here; frith never reaches for a different model on its own."""
 
 import shutil
 import time
 
 import pytest
 
-from copse import agents
-from copse.config import RepoConfig
-from copse.db import Agent
-from copse.native import runner
+from frith import agents
+from frith.config import RepoConfig
+from frith.db import Agent
+from frith.native import runner
 
 
 def worker(provider="claude"):
@@ -52,7 +52,7 @@ class FakeLearner:
 
 @pytest.fixture
 def learner(monkeypatch):
-    from copse import learning
+    from frith import learning
 
     box = {"learner": None}
     monkeypatch.setattr(learning, "plugin", lambda cfg, repo_root: box["learner"])

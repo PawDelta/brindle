@@ -1,10 +1,10 @@
 #!/bin/sh
-# Install copse: curl -fsSL pawdelta.com/copse/install | sh
+# Install frith: curl -fsSL pawdelta.com/frith/install | sh
 #
 # Installs uv (if missing) and tmux (with Homebrew on macOS; prints the
-# command elsewhere), then copse itself with `uv tool install`, then runs
-# `copse doctor`. Safe to run again: it upgrades copse in place.
-# COPSE_VERSION=0.14.3 pins a version.
+# command elsewhere), then frith itself with `uv tool install`, then runs
+# `frith doctor`. Safe to run again: it upgrades frith in place.
+# FRITH_VERSION=0.14.3 pins a version.
 set -eu
 
 say() { printf '%s\n' "$*"; }
@@ -15,7 +15,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 case "$(uname -s)" in
   Darwin) os=mac ;;
   Linux) os=linux ;;
-  *) say "copse runs on macOS and Linux (on Windows, use WSL)."; exit 1 ;;
+  *) say "frith runs on macOS and Linux (on Windows, use WSL)."; exit 1 ;;
 esac
 
 if ! have uv; then
@@ -34,12 +34,12 @@ if ! have tmux; then
   elif have dnf; then
     warn "tmux is missing. Install it with: sudo dnf install -y tmux"
   else
-    warn "tmux is missing: copse runs every agent in a tmux window. Install it with your package manager."
+    warn "tmux is missing: frith runs every agent in a tmux window. Install it with your package manager."
   fi
 fi
 
-spec="copse-ai"
-[ -n "${COPSE_VERSION:-}" ] && spec="copse-ai==$COPSE_VERSION"
+spec="frith"
+[ -n "${FRITH_VERSION:-}" ] && spec="frith==$FRITH_VERSION"
 step "installing $spec"
 uv tool install --upgrade --python '>=3.11' "$spec"
 
@@ -55,9 +55,9 @@ if ! have claude; then
 fi
 
 say ""
-copse doctor || true
+frith doctor || true
 say ""
-step "copse $(copse --version 2>/dev/null | cut -d' ' -f2) is installed. Next:"
+step "frith $(frith --version 2>/dev/null | cut -d' ' -f2) is installed. Next:"
 say "    cd your/repo"
-say "    copse init     # detects your setup and test commands"
-say "    copse          # opens the supervisor; tell it what to build"
+say "    frith init     # detects your setup and test commands"
+say "    frith          # opens the supervisor; tell it what to build"

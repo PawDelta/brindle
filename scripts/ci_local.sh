@@ -76,7 +76,7 @@ if [ "$FORCE" = 0 ]; then
 fi
 # A fresh private directory per run (mktemp: unpredictable name, mode 0700),
 # never a fixed path someone else could have planted a symlink at.
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/copse-ci-local-$SHORT.XXXXXX")" || exit 1
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/frith-ci-local-$SHORT.XXXXXX")" || exit 1
 mkdir -p "$WORK/src" "$WORK/logs"
 echo "==> work and logs: $WORK"
 git -C "$ROOT" archive "$SHA" | tar -x -C "$WORK/src"
@@ -99,7 +99,7 @@ if printf '%s\n' "${LEGS[@]}" | grep -q '^linux:'; then
     SKIPPED="$(printf '%s\n' "${LEGS[@]}" | grep '^linux:' | tr '\n' ' ')"
     LEGS=($(printf '%s\n' "${LEGS[@]}" | grep -v '^linux:'))
   else
-    docker build -q -t copse-ci-linux -f "$ROOT/scripts/ci_local.Dockerfile" "$ROOT/scripts" >/dev/null \
+    docker build -q -t frith-ci-linux -f "$ROOT/scripts/ci_local.Dockerfile" "$ROOT/scripts" >/dev/null \
       || { echo "building the Linux CI image failed" >&2; exit 1; }
   fi
 fi
@@ -125,7 +125,7 @@ leg() {   # leg host:3.12 | linux:3.12 -> runs the suite, exit status is the res
   else
     # The export is copied inside, so the runner-like user owns its checkout;
     # uv's cache (Pythons, wheels) persists in a volume between runs.
-    docker run --rm -v "$dir:/src:ro" -v copse-ci-uv-cache:/home/ci/.cache/uv copse-ci-linux \
+    docker run --rm -v "$dir:/src:ro" -v frith-ci-uv-cache:/home/ci/.cache/uv frith-ci-linux \
       sh -c "cp -R /src /home/ci/work && cd /home/ci/work && uv sync -q --python $py && uv run -q --python $py $PYTEST" \
       >"$log" 2>&1
   fi

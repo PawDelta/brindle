@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from copse.native import (Client, ClientError, Endpoint, LoopConfig, NativeAgent, Permissions,
+from frith.native import (Client, ClientError, Endpoint, LoopConfig, NativeAgent, Permissions,
                           Toolbox, ToolSpec, core_tools)
-from copse.native.client import Usage
-from copse.native.permissions import bash_matches, split_commands
-from copse.native.tools import clip
+from frith.native.client import Usage
+from frith.native.permissions import bash_matches, split_commands
+from frith.native.tools import clip
 
 
 # -- a scripted endpoint ---------------------------------------------------------
@@ -241,7 +241,7 @@ def test_queued_messages_are_delivered_between_model_calls(fake, tmp_path):
     # Drained before the first call: task, then the queued message.
     first = fake.requests[0]["messages"]
     assert first[1]["content"] == "start"
-    assert first[2]["role"] == "user" and first[2]["content"].startswith("copse delivered this message")
+    assert first[2]["role"] == "user" and first[2]["content"].startswith("frith delivered this message")
     assert "bump the version" in first[2]["content"]
     assert seen == ["processing", "idle"]
 
@@ -321,12 +321,12 @@ def test_context_is_trimmed_then_folded_to_fit(fake, tmp_path):
     for req in fake.requests:
         assert sum(len(json.dumps(m)) for m in req["messages"]) // 4 < 2000 + 1500
     # Folds accumulate into one summary rather than summarizing the summary.
-    assert a.messages[1]["content"].count("summarized by copse") == 1
+    assert a.messages[1]["content"].count("summarized by frith") == 1
     assert a.messages[1]["content"].count("you ran Read big.txt") >= 6
     # The task survived at the front, and the fold left a readable summary.
     assert a.messages[0]["content"] == "the task"
     assert a.folded > 0
-    assert a.messages[1]["role"] == "user" and "summarized by copse" in a.messages[1]["content"]
+    assert a.messages[1]["role"] == "user" and "summarized by frith" in a.messages[1]["content"]
     assert "you ran Read big.txt" in a.messages[1]["content"]
     assert a.messages[2]["role"] == "assistant"
     assert a.messages[3]["role"] != "tool"  # no orphaned tool result after the fold
@@ -444,7 +444,7 @@ def test_clip_keeps_both_ends():
 
 
 def test_tool_exceptions_become_error_results(box):
-    from copse.native.tools import Tool
+    from frith.native.tools import Tool
 
     def boom(args):
         raise RuntimeError("kaput")
@@ -511,7 +511,7 @@ def test_modes_and_rules():
     assert p.decide("Bash", {"command": "uv run pytest -q"}) == "allow"
     assert p.decide("Bash", {"command": "pytest"}) == "allow"
     assert p.decide("Bash", {"command": "pytest -x"}) == "ask"
-    assert p.decide("mcp__copse__report_result", {}) == "allow"
+    assert p.decide("mcp__frith__report_result", {}) == "allow"
 
     assert Permissions("dontAsk", []).decide("Write", {"path": "x"}) == "deny"
     assert Permissions("dont-ask", []).decide("Bash", {"command": "ls"}) == "deny"

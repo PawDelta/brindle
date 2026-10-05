@@ -7,9 +7,9 @@ import time
 
 import pytest
 
-from copse import agents, autopilot, learning, mcp_server, plugins, quota, workspaces
-from copse.config import DEFAULT_ROUTING, load_repo_config
-from copse.db import Agent
+from frith import agents, autopilot, learning, mcp_server, plugins, quota, workspaces
+from frith.config import DEFAULT_ROUTING, load_repo_config
+from frith.db import Agent
 
 
 class Picker(learning.LearningPlugin):
@@ -37,11 +37,11 @@ def clear_cache():
 
 @pytest.fixture
 def boss(db, repo, monkeypatch):
-    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".frith").mkdir(exist_ok=True)
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     return ws
 
 
@@ -52,8 +52,8 @@ def everything_available(monkeypatch):
 
 
 def config(repo, **kw):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text(json.dumps(kw))
+    (repo / ".frith").mkdir(exist_ok=True)
+    (repo / ".frith" / "config.json").write_text(json.dumps(kw))
 
 
 def choose(db, repo, requested=None, weight=None, why=None):
@@ -61,7 +61,7 @@ def choose(db, repo, requested=None, weight=None, why=None):
 
 
 def install(monkeypatch, plugin):
-    from copse.pro import learning as pro_learning
+    from frith.pro import learning as pro_learning
 
     plugins.reset()
     monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: plugin)

@@ -1,0 +1,13 @@
+frith 0.12.0 makes autopilot a better project manager: it routes each task to the provider that fits, pauses at usage limits and picks up again on its own, can ask workers for a plan first, keeps goals.md up to date, and keeps the supervisor's chat quiet.
+
+## New
+- **Routing by weight.** `assign` and `handoff` take `weight: light | medium | heavy`. The `routing` config maps each tier to an ordered list of profiles (defaults: `developer-local`, `developer-codex`, and `developer-heavy` on Fable 5.1, each falling back to `developer`). frith skips profiles whose CLI isn't installed or whose provider is near its limit, and says what it picked and why. A profile you name always wins.
+- **New built-in profiles:** `developer-codex` (Codex) and `developer-heavy` (Claude Fable 5.1, high effort).
+- **Per-provider usage.** frith knows how close each provider is to its limit: Claude from its status line, Codex from the rollout files it writes (whatever its window: 5 hours, weekly, or 30 days on the Go plan), Antigravity from limit errors plus a cooldown (`limit_cooldown_minutes`), local models from whether the server answers. frith only reads what the CLIs write locally, never a login token. Notes appear in `assign` replies, `get_progress`, the sidebar and `frith doctor`.
+- **Pause at the usage limit, resume at reset.** When Claude reaches `usage_limit`, autopilot pauses the session's Claude workers (their work is kept) and resumes exactly those once the window resets. A limit on another provider is named correctly and pauses nothing else.
+- **Plan-first workers.** `plan_first` on `assign`/`handoff`, or in the repo config: the worker proposes a plan with `submit_plan` and waits; the supervisor answers with `approve_plan`. File edits are blocked until the plan is approved.
+- **goals.md stays current.** A goal loaded from `.frith/goals.md` gets `status: passed at abc1234 (date)` lines written back after each check. Only the status, a short commit and a date are written, never session details, so the file is safe to commit. A new session always re-runs the checks.
+- **Quieter messages.** Messages to the supervisor from workers and frith arrive as a one-line notice; the supervisor reads them with `read_messages`. `"message_delivery": "push"` restores the old behaviour. Messages you send are unchanged.
+- **`cancel_task`** cancels one of your queued tasks, and anything waiting on it.
+- **Learning plugins.** frith can report how worker tasks turned out to an installed learning plugin and let it suggest profiles (`learning`, `learning_candidates`, `frith learning`). Off by default; frith ships no plugin.
+- **The version is visible:** the tmux status bar reads `frith 0.12.0`, and `frith --version` prints it.

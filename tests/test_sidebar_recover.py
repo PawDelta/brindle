@@ -1,4 +1,4 @@
-"""Getting a stranded sidebar back: `copse sidebar`,
+"""Getting a stranded sidebar back: `frith sidebar`,
 rescuing it before a worker's session goes away, and the come-home net."""
 
 import time
@@ -6,17 +6,17 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from copse import agents, doctor, tmux, workspaces
-from copse.cli import app
-from copse.db import DB, Agent, Workspace
-from copse.sidebar_follow import rescue_sidebar, sidebar_here
+from frith import agents, doctor, tmux, workspaces
+from frith.cli import app
+from frith.db import DB, Agent, Workspace
+from frith.sidebar_follow import rescue_sidebar, sidebar_here
 
-ROOT_SESSION = "copse_recovertest"
-WORKER_SESSION = "copse_recovertest_worker"
+ROOT_SESSION = "frith_recovertest"
+WORKER_SESSION = "frith_recovertest_worker"
 
 
 @pytest.fixture
-def db(copse_home):
+def db(frith_home):
     return DB()
 
 
@@ -85,7 +85,7 @@ def test_sidebar_here_rejects_an_unknown_session(db):
         sidebar_here(db, "no-such-session")
 
 
-def test_sidebar_command_reports_failure(copse_home):
+def test_sidebar_command_reports_failure(frith_home):
     result = CliRunner().invoke(app, ["sidebar", "--session", "no-such-session"])
     assert result.exit_code != 0
     assert "sidebar" in CliRunner().invoke(app, ["sidebar", "--help"]).output
@@ -128,7 +128,7 @@ def test_come_home_works_even_if_the_root_window_has_no_matching_agent(stranded,
 def test_prefix_s_pulls_a_sidebar_that_lives_elsewhere(stranded):
     tmux.bind_session_keys(ROOT_SESSION)
     line = next(ln for ln in tmux._tmux("list-keys", "-T", "prefix").stdout.splitlines()
-                if " S " in ln and "copse" in ln)
+                if " S " in ln and "frith" in ln)
     assert "sidebar" in line and "--session" in line and "resize-pane -Z" in line
 
 
@@ -148,5 +148,5 @@ def test_has_sidebar_check_tells_windows_apart(stranded):
     assert has_sidebar(root_win) == "yes"
 
 
-def test_doctor_mentions_the_command(copse_home):
-    assert any("copse sidebar" in c.detail for c in doctor.checks(None))
+def test_doctor_mentions_the_command(frith_home):
+    assert any("frith sidebar" in c.detail for c in doctor.checks(None))

@@ -2,8 +2,8 @@ import json
 import time
 from pathlib import Path
 
-from copse import agents, usage, view
-from copse.db import Agent
+from frith import agents, usage, view
+from frith.db import Agent
 
 
 def _line(msg_id, input_tokens=0, output_tokens=0, cache_read=0, cache_creation=0,
@@ -150,7 +150,7 @@ def test_summary_line_format():
 
 
 def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
-    from copse import workspaces
+    from frith import workspaces
 
     from conftest import sh
 
@@ -162,8 +162,8 @@ def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
     (work / "f.txt").write_text("x")
     sh("git add -A && git commit -qm init", work)
 
-    (work / ".copse").mkdir()
-    (work / ".copse" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards reports
+    (work / ".frith").mkdir()
+    (work / ".frith" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards reports
     ws = workspaces.create(db, str(work), "feature").workspace
     t = tmp_path / "sess.jsonl"
     write(t, [_line("m1", input_tokens=2000, output_tokens=9000, cache_read=160000, cache_creation=20000)])
@@ -185,7 +185,7 @@ def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
 
 
 def test_hook_records_the_transcript_path(db, repo):
-    from copse import workspaces
+    from frith import workspaces
 
     ws = workspaces.create(db, str(repo), "feature").workspace
     a = Agent("a1", ws.id, "developer", "claude", None, "assign", "idle", "", None, time.time())
@@ -195,7 +195,7 @@ def test_hook_records_the_transcript_path(db, repo):
 
 
 def test_agent_entry_reads_once_then_only_stats(db, tmp_path, monkeypatch):
-    from copse import workspaces
+    from frith import workspaces
 
     from conftest import sh
 
@@ -292,10 +292,10 @@ def test_unreadable_file_does_not_raise(db, tmp_path, monkeypatch):
 
 
 def test_no_summary_line_when_usage_is_empty(db, repo, monkeypatch):
-    from copse import workspaces
+    from frith import workspaces
 
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"pipeline": false}')
+    (repo / ".frith").mkdir(exist_ok=True)
+    (repo / ".frith" / "config.json").write_text('{"pipeline": false}')
     ws = workspaces.create(db, str(repo), "feature").workspace
     t = repo.parent / "empty.jsonl"
     t.write_text("")
@@ -310,7 +310,7 @@ def test_no_summary_line_when_usage_is_empty(db, repo, monkeypatch):
 
 
 def test_agent_entry_survives_a_broken_usage_read(db, repo, monkeypatch):
-    from copse import workspaces
+    from frith import workspaces
 
     ws = workspaces.create(db, str(repo), "feature").workspace
     a = Agent("a1", ws.id, "developer", "claude", None, "assign", "idle", "", "done", time.time(),
@@ -327,7 +327,7 @@ def test_agent_entry_survives_a_broken_usage_read(db, repo, monkeypatch):
 
 
 def test_hook_ignores_transcript_path_for_non_claude_providers(db, repo):
-    from copse import workspaces
+    from frith import workspaces
 
     ws = workspaces.create(db, str(repo), "feature").workspace
     db.add_agent(Agent("a1", ws.id, "developer", "antigravity", None, "assign", "idle", "", None,

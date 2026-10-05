@@ -1,4 +1,4 @@
-"""Starting Ollama for the native profiles when copse opens (copse.native.serve)."""
+"""Starting Ollama for the native profiles when frith opens (frith.native.serve)."""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from copse.config import RepoConfig
-from copse.native import serve
+from frith.config import RepoConfig
+from frith.native import serve
 
 
 def _profile(root: Path, name: str, base_url: str, model: str = "qwen3-coder:30b",
              context_tokens: str = "32k") -> None:
-    (root / ".copse" / "agents").mkdir(parents=True, exist_ok=True)
-    (root / ".copse" / "agents" / f"{name}.md").write_text(
+    (root / ".frith" / "agents").mkdir(parents=True, exist_ok=True)
+    (root / ".frith" / "agents" / f"{name}.md").write_text(
         f"---\nname: {name}\ndescription: d\nprovider: native\napi: openai\n"
         f"base_url: {base_url}\nmodel: {model}\ncontext_tokens: {context_tokens}\n---\nbody\n"
     )
@@ -21,7 +21,7 @@ def _profile(root: Path, name: str, base_url: str, model: str = "qwen3-coder:30b
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    monkeypatch.setenv("COPSE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("FRITH_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
     root = tmp_path / "proj"
@@ -45,7 +45,7 @@ def fake_ollama(monkeypatch):
             state["popen"].append((argv, env))
             state["up"] = True  # the server comes up as soon as it's started
 
-    monkeypatch.setattr("copse.native.runner.probe", probe)
+    monkeypatch.setattr("frith.native.runner.probe", probe)
     monkeypatch.setattr(serve.shutil, "which", lambda name: "/opt/homebrew/bin/ollama" if name == "ollama" else None)
     monkeypatch.setattr(serve.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(serve, "warm", lambda server, model, timeout=0: state["warmed"].append((server.host, model)) or True)
@@ -66,11 +66,11 @@ def test_local_servers_group_profiles_by_host_and_take_the_largest_context(repo)
     assert "remote" not in [n for s in servers.values() for n in s.profiles]
 
 
-def test_by_default_copse_never_starts_or_preloads_a_model(repo, fake_ollama):
+def test_by_default_frith_never_starts_or_preloads_a_model(repo, fake_ollama):
     """A 30B model holds ~20 GB of GPU memory: unless the repo asks for it,
-    copse uses a server that's already running and never starts one or
+    frith uses a server that's already running and never starts one or
     loads a model into it."""
-    from copse.config import load_repo_config
+    from frith.config import load_repo_config
 
     _profile(repo, "worker", "http://localhost:11434/v1", context_tokens="32k")
     cfg = load_repo_config(str(repo))
@@ -89,7 +89,7 @@ def test_ensure_starts_ollama_with_doctors_context_length_and_warms_each_model(r
     assert "OLLAMA_HOST" not in env
     assert ("http://localhost:11434", "qwen3-coder:30b") in fake_ollama["warmed"]
     assert any("started ollama serve" in line and "worker" in line for line in lines)
-    assert (repo / "ollama.log").read_text().startswith("\n== copse: starting ollama serve")
+    assert (repo / "ollama.log").read_text().startswith("\n== frith: starting ollama serve")
 
 
 def test_ensure_leaves_a_running_server_alone_but_still_warms(repo, fake_ollama):
@@ -125,16 +125,16 @@ def test_needed_lists_only_unreachable_local_servers(repo, fake_ollama):
 
 
 def test_repo_config_reads_local_models(repo):
-    from copse.config import load_repo_config
+    from frith.config import load_repo_config
 
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"local_models": true}')
+    (repo / ".frith").mkdir(exist_ok=True)
+    (repo / ".frith" / "config.json").write_text('{"local_models": true}')
     assert load_repo_config(str(repo)).local_models is True
-    (repo / ".copse" / "config.json").write_text("{}")
+    (repo / ".frith" / "config.json").write_text("{}")
     assert load_repo_config(str(repo)).local_models is False  # off unless asked for
 
 
-# -- Stopping the server copse started once no session uses it.
+# -- Stopping the server frith started once no session uses it.
 
 SERVE = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
 
@@ -155,7 +155,7 @@ def fake_serve():
         p = subprocess.Popen([sys.executable, "-c", SERVE, "ollama", "serve"], start_new_session=True)
         started.append(p)
         # Until the child execs, ps shows the parent's command line (Linux
-        # especially), and copse rightly won't stop a process that isn't ollama.
+        # especially), and frith rightly won't stop a process that isn't ollama.
         deadline = time.monotonic() + 5
         while not serve._is_ollama_serve(p.pid) and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -218,7 +218,7 @@ def test_stop_unused_forgets_a_pid_that_is_no_longer_ollama(db, monkeypatch):
     assert serve.started_servers() == {}
 
 
-def test_a_server_copse_did_not_start_is_never_stopped(db, monkeypatch):
+def test_a_server_frith_did_not_start_is_never_stopped(db, monkeypatch):
     monkeypatch.setattr(serve, "hosts_in_use", lambda db: set())
     killed = []
     monkeypatch.setattr(serve, "_stop_group", lambda pid, grace: killed.append(pid))
@@ -229,10 +229,10 @@ def test_a_server_copse_did_not_start_is_never_stopped(db, monkeypatch):
 def _root_ws(db, repo):
     import time
 
-    from copse.db import Workspace
+    from frith.db import Workspace
 
     ws = Workspace("ws000001", str(repo), "proj", "root", "main", None, str(repo), None,
-                   "copse-test-proj", time.time())
+                   "frith-test-proj", time.time())
     db.add_workspace(ws)
     return ws
 
@@ -240,7 +240,7 @@ def _root_ws(db, repo):
 def test_hosts_in_use_counts_only_live_or_just_started_session_roots(db, repo, monkeypatch):
     import time
 
-    from copse.db import Agent
+    from frith.db import Agent
 
     ws = _root_ws(db, repo)
     old = time.time() - 3600
@@ -259,8 +259,8 @@ def test_hosts_in_use_counts_only_live_or_just_started_session_roots(db, repo, m
 def test_pausing_the_last_session_stops_the_server(db, repo, monkeypatch):
     import time
 
-    from copse import agents
-    from copse.db import Agent
+    from frith import agents
+    from frith.db import Agent
 
     ws = _root_ws(db, repo)
     db.add_agent(Agent("root0001", ws.id, "supervisor", "claude", None, "interactive",

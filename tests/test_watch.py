@@ -1,8 +1,8 @@
 import sqlite3
 import time
 
-from copse import watch
-from copse.db import DB
+from frith import watch
+from frith.db import DB
 
 
 def ws(agents, **kw):
@@ -122,7 +122,7 @@ def test_scroll_into_view_clamps_to_content_bounds():
 
 
 def test_status_since_only_moves_on_change(tmp_path, monkeypatch):
-    from copse.db import Agent
+    from frith.db import Agent
     db = DB(str(tmp_path / "t.db"))
     db.conn.execute("INSERT INTO workspaces VALUES ('w','/r','n','main','b',NULL,'/p',NULL,'s',0)")
     db.add_agent(Agent("a", "w", "developer", "claude", None, "interactive", "idle", "@1", None, 1.0))
@@ -166,10 +166,10 @@ def test_old_databases_get_the_sidebars_table(tmp_path):
     assert db.get_sidebar_pane("a") == "%1"
 
 
-def test_older_copse_ignores_columns_from_a_newer_one(tmp_path):
-    # A newer copse may add columns to ~/.copse/copse.db; this version must
+def test_older_frith_ignores_columns_from_a_newer_one(tmp_path):
+    # A newer frith may add columns to ~/.frith/frith.db; this version must
     # still read the rows instead of crashing (as 0.1.x did on 0.2.0's).
-    from copse.db import Agent
+    from frith.db import Agent
     db = DB(str(tmp_path / "t.db"))
     db.conn.execute("INSERT INTO workspaces VALUES ('w','/r','n','main','b',NULL,'/p',NULL,'s',0)")
     db.add_agent(Agent("a", "w", "developer", "claude", None, "interactive", "idle", "@1", None, 1.0))

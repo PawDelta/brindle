@@ -4,8 +4,8 @@ import time
 
 import pytest
 
-from copse import quota
-from copse.config import RepoConfig
+from frith import quota
+from frith.config import RepoConfig
 
 
 def limits(**windows):
@@ -107,7 +107,7 @@ def test_limit_cooldown_is_configurable():
 
 
 def test_native_headroom_follows_reachability(monkeypatch):
-    from copse.native import serve
+    from frith.native import serve
 
     monkeypatch.setattr(serve, "local_servers", lambda repo_root: [object()])
     monkeypatch.setattr(serve, "reachable", lambda s, timeout=1.0: True)

@@ -7,10 +7,10 @@ import time
 import pytest
 
 from conftest import sh
-from copse import agents, antigravity, autopilot, workspaces
-from copse.db import Agent
-from copse.profiles import load_profile
-from copse.providers import Antigravity, LaunchContext
+from frith import agents, antigravity, autopilot, workspaces
+from frith.db import Agent
+from frith.profiles import load_profile
+from frith.providers import Antigravity, LaunchContext
 
 
 @pytest.fixture
@@ -23,16 +23,16 @@ def add_agent(db, ws, agent_id="g1", mode="interactive", status="idle", profile=
 
 
 def test_command_sets_up_the_checkout(db, ws, repo, monkeypatch):
-    monkeypatch.setenv("COPSE_AGY_BIN", "/bin/agy")
+    monkeypatch.setenv("FRITH_AGY_BIN", "/bin/agy")
     argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, cwd=str(repo)))
     assert argv == ["/bin/agy", "--mode", "accept-edits"]
     agents_dir = repo / ".agents"
-    server = json.loads((agents_dir / "mcp_config.json").read_text())["mcpServers"]["copse"]
+    server = json.loads((agents_dir / "mcp_config.json").read_text())["mcpServers"]["frith"]
     assert server["args"][-1] == "mcp" and server["tools"]["get_progress"] == {"eager": True}
-    hooks = json.loads((agents_dir / "hooks.json").read_text())["copse"]
+    hooks = json.loads((agents_dir / "hooks.json").read_text())["frith"]
     assert "_hook agy-stop" in hooks["Stop"][0]["command"]
-    assert "COPSE_AGENT_ID" not in hooks["Stop"][0]["command"]  # shared by every agent here
-    assert "call_mcp_tool" in (agents_dir / "rules" / "copse.md").read_text()
+    assert "FRITH_AGENT_ID" not in hooks["Stop"][0]["command"]  # shared by every agent here
+    assert "call_mcp_tool" in (agents_dir / "rules" / "frith.md").read_text()
     # Kept out of git, so the checkout stays clean.
     assert sh("git status --porcelain", repo) == ""
 
@@ -47,7 +47,7 @@ def test_existing_config_is_kept_and_tracked_files_are_left_alone(repo):
     (repo / ".agents" / "mcp_config.json").write_text(json.dumps({"mcpServers": {"fs": {"command": "x"}}}))
     antigravity.install(str(repo))
     servers = json.loads((repo / ".agents" / "mcp_config.json").read_text())["mcpServers"]
-    assert set(servers) == {"fs", "copse"}
+    assert set(servers) == {"fs", "frith"}
     # A file that was already there isn't hidden from git.
     assert ".agents/mcp_config.json" in sh("git status --porcelain --untracked-files=all", repo)
     (repo / ".agents" / "hooks.json").write_text("{}")
@@ -58,9 +58,9 @@ def test_existing_config_is_kept_and_tracked_files_are_left_alone(repo):
 
 def test_hook_finds_its_agent_from_the_agy_process(db, ws, monkeypatch):
     add_agent(db, ws, status="processing")
-    monkeypatch.delenv("COPSE_AGENT_ID", raising=False)
+    monkeypatch.delenv("FRITH_AGENT_ID", raising=False)
     parent = os.getppid()
-    monkeypatch.setattr(antigravity, "_process_env", lambda pid: {"COPSE_AGENT_ID": "g1"} if pid == parent else {})
+    monkeypatch.setattr(antigravity, "_process_env", lambda pid: {"FRITH_AGENT_ID": "g1"} if pid == parent else {})
     db.add_autopilot("g1")
     autopilot.set_goal(db, "g1", "Goal", [("M", "false", None)])
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
@@ -72,10 +72,10 @@ def test_hook_finds_its_agent_from_the_agy_process(db, ws, monkeypatch):
 
 def test_process_env_reads_another_process():
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"],
-                             env={**os.environ, "COPSE_AGENT_ID": "abc123"})
+                             env={**os.environ, "FRITH_AGENT_ID": "abc123"})
     try:
         time.sleep(0.3)
-        assert antigravity._process_env(child.pid).get("COPSE_AGENT_ID") == "abc123"
+        assert antigravity._process_env(child.pid).get("FRITH_AGENT_ID") == "abc123"
     finally:
         child.kill()
 
@@ -88,7 +88,7 @@ def test_warmup_then_the_task(db, ws, monkeypatch):
     monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)
     a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
     first, second = db.pop_pending(a.id), db.pop_pending(a.id)
-    assert first.body.startswith("When you run under copse") and "call_mcp_tool" in first.body
+    assert first.body.startswith("When you run under frith") and "call_mcp_tool" in first.body
     assert "You are a developer agent" in first.body and first.body.endswith(antigravity.WARMUP_END)
     assert second.body.startswith("fix it")
 
@@ -114,7 +114,7 @@ def test_report_reminder_only_once_per_turn(db, ws):
     assert antigravity.handle_hook(db, "g1", "agy-stop", {}) is not None
 
 
-def test_new_turn_is_the_user_unless_copse_just_delivered(db, ws):
+def test_new_turn_is_the_user_unless_frith_just_delivered(db, ws):
     add_agent(db, ws)
     db.add_autopilot("g1")
     autopilot.set_goal(db, "g1", "Goal", [("M", "true", None)])
@@ -145,7 +145,7 @@ def test_autopilot_keeps_an_antigravity_supervisor_going(db, ws, monkeypatch):
     autopilot.set_goal(db, "g1", "Goal", [("M", "false", None)])
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
     out = antigravity.handle_hook(db, "g1", "agy-stop", {})
-    assert out["decision"] == "continue" and "[copse autopilot]" in out["reason"]
+    assert out["decision"] == "continue" and "[frith autopilot]" in out["reason"]
 
 
 def test_screen_states():

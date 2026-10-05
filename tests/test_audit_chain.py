@@ -1,5 +1,5 @@
-"""The ``audit`` events plugin (copse Enterprise): a hash-chained, Ed25519
-signed, append-only log of what copse did, local to the install. Tamper
+"""The ``audit`` events plugin (frith Enterprise): a hash-chained, Ed25519
+signed, append-only log of what frith did, local to the install. Tamper
 evidence is the point: every edit, removal or reordering must be caught at
 the right seq. Without an ``audit`` entitlement it must write nothing."""
 
@@ -15,12 +15,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from copse import events, plugins, policy
-from copse.cli import app
-from copse.config import RepoConfig
-from copse.events import Event
-from copse.pro import audit_chain, credentials
-from copse.pro.audit_chain import (
+from frith import events, plugins, policy
+from frith.cli import app
+from frith.config import RepoConfig
+from frith.events import Event
+from frith.pro import audit_chain, credentials
+from frith.pro.audit_chain import (
     ZERO_HASH, AuditChain, audit_dir, canonical, log_path, record_hash, verify,
 )
 from pro_fixtures import BASE, claims, pro_env, sign, signing_key  # noqa: F401 - fixtures
@@ -53,10 +53,10 @@ def chain(home, n=3, **over):
 
 
 def workspace(root, branch="feat/x"):
-    from copse.db import Workspace
+    from frith.db import Workspace
 
     return Workspace("ws-9", str(root), "x", "worktree", branch, "main", str(root / "wt"), None,
-                     "copse-x", time.time())
+                     "frith-x", time.time())
 
 
 def lines(home):
@@ -70,14 +70,14 @@ def rewrite(home, new_lines):
 # -- the chain ------------------------------------------------------------------------------------
 
 
-def test_records_link_into_a_chain_from_a_zero_anchor(copse_home):
-    chain(copse_home, 3)
-    recs = [json.loads(ln) for ln in lines(copse_home)]
+def test_records_link_into_a_chain_from_a_zero_anchor(frith_home):
+    chain(frith_home, 3)
+    recs = [json.loads(ln) for ln in lines(frith_home)]
     assert [r["seq"] for r in recs] == [1, 2, 3]
     assert recs[0]["prev_hash"] == ZERO_HASH
     for prev, rec in zip(recs, recs[1:]):
         assert rec["prev_hash"] == record_hash(prev)
-    for ln, rec in zip(lines(copse_home), recs):
+    for ln, rec in zip(lines(frith_home), recs):
         assert ln.decode() == canonical(rec)        # written in canonical form
         body = {k: rec[k] for k in ("seq", "ts", "event", "prev_hash")}
         assert rec["hash"] == audit_chain.sha256(canonical(body))
@@ -91,170 +91,170 @@ def test_records_link_into_a_chain_from_a_zero_anchor(copse_home):
     assert recs[1]["event"]["kind"] == "review"
 
 
-def test_every_signature_verifies_with_the_install_key(copse_home):
-    chain(copse_home, 4)
-    pub = audit_chain.public_key(copse_home)
-    for ln in lines(copse_home):
+def test_every_signature_verifies_with_the_install_key(frith_home):
+    chain(frith_home, 4)
+    pub = audit_chain.public_key(frith_home)
+    for ln in lines(frith_home):
         rec = json.loads(ln)
         assert audit_chain.signature_ok(pub, rec["hash"], rec["sig"])
         assert not audit_chain.signature_ok(pub, rec["hash"][::-1], rec["sig"])
-    report = verify(REPO, home=copse_home)
+    report = verify(REPO, home=frith_home)
     assert report.ok and report.records == 4 and "chain intact" in report.describe()
-    other = Path(str(copse_home) + "-other")             # another install's key: not ours
-    report = verify(REPO, home=copse_home, pub=audit_chain.public_key(other))
+    other = Path(str(frith_home) + "-other")             # another install's key: not ours
+    report = verify(REPO, home=frith_home, pub=audit_chain.public_key(other))
     assert report.broken_seq == 1 and "signature" in report.reason
 
 
-def test_the_chain_continues_across_plugin_instances_and_processes(copse_home):
-    chain(copse_home, 2)
-    chain(copse_home, 2)
-    report = verify(REPO, home=copse_home)
+def test_the_chain_continues_across_plugin_instances_and_processes(frith_home):
+    chain(frith_home, 2)
+    chain(frith_home, 2)
+    report = verify(REPO, home=frith_home)
     assert report.ok and report.records == 4
-    recs = [json.loads(ln) for ln in lines(copse_home)]
+    recs = [json.loads(ln) for ln in lines(frith_home)]
     assert recs[2]["prev_hash"] == record_hash(recs[1]) and recs[3]["seq"] == 4
 
 
-def test_each_repo_has_its_own_log(copse_home):
-    AuditChain("/work/a", home=copse_home, entitled=ENTITLED).emit(ev(repo_root="/work/a"))
-    AuditChain("/work/b", home=copse_home, entitled=ENTITLED).emit(ev(repo_root="/work/b"))
-    a, b = log_path("/work/a", copse_home), log_path("/work/b", copse_home)
+def test_each_repo_has_its_own_log(frith_home):
+    AuditChain("/work/a", home=frith_home, entitled=ENTITLED).emit(ev(repo_root="/work/a"))
+    AuditChain("/work/b", home=frith_home, entitled=ENTITLED).emit(ev(repo_root="/work/b"))
+    a, b = log_path("/work/a", frith_home), log_path("/work/b", frith_home)
     assert a != b and a.name.startswith("a-") and b.name.startswith("b-")
-    assert verify("/work/a", home=copse_home).records == 1
+    assert verify("/work/a", home=frith_home).records == 1
     assert audit_chain.repo_key("/x/my repo!") .startswith("my_repo-")
 
 
 # -- tamper evidence ------------------------------------------------------------------------------
 
 
-def test_editing_a_record_is_caught_at_its_seq(copse_home):
-    chain(copse_home, 4)
-    ls = lines(copse_home)
+def test_editing_a_record_is_caught_at_its_seq(frith_home):
+    chain(frith_home, 4)
+    ls = lines(frith_home)
     rec = json.loads(ls[2])
     rec["event"]["actor"] = "someone-else"
     ls[2] = canonical(rec).encode()
-    rewrite(copse_home, ls)
-    report = verify(REPO, home=copse_home)
+    rewrite(frith_home, ls)
+    report = verify(REPO, home=frith_home)
     assert not report.ok and report.broken_seq == 3 and "altered" in report.reason
     assert report.records == 2
 
 
-def test_rehashing_an_edited_record_without_the_key_is_caught_by_the_signature(copse_home):
-    chain(copse_home, 3)
-    ls = lines(copse_home)
+def test_rehashing_an_edited_record_without_the_key_is_caught_by_the_signature(frith_home):
+    chain(frith_home, 3)
+    ls = lines(frith_home)
     rec = json.loads(ls[1])
     rec["event"]["approved"] = True
     rec["hash"] = audit_chain.body_hash(rec["seq"], rec["ts"], rec["event"], rec["prev_hash"])
     ls[1] = canonical(rec).encode()
-    rewrite(copse_home, ls)
-    report = verify(REPO, home=copse_home)
+    rewrite(frith_home, ls)
+    report = verify(REPO, home=frith_home)
     assert report.broken_seq == 2 and "signature" in report.reason
 
 
-def test_deleting_a_record_is_caught_at_its_seq(copse_home):
-    chain(copse_home, 5)
-    ls = lines(copse_home)
+def test_deleting_a_record_is_caught_at_its_seq(frith_home):
+    chain(frith_home, 5)
+    ls = lines(frith_home)
     del ls[2]
-    rewrite(copse_home, ls)
-    report = verify(REPO, home=copse_home)
+    rewrite(frith_home, ls)
+    report = verify(REPO, home=frith_home)
     assert report.broken_seq == 3 and "removed" in report.reason
 
 
-def test_deleting_the_last_record_is_caught_by_the_head(copse_home):
-    chain(copse_home, 5)
-    ls = lines(copse_home)
-    rewrite(copse_home, ls[:-1])
-    report = verify(REPO, home=copse_home)
+def test_deleting_the_last_record_is_caught_by_the_head(frith_home):
+    chain(frith_home, 5)
+    ls = lines(frith_home)
+    rewrite(frith_home, ls[:-1])
+    report = verify(REPO, home=frith_home)
     assert report.broken_seq == 5 and "truncated" in report.reason and report.records == 4
-    rewrite(copse_home, ls[:-2])
-    assert verify(REPO, home=copse_home).broken_seq == 4
+    rewrite(frith_home, ls[:-2])
+    assert verify(REPO, home=frith_home).broken_seq == 4
 
 
-def test_reordering_records_is_caught_at_the_first_moved_seq(copse_home):
-    chain(copse_home, 5)
-    ls = lines(copse_home)
+def test_reordering_records_is_caught_at_the_first_moved_seq(frith_home):
+    chain(frith_home, 5)
+    ls = lines(frith_home)
     ls[1], ls[2] = ls[2], ls[1]
-    rewrite(copse_home, ls)
-    report = verify(REPO, home=copse_home)
+    rewrite(frith_home, ls)
+    report = verify(REPO, home=frith_home)
     assert report.broken_seq == 2 and "reordered" in report.reason
 
 
-def test_inserting_a_forged_record_breaks_the_chain(copse_home):
-    chain(copse_home, 3)
-    ls = lines(copse_home)
+def test_inserting_a_forged_record_breaks_the_chain(frith_home):
+    chain(frith_home, 3)
+    ls = lines(frith_home)
     forged = json.loads(ls[1])
     forged["seq"] = 3
     ls.insert(2, canonical(forged).encode())
-    rewrite(copse_home, ls)
-    report = verify(REPO, home=copse_home)
+    rewrite(frith_home, ls)
+    report = verify(REPO, home=frith_home)
     assert report.broken_seq == 3 and "prev_hash" in report.reason
 
 
-def test_garbage_and_an_empty_log(copse_home):
-    assert verify(REPO, home=copse_home).ok and not verify(REPO, home=copse_home).exists
-    chain(copse_home, 2)
-    rewrite(copse_home, lines(copse_home) + [b"not json"])
-    report = verify(REPO, home=copse_home)
+def test_garbage_and_an_empty_log(frith_home):
+    assert verify(REPO, home=frith_home).ok and not verify(REPO, home=frith_home).exists
+    chain(frith_home, 2)
+    rewrite(frith_home, lines(frith_home) + [b"not json"])
+    report = verify(REPO, home=frith_home)
     assert report.broken_seq == 3 and "unreadable" in report.reason
 
 
 # -- files and permissions ------------------------------------------------------------------------
 
 
-def test_files_are_private(copse_home):
-    chain(copse_home, 1)
-    d = audit_dir(copse_home)
+def test_files_are_private(frith_home):
+    chain(frith_home, 1)
+    d = audit_dir(frith_home)
     assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
-    for name in (log_path(REPO, copse_home).name, audit_chain.KEY_FILE):
+    for name in (log_path(REPO, frith_home).name, audit_chain.KEY_FILE):
         assert stat.S_IMODE(os.stat(d / name).st_mode) == 0o600, name
     # Loosened by hand: the next append tightens them again.
-    os.chmod(log_path(REPO, copse_home), 0o644)
+    os.chmod(log_path(REPO, frith_home), 0o644)
     os.chmod(d, 0o755)
-    chain(copse_home, 1)
+    chain(frith_home, 1)
     assert stat.S_IMODE(os.stat(d).st_mode) == 0o700
-    assert stat.S_IMODE(os.stat(log_path(REPO, copse_home)).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(log_path(REPO, frith_home)).st_mode) == 0o600
 
 
-def test_the_key_is_per_install_and_stable(copse_home):
-    k1 = audit_chain.public_key_hex(copse_home)
+def test_the_key_is_per_install_and_stable(frith_home):
+    k1 = audit_chain.public_key_hex(frith_home)
     assert len(k1) == 64 and bytes.fromhex(k1)
-    assert audit_chain.public_key_hex(copse_home) == k1
-    assert audit_chain.public_key_hex(Path(str(copse_home) + "-2")) != k1
-    raw = (audit_dir(copse_home) / audit_chain.KEY_FILE).read_text().strip()
+    assert audit_chain.public_key_hex(frith_home) == k1
+    assert audit_chain.public_key_hex(Path(str(frith_home) + "-2")) != k1
+    raw = (audit_dir(frith_home) / audit_chain.KEY_FILE).read_text().strip()
     assert len(raw) == 64 and raw != k1
 
 
 # -- the entitlement gate -------------------------------------------------------------------------
 
 
-def test_not_entitled_writes_nothing_not_even_a_key(copse_home):
+def test_not_entitled_writes_nothing_not_even_a_key(frith_home):
     p = AuditChain(REPO)                       # the real gate: no login under this home
     p.emit(ev())
     p.emit(ev(kind="deny_assign", reason="no"))
-    assert not (copse_home / "audit").exists()
+    assert not (frith_home / "audit").exists()
     assert p.dropped == 0
 
 
-def test_the_audit_feature_of_a_real_entitlement_turns_it_on(copse_home, signing_key):
+def test_the_audit_feature_of_a_real_entitlement_turns_it_on(frith_home, signing_key):
     def login(features):
         credentials.default_store().save({
             "base_url": BASE, "entitlement": sign(signing_key, claims(features=features))})
         audit_chain_license.clear_cache()
 
-    from copse.pro import license as audit_chain_license
+    from frith.pro import license as audit_chain_license
 
     login(["learning", "team"])
     AuditChain(REPO).emit(ev())
-    assert not (copse_home / "audit").exists()
+    assert not (frith_home / "audit").exists()
     login(["learning", "audit"])
     AuditChain(REPO).emit(ev())
     assert verify(REPO).records == 1
 
 
-def test_the_gate_is_offline_only(copse_home, signing_key, monkeypatch):
+def test_the_gate_is_offline_only(frith_home, signing_key, monkeypatch):
     """A near-expiry entitlement with a refresh token on file: the Team feed
     and the audit chain still don't refresh it, so a merge never waits on
     the network. The stored (still valid) entitlement decides."""
-    from copse.pro import auth, license
+    from frith.pro import auth, license
 
     now = int(time.time())
     credentials.default_store().save({
@@ -271,30 +271,30 @@ def test_the_gate_is_offline_only(copse_home, signing_key, monkeypatch):
     assert verify(REPO).records == 1
 
 
-def test_emit_never_raises(copse_home, monkeypatch):
-    blocked = copse_home / "audit"
+def test_emit_never_raises(frith_home, monkeypatch):
+    blocked = frith_home / "audit"
     blocked.parent.mkdir(parents=True, exist_ok=True)
     blocked.write_text("in the way")                 # the audit dir can't be made
-    p = AuditChain(REPO, home=copse_home, entitled=ENTITLED)
+    p = AuditChain(REPO, home=frith_home, entitled=ENTITLED)
     p.emit(ev())
     assert p.dropped == 1
 
     def boom():
         raise RuntimeError("entitlement check exploded")
 
-    AuditChain(REPO, home=copse_home, entitled=boom).emit(ev())
+    AuditChain(REPO, home=frith_home, entitled=boom).emit(ev())
     monkeypatch.setattr(audit_chain, "append", lambda *a, **kw: 1 / 0)
-    AuditChain(REPO, home=copse_home, entitled=ENTITLED).emit(ev())
+    AuditChain(REPO, home=frith_home, entitled=ENTITLED).emit(ev())
 
 
-# -- through copse: fan-out, policy denials, merges and removals ------------------------------------
+# -- through frith: fan-out, policy denials, merges and removals ------------------------------------
 
 
-def test_every_events_plugin_hears_every_event(copse_home, tmp_path, monkeypatch):
+def test_every_events_plugin_hears_every_event(frith_home, tmp_path, monkeypatch):
     rec = Recorder()
-    audit = AuditChain(str(tmp_path), home=copse_home, entitled=ENTITLED)
+    audit = AuditChain(str(tmp_path), home=frith_home, entitled=ENTITLED)
     install(monkeypatch, {plugins.EVENTS: [("audit", lambda r: audit), ("pro", lambda r: rec)]})
-    from copse.db import Agent
+    from frith.db import Agent
 
     ws = workspace(tmp_path)
     worker = Agent("w-1", "ws-9", "developer", "claude", "boss", "assign", "processing", "@0",
@@ -304,7 +304,7 @@ def test_every_events_plugin_hears_every_event(copse_home, tmp_path, monkeypatch
     events.emit(cfg, "merge", ws, worker, actor="boss")
     events.emit(cfg, "remove", ws, worker, actor="boss", merged=True)
     assert rec.kinds() == ["merge", "remove"]
-    recs = audit_chain.read_records(log_path(str(tmp_path), copse_home))
+    recs = audit_chain.read_records(log_path(str(tmp_path), frith_home))
     assert [r["event"]["kind"] for r in recs] == ["merge", "remove"]
     assert recs[0]["event"]["workspace"] == "ws-9" and recs[1]["event"]["merged"] is True
     assert recs[0]["event"]["agent"] == "w-1" and recs[0]["event"]["actor"] == "boss"
@@ -316,20 +316,20 @@ def test_every_events_plugin_hears_every_event(copse_home, tmp_path, monkeypatch
     assert events.plugins_for(RepoConfig(plugins={"events": "off"}), "r") == []
 
 
-def test_a_failing_plugin_does_not_silence_the_others(copse_home, tmp_path, monkeypatch):
-    audit = AuditChain(str(tmp_path), home=copse_home, entitled=ENTITLED)
+def test_a_failing_plugin_does_not_silence_the_others(frith_home, tmp_path, monkeypatch):
+    audit = AuditChain(str(tmp_path), home=frith_home, entitled=ENTITLED)
     install(monkeypatch, {plugins.EVENTS: [("bad", lambda r: Recorder(fail=True)),
                                            ("audit", lambda r: audit)]})
     events.emit(RepoConfig(), "merge", workspace(tmp_path), None)
-    assert verify(str(tmp_path), home=copse_home).records == 1
+    assert verify(str(tmp_path), home=frith_home).records == 1
 
 
-def test_policy_denials_are_recorded_with_the_reason(copse_home, tmp_path, monkeypatch):
-    audit = AuditChain(str(tmp_path), home=copse_home, entitled=ENTITLED)
+def test_policy_denials_are_recorded_with_the_reason(frith_home, tmp_path, monkeypatch):
+    audit = AuditChain(str(tmp_path), home=frith_home, entitled=ENTITLED)
     install(monkeypatch, {plugins.EVENTS: [("audit", lambda r: audit)],
                           plugins.POLICY: [("gate", lambda r: Gate(assign="after hours",
                                                                    merge="needs two approvals"))]})
-    from copse.db import Agent
+    from frith.db import Agent
 
     cfg = RepoConfig()
     d = policy.check_assign(cfg, str(tmp_path), "developer", "the secret task", "handoff",
@@ -337,28 +337,28 @@ def test_policy_denials_are_recorded_with_the_reason(copse_home, tmp_path, monke
                                                          "interactive", "idle", "@0", None, 0.0))
     assert not d.allowed
     assert not policy.check_merge(cfg, workspace(tmp_path, "feat/y"), None).allowed
-    recs = audit_chain.read_records(log_path(str(tmp_path), copse_home))
+    recs = audit_chain.read_records(log_path(str(tmp_path), frith_home))
     assert [r["event"]["kind"] for r in recs] == ["deny_assign", "deny_merge"]
     a, m = (r["event"] for r in recs)
     assert a["reason"] == "after hours" and a["branch"] == "feat/x" and a["actor"] == "boss"
     assert a["profile"] == "developer" and "secret" not in json.dumps(recs)
     assert m["reason"] == "needs two approvals" and m["workspace"] == "ws-9" and m["branch"] == "feat/y"
-    assert verify(str(tmp_path), home=copse_home).ok
+    assert verify(str(tmp_path), home=frith_home).ok
 
 
 # -- export -----------------------------------------------------------------------------------------
 
 
-def test_export_jsonl_is_the_log_itself(copse_home):
-    chain(copse_home, 3)
-    out = audit_chain.export(REPO, home=copse_home)
-    assert out.encode() == log_path(REPO, copse_home).read_bytes()
+def test_export_jsonl_is_the_log_itself(frith_home):
+    chain(frith_home, 3)
+    out = audit_chain.export(REPO, home=frith_home)
+    assert out.encode() == log_path(REPO, frith_home).read_bytes()
     assert [json.loads(ln)["seq"] for ln in out.splitlines()] == [1, 2, 3]
 
 
-def test_export_csv_has_one_row_per_record(copse_home):
-    chain(copse_home, 2)
-    out = audit_chain.export(REPO, home=copse_home, fmt="csv")
+def test_export_csv_has_one_row_per_record(frith_home):
+    chain(frith_home, 2)
+    out = audit_chain.export(REPO, home=frith_home, fmt="csv")
     rows = list(csv.DictReader(io.StringIO(out)))
     assert list(rows[0]) == list(audit_chain.CSV_COLUMNS)
     assert [r["seq"] for r in rows] == ["1", "2"]
@@ -366,19 +366,19 @@ def test_export_csv_has_one_row_per_record(copse_home):
     assert rows[0]["agent"] == "worker-7" and rows[0]["approved"] == ""
     assert len(rows[0]["hash"]) == 64 and len(rows[0]["sig"]) == 128
     with pytest.raises(audit_chain.AuditError):
-        audit_chain.export(REPO, home=copse_home, fmt="xml")
+        audit_chain.export(REPO, home=frith_home, fmt="xml")
 
 
-def test_export_since_filters_by_record_time(copse_home):
-    p = AuditChain(REPO, home=copse_home, entitled=ENTITLED)
+def test_export_since_filters_by_record_time(frith_home):
+    p = AuditChain(REPO, home=frith_home, entitled=ENTITLED)
     p.emit(ev())
     cut = datetime.now(timezone.utc)
     time.sleep(0.01)
     p.emit(ev(kind="remove"))
-    out = audit_chain.export(REPO, home=copse_home, since=cut)
+    out = audit_chain.export(REPO, home=frith_home, since=cut)
     assert [json.loads(ln)["seq"] for ln in out.splitlines()] == [2]
-    assert audit_chain.export(REPO, home=copse_home, since=datetime(2000, 1, 1)).count("\n") == 2
-    assert audit_chain.export(REPO, home=copse_home, since=datetime(2999, 1, 1)) == ""
+    assert audit_chain.export(REPO, home=frith_home, since=datetime(2000, 1, 1)).count("\n") == 2
+    assert audit_chain.export(REPO, home=frith_home, since=datetime(2999, 1, 1)) == ""
     assert audit_chain.parse_time("2026-09-30T10:00:00Z").tzinfo is not None
     assert audit_chain.parse_time("2026-09-30").tzinfo is not None
 
@@ -386,7 +386,7 @@ def test_export_since_filters_by_record_time(copse_home):
 # -- the CLI --------------------------------------------------------------------------------------
 
 
-def test_cli_verify_export_and_pubkey(copse_home, repo, monkeypatch):
+def test_cli_verify_export_and_pubkey(frith_home, repo, monkeypatch):
     runner = CliRunner()
     root = str(repo)
     AuditChain(root, entitled=ENTITLED).emit(ev(repo_root=root))
@@ -412,7 +412,7 @@ def test_cli_verify_export_and_pubkey(copse_home, repo, monkeypatch):
     log_path(root).write_bytes(b"\n".join(ls) + b"\n")
     res = runner.invoke(app, ["audit", "verify", "--repo", root])
     assert res.exit_code == 1 and "BROKEN at seq 2" in res.output, res.output
-    monkeypatch.chdir(copse_home.parent)
+    monkeypatch.chdir(frith_home.parent)
     res = runner.invoke(app, ["audit", "verify"])
     assert res.exit_code == 0 and "no audit log" in res.output
 
@@ -420,5 +420,5 @@ def test_cli_verify_export_and_pubkey(copse_home, repo, monkeypatch):
 def test_the_audit_entry_point_is_registered():
     from importlib.metadata import entry_points
 
-    assert [e.value for e in entry_points(group="copse.events") if e.name == "audit"] \
-        == ["copse.pro.audit_chain:make"]
+    assert [e.value for e in entry_points(group="frith.events") if e.name == "audit"] \
+        == ["frith.pro.audit_chain:make"]

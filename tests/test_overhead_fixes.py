@@ -1,6 +1,6 @@
 """The seven overhead fixes: tools loaded up front, auto mode, shared
 checks, reviews carried over a sync, supervisor sizing, inbox delivery,
-and `copse doctor`."""
+and `frith doctor`."""
 import asyncio
 import json
 import socket
@@ -10,9 +10,9 @@ import time
 import pytest
 
 from conftest import sh
-from copse import agents, autopilot, doctor, gates, inbox, mcp_server, workspaces
-from copse.db import Agent
-from copse.profiles import load_profile
+from frith import agents, autopilot, doctor, gates, inbox, mcp_server, workspaces
+from frith.db import Agent
+from frith.profiles import load_profile
 
 
 def add(db, ws, agent_id, mode="interactive", profile="supervisor", **kw):
@@ -26,7 +26,7 @@ def add(db, ws, agent_id, mode="interactive", profile="supervisor", **kw):
 
 # -- 1. tools loaded up front --------------------------------------------------
 
-def test_workers_get_copse_tools_up_front_and_chats_keep_tool_search(db, repo):
+def test_workers_get_frith_tools_up_front_and_chats_keep_tool_search(db, repo):
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "w1", mode="assign", profile="developer")
     add(db, ws, "boss")
@@ -35,8 +35,8 @@ def test_workers_get_copse_tools_up_front_and_chats_keep_tool_search(db, repo):
 
 
 def test_profile_can_force_tool_search(db, repo):
-    (repo / ".copse" / "agents").mkdir(parents=True)
-    (repo / ".copse" / "agents" / "developer.md").write_text(
+    (repo / ".frith" / "agents").mkdir(parents=True)
+    (repo / ".frith" / "agents" / "developer.md").write_text(
         "---\nname: developer\nprovider: claude\ntool_search: true\n---\nYou develop.\n")
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "w1", mode="assign", profile="developer")
@@ -57,9 +57,9 @@ def test_workers_run_in_auto_mode_and_are_told_to_stay_home(db, repo):
 
 @pytest.fixture
 def branch(db, repo, tmp_path):
-    (repo / ".copse").mkdir()
+    (repo / ".frith").mkdir()
     log = tmp_path / "check.log"   # outside the worktree, so the check doesn't dirty it
-    (repo / ".copse" / "config.json").write_text(json.dumps({"checks": [f"echo checked >> {log}"]}))
+    (repo / ".frith" / "config.json").write_text(json.dumps({"checks": [f"echo checked >> {log}"]}))
     ws = workspaces.create(db, str(repo), "feat").workspace
     (workspaces.Path(ws.path) / "new.py").write_text("x = 1\n")
     sh("git add new.py && git commit -qm work", workspaces.Path(ws.path))
@@ -67,7 +67,7 @@ def branch(db, repo, tmp_path):
 
 
 def test_check_result_is_cached_by_commit_and_reused(db, branch, repo, tmp_path):
-    from copse.config import load_repo_config
+    from frith.config import load_repo_config
 
     cfg = load_repo_config(str(repo))
     gates.check_summary(db, branch, cfg)          # warmed when the worker reported
@@ -101,8 +101,8 @@ def test_milestone_check_runs_in_the_background_and_holds_the_nudge(db, repo, mo
 # -- 4. a review carries over a clean sync --------------------------------------
 
 def test_approval_carries_over_a_clean_sync(db, repo, monkeypatch):
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text(json.dumps({"review": True}))
+    (repo / ".frith").mkdir()
+    (repo / ".frith" / "config.json").write_text(json.dumps({"review": True}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss")
     ws = workspaces.create(db, str(repo), "feat").workspace
@@ -112,7 +112,7 @@ def test_approval_carries_over_a_clean_sync(db, repo, monkeypatch):
     # main moves on meanwhile
     (repo / "other.py").write_text("y = 2\n")
     sh("git add other.py && git commit -qm main-moved", repo)
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
     assert out.startswith("Merged feat into main"), out
     carried = db.latest_review(ws.id, sh("git rev-parse HEAD", workspaces.Path(ws.path)))
@@ -120,8 +120,8 @@ def test_approval_carries_over_a_clean_sync(db, repo, monkeypatch):
 
 
 def test_unreviewed_sync_still_needs_a_review(db, repo, monkeypatch):
-    (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text(json.dumps({"review": True}))
+    (repo / ".frith").mkdir()
+    (repo / ".frith" / "config.json").write_text(json.dumps({"review": True}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss")
     ws = workspaces.create(db, str(repo), "feat").workspace
@@ -129,7 +129,7 @@ def test_unreviewed_sync_still_needs_a_review(db, repo, monkeypatch):
     sh("git add new.py && git commit -qm work", workspaces.Path(ws.path))
     (repo / "other.py").write_text("y = 2\n")
     sh("git add other.py && git commit -qm main-moved", repo)
-    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    monkeypatch.setenv("FRITH_AGENT_ID", "boss")
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
     assert "request_review again" in out
 
@@ -137,7 +137,7 @@ def test_unreviewed_sync_still_needs_a_review(db, repo, monkeypatch):
 # -- 5. the supervisor sizes work ------------------------------------------------
 
 def test_supervisor_is_told_to_size_work_first():
-    from copse.autopilot import DELEGATION
+    from frith.autopilot import DELEGATION
 
     text = load_profile("supervisor").prompt
     assert "Size first" in text and "delegation rule" in text   # the rule itself comes from config
@@ -154,7 +154,7 @@ def fake_inbox():
     import shutil
     import tempfile
 
-    folder = tempfile.mkdtemp(prefix="copse-inbox-", dir="/tmp")
+    folder = tempfile.mkdtemp(prefix="frith-inbox-", dir="/tmp")
     path = f"{folder}/inbox.sock"
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(path)
@@ -191,7 +191,7 @@ def test_messages_go_through_the_inbox_without_waiting_for_idle(db, repo, fake_i
     assert received[0][0] == {"type": "auth", "token": "tok"}
     frame = received[0][1]
     assert frame["type"] == "user" and "please add a test" in frame["message"]["content"]
-    assert frame["from"] == "copse supervisor boss"
+    assert frame["from"] == "frith supervisor boss"
     assert db.pending_count("w1") == 0          # nothing left for the pane
 
 
@@ -214,7 +214,7 @@ def test_session_start_records_the_inbox(db, repo, monkeypatch):
     assert (a.inbox_socket, a.inbox_token) == ("/tmp/x.sock", "t")
 
 
-# -- 7. copse doctor ------------------------------------------------------------------
+# -- 7. frith doctor ------------------------------------------------------------------
 
 def test_doctor_reports_what_is_missing(repo, monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "tmux" else f"/bin/{name}")
@@ -223,12 +223,12 @@ def test_doctor_reports_what_is_missing(repo, monkeypatch):
     assert by_name["tmux"].level == doctor.FAIL and "brew install tmux" in by_name["tmux"].detail
     assert by_name["checks"].level == doctor.WARN
     text = doctor.render(results)
-    assert "will stop copse from working" in text
+    assert "will stop frith from working" in text
 
 
 def test_doctor_reports_a_missing_add_dir(repo):
-    (repo / ".copse").mkdir(exist_ok=True)
-    (repo / ".copse" / "config.json").write_text('{"add_dirs": ["/no/such/cache", "."]}')
+    (repo / ".frith").mkdir(exist_ok=True)
+    (repo / ".frith" / "config.json").write_text('{"add_dirs": ["/no/such/cache", "."]}')
     by_name = {c.name: c for c in doctor.checks(str(repo))}
     assert by_name["add_dirs"].level == doctor.WARN
     assert "/no/such/cache" in by_name["add_dirs"].detail

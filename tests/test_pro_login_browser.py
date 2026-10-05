@@ -1,4 +1,4 @@
-"""Browser sign-in for ``copse account login``: loopback redirect + PKCE,
+"""Browser sign-in for ``frith account login``: loopback redirect + PKCE,
 with the device flow as the fallback. The backend is mocked; the "browser"
 is a function that GETs the loopback callback the way a redirect would."""
 import base64
@@ -12,8 +12,8 @@ import webbrowser
 
 import pytest
 
-from copse.pro import account, auth, credentials, loopback
-from copse.pro.auth import AuthError
+from frith.pro import account, auth, credentials, loopback
+from frith.pro.auth import AuthError
 from pro_fixtures import BASE, backend, pro_env, signing_key, token  # noqa: F401 - fixtures
 from test_pro_auth import Clock, device_backend
 
@@ -33,7 +33,7 @@ def cli_token(backend, code=GOOD_CODE):
     """Script ``POST /cli/token``: checks the PKCE proof against the challenge
     the fake browser saw in the authorize URL, then issues tokens."""
     def handler(form, headers):
-        assert form["grant_type"] == "authorization_code" and form["client_id"] == "copse-cli"
+        assert form["grant_type"] == "authorization_code" and form["client_id"] == "frith-cli"
         assert form["code"] == code
         assert form["redirect_uri"] == backend.redirect_uri
         verifier = form["code_verifier"]
@@ -67,7 +67,7 @@ def fake_browser(backend, *redirects, callback=True):
         u = urllib.parse.urlsplit(url)
         q = dict(urllib.parse.parse_qsl(u.query))
         assert f"{u.scheme}://{u.netloc}{u.path}" == BASE + "/cli/authorize"
-        assert q["client_id"] == "copse-cli" and q["code_challenge_method"] == "S256"
+        assert q["client_id"] == "frith-cli" and q["code_challenge_method"] == "S256"
         assert re.fullmatch(r"http://127\.0\.0\.1:\d+/callback", q["redirect_uri"])
         assert loopback.STATE_RE.match(q["state"]) and len(q["code_challenge"]) == 43
         backend.challenge, backend.redirect_uri = q["code_challenge"], q["redirect_uri"]
@@ -148,10 +148,10 @@ def test_pkce_pair_and_state():
     assert challenge == b64url(hashlib.sha256(verifier.encode()).digest()) and len(challenge) == 43
     assert loopback.pkce_pair()[0] != verifier
     assert loopback.STATE_RE.match(loopback.new_state())
-    url = loopback.authorize_url(BASE, "http://127.0.0.1:4321/callback", "s" * 20, challenge, "copse-cli")
+    url = loopback.authorize_url(BASE, "http://127.0.0.1:4321/callback", "s" * 20, challenge, "frith-cli")
     q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
     assert url.startswith(BASE + "/cli/authorize?")
-    assert q == {"client_id": "copse-cli", "redirect_uri": "http://127.0.0.1:4321/callback",
+    assert q == {"client_id": "frith-cli", "redirect_uri": "http://127.0.0.1:4321/callback",
                  "state": "s" * 20, "code_challenge": challenge, "code_challenge_method": "S256"}
 
 
@@ -160,7 +160,7 @@ def test_callback_page_is_plain_html_with_no_script_allowed():
         req = urllib.request.Request(srv.redirect_uri + "?state=" + "s" * 20 + "&code=cac_x")
         with urllib.request.urlopen(req, timeout=5) as r:
             body, headers = r.read().decode(), r.headers
-        assert "copse is signed in" in body and "<script" not in body
+        assert "frith is signed in" in body and "<script" not in body
         assert headers["Content-Security-Policy"].startswith("default-src 'none'")
         assert headers["Cache-Control"] == "no-store"
         assert srv.wait(1) == loopback.CallbackResult(code="cac_x")
@@ -235,7 +235,7 @@ def test_can_open_browser(out, env, platform, expected):
     assert loopback.can_open_browser(out, env, platform) is expected
 
 
-# -- `copse account login` ----------------------------------------------------------------------
+# -- `frith account login` ----------------------------------------------------------------------
 
 
 def run(args, out=None, **kw):
