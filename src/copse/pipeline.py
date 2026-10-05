@@ -231,6 +231,9 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: 
     # Read under the lock: an earlier verdict may have merged the branch, or
     # handed it to the supervisor, while this one waited.
     if _settled(db, ws):
+        worker = agents.workspace_worker(db, ws)
+        if worker is not None and worker.pipeline:
+            db.update_agent(worker.id, pipeline=None)
         return True
     worker = agents.workspace_worker(db, ws)
     if worker is None or not worker.pipeline:
@@ -397,15 +400,12 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool) -> str:
         if gates.head(ws) != report.sha:
             return (f"Not merged: {ws.branch} got new commits while the gates ran. "
                     "Call merge_workspace again to check the new commits.")
-        # Several branches merge into one checkout: one at a time, or they
-        # fight over its index ("Unable to write index").
-        with _file_lock("merge-into-" + hashlib.sha1(
-                f"{ws.repo_root}\0{ws.base_branch}".encode()).hexdigest()[:16]):
-            target = workspaces.merge_back(db, ws, squash=squash)
+        # git.merge_into serializes merges into one checkout (checkout_lock).
+        target = workspaces.merge_back(db, ws, squash=squash)
     except git.GitError as e:
         return _settled(db, ws) or f"Not merged: {e}"
     db.set_merged(ws.id, report.sha)
-    text =f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
+    text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
     history.record_safely(
         db, ws.repo_root, "merge", agent=caller, with_usage=True, branch=ws.branch,
         task=f"merge {ws.branch} into {ws.base_branch}", result=text,
