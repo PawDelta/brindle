@@ -33,9 +33,9 @@ refreshes anything; outside air-gap mode it is used when there is no login.
 Its issuer isn't checked against a backend URL, only its signature, type,
 audience and validity.
 
-Development: with ``COPSE_PRO_DEV=1`` *and* an issuer on localhost, keys may
-also be fetched from that server's ``GET /keys`` (JWKS) and are trusted for
-tokens issued by that host only. Never in normal mode.
+Only pinned keys are trusted, in every mode: nothing in the environment can
+make the client trust a key it didn't ship with. To test against a local
+backend, pin its key in ``keys.py`` in your own checkout and don't commit it.
 
 Tokens are never logged or put in exception messages.
 """
@@ -49,7 +49,6 @@ import json
 import logging
 import os
 import sys
-import urllib.parse
 import threading
 import time
 from contextlib import contextmanager
@@ -107,20 +106,6 @@ _test_keys: dict[str, Ed25519PublicKey] = {}
 _keys_lock = threading.Lock()
 
 
-_dev_keys: dict[str, dict[str, Ed25519PublicKey]] = {}
-
-
-def _dev_issuer(issuer: str | None) -> bool:
-    """True only in dev mode for an issuer on localhost."""
-    if os.environ.get("COPSE_PRO_DEV") != "1" or not issuer:
-        return False
-    try:
-        u = urllib.parse.urlsplit(issuer)
-        return u.scheme in ("http", "https") and (u.hostname or "").lower() in LOCAL_HOSTS
-    except ValueError:
-        return False
-
-
 def jwk_thumbprint(x: str) -> str:
     """RFC 7638 thumbprint of an Ed25519 OKP key (the backend's kid)."""
     canonical = json.dumps({"crv": "Ed25519", "kty": "OKP", "x": x},
@@ -128,37 +113,7 @@ def jwk_thumbprint(x: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(canonical.encode()).digest()).rstrip(b"=").decode()
 
 
-def parse_jwks(jwks: dict) -> dict[str, Ed25519PublicKey]:
-    """Ed25519 keys from a JWKS, keeping only those whose kid is their own
-    RFC 7638 thumbprint."""
-    out: dict[str, Ed25519PublicKey] = {}
-    for jwk in (jwks.get("keys") if isinstance(jwks, dict) else None) or []:
-        if not isinstance(jwk, dict) or jwk.get("kty") != "OKP" or jwk.get("crv") != "Ed25519":
-            continue
-        x, kid = jwk.get("x"), jwk.get("kid")
-        if not isinstance(x, str) or not isinstance(kid, str) or jwk_thumbprint(x) != kid:
-            continue
-        try:
-            out[kid] = Ed25519PublicKey.from_public_bytes(_b64decode(x))
-        except (LicenseError, ValueError):
-            continue
-    return out
-
-
-def _dev_key(kid: str, issuer: str) -> Ed25519PublicKey | None:
-    if issuer not in _dev_keys:
-        from copse.pro import auth
-
-        try:
-            _dev_keys[issuer] = parse_jwks(auth.fetch_jwks(issuer))
-        except Exception:  # noqa: BLE001 - fail closed
-            log.info("could not fetch development keys")
-            return None
-        log.warning("COPSE_PRO_DEV: trusting keys served by %s", issuer)
-    return _dev_keys[issuer].get(kid)
-
-
-def _trusted_key(kid: str, issuer: str | None = None) -> Ed25519PublicKey:
+def _trusted_key(kid: str) -> Ed25519PublicKey:
     raw = PINNED_KEYS.get(kid)
     if raw is not None:
         try:
@@ -167,10 +122,6 @@ def _trusted_key(kid: str, issuer: str | None = None) -> Ed25519PublicKey:
             raise LicenseError("pinned key is malformed") from e
     if kid in _test_keys:
         return _test_keys[kid]
-    if _dev_issuer(issuer):
-        key = _dev_key(kid, issuer)
-        if key is not None:
-            return key
     raise LicenseError("entitlement signed by an unknown key")
 
 
@@ -191,10 +142,6 @@ def _test_signing_key(kid: str, public_key: Ed25519PublicKey):
         with _keys_lock:
             _test_keys.pop(kid, None)
         clear_cache()
-
-
-def clear_dev_keys() -> None:
-    _dev_keys.clear()
 
 
 # -- verification ----------------------------------------------------------------------
@@ -247,7 +194,7 @@ def verify(token: str, *, issuer: str | None, now: float | None = None,
     kid = header.get("kid")
     if not isinstance(kid, str) or not kid:
         raise LicenseError("entitlement names no key")
-    key = _trusted_key(kid, issuer)
+    key = _trusted_key(kid)
     sig = _b64decode(parts[2])
     try:
         key.verify(sig, f"{parts[0]}.{parts[1]}".encode("ascii"))
