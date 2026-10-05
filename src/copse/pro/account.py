@@ -45,6 +45,9 @@ USAGE = """usage: copse account [<command>] [--base-url URL]
   org join <code>   accept an invite code and join that org
   org use <org_id>  work as a member of <org_id> (`personal` for your own)
   org policy        show the current org's policy (and refresh the cached copy)
+  org learning-share [on|off] [--org ORG]
+            show, or turn on/off, sharing this org's coarse learning records into
+            the cross-org prior (off by default; owner/admin to change)
   org ci-token create <name> [--org ORG]
                     create a CI token for `copse ci run` (admin+); shown once
   org ci-token list [--org ORG]           list the org's CI tokens
@@ -175,6 +178,46 @@ class _OrgCommands:
         self._say(f"Revoked CI token {rest[0]}; runs using it stop at their next start.")
         return 0
 
+    def cmd_org_learning_share(self, base: str | None, *state: str, org: str | None = None) -> int:
+        from copse import airgap
+
+        if airgap.enabled():
+            raise auth.AuthError(f"air-gap mode is on via {airgap.source()}: nothing is shared and "
+                                 "learning sharing is unavailable", code="airgap")
+        org_id = self._team_org(org) if org else self._current_org_required()
+        client = self._client(base)
+        if state:
+            got = auth.set_learning_sharing(client, self.store, org_id, state[0] == "on")
+        else:
+            got = auth.get_learning_sharing(client, self.store, org_id)
+        self._say(f"Learning sharing for {org_id}: {'ON' if got['enabled'] else 'off'}"
+                  + (f" (changed {_when(got['updated_at'])})" if got["updated_at"] else "")
+                  + ".")
+        self._say("When on, this org's coarse learning records (task kind, size, weight, profile, "
+                  "cost, outcome),")
+        self._say("the same ones already sent for hosted learning, under this org's own hashes, "
+                  "also feed a")
+        self._say("cross-org prior that gives every Pro org a starting point. Never task text, "
+                  "paths or names;")
+        self._say("only copse's built-in profile names are pooled, custom ones never leave the org.")
+        self._say("Each org adds at most 10 tasks per task type, and a type's prior is used once "
+                  "5 orgs have")
+        self._say("contributed. It counts for at most 8 tasks, so your own data still wins "
+                  "soon after.")
+        self._say("Turning it off stops new contributions; what was shared fades out over a "
+                  "60-day half-life.")
+        self._say("Off by default.")
+        if not state:
+            self._say("Change it (owner/admin): `copse account org learning-share on|off`.")
+        return 0
+
+    def _current_org_required(self) -> str:
+        org = self._current_org()
+        if not org:
+            raise auth.AuthError("no org selected: pass --org ORG or run `copse account login`",
+                                 code="no_team_org")
+        return org
+
     def cmd_org_use(self, base: str | None, org_id: str) -> int:
         target = None if org_id == "personal" else org_id
         ent = auth.switch_org(self._client(base), self.store, target)
@@ -266,6 +309,7 @@ class ProAccount(_OrgCommands):
             "portal": not rest, "sync": not rest,
             "org": (sub in ("list", "policy") and len(rest) <= 1)
             or (sub in ("use", "invite", "join") and len(rest) == 2)
+            or (sub == "learning-share" and len(rest) <= 2 and rest[1:] in ([], ["on"], ["off"]))
             or (sub == "create" and len(rest) >= 2)
             or (sub == "ci-token" and len(rest) >= 2 and (
                 (rest[1] == "create" and len(rest) >= 3) or (rest[1] == "list" and len(rest) == 2)
@@ -275,7 +319,7 @@ class ProAccount(_OrgCommands):
         }.get(cmd, False)
         flags_ok = {"upgrade": ("team", "seats", "org"), "portal": ("org",), "login": ("device",),
                     "org": ("org", "admin") if sub == "invite"
-                    else ("org",) if sub == "ci-token" else ()}.get(cmd, ())
+                    else ("org",) if sub in ("ci-token", "learning-share") else ()}.get(cmd, ())
         if not ok or any(v is not None and k not in flags_ok for k, v in opts.items()):
             print(USAGE, file=self.err)
             return 2
@@ -287,6 +331,8 @@ class ProAccount(_OrgCommands):
                     return self.cmd_org_invite(base, rest[1], opts["org"], bool(opts["admin"]))
                 if sub == "ci-token":
                     return self.cmd_org_ci_token(base, *rest[1:], org=opts["org"])
+                if sub == "learning-share":
+                    return self.cmd_org_learning_share(base, *rest[1:], org=opts["org"])
                 return getattr(self, "cmd_org_" + sub)(base, *rest[1:])
             if cmd == "upgrade":
                 return self.cmd_upgrade(base, team=bool(opts["team"]), seats=seats, org=opts["org"])
@@ -354,6 +400,9 @@ class ProAccount(_OrgCommands):
             else:
                 self._say(f"    {feature:<9} {what:<50} needs {plan.capitalize()}")
         self._say("")
+        if ent and "learning" in have and not ent.in_grace:
+            self._learning_share_line(base, ent.org_id)
+        self._say("")
         if ent is None:
             self._say("Next: `copse account login`, then `copse account upgrade`. "
                       f"Plans: {PRICING_URL}")
@@ -367,6 +416,20 @@ class ProAccount(_OrgCommands):
             self._say(f"Enterprise (audit log, air-gap) is sales-led: {PRICING_URL}")
         self._say("More: `copse account status` (your plan), `copse account --help` (all commands).")
         return 0
+
+    def _learning_share_line(self, base: str | None, org_id: str) -> None:
+        """One best-effort line for bare ``copse account``; silent when it can't be read."""
+        from copse import airgap
+
+        if airgap.enabled():
+            return
+        try:
+            got = auth.get_learning_sharing(self._client(base), self.store, org_id)
+        except Exception:  # noqa: BLE001 - offline, logged out or an older backend: skip the line
+            return
+        self._say(f"Learning sharing: {'ON' if got['enabled'] else 'off'} "
+                  "(pool coarse records into the cross-org prior; "
+                  "`copse account org learning-share`)")
 
     def cmd_login(self, base: str | None, device: bool = False) -> int:
         """Browser sign-in when a browser can open here (a terminal, not SSH,
