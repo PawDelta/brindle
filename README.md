@@ -830,14 +830,24 @@ steer the agents.
 
 `copse ci init` writes `.github/workflows/copse.yml`, which runs on
 `workflow_dispatch` and whenever an issue gets the label (`copse` by
-default). It has two jobs. `run` (permissions: `contents: read`,
-`issues: read`) checks the repo out without keeping credentials, installs
-tmux, copse (`uv tool install copse-ai`) and Claude Code, runs
-`copse ci entitle` in a step of its own, then `copse ci run --issue <number>
---entitlement … --bundle …` with only `ANTHROPIC_API_KEY` and a read-only
-`GH_TOKEN`, and uploads the bundle as an artifact. `publish` (permissions:
-`contents: write`, `pull-requests: write`) starts on a fresh machine, checks
-nothing out, downloads the artifact and runs `copse ci publish`. It won't
+default). It has three jobs:
+
+- `entitle` (no permissions) runs `copse ci entitle` with `COPSE_PRO_TOKEN`
+  on a machine that checks out and runs nothing from the repo. It hands the
+  short-lived entitlement (three hours) to the next job as an artifact kept
+  one day, so the CI token is never on the agents' machine.
+- `run` (permissions: `contents: read`, `issues: read`) checks the repo out
+  without keeping credentials, installs tmux, copse (pinned to the version
+  that wrote the workflow) and Claude Code, then runs `copse ci run --issue
+  <number> --entitlement … --bundle …` with only `ANTHROPIC_API_KEY` and a
+  read-only `GH_TOKEN`. copse deletes the entitlement file before any agent
+  starts. The job uploads the bundle as an artifact.
+- `publish` (permissions:
+  `contents: write`, `pull-requests: write`) starts on a fresh machine, checks
+  nothing out, downloads the artifact and runs `copse ci publish`, targeting
+  the repository's default branch.
+
+`copse ci init` won't
 overwrite an existing file without `--force`. The workflow needs two secrets,
 `COPSE_PRO_TOKEN` (an org CI token, below) and `ANTHROPIC_API_KEY`, and the
 repo's Actions settings must allow GitHub Actions to create pull requests.
