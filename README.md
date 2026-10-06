@@ -868,6 +868,22 @@ repo's Actions settings must allow GitHub Actions to create pull requests.
 The model API key is the one secret agents must have; give it a spending
 limit.
 
+`brindle ci init --validate` writes `.github/workflows/brindle-validate.yml`,
+which checks every pull request (`pull_request`, never `pull_request_target`)
+with the same split: `entitle` holds the CI token, `validate` runs
+`brindle ci validate` on the pull request's code with a read-only token and
+uploads a verdict file, and `report` (permissions: `checks: write`,
+`pull-requests: write`; no checkout) runs `brindle ci validate-report VERDICT
+--repo owner/name --pr N --sha SHA`. It treats the verdict as untrusted (schema,
+size caps, escaped markdown), creates the "brindle validate" check on the head
+commit (success for pass; failure for fail or error only in blocking mode;
+neutral otherwise) and keeps one PR comment up to date. Fork pull requests get
+no secrets on `pull_request`, so they get a neutral check saying so. To block
+merges, set `BRINDLE_VALIDATE_MODE: blocking` in the workflow (`--mode
+blocking`) and require the "brindle validate" check in branch protection. The
+validate job runs the pull request's code, which could write its own verdict:
+a required check catches mistakes, not a hostile pull request.
+
 An org admin creates the CI token; it is shown once, so store it straight away:
 
 ```sh
