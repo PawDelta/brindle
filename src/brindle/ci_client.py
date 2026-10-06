@@ -560,6 +560,9 @@ def start(repo: str, trigger: dict, out_dir: str | Path, *, client: Client, toke
         say("not started: " + (auth._sanitize(msg, 300) if _str(msg) else "the branch has changes brindle didn't make")
             + " (the server has commented)")
         return 0
+    if status == 410 and body.get("error") == "jira_text_gone":
+        say("not started: the Jira ticket's text has expired on the server; move the ticket to the trigger status again")
+        return 0
     raise _error(status, body)
 
 

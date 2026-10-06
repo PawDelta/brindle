@@ -579,6 +579,19 @@ def test_start_branch_conflict_exits_zero(plan, tmp_path):
     assert not (tmp_path / "out").exists()
 
 
+def test_start_dispatch_jira_text_gone_exits_zero(plan, tmp_path):
+    t = FakeTransport({"POST /ci/runs": [(410, {"error": "jira_text_gone"})]})
+    said = []
+    code = ci_client.start(REPO, {"kind": "dispatch", "run_id": "run_abc"}, tmp_path / "out",
+                           client=ci_client.Client(BASE, t), token=CI_TOKEN, providers=[], say=said.append)
+    assert code == 0 and said[0].startswith("not started: the Jira ticket's text has expired")
+    assert not (tmp_path / "out").exists()
+    # any other 410 is still an error
+    t = FakeTransport({"POST /ci/runs": [(410, {"error": "gone"})]})
+    with pytest.raises(ci_client.CIError):
+        ci_client.start(REPO, {"kind": "dispatch", "run_id": "run_abc"}, tmp_path / "out",
+                        client=ci_client.Client(BASE, t), token=CI_TOKEN, providers=[], say=said.append)
+
 def push_branch(repo, branch: str) -> str:
     """A branch with one commit past main, pushed to origin and deleted
     locally (as a fresh CI checkout would see it). Returns its tip."""
