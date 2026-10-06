@@ -777,6 +777,7 @@ brindle ci run --issue 42                      # the goal is the issue's title a
 brindle ci run --goal "Add a /health endpoint" # or typed; a goals.md-shaped text brings its milestones
 brindle ci run --goal-file .brindle/goals.md --timeout 90 --max-workers 2 --base develop --no-pr
 brindle ci init --label brindle                  # the GitHub Actions workflow (see below)
+brindle ci doctor || true                        # in a CI job: which agent CLIs and keys are there (names only)
 
 # The same run in three steps, so no secret worth stealing is near the agents:
 brindle ci entitle --out ent.jwt                                      # uses BRINDLE_PRO_TOKEN, then exits

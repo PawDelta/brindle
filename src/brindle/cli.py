@@ -1650,7 +1650,22 @@ def ci_init(
     typer.echo("Add the BRINDLE_PRO_TOKEN secret (from `brindle account org ci-token create`) and "
                "ANTHROPIC_API_KEY, and allow GitHub Actions to create pull requests in the repo's "
                "Actions settings. Only people you trust with write access should be able to apply "
-               "the label.")
+               "the label. Optional: OPENAI_API_KEY or CODEX_API_KEY also installs Codex for "
+               "routing to pick from.")
+
+
+@ci_app.command("doctor")
+def ci_doctor(
+    entitlement: Optional[str] = typer.Option(None, "--entitlement", help="The entitlement file to look for (default: where the workflow puts it under $RUNNER_TEMP)."),
+) -> None:
+    """In a CI job: which agent CLIs and keys are present, and whether the entitlement file or BRINDLE_PRO_TOKEN is set.
+
+    Prints names and set/not set only, never a value. Exits 1 when no agent CLI
+    can run; in a workflow step, run `brindle ci doctor || true` so a report
+    doesn't fail the job."""
+    from brindle import ci_providers
+
+    raise typer.Exit(ci_providers.doctor(entitlement, echo=typer.echo))
 
 
 # -- internal ----------------------------------------------------------------
