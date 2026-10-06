@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS agents (
     pipeline_rounds INTEGER,
     stuck_noted REAL,              -- status_since of the 'waiting' spell its supervisor was told about (brindle.cull)
     review_sha TEXT,               -- the commit a reviewer was started on (agents.request_review)
-    unreported_noted INTEGER       -- its supervisor was told it stopped without reporting (agents.tell_parent_unreported)
+    unreported_noted INTEGER,      -- its supervisor was told it stopped without reporting (agents.tell_parent_unreported)
+    tmux_server TEXT               -- the private tmux server (BRINDLE_TMUX_SOCKET) its window is on; NULL: the default server
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +354,7 @@ class Agent:
     unreported_noted: int | None = None
     plan_first: int | None = None      # must get its plan approved before editing (brindle.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
+    tmux_server: str | None = None     # the private tmux server its window is on (see tmux.current_server)
 
 
 @dataclass
@@ -538,7 +540,8 @@ class DB:
         for col, kind in (("review_sha", "TEXT"), ("unreported_noted", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
-        for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT")):
+        for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT"),
+                          ("tmux_server", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
@@ -729,16 +732,26 @@ class DB:
     # -- agents ------------------------------------------------------------
 
     def add_agent(self, a: Agent) -> None:
+        if a.tmux_server is None:
+            # An agent's window goes on the tmux server brindle is using when
+            # its row is made (agents._open_window re-records it on launch,
+            # for a resume on another server). Only rows an older brindle
+            # made have no server, and count as the default server's.
+            from brindle import tmux
+
+            a.tmux_server = tmux.current_server()
         with self.tx() as c:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
-                "headless, transcript_path, done_when, inbox_socket, inbox_token, review_sha) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "headless, transcript_path, done_when, inbox_socket, inbox_token, review_sha, "
+                "tmux_server) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
                  a.status_since or a.created_at, a.task, a.session_ref, a.headless,
-                 a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha),
+                 a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha,
+                 a.tmux_server),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:

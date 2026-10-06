@@ -684,7 +684,9 @@ def _attach(agent: dict, ws: dict, db: DB) -> None:
 
 def _peek(stdscr, agent: dict, styles: dict[str, int]) -> None:
     try:
-        screen = tmux.capture(agent["window"], lines=200).rstrip().splitlines()
+        # The agent's own server: its pane id names another pane elsewhere.
+        screen = tmux.capture(agent["window"], lines=200,
+                              server=agent.get("tmux_server") or None).rstrip().splitlines()
     except tmux.TmuxError as e:
         screen = [f"(can't read the agent's terminal: {e})"]
     h, w = stdscr.getmaxyx()

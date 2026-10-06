@@ -119,6 +119,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
             pending=db.pending_count(a.id),
             reported=a.result is not None,
             window=a.tmux_window,
+            tmux_server=a.tmux_server,
             headless=bool(a.headless),
             subagents=visible,
         )
