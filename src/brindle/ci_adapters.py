@@ -7,10 +7,11 @@ An adapter answers four questions and does three things:
 
 * ``installed()``: is the provider's CLI on this machine.
 * ``credential(env)``: which credential *names* are present (never values) and
-  what kind they are: an API key, Anthropic workload identity federation (a
-  Console service account, billed as API), a cloud sign-in (Bedrock, Vertex,
-  ...), an endpoint without a key, or a personal subscription
-  (``CLAUDE_CODE_OAUTH_TOKEN``; a ChatGPT login for Codex).
+  what kind they are: an API key, a cloud sign-in (Bedrock, Vertex, ...), an
+  endpoint without a key, or a personal subscription (``CLAUDE_CODE_OAUTH_TOKEN``;
+  a ChatGPT login for Codex). Anthropic workload identity federation reaches
+  here as an API key: the workflow exchanges GitHub's OIDC token once and
+  gives the job ``ANTHROPIC_AUTH_TOKEN``.
 * ``available(env)``: installed and holding some credential.
 * ``launch``: start a brindle autopilot supervisor with the plan's instructions.
 * ``review``: ask the model one question (the plan's instructions) and return
@@ -44,7 +45,6 @@ from typing import Mapping, MutableMapping
 from brindle import providers
 
 API_KEY = "api_key"
-FEDERATION = "federation"
 CLOUD = "cloud"
 ENDPOINT = "endpoint"
 SUBSCRIPTION = "subscription"
@@ -54,12 +54,6 @@ AUTH = "auth"
 CLAUDE_API_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 CLAUDE_CLOUD = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 CLAUDE_SUBSCRIPTION = ("CLAUDE_CODE_OAUTH_TOKEN",)
-# Workload identity federation (Claude Code reads these itself): all three
-# IDs and one identity token source; the workspace is optional.
-CLAUDE_FEDERATION_IDS = ("ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
-                         "ANTHROPIC_SERVICE_ACCOUNT_ID")
-CLAUDE_FEDERATION_TOKENS = ("ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_IDENTITY_TOKEN")
-CLAUDE_FEDERATION_OPTIONAL = ("ANTHROPIC_WORKSPACE_ID",)
 CODEX_API_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 CODEX_LOGIN = "codex login (auth.json)"     # the name shown for a ChatGPT sign-in
 NATIVE_KEYS_ENV = "BRINDLE_CI_NATIVE_KEYS"   # the workflow lists NAME@host pairs native profiles may use
@@ -70,7 +64,7 @@ BASE_URL_RE = re.compile(r"^(?P<scheme>https?)://(?P<host>[A-Za-z0-9]([A-Za-z0-9
                          r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
 # Every known provider credential: what a check must not see, and what a
 # repo-supplied native profile may not point at its own endpoint.
-PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, "ANTHROPIC_IDENTITY_TOKEN", *CODEX_API_KEYS,
+PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KEYS,
                            "GEMINI_API_KEY", "GOOGLE_API_KEY"))
 REVIEW_TIMEOUT = 1200.0
 DEFAULT_PROFILE = "supervisor"
@@ -82,7 +76,7 @@ class AdapterError(Exception):
 
 @dataclass(frozen=True)
 class Credential:
-    kind: str | None            # API_KEY | FEDERATION | CLOUD | ENDPOINT | SUBSCRIPTION | None
+    kind: str | None            # API_KEY | CLOUD | ENDPOINT | SUBSCRIPTION | None
     names: tuple[str, ...]      # the credential names present (never values)
 
 
@@ -217,21 +211,11 @@ def _run(argv: list[str], cwd: str, env: Mapping[str, str], stdin: str, timeout:
     return Review(proc.stdout or "", exit=proc.returncode)
 
 
-def federation(env: Mapping[str, str]) -> tuple[str, ...]:
-    """The federation variable names present when federation is complete
-    (all three IDs and an identity token source), else ()."""
-    if not all(env.get(k) for k in CLAUDE_FEDERATION_IDS):
-        return ()
-    tokens = tuple(k for k in CLAUDE_FEDERATION_TOKENS if env.get(k))
-    if not tokens:
-        return ()
-    return (*CLAUDE_FEDERATION_IDS, *tokens, *(k for k in CLAUDE_FEDERATION_OPTIONAL if env.get(k)))
-
-
 def drop_empty_keys(env: MutableMapping[str, str]) -> list[str]:
     """Remove Claude key variables set to an empty string from ``env`` in
     place (a workflow's ``${{ secrets.ANTHROPIC_API_KEY }}`` when the secret
-    isn't set): Claude Code takes an empty key over federation and fails.
+    isn't set): an empty key still wins Claude Code's precedence, over the
+    ``ANTHROPIC_AUTH_TOKEN`` that identity federation gives the job.
     Returns the names removed."""
     gone = [k for k in CLAUDE_API_KEYS if k in env and not env[k]]
     for k in gone:
@@ -241,7 +225,7 @@ def drop_empty_keys(env: MutableMapping[str, str]) -> list[str]:
 
 def claude_env(env: Mapping[str, str]) -> dict[str, str]:
     """The environment the claude CLI runs in: ``env`` without empty key
-    variables (federation's own variables pass through)."""
+    variables."""
     out = dict(env)
     drop_empty_keys(out)
     return out
@@ -258,9 +242,6 @@ class ClaudeAdapter(Adapter):
         keys = tuple(k for k in CLAUDE_API_KEYS if env.get(k))
         if keys:
             return Credential(API_KEY, keys)
-        fed = federation(env)
-        if fed:
-            return Credential(FEDERATION, fed)
         cloud = tuple(k for k in CLAUDE_CLOUD if env.get(k))
         if cloud:
             return Credential(CLOUD, cloud)
@@ -524,7 +505,7 @@ def usable(adapter: Adapter, env: Mapping[str, str], org: bool | None) -> tuple[
     if adapter.credential(env).kind == SUBSCRIPTION and org is not False:
         who = "an organization" if org else "unknown (treated as an organization)"
         return False, (f"its only credential is a personal subscription and the repository owner is "
-                       f"{who}: use an API key, identity federation or a cloud sign-in")
+                       f"{who}: use an API key or a cloud sign-in")
     return True, ""
 
 
@@ -570,6 +551,6 @@ def format_doctor(rows: list[dict], repo: str | None, org: bool | None) -> str:
 
 __all__ = ["Adapter", "AdapterError", "ClaudeAdapter", "CodexAdapter", "Credential", "NativeAdapter",
            "Review", "default_adapters", "doctor", "format_doctor", "merge_usage", "providers_available",
-           "repo_is_org", "usable", "claude_env", "drop_empty_keys", "federation", "API_KEY", "CLOUD",
-           "ENDPOINT", "FEDERATION", "SUBSCRIPTION"]
+           "repo_is_org", "usable", "claude_env", "drop_empty_keys", "API_KEY", "CLOUD", "ENDPOINT",
+           "SUBSCRIPTION"]
 

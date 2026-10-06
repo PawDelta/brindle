@@ -757,14 +757,14 @@ def test_scrub_secrets_and_check_env():
     assert set(ci_client.check_env(env)) == {"GITHUB_REPOSITORY", "PATH"}
 
 
-def test_scrub_secrets_keeps_federation_and_drops_empty_keys():
+def test_scrub_secrets_drops_empty_keys():
     """The workflow sets ANTHROPIC_API_KEY from a secret that may not exist
-    (an empty string), which Claude Code would take over federation."""
-    fed = {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": "org-uuid",
-           "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1", "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t"}
-    env = {**fed, "ANTHROPIC_API_KEY": "", "BRINDLE_PRO_TOKEN": "x", "PATH": "/bin"}
+    (an empty string), which Claude Code would take over the federation
+    token in ANTHROPIC_AUTH_TOKEN."""
+    env = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "BRINDLE_PRO_TOKEN": "x",
+           "PATH": "/bin"}
     assert ci_client.scrub_secrets(env) == ["ANTHROPIC_API_KEY", "BRINDLE_PRO_TOKEN"]
-    assert env == {**fed, "PATH": "/bin"}
+    assert env == {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}
 
 
 def test_read_run_token_deletes_the_file(tmp_path):

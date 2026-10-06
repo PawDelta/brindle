@@ -802,18 +802,18 @@ workflows call these commands:
 Credential names are reported, never values. On a repository owned by a GitHub
 organization, a provider signed in only with a personal subscription is not used.
 
-With identity federation the job has no stored Anthropic key: GitHub's OIDC
-token is exchanged for a short-lived one, as a Claude Console service account
-(billed as API, so it is allowed on organization repositories). `brindle ci
-init` stores the rule, organization, service account and optional workspace IDs
-as the Actions variables `ANTHROPIC_FEDERATION_RULE_ID`,
+With identity federation the repository stores no Anthropic key: the workflow
+exchanges GitHub's OIDC token once for a short-lived Anthropic token, as a
+Claude Console service account (billed as API, so it is allowed on
+organization repositories), and gives the job `ANTHROPIC_AUTH_TOKEN`. `brindle
+ci init` stores the rule, organization, service account and optional workspace
+IDs as the Actions variables `ANTHROPIC_FEDERATION_RULE_ID`,
 `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
-`ANTHROPIC_WORKSPACE_ID`; the workflows put them and
-`ANTHROPIC_IDENTITY_TOKEN_FILE` in the job's environment. Create the federation
-rule in the Claude Console with subject `repo:<owner>/<name>:*`, audience
-`https://api.anthropic.com`, and a token lifetime of at least 7200 seconds.
-Leave the `ANTHROPIC_API_KEY` secret unset: a key takes precedence over
-federation (brindle drops an empty one before Claude Code starts).
+`ANTHROPIC_WORKSPACE_ID`. Create the federation rule in the Claude Console with
+subject `repo:<owner>/<name>:*`, audience `https://api.anthropic.com`, and a
+token lifetime of at least 7200 seconds. Leave the `ANTHROPIC_API_KEY` secret
+unset: a key takes precedence (brindle drops an empty one before Claude Code
+starts).
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `brindle close <id>` to stop it and hide it. Stopping means
@@ -970,7 +970,7 @@ it's signed in without a plan that includes it, is reported to its supervisor.
 
 | Provider | Key login (environment variables) |
 |---|---|
-| `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, workload identity federation (`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and `ANTHROPIC_IDENTITY_TOKEN_FILE` or `ANTHROPIC_IDENTITY_TOKEN`), or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
+| `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
 | `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY` |
 | `antigravity` | `GEMINI_API_KEY`, only with `"modelProvider": "gemini"` in `agy`'s `settings.json` (see [Google Antigravity](#google-antigravity)); otherwise `agy`'s own browser sign-in |
 

@@ -92,8 +92,8 @@ SETUP_DIR = ".github/workflows"
 SETUP_BRANCH = "brindle/ci-setup"
 ENV_TOKEN = "BRINDLE_PRO_TOKEN"
 # How init sets Claude up: the ANTHROPIC_API_KEY secret, or workload identity
-# federation (the IDs as Actions variables; the workflow puts them, and the
-# identity token file, in the job's environment).
+# federation (the IDs as Actions variables; the workflow exchanges GitHub's
+# OIDC token with them once and gives the job ANTHROPIC_AUTH_TOKEN).
 KEY = "key"
 FEDERATION = "federation"
 CREDENTIALS = (KEY, FEDERATION)
@@ -130,7 +130,7 @@ def is_model_key(name: str) -> bool:
 def scrub_secrets(env: MutableMapping[str, str]) -> list[str]:
     """Remove the job's secrets from ``env`` in place (before any agent
     starts), and Claude key variables set to an empty string, which Claude
-    Code would take over identity federation. Returns the names removed."""
+    Code would take over the federation token. Returns the names removed."""
     gone = sorted(k for k in env if is_job_secret(k))
     for k in gone:
         del env[k]
