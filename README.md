@@ -450,7 +450,7 @@ Autopilot, merge gates and cleanup:
 | `sidebar` | `"left"` | where the dashboard sits in each window: `"left"` of the chat, or `"bottom"` (full-width rows under it) |
 | `delegation` | `"balanced"` | how readily the supervisor hands work to workers. `"conservative"` does most work in its own chat (fewest tokens), `"fast"` splits any multi-part request across parallel workers straight away (quickest, most tokens). `brindle delegation fast` saves it for every repo and session (in `~/.brindle/config.json`; `--repo` for this repo only) and tells a running supervisor |
 | `delete_merged_branches` | `true` | removing a worktree (after a merge, `brindle rm`, `brindle prune`, session cleanup) also deletes its branch once every commit is in its base, so finished branches don't pile up. An unmerged branch is always kept; `false` keeps them all. If GitHub keeps merged PR branches, the first `brindle pr` in a repo offers to turn on its automatic deletion with your `gh` login (repo admins only) |
-| `pr_footer` | `true` | `brindle pr` and `brindle ci` end the PR description with one line: "🌲 Built in parallel and verified with brindle" (a link). `false` leaves it out. Never added to commit messages |
+| `pr_footer` | `true` | `brindle pr` ends the PR description with one line: "🌲 Built in parallel and verified with brindle" (a link). `false` leaves it out. Never added to commit messages |
 | `message_delivery` | `"pull"` | how agent and brindle messages reach an interactive supervisor: `"pull"` keeps them unread and delivers one notice ("brindle (16:25:03): 2 new messages (from 9f742c5c, pipeline). Call read_messages."; the time keeps Claude Code from dropping a repeat; the sidebar shows an unread count), `"push"` delivers each message's text. Messages you send (`brindle send`, typing) and messages to workers are always pushed |
 | `learning` | `"auto"` | hosted learning (brindle Pro, via the API; see below): `"auto"` uses it when your plan includes it and nothing otherwise; `"cloud"`; `"off"`. Any other value means off |
 | `learning_candidates` | `[]` | the profile names the hosted learner may pick from |
@@ -639,7 +639,7 @@ how to use them, and the next step to get the rest:
 | hosted learning | Pro | on by itself; `brindle learning` |
 | per-worktree services | Pro | `"services"` in `.brindle/config.json` |
 | org policies + audit feed | Team | `brindle account org policy` |
-| Brindle-CI | Team | `brindle ci init` |
+| Brindle-CI | Team | back in a later release |
 | audit log, air-gap | Enterprise | `brindle audit verify`, `"airgap": true` |
 
 ```sh
@@ -758,160 +758,14 @@ brindle audit pubkey                               # this install's public key (
 one altered in place (hash or signature), one removed, inserted or reordered
 (seq and prev_hash), or a truncated tail. Verifying and exporting never need
 the entitlement, so a log keeps its value after a plan lapses.
-### Brindle-CI: issues into pull requests
 
-brindle Team can run brindle with nobody at a terminal. `brindle ci run` cuts a
-`brindle/ci-<issue or slug>` branch, starts a supervisor with autopilot on in a
-detached tmux session, gives it the goal, and waits until every milestone's
-check passes. Then it pushes the branch and opens the pull request with `gh`
-(the body lists the goal, the milestones and their checks, and `Closes #N`
-for an issue), prints the PR URL and exits 0; with `--bundle` it writes the
-branch to a file instead, for `brindle ci publish` (see below). It exits 1, with what happened,
-when the supervisor asks for a decision (`need_user`: the question is the
-reason), stalls, or runs out of time. The session and its workers are always
-stopped at the end, and a JSON summary goes to `$GITHUB_STEP_SUMMARY` when
-that is set.
+### Brindle-CI
 
-```sh
-brindle ci run --issue 42                      # the goal is the issue's title and body
-brindle ci run --goal "Add a /health endpoint" # or typed; a goals.md-shaped text brings its milestones
-brindle ci run --goal-file .brindle/goals.md --timeout 90 --max-workers 2 --base develop --no-pr
-brindle ci init --label brindle                  # the GitHub Actions workflow (see below)
-brindle ci doctor || true                        # in a CI job: which agent CLIs and keys are there (names only)
-
-# The same run in three steps, so no secret worth stealing is near the agents:
-brindle ci entitle --out ent.jwt                                      # uses BRINDLE_PRO_TOKEN, then exits
-brindle ci run --issue 42 --entitlement ent.jwt --bundle out/brindle.bundle --outcome out/outcome.json   # no CI token, no push token
-brindle ci publish out/brindle.bundle --repo acme/api                   # elsewhere: pushes and opens the PR
-brindle ci report out/outcome.json --issue 42 --repo acme/api           # elsewhere: comments the outcome on the issue
-```
-
-With `--issue` and `--goal`, the supervisor derives the milestones and their
-checks itself; a goals.md-shaped goal (`# Goal`, `## Milestone`, `check:`) is
-recorded as written. `--max-workers` sets `max_agents` in the repo's
-`.brindle/config.local.json`.
-
-**Who is trusted with what.** Agents run your repo's code: its tests, its
-scripts, and whatever an issue talks them into. They run as the same user as
-brindle, so treat everything on that machine as theirs to read: environment
-variables, files, git and `gh` settings. brindle does take its tokens out of the
-environment before agents start and pushes from a clean copy of the commits,
-but that only makes theft harder. What actually protects a secret is that it
-isn't on the machine while agents run. So the work can be split:
-
-1. `brindle ci entitle --out FILE` exchanges `BRINDLE_PRO_TOKEN` for the signed,
-   short-lived entitlement and writes it to a file (mode 0600). Run it on a
-   different machine from the agents (the workflow gives it its own job):
-   on hosted runners agents have sudo, and the runner holds every secret of
-   the job they run in. `brindle ci run` reads the file and deletes it before
-   any agent starts.
-2. `brindle ci run --entitlement FILE --bundle PATH --outcome FILE` does the
-   work with no CI token and no token that can write to GitHub (`--issue`
-   needs one that can read). When the goal is verified it writes the new
-   commits to PATH as a git bundle, and `PATH.json` with the branch, base,
-   title and body of the pull request. When it ends any other way (a
-   question, a stall, the timeout) but commits were made, it writes the same
-   bundle marked `partial`, so the work isn't lost. `--bundle` implies
-   `--no-pr`: nothing is pushed. Whatever happened, `--outcome FILE` gets a
-   JSON record of it (status, note, milestones), even when the run couldn't
-   start.
-3. `brindle ci publish PATH [--repo owner/name]` runs where no agent ever ran,
-   with the token that can push. It verifies the bundle, fetches its one
-   `brindle/ci-…` branch into a fresh bare repo, pushes that branch to
-   `https://github.com/<repo>` (default: `$GITHUB_REPOSITORY`) and opens the
-   pull request with `gh`: a draft one, listing which milestones passed, for
-   a `partial` bundle. A re-run that adds to the branch updates the open
-   pull request instead (and marks a draft ready once the goal is verified).
-   It never checks out or runs repo code, hooks or
-   agents, and it refuses a bundle whose branch isn't a `brindle/ci-` branch, so
-   a run can't publish over `main`. The pull request targets `--base`, else
-   the repository's default branch; the bundle doesn't get to choose. A
-   hostile run can still add commits to an existing `brindle/ci-` branch.
-   `--if-present` makes a missing bundle (a run that left no commits) a
-   no-op rather than an error.
-4. `brindle ci report FILE --issue N [--repo owner/name]` runs where no agent
-   ever ran, with a token that can only comment on issues. It comments the
-   outcome on the issue: the pull request (`--pr-url`, from the publish
-   step), the supervisor's question, the stall, the timeout or the error,
-   and a table of the milestones. The outcome file was written on the
-   agents' machine, so only its expected fields are read, every text is
-   bounded, and all of it is rendered as code: nothing in it becomes
-   markdown, a mention, a link or HTML. To answer the supervisor's question,
-   comment on the issue and add the label again: the next run reads the
-   comments made after brindle's question and continues on the same branch.
-   Only comments by the repo's owner, org members and collaborators count,
-   since they steer the agents too; anyone else's are left out.
-
-The workflow `brindle ci init` writes pins brindle to the version that wrote it,
-since the publishing job holds a write token. The short-lived entitlement
-passes between jobs as an artifact kept one day. A CI entitlement expires
-three hours after it's issued, so anyone who can download the repo's
-artifacts could use it for that long at most.
-
-`brindle ci run` without `--bundle` still pushes and opens the pull request
-itself. Use that only where you trust the repo's code and everyone who can
-steer the agents.
-
-`brindle ci init` writes `.github/workflows/brindle.yml`, which runs on
-`workflow_dispatch` and whenever an issue gets the label (`brindle` by
-default). It has four jobs:
-
-- `entitle` (no permissions) runs `brindle ci entitle` with `BRINDLE_PRO_TOKEN`
-  on a machine that checks out and runs nothing from the repo. It hands the
-  short-lived entitlement (three hours) to the next job as an artifact kept
-  one day, so the CI token is never on the agents' machine.
-- `run` (permissions: `contents: read`, `issues: read`) checks the repo out
-  without keeping credentials, installs tmux, brindle (pinned to the version
-  that wrote the workflow) and Claude Code, then runs `brindle ci run --issue
-  <number> --entitlement … --bundle … --outcome …` with only `ANTHROPIC_API_KEY`
-  and a read-only `GH_TOKEN`. brindle deletes the entitlement file before any
-  agent starts. However the run ends, the job uploads the outcome, and the
-  bundle when there are commits, as an artifact.
-- `publish` (permissions:
-  `contents: write`, `pull-requests: write`) starts on a fresh machine, checks
-  nothing out, downloads the artifact and runs `brindle ci publish`, targeting
-  the repository's default branch. It runs after a failed run too, so partial
-  work becomes a draft pull request.
-- `report` (permissions: `issues: write`) runs last, whatever happened, on a
-  fresh machine with no checkout, and runs `brindle ci report`: a comment on
-  the issue with the outcome, the pull request, the supervisor's question
-  and the milestones. It runs even when the run never started (a refused CI
-  token), never for an unrelated label.
-
-`brindle ci init` won't
-overwrite an existing file without `--force`. The workflow needs two secrets,
-`BRINDLE_PRO_TOKEN` (an org CI token, below) and `ANTHROPIC_API_KEY`, and the
-repo's Actions settings must allow GitHub Actions to create pull requests.
-The model API key is the one secret agents must have; give it a spending
-limit.
-
-An org admin creates the CI token; it is shown once, so store it straight away:
-
-```sh
-brindle account org ci-token create "acme/api actions" --org org_...   # prints cpc_... once
-gh secret set BRINDLE_PRO_TOKEN                                         # paste it
-brindle account org ci-token list --org org_...                         # names, status, last used; never the secret
-brindle account org ci-token revoke ct_... --org org_...                # CI stops at its next run
-```
-
-On every run the token is presented to the backend, which checks it and the
-org's live plan and returns a signed entitlement. `brindle ci run` verifies it in
-memory and writes nothing to disk; `brindle ci entitle` writes only the signed
-entitlement, which expires soon, never the token. The token doesn't rotate, so one secret
-keeps working until it is revoked or the org's plan no longer includes CI. A
-refresh token from `brindle account login` won't do: it rotates on use.
-
-Two things to know before you add the label to your repo:
-
-- **Who can apply the label.** The issue body steers an unattended agent
-  whose work becomes a pull request on a `brindle/ci-` branch. Only people you
-  trust with write access should be able to apply the trigger label; on a
-  public repo, anyone who can write the issue text is choosing what the agent
-  is told to do. Review the pull request like any other before merging it.
-- **CI on the pull request.** A PR opened with the workflow's own
-  `GITHUB_TOKEN` doesn't trigger the repo's other workflows. If you want your
-  checks to run on brindle's PRs, set `GH_TOKEN` in the `publish` job to a
-  GitHub App installation token or a personal access token instead.
+Brindle-CI (brindle Team) brings brindle into your CI: it fixes broken builds,
+turns issues into pull requests whose checks it has verified, and reviews pull
+requests with evidence. It runs on your own CI with your own model keys. It is
+moving to a hosted control plane and will be back in a later release; until
+then `brindle ci` says so and exits 1.
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `brindle close <id>` to stop it and hide it. Stopping means

@@ -104,7 +104,7 @@ class RepoConfig:
     # starting one to the person.
     local_models: bool = False
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
-    pr_footer: bool = True             # `brindle pr` / `brindle ci` end the PR body with one "built with brindle" line
+    pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
     # ~/.brindle/config.json's, then the repo's, then config.local.json's, all kept.

@@ -18,7 +18,7 @@ FEATURES = (
     ("services", "pro", "per-worktree Docker services (db, cache)",
      '"services" in .brindle/config.json'),
     ("team", "team", "org policies + team audit feed", "`brindle account org policy`"),
-    ("ci", "team", "Brindle-CI: issues into pull requests", "`brindle ci init`"),
+    ("ci", "team", "Brindle-CI: fixes builds, issues into verified PRs", "back in a later release"),
     ("audit", "enterprise", "tamper-evident local audit log", "`brindle audit verify`"),
     ("airgap", "enterprise", "air-gapped mode, local models only",
      '"airgap": true in .brindle/config.json'),
@@ -59,7 +59,7 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
             the other orgs in its company, never with other companies
             (off by default; owner/admin to change)
   org ci-token create <name> [--org ORG]
-                    create a CI token for `brindle ci run` (admin+); shown once
+                    create a CI token for brindle CI (admin+); shown once
   org ci-token list [--org ORG]           list the org's CI tokens
   org ci-token revoke <token_id> [--org ORG]  revoke a CI token
   license install <file>  install an offline (brindle Enterprise) license; verified with the
