@@ -903,6 +903,9 @@ def test_plan_instructions_by_hash_are_checked(plan):
         ci_client.verify_plan(by_hash, repo=REPO, texts=[text])
     with pytest.raises(CIError, match="plan texts are malformed"):
         ci_client.verify_plan(by_hash, repo=REPO, texts="{not json")
+    with pytest.raises(CIError, match="isn't valid UTF-8") as e:
+        ci_client.verify_plan(by_hash, repo=REPO, texts={h: "lone \ud800 surrogate"})
+    assert e.value.code == "bad_plan"
     tampered = [{"id": "r1", "provider": "claude", "instructions_sha256": h}]
     with pytest.raises(CIError, match="reviewer r1 instructions text doesn't match"):
         ci_client.verify_plan(plan("validation", reviewers=tampered), repo=REPO, texts={h: "evil"})
@@ -983,7 +986,7 @@ def validate(server, ci_repo, tmp_path, *, adapters, env=None, org=False, say=No
         return None
     plan_token = (out / "plan.jwt").read_text()
     return ci_client.run(plan_token, out / "run_token", cwd=str(ci_repo), env=env, client=server.client,
-                         adapters=adapters, org=org, texts=ci_client.read_plan_texts(out / "plan.jwt"),
+                         adapters=adapters, org=org, texts=lambda: ci_client.read_plan_texts(out / "plan.jwt"),
                          say=said.append)
 
 
@@ -1210,6 +1213,25 @@ def test_cli_run_fails_cleanly_on_a_bad_plan(ci_repo, tmp_path, monkeypatch):
     tf = token_file(tmp_path)
     result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
     assert result.exit_code == 1 and "brindle ci: malformed plan" in result.output
+    assert not tf.exists(), "the run token never stays on disk"
+
+
+@pytest.mark.parametrize("make, error", [
+    (lambda p: p.mkdir(), "can't read the plan texts"),
+    (lambda p: p.write_text("{not json"), "plan texts are malformed"),
+    (lambda p: p.write_bytes(b'{"\xff": 1}'), "plan texts are malformed"),
+])
+def test_cli_run_reads_plan_texts_after_the_run_token(plan, ci_repo, tmp_path, monkeypatch, make, error):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    (tmp_path / "plan.jwt").write_text(plan())
+    make(tmp_path / "plan_texts.json")
+    tf = token_file(tmp_path)
+    result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
+    assert result.exit_code == 1 and error in result.output
     assert not tf.exists(), "the run token never stays on disk"
 
 

@@ -242,7 +242,11 @@ def _resolve_instructions(obj: dict, texts: Mapping[str, str], what: str) -> Non
     text = texts.get(digest)
     if not _str(text):
         raise CIError(f"{what} instructions text is missing", code="bad_plan")
-    if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeError:
+        raise CIError(f"{what} instructions text isn't valid UTF-8", code="bad_plan") from None
+    if hashlib.sha256(encoded).hexdigest() != digest:
         raise CIError(f"{what} instructions text doesn't match its hash", code="bad_plan")
     obj["instructions"] = text
 
@@ -648,19 +652,20 @@ def _write_plan_files(out_dir: str | Path, body: dict, id_key: str) -> str:
 def read_plan_texts(plan_path: str | Path):
     """The plan texts the start job saved beside the plan file at
     ``plan_path``: None when there are none. They are checked against the
-    plan's signed hashes by :func:`verify_plan`, which rejects anything that
-    isn't a mapping (an unparsable file comes back as its raw text, so the
-    rejection happens after the run token is read and deleted)."""
+    plan's signed hashes by :func:`verify_plan`. ``run`` calls this (as its
+    ``texts`` loader) only after the run token is read and deleted."""
     try:
         raw = (Path(plan_path).parent / PLAN_TEXTS_FILE).read_text("utf-8")
     except FileNotFoundError:
         return None
     except OSError as e:
         raise CIError(f"can't read the plan texts: {e.strerror or e}") from e
+    except ValueError:
+        raise CIError("plan texts are malformed", code="bad_plan") from None
     try:
         return json.loads(raw)
     except ValueError:
-        return raw
+        raise CIError("plan texts are malformed", code="bad_plan") from None
 
 
 def start(repo: str, trigger: dict, out_dir: str | Path, *, client: Client, token: str,
@@ -889,8 +894,9 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
         org: bool | None = None, texts=None, say: Callable[[str], None] = print) -> dict:
     """``brindle ci run``: the run job. A run plan runs the supervisor and
     uploads the result; a validation plan runs the checks and reviewers and
-    uploads the evidence. ``texts`` are the plan texts saved beside the plan
-    (:func:`read_plan_texts`). Returns the server's answer to the upload."""
+    uploads the evidence. ``texts`` are the plan texts saved beside the plan,
+    or a function that reads them (:func:`read_plan_texts`), called once the
+    run token is gone from disk. Returns the server's answer to the upload."""
     from brindle import workspaces
     from brindle.db import DB
 
@@ -898,6 +904,8 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     # The token file goes first, whatever happens to the plan: a rejected
     # plan must not leave a run token on the runner's disk.
     run_token = read_run_token(token_path)
+    if callable(texts):
+        texts = texts()
     plan = verify_plan(plan_token, repo=repo, now=clock(), texts=texts)
     if plan["plan_kind"] == "validation":
         check_validation_checkout(plan, cwd)
