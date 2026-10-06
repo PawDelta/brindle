@@ -1633,15 +1633,52 @@ def ci_publish(
     raise typer.Exit(ci.publish_cli(path, repo, base, echo=typer.echo))
 
 
+@ci_app.command("validate-report")
+def ci_validate_report(
+    verdict: Optional[str] = typer.Argument(None, help="The verdict JSON `brindle ci validate` wrote (untrusted: it is checked and escaped)."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="owner/name on github.com (default: $GITHUB_REPOSITORY)."),
+    pr: int = typer.Option(..., "--pr", help="The pull request, from the workflow event (not from the verdict)."),
+    sha: str = typer.Option(..., "--sha", help="The pull request's head commit, from the workflow event."),
+    mode: str = typer.Option("advisory", "--mode", help="advisory (never a failed check) or blocking; the workflow decides, not the verdict."),
+    skip_fork: bool = typer.Option(False, "--skip-fork", help="Report a neutral check saying a fork's pull request can't be validated."),
+    bot: str = typer.Option("github-actions[bot]", "--bot", help="The login the comment is posted as, to find and update it."),
+) -> None:
+    """Post a `brindle ci validate` verdict: the "brindle validate" check run and one PR comment.
+
+    Needs only `checks: write` and `pull-requests: write`, no checkout, and
+    never runs repo code. The comment is updated in place on later runs."""
+    from brindle import ci_validate_report as cvr
+
+    if verdict is None and not skip_fork:
+        _fail("give the verdict file, or --skip-fork")
+    raise typer.Exit(cvr.report_cli(verdict, repo, pr, sha, mode,
+                                    skipped=cvr.FORK_SKIP if skip_fork else None, bot=bot,
+                                    echo=typer.echo))
+
+
 @ci_app.command("init")
 def ci_init(
     label: str = typer.Option("brindle", "--label", help="Issues given this label start a run."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing workflow file."),
+    validate: bool = typer.Option(False, "--validate", help="Write .github/workflows/brindle-validate.yml instead: `brindle ci validate` on every pull request."),
 ) -> None:
     """Write .github/workflows/brindle.yml: `brindle ci run` on labelled issues, publishing from a second job."""
     from brindle import ci
 
     root = _run(git.main_repo_root, os.getcwd())
+    if validate:
+        from brindle import ci_validate_report as cvr
+
+        try:
+            path = cvr.init(root, force=force)
+        except ci.CIError as e:
+            _fail(str(e))
+        typer.echo(f"wrote {path}")
+        typer.echo("Add the BRINDLE_PRO_TOKEN secret (from `brindle account org ci-token create`) and "
+                   "ANTHROPIC_API_KEY. The check is advisory; to block merges, set "
+                   "BRINDLE_VALIDATE_MODE to blocking in the workflow and require the "
+                   "\"brindle validate\" check in branch protection.")
+        return
     try:
         path = ci.init(root, label=label, force=force)
     except ci.CIError as e:
