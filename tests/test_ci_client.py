@@ -1056,7 +1056,7 @@ def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
                    say=said.append)
     text = "\n".join(said)
     assert CI_TOKEN not in text and "ct_1" in text
-    assert opened == [BASE + "/github/install"]
+    assert opened == [BASE + "/github/install?org_id=org_1"]
     secret_calls = [c for c in calls if c[0][:3] == ["gh", "secret", "set"]]
     assert secret_calls[0][0][3] == "BRINDLE_PRO_TOKEN" and secret_calls[0][1] == CI_TOKEN
     assert secret_calls[1][0][3] == "ANTHROPIC_API_KEY" and secret_calls[1][1] is None, "the person pastes it into gh"
@@ -1098,12 +1098,14 @@ def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
         got.update(client=client, store=s, org=org, name=name)
         raise Stop
     monkeypatch.setattr(auth, "create_ci_token", create_ci_token)
-    said = []
+    said, opened = [], []
     with pytest.raises(Stop):
         ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), env={},
-                       run=run, open_url=lambda url: None, client=ci_client.Client(BASE, FakeTransport({})),
+                       run=run, open_url=opened.append, client=ci_client.Client(BASE, FakeTransport({})),
                        say=said.append)
     assert any(s.startswith("3/6") for s in said)
+    # The install page needs the org: the server answers 400 "org_id is required" without it.
+    assert opened == [BASE + "/github/install?org_id=org_1"]
     assert got["store"] is store and got["org"] == "org_1" and got["name"] == f"ci:{REPO}"
     assert isinstance(got["client"], auth.Client)
     assert isinstance(account.make(str(ci_repo)), account.ProAccount)
