@@ -771,9 +771,11 @@ workflows call these commands:
   the workflows as a pull request, then a doctor check).
 - `brindle ci doctor`: which provider CLIs and credential names a runner has, and
   which providers CI may use on this repository.
-- `brindle ci start`: start a run for an issue, a goal text or a dispatched run.
-- `brindle ci run`: run a started run: the supervisor, then upload the result.
-- `brindle ci validate`: validate a pull request and upload the evidence.
+- `brindle ci start`: start a run for an issue, a goal text or a dispatched run,
+  or a validation of a pull request.
+- `brindle ci run`: run what was started: the supervisor and the result upload,
+  or the pull request's checks and reviews and the evidence upload.
+- `brindle ci report`: tell the service how the workflow's jobs ended.
 
 Credential names are reported, never values. On a repository owned by a GitHub
 organization, a provider signed in only with a personal subscription is not used.

@@ -108,7 +108,7 @@ def test_ci_section_says_what_not_how():
     text = README.read_text()
     section = text[text.index("### Brindle-CI"):]
     section = section[:section.index("\n**Closing and cleaning up.**")]
-    for cmd in ("init", "doctor", "start", "run", "validate"):
+    for cmd in ("init", "doctor", "start", "run", "report"):
         assert f"`brindle ci {cmd}`" in section
     for word in ("heartbeat", "/ci/", "jwt", "signature", "verdict", "stall", "prompt", "instructions"):
         assert word not in section.lower(), word

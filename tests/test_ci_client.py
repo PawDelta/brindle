@@ -16,7 +16,7 @@ from conftest import sh
 from pro_fixtures import BASE, TEST_KID, FakeTransport, b64, pro_env, sign, signing_key  # noqa: F401
 
 REPO = "acme/widgets"
-RUN_TOKEN = "cpr_" + "r" * 32
+RUN_TOKEN = "crt_" + "r" * 32
 CI_TOKEN = "cpc_" + "c" * 32
 PLAN_HEADER = {"typ": "brindle-ci-plan+jwt"}
 
@@ -216,8 +216,122 @@ def test_trigger_for():
     assert ci_client.trigger_for(3, None, None) == {"kind": "issue", "issue": 3}
     assert ci_client.trigger_for(None, "Title\nmore", None) == {"kind": "text", "title": "Title", "detail": "more"}
     assert ci_client.trigger_for(None, None, "run_abc1") == {"kind": "dispatch", "run_id": "run_abc1"}
+    assert ci_client.trigger_for(validate=True, pr=7, head="0" * 40, fork=True) == {
+        "kind": "validate", "pr": 7, "head_sha": "0" * 40, "fork": True}
+    assert ci_client.trigger_for(validate=True, pr=7, head="0" * 40)["fork"] is False
     with pytest.raises(CIError, match="exactly one"):
         ci_client.trigger_for(1, "x", None)
+    with pytest.raises(CIError, match="exactly one"):
+        ci_client.trigger_for(1, validate=True, pr=7, head="0" * 40)
+    with pytest.raises(CIError, match="--validate needs"):
+        ci_client.trigger_for(validate=True, pr=7, head="short")
+    assert ci_client.parse_bool("true") is True and ci_client.parse_bool("False") is False
+    assert ci_client.parse_bool(None) is None
+    with pytest.raises(CIError, match="true or false"):
+        ci_client.parse_bool("maybe")
+
+
+def test_oidc_header_on_every_call_inside_actions(plan, tmp_path):
+    fetched = []
+
+    def fetch(url, request_token):
+        fetched.append((url, request_token))
+        return "h.p.s"
+    actions = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test/x?api-version=2",
+               "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req-secret"}
+    clock = {"t": 1000.0}
+    oidc = ci_client.OIDC(actions, fetch=fetch, clock=lambda: clock["t"])
+    server = Server(plan())
+    client = ci_client.Client(BASE, server.transport, oidc=oidc)
+    assert ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=client, token=CI_TOKEN,
+                           providers=[], say=lambda s: None) == 0
+    client.events(RUN_TOKEN, "run_1", {"state": "working"})
+    for _, _, hdrs in server.transport.calls:
+        assert hdrs["X-Brindle-OIDC"] == "h.p.s"
+    assert fetched == [(actions["ACTIONS_ID_TOKEN_REQUEST_URL"], "req-secret")], "cached within its ttl"
+    clock["t"] += 600
+    client.events(RUN_TOKEN, "run_1", {"state": "working"})
+    assert len(fetched) == 2
+    # Outside Actions: no header at all.
+    bare = ci_client.Client(BASE, Server(plan()).transport, env={})
+    bare.events(RUN_TOKEN, "run_1", {"state": "working"})
+    assert "X-Brindle-OIDC" not in bare.transport.calls[-1][2]
+    # The source is captured at construction, so scrubbing the job's secrets later doesn't lose it.
+    env = run_env(**actions)
+    captured = ci_client.Client(BASE, server.transport, env=env)
+    ci_client.scrub_secrets(env)
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in env and captured.oidc.available
+
+
+def test_oidc_fetch_parses_the_actions_answer(monkeypatch):
+    import urllib.request
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return self.body
+    seen = {}
+
+    def urlopen(req, timeout=0):
+        seen["url"], seen["auth"] = req.full_url, req.get_header("Authorization")
+        return Resp(b'{"value": "a.b.c"}')
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    assert ci_client._fetch_oidc("https://token.actions.test/x?api-version=2", "req") == "a.b.c"
+    assert seen["url"] == "https://token.actions.test/x?api-version=2&audience=https%3A%2F%2Fpawdelta.com%2Fbrindle"
+    assert seen["auth"] == "bearer req"
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=0: Resp(b'{"nope": 1}'))
+    with pytest.raises(CIError, match="held no token") as e:
+        ci_client._fetch_oidc("https://token.actions.test/x", "req")
+    assert "req" not in str(e.value) and e.value.code == "oidc"
+    with pytest.raises(CIError, match="isn't https"):
+        ci_client._fetch_oidc("http://token.actions.test/x", "req")
+
+
+def test_plans_up_to_256kb_verify(plan, tmp_path):
+    big = plan(instructions="x" * (180 * 1024))
+    assert 200 * 1024 < len(big) <= 256 * 1024
+    assert len(ci_client.verify_plan(big, repo=REPO)["instructions"]) == 180 * 1024
+    server = Server(big)
+    assert ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=server.client, token=CI_TOKEN,
+                           providers=[], say=lambda s: None) == 0
+    assert (tmp_path / "plan.jwt").read_text() == big
+    too_big = plan(instructions="x" * (200 * 1024))
+    with pytest.raises(CIError, match="malformed plan"):
+        ci_client.verify_plan(too_big, repo=REPO)
+    assert ci_client.CI_MAX_RESPONSE >= 2 * ci_client.MAX_PLAN_BYTES
+
+
+def test_report_posts_job_status(plan, tmp_path):
+    t = FakeTransport({"POST /ci/runs/run_1/job-status": [(200, {})]})
+    client = ci_client.Client(BASE, t)
+    said = []
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="failure", say=said.append)
+    assert said == ["nothing to report: the start job wrote no plan"] and not t.calls
+    (tmp_path / "plan.jwt").write_text(plan(iat=int(time.time()) - 7200, exp=int(time.time()) - 3600))
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="failure", say=said.append)
+    assert [(c[0], c[1]) for c in t.calls] == [
+        ("POST /ci/runs/run_1/job-status", {"job": "start", "conclusion": "success"}),
+        ("POST /ci/runs/run_1/job-status", {"job": "run", "conclusion": "failure"})]
+    assert all(c[2]["Authorization"] == f"Bearer {CI_TOKEN}" for c in t.calls)
+    assert said[-1] == "reported: run job failure"
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="cancelled", run=None, say=said.append)
+    assert len(t.calls) == 3
+    with pytest.raises(CIError, match="--run must be one of"):
+        ci_client.report(tmp_path, client=client, token=CI_TOKEN, start=None, run="exploded", say=said.append)
+    (tmp_path / "plan.jwt").write_text(plan("validation"))
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="success", say=said.append)
+    assert said[-1].startswith("nothing to report: validations") and len(t.calls) == 3
+    (tmp_path / "plan.jwt").write_text("garbage")
+    with pytest.raises(CIError, match="malformed plan"):
+        ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run=None, say=said.append)
 
 
 # -- run ---------------------------------------------------------------------------------------
@@ -497,7 +611,26 @@ def test_ci_token_from_env():
 # -- validate ----------------------------------------------------------------------------------------
 
 
-def test_validate_runs_checks_scrubbed_and_asks_reviewers(plan, ci_repo, monkeypatch):
+
+
+def validate(server, ci_repo, tmp_path, *, adapters, env=None, org=False, say=None, pr=7):
+    """A validation the way the workflow runs it: `ci start --validate` in
+    one job, then `ci run` with the plan and run token it wrote."""
+    env = run_env() if env is None else env
+    said = [] if say is None else say
+    providers = ci_adapters.providers_available(adapters, env, org)
+    out = tmp_path / "out"
+    code = ci_client.start(REPO, {"kind": "validate", "pr": pr, "head_sha": head(ci_repo), "fork": False}, out,
+                           client=server.client, token=CI_TOKEN, providers=providers, say=said.append)
+    assert code == 0
+    if not (out / "plan.jwt").exists():
+        return None
+    plan_token = (out / "plan.jwt").read_text()
+    return ci_client.run(plan_token, out / "run_token", cwd=str(ci_repo), env=env, client=server.client,
+                         adapters=adapters, org=org, say=said.append)
+
+
+def test_validate_runs_checks_scrubbed_and_asks_reviewers(plan, ci_repo, tmp_path, monkeypatch):
     sha = head(ci_repo)
     vplan = plan("validation", head_sha=sha,
                  checks=[{"id": "c1", "command": "echo ok; printenv ANTHROPIC_API_KEY GH_TOKEN; exit 0", "timeout_s": 30},
@@ -507,11 +640,12 @@ def test_validate_runs_checks_scrubbed_and_asks_reviewers(plan, ci_repo, monkeyp
     env = run_env(ANTHROPIC_API_KEY="sk-secret-value")
     monkeypatch.setenv("BRINDLE_PRO_TOKEN", CI_TOKEN)
     said = []
-    result = ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=env, client=server.client, token=CI_TOKEN,
-                                adapters={"claude": adapter}, org=False, say=said.append)
+    result = validate(server, ci_repo, tmp_path, adapters={"claude": adapter}, env=env, say=said)
     assert result["status"] == "posted" and "success" in said[-1]
+    assert "validation val_1 started" in said[0]
     start = server.transport.calls[0][1]
     assert start == {"repo": REPO, "pr": 7, "head_sha": sha, "fork": False, "providers_available": ["claude"]}
+    assert not (tmp_path / "out" / "run_token").exists()
     assert "BRINDLE_PRO_TOKEN" not in env and "GH_TOKEN" not in env
     assert "BRINDLE_PRO_TOKEN" not in os.environ
     assert env["ANTHROPIC_API_KEY"] == "sk-secret-value", "model keys stay for the reviewers"
@@ -526,7 +660,7 @@ def test_validate_runs_checks_scrubbed_and_asks_reviewers(plan, ci_repo, monkeyp
     assert "sk-secret-value" not in json.dumps(server.transport.calls, default=str)
 
 
-def test_validate_fills_the_check_results_slot(plan, ci_repo):
+def test_validate_fills_the_check_results_slot(plan, ci_repo, tmp_path):
     sha = head(ci_repo)
     vplan = plan("validation", head_sha=sha,
                  checks=[{"id": "c1", "command": "echo all good", "timeout_s": 30},
@@ -536,8 +670,7 @@ def test_validate_fills_the_check_results_slot(plan, ci_repo):
                             {"id": "r2", "provider": "claude", "instructions": "No slot here"}])
     server = Server(plan(), validation_plan=vplan)
     adapter = FakeAdapter("claude")
-    ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client, token=CI_TOKEN,
-                       adapters={"claude": adapter}, org=False, say=lambda s: None)
+    validate(server, ci_repo, tmp_path, adapters={"claude": adapter})
     filled = adapter.reviews[0][0]
     assert filled.startswith("Review.\n\ncheck c1: exit 0 (") and "all good" in filled
     assert "check c2: exit 2 (" in filled and "broken" in filled
@@ -546,7 +679,7 @@ def test_validate_fills_the_check_results_slot(plan, ci_repo):
     assert ci_client.render_check_results([]) == "(no checks were run)"
 
 
-def test_validate_handles_more(plan, ci_repo):
+def test_validate_handles_more_with_the_complete_evidence(plan, ci_repo, tmp_path):
     sha = head(ci_repo)
     first = plan("validation", head_sha=sha)
     second = plan("validation", head_sha=sha, jti="p2",
@@ -556,47 +689,53 @@ def test_validate_handles_more(plan, ci_repo):
                     evidence=[{"status": "more", "plan": second},
                               {"status": "posted", "conclusion": "failure", "check_url": "https://gh.test/c"}])
     claude, codex = FakeAdapter("claude", reply="A"), FakeAdapter("codex", reply="B")
-    result = ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client,
-                                token=CI_TOKEN, adapters={"claude": claude, "codex": codex}, org=False,
-                                say=lambda s: None)
+    result = validate(server, ci_repo, tmp_path, adapters={"claude": claude, "codex": codex})
     assert result["conclusion"] == "failure"
     assert len(server.evidence_calls) == 2
-    assert [r["id"] for r in server.evidence_calls[0]["reviews"]] == ["r1"]
-    assert [r["id"] for r in server.evidence_calls[1]["reviews"]] == ["r1", "r2"]
+    first_call, second_call = server.evidence_calls
+    assert [r["id"] for r in first_call["reviews"]] == ["r1"]
+    assert [r["id"] for r in second_call["reviews"]] == ["r1", "r2"], "the follow-up carries every review"
+    assert second_call["checks"] == first_call["checks"], "and every check"
     assert len(claude.reviews) == 1 and len(codex.reviews) == 1, "each reviewer is asked once"
-    assert server.evidence_calls[1]["usage"]["fake-model"]["input"] == 6
+    assert second_call["usage"]["fake-model"]["input"] == 6
 
 
-def test_validate_records_an_unusable_reviewer(plan, ci_repo):
+def test_validate_records_an_unusable_reviewer(plan, ci_repo, tmp_path):
     sha = head(ci_repo)
     server = Server(plan(), validation_plan=plan("validation", head_sha=sha))
     sub = FakeAdapter("claude", kind="subscription")
-    ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client, token=CI_TOKEN,
-                       adapters={"claude": sub}, org=True, say=lambda s: None)
+    validate(server, ci_repo, tmp_path, adapters={"claude": sub}, org=True)
     assert server.transport.calls[0][1]["providers_available"] == []
     row = server.evidence_calls[0]["reviews"][0]
     assert row["reply"] == "" and "personal subscription" in row["error"] and not sub.reviews
 
 
-def test_validate_skipped_for_forks(plan, ci_repo, tmp_path, monkeypatch):
-    sha = head(ci_repo)
-    t = FakeTransport({"POST /ci/validations": [(200, {"skipped": "fork"})]})
+@pytest.mark.parametrize("why", ["fork", "stale_head"])
+def test_start_validate_skipped(plan, ci_repo, tmp_path, why):
+    t = FakeTransport({"POST /ci/validations": [(200, {"skipped": why})]})
+    said = []
+    code = ci_client.start(REPO, {"kind": "validate", "pr": 7, "head_sha": head(ci_repo), "fork": why == "fork"},
+                           tmp_path / "out", client=ci_client.Client(BASE, t), token=CI_TOKEN, providers=[],
+                           say=said.append)
+    assert code == 0 and f"skipped: {why}" in said[0]
+    assert not (tmp_path / "out").exists(), "nothing for the run job"
+    assert t.calls[0][1]["fork"] is (why == "fork")
+
+
+def test_pr_is_fork_from_the_event_payload(tmp_path):
     event = tmp_path / "event.json"
     event.write_text(json.dumps({"pull_request": {"head": {"repo": {"full_name": "someone/widgets", "fork": True}}}}))
-    said = []
-    out = ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(GITHUB_EVENT_PATH=str(event)),
-                             client=ci_client.Client(BASE, t), token=CI_TOKEN, adapters={}, org=False,
-                             say=said.append)
-    assert out == {"skipped": "fork"} and "skipped: fork" in said[0]
-    assert t.calls[0][1]["fork"] is True
+    assert ci_client.pr_is_fork({"GITHUB_EVENT_PATH": str(event)}, REPO) is True
+    event.write_text(json.dumps({"pull_request": {"head": {"repo": {"full_name": REPO, "fork": False}}}}))
+    assert ci_client.pr_is_fork({"GITHUB_EVENT_PATH": str(event)}, REPO) is False
+    assert ci_client.pr_is_fork({}, REPO) is False
 
 
-def test_validate_rejects_the_wrong_head(plan, ci_repo):
-    sha = head(ci_repo)
+def test_validate_rejects_the_wrong_head(plan, ci_repo, tmp_path):
     server = Server(plan(), validation_plan=plan("validation", head_sha="2" * 40))
     with pytest.raises(CIError, match="not the plan's head"):
-        ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client, token=CI_TOKEN,
-                           adapters={}, org=False, say=lambda s: None)
+        validate(server, ci_repo, tmp_path, adapters={})
+    assert not (tmp_path / "out" / "run_token").exists()
 
 
 def test_run_check_times_out(ci_repo):
@@ -653,7 +792,7 @@ def test_cli_doctor_and_help(ci_repo, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "ANTHROPIC_API_KEY" in result.output and "very-secret" not in result.output
     assert "personal account" in result.output
-    for cmd in ("start", "run", "validate", "doctor", "init"):
+    for cmd in ("start", "run", "report", "doctor", "init"):
         assert CliRunner().invoke(app, ["ci", cmd, "--help"]).exit_code == 0
 
 

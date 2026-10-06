@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -38,7 +39,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
-import urllib.parse
 
 from brindle import providers
 
@@ -55,7 +55,11 @@ CLAUDE_SUBSCRIPTION = ("CLAUDE_CODE_OAUTH_TOKEN",)
 CODEX_API_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 CODEX_LOGIN = "codex login (auth.json)"     # the name shown for a ChatGPT sign-in
 NATIVE_KEYS_ENV = "BRINDLE_CI_NATIVE_KEYS"   # the workflow lists NAME@host pairs native profiles may use
-LOCAL_ONLY = "local"                         # a bare NAME in that list: local endpoints only
+LOOPBACK = frozenset({"localhost", "127.0.0.1"})
+HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+# A base_url written plainly: scheme, host, optional port, optional plain path.
+BASE_URL_RE = re.compile(r"^(?P<scheme>https?)://(?P<host>[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
+                         r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
 # Every known provider credential: what a check must not see, and what a
 # repo-supplied native profile may not point at its own endpoint.
 PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KEYS,
@@ -308,41 +312,52 @@ class NativeAdapter(Adapter):
     def allowed_keys(env: Mapping[str, str]) -> dict[str, frozenset[str]]:
         """Which key variable a native profile may send to which host, from
         ``BRINDLE_CI_NATIVE_KEYS`` (comma-separated ``NAME@host`` entries,
-        set by the workflow, never the repository): ``{name: hosts}``. A
-        bare ``NAME`` allows only local and private-network endpoints, since
-        the profile, which comes from the repository, picks the endpoint.
-        Another provider's credential and the job's secrets are never
-        allowed, whatever the list says."""
+        set by the workflow, never the repository): ``{name: hosts}``. The
+        profile, which comes from the repository, picks the endpoint, so a
+        key goes only to the host it was paired with. A bare ``NAME`` reaches
+        loopback only (``localhost``, ``127.0.0.1``): not link-local (the
+        cloud metadata range) and not a private network, since self-hosted
+        runners sit on shared ones; such endpoints need an explicit
+        ``NAME@host``. Another provider's credential and the job's secrets
+        are never allowed, whatever the list says."""
         out: dict[str, set[str]] = {}
         for entry in (env.get(NATIVE_KEYS_ENV) or "").split(","):
             name, _, host = entry.strip().partition("@")
             name, host = name.strip(), host.strip().lower()
-            if not name or name in PROVIDER_KEYS or name.startswith("GH_") \
-                    or name in ("GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"):
+            if not name or (host and not HOST_RE.match(host)) or name in PROVIDER_KEYS \
+                    or name.startswith("GH_") or name in ("GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"):
                 continue
-            out.setdefault(name, set()).add(host or LOCAL_ONLY)
+            out.setdefault(name, set()).update({host} if host else LOOPBACK)
         return {k: frozenset(v) for k, v in out.items()}
+
+    @staticmethod
+    def endpoint_host(base_url: str | None) -> str | None:
+        """The host of a plainly written base_url, or None when the URL has
+        anything a parser could read two ways: userinfo, a backslash,
+        whitespace, a query or fragment, an IPv6 literal, a non-ASCII or
+        percent-encoded character. The native client only ever connects to
+        a URL this function accepted, so what it checks is what is used."""
+        m = BASE_URL_RE.match(base_url or "")
+        if not m:
+            return None
+        return m.group("host").lower()
 
     def _key_refused(self, p, env: Mapping[str, str]) -> str | None:
         """Why profile ``p``'s key may not be sent, or None. A profile comes
         from the repository and names any endpoint, so a key goes only to a
-        host the workflow paired it with (see allowed_keys); a denylist
-        can't cover every secret a runner holds."""
-        from brindle import airgap
-
+        host the workflow paired it with (see allowed_keys), over https
+        (plain http only to the loopback names), and only to a URL written
+        plainly enough that no parser can read another host out of it."""
         if not p.api_key_env:
             return None
         hosts = self.allowed_keys(env).get(p.api_key_env, frozenset())
-        try:
-            u = urllib.parse.urlsplit(p.base_url or "")
-            host = (u.hostname or "").lower()
-        except ValueError:
-            host = ""
-        if host and (host in hosts or (LOCAL_ONLY in hosts and airgap.is_local_host(host))) \
-                and (u.scheme == "https" or airgap.is_local_host(host)):
+        host = self.endpoint_host(p.base_url)
+        scheme = (p.base_url or "").split(":", 1)[0].lower()
+        if host and host in hosts and (scheme == "https" or (scheme == "http" and host in LOOPBACK)):
             return None
-        return (f"profile {p.name!r} would send {p.api_key_env} to {host or 'its endpoint'}; "
-                f"list {p.api_key_env}@{host or 'host'} in {NATIVE_KEYS_ENV} to allow that")
+        shown = host or "an endpoint it can't read plainly"
+        return (f"profile {p.name!r} would send {p.api_key_env} to {shown}; "
+                f"list {p.api_key_env}@{host or 'host'} in {NATIVE_KEYS_ENV} (https) to allow that")
 
     def _profiles(self, env: Mapping[str, str] | None = None) -> list:
         """The repo's native profiles with an endpoint whose key (if any) the

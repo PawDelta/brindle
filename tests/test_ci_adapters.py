@@ -72,7 +72,7 @@ def test_native_credential_from_profiles(repo):
     assert "MY_MODEL_KEY" not in a.credential({}).names
     assert "MY_MODEL_KEY" not in a.credential({"MY_MODEL_KEY": "v"}).names, "not allowed by the workflow"
     bare = {"MY_MODEL_KEY": "v", "BRINDLE_CI_NATIVE_KEYS": "MY_MODEL_KEY, OTHER@x.test"}
-    assert "MY_MODEL_KEY" not in a.credential(bare).names, "a bare name reaches local endpoints only"
+    assert "MY_MODEL_KEY" not in a.credential(bare).names, "a bare name reaches loopback only"
     allowed = {"MY_MODEL_KEY": "v", "BRINDLE_CI_NATIVE_KEYS": "MY_MODEL_KEY@api.test, OTHER@x.test"}
     assert a.credential(allowed) == ci_adapters.Credential(API_KEY, ("MY_MODEL_KEY",))
     (d / "local.md").write_text("---\nname: local\ndescription: x\nprovider: native\nbase_url: http://127.0.0.1:8080/v1\n"
@@ -114,6 +114,71 @@ def test_native_profile_may_not_redirect_another_providers_key(repo):
                               "model: m\napi_key_env: AWS_SECRET_ACCESS_KEY\n---\nprompt\n")
     with pytest.raises(ci_adapters.AdapterError, match="would send AWS_SECRET_ACCESS_KEY"):
         a.review("q", str(repo), listed, profile="aws")   # an allowed host still needs https
+
+
+@pytest.mark.parametrize("base_url", [
+    "https://api.good.test@evil.test/v1",          # userinfo
+    "https://api.good.test\\@evil.test/v1",        # backslash
+    "https://api.good.test/v1?x=1",                # query
+    "https://api.good.test/v1#frag",               # fragment
+    "https://api.good.test /v1",                   # whitespace
+    "https://api.good.test/v1/%2e%2e",             # percent-encoding
+    "https://[::1]:8080/v1",                       # IPv6 literal
+    "https://xn--gd-fka.test/v1",                  # fine shape but not the allowed host
+    "ftp://api.good.test/v1",
+])
+def test_native_key_needs_a_plainly_written_url(repo, base_url):
+    d = repo / ".brindle" / "agents"
+    d.mkdir(parents=True)
+    (d / "odd.md").write_text(f"---\nname: odd\ndescription: x\nprovider: native\nbase_url: \"{base_url}\"\n"
+                              "model: m\napi_key_env: MY_KEY\n---\nprompt\n")
+    env = {"MY_KEY": "v", "BRINDLE_CI_NATIVE_KEYS": "MY_KEY@api.good.test"}
+    with pytest.raises(ci_adapters.AdapterError, match="would send MY_KEY"):
+        NativeAdapter(str(repo)).review("q", str(repo), env, profile="odd")
+    assert ci_adapters.NativeAdapter.endpoint_host("https://api.good.test:8443/v1/") == "api.good.test"
+    assert ci_adapters.NativeAdapter.endpoint_host("https://API.Good.test") == "api.good.test"
+
+
+def test_bare_native_key_reaches_loopback_only(repo):
+    d = repo / ".brindle" / "agents"
+    d.mkdir(parents=True)
+    env = {"MY_KEY": "v", "BRINDLE_CI_NATIVE_KEYS": "MY_KEY"}
+    assert ci_adapters.NativeAdapter.allowed_keys(env) == {"MY_KEY": frozenset({"localhost", "127.0.0.1"})}
+    from brindle.profiles import load_profile
+
+    a = NativeAdapter(str(repo))
+    for host, ok in (("localhost:11434", True), ("127.0.0.1:8080", True), ("169.254.169.254", False),
+                     ("10.0.0.5:8000", False), ("192.168.1.9", False), ("api.good.test", False)):
+        (d / "p.md").write_text(f"---\nname: p\ndescription: x\nprovider: native\nbase_url: http://{host}/v1\n"
+                                "model: m\napi_key_env: MY_KEY\n---\nprompt\n")
+        assert (a._key_refused(load_profile("p", str(repo)), env) is None) is ok, host
+    # A private host needs an explicit pairing, and https: http://api.good.test stays refused even when paired.
+    paired = {**env, "BRINDLE_CI_NATIVE_KEYS": "MY_KEY@api.good.test"}
+    assert a._key_refused(load_profile("p", str(repo)), paired) is not None
+    (d / "p.md").write_text("---\nname: p\ndescription: x\nprovider: native\nbase_url: https://10.0.0.5:8000/v1\n"
+                            "model: m\napi_key_env: MY_KEY\n---\nprompt\n")
+    assert a._key_refused(load_profile("p", str(repo)), {**env, "BRINDLE_CI_NATIVE_KEYS": "MY_KEY@10.0.0.5"}) is None
+
+
+def test_native_client_refuses_cross_origin_redirects():
+    import urllib.error
+    import urllib.request
+
+    from brindle.native import client as native_client
+
+    handler = native_client._SameOriginRedirects()
+    req = urllib.request.Request("https://api.good.test/v1/chat/completions", data=b"{}",
+                                 headers={"Authorization": "Bearer k"}, method="POST")
+    with pytest.raises(urllib.error.HTTPError, match="another host"):
+        handler.redirect_request(req, None, 307, "Temporary Redirect", {}, "https://evil.test/collect")
+    with pytest.raises(urllib.error.HTTPError, match="another host"):
+        handler.redirect_request(req, None, 307, "Temporary Redirect", {}, "http://api.good.test/v1")
+    with pytest.raises(urllib.error.HTTPError, match="another host"):
+        handler.redirect_request(req, None, 307, "Temporary Redirect", {}, "https://api.good.test:8443/v1")
+    # Same origin: urllib's own rules apply (a redirected POST is still refused by urllib itself).
+    get = urllib.request.Request("https://api.good.test/v1/models", headers={"Authorization": "Bearer k"})
+    same = handler.redirect_request(get, None, 302, "Found", {}, "https://api.good.test/v2/models")
+    assert same is not None and same.full_url == "https://api.good.test/v2/models"
 
 
 # -- the credential rule --------------------------------------------------------------------------

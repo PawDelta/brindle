@@ -234,15 +234,17 @@ class Client:
         self.transport = transport or UrllibTransport()
 
     def call(self, method: str, path: str, form: dict | None = None,
-             token: str | None = None) -> tuple[int, dict]:
+             token: str | None = None, headers: dict | None = None) -> tuple[int, dict]:
         url = self.base + path
         check_url(url)
         try:
             airgap.guard(url, f"brindle Pro {method} {path.split('?', 1)[0]}")
         except airgap.AirGapError as e:
             raise AirGapped(str(e)) from None
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        return self.transport.request(method, url, form, headers)
+        hdrs = dict(headers or {})
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        return self.transport.request(method, url, form, hdrs)
 
     def post(self, path: str, form: dict, token: str | None = None) -> tuple[int, dict]:
         return self.call("POST", path, form, token)

@@ -54,7 +54,7 @@ MAX_PLAN_BYTES = 256 * 1024
 LEEWAY = license.LEEWAY
 PLAN_COMMON = ("iss", "aud", "sub", "org_id", "kid", "jti", "iat", "exp", "token_use", "plan_kind",
                "id", "repo")
-RUN_TOKEN_RE = re.compile(r"^cpr_[A-Za-z0-9_-]{16,256}$")
+RUN_TOKEN_RE = re.compile(r"^crt_[A-Za-z0-9_-]{16,256}$")
 CI_TOKEN_RE = re.compile(r"^cpc_[A-Za-z0-9_-]{16,256}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -78,8 +78,13 @@ NOTE_MAX = 500
 BUNDLE_MAX = 25 * 1024 * 1024
 EVIDENCE_MAX = 256 * 1024
 UPLOAD_TIMEOUT = 120.0
-UPLOAD_MAX_RESPONSE = auth.MAX_RESPONSE
+CI_MAX_RESPONSE = 1024 * 1024    # a plan can be 256 KB, and comes inside a JSON answer
+OIDC_AUDIENCE = "https://pawdelta.com/brindle"
+OIDC_HEADER = "X-Brindle-OIDC"
+OIDC_TTL = 240
 PLAN_FILE = "plan.jwt"
+CONCLUSIONS = ("success", "failure", "cancelled")
+KILL_GRACE_S = 10.0              # wait this long for a killed check's output pipe to close
 TOKEN_FILE = "run_token"
 SETUP_KINDS = ("issue", "validate", "fix")
 SETUP_DIR = ".github/workflows"
@@ -320,20 +325,76 @@ def multipart(fields: list[tuple[str, str, bytes, str]]) -> auth.RawBody:
     return auth.RawBody(bytes(out), f"multipart/form-data; boundary={boundary}")
 
 
+def _fetch_oidc(url: str, request_token: str, timeout: float = 15.0) -> str:
+    """Ask the Actions runtime for an OIDC token for brindle's audience."""
+    import urllib.error
+    import urllib.request
+
+    full = url + ("&" if "?" in url else "?") + "audience=" + urllib.parse.quote(OIDC_AUDIENCE, safe="")
+    if urllib.parse.urlsplit(full).scheme != "https":
+        raise CIError("the OIDC token request URL isn't https", code="oidc")
+    req = urllib.request.Request(full, headers={"Authorization": f"bearer {request_token}",
+                                                "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(64 * 1024)
+    except (urllib.error.URLError, OSError, ValueError):
+        raise CIError("couldn't get the GitHub Actions OIDC token", code="oidc") from None
+    try:
+        value = json.loads(body.decode("utf-8")).get("value")
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        value = None
+    if not isinstance(value, str) or value.count(".") != 2:
+        raise CIError("the GitHub Actions OIDC answer held no token", code="oidc")
+    return value
+
+
+class OIDC:
+    """The ``X-Brindle-OIDC`` header: a GitHub Actions OIDC token for brindle's
+    audience, when this job can mint one (``ACTIONS_ID_TOKEN_REQUEST_URL`` and
+    ``ACTIONS_ID_TOKEN_REQUEST_TOKEN``, read once at construction, before the
+    job's secrets are scrubbed). Outside Actions there is no header. Tokens
+    are cached a few minutes and never logged."""
+
+    def __init__(self, env: Mapping[str, str] | None = None, fetch: Callable[[str, str], str] = _fetch_oidc,
+                 clock: Callable[[], float] = time.time) -> None:
+        env = os.environ if env is None else env
+        self.url = env.get("ACTIONS_ID_TOKEN_REQUEST_URL") or None
+        self.request_token = env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN") or None
+        self._fetch, self._clock = fetch, clock
+        self._cached: tuple[float, str] | None = None
+
+    @property
+    def available(self) -> bool:
+        return bool(self.url and self.request_token)
+
+    def header(self) -> dict[str, str]:
+        if not self.available:
+            return {}
+        now = self._clock()
+        if self._cached is None or self._cached[0] <= now:
+            self._cached = (now + OIDC_TTL, self._fetch(self.url, self.request_token))
+        return {OIDC_HEADER: self._cached[1]}
+
+
 class Client:
     """The ``/ci`` endpoints. Reuses :class:`brindle.pro.auth.Client`'s URL
     rules, transport (https only, timeouts, same-origin redirects) and
-    air-gap guard."""
+    air-gap guard. Every call carries the job's OIDC token when there is
+    one (:class:`OIDC`)."""
 
-    def __init__(self, base: str | None = None, transport: auth.Transport | None = None) -> None:
+    def __init__(self, base: str | None = None, transport: auth.Transport | None = None,
+                 oidc: OIDC | None = None, env: Mapping[str, str] | None = None) -> None:
         self.base = auth.base_url(base)
-        self.transport = transport or auth.UrllibTransport()
+        self.transport = transport or auth.UrllibTransport(max_bytes=CI_MAX_RESPONSE)
         self._client = auth.Client(self.base, self.transport)
-        self._uploads = auth.Client(self.base, transport or auth.UrllibTransport(timeout=UPLOAD_TIMEOUT))
+        self._uploads = auth.Client(self.base, transport or auth.UrllibTransport(
+            timeout=UPLOAD_TIMEOUT, max_bytes=CI_MAX_RESPONSE))
+        self.oidc = oidc or OIDC(env)
 
     def _call(self, method: str, path: str, body, token: str, *, client=None) -> tuple[int, dict]:
         try:
-            return (client or self._client).call(method, path, body, token)
+            return (client or self._client).call(method, path, body, token, headers=self.oidc.header())
         except auth.AirGapped as e:
             raise CIError(str(e), code="airgap") from e
         except auth.TransportError as e:
@@ -403,19 +464,37 @@ def refuse_airgap() -> None:
 # -- start ------------------------------------------------------------------------------------------
 
 
+def _write_plan_files(out_dir: str | Path, body: dict, id_key: str) -> str:
+    the_id, plan, run_token = body.get(id_key), body.get("plan"), body.get("run_token")
+    if not (_str(the_id) and _str(plan) and isinstance(run_token, str) and RUN_TOKEN_RE.match(run_token)):
+        raise CIError("the server's answer is malformed", code="bad_response")
+    out = Path(out_dir)
+    write_private(out / PLAN_FILE, plan)
+    write_private(out / TOKEN_FILE, run_token + "\n")
+    return auth._sanitize(the_id, 80)
+
+
 def start(repo: str, trigger: dict, out_dir: str | Path, *, client: Client, token: str,
           providers: list[str], say: Callable[[str], None] = print) -> int:
-    """``brindle ci start``: ask for a run; write its plan and run token to
-    ``out_dir``. Exit code: 0 on a run or a duplicate, 1 otherwise."""
+    """``brindle ci start``: ask for a run (or, for a ``validate`` trigger, a
+    validation); write its plan and run token to ``out_dir`` for the run
+    job. Exit code: 0 when started, when a duplicate already covers it, or
+    when the server skipped it (nothing written); 1 otherwise."""
+    if trigger["kind"] == "validate":
+        status, body = client.start_validation(token, repo, trigger["pr"], trigger["head_sha"], trigger["fork"],
+                                               providers)
+        if status == 200 and _str(body.get("skipped")):
+            say(f"skipped: {auth._sanitize(body['skipped'], 40)} (the server posts the check itself)")
+            return 0
+        if status == 201:
+            vid = _write_plan_files(out_dir, body, "validation_id")
+            say(f"validation {vid} started; plan and run token written to {out_dir}")
+            return 0
+        raise _error(status, body)
     status, body = client.start_run(token, repo, trigger, providers)
     if status == 201:
-        run_id, plan, run_token = body.get("run_id"), body.get("plan"), body.get("run_token")
-        if not (_str(run_id) and _str(plan) and isinstance(run_token, str) and RUN_TOKEN_RE.match(run_token)):
-            raise CIError("the server's run answer is malformed", code="bad_response")
-        out = Path(out_dir)
-        write_private(out / PLAN_FILE, plan)
-        write_private(out / TOKEN_FILE, run_token + "\n")
-        say(f"run {auth._sanitize(run_id, 80)} started; plan and run token written to {out}")
+        run_id = _write_plan_files(out_dir, body, "run_id")
+        say(f"run {run_id} started; plan and run token written to {out_dir}")
         return 0
     if status == 409 and body.get("error") == "duplicate":
         existing = body.get("existing") if isinstance(body.get("existing"), dict) else {}
@@ -426,10 +505,17 @@ def start(repo: str, trigger: dict, out_dir: str | Path, *, client: Client, toke
     raise _error(status, body)
 
 
-def trigger_for(issue: int | None, goal_text: str | None, dispatch: str | None) -> dict:
-    given = [x for x in (issue, goal_text, dispatch) if x is not None]
+def trigger_for(issue: int | None = None, goal_text: str | None = None, dispatch: str | None = None,
+                validate: bool = False, pr: int | None = None, head: str | None = None,
+                fork: bool | None = None) -> dict:
+    """What ``brindle ci start`` was asked to start."""
+    given = [x for x in (issue, goal_text, dispatch) if x is not None] + ([True] if validate else [])
     if len(given) != 1:
-        raise CIError("give exactly one of --issue, --goal-text or --dispatch")
+        raise CIError("give exactly one of --issue, --goal-text, --dispatch or --validate")
+    if validate:
+        if pr is None or not SHA_RE.match(head or ""):
+            raise CIError("--validate needs --pr N and --head <40-hex sha>")
+        return {"kind": "validate", "pr": int(pr), "head_sha": head, "fork": bool(fork)}
     if issue is not None:
         return {"kind": "issue", "issue": int(issue)}
     if dispatch is not None:
@@ -439,6 +525,56 @@ def trigger_for(issue: int | None, goal_text: str | None, dispatch: str | None) 
     text = (goal_text or "").strip()
     title, _, detail = text.partition("\n")
     return {"kind": "text", "title": title.strip(), "detail": detail.strip()}
+
+
+def parse_bool(text: str | None) -> bool | None:
+    if text is None:
+        return None
+    t = text.strip().lower()
+    if t in ("true", "1", "yes"):
+        return True
+    if t in ("false", "0", "no", ""):
+        return False
+    raise CIError("--fork takes true or false")
+
+
+def plan_id(plan_token: str) -> tuple[str, str]:
+    """(plan_kind, id) of a plan whose signature checks out, without the
+    time or repository checks: for the report job, which may run after the
+    plan expired and only names the run to the server."""
+    try:
+        c = license.verify_signed(plan_token, typ=PLAN_TYP, token_use=PLAN_TOKEN_USE, what="plan",
+                                  max_bytes=MAX_PLAN_BYTES)
+    except license.LicenseError as e:
+        raise CIError(str(e), code="bad_plan") from e
+    if not (_str(c.get("id")) and c.get("plan_kind") in ("run", "validation")):
+        raise CIError("plan claims are malformed", code="bad_plan")
+    return c["plan_kind"], c["id"]
+
+
+def report(plan_dir: str | Path, *, client: Client, token: str, start: str | None, run: str | None,
+           say: Callable[[str], None] = print) -> None:
+    """``brindle ci report``: tell the server how the start and run jobs
+    ended (``POST /ci/runs/{id}/job-status``), so it can comment when the
+    run job died without uploading. Nothing to report when the start job
+    wrote no plan (a duplicate or a skip)."""
+    path = Path(plan_dir) / PLAN_FILE
+    try:
+        plan_token = path.read_text("utf-8").strip()
+    except OSError:
+        say("nothing to report: the start job wrote no plan")
+        return
+    kind, the_id = plan_id(plan_token)
+    if kind != "run":
+        say("nothing to report: validations report through their evidence")
+        return
+    for job, conclusion in (("start", start), ("run", run)):
+        if conclusion is None:
+            continue
+        if conclusion not in CONCLUSIONS:
+            raise CIError(f"--{job} must be one of {', '.join(CONCLUSIONS)}")
+        client.job_status(token, the_id, job, conclusion)
+        say(f"reported: {job} job {conclusion}")
 
 
 # -- the run loop -----------------------------------------------------------------------------------
@@ -527,8 +663,10 @@ def make_bundle(cwd: str, base_sha: str, branch: str) -> tuple[int, bytes | None
 def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMapping[str, str],
         client: Client, db=None, adapters: Mapping[str, ci_adapters.Adapter] | None = None,
         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
-        say: Callable[[str], None] = print) -> dict:
-    """``brindle ci run``. Returns the server's answer to the result upload."""
+        org: bool | None = None, say: Callable[[str], None] = print) -> dict:
+    """``brindle ci run``: the run job. A run plan runs the supervisor and
+    uploads the result; a validation plan runs the checks and reviewers and
+    uploads the evidence. Returns the server's answer to the upload."""
     from brindle import workspaces
     from brindle.db import DB
 
@@ -537,8 +675,13 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     # plan must not leave a run token on the runner's disk.
     run_token = read_run_token(token_path)
     plan = verify_plan(plan_token, repo=repo, now=clock())
-    if plan["plan_kind"] != "run":
-        raise CIError("this plan isn't a run plan")
+    if plan["plan_kind"] == "validation":
+        check_validation_checkout(plan, cwd)
+        gone = scrub_secrets(env)
+        for k in gone:
+            os.environ.pop(k, None)
+        return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
+                              org=org, clock=clock, say=say)
     check_run_checkout(plan, cwd)
     gone = scrub_secrets(env)
     for k in gone:
@@ -646,7 +789,10 @@ def run_check(check: dict, cwd: str, env: Mapping[str, str], *, popen=subprocess
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 proc.kill()
-            out, _ = proc.communicate()
+            try:
+                out, _ = proc.communicate(timeout=KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                out = b""     # something still holds the pipe after SIGKILL: don't wait on it
             code = 124
         output = (out or b"").decode("utf-8", "replace")
         if code == 124:
@@ -713,34 +859,21 @@ def pr_is_fork(env: Mapping[str, str], repo: str) -> bool:
     return False
 
 
-def validate(repo: str, pr: int, head: str, *, cwd: str, env: MutableMapping[str, str], client: Client,
-             token: str, adapters: Mapping[str, ci_adapters.Adapter] | None = None,
-             org: bool | None = None, clock: Callable[[], float] = time.time,
-             check_runner: Callable[..., dict] = run_check, say: Callable[[str], None] = print) -> dict:
-    """``brindle ci validate``: start and run a validation in one process."""
-    if not SHA_RE.match(head or ""):
-        raise CIError("--head must be a full 40-hex commit sha")
+def run_validation(plan: dict, run_token: str, *, cwd: str, env: MutableMapping[str, str], client: Client,
+                   adapters: Mapping[str, ci_adapters.Adapter] | None = None, org: bool | None = None,
+                   clock: Callable[[], float] = time.time, check_runner: Callable[..., dict] = run_check,
+                   say: Callable[[str], None] = print) -> dict:
+    """The run job of a validation (``brindle ci run`` with a validation
+    plan): the checks in a scrubbed environment, each reviewer through its
+    adapter, the evidence upload, and a second upload of the complete
+    evidence when the server answers ``more``. The job's secrets are
+    already scrubbed by the caller."""
+    repo = plan["repo"]
+    check_validation_checkout(plan, cwd)
     adapters = adapters or ci_adapters.default_adapters(cwd)
-    providers = ci_adapters.providers_available(adapters, env, org)
-    status, body = client.start_validation(token, repo, pr, head, pr_is_fork(env, repo), providers)
-    if status == 200 and body.get("skipped"):
-        say(f"skipped: {auth._sanitize(body['skipped'], 40)} (the server posts the check itself)")
-        return body
-    if status != 201:
-        raise _error(status, body)
-    plan = verify_plan(body.get("plan") or "", repo=repo, now=clock())
-    if plan["plan_kind"] != "validation":
-        raise CIError("this plan isn't a validation plan", code="bad_plan")
-    if plan["pr"] != pr:
-        raise CIError("the plan is for another pull request", code="bad_plan")
-    check_validation_checkout(plan, cwd, head)
-    run_token = body.get("run_token")
-    if not (isinstance(run_token, str) and RUN_TOKEN_RE.match(run_token)):
-        raise CIError("the server's validation answer is malformed", code="bad_response")
+    if org is None:
+        org = ci_adapters.repo_is_org(env, repo)
     validation_id = plan["id"]
-    gone = scrub_secrets(env)
-    for k in gone:
-        os.environ.pop(k, None)
     scrubbed = check_env(env)
     checks = [check_runner(c, cwd, scrubbed) for c in plan["checks"]]
     usage: dict = {}
@@ -885,4 +1018,5 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
 
 
 __all__ = ["CIError", "Client", "check_env", "doctor", "init", "read_run_token", "run", "run_check",
-           "scrub_secrets", "session_event", "start", "trigger_for", "validate", "verify_plan"]
+           "scrub_secrets", "session_event", "start", "trigger_for", "run_validation", "report", "plan_id",
+           "OIDC", "verify_plan"]
