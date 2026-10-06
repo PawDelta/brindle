@@ -335,8 +335,11 @@ class NativeAdapter(Adapter):
         """The host of a plainly written base_url, or None when the URL has
         anything a parser could read two ways: userinfo, a backslash,
         whitespace, a query or fragment, an IPv6 literal, a non-ASCII or
-        percent-encoded character. The native client only ever connects to
-        a URL this function accepted, so what it checks is what is used."""
+        percent-encoded character. Hostnames must be ASCII: an
+        internationalized host is given as punycode (``xn--...``), both here
+        and in ``BRINDLE_CI_NATIVE_KEYS``. The native client only ever
+        connects to a URL this function accepted, so what it checks is what
+        is used."""
         m = BASE_URL_RE.match(base_url or "")
         if not m:
             return None

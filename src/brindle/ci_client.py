@@ -413,6 +413,11 @@ class OIDC:
         return bool(self.url and self.request_token)
 
     def header(self) -> dict[str, str]:
+        """The header to send, or nothing outside Actions. The token goes to
+        whatever ``BRINDLE_PRO_BASE_URL`` names (https is enforced, see
+        :func:`brindle.pro.auth.check_url`), so that variable must come from
+        trusted workflow environment, never from the repository: whoever
+        receives the token can act as this job toward the server."""
         if not self.available:
             return {}
         now = self._clock()
@@ -657,7 +662,10 @@ def tail(text: str | None, limit: int) -> str:
 
 def milestone_rows(db, root_id: str, ids: list[int] | None = None) -> list[dict]:
     """The session's milestones as the server wants them, under the PLAN's
-    milestone ids (``ids``, in the plan's order), never brindle's positions."""
+    milestone ids, never brindle's positions. The mapping is by order: the
+    i-th milestone brindle stores (``set_goal`` keeps the plan's order) is
+    reported as ``ids[i]``. A row past the end of ``ids`` (which only a
+    goal brindle didn't get from the plan could produce) keeps its position."""
     rows = []
     for i, m in enumerate(db.milestones(root_id)):
         rows.append({"id": ids[i] if ids and i < len(ids) else m.position, "status": m.status,
