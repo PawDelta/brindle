@@ -1,4 +1,4 @@
-brindle 0.0.1 is copse, renamed. Same tool, new name: **Brindle by PawDelta**. This first brindle release also lets learning choose models, adds a savings report and company-wide learning for paid plans, and runs CI without the agents ever holding a token that can push.
+brindle 0.0.1 is copse, renamed. Same tool, new name: **Brindle by PawDelta**. This first brindle release also lets learning choose models, adds a savings report and company-wide learning for paid plans.
 
 ## Moving from copse
 - **Install `brindle`**: `uv tool install brindle` (or `pipx install brindle`). The command is `brindle`.
@@ -12,7 +12,7 @@ brindle 0.0.1 is copse, renamed. Same tool, new name: **Brindle by PawDelta**. T
 - **Savings report** (Pro): `brindle account savings` shows what learning's picks did in this repo, this month and last, against the baseline. Org admins and owners see monthly totals for the whole org on the account page.
 - **Learning across your company** (Team): link several orgs into one company with `brindle account org company link`, and each org can opt in to pooling its learning with `brindle account org learning-share on`. Off by default; never shared with another company.
 - **Policy per role** (Team): owners, admins and members can each get their own overrides, policies can limit agent profiles (`allowed_profiles`), and Enterprise can define custom roles (`brindle account org member policy-role`).
-- **Safer brindle CI** (Team): `brindle ci entitle`, `brindle ci run --bundle` and `brindle ci publish` split a run across three machines, so the agents never hold the CI token or a token that can push. `brindle ci init` writes that workflow as three jobs.
+- **brindle CI** (Team): issues into verified pull requests on your own CI with your own model keys. Moving to a hosted control plane; back in a later release.
 - **`brindle sidebar`** brings a session's sidebar into the tmux session you're in, or restarts it (`Ctrl-b S` does the same). The sidebar follows you between brindle windows, including on tmux 3.7.
 - **`brindle permissions check`** shows the effective permission rules per provider without changing anything, and profiles can add their own `permission_denies`. brindle trusts its Codex permission hook itself the first time a Codex worker needs it.
 - **A new look.** The dashboard's pine is now a brindle paw, and brindle's tmux theme and colours match pawdelta.com/brindle.
