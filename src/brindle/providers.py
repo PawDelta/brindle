@@ -144,10 +144,6 @@ def trust_folder(path: str) -> bool:
     other's flag. Claude Code writes this file too, without that lock, so
     the file is re-read right before the replace to keep the window for
     losing one of its writes as small as possible."""
-    import fcntl
-
-    from brindle.config import brindle_home
-
     # Through any symlink (dotfile managers link this file): replacing the
     # link itself would orphan the file it points to.
     config = os.path.realpath(claude_global_config())
@@ -155,16 +151,74 @@ def trust_folder(path: str) -> bool:
     try:
         if _trusted(_read_json(config), key):
             return True  # the usual case: nothing to write
+        with _config_lock():
+            return _write_trust(config, key)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
+# The first-run answers a person gives Claude Code once on their own machine.
+CI_THEME = "dark"
+API_KEY_SUFFIX = 20   # Claude Code records an approved key by its last 20 characters
+
+
+def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
+    """brindle CI only, never on a person's machine: give Claude Code the
+    state it would have after its first-run screens (theme picker, onboarding,
+    the "use this API key?" question, the folder trust dialog), so a
+    supervisor on a fresh runner starts at its prompt instead of on a screen
+    nobody will answer. Merges into ``$CLAUDE_CONFIG_DIR/.claude.json`` (else
+    ``~/.claude.json``), creating it if it's missing, mode 0600. ``api_key``
+    is only ever stored as Claude Code stores it: its last 20 characters.
+    Returns the file's path; raises OSError or ValueError (a file that isn't
+    a JSON object) when it can't write."""
+    config = os.path.realpath(claude_global_config())
+    os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+    with _config_lock():
+        try:
+            data = _read_json(config)
+        except FileNotFoundError:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError(f"{config} doesn't hold a JSON object")
+        data["hasCompletedOnboarding"] = True
+        data.setdefault("theme", CI_THEME)
+        projects = data.setdefault("projects", {})
+        for path in trusted:
+            projects.setdefault(os.path.realpath(path), {})["hasTrustDialogAccepted"] = True
+        if api_key:
+            responses = data.setdefault("customApiKeyResponses", {})
+            approved = responses.setdefault("approved", [])
+            suffix = api_key[-API_KEY_SUFFIX:]
+            if suffix not in approved:
+                approved.append(suffix)
+            responses.setdefault("rejected", [])
+            if suffix in responses["rejected"]:
+                responses["rejected"].remove(suffix)
+        _replace_json(config, data, 0o600)
+    return config
+
+
+def _config_lock():
+    """The brindle lock around every write to Claude Code's global state, so
+    two brindle processes can't drop each other's change."""
+    import contextlib
+    import fcntl
+
+    from brindle.config import brindle_home
+
+    @contextlib.contextmanager
+    def held():
         lock_dir = brindle_home() / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
         with open(lock_dir / "claude-trust.lock", "a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                return _write_trust(config, key)
+                yield
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-    except (OSError, ValueError, AttributeError, TypeError):
-        return False
+
+    return held()
 
 
 def _read_json(path: str) -> dict:
@@ -179,22 +233,29 @@ def _trusted(data: dict, key: str) -> bool:
 def _write_trust(config: str, key: str) -> bool:
     """trust_folder's write; the caller holds the lock."""
     import stat
-    import uuid
 
     mode = stat.S_IMODE(os.stat(config).st_mode)
+    data = _read_json(config)  # as late as possible: Claude Code may have just written it
+    if _trusted(data, key):
+        return True
+    data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
+    _replace_json(config, data, mode)
+    return True
+
+
+def _replace_json(config: str, data: dict, mode: int) -> None:
+    """Write ``data`` over ``config`` atomically with ``mode``, through a temp
+    file beside it that never has a wider mode and is always removed."""
+    import uuid
+
     tmp = f"{config}.brindle-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     try:
-        data = _read_json(config)  # as late as possible: Claude Code may have just written it
-        if _trusted(data, key):
-            return True
-        data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
         text = json.dumps(data, indent=2)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.chmod(tmp, mode)  # the umask may have narrowed it
         os.replace(tmp, config)  # atomic: Claude Code never reads half a file
-        return True
     finally:
         try:
             os.unlink(tmp)
@@ -210,6 +271,25 @@ class ClaudeCode(Provider):
     # Claude Code's input box, across versions: the "❯" prompt line, the old
     # "? for shortcuts" hint, or a turn already running.
     READY = re.compile(r"^\s*❯|\? for shortcuts|esc to interrupt|⏵⏵", re.M)
+    # Claude Code's first-run screens, which only a person answers (their
+    # menus' "❯" cursor would pass for READY): the theme picker, the rest of
+    # onboarding, the sign-in choice and the "use this API key?" question.
+    FIRST_RUN = (
+        (re.compile(r"Choose the text style", re.I), "its first-run theme picker"),
+        (re.compile(r"Security notes:[\s\S]*Press Enter to continue", re.I), "its first-run security notes"),
+        (re.compile(r"Select login method", re.I), "its sign-in choice"),
+        (re.compile(r"Do you want to use this API key\?", re.I), 'its "use this API key?" question'),
+    )
+    # The footer under the input box, which no first-run screen has: with it
+    # on screen, a first-run question is only quoted in the transcript.
+    INPUT_FOOTER = re.compile(r"\? for shortcuts|esc to interrupt|⏵⏵|⏸|mode on")
+
+    @classmethod
+    def first_run_screen(cls, screen: str) -> str | None:
+        """Which first-run screen ``screen`` shows, or None."""
+        if cls.INPUT_FOOTER.search(screen):
+            return None
+        return next((what for pattern, what in cls.FIRST_RUN if pattern.search(screen)), None)
 
     @staticmethod
     def can_resume(session_id: str) -> bool:
