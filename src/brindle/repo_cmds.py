@@ -46,7 +46,7 @@ def repo_add(
             f"Pass repo=\"{a.alias}\" to assign or handoff to put a worker there; it gets that "
             "repo's own checks, review and merge. list_repos shows every attached repo.",
             sender_id=None)
-    except (agents.AgentError, Exception):  # noqa: BLE001 - paused or unreachable: it learns on resume
+    except Exception:  # noqa: BLE001 - paused or unreachable: it learns on resume
         pass
 
 

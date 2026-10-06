@@ -132,15 +132,13 @@ def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
     in ``unmet_dependencies``.
 
     A dependency may live in another repo of the session (brindle.repos): an
-    agent id is found wherever its task is; a branch name is looked for in
-    ``repo_root`` first and only then in other repos, since two repos may
-    have a branch of the same name."""
+    agent id is found wherever its task is, but a bare branch name only
+    matches within ``repo_root``, since two repos may have a branch of the
+    same name."""
     branch = _dep_branch(db, dep)
     candidates = [t for t in db.list_tasks(repo_root) if t.agent_id == dep or t.branch == branch]
     if not candidates:
         candidates = [t for t in db.list_tasks() if t.agent_id == dep]
-    if not candidates:
-        candidates = [t for t in db.list_tasks() if t.branch == branch]
     return max(candidates, key=lambda t: t.created_at) if candidates else None
 
 
@@ -191,10 +189,14 @@ def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:
     return dep == ws.branch or (worker_id is not None and dep == worker_id)
 
 
-def _refers_to(dep: str, t: Task) -> bool:
+def _refers_to(dep: str, t: Task, from_repo: str | None = None) -> bool:
     """Whether a ``depends_on`` entry names task ``t``: its worker's agent id
-    (once it has one) or its declared branch."""
-    return dep == t.branch or (t.agent_id is not None and dep == t.agent_id)
+    (once it has one), from any repo, or its declared branch, only from the
+    same repo (``from_repo``: the depending task's; two repos may have a
+    branch of the same name)."""
+    if t.agent_id is not None and dep == t.agent_id:
+        return True
+    return dep == t.branch and (from_repo is None or from_repo == t.repo_root)
 
 
 def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
@@ -217,7 +219,7 @@ def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
         except agents.AgentError:
             pass
     for dependent in db.list_tasks(state="pending"):   # any repo of the session may wait on it
-        if any(_refers_to(d, t) for d in _loads(dependent.depends_on)):
+        if any(_refers_to(d, t, dependent.repo_root) for d in _loads(dependent.depends_on)):
             cancelled += _cancel(
                 db, dependent.id, f"its dependency {t.id} ({t.branch or t.id}) was cancelled")
     return cancelled

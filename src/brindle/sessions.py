@@ -120,9 +120,27 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                   "SELECT ?, alias, repo_root, added_at FROM session_repos WHERE root_id=?",
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
+    _repoint_orphaned_tasks(db, new.id)
     if pause_old:
         agents.pause(db, old_root_id, stop_local_models=False)
     return new
+
+
+def _repoint_orphaned_tasks(db: DB, root_id: str) -> None:
+    """A queued task whose caller workspace is gone (an attached repo's
+    checkout record was removed, say) would fail to start: point it at its
+    repo's root checkout instead. A repo that is gone from disk is left
+    alone; starting the task reports that then."""
+    from brindle import repos
+
+    for t in db.list_tasks(state="pending"):
+        if t.caller_id != root_id or db.get_workspace(t.caller_ws_id) is not None:
+            continue
+        try:
+            ws = repos.target_workspace(db, t.repo_root)
+        except git.GitError:
+            continue
+        db.update_task(t.id, caller_ws_id=ws.id)
 
 
 def _forget(db: DB, s: Session) -> None:

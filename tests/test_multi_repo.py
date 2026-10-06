@@ -213,6 +213,54 @@ def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, we
     assert msg is not None and "Started" in msg.body and worker_a in msg.body
 
 
+def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    repos.attach(db, "boss", str(web), "web")
+    worker_main = started_worker_id(asyncio.run(mcp_server.assign("developer", "A", branch="feat-a")))
+    worker_web = started_worker_id(asyncio.run(mcp_server.assign("developer", "W", branch="feat-w", repo="web")))
+    # Both repos queue a task on a branch called "shared".
+    assert "Queued" in asyncio.run(mcp_server.assign("developer", "S", branch="shared", depends_on=[worker_main]))
+    assert "Queued" in asyncio.run(mcp_server.assign("developer", "S", branch="shared", repo="web",
+                                                     depends_on=[worker_web]))
+    # A task in the main repo waiting on "shared" by name means the main repo's.
+    assert "Queued" in asyncio.run(mcp_server.assign("developer", "D", branch="dep", depends_on=["shared"]))
+    [p_main] = [t for t in db.list_tasks(str(repo), state="pending") if t.branch == "shared"]
+    [p_web] = [t for t in db.list_tasks(str(web), state="pending") if t.branch == "shared"]
+    [dep] = [t for t in db.list_tasks(str(repo), state="pending") if t.branch == "dep"]
+
+    assert tasks.cancel(db, db.get_agent("boss"), p_web.id) == f"Cancelled task {p_web.id}."
+    assert db.get_task(p_web.id).state == "cancelled"
+    assert db.get_task(dep.id).state == "pending"       # the other repo's "shared" is unrelated
+    assert db.get_task(p_main.id).state == "pending"
+
+    assert dep.id in tasks.cancel(db, db.get_agent("boss"), p_main.id)   # its own repo's: cascades
+    assert db.get_task(dep.id).state == "cancelled"
+
+
+def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo, web, boss, monkeypatch):
+    from brindle import sessions
+
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    repos.attach(db, "boss", str(web), "web")
+    worker_a = started_worker_id(asyncio.run(mcp_server.assign("developer", "A", branch="feat-a")))
+    assert "Queued" in asyncio.run(mcp_server.assign("developer", "B", branch="feat-b", repo="web",
+                                                     depends_on=[worker_a]))
+    assert "Queued" in asyncio.run(mcp_server.assign("developer", "C", branch="feat-c", depends_on=[worker_a]))
+    [b] = db.list_tasks(str(web), state="pending")
+    web_root = db.get_workspace(b.caller_ws_id)
+    assert web_root.repo_root == str(web)
+    db.delete_workspace(web_root.id)                 # its checkout record is gone
+
+    new = sessions.handover(db, "boss", boss, "take over", pause_old=False)
+    b = db.get_task(b.id)
+    assert b.caller_id == new.id
+    ws = db.get_workspace(b.caller_ws_id)
+    assert ws is not None and ws.repo_root == str(web) and ws.kind == "main"
+    [c] = [t for t in db.list_tasks(str(repo), state="pending") if t.branch == "feat-c"]
+    assert c.caller_id == new.id and c.caller_ws_id == boss.id
+    assert [x.alias for x in repos.attached(db, new.id)] == ["web"] and repos.attached(db, "boss") == []
+
+
 def test_list_agents_groups_by_repo(db, repo, web, boss):
     repos.attach(db, "boss", str(web), "web")
     main_worker = started_worker_id(asyncio.run(mcp_server.assign("developer", "m", branch="m")))
