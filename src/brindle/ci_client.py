@@ -199,7 +199,7 @@ def _check_run_plan(c: dict) -> None:
             raise CIError("run plan milestones are malformed")
         for m in ms:
             if not (isinstance(m, dict) and _is_int(m.get("id")) and _str(m.get("title"))
-                    and _str(m.get("check"))):
+                    and (m.get("check") is None or _str(m.get("check")))):
                 raise CIError("run plan milestones are malformed")
     if not _str(c.get("instructions")):
         raise CIError("run plan has no instructions")
@@ -211,6 +211,9 @@ def _check_run_plan(c: dict) -> None:
                                             "heartbeat_s": DEFAULT_HEARTBEAT_S})
     if not _is_int(c.get("attempt", 1)):
         raise CIError("run plan attempt is malformed")
+    cont = c.get("continuation")
+    if cont is not None and not (isinstance(cont, dict) and _is_int(cont.get("pr")) and cont["pr"] > 0):
+        raise CIError("run plan continuation is malformed")
 
 
 def _check_validation_plan(c: dict) -> None:
@@ -280,6 +283,47 @@ def check_run_checkout(plan: dict, cwd: str) -> None:
     head = head_sha(cwd)
     if head != plan["base_sha"]:
         raise CIError(f"the checkout is at {head[:12]}, not the plan's base {plan['base_sha'][:12]}")
+
+
+def branch_tip(cwd: str, branch: str) -> str | None:
+    """The commit ``branch`` points at: the local branch, else the remote's
+    after a fetch. None when neither exists."""
+    for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+        proc = git.run(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd, check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+        if ref.startswith("refs/heads/") and git.has_remote(cwd):
+            git.run(["fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                    cwd, check=False)
+    return None
+
+
+def prepare_branch(plan: dict, cwd: str) -> None:
+    """Put the checkout on the plan's branch. A new run cuts the branch from
+    the checkout, which must be at ``base_sha``. A continuation (the plan
+    carries ``continuation``) checks the existing branch out at its tip,
+    which must be ``base_sha``: the server read that tip when it planned, and
+    anything else means the branch moved since."""
+    branch, base_sha = plan["branch"], plan["base_sha"]
+    if not plan.get("continuation"):
+        check_run_checkout(plan, cwd)
+        try:
+            git.run(["checkout", "-B", branch], cwd)
+        except git.GitError as e:
+            raise CIError(f"can't create branch {branch}: {e}") from e
+        return
+    tip = branch_tip(cwd, branch)
+    if tip is None:
+        raise CIError(f"continuation: branch {branch} doesn't exist here or on origin")
+    if tip != base_sha:
+        raise CIError(f"continuation: branch {branch} is at {tip[:12]}, not the plan's base {base_sha[:12]}")
+    try:
+        git.run(["checkout", "-B", branch, base_sha], cwd)
+    except git.GitError as e:
+        raise CIError(f"can't check out branch {branch}: {e}") from e
+    head = head_sha(cwd)
+    if head != base_sha:
+        raise CIError(f"continuation: the checkout is at {head[:12]}, not {base_sha[:12]}")
 
 
 def check_validation_checkout(plan: dict, cwd: str, head: str | None = None) -> None:
@@ -427,9 +471,9 @@ class Client:
             raise _error(status, body)
         return body
 
-    def job_status(self, token: str, run_id: str, job: str, conclusion: str) -> None:
+    def job_status(self, token: str, run_id: str, repo: str, job: str, conclusion: str) -> None:
         status, body = self._call("POST", f"/ci/runs/{urllib.parse.quote(run_id, safe='')}/job-status",
-                                  auth.JSONBody(job=job, conclusion=conclusion), token)
+                                  auth.JSONBody(repo=repo, job=job, conclusion=conclusion), token)
         if status != 200:
             raise _error(status, body)
 
@@ -538,18 +582,19 @@ def parse_bool(text: str | None) -> bool | None:
     raise CIError("--fork takes true or false")
 
 
-def plan_id(plan_token: str) -> tuple[str, str]:
-    """(plan_kind, id) of a plan whose signature checks out, without the
-    time or repository checks: for the report job, which may run after the
-    plan expired and only names the run to the server."""
+def plan_id(plan_token: str) -> tuple[str, str, str]:
+    """(plan_kind, id, repo) of a plan whose signature checks out, without
+    the time or repository checks: for the report job, which may run after
+    the plan expired and only names the run to the server."""
     try:
         c = license.verify_signed(plan_token, typ=PLAN_TYP, token_use=PLAN_TOKEN_USE, what="plan",
                                   max_bytes=MAX_PLAN_BYTES)
     except license.LicenseError as e:
         raise CIError(str(e), code="bad_plan") from e
-    if not (_str(c.get("id")) and c.get("plan_kind") in ("run", "validation")):
+    if not (_str(c.get("id")) and c.get("plan_kind") in ("run", "validation") and _str(c.get("repo"))
+            and REPO_RE.match(c["repo"])):
         raise CIError("plan claims are malformed", code="bad_plan")
-    return c["plan_kind"], c["id"]
+    return c["plan_kind"], c["id"], c["repo"]
 
 
 def report(plan_dir: str | Path, *, client: Client, token: str, start: str | None, run: str | None,
@@ -564,7 +609,7 @@ def report(plan_dir: str | Path, *, client: Client, token: str, start: str | Non
     except OSError:
         say("nothing to report: the start job wrote no plan")
         return
-    kind, the_id = plan_id(plan_token)
+    kind, the_id, repo = plan_id(plan_token)
     if kind != "run":
         say("nothing to report: validations report through their evidence")
         return
@@ -573,7 +618,7 @@ def report(plan_dir: str | Path, *, client: Client, token: str, start: str | Non
             continue
         if conclusion not in CONCLUSIONS:
             raise CIError(f"--{job} must be one of {', '.join(CONCLUSIONS)}")
-        client.job_status(token, the_id, job, conclusion)
+        client.job_status(token, the_id, repo, job, conclusion)
         say(f"reported: {job} job {conclusion}")
 
 
@@ -585,10 +630,12 @@ def tail(text: str | None, limit: int) -> str:
     return text if len(text.encode("utf-8")) <= limit else text.encode("utf-8")[-limit:].decode("utf-8", "ignore")
 
 
-def milestone_rows(db, root_id: str) -> list[dict]:
+def milestone_rows(db, root_id: str, ids: list[int] | None = None) -> list[dict]:
+    """The session's milestones as the server wants them, under the PLAN's
+    milestone ids (``ids``, in the plan's order), never brindle's positions."""
     rows = []
-    for m in db.milestones(root_id):
-        rows.append({"id": m.position, "status": m.status,
+    for i, m in enumerate(db.milestones(root_id)):
+        rows.append({"id": ids[i] if ids and i < len(ids) else m.position, "status": m.status,
                      "exit": 0 if m.status == "passed" else 1 if m.status == "failed" else None,
                      "output_tail": tail(m.output, OUTPUT_TAIL)})
     return rows
@@ -602,7 +649,8 @@ def count_commits(cwd: str, base_sha: str, branch: str) -> int:
 
 
 def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | None = None,
-                  base_sha: str | None = None, branch: str | None = None) -> dict:
+                  base_sha: str | None = None, branch: str | None = None,
+                  milestone_ids: list[int] | None = None) -> dict:
     """What the session looks like right now, as the server wants it: the
     state brindle's autopilot records, the milestones and the usage. No
     interpretation beyond naming the autopilot's own states."""
@@ -622,7 +670,8 @@ def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | 
         state, note = "failed", f"the supervisor is {root.status}"
     else:
         state, note = "working", f"supervisor {root.status}; autopilot {ap.state if ap else 'off'}"
-    event = {"state": state, "milestones": milestone_rows(db, root_id), "usage": adapter.usage(db, root_id),
+    event = {"state": state, "milestones": milestone_rows(db, root_id, milestone_ids),
+             "usage": adapter.usage(db, root_id),
              "commits": count_commits(cwd, base_sha, branch) if cwd and base_sha and branch else 0,
              "provider_error": adapter.provider_error(db, root_id)}
     if question:
@@ -682,15 +731,11 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
             os.environ.pop(k, None)
         return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
                               org=org, clock=clock, say=say)
-    check_run_checkout(plan, cwd)
+    prepare_branch(plan, cwd)
     gone = scrub_secrets(env)
     for k in gone:
         os.environ.pop(k, None)
     run_id, base_sha, branch = plan["id"], plan["base_sha"], plan["branch"]
-    try:
-        git.run(["checkout", "-B", branch], cwd)
-    except git.GitError as e:
-        raise CIError(f"can't create branch {branch}: {e}") from e
     db = db or DB()
     ws = workspaces.adopt_root(db, cwd)
     adapters = adapters or ci_adapters.default_adapters(ws.repo_root)
@@ -713,7 +758,8 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     event: dict = {"state": "working", "milestones": [], "usage": {}}
     while final is None:
         sleep(plan["limits"]["heartbeat_s"])
-        event = session_event(db, root.id, adapter, cwd=cwd, base_sha=base_sha, branch=branch)
+        event = session_event(db, root.id, adapter, cwd=cwd, base_sha=base_sha, branch=branch,
+                              milestone_ids=[m["id"] for m in plan.get("milestones") or []])
         try:
             answer = client.events(run_token, run_id, event)
         except CIError as e:
@@ -725,10 +771,12 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
             continue
         action = answer.get("action")
         if action == "continue":
-            if event["state"] in ("finished", "failed"):
+            # A session that is over, or that needs the person, ends the job
+            # at once: the result carries the state (and the question) and
+            # the server takes it from there. A stalled session keeps
+            # heartbeating until the server says escalate or stop.
+            if event["state"] in ("finished", "failed", "needs_user"):
                 final = event["state"]
-            elif clock() > deadline:
-                final = "timeout"
         elif action == "stop":
             reason = answer.get("reason")
             final = reason if reason in ("budget", "timeout") else event["state"] if event["state"] != "working" else "failed"
@@ -745,14 +793,15 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
         else:
             raise CIError("the server sent an unknown action", code="bad_response")
     adapter.stop(db, root.id)
-    event = session_event(db, root.id, adapter, cwd=cwd, base_sha=base_sha, branch=branch)
+    event = session_event(db, root.id, adapter, cwd=cwd, base_sha=base_sha, branch=branch,
+                          milestone_ids=[m["id"] for m in plan.get("milestones") or []])
     commits, bundle, why = make_bundle(cwd, base_sha, branch)
     evidence = {"final_state": final, "milestones": event["milestones"], "usage": event["usage"],
                 "providers": providers_used, "commits": commits}
     if event.get("question"):
         evidence["question"] = event["question"]
     if why and commits:
-        evidence["note"] = why
+        log.warning("brindle ci: uploading without a bundle: %s", why)
     result = client.put_result(run_token, run_id, evidence, bundle)
     status = result.get("status")
     if status == "published" and _str(result.get("url")):
@@ -825,23 +874,27 @@ def ask_reviewer(reviewer: dict, cwd: str, env: Mapping[str, str],
     if CHECK_RESULTS_SLOT in instructions:
         instructions = instructions.replace(CHECK_RESULTS_SLOT, render_check_results(checks or []))
     adapter = adapters.get(reviewer["provider"])
+    # Only the protocol's fields: a reviewer that couldn't run or whose CLI
+    # failed is sent with an empty reply (and the model, when known); what
+    # that means for the verdict is the server's call.
     row = {"id": reviewer["id"], "provider": reviewer["provider"], "model": None, "reply": ""}
     if adapter is None:
-        row["error"] = "no adapter"
+        log.warning("brindle ci: reviewer %s: no adapter for %s", reviewer["id"], reviewer["provider"])
         return row, {}
     ok, why = ci_adapters.usable(adapter, env, org)
     if not ok:
-        row["error"] = why
+        log.warning("brindle ci: reviewer %s not usable: %s", reviewer["id"], why)
         return row, {}
     try:
         rev = adapter.review(instructions, cwd, env)
     except ci_adapters.AdapterError as e:
-        row["error"] = str(e)
+        log.warning("brindle ci: reviewer %s failed: %s", reviewer["id"], e)
         return row, {}
     row["model"] = rev.model
-    row["reply"] = tail(rev.reply, REPLY_MAX)
-    if rev.exit not in (None, 0):
-        row["error"] = f"exit {rev.exit}"
+    if rev.exit in (None, 0):
+        row["reply"] = tail(rev.reply, REPLY_MAX)
+    else:
+        log.warning("brindle ci: reviewer %s exited %s", reviewer["id"], rev.exit)
     return row, rev.usage
 
 

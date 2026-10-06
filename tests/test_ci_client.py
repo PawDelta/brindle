@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import time
+import uuid
 
 import pytest
 
@@ -75,7 +76,7 @@ class FakeAdapter(ci_adapters.Adapter):
         return ci_adapters.Credential(self._kind if self._available else None, ("FAKE_KEY",))
 
     def launch(self, db, ws, instructions, profile):
-        aid = f"{self.name[:2]}{len(self.launched)}00000"
+        aid = f"{self.name[:2]}{len(self.launched)}{uuid.uuid4().hex[:5]}"
         db.add_agent(Agent(id=aid, workspace_id=ws.id, profile=profile or "supervisor", provider=self.name,
                            parent_id=None, mode="interactive", status="idle", tmux_window="", result=None,
                            created_at=time.time(), task=instructions))
@@ -311,24 +312,30 @@ def test_plans_up_to_256kb_verify(plan, tmp_path):
 
 def test_report_posts_job_status(plan, tmp_path):
     t = FakeTransport({"POST /ci/runs/run_1/job-status": [(200, {})]})
-    client = ci_client.Client(BASE, t)
+    oidc = ci_client.OIDC({"ACTIONS_ID_TOKEN_REQUEST_URL": "https://t.actions.test/x",
+                           "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req"}, fetch=lambda url, tok: "h.p.s")
+    client = ci_client.Client(BASE, t, oidc=oidc)
     said = []
     ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="failure", say=said.append)
     assert said == ["nothing to report: the start job wrote no plan"] and not t.calls
     (tmp_path / "plan.jwt").write_text(plan(iat=int(time.time()) - 7200, exp=int(time.time()) - 3600))
     ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="failure", say=said.append)
     assert [(c[0], c[1]) for c in t.calls] == [
-        ("POST /ci/runs/run_1/job-status", {"job": "start", "conclusion": "success"}),
-        ("POST /ci/runs/run_1/job-status", {"job": "run", "conclusion": "failure"})]
-    assert all(c[2]["Authorization"] == f"Bearer {CI_TOKEN}" for c in t.calls)
-    assert said[-1] == "reported: run job failure"
+        ("POST /ci/runs/run_1/job-status", {"repo": REPO, "job": "start", "conclusion": "success"}),
+        ("POST /ci/runs/run_1/job-status", {"repo": REPO, "job": "run", "conclusion": "failure"})]
+    assert all(c[2]["Authorization"] == f"Bearer {CI_TOKEN}" and c[2]["X-Brindle-OIDC"] == "h.p.s" for c in t.calls)
+    plain = ci_client.Client(BASE, t, env={})
+    ci_client.report(tmp_path, client=plain, token=CI_TOKEN, start=None, run="success", say=said.append)
+    assert "X-Brindle-OIDC" not in t.calls[-1][2] and t.calls[-1][1]["repo"] == REPO
+    t.calls.clear()
+    assert said[-1] == "reported: run job success" and said[-2] == "reported: run job failure"
     ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="cancelled", run=None, say=said.append)
-    assert len(t.calls) == 3
+    assert len(t.calls) == 1
     with pytest.raises(CIError, match="--run must be one of"):
         ci_client.report(tmp_path, client=client, token=CI_TOKEN, start=None, run="exploded", say=said.append)
     (tmp_path / "plan.jwt").write_text(plan("validation"))
     ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="success", say=said.append)
-    assert said[-1].startswith("nothing to report: validations") and len(t.calls) == 3
+    assert said[-1].startswith("nothing to report: validations") and len(t.calls) == 1
     (tmp_path / "plan.jwt").write_text("garbage")
     with pytest.raises(CIError, match="malformed plan"):
         ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run=None, say=said.append)
@@ -448,12 +455,65 @@ def test_run_reports_needs_user(plan, ci_repo, tmp_path):
 
     def ask(seconds):
         db.update_autopilot(adapter.launched[0][0], state="blocked", note="which database?")
-    server = Server(token, actions=[{"action": "stop", "reason": "cancelled"}])
+    server = Server(token)   # the server only ever says continue
     ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
                   db=db, adapters={"claude": adapter}, sleep=ask, say=lambda s: None)
+    assert len(server.events) == 1, "needs_user ends the job at once"
     assert server.events[0]["state"] == "needs_user" and server.events[0]["question"] == "which database?"
+    assert adapter.stopped == [adapter.launched[0][0]]
     ev = evidence_of(server.results[0])
     assert ev["final_state"] == "needs_user" and ev["question"] == "which database?"
+
+
+def test_run_keeps_heartbeating_while_stalled(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    db, adapter = DB(), FakeAdapter("claude")
+
+    def stall(seconds):
+        db.update_autopilot(adapter.launched[0][0], state="stalled", note="no progress after 3 reminders")
+    server = Server(token, actions=[{"action": "continue"}, {"action": "continue"},
+                                    {"action": "stop", "reason": "timeout"}])
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=db, adapters={"claude": adapter}, sleep=stall, say=lambda s: None)
+    assert [e["state"] for e in server.events] == ["stalled"] * 3, "the server decides what a stall means"
+    assert evidence_of(server.results[0])["final_state"] == "timeout"
+
+
+def test_milestones_carry_the_plans_ids_and_may_lack_a_check(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base, milestones=[{"id": 7, "title": "design", "check": None},
+                                           {"id": 9, "title": "tests pass", "check": "true"}])
+    db, adapter = DB(), FakeAdapter("claude")
+
+    def pass_second(seconds):
+        root = adapter.launched[0][0]
+        db.record_check(db.milestones(root)[1].id, True, "ok\n")
+        db.update_autopilot(root, state="done")
+    server = Server(token)
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=db, adapters={"claude": adapter}, sleep=pass_second, say=lambda s: None)
+    rows = server.events[0]["milestones"]
+    assert [(r["id"], r["status"], r["exit"]) for r in rows] == [(7, "pending", None), (9, "passed", 0)]
+    assert rows[1]["output_tail"] == "ok\n"
+    assert [r["id"] for r in evidence_of(server.results[0])["milestones"]] == [7, 9]
+    with pytest.raises(CIError, match="milestones are malformed"):
+        ci_client.verify_plan(plan(milestones=[{"id": 1, "title": "x", "check": ""}]), repo=REPO)
+
+
+def test_result_has_only_protocol_fields_without_a_bundle(plan, ci_repo, tmp_path, monkeypatch):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    server = Server(token, actions=[{"action": "stop", "reason": "budget"}])
+    monkeypatch.setattr(ci_client, "BUNDLE_MAX", 10)
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=DB(), adapters={"claude": FakeAdapter("claude", commit=commit_file)}, sleep=lambda s: None,
+                  say=lambda s: None)
+    body = server.results[0]
+    ev = evidence_of(body)
+    assert b'name="bundle"' not in body, "over the limit: no bundle"
+    assert ev["final_state"] == "budget" and ev["commits"] == 1
+    assert set(ev) <= {"final_state", "milestones", "usage", "providers", "question", "commits"}
 
 
 def test_run_reports_provider_errors(plan, ci_repo, tmp_path, monkeypatch):
@@ -465,21 +525,69 @@ def test_run_reports_provider_errors(plan, ci_repo, tmp_path, monkeypatch):
     adapter.provider_error = lambda db_, root: ci_adapters.Adapter.provider_error(adapter, db_, root)
     beats = []
 
+    from brindle import quota
+
     def sleep(seconds):
-        root = adapter.launched[0][0]
         beats.append(1)
         if len(beats) == 1:
-            db.update_autopilot(root, state="usage_paused", note="Claude's usage limit was reached")
+            monkeypatch.setattr(quota, "get", lambda provider: quota.Quota(provider, [], time.time() + 600, 0.0, "t"))
         elif len(beats) == 2:
-            db.update_autopilot(root, state="running", note=None)
+            monkeypatch.setattr(quota, "get", lambda provider: None)
             monkeypatch.setattr(providers, "signed_out", lambda provider, env=None: "signed out")
     server = Server(token, actions=[{"action": "continue"}, {"action": "continue"},
                                     {"action": "stop", "reason": "cancelled"}])
     ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
                   db=db, adapters={"claude": adapter}, sleep=sleep, say=lambda s: None)
     assert [(e["state"], e["provider_error"]) for e in server.events] == [
-        ("needs_user", "rate_limit"), ("working", "auth"), ("working", "auth")]
+        ("working", "rate_limit"), ("working", "auth"), ("working", "auth")]
     assert all(e["commits"] == 0 for e in server.events)
+    assert evidence_of(server.results[0])["final_state"] == "failed", "cancelled while working"
+
+
+def push_branch(repo, branch: str) -> str:
+    """A branch with one commit past main, pushed to origin and deleted
+    locally (as a fresh CI checkout would see it). Returns its tip."""
+    sh(f"git checkout -q -b {branch}", repo)
+    (repo / "earlier.txt").write_text("from the first run\n")
+    sh("git add earlier.txt && git commit -qm earlier", repo)
+    tip = sh("git rev-parse HEAD", repo)
+    sh(f"git push -q origin {branch} && git checkout -q main && git branch -q -D {branch}", repo)
+    return tip
+
+
+def test_run_continuation_checks_out_the_existing_branch(plan, ci_repo, tmp_path):
+    tip = push_branch(ci_repo, "brindle/ci-1")
+    main = head(ci_repo)
+    token = plan(base_sha=tip, continuation={"pr": 12})
+    server = Server(token)
+    db, adapter = DB(), FakeAdapter("claude", commit=commit_file)
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client, db=db,
+                  adapters={"claude": adapter}, sleep=finish_after(db, adapter, 1), say=lambda s: None)
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-1"
+    assert sh("git rev-parse HEAD~1", ci_repo) == tip, "the new commit sits on the branch tip"
+    assert sh("git merge-base --is-ancestor " + main + " HEAD && echo yes", ci_repo) == "yes"
+    ev = evidence_of(server.results[0])
+    assert ev["commits"] == 1 and ev["final_state"] == "finished"
+    assert b'name="bundle"' in server.results[0]
+    assert server.events[0]["commits"] == 1
+
+
+def test_run_continuation_refuses_a_moved_branch(plan, ci_repo, tmp_path):
+    tip = push_branch(ci_repo, "brindle/ci-1")
+    token = plan(base_sha="3" * 40, continuation={"pr": 12})
+    tf = token_file(tmp_path)
+    with pytest.raises(CIError, match=f"brindle/ci-1 is at {tip[:12]}, not the plan's base 333333333333"):
+        ci_client.run(token, tf, cwd=str(ci_repo), env=run_env(), client=Server(token).client, db=DB(),
+                      adapters={"claude": FakeAdapter("claude")}, sleep=lambda s: None)
+    assert not tf.exists()
+    missing = plan(base_sha=tip, branch="brindle/ci-9", continuation={"pr": 12})
+    with pytest.raises(CIError, match="brindle/ci-9 doesn't exist"):
+        ci_client.run(missing, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=Server(missing).client,
+                      db=DB(), adapters={"claude": FakeAdapter("claude")}, sleep=lambda s: None)
+    with pytest.raises(CIError, match="continuation is malformed"):
+        ci_client.verify_plan(plan(continuation={"pr": "12"}), repo=REPO)
+    with pytest.raises(CIError, match="continuation is malformed"):
+        ci_client.verify_plan(plan(continuation="yes"), repo=REPO)
 
 
 def test_run_rejects_a_checkout_not_at_base(plan, ci_repo, tmp_path):
@@ -510,19 +618,32 @@ def test_run_keeps_going_when_a_heartbeat_fails(plan, ci_repo, tmp_path):
     assert evidence_of(server.results[0])["final_state"] == "timeout"
 
 
-def test_run_ends_past_the_plan_timeout_without_the_server(plan, ci_repo, tmp_path):
+def test_run_ends_past_the_plan_timeout_only_when_the_server_is_unreachable(plan, ci_repo, tmp_path):
+    from brindle.pro.auth import TransportError
+
     base = head(ci_repo)
     token = plan(base_sha=base)
     server = Server(token)
     clock = {"t": time.time()}
+    attempts = []
 
     def tick(s):
         clock["t"] += 15 * 60
+
+    def down(form, headers):
+        attempts.append(1)
+        raise TransportError("down")
+    server.transport.routes["POST /ci/runs/run_1/events"] = down
     ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
                   db=DB(), adapters={"claude": FakeAdapter("claude")}, clock=lambda: clock["t"], sleep=tick,
                   say=lambda s: None)
-    assert evidence_of(server.results[0])["final_state"] == "timeout"
-    assert len(server.events) <= 3
+    assert evidence_of(server.results[0])["final_state"] == "timeout" and len(attempts) <= 3
+    # A server that answers keeps the run alive past the plan's timeout: timing out is its call.
+    server2 = Server(token, actions=[{"action": "continue"}] * 5 + [{"action": "stop", "reason": "timeout"}])
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server2.client,
+                  db=DB(), adapters={"claude": FakeAdapter("claude")}, clock=lambda: clock["t"], sleep=tick,
+                  say=lambda s: None)
+    assert len(server2.events) == 6
 
 
 # -- plan verification ---------------------------------------------------------------------------
@@ -707,7 +828,19 @@ def test_validate_records_an_unusable_reviewer(plan, ci_repo, tmp_path):
     validate(server, ci_repo, tmp_path, adapters={"claude": sub}, org=True)
     assert server.transport.calls[0][1]["providers_available"] == []
     row = server.evidence_calls[0]["reviews"][0]
-    assert row["reply"] == "" and "personal subscription" in row["error"] and not sub.reviews
+    assert row == {"id": "r1", "provider": "claude", "model": None, "reply": ""} and not sub.reviews
+    assert server.evidence_calls[0]["checks"], "the checks are posted whatever the reviewers did"
+
+
+def test_validate_sends_an_empty_reply_for_a_failed_reviewer_cli(plan, ci_repo, tmp_path):
+    sha = head(ci_repo)
+    server = Server(plan(), validation_plan=plan("validation", head_sha=sha))
+    failing = FakeAdapter("claude", reply="partial words")
+    failing.review = lambda *a, **k: ci_adapters.Review("partial words", model="fake-model", exit=1)
+    validate(server, ci_repo, tmp_path, adapters={"claude": failing})
+    row = server.evidence_calls[0]["reviews"][0]
+    assert row == {"id": "r1", "provider": "claude", "model": "fake-model", "reply": ""}
+    assert set(row) == {"id", "provider", "model", "reply"}
 
 
 @pytest.mark.parametrize("why", ["fork", "stale_head"])
