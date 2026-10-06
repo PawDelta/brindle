@@ -31,6 +31,7 @@ detection, no rendering. The server does that.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -43,6 +44,8 @@ from typing import Mapping, MutableMapping
 
 
 from brindle import providers
+
+log = logging.getLogger(__name__)
 
 API_KEY = "api_key"
 CLOUD = "cloud"
@@ -67,6 +70,7 @@ BASE_URL_RE = re.compile(r"^(?P<scheme>https?)://(?P<host>[A-Za-z0-9]([A-Za-z0-9
 PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KEYS,
                            "GEMINI_API_KEY", "GOOGLE_API_KEY"))
 REVIEW_TIMEOUT = 1200.0
+FIRST_RUN_WAIT = 20.0    # how long a new claude supervisor's pane is watched for a first-run screen
 DEFAULT_PROFILE = "supervisor"
 
 
@@ -165,6 +169,11 @@ class Adapter:
 
         return agents.is_alive(root)
 
+    def stuck_screen(self, db, root) -> str | None:
+        """Why the supervisor can't make progress on its own (a screen only a
+        person answers), or None. Default: never."""
+        return None
+
     def review(self, instructions: str, cwd: str, env: Mapping[str, str], *,
                timeout: float = REVIEW_TIMEOUT, profile: str | None = None) -> Review:
         raise AdapterError(f"{self.name} can't review")
@@ -250,8 +259,57 @@ class ClaudeAdapter(Adapter):
             return Credential(SUBSCRIPTION, sub)
         return Credential(None, ())
 
+    @staticmethod
+    def prepare(cwd: str, env: Mapping[str, str]) -> None:
+        """Answer Claude Code's first-run screens ahead of time (a fresh
+        runner has no Claude Code state, and nobody is there to answer them),
+        trusting the checkout ``cwd``. brindle's own worktrees are trusted
+        when they're made (providers.trust_folder), now that the file exists.
+        Only on a CI runner (``GITHUB_ACTIONS`` or ``CI`` is ``"true"`` in
+        ``env``): anywhere else Claude Code's state is the person's own, and
+        is left alone."""
+        if "true" not in (env.get("GITHUB_ACTIONS"), env.get("CI")):
+            log.info("brindle ci: not on a CI runner, leaving Claude Code's state alone")
+            return
+        try:
+            providers.seed_ci_config([cwd], env.get("ANTHROPIC_API_KEY") or None)
+        except (OSError, ValueError) as e:
+            raise AdapterError(f"couldn't set up Claude Code's state: {e}") from None
+
+    def launch(self, db, ws, instructions: str, profile: str | None):
+        """Start the supervisor, then fail fast if it sits on a first-run
+        screen anyway (it would wait there for good, spending nothing)."""
+        self.prepare(ws.path, os.environ)
+        root = super().launch(db, ws, instructions, profile)
+        deadline = time.time() + FIRST_RUN_WAIT
+        while True:
+            screen = self._screen(root)
+            why = providers.ClaudeCode.first_run_screen(screen or "")
+            if why:
+                self.stop(db, root.id)
+                raise AdapterError(f"Claude Code stopped on {why}, which nobody in CI can answer")
+            if screen is None or providers.ClaudeCode.READY.search(screen) or time.time() >= deadline:
+                return root
+            time.sleep(1)
+
+    def stuck_screen(self, db, root) -> str | None:
+        why = providers.ClaudeCode.first_run_screen(self._screen(root) or "")
+        return f"Claude Code is on {why}, which nobody in CI can answer" if why else None
+
+    @staticmethod
+    def _screen(root) -> str | None:
+        from brindle import agents, tmux
+
+        if root is None or not getattr(root, "tmux_window", None):
+            return None
+        try:
+            return tmux.capture(root.tmux_window, lines=60, server=agents.server_of(root))
+        except tmux.TmuxError:
+            return None
+
     def review(self, instructions: str, cwd: str, env: Mapping[str, str], *,
                timeout: float = REVIEW_TIMEOUT, profile: str | None = None) -> Review:
+        self.prepare(cwd, env)
         argv = [self.binary() or "claude", "-p", "--output-format", "json"]
         rev = _run(argv, cwd, claude_env(env), instructions, timeout)
         try:
