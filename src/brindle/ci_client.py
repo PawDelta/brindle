@@ -59,6 +59,7 @@ CI_TOKEN_RE = re.compile(r"^cpc_[A-Za-z0-9_-]{16,256}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 ORIGIN_RE = re.compile(r"[:/]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@")   # user:token@ in a remote URL
 PROVIDERS = ("claude", "codex", "native")
 
 # Secrets a CI job holds that no agent may see.
@@ -1045,13 +1046,20 @@ def _gh(args: list[str], *, run=subprocess.run, input: str | None = None, intera
     return out
 
 
-def origin_repo(cwd: str) -> str | None:
-    """The ``owner/name`` that ``cwd``'s ``origin`` remote points at (https,
-    ssh or scp-style URL), or None when there is no such remote."""
-    proc = git.run(["remote", "get-url", "origin"], cwd, check=False)
-    if proc.returncode != 0:
+def origin_url(cwd: str) -> str | None:
+    """``cwd``'s ``origin`` remote URL, or None when there is none (or git
+    can't tell: not installed, timed out)."""
+    try:
+        proc = git.run(["remote", "get-url", "origin"], cwd, check=False)
+    except git.GitError:
         return None
-    m = ORIGIN_RE.search((proc.stdout or "").strip())
+    url = (proc.stdout or "").strip()
+    return url if proc.returncode == 0 and url else None
+
+
+def origin_repo(url: str) -> str | None:
+    """The ``owner/name`` an https, ssh or scp-style remote URL names, or None."""
+    m = ORIGIN_RE.search(url)
     return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
@@ -1059,9 +1067,15 @@ def check_checkout(repo: str, cwd: str) -> None:
     """init builds the setup pull request from the checkout in ``cwd``: it
     must be a checkout of ``repo``, or the workflows would be committed and
     pushed to another repository."""
-    origin = origin_repo(cwd)
-    if (origin or "").lower() != repo.lower():
-        raise CIError(f"run this inside a checkout of {repo} (origin here is {origin or 'not set'})")
+    url = origin_url(cwd)
+    if url is None:
+        raise CIError(f"run this inside a checkout of {repo} (no origin remote here)")
+    origin = origin_repo(url)
+    if origin is None:
+        shown = auth._sanitize(URL_USERINFO_RE.sub(r"\1", url), 200)
+        raise CIError(f"run this inside a checkout of {repo} (origin here ({shown}) isn't a GitHub owner/name)")
+    if origin.lower() != repo.lower():
+        raise CIError(f"run this inside a checkout of {repo} (origin here is {origin})")
 
 
 def _claude_credential(given: str | None, ask: Callable[[str, str], str] | None) -> str:
@@ -1087,8 +1101,18 @@ def _set_federation(repo: str, env: Mapping[str, str], ask: Callable[[str, str],
             continue
         _gh(["variable", "set", name, "--repo", repo, "--body", value], run=run)
         say(f"   {name} set")
-    say(f"   create the federation rule in the Claude Console: subject repo:{repo}:*, "
-        f"audience {FEDERATION_AUDIENCE}, token lifetime at least {FEDERATION_MIN_LIFETIME_S} s")
+    say(f"   create the federation rule in the Claude Console: subject prefix repo:{repo}:*, "
+        f"condition {federation_condition(repo)}, audience {FEDERATION_AUDIENCE}, "
+        f"token lifetime at least {FEDERATION_MIN_LIFETIME_S} s")
+    say("   this lets only brindle's workflows mint tokens; on pull requests the PR's copy of the validate "
+        "workflow runs, so only give write access to people you trust (forks never get a token)")
+
+
+def federation_condition(repo: str) -> str:
+    """The CEL condition init recommends for the federation rule: the
+    repository's own brindle CI workflows, not any workflow in it."""
+    return (f'claims.repository == "{repo}" && '
+            f'claims.workflow_ref.startsWith("{repo}/{SETUP_DIR}/brindle-ci-")')
 
 
 def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd: str, env: Mapping[str, str],

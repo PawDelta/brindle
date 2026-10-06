@@ -810,8 +810,16 @@ ci init` stores the rule, organization, service account and optional workspace
 IDs as the Actions variables `ANTHROPIC_FEDERATION_RULE_ID`,
 `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
 `ANTHROPIC_WORKSPACE_ID`. Create the federation rule in the Claude Console with
-subject `repo:<owner>/<name>:*`, audience `https://api.anthropic.com`, and a
-token lifetime of at least 7200 seconds. Leave the `ANTHROPIC_API_KEY` secret
+subject prefix `repo:<owner>/<name>:*`, the condition
+
+```text
+claims.repository == "<owner>/<name>" && claims.workflow_ref.startsWith("<owner>/<name>/.github/workflows/brindle-ci-")
+```
+
+audience `https://api.anthropic.com`, and a token lifetime of at least 7200
+seconds. The condition lets only brindle's workflows mint tokens. On pull
+requests the pull request's own copy of the validate workflow runs, so give
+write access only to people you trust (forks never get a token). Leave the `ANTHROPIC_API_KEY` secret
 unset: a key takes precedence (brindle drops an empty one before Claude Code
 starts).
 

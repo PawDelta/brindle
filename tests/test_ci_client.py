@@ -1149,7 +1149,10 @@ def test_init_federation_sets_the_variables(init_run):
     secrets = [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]]
     assert secrets == ["BRINDLE_PRO_TOKEN"], "no ANTHROPIC_API_KEY secret with federation"
     text = "\n".join(said)
-    assert f"repo:{REPO}:*" in text and "https://api.anthropic.com" in text and "7200 s" in text
+    assert f"subject prefix repo:{REPO}:*" in text and "https://api.anthropic.com" in text and "7200 s" in text
+    assert (f'condition claims.repository == "{REPO}" && '
+            f'claims.workflow_ref.startsWith("{REPO}/.github/workflows/brindle-ci-")') in text
+    assert "forks never get a token" in text
 
 
 def test_init_federation_non_interactive(init_run):
@@ -1204,6 +1207,25 @@ def test_init_refuses_a_checkout_of_another_repo(ci_repo, url):
 def test_origin_repo_matches_any_url_form(ci_repo, url):
     sh(f"git remote set-url origin {url}", ci_repo)
     ci_client.check_checkout(REPO, str(ci_repo))
+
+
+def test_check_checkout_shows_an_unreadable_origin_without_credentials(ci_repo):
+    sh("git remote set-url origin https://user:s3cret@git.example.test", ci_repo)
+    with pytest.raises(CIError) as e:
+        ci_client.check_checkout(REPO, str(ci_repo))
+    msg = str(e.value)
+    assert "origin here (https://git.example.test) isn't a GitHub owner/name" in msg
+    assert "s3cret" not in msg and "user" not in msg
+
+
+def test_check_checkout_when_git_fails(ci_repo, monkeypatch):
+    from brindle import git as git_mod
+
+    def boom(args, cwd, check=True):
+        raise git_mod.GitError("git remote get-url origin: timed out")
+    monkeypatch.setattr(git_mod, "run", boom)
+    with pytest.raises(CIError, match=f"run this inside a checkout of {REPO} \\(no origin remote here\\)"):
+        ci_client.check_checkout(REPO, str(ci_repo))
 
 
 def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
