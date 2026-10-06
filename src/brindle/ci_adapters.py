@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+import urllib.parse
+
 from brindle import providers
 
 API_KEY = "api_key"
@@ -52,7 +54,8 @@ CLAUDE_CLOUD = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_COD
 CLAUDE_SUBSCRIPTION = ("CLAUDE_CODE_OAUTH_TOKEN",)
 CODEX_API_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 CODEX_LOGIN = "codex login (auth.json)"     # the name shown for a ChatGPT sign-in
-NATIVE_KEYS_ENV = "BRINDLE_CI_NATIVE_KEYS"   # the workflow lists the key variables native profiles may send
+NATIVE_KEYS_ENV = "BRINDLE_CI_NATIVE_KEYS"   # the workflow lists NAME@host pairs native profiles may use
+LOCAL_ONLY = "local"                         # a bare NAME in that list: local endpoints only
 # Every known provider credential: what a check must not see, and what a
 # repo-supplied native profile may not point at its own endpoint.
 PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KEYS,
@@ -302,26 +305,44 @@ class NativeAdapter(Adapter):
         return True
 
     @staticmethod
-    def allowed_keys(env: Mapping[str, str]) -> frozenset[str]:
-        """The key variables a native profile may send to its endpoint here:
-        the names in ``BRINDLE_CI_NATIVE_KEYS`` (comma-separated), which the
-        workflow sets, never the repository. Another provider's credential
-        is never allowed, whatever the list says."""
-        names = {n.strip() for n in (env.get(NATIVE_KEYS_ENV) or "").split(",") if n.strip()}
-        return frozenset(n for n in names if n not in PROVIDER_KEYS and not n.startswith("GH_")
-                         and n not in ("GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"))
+    def allowed_keys(env: Mapping[str, str]) -> dict[str, frozenset[str]]:
+        """Which key variable a native profile may send to which host, from
+        ``BRINDLE_CI_NATIVE_KEYS`` (comma-separated ``NAME@host`` entries,
+        set by the workflow, never the repository): ``{name: hosts}``. A
+        bare ``NAME`` allows only local and private-network endpoints, since
+        the profile, which comes from the repository, picks the endpoint.
+        Another provider's credential and the job's secrets are never
+        allowed, whatever the list says."""
+        out: dict[str, set[str]] = {}
+        for entry in (env.get(NATIVE_KEYS_ENV) or "").split(","):
+            name, _, host = entry.strip().partition("@")
+            name, host = name.strip(), host.strip().lower()
+            if not name or name in PROVIDER_KEYS or name.startswith("GH_") \
+                    or name in ("GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"):
+                continue
+            out.setdefault(name, set()).add(host or LOCAL_ONLY)
+        return {k: frozenset(v) for k, v in out.items()}
 
     def _key_refused(self, p, env: Mapping[str, str]) -> str | None:
         """Why profile ``p``'s key may not be sent, or None. A profile comes
-        from the repository and names any endpoint, so a key goes there only
-        when the workflow allowed that variable by name (see allowed_keys);
-        a denylist can't cover every secret a runner holds."""
+        from the repository and names any endpoint, so a key goes only to a
+        host the workflow paired it with (see allowed_keys); a denylist
+        can't cover every secret a runner holds."""
+        from brindle import airgap
+
         if not p.api_key_env:
             return None
-        if p.api_key_env in self.allowed_keys(env):
+        hosts = self.allowed_keys(env).get(p.api_key_env, frozenset())
+        try:
+            u = urllib.parse.urlsplit(p.base_url or "")
+            host = (u.hostname or "").lower()
+        except ValueError:
+            host = ""
+        if host and (host in hosts or (LOCAL_ONLY in hosts and airgap.is_local_host(host))) \
+                and (u.scheme == "https" or airgap.is_local_host(host)):
             return None
-        return (f"profile {p.name!r} would send {p.api_key_env} to its own endpoint; "
-                f"name it in {NATIVE_KEYS_ENV} to allow that")
+        return (f"profile {p.name!r} would send {p.api_key_env} to {host or 'its endpoint'}; "
+                f"list {p.api_key_env}@{host or 'host'} in {NATIVE_KEYS_ENV} to allow that")
 
     def _profiles(self, env: Mapping[str, str] | None = None) -> list:
         """The repo's native profiles with an endpoint whose key (if any) the
