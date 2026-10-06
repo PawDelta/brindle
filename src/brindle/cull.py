@@ -185,7 +185,7 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         ws = db.get_workspace(a.workspace_id)
         try:
-            screen = tmux.capture(a.tmux_window, lines=40)
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
         except tmux.TmuxError:
             screen = ""
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])
@@ -225,12 +225,12 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        last = tmux.window_activity(a.tmux_window) or a.created_at
+        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a)) or a.created_at
         if now - last < SILENT_AFTER or a.stuck_noted == last:
             continue
         ws = db.get_workspace(a.workspace_id)
         try:
-            screen = tmux.capture(a.tmux_window, lines=40)
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
         except tmux.TmuxError:
             screen = ""
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])

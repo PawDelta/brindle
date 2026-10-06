@@ -889,11 +889,19 @@ def is_alive(agent: Agent, panes: dict[str, bool] | None = None) -> bool:
     return tmux.window_alive(agent.tmux_window, server=agent.tmux_server or None)
 
 
+def server_of(agent: Agent) -> str | None:
+    """The tmux server ``agent``'s window is on (a private socket name, or
+    None for the default server), for the ``server`` argument of tmux calls
+    on its pane: reading it, typing into it. Always pass it: a pane id names
+    a different pane on every other server."""
+    return agent.tmux_server or None
+
+
 def own_panes(agent: Agent) -> tmux.PaneSnapshot:
     """A pane snapshot of the tmux server ``agent``'s window is on."""
     if same_server(agent):
         return tmux.list_panes()
-    return tmux.list_panes(server=agent.tmux_server or None)
+    return tmux.list_panes(server=server_of(agent))
 
 
 def pane_owners(db: DB, panes: dict[str, bool] | None = None) -> dict[str, str]:
@@ -1032,7 +1040,8 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None) -> str
         db.enqueue(agent.id, text, sender_id)
         return "delivered" if agent.status == "idle" else "queued"
     if not provider.uses_hooks:
-        tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id))
+        tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
+                   server=server_of(agent))
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id)
     if _deliver_to_inbox(db, agent, message_id, text, sender_id):
@@ -1077,7 +1086,7 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
         if i:
             time.sleep(gap)
         try:
-            screen = tmux.capture(agent.tmux_window, lines=40)
+            screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
         except tmux.TmuxError:
             return None
         state = provider.screen_state(screen)
@@ -1152,7 +1161,8 @@ def flush(db: DB, agent_id: str) -> bool:
         return False
     agent = db.get_agent(agent_id)
     assert agent is not None
-    tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id))
+    tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+               server=server_of(agent))
     return True
 
 
@@ -1166,16 +1176,17 @@ def _paste_blocked(agent: Agent) -> bool:
     re-check before giving up."""
     provider = get_provider(agent.provider)
     interactive = agent.mode == "interactive"
+    server = server_of(agent)
     try:
-        screen = tmux.capture(agent.tmux_window, lines=40, escapes=True)
+        screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
         return False
     reason = provider.paste_blocked(screen, interactive)
     if reason == "background":
-        tmux.send_keys(agent.tmux_window, "Escape")
+        tmux.send_keys(agent.tmux_window, "Escape", server=server)
         time.sleep(0.3)
         try:
-            screen = tmux.capture(agent.tmux_window, lines=40, escapes=True)
+            screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
         except tmux.TmuxError:
             return False
         reason = provider.paste_blocked(screen, interactive)
@@ -1306,7 +1317,7 @@ def wait_for_result(db: DB, agent_id: str, timeout: float, poll: float = 2.0) ->
         if not is_alive(agent):
             screen = ""
             try:
-                screen = tmux.capture(agent.tmux_window, lines=40)
+                screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
             except tmux.TmuxError:
                 pass
             raise AgentError(f"agent {agent_id} exited without reporting. Last output:\n{screen}")

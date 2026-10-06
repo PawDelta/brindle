@@ -375,7 +375,7 @@ def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch):
     a = worker_on(db, ws, "unknown", now - 3600)
     db.update_agent(a.id, provider="codex")
     last = now - cull.SILENT_AFTER - 5
-    monkeypatch.setattr(tmux, "window_activity", lambda target: last)
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: last)
 
     assert cull.note_silent(db, now, {}) != []
     assert cull.note_silent(db, now + 60, {}) == []  # same silence: not again
@@ -386,5 +386,5 @@ def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch):
 def test_recently_active_worker_is_not_silent(db, root, screens, monkeypatch):
     _, ws = root
     worker_on(db, ws, "unknown", time.time() - 3600)
-    monkeypatch.setattr(tmux, "window_activity", lambda target: time.time() - 30)
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: time.time() - 30)
     assert cull.note_silent(db, time.time(), {}) == []

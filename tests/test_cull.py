@@ -163,7 +163,7 @@ def test_another_brindle_homes_agents_are_left_alone(proc_cleanup, monkeypatch):
 
 
 @pytest.fixture
-def other_server(monkeypatch):
+def other_server():
     """A second private tmux server, as a demo recording would use, for the
     cull to run on; the agents under test stay on the test run's server."""
     name = f"brindle-test-{os.getpid()}-other"
@@ -250,6 +250,29 @@ def test_pane_ownership_is_per_server(db, ws, other_server, monkeypatch):
     monkeypatch.setenv("BRINDLE_TMUX_SOCKET", here)
     assert tmux.window_alive(pane), "closing the other server's agent killed this server's pane"
     assert agents.is_alive(db.get_agent("mine"))
+
+
+def test_pane_reads_and_keys_go_to_the_agents_own_server(db, ws, other_server, monkeypatch):
+    # Reading an agent's screen or typing into its pane goes to the server
+    # its window is on, whatever server brindle is using at the time: on any
+    # other server the same pane id would be some other pane (or nothing).
+    tmux.ensure_session(ws.tmux_session, ws.path, {})
+    pane = tmux.new_window(ws.tmux_session, "abc12345", ws.path, ["cat"], {},
+                           tag=(agents.AGENT_TAG, "abc12345"))
+    add(db, ws, "abc12345", status="processing", tmux_window=pane)
+    a = db.get_agent("abc12345")
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    with pytest.raises(tmux.TmuxError):
+        tmux.capture(pane, lines=5)  # nothing of the sort on this server
+    tmux.send_keys(pane, "-l", "hello from brindle", server=agents.server_of(a))
+    deadline = time.time() + 5
+    screen = ""
+    while time.time() < deadline and "hello from brindle" not in screen:
+        time.sleep(0.1)
+        screen = tmux.capture(pane, lines=5, server=agents.server_of(a))
+    assert "hello from brindle" in screen
+    assert tmux.window_activity(pane, server=agents.server_of(a)) is not None
+    assert tmux.window_activity(pane) is None
 
 
 def test_agents_record_the_server_they_were_launched_on(db, ws):

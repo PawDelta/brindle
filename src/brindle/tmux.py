@@ -280,16 +280,17 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
     return result
 
 
-def window_pids(target: str) -> list[int]:
+def window_pids(target: str, server: object = _THIS_SERVER) -> list[int]:
     """The process ids of the programs in ``target``'s panes."""
-    out = _tmux("list-panes", "-t", target, "-F", "#{pane_pid}", check=False).stdout
+    out = _tmux("list-panes", "-t", target, "-F", "#{pane_pid}", check=False, server=server).stdout
     return [int(p) for p in out.split() if p.isdigit()]
 
 
-def window_activity(target: str) -> float | None:
+def window_activity(target: str, server: object = _THIS_SERVER) -> float | None:
     """When ``target``'s window last printed anything (epoch seconds), or
     None if tmux can't say."""
-    proc = _tmux("display-message", "-p", "-t", target, "#{window_activity}", check=False)
+    proc = _tmux("display-message", "-p", "-t", target, "#{window_activity}", check=False,
+                 server=server)
     try:
         return float(proc.stdout.strip())
     except ValueError:
@@ -570,31 +571,38 @@ def kill_session(session: str) -> None:
     _tmux("kill-session", "-t", f"={session}", check=False)
 
 
-def capture(target: str, lines: int = 200, escapes: bool = False) -> str:
+def capture(target: str, lines: int = 200, escapes: bool = False,
+            server: object = _THIS_SERVER) -> str:
     """``escapes`` includes SGR colour/attribute codes (capture-pane -e):
-    needed to tell styled placeholder text apart from something typed."""
+    needed to tell styled placeholder text apart from something typed.
+    ``server``: the tmux server ``target`` is on, when it isn't the one
+    brindle is using (an agent's own; see agents.server_of)."""
     flags = ["-e"] if escapes else []
-    return _tmux("capture-pane", "-p", "-J", *flags, "-t", target, "-S", f"-{lines}").stdout
+    return _tmux("capture-pane", "-p", "-J", *flags, "-t", target, "-S", f"-{lines}",
+                 server=server).stdout
 
 
-def paste(target: str, text: str, submit: bool = True, lead: str | None = None) -> None:
+def paste(target: str, text: str, submit: bool = True, lead: str | None = None,
+          server: object = _THIS_SERVER) -> None:
     """Paste ``text`` as one bracketed paste (so newlines don't submit early),
     then press Enter. ``lead``, a single line, is typed before it instead of
     pasted: agent CLIs treat pasted text as untrusted content, and typed
-    text as the person's own words, so the lead is what vouches for it."""
+    text as the person's own words, so the lead is what vouches for it.
+    ``server`` as for capture."""
     if lead:
-        _tmux("send-keys", "-t", target, "-l", lead.replace("\n", " ") + " ")
+        _tmux("send-keys", "-t", target, "-l", lead.replace("\n", " ") + " ", server=server)
     buf = f"brindle-{uuid.uuid4().hex[:8]}"
-    _tmux("load-buffer", "-b", buf, "-", input=text)
-    _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target)
+    _tmux("load-buffer", "-b", buf, "-", input=text, server=server)
+    _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target, server=server)
     if submit:
         # TUIs debounce paste events; Enter too soon gets folded into the paste.
         time.sleep(0.3)
-        _tmux("send-keys", "-t", target, "Enter")
+        _tmux("send-keys", "-t", target, "Enter", server=server)
 
 
-def send_keys(target: str, *keys: str) -> None:
-    _tmux("send-keys", "-t", target, *keys)
+def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
+    """``server`` as for capture."""
+    _tmux("send-keys", "-t", target, *keys, server=server)
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:
