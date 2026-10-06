@@ -22,6 +22,13 @@ it (see brindle.native.serve.stop_unused).
 
 Interactive agents (supervisor chats) are never closed here; only their
 leftover processes are stopped.
+
+Every judgement from a pane list is about the tmux server it came from (see
+tmux.current_server and agents.same_server): an agent whose window is on
+another server, such as the person's real sessions seen from a demo
+recording's private server, is left alone, since its pane id means nothing
+here. A sweep run with BRINDLE_TMUX_SOCKET set once stopped three live
+workers that way.
 """
 
 from __future__ import annotations
@@ -83,13 +90,17 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         # A pane id a newer agent has since been given isn't this one's.
         return agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)
 
+    def here(a: Agent) -> bool:
+        # Only this server's panes can say whether this agent is running.
+        return agents.same_server(a, panes)
+
     # 1. Processes of agents that shouldn't be running.
     leftovers = []
     for aid in procs.all_agent_ids(table):
         a = db.get_agent(aid)
         if a is None or a.status in ("paused", "done") or a.dismissed_at is not None:
             leftovers.append(aid)
-        elif (agents.runs_process(a) and not alive(a)
+        elif (agents.runs_process(a) and here(a) and not alive(a)
               and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
             db.end_native_subagents(a.id)
             db.set_status(a.id, "done" if a.mode != "interactive" and a.result is not None
@@ -111,7 +122,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     limits: dict[str, float] = {}
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or a.dismissed_at is not None
-                or not agents.runs_process(a)):
+                or not agents.runs_process(a) or not here(a)):
             continue
         if a.status == "paused" and _usage_paused(db, a):
             continue
@@ -163,8 +174,8 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
                 or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting")
-                or not agents.runs_process(a) or not agents.is_alive(a, panes)
-                or not agents.owns_pane(db, a, owners)):
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
         if a.status != "waiting":
             agents.screen_status(db, a, samples=1)
@@ -211,8 +222,8 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
                 or a.dismissed_at is not None or a.status not in ("unknown", "starting")
-                or not agents.runs_process(a) or not agents.is_alive(a, panes)
-                or not agents.owns_pane(db, a, owners)):
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
         last = tmux.window_activity(a.tmux_window) or a.created_at
         if now - last < SILENT_AFTER or a.stuck_noted == last:
@@ -345,12 +356,13 @@ def prune_stale_agents(db: DB, now: float | None = None) -> list[str]:
     for a in db.list_agents():
         # Only agents nothing is running for: a paused one, or one whose
         # process has exited. An idle agent with a live pane is just waiting
-        # at its prompt (a supervisor between requests) and stays.
+        # at its prompt (a supervisor between requests) and stays. Whether a
+        # process has exited is only this server's panes' to say.
         if a.dismissed_at is not None:
             continue
         stopped = a.status == "paused" or (
             a.status in ("idle", "starting", "processing", "waiting", "unknown")
-            and not agents.is_alive(a, panes)
+            and agents.same_server(a, panes) and not agents.is_alive(a, panes)
         )
         if not stopped:
             continue

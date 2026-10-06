@@ -331,8 +331,12 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
     target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id, agent),
                              tag=(AGENT_TAG, agent.id))
-    db.update_agent(agent.id, tmux_window=target)
+    # The pane id only means anything on the server that issued it (a
+    # resumed agent may come back on a different one), so record both.
+    server = tmux.current_server()
+    db.update_agent(agent.id, tmux_window=target, tmux_server=server)
     agent.tmux_window = target
+    agent.tmux_server = server
     if watch_pane:
         # Best effort: a failed split (or a lock some other process held
         # past _sidebar_lock's timeout) must not fail the agent it sits
@@ -694,7 +698,9 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
         ws = db.get_workspace(a.workspace_id)
         if ws:
             sessions.add(ws.tmux_session)
-        if a.tmux_window and owns_pane(db, a, owners):
+        # A window on another tmux server isn't reachable from here, and its
+        # pane id would name some other pane on this one (see same_server).
+        if a.tmux_window and same_server(a) and owns_pane(db, a, owners):
             windows.append(a.tmux_window)
         # Its own SubagentStop hooks will never fire once its process stops.
         db.end_native_subagents(a.id)
@@ -852,18 +858,42 @@ def runs_process(agent: Agent) -> bool:
     return provider is None or provider.launches_process
 
 
+def same_server(agent: Agent, panes: dict[str, bool] | None = None) -> bool:
+    """Whether ``agent``'s window is on the tmux server ``panes`` (a
+    ``tmux.list_panes()`` snapshot; omitted: the server brindle is using)
+    describes. Pane ids are only meaningful on the server that issued them:
+    an agent on another server (a demo recording's private server beside the
+    person's real sessions, say) must never be judged, let alone stopped, by
+    this server's pane list. An agent with no server recorded (launched by an
+    older brindle) counts as the default server's; a plain dict of panes as
+    the current server's."""
+    server = getattr(panes, "server", tmux.current_server())
+    return (agent.tmux_server or None) == server
+
+
 def is_alive(agent: Agent, panes: dict[str, bool] | None = None) -> bool:
     """``panes`` is a pre-fetched ``tmux.list_panes()`` result, shared by a
     whole snapshot so callers don't each shell out for their own agent's
-    pane. Omit it to check this one agent's pane directly."""
+    pane. Omit it to check this one agent's pane directly. An agent whose
+    window is on another tmux server than the snapshot's (see same_server)
+    is asked of its own server instead: the snapshot can't speak for it."""
     if not runs_process(agent):
         # No process to watch: it's at work until its result is recorded.
         return agent.result is None and agent.status not in ("paused", "done")
     if not agent.tmux_window:
         return False
-    if panes is not None:
+    if panes is not None and same_server(agent, panes):
         return panes.get(agent.tmux_window, False)
-    return tmux.window_alive(agent.tmux_window)
+    if same_server(agent):
+        return tmux.window_alive(agent.tmux_window)
+    return tmux.window_alive(agent.tmux_window, server=agent.tmux_server or None)
+
+
+def own_panes(agent: Agent) -> tmux.PaneSnapshot:
+    """A pane snapshot of the tmux server ``agent``'s window is on."""
+    if same_server(agent):
+        return tmux.list_panes()
+    return tmux.list_panes(server=agent.tmux_server or None)
 
 
 def pane_owners(db: DB, panes: dict[str, bool] | None = None) -> dict[str, str]:
@@ -878,12 +908,14 @@ def pane_owners(db: DB, panes: dict[str, bool] | None = None) -> dict[str, str]:
     records the pane id a moment after the pane exists) and the sidebar,
     which no agent row ever names. ``panes`` is a pre-fetched
     ``tmux.list_panes()`` snapshot, which already carries the tags; without
-    one, this fetches its own."""
-    owners = {a.tmux_window: a.id for a in db.list_agents() if a.tmux_window}  # oldest first
-    tags = getattr(panes, "tags", None)
-    if tags is None:
-        tags = tmux.list_panes().tags
-    for pane, found in tags.items():
+    one, this fetches its own. Only agents on the snapshot's tmux server are
+    listed (see same_server): another server hands out the same pane ids,
+    and its agents are no claim on this one's panes."""
+    if panes is None or not isinstance(panes, tmux.PaneSnapshot):
+        panes = tmux.list_panes()
+    owners = {a.tmux_window: a.id for a in db.list_agents()
+              if a.tmux_window and same_server(a, panes)}  # oldest first
+    for pane, found in panes.tags.items():
         owners[pane] = found.get(AGENT_TAG, "")  # a sidebar is no agent's pane
     return owners
 
@@ -892,10 +924,15 @@ def owns_pane(db: DB, agent: Agent, owners: dict[str, str] | None = None) -> boo
     """False when a newer agent has since been recorded on ``agent``'s pane
     id: that pane, if alive, is the newer agent's, never ``agent``'s. Check
     this before touching an agent's window (killing it, reading it).
-    ``owners`` is a pre-fetched ``pane_owners`` result, for loops."""
+    ``owners`` is a pre-fetched ``pane_owners`` result, for loops. A pane
+    those owners don't cover at all belongs to another tmux server (see
+    pane_owners), where nothing here could have taken it over; without
+    ``owners``, the agent's own server is asked."""
     if not agent.tmux_window:
         return True
-    return (pane_owners(db) if owners is None else owners).get(agent.tmux_window) == agent.id
+    if owners is None:
+        owners = pane_owners(db, own_panes(agent))
+    return owners.get(agent.tmux_window, agent.id) == agent.id
 
 
 def format_message(db: DB, body: str, sender_id: str | None) -> str:
@@ -1366,7 +1403,9 @@ def _stop(db: DB, agent: Agent) -> None:
     A pane id a newer agent has since been given is left alone (see owns_pane)."""
     from brindle import procs
 
-    window = agent.tmux_window if owns_pane(db, agent) else ""
+    # Only a window on the server brindle is using: another server's pane
+    # ids mean other panes here (see same_server).
+    window = agent.tmux_window if same_server(agent) and owns_pane(db, agent) else ""
     pane_pids = tmux.window_pids(window) if window else []
     if window:
         tmux.kill_window(window)

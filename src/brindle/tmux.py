@@ -17,17 +17,36 @@ class TmuxError(RuntimeError):
     pass
 
 
+def current_server() -> str | None:
+    """The private tmux server brindle is using (BRINDLE_TMUX_SOCKET: the
+    test suite's, or a demo recording's), or None for the default server.
+    Recorded on each agent at launch (agents.tmux_server): pane ids are only
+    meaningful on the server that issued them, so nothing may judge an agent
+    by another server's panes."""
+    return os.environ.get("BRINDLE_TMUX_SOCKET") or None
+
+
+def _argv(server: str | None) -> list[str]:
+    return ["tmux", "-L", server] if server else ["tmux"]
+
+
 def _base() -> list[str]:
     """``tmux``, or ``tmux -L <name>`` when BRINDLE_TMUX_SOCKET selects a
     private server (used by the test suite so runs can't collide)."""
-    sock = os.environ.get("BRINDLE_TMUX_SOCKET")
-    return ["tmux", "-L", sock] if sock else ["tmux"]
+    return _argv(current_server())
 
 
-def _tmux(*args: str, input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+# The default ``server`` of the calls that can ask another tmux server: the
+# one brindle is using (see current_server).
+_THIS_SERVER: object = object()
+
+
+def _tmux(*args: str, input: str | None = None, check: bool = True,
+          server: object = _THIS_SERVER) -> subprocess.CompletedProcess:
     if not shutil.which("tmux"):
         raise TmuxError("tmux is not installed (macOS: `brew install tmux`)")
-    proc = subprocess.run([*_base(), *args], capture_output=True, text=True, input=input)
+    base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
+    proc = subprocess.run([*base, *args], capture_output=True, text=True, input=input)
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)}: {proc.stderr.strip()}")
     return proc
@@ -201,8 +220,11 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
     return pane
 
 
-def window_alive(target: str) -> bool:
-    proc = _tmux("display-message", "-p", "-t", target, "#{pane_dead}", check=False)
+def window_alive(target: str, server: object = _THIS_SERVER) -> bool:
+    """Whether ``target`` (a pane or window id) is alive. ``server`` names
+    another tmux server to ask (a private socket name, or None for the
+    default server): an agent's own, when it isn't the one brindle is using."""
+    proc = _tmux("display-message", "-p", "-t", target, "#{pane_dead}", check=False, server=server)
     return proc.returncode == 0 and proc.stdout.strip() == "0"
 
 
@@ -218,27 +240,31 @@ PANE_TAGS = (AGENT_TAG, SIDEBAR_TAG)
 class PaneSnapshot(dict):
     """list_panes' result: pane (and window) id -> alive, plus ``tags``,
     pane id -> {tag: value} for every live-or-dead pane that carries one of
-    PANE_TAGS."""
+    PANE_TAGS, and ``server``, the tmux server it was taken from (see
+    current_server): it says nothing about panes on any other server."""
 
     tags: dict[str, dict[str, str]]
+    server: str | None
 
-    def __init__(self) -> None:
+    def __init__(self, server: str | None = None) -> None:
         super().__init__()
         self.tags = {}
+        self.server = server
 
 
-def list_panes() -> PaneSnapshot:
-    """Every pane's liveness across every session on this server, in one
+def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
+    """Every pane's liveness across every session on this server (or on
+    ``server``, another one's name, or None for the default server), in one
     call, keyed by pane id (and also by window id, for agents whose stored
     ``tmux_window`` predates pane-id tracking -- a window counts as alive if
     any of its panes are), with each pane's brindle tags (see PANE_TAGS). A
     snapshot with several agents can share this instead of one
     ``display-message`` per agent. Empty (not an error) when there is no
     server running, or tmux isn't installed at all."""
-    result = PaneSnapshot()
+    result = PaneSnapshot(current_server() if server is _THIS_SERVER else server)  # type: ignore[arg-type]
     fmt = "\t".join(["#{window_id}", "#{pane_id}", "#{pane_dead}", *(f"#{{{k}}}" for k in PANE_TAGS)])
     try:
-        proc = _tmux("list-panes", "-a", "-F", fmt, check=False)
+        proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
     except TmuxError:
         return result
     if proc.returncode != 0:
