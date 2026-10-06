@@ -431,3 +431,131 @@ def test_installed_uses_the_given_path(bins):
     assert a.installed({"PATH": str(bins)}) and a.installed()
     assert not a.installed({"PATH": "/nonexistent"})
     assert os.path.basename(a.cli_path({"PATH": str(bins)})) == "claude"
+
+
+# -- Claude Code's first-run screens in CI -----------------------------------------------------
+
+KEY = "sk-ant-api03-dummydummydummydummydummy0123456789abcdefABCDEFG"
+# What a fresh runner's pane showed (Claude Code 2.1.292).
+THEME_PICKER = """ Let's get started.
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+     Auto (match terminal)
+ ❯ ✔ Dark mode
+     Light mode
+"""
+API_KEY_QUESTION = """  Detected a custom API key in your environment
+  ANTHROPIC_API_KEY: sk-ant-...3456789abcdefABCDEFG
+  Do you want to use this API key?
+    Yes
+  ❯ No (recommended)
+  Enter to confirm · Esc to cancel
+"""
+PROMPT = """────────────────
+❯ Try "write a test for <filepath>"
+────────────────
+  ⏸ manual mode on · ? for shortcuts
+"""
+
+
+def _config(tmp_path):
+    return json.loads((tmp_path / "claude-config" / ".claude.json").read_text())
+
+
+def test_prepare_seeds_a_missing_claude_config(tmp_path, repo):
+    import stat
+
+    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_API_KEY": KEY})
+    path = tmp_path / "claude-config" / ".claude.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    data = _config(tmp_path)
+    assert data["hasCompletedOnboarding"] is True and data["theme"]
+    assert data["projects"][os.path.realpath(repo)] == {"hasTrustDialogAccepted": True}
+    assert data["customApiKeyResponses"]["approved"] == [KEY[-20:]]
+    assert KEY not in path.read_text(), "only the key's last 20 characters are stored"
+
+
+def test_prepare_merges_into_existing_state(tmp_path, repo):
+    path = tmp_path / "claude-config" / ".claude.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"numStartups": 3, "theme": "light", "projects": {"/elsewhere": {"x": 1}},
+                                "customApiKeyResponses": {"approved": ["other"], "rejected": [KEY[-20:]]}}))
+    path.chmod(0o644)
+    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_API_KEY": KEY})
+    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_API_KEY": KEY})   # idempotent
+    data = _config(tmp_path)
+    assert data["numStartups"] == 3 and data["theme"] == "light"
+    assert data["projects"]["/elsewhere"] == {"x": 1}
+    assert data["customApiKeyResponses"] == {"approved": ["other", KEY[-20:]], "rejected": []}
+    assert oct(path.stat().st_mode & 0o777) == oct(0o600)
+
+
+def test_prepare_without_a_key_approves_none(tmp_path, repo):
+    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_AUTH_TOKEN": "federated"})
+    assert "customApiKeyResponses" not in _config(tmp_path)
+
+
+def test_prepare_refuses_a_config_that_isnt_an_object(tmp_path, repo):
+    path = tmp_path / "claude-config" / ".claude.json"
+    path.parent.mkdir()
+    path.write_text("[]")
+    with pytest.raises(ci_adapters.AdapterError, match="couldn't set up Claude Code's state"):
+        ClaudeAdapter.prepare(str(repo), {})
+    assert path.read_text() == "[]"
+
+
+def test_worktrees_are_trusted_once_ci_seeded_the_config(tmp_path, repo):
+    from brindle.providers import trust_folder
+
+    ClaudeAdapter.prepare(str(repo), {})
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    assert trust_folder(str(wt)) is True
+    assert _config(tmp_path)["projects"][os.path.realpath(wt)]["hasTrustDialogAccepted"] is True
+
+
+def test_first_run_screens_are_recognised():
+    from brindle.providers import ClaudeCode
+
+    assert ClaudeCode.first_run_screen(THEME_PICKER) == "its first-run theme picker"
+    assert "API key" in ClaudeCode.first_run_screen(API_KEY_QUESTION)
+    assert ClaudeCode.first_run_screen(PROMPT) is None
+    assert ClaudeCode.first_run_screen(API_KEY_QUESTION + PROMPT) is None, "only quoted in the transcript"
+
+
+def _launch_showing(monkeypatch, db, repo, screens):
+    from brindle import agents, tmux, workspaces
+    from brindle.db import Agent
+
+    ws = workspaces.adopt_root(db, str(repo))
+    root = Agent(id="root0000", workspace_id=ws.id, profile="supervisor", provider="claude", parent_id=None,
+                 mode="interactive", status="idle", tmux_window="%9", result=None, created_at=1.0)
+    monkeypatch.setattr(agents, "spawn", lambda *a, **kw: root)
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: screens.pop(0) if len(screens) > 1 else screens[0])
+    monkeypatch.setattr(ci_adapters.time, "sleep", lambda s: None)
+    stopped = []
+    monkeypatch.setattr(agents, "pause", lambda db_, rid: stopped.append(rid))
+    return ws, root, stopped
+
+
+@pytest.mark.parametrize("screen, what", [(THEME_PICKER, "theme picker"), (API_KEY_QUESTION, "API key")])
+def test_launch_fails_fast_on_a_first_run_screen(db, repo, monkeypatch, screen, what):
+    ws, root, stopped = _launch_showing(monkeypatch, db, repo, [screen])
+    with pytest.raises(ci_adapters.AdapterError, match=what):
+        ClaudeAdapter().launch(db, ws, "go", None)
+    assert stopped == ["root0000"]
+
+
+def test_launch_returns_once_the_prompt_shows(db, repo, monkeypatch, tmp_path):
+    ws, root, stopped = _launch_showing(monkeypatch, db, repo, ["", PROMPT])
+    assert ClaudeAdapter().launch(db, ws, "go", None) is root
+    assert stopped == []
+    assert _config(tmp_path)["projects"][os.path.realpath(ws.path)]["hasTrustDialogAccepted"] is True
+
+
+def test_stuck_screen_reads_the_supervisors_pane(db, repo, monkeypatch):
+    _, root, _ = _launch_showing(monkeypatch, db, repo, [API_KEY_QUESTION])
+    assert "API key" in ClaudeAdapter().stuck_screen(db, root)
+    _, root, _ = _launch_showing(monkeypatch, db, repo, [PROMPT])
+    assert ClaudeAdapter().stuck_screen(db, root) is None
+    assert CodexAdapter().stuck_screen(db, root) is None

@@ -84,6 +84,8 @@ CI_MAX_RESPONSE = 1024 * 1024    # a plan can be 256 KB, and comes inside a JSON
 OIDC_AUDIENCE = "https://pawdelta.com/brindle"
 OIDC_HEADER = "X-Brindle-OIDC"
 OIDC_TTL = 240
+OIDC_EXP_MARGIN = 30             # stop sending a token this long before its exp
+OIDC_RETRY_DELAYS = (1.0, 3.0)   # between tries of a failed OIDC fetch
 PLAN_FILE = "plan.jwt"
 CONCLUSIONS = ("success", "failure", "cancelled")
 KILL_GRACE_S = 10.0              # wait this long for a killed check's output pipe to close
@@ -399,8 +401,11 @@ def _fetch_oidc(url: str, request_token: str, timeout: float = 15.0) -> str:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read(64 * 1024)
-    except (urllib.error.URLError, OSError, ValueError):
-        raise CIError("couldn't get the GitHub Actions OIDC token", code="oidc") from None
+    except urllib.error.HTTPError as e:
+        raise CIError(f"couldn't get the GitHub Actions OIDC token (HTTP {e.code})", code="oidc") from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        why = type(getattr(e, "reason", None) or e).__name__
+        raise CIError(f"couldn't get the GitHub Actions OIDC token ({why})", code="oidc") from None
     try:
         value = json.loads(body.decode("utf-8")).get("value")
     except (ValueError, AttributeError, UnicodeDecodeError):
@@ -415,15 +420,19 @@ class OIDC:
     audience, when this job can mint one (``ACTIONS_ID_TOKEN_REQUEST_URL`` and
     ``ACTIONS_ID_TOKEN_REQUEST_TOKEN``, read once at construction, before the
     job's secrets are scrubbed). Outside Actions there is no header. Tokens
-    are cached a few minutes and never logged."""
+    are cached a few minutes (never past their own ``exp``) and never logged.
+
+    GitHub's token endpoint fails now and then; a run job asks it once per
+    heartbeat for hours, so a failed fetch is retried, and when it still
+    fails a cached token that hasn't expired yet is sent instead."""
 
     def __init__(self, env: Mapping[str, str] | None = None, fetch: Callable[[str, str], str] = _fetch_oidc,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep) -> None:
         env = os.environ if env is None else env
         self.url = env.get("ACTIONS_ID_TOKEN_REQUEST_URL") or None
         self.request_token = env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN") or None
-        self._fetch, self._clock = fetch, clock
-        self._cached: tuple[float, str] | None = None
+        self._fetch, self._clock, self._sleep = fetch, clock, sleep
+        self._cached: tuple[float, float, str] | None = None   # (refresh at, expires at, token)
 
     @property
     def available(self) -> bool:
@@ -439,8 +448,41 @@ class OIDC:
             return {}
         now = self._clock()
         if self._cached is None or self._cached[0] <= now:
-            self._cached = (now + OIDC_TTL, self._fetch(self.url, self.request_token))
-        return {OIDC_HEADER: self._cached[1]}
+            try:
+                token = self._fetch_retrying()
+            except CIError:
+                if self._cached is not None and self._cached[1] > self._clock():
+                    return {OIDC_HEADER: self._cached[2]}
+                raise
+            now = self._clock()
+            expires = _jwt_exp(token)
+            expires = now + OIDC_TTL + OIDC_EXP_MARGIN if expires is None else expires - OIDC_EXP_MARGIN
+            self._cached = (min(now + OIDC_TTL, expires), expires, token)
+        return {OIDC_HEADER: self._cached[2]}
+
+    def _fetch_retrying(self) -> str:
+        for delay in (*OIDC_RETRY_DELAYS, None):
+            try:
+                return self._fetch(self.url, self.request_token)
+            except CIError:
+                if delay is None:
+                    raise
+                self._sleep(delay)
+        raise AssertionError("unreachable")
+
+
+def _jwt_exp(token: str) -> float | None:
+    """A JWT's ``exp``, read without verifying it (the server verifies it;
+    this only says when to stop sending it)."""
+    import base64
+
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        exp = claims.get("exp")
+    except (IndexError, ValueError, AttributeError, TypeError):
+        return None
+    return float(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
 
 
 class Client:
@@ -721,6 +763,8 @@ def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | 
         state, note = "stalled", ap.note
     elif root.status in ("paused", "done") or not adapter.alive(db, root):
         state, note = "failed", f"the supervisor is {root.status}"
+    elif stuck := adapter.stuck_screen(db, root):
+        state, note = "failed", stuck
     else:
         state, note = "working", f"supervisor {root.status}; autopilot {ap.state if ap else 'off'}"
     event = {"state": state, "milestones": milestone_rows(db, root_id, milestone_ids),
@@ -799,7 +843,10 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
         adapter = adapters.get(p["provider"])
         if adapter is None:
             raise CIError(f"no adapter for provider {p['provider']}")
-        root = adapter.launch(db, ws, p["instructions"], p.get("profile"))
+        try:
+            root = adapter.launch(db, ws, p["instructions"], p.get("profile"))
+        except ci_adapters.AdapterError as e:
+            raise CIError(f"the {p['provider']} supervisor couldn't start: {e}", code="launch") from None
         _set_goal(db, root.id, p)
         providers_used.append(p["provider"])
         say(f"supervisor {root.id} started ({p['provider']}, attempt {p.get('attempt', 1)})")
@@ -818,7 +865,7 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
         except CIError as e:
             if e.code in ("airgap", "bad_plan"):
                 raise
-            log.warning("brindle ci: heartbeat failed (%s)", e.code)
+            log.warning("brindle ci: heartbeat failed (%s): %s", e.code, e)
             if clock() > deadline:
                 final = "timeout"
             continue

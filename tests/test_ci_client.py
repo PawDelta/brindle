@@ -264,6 +264,82 @@ def test_oidc_header_on_every_call_inside_actions(plan, tmp_path):
     assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in env and captured.oidc.available
 
 
+def _jwt(exp) -> str:
+    import base64
+
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+    return f"h.{payload}.s"
+
+
+ACTIONS = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test/x",
+           "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req-secret"}
+
+
+def test_oidc_retries_a_failed_fetch():
+    answers = [CIError("down", code="oidc"), CIError("down", code="oidc"), _jwt(2000)]
+    slept = []
+
+    def fetch(url, request_token):
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return a
+    oidc = ci_client.OIDC(ACTIONS, fetch=fetch, clock=lambda: 1000.0, sleep=slept.append)
+    assert oidc.header() == {"X-Brindle-OIDC": _jwt(2000)}
+    assert slept == list(ci_client.OIDC_RETRY_DELAYS)
+
+
+def test_oidc_falls_back_to_an_unexpired_token_then_gives_up():
+    clock = {"t": 1000.0}
+    fail = {"on": False}
+
+    def fetch(url, request_token):
+        if fail["on"]:
+            raise CIError("couldn't get the GitHub Actions OIDC token (HTTP 503)", code="oidc")
+        return _jwt(clock["t"] + 600)
+    oidc = ci_client.OIDC(ACTIONS, fetch=fetch, clock=lambda: clock["t"], sleep=lambda s: None)
+    token = oidc.header()["X-Brindle-OIDC"]
+    fail["on"] = True
+    clock["t"] += ci_client.OIDC_TTL + 1          # due for a refresh, but the old one is still good
+    assert oidc.header() == {"X-Brindle-OIDC": token}
+    clock["t"] = 1000.0 + 600                     # past its exp: no stale token is ever sent
+    with pytest.raises(CIError, match="HTTP 503"):
+        oidc.header()
+
+
+def test_oidc_refreshes_before_the_token_expires():
+    fetched = []
+
+    def fetch(url, request_token):
+        fetched.append(1)
+        return _jwt(1000.0 + 60)                  # shorter-lived than OIDC_TTL
+    clock = {"t": 1000.0}
+    oidc = ci_client.OIDC(ACTIONS, fetch=fetch, clock=lambda: clock["t"], sleep=lambda s: None)
+    oidc.header()
+    clock["t"] += 60 - ci_client.OIDC_EXP_MARGIN
+    oidc.header()
+    assert len(fetched) == 2
+
+
+def test_oidc_fetch_says_why_it_failed(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    def http_error(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 503, "busy", {}, io.BytesIO(b""))
+    monkeypatch.setattr(urllib.request, "urlopen", http_error)
+    with pytest.raises(CIError, match=r"\(HTTP 503\)") as e:
+        ci_client._fetch_oidc("https://token.actions.test/x", "req-secret")
+    assert "req-secret" not in str(e.value) and e.value.code == "oidc"
+
+    def timeout(req, timeout=0):
+        raise urllib.error.URLError(TimeoutError("timed out"))
+    monkeypatch.setattr(urllib.request, "urlopen", timeout)
+    with pytest.raises(CIError, match=r"\(TimeoutError\)"):
+        ci_client._fetch_oidc("https://token.actions.test/x", "req-secret")
+
+
 def test_oidc_fetch_parses_the_actions_answer(monkeypatch):
     import urllib.request
 
@@ -463,6 +539,37 @@ def test_run_reports_needs_user(plan, ci_repo, tmp_path):
     assert adapter.stopped == [adapter.launched[0][0]]
     ev = evidence_of(server.results[0])
     assert ev["final_state"] == "needs_user" and ev["question"] == "which database?"
+
+
+def test_run_fails_fast_when_the_supervisor_cant_start(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+
+    class Stuck(FakeAdapter):
+        def launch(self, db, ws, instructions, profile):
+            raise ci_adapters.AdapterError("Claude Code stopped on its first-run theme picker, "
+                                           "which nobody in CI can answer")
+    server = Server(token)
+    with pytest.raises(CIError, match="claude supervisor couldn't start: .*theme picker") as e:
+        ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                      db=DB(), adapters={"claude": Stuck("claude")}, sleep=lambda s: None, say=lambda s: None)
+    assert e.value.code == "launch" and server.events == []
+
+
+def test_run_ends_when_the_supervisor_sits_on_a_first_run_screen(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+
+    class Stuck(FakeAdapter):
+        def stuck_screen(self, db, root):
+            return 'Claude Code is on its "use this API key?" question, which nobody in CI can answer'
+    adapter = Stuck("claude")
+    server = Server(token)   # the server only ever says continue
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=DB(), adapters={"claude": adapter}, sleep=lambda s: None, say=lambda s: None)
+    assert len(server.events) == 1
+    assert server.events[0]["state"] == "failed" and "API key" in server.events[0]["note"]
+    assert evidence_of(server.results[0])["final_state"] == "failed"
 
 
 def test_run_keeps_heartbeating_while_stalled(plan, ci_repo, tmp_path):
