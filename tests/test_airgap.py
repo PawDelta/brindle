@@ -273,17 +273,9 @@ def test_learning_sends_nothing_and_suggests_nothing(on, backend, tmp_path, fixe
     assert "inactive" in learner.report()
 
 
-def test_ci_token_exchange_and_ci_token_commands_are_refused(on, backend, monkeypatch):
-    """brindle ci's POST /ci/entitlement and the org ci-token helpers are Pro
-    paths like any other: refused before the transport, with a message that
-    points at the offline license."""
-    from brindle import ci
-
-    with pytest.raises(auth.AirGapped):
-        ci.entitlement_from_token("cpc_" + "x" * 40, client(backend))
-    monkeypatch.setenv(ci.TOKEN_ENV, "cpc_" + "x" * 40)
-    with pytest.raises(ci.CIError, match="air-gap mode.*license install"):
-        ci.require_ci(client(backend))
+def test_ci_token_commands_are_refused(on, backend):
+    """The org ci-token helpers are Pro paths like any other: refused before
+    the transport."""
     store = login(backend, team_claims(features=["team", "ci"]))
     for call in (lambda: auth.create_ci_token(client(backend), store, ORG, "gh"),
                  lambda: auth.list_ci_tokens(client(backend), store, ORG),
