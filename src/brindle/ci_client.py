@@ -1054,12 +1054,12 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
 
     plugin = account or account_mod.make(cwd)
     api = client or Client(base)
-    install_url = api.base + "/github/install"
+    org_id = plugin._team_org(org)
+    install_url = api.base + "/github/install?" + urllib.parse.urlencode({"org_id": org_id})
     say(f"2/6 install the brindle GitHub App for {repo}: {install_url}")
     (open_url or webbrowser.open)(install_url)
 
     say("3/6 creating the org CI token and storing it as the BRINDLE_PRO_TOKEN secret")
-    org_id = plugin._team_org(org)
     got = auth.create_ci_token(plugin._client(base), plugin.store, org_id, f"ci:{repo}")
     cpc = got["token"]
     _gh(["secret", "set", ENV_TOKEN, "--repo", repo], run=run, input=cpc)
