@@ -983,6 +983,7 @@ def test_cli_start_needs_the_token(ci_repo, tmp_path, monkeypatch):
     from brindle.cli import app
 
     monkeypatch.delenv("BRINDLE_PRO_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)   # on GitHub Actions it names the real repo
     result = CliRunner().invoke(app, ["ci", "start", "--repo", REPO, "--issue", "1", "--out", str(tmp_path)])
     assert result.exit_code == 1 and "BRINDLE_PRO_TOKEN isn't set" in result.output
 
