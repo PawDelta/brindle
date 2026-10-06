@@ -529,6 +529,78 @@ def test_tests_in_diff():
     assert v.tests_in_diff(diff) == {"test_a", "test_b", "TestGo", "renders the thing", "test_new"}
 
 
+# -- end to end: the verdict feeds the reporter -----------------------------------
+
+
+class RecordingGh:
+    """The reporter's gh: records the check run and the comment it posts."""
+
+    def __init__(self):
+        self.payloads = []
+
+    def __call__(self, args, payload=None, env=None):
+        if payload is not None:
+            self.payloads.append((args, payload))
+        return ""    # no earlier comment to update
+
+    def check(self):
+        return next(p for a, p in self.payloads if "check-runs" in a[3])
+
+    def comment(self):
+        return next(p["body"] for a, p in self.payloads if "comments" in a[3])
+
+
+def plain(markdown: str) -> str:
+    """The reporter's escaped markdown with the escapes undone, for substring checks."""
+    return markdown.replace("​", "").replace("\\", "")
+
+
+def test_the_verdict_feeds_straight_into_the_reporter(pr_repo, gh, tmp_path):
+    from brindle import ci_validate_report as cvr
+
+    repo, sha = pr_repo
+    opinion = reply([(1, "met", "test_health"), (2, "met", "test_health")],
+                    [("blocking", "health.py", 2, "`uptime` is **hardcoded** <script>alert(1)</script>")])
+    verdict = validate(pr_repo, mode="blocking", run_check=failing, ask_fn=canned(("rev-a", opinion)))
+    assert verdict.status == "fail"
+    path = verdict.write(tmp_path / "verdict.json")
+
+    v = cvr.load_verdict(path)              # the reporter's own schema check and caps
+    assert v == verdict.to_dict()
+    posted = RecordingGh()
+    out = cvr.report(path, "acme/widgets", 3, sha, "blocking", gh=posted)
+    assert out == {"status": "fail", "conclusion": "failure", "comment": "created"}
+    check = posted.check()
+    assert check["head_sha"] == sha and check["conclusion"] == "failure"
+    body = posted.comment()
+    assert body.startswith(cvr.MARKER) and "❌ fail" in body
+    assert "<script>" not in body             # the finding's text is escaped, not rendered
+    text = plain(body)
+    assert "echo trusted-check" in text and "AssertionError: 404 != 200" in text
+    assert "GET /health returns 200" in text and "the body has uptime" in text
+    assert "test_health" in text and "rev-a" in text and "hardcoded" in text
+    # The same verdict posted by an advisory workflow is never a failed check.
+    assert cvr.report(path, "acme/widgets", 3, sha, "advisory", gh=RecordingGh())["conclusion"] == "neutral"
+
+
+def test_a_verdict_without_a_commit_still_reports_its_error(pr_repo, monkeypatch, tmp_path):
+    from brindle import ci_validate_report as cvr
+
+    def broken(args, cwd):
+        raise ci.CIError("gh pr view failed: HTTP 502")
+
+    monkeypatch.setattr(v, "_gh_json", broken)
+    path = validate(pr_repo, mode="blocking").write(tmp_path / "verdict.json")
+    assert json.loads(path.read_text())["head_sha"] == ""
+    posted = RecordingGh()
+    out = cvr.report(path, "acme/widgets", 3, pr_repo[1], "blocking", gh=posted)
+    assert out["status"] == "error" and out["conclusion"] == "failure"
+    assert posted.check()["head_sha"] == pr_repo[1]
+    assert "gh pr view failed: HTTP 502" in plain(posted.comment())
+    with pytest.raises(cvr.VerdictError):      # only an error verdict may lack its commit
+        cvr.validate_verdict({**json.loads(path.read_text()), "status": "pass"})
+
+
 # -- the command ------------------------------------------------------------------
 
 

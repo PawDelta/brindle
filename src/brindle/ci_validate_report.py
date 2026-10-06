@@ -124,7 +124,9 @@ def validate_verdict(data) -> dict:
     if not _int(d.get("pr")) or d["pr"] <= 0:
         raise VerdictError("pr must be a positive integer")
     sha = d.get("head_sha")
-    if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+    # An error verdict may have no commit: `brindle ci validate` writes one
+    # when gh couldn't even tell it the head. The workflow's --sha fills it in.
+    if not isinstance(sha, str) or not (_SHA.fullmatch(sha) or (sha == "" and d.get("status") == "error")):
         raise VerdictError("head_sha must be a full hex commit id")
     tokens = d.get("tokens")
     if "tokens" not in d or not (tokens is None or (_int(tokens) and tokens >= 0)):
@@ -416,9 +418,10 @@ def report(verdict_path: str | Path | None, repo: str, pr: int, sha: str, mode: 
             v = load_verdict(verdict_path) if verdict_path else None
             if v is None:
                 raise VerdictError("no verdict: the validate job didn't produce one")
-            if v["pr"] != pr or v["head_sha"] != sha:
+            if v["pr"] != pr or (v["head_sha"] and v["head_sha"] != sha):
                 raise VerdictError(f"the verdict is for another pull request or commit, not "
                                    f"#{pr} at {sha[:12]}")
+            v["head_sha"] = v["head_sha"] or sha
         except VerdictError as e:
             v = error_verdict(pr, sha, mode, f"brindle validate produced no usable verdict: {e}")
     create_check(repo, sha, v, mode, gh)
