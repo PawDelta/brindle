@@ -471,8 +471,12 @@ class Client:
             raise _error(status, body)
         return body
 
-    def job_status(self, token: str, run_id: str, repo: str, job: str, conclusion: str) -> None:
-        status, body = self._call("POST", f"/ci/runs/{urllib.parse.quote(run_id, safe='')}/job-status",
+    def job_status(self, token: str, the_id: str, repo: str, job: str, conclusion: str,
+                   kind: str = "run") -> None:
+        """``POST /ci/runs/{id}/job-status`` (``kind="run"``) or
+        ``POST /ci/validations/{id}/job-status`` (``kind="validation"``)."""
+        collection = "validations" if kind == "validation" else "runs"
+        status, body = self._call("POST", f"/ci/{collection}/{urllib.parse.quote(the_id, safe='')}/job-status",
                                   auth.JSONBody(repo=repo, job=job, conclusion=conclusion), token)
         if status != 200:
             raise _error(status, body)
@@ -546,6 +550,11 @@ def start(repo: str, trigger: dict, out_dir: str | Path, *, client: Client, toke
                 else f"run {auth._sanitize(existing.get('run_id', '?'), 80)}")
         say(f"not started: {what} already covers this (the server has commented)")
         return 0
+    if status == 409 and body.get("error") == "branch_conflict":
+        msg = body.get("message")
+        say("not started: " + (auth._sanitize(msg, 300) if _str(msg) else "the branch has changes brindle didn't make")
+            + " (the server has commented)")
+        return 0
     raise _error(status, body)
 
 
@@ -600,24 +609,40 @@ def plan_id(plan_token: str) -> tuple[str, str, str]:
 def report(plan_dir: str | Path, *, client: Client, token: str, start: str | None, run: str | None,
            say: Callable[[str], None] = print) -> None:
     """``brindle ci report``: tell the server how the start and run jobs
-    ended (``POST /ci/runs/{id}/job-status``), so it can comment when the
-    run job died without uploading. Nothing to report when the start job
-    wrote no plan (a duplicate or a skip)."""
-    path = Path(plan_dir) / PLAN_FILE
+    ended, so it can comment (a run) or post the check (a validation) when
+    the run job died without uploading. A run reports every conclusion
+    given to ``POST /ci/runs/{id}/job-status``; a validation reports only a
+    failed or cancelled run job, to ``POST /ci/validations/{id}/job-status``,
+    with the run token when the run job left it behind, else the CI token.
+    Nothing to report when the start job wrote no plan (a duplicate, a
+    conflict or a skip)."""
+    plan_dir = Path(plan_dir)
     try:
-        plan_token = path.read_text("utf-8").strip()
+        plan_token = (plan_dir / PLAN_FILE).read_text("utf-8").strip()
     except OSError:
         say("nothing to report: the start job wrote no plan")
         return
+    for job, conclusion in (("start", start), ("run", run)):
+        if conclusion is not None and conclusion not in CONCLUSIONS:
+            raise CIError(f"--{job} must be one of {', '.join(CONCLUSIONS)}")
     kind, the_id, repo = plan_id(plan_token)
-    if kind != "run":
-        say("nothing to report: validations report through their evidence")
+    if kind == "validation":
+        if run not in ("failure", "cancelled"):
+            say("nothing to report: the validation's run job uploaded its evidence")
+            return
+        bearer = token
+        try:
+            left = (plan_dir / TOKEN_FILE).read_text("utf-8").strip()
+            if RUN_TOKEN_RE.match(left):
+                bearer = left        # the run job never read it: it is still good for this one call
+        except OSError:
+            pass
+        client.job_status(bearer, the_id, repo, "run", run, kind="validation")
+        say(f"reported: run job {run}")
         return
     for job, conclusion in (("start", start), ("run", run)):
         if conclusion is None:
             continue
-        if conclusion not in CONCLUSIONS:
-            raise CIError(f"--{job} must be one of {', '.join(CONCLUSIONS)}")
         client.job_status(token, the_id, repo, job, conclusion)
         say(f"reported: {job} job {conclusion}")
 

@@ -335,7 +335,7 @@ def test_report_posts_job_status(plan, tmp_path):
         ci_client.report(tmp_path, client=client, token=CI_TOKEN, start=None, run="exploded", say=said.append)
     (tmp_path / "plan.jwt").write_text(plan("validation"))
     ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="success", say=said.append)
-    assert said[-1].startswith("nothing to report: validations") and len(t.calls) == 1
+    assert said[-1].startswith("nothing to report: the validation") and len(t.calls) == 1
     (tmp_path / "plan.jwt").write_text("garbage")
     with pytest.raises(CIError, match="malformed plan"):
         ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run=None, say=said.append)
@@ -542,6 +542,41 @@ def test_run_reports_provider_errors(plan, ci_repo, tmp_path, monkeypatch):
         ("working", "rate_limit"), ("working", "auth"), ("working", "auth")]
     assert all(e["commits"] == 0 for e in server.events)
     assert evidence_of(server.results[0])["final_state"] == "failed", "cancelled while working"
+
+
+def test_report_posts_a_failed_validation_run_job(plan, tmp_path):
+    t = FakeTransport({"POST /ci/validations/val_1/job-status": [(200, {})]})
+    oidc = ci_client.OIDC({"ACTIONS_ID_TOKEN_REQUEST_URL": "https://t.actions.test/x",
+                           "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req"}, fetch=lambda url, tok: "h.p.s")
+    client = ci_client.Client(BASE, t, oidc=oidc)
+    said = []
+    (tmp_path / "plan.jwt").write_text(plan("validation"))
+    # The run job uploaded: nothing to report, whatever the start job said.
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="failure", run="success", say=said.append)
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run=None, say=said.append)
+    assert not t.calls
+    # The run job died: the server posts the check, told with the CI token when the run token is gone.
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="failure", say=said.append)
+    assert t.calls[-1][:2] == ("POST /ci/validations/val_1/job-status", {"repo": REPO, "job": "run", "conclusion": "failure"})
+    assert t.calls[-1][2]["Authorization"] == f"Bearer {CI_TOKEN}" and t.calls[-1][2]["X-Brindle-OIDC"] == "h.p.s"
+    assert said[-1] == "reported: run job failure"
+    # The run job never ran (cancelled): its token is still in the artifact and is used for this one call.
+    token_file(tmp_path)
+    ci_client.report(tmp_path, client=client, token=CI_TOKEN, start="success", run="cancelled", say=said.append)
+    assert t.calls[-1][1]["conclusion"] == "cancelled" and t.calls[-1][2]["Authorization"] == f"Bearer {RUN_TOKEN}"
+    assert len(t.calls) == 2
+    with pytest.raises(CIError, match="--run must be one of"):
+        ci_client.report(tmp_path, client=client, token=CI_TOKEN, start=None, run="nope", say=said.append)
+
+
+def test_start_branch_conflict_exits_zero(plan, tmp_path):
+    t = FakeTransport({"POST /ci/runs": [(409, {"error": "branch_conflict",
+                                                "message": "brindle/ci-123 has commits brindle didn't make"})]})
+    said = []
+    code = ci_client.start(REPO, {"kind": "issue", "issue": 123}, tmp_path / "out", client=ci_client.Client(BASE, t),
+                           token=CI_TOKEN, providers=[], say=said.append)
+    assert code == 0 and said == ["not started: brindle/ci-123 has commits brindle didn't make (the server has commented)"]
+    assert not (tmp_path / "out").exists()
 
 
 def push_branch(repo, branch: str) -> str:
