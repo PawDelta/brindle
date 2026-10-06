@@ -52,6 +52,7 @@ CLAUDE_CLOUD = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_COD
 CLAUDE_SUBSCRIPTION = ("CLAUDE_CODE_OAUTH_TOKEN",)
 CODEX_API_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 CODEX_LOGIN = "codex login (auth.json)"     # the name shown for a ChatGPT sign-in
+NATIVE_KEYS_ENV = "BRINDLE_CI_NATIVE_KEYS"   # the workflow lists the key variables native profiles may send
 # Every known provider credential: what a check must not see, and what a
 # repo-supplied native profile may not point at its own endpoint.
 PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KEYS,
@@ -300,38 +301,61 @@ class NativeAdapter(Adapter):
     def installed(self, env: Mapping[str, str] | None = None) -> bool:
         return True
 
-    def _profiles(self) -> list:
-        """The repo's native profiles with an endpoint. One whose key
-        variable is another provider's (``api_key_env: ANTHROPIC_API_KEY``
-        with a base_url of its choosing) is left out: a profile comes from
-        the repository, and must not be able to send a CI key elsewhere."""
+    @staticmethod
+    def allowed_keys(env: Mapping[str, str]) -> frozenset[str]:
+        """The key variables a native profile may send to its endpoint here:
+        the names in ``BRINDLE_CI_NATIVE_KEYS`` (comma-separated), which the
+        workflow sets, never the repository. Another provider's credential
+        is never allowed, whatever the list says."""
+        names = {n.strip() for n in (env.get(NATIVE_KEYS_ENV) or "").split(",") if n.strip()}
+        return frozenset(n for n in names if n not in PROVIDER_KEYS and not n.startswith("GH_")
+                         and n not in ("GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"))
+
+    def _key_refused(self, p, env: Mapping[str, str]) -> str | None:
+        """Why profile ``p``'s key may not be sent, or None. A profile comes
+        from the repository and names any endpoint, so a key goes there only
+        when the workflow allowed that variable by name (see allowed_keys);
+        a denylist can't cover every secret a runner holds."""
+        if not p.api_key_env:
+            return None
+        if p.api_key_env in self.allowed_keys(env):
+            return None
+        return (f"profile {p.name!r} would send {p.api_key_env} to its own endpoint; "
+                f"name it in {NATIVE_KEYS_ENV} to allow that")
+
+    def _profiles(self, env: Mapping[str, str] | None = None) -> list:
+        """The repo's native profiles with an endpoint whose key (if any) the
+        workflow allows."""
         from brindle.profiles import list_profiles
 
+        env = os.environ if env is None else env
         try:
             return [p for p in list_profiles(self.repo_root)
-                    if p.provider == "native" and p.base_url and p.api_key_env not in PROVIDER_KEYS]
+                    if p.provider == "native" and p.base_url and self._key_refused(p, env) is None]
         except Exception:  # noqa: BLE001 - a broken profile is reported elsewhere
             return []
 
-    def _profile(self, name: str | None):
+    def _profile(self, name: str | None, env: Mapping[str, str] | None = None):
         from brindle.profiles import load_profile
 
+        env = os.environ if env is None else env
         if name:
             p = load_profile(name, self.repo_root)
             if p.provider != "native":
                 raise AdapterError(f"profile {name!r} doesn't use the native provider")
-            if p.api_key_env in PROVIDER_KEYS:
-                raise AdapterError(f"profile {name!r} would send {p.api_key_env} to its own endpoint")
+            why = self._key_refused(p, env)
+            if why:
+                raise AdapterError(why)
             return p
-        for p in self._profiles():
-            if not p.api_key_env or os.environ.get(p.api_key_env):
+        for p in self._profiles(env):
+            if not p.api_key_env or env.get(p.api_key_env):
                 return p
-        raise AdapterError("no native profile with an endpoint (and its key) is available")
+        raise AdapterError("no native profile with an endpoint (and an allowed key) is available")
 
     def credential(self, env: Mapping[str, str]) -> Credential:
         names = []
         keyless = False
-        for p in self._profiles():
+        for p in self._profiles(env):
             if p.api_key_env and env.get(p.api_key_env):
                 names.append(p.api_key_env)
             elif not p.api_key_env:
@@ -343,7 +367,7 @@ class NativeAdapter(Adapter):
         return Credential(None, ())
 
     def available(self, env: Mapping[str, str]) -> tuple[bool, str]:
-        if not self._profiles():
+        if not self._profiles(env):
             return False, "no native profile with a base_url"
         if self.credential(env).kind is None:
             return False, "no native profile has its key"
@@ -360,9 +384,10 @@ class NativeAdapter(Adapter):
         from brindle.native.client import Client, ClientError
         from brindle.native.runner import endpoint_for
 
-        p = self._profile(profile)
+        p = self._profile(profile, env)
         endpoint = endpoint_for(p)
         endpoint.timeout = timeout
+        endpoint.api_key = env.get(p.api_key_env) if p.api_key_env else None
         try:
             reply = Client(endpoint).complete(p.prompt or None, [{"role": "user", "content": instructions}], [])
         except ClientError as e:
