@@ -71,6 +71,11 @@ PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KE
                            "GEMINI_API_KEY", "GOOGLE_API_KEY"))
 REVIEW_TIMEOUT = 1200.0
 FIRST_RUN_WAIT = 20.0    # how long a new claude supervisor's pane is watched for a first-run screen
+# An API error Claude Code retries itself (429, 5xx, overloaded) ends the run
+# only once a pane has shown it this long; one it won't retry, at once.
+TRANSIENT_API_ERROR_S = 120.0
+API_ERROR_MAX = 300
+SECRET_LIKE = re.compile(r"\bsk-[A-Za-z0-9_-]+|\b(?:Bearer|Basic)\s+\S+|[A-Za-z0-9_+/=-]{40,}", re.I)
 DEFAULT_PROFILE = "supervisor"
 
 
@@ -240,9 +245,20 @@ def claude_env(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
+def api_error_line(error: str) -> str:
+    """An API error as a run's note may carry it: printable ASCII, anything
+    key- or token-like redacted, at most API_ERROR_MAX characters."""
+    text = SECRET_LIKE.sub("[redacted]", error)
+    return re.sub(r"[^\x20-\x7e]", "?", text)[:API_ERROR_MAX]
+
+
 class ClaudeAdapter(Adapter):
     name = "claude"
     cli = "claude"
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self.clock = clock
+        self._api_errors: dict[str, tuple[str, float]] = {}   # agent id -> (error, first seen)
 
     def binary(self) -> str | None:
         return providers.claude_binary()
@@ -293,12 +309,40 @@ class ClaudeAdapter(Adapter):
             time.sleep(1)
 
     def stuck_screen(self, db, root) -> str | None:
+        """A first-run screen on the supervisor's pane, or an API error the
+        supervisor's or a reviewer's last reply ended on: at once when Claude
+        Code won't retry it, else once it has been there TRANSIENT_API_ERROR_S
+        (it would otherwise sit at its prompt, spending nothing, until the
+        server's stall timer)."""
+        from brindle import agents
+
         screen = self._screen(root) or ""
         why = providers.ClaudeCode.first_run_screen(screen)
         if why:
             return f"Claude Code is on {why}, which nobody in CI can answer"
-        error = providers.ClaudeCode.fatal_api_error(screen)
-        return f"Claude Code stopped on an error it won't retry: {error}" if error else None
+        panes = [("Claude Code", root, screen)]
+        if root is not None:
+            panes += [(f"reviewer {a.id}'s Claude Code", a, self._screen(a) or "")
+                      for a in agents.tree(db, root.id)
+                      if a.id != root.id and a.mode == "review" and a.provider == self.name]
+        now = self.clock()
+        for who, agent, text in panes:
+            if agent is None:
+                continue
+            error = providers.ClaudeCode.api_error(text)
+            if error is None:
+                self._api_errors.pop(agent.id, None)
+                continue
+            seen, since = self._api_errors.get(agent.id, (None, now))
+            if seen != error:
+                since = now
+            self._api_errors[agent.id] = (error, since)
+            line = api_error_line(error)
+            if providers.ClaudeCode.FATAL_API_ERROR.match(error):
+                return f"{who} stopped on an error it won't retry: {line}"
+            if now - since >= TRANSIENT_API_ERROR_S:
+                return f"{who} has been stopped on an API error for {int(now - since)}s: {line}"
+        return None
 
     @staticmethod
     def _screen(root) -> str | None:

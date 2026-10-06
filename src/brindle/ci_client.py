@@ -107,6 +107,12 @@ FEDERATION_VARS = (   # (variable, question, required)
     ("ANTHROPIC_SERVICE_ACCOUNT_ID", "service account id (svac_...)", True),
     ("ANTHROPIC_WORKSPACE_ID", "workspace id (wrkspc_..., optional)", False),
 )
+# An organization-level API key (not scoped to a workspace) needs the
+# workspace in every request: the workflow sends it as an
+# anthropic-workspace-id header (ANTHROPIC_CUSTOM_HEADERS) from this variable.
+WORKSPACE_VAR = "ANTHROPIC_WORKSPACE_ID"
+WORKSPACE_QUESTION = "workspace ID (only for an organization-level key; leave blank for a workspace key)"
+WORKSPACE_ID_RE = re.compile(r"^wrkspc_[A-Za-z0-9_-]+$")
 FEDERATION_AUDIENCE = "https://api.anthropic.com"
 FEDERATION_MIN_LIFETIME_S = 7200
 
@@ -1140,6 +1146,28 @@ def _claude_credential(given: str | None, ask: Callable[[str, str], str] | None)
     return choice
 
 
+def _workspace_id(value: str) -> str:
+    value = value.strip()
+    if value and not WORKSPACE_ID_RE.match(value):
+        raise CIError(f"a workspace ID looks like wrkspc_..., not {auth._sanitize(value, 40)!r}")
+    return value
+
+
+def _set_key_workspace(repo: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None,
+                       given: str | None, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
+    """For an organization-level API key, store its workspace as the
+    ``ANTHROPIC_WORKSPACE_ID`` Actions variable (not a secret), which the
+    workflow turns into the anthropic-workspace-id header. ``given`` (from
+    --workspace-id) skips the question, which defaults to the variable in ``env``."""
+    if given is None:
+        given = (ask or (lambda q, d: d))(WORKSPACE_QUESTION, env.get(WORKSPACE_VAR) or "")
+    value = _workspace_id(given)
+    if not value:
+        return
+    _gh(["variable", "set", WORKSPACE_VAR, "--repo", repo, "--body", value], run=run)
+    say(f"   {WORKSPACE_VAR} set: requests carry the anthropic-workspace-id header")
+
+
 def _set_federation(repo: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None, *,
                     run=subprocess.run, say: Callable[[str], None] = print) -> None:
     """Store Claude's workload identity federation IDs as the repository's
@@ -1149,6 +1177,8 @@ def _set_federation(repo: str, env: Mapping[str, str], ask: Callable[[str, str],
     say("   claude: identity federation; the IDs are stored as Actions variables")
     for name, question, required in FEDERATION_VARS:
         value = asker(question, env.get(name) or "").strip()
+        if name == WORKSPACE_VAR:
+            value = _workspace_id(value)
         if not value:
             if required:
                 raise CIError(f"{name} is required for identity federation")
@@ -1172,12 +1202,14 @@ def federation_condition(repo: str) -> str:
 def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd: str, env: Mapping[str, str],
          base: str | None = None, run=subprocess.run, open_url: Callable[[str], None] | None = None,
          ask: Callable[[str, str], str] | None = None, account=None, client: Client | None = None,
-         credential: str | None = None, say: Callable[[str], None] = print) -> None:
+         credential: str | None = None, workspace_id: str | None = None,
+         say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
     :class:`brindle.pro.account.ProAccount` (the person's brindle Pro
     login; built with ``make`` when not given), ``ask(question, default)`` asks the person, ``open_url`` opens
     the browser. ``credential`` is how Claude signs in (``key`` or
-    ``federation``; asked when not given)."""
+    ``federation``; asked when not given). ``workspace_id`` is the workspace
+    of an organization-level API key (asked after the key when not given)."""
     import webbrowser
 
     from brindle.pro import account as account_mod
@@ -1185,6 +1217,8 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     refuse_airgap()
     if credential is not None:
         credential = _claude_credential(credential, None)
+    if workspace_id is not None:
+        workspace_id = _workspace_id(workspace_id)
     if repo:
         if not REPO_RE.match(repo):
             raise CIError("repository must be owner/name (pass --repo)")
@@ -1229,6 +1263,8 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
             continue
         say(f"   {p}: paste the key for {name}")
         _gh(["secret", "set", name, "--repo", repo], run=run, interactive=True)
+        if p == "claude":
+            _set_key_workspace(repo, env, ask, workspace_id, run=run, say=say)
 
     say("5/6 fetching the workflows and opening a pull request with them")
     files = {}

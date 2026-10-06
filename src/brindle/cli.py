@@ -1704,13 +1704,15 @@ def ci_init(
     org: Optional[str] = typer.Option(None, "--org", help="The brindle Team org whose CI token to use."),
     providers: Optional[str] = typer.Option(None, "--providers", help="Comma-separated providers to set keys for (asked otherwise)."),
     credential: Optional[str] = typer.Option(None, "--credential", help="How Claude signs in: key (the ANTHROPIC_API_KEY secret) or federation (workload identity federation; asked otherwise)."),
+    workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="With an organization-level API key: its workspace (wrkspc_...), stored as the ANTHROPIC_WORKSPACE_ID variable (asked otherwise, defaulting to $ANTHROPIC_WORKSPACE_ID)."),
 ) -> None:
     """Set a repository up for brindle CI: the GitHub App, the secrets, the workflows (as a pull request), then doctor."""
     from brindle import ci_client
 
     names = [p.strip() for p in providers.split(",") if p.strip()] if providers else None
     _ci_call(ci_client.init, repo=repo, org=org, providers=names, cwd=os.getcwd(), env=os.environ,
-             credential=credential, ask=lambda q, d: typer.prompt(q, default=d), say=typer.echo)
+             credential=credential, workspace_id=workspace_id, ask=lambda q, d: typer.prompt(q, default=d),
+             say=typer.echo)
 
 
 # -- internal ----------------------------------------------------------------
