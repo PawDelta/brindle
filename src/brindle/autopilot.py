@@ -176,13 +176,14 @@ class AutopilotError(RuntimeError):
 class Plan:
     goal: str
     detail: str | None
-    milestones: list[tuple]   # (title, check, detail[, profile])
+    milestones: list[tuple]   # (title, check, detail[, profile[, repo]])
 
 
 def parse_goals(text: str) -> Plan | None:
     """``# Goal`` then ``## Milestone`` sections, each with an optional
-    ``check: <command>`` line and ``profile: <name>`` line. Returns None when
-    there's no goal heading."""
+    ``check: <command>`` line (``check@<alias>: <command>`` runs it in a repo
+    attached to the session; so does a ``repo: <alias>`` line) and a
+    ``profile: <name>`` line. Returns None when there's no goal heading."""
     goal, detail_lines = None, []
     milestones: list[list] = []
     for line in text.splitlines():
@@ -191,7 +192,7 @@ def parse_goals(text: str) -> Plan | None:
                 goal = m.group(1)
             continue
         if m := re.match(r"^##\s+(.+?)\s*$", line):
-            milestones.append([m.group(1), None, [], None])
+            milestones.append([m.group(1), None, [], None, None])
             continue
         if milestones and STATUS_RE.match(line):
             continue   # written by sync_goals_file: information only, never read back
@@ -200,17 +201,31 @@ def parse_goals(text: str) -> Plan | None:
         ):
             milestones[-1][3] = m.group(1)
             continue
-        if milestones and milestones[-1][1] is None and (
-            m := re.match(r"^\s*check:\s*`?(.+?)`?\s*$", line, re.I)
+        if milestones and milestones[-1][4] is None and (
+            m := re.match(r"^\s*repo:\s*`?([\w.-]+)`?\s*$", line, re.I)
         ):
-            milestones[-1][1] = m.group(1)
+            milestones[-1][4] = m.group(1)
+            continue
+        if milestones and milestones[-1][1] is None and (
+            m := re.match(r"^\s*check(?:@([\w.-]+))?:\s*`?(.+?)`?\s*$", line, re.I)
+        ):
+            milestones[-1][1] = m.group(2)
+            if m.group(1):
+                milestones[-1][4] = m.group(1)
             continue
         (milestones[-1][2] if milestones else detail_lines).append(line)
     if not goal:
         return None
     clean = lambda lines: "\n".join(lines).strip() or None  # noqa: E731
-    return Plan(goal, clean(detail_lines),
-                [(t, c, clean(d), *([p] if p else [])) for t, c, d, p in milestones])
+    out = []
+    for t, c, d, p, r in milestones:
+        item: tuple = (t, c, clean(d))
+        if p or r:
+            item += (p,)
+        if r:
+            item += (r,)
+        out.append(item)
+    return Plan(goal, clean(detail_lines), out)
 
 
 def goals_path(root: str) -> Path:
@@ -364,7 +379,7 @@ def set_enabled(db: DB, root_id: str, on: bool) -> None:
 
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None) -> None:
-    """Record the goal and its milestones, ``(title, check, detail[, profile])``.
+    """Record the goal and its milestones, ``(title, check, detail[, profile[, repo]])``.
     A milestone that keeps its title and check keeps its last result."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
@@ -588,7 +603,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     that passed at the checkout's current HEAD are skipped. Only a milestone
     newly passing, and not already passed at this commit, counts as progress,
     so a flaky check can't keep resetting the nudge limit."""
-    from brindle import git, workspaces
+    from brindle import git, repos, workspaces
 
     cfg = cfg or load_repo_config(ws.repo_root)
     ms = db.milestones(root_id)
@@ -597,13 +612,29 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     chosen = [m for m in ms if position is None or m.position == position]
     if not chosen:
         raise AutopilotError(f"no milestone {position}; they're numbered 1-{len(ms)}")
-    env = workspaces.workspace_env(ws)
-    # The commit the checks ran against. Uncommitted changes could break a
-    # check without moving HEAD, so a dirty checkout records no sha.
-    try:
-        head: str | None = None if git.dirty_files(ws.path) else git.out(["rev-parse", "HEAD"], ws.path)
-    except git.GitError:
-        head = None
+
+    def commit_of(checkout: Workspace) -> str | None:
+        # The commit the checks ran against. Uncommitted changes could break a
+        # check without moving HEAD, so a dirty checkout records no sha.
+        try:
+            return None if git.dirty_files(checkout.path) else git.out(["rev-parse", "HEAD"], checkout.path)
+        except git.GitError:
+            return None
+
+    head = commit_of(ws)
+    # A milestone for a repo attached to the session runs in that repo's own
+    # checkout, with that repo's config; its sha bookkeeping is that checkout's.
+    sites: dict[str | None, tuple[Workspace, RepoConfig, str | None]] = {None: (ws, cfg, head)}
+
+    def site(alias: str | None) -> tuple[Workspace, RepoConfig, str | None] | str:
+        if alias not in sites:
+            found = repos.resolve_attached(db, root_id, alias)
+            if found is None:
+                return f"repo {alias!r} isn't attached to this session (`brindle repo ls`)"
+            other = repos.target_workspace(db, found.repo_root)
+            sites[alias] = (other, load_repo_config(other.repo_root), commit_of(other))
+        return sites[alias]
+
     newly_passed = False
 
     def run(batch: list[Milestone]) -> None:
@@ -613,20 +644,30 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         for m in batch:
             if not m.check_cmd:
                 continue
+            at = site(m.repo)
+            if isinstance(at, str):
+                db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n{at}", None)
+                continue
+            checkout, repo_cfg, sha = at
             # Cached by commit when the checkout is clean, so a check that
             # already passed at this HEAD (as a merge gate, say) isn't re-run.
-            ok, out = gates.run_checked(db, ws, m.check_cmd, env, cfg.check_timeout)
+            ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout),
+                                        repo_cfg.check_timeout)
             # Not if it already passed at this very commit: a flaky check
             # flipping back isn't progress.
-            newly_passed |= ok and m.status != "passed" and (head is None or m.passed_sha != head)
-            db.record_check(m.id, ok, out, head)
+            newly_passed |= ok and m.status != "passed" and (sha is None or m.passed_sha != sha)
+            db.record_check(m.id, ok, out, sha)
 
     run(chosen)
     ms = db.milestones(root_id)
     regressed: list[Milestone] = []
     if position is not None and len(ms) > 1:
-        recheck = [m for m in ms if m.position != position and m.status == "passed"
-                   and (head is None or m.checked_sha != head)]
+        def moved(m: Milestone) -> bool:
+            at = site(m.repo)
+            sha = at[2] if not isinstance(at, str) else None
+            return sha is None or m.checked_sha != sha
+
+        recheck = [m for m in ms if m.position != position and m.status == "passed" and moved(m)]
         if recheck:
             was_passed = {m.id for m in recheck}
             run(recheck)
@@ -815,7 +856,8 @@ def progress(db: DB, root_id: str) -> str:
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
     for m in db.milestones(root_id):
-        how = f"check: `{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
+        where = f"@{m.repo}: " if m.repo else ""
+        how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
         who = f", profile: {m.profile}" if m.profile else ""
         lines.append(f"  {MARK.get(m.status, '·')} {m.position}. {m.title} ({how}{who}{when})")

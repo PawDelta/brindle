@@ -187,6 +187,28 @@ def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
     return st.ahead == 0
 
 
+def attached_roots(db: DB, repo_root: str) -> list[str]:
+    """Repos attached (brindle.repos) to sessions rooted in ``repo_root``,
+    in the order they were attached, without duplicates."""
+    out: list[str] = []
+    for r in db.session_repos():
+        root = db.get_agent(r.root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws and ws.repo_root == repo_root and r.repo_root not in out and r.repo_root != repo_root:
+            out.append(r.repo_root)
+    return out
+
+
+def session_workspaces(db: DB, repo_root: str | None) -> list[Workspace]:
+    """``repo_root``'s workspaces, then those of the repos attached to its
+    sessions (every workspace when ``repo_root`` is None)."""
+    rows = db.find_workspaces(repo_root)
+    if repo_root:
+        for other in attached_roots(db, repo_root):
+            rows += db.find_workspaces(other)
+    return rows
+
+
 def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[dict]:
     """What the sidebar shows: agents closed with `brindle close`, and stopped
     sessions with nothing left running, are left out, as is a worktree
@@ -197,7 +219,7 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
     if panes is None:
         panes = tmux.list_panes()
     alive = live_agents(db, panes)
-    found = [(ws, db.list_agents(ws.id)) for ws in db.find_workspaces(repo_root)]
+    found = [(ws, db.list_agents(ws.id)) for ws in session_workspaces(db, repo_root)]
     by_id = {a.id: a for _, everyone in found for a in everyone}
     newest_live_root = max((a.created_at for a in by_id.values()
                             if a.id in alive and not a.parent_id and a.mode == "interactive"),

@@ -110,7 +110,17 @@ CREATE TABLE IF NOT EXISTS milestones (
     output TEXT,                   -- the tail of the last check's output
     checked_sha TEXT,              -- the checkout's HEAD when it was last checked
     passed_sha TEXT,               -- the checkout's HEAD when it last passed
-    profile TEXT                   -- default worker profile for assign
+    profile TEXT,                  -- default worker profile for assign
+    repo TEXT                      -- alias of the attached repo the check runs in (brindle.repos); NULL: the session's own
+);
+-- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
+-- assign/handoff may put workers there by alias.
+CREATE TABLE IF NOT EXISTS session_repos (
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    alias TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    added_at REAL NOT NULL,
+    PRIMARY KEY (root_id, alias)
 );
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
@@ -393,6 +403,15 @@ class Milestone:
     checked_sha: str | None = None
     passed_sha: str | None = None
     profile: str | None = None
+    repo: str | None = None
+
+
+@dataclass
+class SessionRepo:
+    root_id: str
+    alias: str
+    repo_root: str
+    added_at: float
 
 
 @dataclass
@@ -563,7 +582,7 @@ class DB:
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE autopilot ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
-        for col in ("checked_sha", "passed_sha", "profile"):
+        for col in ("checked_sha", "passed_sha", "profile", "repo"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
         cache_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(usage_cache)")}
@@ -639,6 +658,28 @@ class DB:
     def delete_workspace(self, ws_id: str) -> None:
         with self.tx() as c:
             c.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
+
+    # -- attached repos (brindle.repos) ---------------------------------------
+
+    def add_session_repo(self, root_id: str, alias: str, repo_root: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT INTO session_repos (root_id, alias, repo_root, added_at) VALUES (?,?,?,?)",
+                      (root_id, alias, repo_root, time.time()))
+
+    def remove_session_repo(self, root_id: str, alias: str) -> bool:
+        with self.tx() as c:
+            cur = c.execute("DELETE FROM session_repos WHERE root_id=? AND alias=?", (root_id, alias))
+            return cur.rowcount > 0
+
+    def session_repos(self, root_id: str | None = None) -> list[SessionRepo]:
+        """A session's attached repos in the order they were added; every
+        session's when ``root_id`` is None."""
+        if root_id:
+            rows = self.conn.execute(
+                "SELECT * FROM session_repos WHERE root_id=? ORDER BY added_at", (root_id,))
+        else:
+            rows = self.conn.execute("SELECT * FROM session_repos ORDER BY added_at")
+        return [_load(SessionRepo, r) for r in rows]
 
     def used_port_bases(self) -> set[int]:
         rows = self.conn.execute(
@@ -995,14 +1036,15 @@ class DB:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
     def set_milestones(self, root_id: str, items: list[tuple]) -> None:
-        """Replace the session's milestones with ``(title, check_cmd, detail[, profile])`` items."""
+        """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo]])`` items."""
         with self.tx() as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
             for i, (title, check, detail, *rest) in enumerate(items, start=1):
                 c.execute(
-                    "INSERT INTO milestones (root_id, position, title, check_cmd, detail, profile) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (root_id, i, title, check, detail, rest[0] if rest else None),
+                    "INSERT INTO milestones (root_id, position, title, check_cmd, detail, profile, repo) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (root_id, i, title, check, detail, rest[0] if rest else None,
+                     rest[1] if len(rest) > 1 else None),
                 )
 
     def milestones(self, root_id: str) -> list[Milestone]:

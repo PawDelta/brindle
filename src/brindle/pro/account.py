@@ -17,6 +17,7 @@ FEATURES = (
      "on by itself; see `brindle learning`"),
     ("services", "pro", "per-worktree Docker services (db, cache)",
      '"services" in .brindle/config.json'),
+    ("multi_repo", "pro", "work across several repos in one session", "`brindle repo add <path>`"),
     ("team", "team", "org policies + team audit feed", "`brindle account org policy`"),
     ("ci", "team", "Brindle-CI: fixes builds, issues into verified PRs", "back in a later release"),
     ("audit", "enterprise", "tamper-evident local audit log", "`brindle audit verify`"),

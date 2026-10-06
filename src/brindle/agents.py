@@ -310,11 +310,14 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace):
         profile = replace(profile, prompt="\n\n".join(
             p for p in (profile.prompt.strip(), pilot.supervisor_rules(cfg), pilot.delegation_rule(cfg)) if p))
     if agent.mode == "interactive":
-        from brindle import codemap
+        from brindle import codemap, repos
 
         note = codemap.guidance(ws.repo_root)
         if note:
             profile = replace(profile, prompt=f"{profile.prompt}\n\n{note}".strip())
+        attached = repos.guidance(db, agent.id)   # a session root's attached repos
+        if attached:
+            profile = replace(profile, prompt=f"{profile.prompt}\n\n{attached}".strip())
     if agent.headless:
         profile = replace(profile, headless=True)
     return profile
@@ -1483,10 +1486,14 @@ def delegate(
     committed work, and nobody edits the same files. Refuses beyond the
     repo's ``max_agents`` workers running at once."""
     from brindle import autopilot as pilot
+    from brindle import repos
     from brindle.config import load_repo_config
 
+    # The workers-at-once cap is the session's (its own repo's max_agents),
+    # whichever repo of the session this worker goes to.
+    cap_root = (repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None) or caller_ws.repo_root
     try:
-        pilot.check_capacity(db, caller.id if caller else None, load_repo_config(caller_ws.repo_root))
+        pilot.check_capacity(db, caller.id if caller else None, load_repo_config(cap_root))
     except pilot.AutopilotError as e:
         raise AgentError(str(e)) from e
     if plan_first is None:

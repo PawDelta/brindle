@@ -11,7 +11,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-from brindle import agents, autopilot, codex_hook, git, history, pipeline, policy, quota, savings, sessions, tasks, workspaces
+from brindle import agents, autopilot, codex_hook, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, workspaces
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import list_profiles
@@ -32,7 +32,10 @@ mcp = MCPServer(
         "profile starts no process: the reply gives you a worktree and a prompt for your "
         "own Agent tool; record the outcome with `complete_subagent`. In an autopilot "
         "session, track the goal with `set_goal`, `get_progress` and `check_milestone`, and "
-        "get branches approved with `request_review` before merging."
+        "get branches approved with `request_review` before merging. A session can work "
+        "across several repos (brindle Pro): the user attaches them with `brindle repo add`, "
+        "`list_repos` shows them, and `repo=<alias>` on handoff/assign (and on the workspace "
+        "tools) puts a worker in that repo, with that repo's own checks, review and merge."
     ),
 )
 
@@ -48,9 +51,37 @@ def _caller(db: DB) -> tuple[Agent | None, Workspace]:
     return agent, ws
 
 
-def _ws(db: DB, ref: str) -> Workspace:
-    _, here = _caller(db)
-    return workspaces.resolve(db, ref, cwd=here.path)
+def _root_id(db: DB, caller: Agent | None) -> str | None:
+    return autopilot.root_of(db, caller.id) if caller else None
+
+
+def _target(db: DB, caller: Agent | None, here: Workspace, repo: str | None) -> Workspace:
+    """The workspace a tool works from: ``here`` (the caller's own), or, with
+    ``repo`` (an alias or path of a repo attached to the session), the main
+    checkout of that repo. Raises ``repos.RepoError`` (with the brindle Pro
+    message when the plan lacks ``multi_repo``)."""
+    if not repo or not repo.strip():
+        return here
+    root_id = _root_id(db, caller)
+    if root_id is None:
+        raise repos.RepoError("not running as a brindle agent, so no session has attached repos")
+    repo_root = repos.resolve(db, root_id, here.repo_root, repo)
+    if os.path.realpath(repo_root) == os.path.realpath(here.repo_root):
+        return here
+    return repos.target_workspace(db, repo_root)
+
+
+def _session_repos(db: DB, caller: Agent | None, here: Workspace) -> list[tuple[str | None, str]]:
+    """``(alias, repo_root)`` for every repo the caller's session covers."""
+    root_id = _root_id(db, caller)
+    found = repos.session_roots(db, root_id) if root_id else []
+    return found or [(None, here.repo_root)]
+
+
+def _ws(db: DB, ref: str, repo: str | None = None) -> Workspace:
+    caller, here = _caller(db)
+    at = _target(db, caller, here, repo)
+    return workspaces.resolve(db, ref, cwd=at.path)
 
 
 _busy_worker = pipeline.busy_worker
@@ -194,9 +225,14 @@ async def handoff(
     agent_profile: str = "", task: str = "", isolate: bool = True, branch: str | None = None,
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
     files: list[str] | None = None, depends_on: list[str] | None = None,
-    plan_first: bool | None = None, weight: str | None = None,
+    plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
+
+    repo: the alias (or path) of a repo attached to this session (brindle Pro;
+    see list_repos) to put the worker in instead of this one. It then gets a
+    worktree in that repo, that repo's own checks and review, and merges into
+    that repo's branch. Default: this repo.
 
     agent_profile is optional: when empty, the current unverified milestone's
     profile is used, else `weight` routes to an available profile, else the
@@ -240,6 +276,10 @@ async def handoff(
         caller, ws = _caller(db)
         if not task.strip():
             return "Give the worker a task."
+        try:
+            ws = _target(db, caller, ws, repo)
+        except repos.RepoError as e:
+            return f"Not started: {e}"
         why: list[str] = []
         decision: dict = {}
         try:
@@ -311,9 +351,15 @@ async def assign(
     agent_profile: str = "", task: str = "", isolate: bool = True, branch: str | None = None,
     done_when: str | None = None, files: list[str] | None = None,
     depends_on: list[str] | None = None, plan_first: bool | None = None,
-    weight: str | None = None,
+    weight: str | None = None, repo: str | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
+
+    repo: the alias (or path) of a repo attached to this session (brindle Pro;
+    see list_repos) to put the worker in instead of this one. It then gets a
+    worktree in that repo, that repo's own checks and review, and merges into
+    that repo's branch. depends_on may name a task in any repo of the session.
+    Default: this repo.
 
     agent_profile is optional: when empty, the current unverified milestone's
     profile is used, else `weight` routes to an available profile, else the
@@ -348,6 +394,10 @@ async def assign(
         caller, ws = _caller(db)
         if not task.strip():
             return "Give the worker a task."
+        try:
+            ws = _target(db, caller, ws, repo)
+        except repos.RepoError as e:
+            return f"Not started: {e}"
         why: list[str] = []
         decision: dict = {}
         try:
@@ -391,6 +441,8 @@ async def assign(
         if not agents.runs_process(worker):
             return agents.subagent_brief(worker, wws)
         text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
+        if repo and repo.strip():
+            text += f" (repo {repo.strip()}: {wws.repo_root})"
         for w in why:
             text += f"\nprofile: {w}"
         if learned and not why:
@@ -493,31 +545,72 @@ def complete_subagent(agent_id: str, result: str) -> str:
     return text
 
 
+def _per_repo(db: DB, caller: Agent | None, here: Workspace, repo: str | None,
+              render) -> str:
+    """``render(repo_root) -> str`` for the session's repos (all of them, or
+    the one ``repo`` names), with a header per repo when there are several."""
+    if repo and repo.strip():
+        try:
+            at = _target(db, caller, here, repo)
+        except repos.RepoError as e:
+            return str(e)
+        return render(at.repo_root)
+    found = _session_repos(db, caller, here)
+    if len(found) == 1:
+        return render(found[0][1])
+    parts = []
+    for alias, root in found:
+        label = alias or "this repo"
+        parts.append(f"## {label} ({root})\n{render(root)}")
+    return "\n\n".join(parts)
+
+
 @mcp.tool()
-def list_agents() -> str:
-    """List agents in this repository with their status, workspace and branch."""
+def list_agents(repo: str | None = None) -> str:
+    """List agents in this repository with their status, workspace and
+    branch; with repos attached to the session (list_repos), every repo's,
+    grouped by repo. repo: only that repo's (an alias or path)."""
     db = DB()
     caller, here = _caller(db)
-    lines = []
-    for ws in db.find_workspaces(here.repo_root):
-        for a in db.list_agents(ws.id):
-            me = " (you)" if caller and a.id == caller.id else ""
-            parent = f" parent={a.parent_id}" if a.parent_id else ""
-            lines.append(
-                f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
-                f"ws={ws.id} branch={ws.branch}{_last_activity(a)}"
-            )
-    return "\n".join(lines) or "No agents."
+
+    def render(repo_root: str) -> str:
+        lines = []
+        for ws in db.find_workspaces(repo_root):
+            for a in db.list_agents(ws.id):
+                me = " (you)" if caller and a.id == caller.id else ""
+                parent = f" parent={a.parent_id}" if a.parent_id else ""
+                lines.append(
+                    f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
+                    f"ws={ws.id} branch={ws.branch}{_last_activity(a)}"
+                )
+        return "\n".join(lines) or "No agents."
+
+    return _per_repo(db, caller, here, repo, render)
 
 
 @mcp.tool()
-def list_tasks() -> str:
+def list_tasks(repo: str | None = None) -> str:
     """Coordination tasks (assign/handoff calls given files or depends_on)
     that are queued or were cancelled: what a queued one is waiting on, and
-    why a cancelled one was cancelled. Started tasks show in list_agents."""
+    why a cancelled one was cancelled. Started tasks show in list_agents.
+    Covers every repo of the session; repo: only that one (alias or path)."""
     db = DB()
-    _, here = _caller(db)
-    return tasks.list_text(db, here.repo_root)
+    caller, here = _caller(db)
+    return _per_repo(db, caller, here, repo, lambda root: tasks.list_text(db, root))
+
+
+@mcp.tool()
+def list_repos() -> str:
+    """The repos attached to this session (brindle Pro), alias and path. A
+    worker goes to one with repo=<alias> on handoff/assign; the user attaches
+    repos with `brindle repo add <path> [--name alias]`."""
+    db = DB()
+    caller, here = _caller(db)
+    root_id = _root_id(db, caller)
+    if root_id is None:
+        return "Not running as a brindle agent; no session to list repos for."
+    own = f"this repo (default): {here.repo_root}"
+    return f"{own}\n{repos.listing_text(db, root_id)}"
 
 
 @mcp.tool()
@@ -553,11 +646,15 @@ def list_agent_profiles() -> str:
 
 
 @mcp.tool()
-def workspace_diff(workspace: str, stat_only: bool = False) -> str:
+def workspace_diff(workspace: str, stat_only: bool = False, repo: str | None = None) -> str:
     """Show everything a workspace's branch changes relative to its base
-    (commits plus uncommitted edits)."""
+    (commits plus uncommitted edits). repo: look the workspace up in that
+    attached repo (alias or path); a workspace id works without it."""
     db = DB()
-    ws = _ws(db, workspace)
+    try:
+        ws = _ws(db, workspace, repo)
+    except repos.RepoError as e:
+        return str(e)
     text = git.diff(ws.path, workspaces.require_base(ws), stat=stat_only) or "(no changes)"
     if len(text) > MAX_DIFF_CHARS:
         text = text[:MAX_DIFF_CHARS] + "\n... (truncated; use stat_only or read files directly)"
@@ -565,8 +662,11 @@ def workspace_diff(workspace: str, stat_only: bool = False) -> str:
 
 
 @mcp.tool()
-async def merge_workspace(workspace: str, squash: bool = False) -> str:
+async def merge_workspace(workspace: str, squash: bool = False, repo: str | None = None) -> str:
     """Merge a workspace's branch into its base branch (for workers: your branch).
+    A workspace in a repo attached to the session merges into that repo's
+    branch, through that repo's own gates; repo (alias or path) looks it up
+    there, a workspace id works without it.
 
     Before the gates run, if the branch is behind its (local) base and the
     worktree is clean, brindle merges the base into the branch first, so a
@@ -590,14 +690,18 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
     def run() -> str:
         db = DB()
         caller, _ = _caller(db)
-        ws = _ws(db, workspace)
+        try:
+            ws = _ws(db, workspace, repo)
+        except repos.RepoError as e:
+            return f"Not merged: {e}"
         return pipeline.merge(db, caller, ws, squash=squash)
 
     return await asyncio.to_thread(run)
 
 
 @mcp.tool()
-async def request_review(workspace: str, focus: str | None = None, profile: str | None = None) -> str:
+async def request_review(workspace: str, focus: str | None = None, profile: str | None = None,
+                         repo: str | None = None) -> str:
     """Start a reviewer agent on a worker's branch. It doesn't edit code; its
     verdict arrives as a message and is recorded for merge_workspace, which
     only accepts an approval of the branch's current commit. The repo's
@@ -608,12 +712,16 @@ async def request_review(workspace: str, focus: str | None = None, profile: str 
     profile: the reviewer profile to use; defaults to the repo's
     `review_profile` config, else the built-in `reviewer-codex` profile (a
     different model from a Claude worker) when Codex is installed, else
-    `reviewer`.
+    `reviewer`. repo: look the workspace up in that attached repo (alias or
+    path); the reviewer and checks are that repo's own.
     """
     def start() -> tuple[Agent, Workspace, RepoConfig] | str:
         db = DB()
         caller, _ = _caller(db)
-        ws = _ws(db, workspace)
+        try:
+            ws = _ws(db, workspace, repo)
+        except repos.RepoError as e:
+            return str(e)
         if ws.kind != "worktree":
             return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
         cfg = load_repo_config(ws.repo_root)
@@ -651,8 +759,10 @@ def submit_review(approved: bool, summary: str) -> str:
 
 
 @mcp.tool()
-def remove_workspace(workspace: str, delete_branch: bool | None = None, force: bool = False) -> str:
-    """Remove a workspace's worktree and stop its agents. By default the
+def remove_workspace(workspace: str, delete_branch: bool | None = None, force: bool = False,
+                     repo: str | None = None) -> str:
+    """Remove a workspace's worktree and stop its agents (repo: look it up
+    in that attached repo; a workspace id works without it). By default the
     branch is deleted once it is fully merged into its base (the repo's
     delete_merged_branches) and kept otherwise; delete_branch=false always
     keeps it, delete_branch=true deletes it (only if merged, unless force).
@@ -661,7 +771,10 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
     cancelled and its caller is told."""
     db = DB()
     caller, _ = _caller(db)
-    ws = _ws(db, workspace)
+    try:
+        ws = _ws(db, workspace, repo)
+    except repos.RepoError as e:
+        return str(e)
     unmerged = False
     if ws.kind == "worktree" and ws.base_branch and os.path.isdir(ws.path):
         try:
@@ -694,11 +807,13 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 @mcp.tool()
 def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None) -> str:
     """Autopilot: record what we're building. milestones is an ordered list of
-    {"title": ..., "check": ..., "detail": ..., "profile": ...}. The optional
+    {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. The optional
     profile names the default worker profile for `assign` while that milestone
     is the current one (e.g. a cheaper profile for a small milestone). Each check is a shell command
     brindle runs from the root of your checkout; it must exit 0 only when that
-    milestone is done (e.g. "uv run pytest tests/test_settings.py -q").
+    milestone is done (e.g. "uv run pytest tests/test_settings.py -q"). A check
+    for a repo attached to the session runs in that repo's checkout: give its
+    alias as "repo", or write the check as "@<alias>: <command>".
     Replaces any earlier goal; milestones that keep their title and check keep
     their last result."""
     db = DB()
@@ -711,9 +826,13 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
         title = str(m.get("title", "")).strip()
         if not title:
             return "Every milestone needs a title."
-        check = str(m.get("check") or "").strip() or None
+        repo_alias, check = repos.split_check(str(m.get("check") or ""))
+        repo_alias = str(m.get("repo") or "").strip() or repo_alias
+        if repo_alias and repos.resolve_attached(db, root_id, repo_alias) is None:
+            return (f"Milestone {title!r} names repo {repo_alias!r}, which isn't attached to this "
+                    "session (list_repos shows what is).")
         items.append((title, check, (str(m.get("detail") or "").strip() or None),
-                      (str(m.get("profile") or "").strip() or None)))
+                      (str(m.get("profile") or "").strip() or None), repo_alias))
     try:
         autopilot.set_goal(db, root_id, goal, items, detail)
     except autopilot.AutopilotError as e:
