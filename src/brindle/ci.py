@@ -805,6 +805,8 @@ WORKFLOW = """\
 #
 # Secrets: BRINDLE_PRO_TOKEN (an org CI token, cpc_..., from
 # `brindle account org ci-token create`) and ANTHROPIC_API_KEY (for Claude Code).
+# Optional: OPENAI_API_KEY or CODEX_API_KEY also installs Codex, so routing can
+# pick it; `brindle ci doctor` in a job lists the CLIs and keys it finds.
 # In the repo's Actions settings, allow GitHub Actions to create pull requests.
 #
 # Three jobs, because agents run the repo's own code and can reach anything on
@@ -879,8 +881,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
       - name: Install brindle
         run: uv tool install {package}
-      - name: Install the agent CLI
-        run: npm install -g @anthropic-ai/claude-code
+{providers}
       - name: Git identity for the agents' commits
         run: |
           git config --global user.name "brindle[bot]"
@@ -935,7 +936,10 @@ def workflow_text(label: str = "brindle") -> str:
     if not re.fullmatch(r"[A-Za-z0-9 _.:/-]{1,50}", label):
         raise CIError("the label may use letters, digits, spaces and _ . : / -")
     pinned = re.fullmatch(r"[0-9]+(\.[0-9]+)*([ab]|rc|\.post|\.dev)?[0-9]*", __version__ or "")
-    return WORKFLOW.format(label=label, package=f"brindle=={__version__}" if pinned else "brindle")
+    from brindle import ci_providers
+
+    return WORKFLOW.format(label=label, package=f"brindle=={__version__}" if pinned else "brindle",
+                           providers=ci_providers.workflow_steps())
 
 
 def init(repo_root: str | Path, label: str = "brindle", force: bool = False) -> Path:
