@@ -1633,6 +1633,28 @@ def ci_publish(
     raise typer.Exit(ci.publish_cli(path, repo, base, echo=typer.echo))
 
 
+@ci_app.command("validate")
+def ci_validate(
+    pr: int = typer.Option(..., "--pr", help="The pull request to validate."),
+    out: str = typer.Option("verdict.json", "--out", help="Where to write the verdict JSON (version 1)."),
+    mode: str = typer.Option("advisory", "--mode", help="advisory (never fails) or blocking (fails only on a failing check or an unmet criterion with evidence)."),
+    entitlement: Optional[str] = typer.Option(None, "--entitlement", help="Read the entitlement from this file (written by `brindle ci entitle`) instead of exchanging BRINDLE_PRO_TOKEN."),
+) -> None:
+    """Check a pull request headless: its checks, a review, and the linked issue's acceptance criteria.
+
+    Writes no code and nothing to GitHub. The PR's head is fetched into a
+    fresh worktree with hooks off; the repo's `checks` run there with every
+    GitHub token withheld from the environment; the repo's reviewer profile(s)
+    review the diff (in parallel when more than one can run) and judge each
+    criterion of the issue the PR closes, with evidence. Only hard evidence (a
+    failing check, an unmet criterion backed by failing output) fails a
+    blocking run; review opinions never do. Exits 0 on pass or neutral, 1 on
+    fail, 2 on error. Needs a read-only GitHub token for gh, and nothing more."""
+    from brindle import ci_validate
+
+    raise typer.Exit(ci_validate.validate_cli(pr, out, mode, echo=typer.echo, entitlement=entitlement))
+
+
 @ci_app.command("init")
 def ci_init(
     label: str = typer.Option("brindle", "--label", help="Issues given this label start a run."),

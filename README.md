@@ -784,6 +784,19 @@ brindle ci run --issue 42 --entitlement ent.jwt --bundle out/brindle.bundle   # 
 brindle ci publish out/brindle.bundle --repo acme/api                   # elsewhere: pushes and opens the PR
 ```
 
+`brindle ci validate --pr N --out verdict.json` is the other direction: a
+headless check of a pull request that writes no code and nothing to GitHub. It
+fetches the PR's head into a fresh worktree (hooks off), runs the repo's
+`checks` there with every GitHub token withheld, has the repo's reviewer
+profile(s) review the diff (in parallel when more than one can run) and
+judges each acceptance criterion of the issue the PR closes, with evidence (a
+test the diff adds, a line of check output), then writes one verdict JSON for
+a reporter. `--mode advisory` (the default) never fails; `--mode blocking`
+fails only on hard evidence (a failing check, an unmet criterion backed by
+failing output), never on a reviewer's opinion. It needs a read-only GitHub
+token for `gh`, the model key, and the `ci` entitlement (`--entitlement FILE`
+works as for `run`).
+
 With `--issue` and `--goal`, the supervisor derives the milestones and their
 checks itself; a goals.md-shaped goal (`# Goal`, `## Milestone`, `check:`) is
 recorded as written. `--max-workers` sets `max_agents` in the repo's
