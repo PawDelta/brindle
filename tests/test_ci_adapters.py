@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from brindle import ci_adapters
-from brindle.ci_adapters import (API_KEY, CLOUD, ENDPOINT, SUBSCRIPTION, ClaudeAdapter, CodexAdapter,
+from brindle.ci_adapters import (API_KEY, CLOUD, ENDPOINT, FEDERATION, SUBSCRIPTION, ClaudeAdapter, CodexAdapter,
                                  NativeAdapter, Review, default_adapters, doctor, format_doctor,
                                  merge_usage, providers_available, repo_is_org, usable)
 
@@ -43,6 +43,33 @@ def test_claude_credential_kinds(env, kind, names):
     cred = ClaudeAdapter().credential(env)
     assert (cred.kind, cred.names) == (kind, names)
     assert ClaudeAdapter().credential_kind(env) == kind
+
+
+FED_IDS = {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": "org-uuid",
+           "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1"}
+FED_ID_NAMES = ("ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_SERVICE_ACCOUNT_ID")
+
+
+@pytest.mark.parametrize("env, kind, names", [
+    ({**FED_IDS, "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t"}, FEDERATION,
+     (*FED_ID_NAMES, "ANTHROPIC_IDENTITY_TOKEN_FILE")),
+    ({**FED_IDS, "ANTHROPIC_IDENTITY_TOKEN": "jwt", "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}, FEDERATION,
+     (*FED_ID_NAMES, "ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_WORKSPACE_ID")),
+    # An empty key doesn't count (and is dropped before claude runs).
+    ({**FED_IDS, "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t", "ANTHROPIC_API_KEY": ""}, FEDERATION,
+     (*FED_ID_NAMES, "ANTHROPIC_IDENTITY_TOKEN_FILE")),
+    # A real key shadows federation in Claude Code, so it's what is reported.
+    ({**FED_IDS, "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t", "ANTHROPIC_API_KEY": "k"}, API_KEY,
+     ("ANTHROPIC_API_KEY",)),
+    # Incomplete federation is no credential.
+    (FED_IDS, None, ()),
+    ({**FED_IDS, "ANTHROPIC_SERVICE_ACCOUNT_ID": "", "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t"}, None, ()),
+    ({**FED_IDS, "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t", "CLAUDE_CODE_OAUTH_TOKEN": "o"}, FEDERATION,
+     (*FED_ID_NAMES, "ANTHROPIC_IDENTITY_TOKEN_FILE")),
+])
+def test_claude_federation_credential(env, kind, names):
+    cred = ClaudeAdapter().credential(env)
+    assert (cred.kind, cred.names) == (kind, names)
 
 
 def test_codex_credential_kinds(tmp_path):
@@ -198,6 +225,16 @@ def test_subscription_only_is_unusable_on_org_repos(bins):
     assert usable(a, {**key, "PATH": "/nonexistent"}, org=False) == (False, "claude isn't installed")
 
 
+def test_federation_is_usable_on_org_repos(bins):
+    """A federated Console service account is billed as API, not a
+    personal subscription: fine on an organization's repository."""
+    fed = {**FED_IDS, "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t", "PATH": str(bins)}
+    a = ClaudeAdapter()
+    assert usable(a, fed, org=True) == (True, "")
+    assert usable(a, fed, org=None) == (True, "")
+    assert "claude" in providers_available({"claude": a}, fed, org=True)
+
+
 def test_providers_available(bins):
     env = {"CLAUDE_CODE_OAUTH_TOKEN": "o", "OPENAI_API_KEY": "k", "PATH": str(bins)}
     adapters = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
@@ -265,6 +302,20 @@ def test_claude_review_parses_json_output(monkeypatch, tmp_path):
                          usage={"claude-x": {"input": 7, "output": 3, "cache_read": 1}})
     assert seen["argv"][1:] == ["-p", "--output-format", "json"] and seen["stdin"] == "review this"
     assert seen["env"] == {"ANTHROPIC_API_KEY": "k"} and seen["cwd"] == str(tmp_path)
+
+
+def test_claude_review_env_keeps_federation_and_drops_empty_keys(monkeypatch, tmp_path):
+    seen = {}
+
+    def run(argv, **kw):
+        seen["env"] = kw.get("env")
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+    monkeypatch.setattr(ci_adapters.subprocess, "run", run)
+    fed = {**FED_IDS, "ANTHROPIC_IDENTITY_TOKEN_FILE": "/tmp/t", "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
+    env = {**fed, "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": ""}
+    ClaudeAdapter().review("review this", str(tmp_path), env)
+    assert seen["env"] == fed, "an empty key would shadow federation in Claude Code"
+    assert env["ANTHROPIC_API_KEY"] == "", "the caller's env is left alone"
 
 
 def test_claude_review_keeps_raw_text_when_not_json(monkeypatch, tmp_path):

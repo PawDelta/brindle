@@ -558,7 +558,8 @@ def seen_signed_in(provider: str) -> bool:
 # and Application Default Credentials sign-ins are chosen on that screen).
 _ENV_AUTH = {
     "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"),
+               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+               "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_IDENTITY_TOKEN"),
     "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
     "antigravity": ("GEMINI_API_KEY",),
 }
