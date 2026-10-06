@@ -531,11 +531,24 @@ def codex_binary() -> str:
 
 
 
-# Signed in, by provider, and when that was seen: a positive answer is kept a
-# while (a long-lived MCP server launches many agents); a negative one isn't,
-# so signing in takes effect on the next try.
-_SIGNED_IN: dict[str, float] = {}
+# Signed in, by (provider, the profile env the probe ran with), and when that
+# was seen: a positive answer is kept a while (a long-lived MCP server launches
+# many agents); a negative one isn't, so signing in takes effect on the next
+# try. A profile's env can change the answer (a base URL, a settings path), so
+# one profile's yes doesn't stand for another's.
+_SIGNED_IN: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
 SIGNED_IN_TTL = 600
+
+
+def _signed_in_key(provider: str, env: dict[str, str] | None) -> tuple:
+    return provider, tuple(sorted(env.items())) if env else ()
+
+
+def seen_signed_in(provider: str) -> bool:
+    """Whether a status check answered "signed in" for ``provider`` recently,
+    with any profile env (brindle doctor's "its own login")."""
+    now = time.time()
+    return any(k[0] == provider and now - t < SIGNED_IN_TTL for k, t in _SIGNED_IN.items())
 
 # Credentials a CLI takes from the environment instead of its own login.
 # agy (1.1.13 and later) reads GEMINI_API_KEY only when its settings.json
@@ -575,7 +588,8 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     full_env = {**os.environ, **env} if env else os.environ
     if any(full_env.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
-    seen = _SIGNED_IN.get(provider)
+    key = _signed_in_key(provider, env)
+    seen = _SIGNED_IN.get(key)
     if seen and time.time() - seen < SIGNED_IN_TTL:
         return None
     reason = None
@@ -615,7 +629,7 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     else:
         return None
     if reason is None and res is not None:
-        _SIGNED_IN[provider] = time.time()
+        _SIGNED_IN[key] = time.time()
     return reason
 
 

@@ -1027,13 +1027,32 @@ brindle only offers a profile whose CLI is installed and signed in. A profile on
 CLI that isn't signed in is left out of the supervisor's profile list and of
 routing by weight, and naming it directly stops with how to sign in
 (`claude auth login`, `codex login`, running `agy`) instead of opening the CLI's
-login screen. `brindle doctor` shows each CLI's sign-in. Keys set in the environment
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` and the like) count as
-signed in, from your environment or a profile's `env` lines; `agy` reads
-`GEMINI_API_KEY` only with `"modelProvider": "gemini"` in its settings (see
-[Google Antigravity](#google-antigravity)). A worker that no hook reports on (Codex)
+login screen. `brindle doctor` shows, for each installed CLI, how it's signed in
+and whether a quota limit is in effect. Sign-in is its own login, an environment
+key (by name, never its value) set in your shell or in a profile's
+`env.NAME: value` lines, signed out, or unknown when the status check gives no
+answer. Keys set in the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY` and the like) count as signed in; see the table below for what
+each CLI takes. A worker that no hook reports on (Codex)
 and that shows nothing new for 10 minutes without reporting, for example because
 it's signed in without a plan that includes it, is reported to its supervisor.
+
+#### Key login
+
+| Provider | Key login (environment variables) |
+|---|---|
+| `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
+| `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY` |
+| `antigravity` | `GEMINI_API_KEY`, only with `"modelProvider": "gemini"` in `agy`'s `settings.json` (see [Google Antigravity](#google-antigravity)); otherwise `agy`'s own browser sign-in |
+
+Workers that run unattended should use key login where the CLI supports it.
+A personal login is one interactive session with one quota shared by every
+worker: when it expires or its quota runs out, every worker on it stalls until
+someone signs in again in a browser. A key gives workers their own limits and
+needs no browser step. Put the key in your environment, or in a profile's
+`env.NAME: value` lines in `~/.brindle/agents` (never in the repo), and
+`brindle doctor` names the variable each CLI gets, from your shell or from
+which profiles.
 
 ### Cheap workers
 

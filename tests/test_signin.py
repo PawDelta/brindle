@@ -165,6 +165,19 @@ def test_signed_in_is_remembered_signed_out_is_not(monkeypatch):
     assert len(calls) == 2
 
 
+def test_signed_in_is_remembered_per_profile_env(monkeypatch):
+    """A yes for one profile's env isn't reused for another's: a different
+    base URL or settings path can change the answer."""
+    calls = fake_probe(monkeypatch, {"models": AGY_IN})
+    assert providers.signed_out("antigravity", {"GOOGLE_GEMINI_BASE_URL": "http://a"}) is None
+    assert providers.signed_out("antigravity", {"GOOGLE_GEMINI_BASE_URL": "http://a"}) is None
+    assert len(calls) == 1
+    assert providers.signed_out("antigravity", {"GOOGLE_GEMINI_BASE_URL": "http://b"}) is None
+    assert providers.signed_out("antigravity") is None
+    assert len(calls) == 3
+    assert providers.seen_signed_in("antigravity") and not providers.seen_signed_in("codex")
+
+
 def test_spawn_refuses_and_leaves_no_agent(db, repo, monkeypatch):
     fake_probe(monkeypatch, {"login": CODEX_OUT})
     ws = workspaces.adopt_root(db, str(repo))
