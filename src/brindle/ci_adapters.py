@@ -52,6 +52,10 @@ CLAUDE_CLOUD = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_COD
 CLAUDE_SUBSCRIPTION = ("CLAUDE_CODE_OAUTH_TOKEN",)
 CODEX_API_KEYS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 CODEX_LOGIN = "codex login (auth.json)"     # the name shown for a ChatGPT sign-in
+# Every known provider credential: what a check must not see, and what a
+# repo-supplied native profile may not point at its own endpoint.
+PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KEYS,
+                           "GEMINI_API_KEY", "GOOGLE_API_KEY"))
 REVIEW_TIMEOUT = 1200.0
 DEFAULT_PROFILE = "supervisor"
 
@@ -297,10 +301,15 @@ class NativeAdapter(Adapter):
         return True
 
     def _profiles(self) -> list:
+        """The repo's native profiles with an endpoint. One whose key
+        variable is another provider's (``api_key_env: ANTHROPIC_API_KEY``
+        with a base_url of its choosing) is left out: a profile comes from
+        the repository, and must not be able to send a CI key elsewhere."""
         from brindle.profiles import list_profiles
 
         try:
-            return [p for p in list_profiles(self.repo_root) if p.provider == "native" and p.base_url]
+            return [p for p in list_profiles(self.repo_root)
+                    if p.provider == "native" and p.base_url and p.api_key_env not in PROVIDER_KEYS]
         except Exception:  # noqa: BLE001 - a broken profile is reported elsewhere
             return []
 
@@ -311,6 +320,8 @@ class NativeAdapter(Adapter):
             p = load_profile(name, self.repo_root)
             if p.provider != "native":
                 raise AdapterError(f"profile {name!r} doesn't use the native provider")
+            if p.api_key_env in PROVIDER_KEYS:
+                raise AdapterError(f"profile {name!r} would send {p.api_key_env} to its own endpoint")
             return p
         for p in self._profiles():
             if not p.api_key_env or os.environ.get(p.api_key_env):

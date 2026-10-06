@@ -374,7 +374,7 @@ def test_run_rejects_a_checkout_not_at_base(plan, ci_repo, tmp_path):
     with pytest.raises(CIError, match="not the plan's base"):
         ci_client.run(token, tf, cwd=str(ci_repo), env=run_env(), client=Server(token).client, db=DB(),
                       adapters={"claude": FakeAdapter("claude")}, sleep=lambda s: None)
-    assert tf.exists(), "the token file is only read once the plan checks out"
+    assert not tf.exists(), "the token file is deleted whatever happens to the plan"
 
 
 def test_run_keeps_going_when_a_heartbeat_fails(plan, ci_repo, tmp_path):
@@ -604,6 +604,21 @@ def test_run_check_times_out(ci_repo):
     assert row["exit"] == 124 and "timed out after 1s" in row["output_excerpt"]
 
 
+def test_run_check_timeout_kills_the_whole_process_group(ci_repo):
+    """A grandchild that keeps the output pipe open must not outlive the timeout."""
+    t0 = time.monotonic()
+    row = ci_client.run_check({"id": "fork", "command": "echo started; sh -c 'sleep 30' & sleep 30", "timeout_s": 1},
+                              str(ci_repo), {"PATH": os.environ["PATH"]})
+    assert row["exit"] == 124 and "started" in row["output_excerpt"]
+    assert time.monotonic() - t0 < 10
+
+
+def test_run_check_missing_command(ci_repo):
+    row = ci_client.run_check({"id": "x", "command": "definitely-not-a-command-xyz", "timeout_s": 5},
+                              str(ci_repo), {"PATH": "/nonexistent"})
+    assert row["exit"] == 127
+
+
 # -- air-gap, doctor, the CLI ------------------------------------------------------------------------
 
 
@@ -652,7 +667,7 @@ def test_cli_run_fails_cleanly_on_a_bad_plan(ci_repo, tmp_path, monkeypatch):
     tf = token_file(tmp_path)
     result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
     assert result.exit_code == 1 and "brindle ci: malformed plan" in result.output
-    assert tf.exists()
+    assert not tf.exists(), "the run token never stays on disk"
 
 
 def test_cli_start_needs_the_token(ci_repo, tmp_path, monkeypatch):

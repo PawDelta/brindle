@@ -35,10 +35,11 @@ import logging
 import os
 import re
 import secrets
+import signal
 import subprocess
+import tempfile
 import time
 import urllib.parse
-import uuid
 from pathlib import Path
 from typing import Callable, Mapping, MutableMapping
 
@@ -64,8 +65,7 @@ SECRET_ENV = ("BRINDLE_PRO_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN",
               "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL")
 SECRET_PREFIXES = ("GH_",)
 # What a check command must not see either: model keys and anything token-like.
-MODEL_KEY_NAMES = (*ci_adapters.CLAUDE_API_KEYS, *ci_adapters.CLAUDE_SUBSCRIPTION,
-                   *ci_adapters.CODEX_API_KEYS, "GEMINI_API_KEY", "GOOGLE_API_KEY")
+MODEL_KEY_NAMES = ci_adapters.PROVIDER_KEYS
 MODEL_KEY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_AUTH_TOKEN", "_PASSWORD")
 
 DEFAULT_HEARTBEAT_S = 60
@@ -81,8 +81,8 @@ UPLOAD_TIMEOUT = 120.0
 UPLOAD_MAX_RESPONSE = auth.MAX_RESPONSE
 PLAN_FILE = "plan.jwt"
 TOKEN_FILE = "run_token"
-WORKFLOW_KINDS = ("issue", "validate", "fix")
-WORKFLOW_DIR = ".github/workflows"
+SETUP_KINDS = ("issue", "validate", "fix")
+SETUP_DIR = ".github/workflows"
 SETUP_BRANCH = "brindle/ci-setup"
 ENV_TOKEN = "BRINDLE_PRO_TOKEN"
 
@@ -512,17 +512,13 @@ def make_bundle(cwd: str, base_sha: str, branch: str) -> tuple[int, bytes | None
     n = count_commits(cwd, base_sha, branch)
     if n == 0:
         return 0, None, "no commits"
-    path = Path(cwd) / ".git" / f"brindle-ci-{uuid.uuid4().hex}.bundle"
-    try:
-        git.run(["bundle", "create", str(path), f"{base_sha}..{branch}"], cwd)
-        data = path.read_bytes()
-    except (git.GitError, OSError) as e:
-        raise CIError(f"can't write the bundle: {e}") from e
-    finally:
+    with tempfile.TemporaryDirectory(prefix="brindle-ci-") as tmp:
+        path = Path(tmp) / "run.bundle"
         try:
-            path.unlink()
-        except OSError:
-            pass
+            git.run(["bundle", "create", str(path), f"{base_sha}..{branch}"], cwd)
+            data = path.read_bytes()
+        except (git.GitError, OSError) as e:
+            raise CIError(f"can't write the bundle: {e}") from e
     if len(data) > BUNDLE_MAX:
         return n, None, f"bundle is {len(data)} bytes, over the {BUNDLE_MAX} limit"
     return n, data, None
@@ -537,11 +533,13 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     from brindle.db import DB
 
     repo = github_repo(env)
+    # The token file goes first, whatever happens to the plan: a rejected
+    # plan must not leave a run token on the runner's disk.
+    run_token = read_run_token(token_path)
     plan = verify_plan(plan_token, repo=repo, now=clock())
     if plan["plan_kind"] != "run":
         raise CIError("this plan isn't a run plan")
     check_run_checkout(plan, cwd)
-    run_token = read_run_token(token_path)
     gone = scrub_secrets(env)
     for k in gone:
         os.environ.pop(k, None)
@@ -626,20 +624,33 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
 # -- validate -----------------------------------------------------------------------------------------
 
 
-def run_check(check: dict, cwd: str, env: Mapping[str, str], *, run=subprocess.run) -> dict:
-    """Run one check command in ``env`` with its timeout; the raw outcome."""
+def run_check(check: dict, cwd: str, env: Mapping[str, str], *, popen=subprocess.Popen) -> dict:
+    """Run one check command in ``env`` with its timeout; the raw outcome.
+    The command gets its own process group, so a timeout kills everything it
+    started (a grandchild holding the output pipes would otherwise keep the
+    job waiting past the timeout)."""
     timeout = int(check.get("timeout_s", 900))
     t0 = time.monotonic()
     try:
-        proc = run(check["command"], shell=True, cwd=cwd, env=dict(env), capture_output=True, text=True,
-                   timeout=timeout, stdin=subprocess.DEVNULL)
-        code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
-    except subprocess.TimeoutExpired as e:
-        code = 124
-        output = ((e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or ""))
-        output += f"\n(timed out after {timeout}s)"
+        proc = popen(check["command"], shell=True, cwd=cwd, env=dict(env), stdout=subprocess.PIPE,
+                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
     except OSError as e:
+        proc = None
         code, output = 127, str(e)
+    if proc is not None:
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
+            out, _ = proc.communicate()
+            code = 124
+        output = (out or b"").decode("utf-8", "replace")
+        if code == 124:
+            output += f"\n(timed out after {timeout}s)"
     return {"id": check["id"], "exit": code, "output_excerpt": tail(output, OUTPUT_EXCERPT),
             "duration_s": round(time.monotonic() - t0, 1)}
 
@@ -848,14 +859,13 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
 
     say("5/6 fetching the workflows and opening a pull request with them")
     files = {}
-    for kind in WORKFLOW_KINDS:
+    for kind in SETUP_KINDS:
         try:
-            files[f"{WORKFLOW_DIR}/brindle-ci-{kind}.yml"] = api.workflow(cpc, kind)
+            files[f"{SETUP_DIR}/brindle-ci-{kind}.yml"] = api.workflow(cpc, kind)
         except CIError as e:
             if e.code in ("not_found", "http_404", "bad_request"):
                 continue
             raise
-    del cpc
     if not files:
         raise CIError("the server offered no workflow for this org")
     git.run(["checkout", "-B", SETUP_BRANCH], cwd)
