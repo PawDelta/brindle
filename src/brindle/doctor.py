@@ -129,11 +129,11 @@ def signin_checks(repo_root: str | None = None) -> list[Check]:
         elif why:
             level = FAIL if provider == "claude" else WARN
             signin = f"signed out: {why}"
-        elif provider in providers._SIGNED_IN:
+        elif providers.seen_signed_in(provider):
             # Only a status check that answered "signed in" records this.
             signin = "its own login"
         else:
-            signin = "sign-in unknown (no status check for this CLI)"
+            signin = "sign-in unknown (the status check gave no answer)"
         if not env:
             for key, names in _profile_keys(provider, repo_root).items():
                 signin += f"; profile{'s' if len(names) > 1 else ''} {', '.join(names)}: environment key {key}"

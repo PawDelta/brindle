@@ -489,7 +489,7 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.set_status(agent.id, status)
         agent.status = status
         return
-    why = signed_out(provider.name)
+    why = signed_out(provider.name, profile.env)
     if why:
         raise AgentError(why)
     # Here rather than in spawn, so a resume checks too: a directory can be

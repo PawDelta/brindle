@@ -27,29 +27,38 @@ def lines(repo_root=None):
     return {c.name: c for c in doctor.signin_checks(repo_root)}
 
 
-SIGNED_IN = {"auth": (0, json.dumps({"loggedIn": True})), "login": (0, "Logged in using ChatGPT\n")}
+SIGNED_IN = {"auth": (0, json.dumps({"loggedIn": True})), "login": (0, "Logged in using ChatGPT\n"),
+             "models": (0, "Fetching available models...\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)\n")}
 
 
 def test_doctor_lists_each_installed_cli(installed, monkeypatch):
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv: SIGNED_IN.get(argv[1]))
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
     got = lines()
     assert set(got) == {"Claude Code sign-in", "Codex sign-in", "Google Antigravity sign-in"}
-    for name in ("Claude Code sign-in", "Codex sign-in"):
+    for name in ("Claude Code sign-in", "Codex sign-in", "Google Antigravity sign-in"):
         assert got[name].level == doctor.OK
         assert got[name].detail == "its own login; quota: no limit in effect"
-    # agy has no status check, so brindle can't say it's signed in.
-    agy = got["Google Antigravity sign-in"]
-    assert agy.level == doctor.OK
-    assert agy.detail == "sign-in unknown (no status check for this CLI); quota: no limit in effect"
 
 
 def test_doctor_unknown_when_the_status_check_gives_no_answer(installed):
     # conftest's probe answers nothing, like an older CLI without the command.
-    assert lines()["Claude Code sign-in"].detail.startswith("sign-in unknown")
+    got = lines()
+    assert got["Claude Code sign-in"].detail.startswith("sign-in unknown")
+    assert got["Google Antigravity sign-in"].detail.startswith("sign-in unknown")
+
+
+def test_doctor_own_login_needs_a_yes_for_that_provider(installed, monkeypatch):
+    # A yes recorded for Claude (with any profile env) says nothing about agy.
+    monkeypatch.setattr(providers, "_auth_probe",
+                        lambda argv, env=None: SIGNED_IN.get(argv[1]) if argv[1] == "auth" else None)
+    assert providers.signed_out("claude", {"ANTHROPIC_BASE_URL": "http://x"}) is None
+    got = lines()
+    assert got["Claude Code sign-in"].detail.startswith("its own login")
+    assert got["Google Antigravity sign-in"].detail.startswith("sign-in unknown")
 
 
 def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv: SIGNED_IN.get(argv[1]))
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
     agents = repo / ".brindle" / "agents"
     agents.mkdir(parents=True)
     (agents / "keyed.md").write_text(
@@ -85,14 +94,18 @@ def test_doctor_reads_env_keys_from_providers_generically(installed, monkeypatch
 
 
 def test_doctor_shows_signed_out(installed, monkeypatch):
-    replies = {"auth": (1, json.dumps({"loggedIn": False})), "login": (1, "Not logged in\n")}
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv: replies.get(argv[1]))
+    replies = {"auth": (1, json.dumps({"loggedIn": False})), "login": (1, "Not logged in\n"),
+               "models": (1, "Error: Please sign in to view available models. Launch the CLI "
+                             "without arguments to sign in.\n")}
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: replies.get(argv[1]))
     got = lines()
     assert got["Claude Code sign-in"].level == doctor.FAIL
     assert got["Claude Code sign-in"].detail.startswith("signed out: ")
     assert "claude auth login" in got["Claude Code sign-in"].detail
     assert got["Codex sign-in"].level == doctor.WARN
     assert "codex login" in got["Codex sign-in"].detail
+    assert got["Google Antigravity sign-in"].level == doctor.WARN
+    assert "run `agy`" in got["Google Antigravity sign-in"].detail
 
 
 def test_doctor_shows_a_quota_limit_in_effect(installed):

@@ -404,8 +404,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str) -> str | None:
     except KeyError:
         return f"no profile {name}"
     cli = CLI_FOR_PROVIDER.get(p.provider)
-    if cli and unusable(p.provider):
-        return (f"{cli} isn't signed in, skipped {name}" if signed_out(p.provider)
+    if cli and unusable(p.provider, p.env):
+        return (f"{cli} isn't signed in, skipped {name}" if signed_out(p.provider, p.env)
                 else f"{cli} isn't installed, skipped {name}")
     if p.provider in quota.PROVIDERS:
         room = quota.headroom(p.provider, cfg, repo_root)

@@ -1023,14 +1023,14 @@ change files under a directory without prompts.
 brindle only offers a profile whose CLI is installed and signed in. A profile on a
 CLI that isn't signed in is left out of the supervisor's profile list and of
 routing by weight, and naming it directly stops with how to sign in
-(`claude auth login`, `codex login`) instead of opening the CLI's login screen.
-`brindle doctor` shows, for each installed CLI, how it's signed in and whether
-a quota limit is in effect. Sign-in is its own login, an environment key (by
-name, never its value) set in your shell or in a profile's `env.NAME: value`
-lines, signed out, or unknown for a CLI with no status check. Keys set in the environment
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and the like) count as signed in.
-`agy` has no sign-in status command, so brindle can't tell when it's signed out:
-sign in once by running `agy` yourself. A worker that no hook reports on (Codex)
+(`claude auth login`, `codex login`, running `agy`) instead of opening the CLI's
+login screen. `brindle doctor` shows, for each installed CLI, how it's signed in
+and whether a quota limit is in effect. Sign-in is its own login, an environment
+key (by name, never its value) set in your shell or in a profile's
+`env.NAME: value` lines, signed out, or unknown when the status check gives no
+answer. Keys set in the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY` and the like) count as signed in; see the table below for what
+each CLI takes. A worker that no hook reports on (Codex)
 and that shows nothing new for 10 minutes without reporting, for example because
 it's signed in without a plan that includes it, is reported to its supervisor.
 
@@ -1040,7 +1040,7 @@ it's signed in without a plan that includes it, is reported to its supervisor.
 |---|---|
 | `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
 | `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY` |
-| `antigravity` | browser login (`agy`'s own sign-in) |
+| `antigravity` | `GEMINI_API_KEY`, only with `"modelProvider": "gemini"` in `agy`'s `settings.json` (see [Google Antigravity](#google-antigravity)); otherwise `agy`'s own browser sign-in |
 
 Workers that run unattended should use key login where the CLI supports it.
 A personal login is one interactive session with one quota shared by every
@@ -1284,6 +1284,15 @@ Codex. Install it and sign in once:
 curl -fsSL https://antigravity.google/cli/install.sh | bash
 agy        # sign in with your Google account, then quit
 ```
+
+To run unattended workers without a browser login, `agy` (1.1.13 or newer) can use
+a Gemini API key instead: put `"modelProvider": "gemini"` in
+`~/.gemini/antigravity-cli/settings.json` and set `GEMINI_API_KEY`, in your
+environment or in a profile's `env.GEMINI_API_KEY: ...` line (keep the key out of
+the repo). The key alone does nothing: without `modelProvider`, `agy` still asks
+you to sign in. `agy` takes no other key or token from the environment; its
+Google Cloud, Workforce Identity and Application Default Credentials sign-ins are
+chosen on its sign-in screen.
 
 Then run the whole session on it with `brindle --provider antigravity`, or mix models:
 give a profile `provider: antigravity` (for example a `gemini-reviewer` for a second

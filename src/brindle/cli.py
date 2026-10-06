@@ -1512,13 +1512,15 @@ def agent_profiles() -> None:
         pass
     from brindle.providers import unusable
 
-    why: dict[str, str | None] = {}
+    why: dict[tuple, str | None] = {}
     hidden: dict[str, list[str]] = {}
     for p in list_profiles(root):
-        if p.provider not in why:
-            why[p.provider] = unusable(p.provider)
-        if why[p.provider]:
-            hidden.setdefault(why[p.provider], []).append(p.name)
+        # A profile's env can carry the CLI's key, so one on a signed-out CLI can still run.
+        key = (p.provider, tuple(sorted(p.env.items())))
+        if key not in why:
+            why[key] = unusable(p.provider, p.env)
+        if why[key]:
+            hidden.setdefault(why[key], []).append(p.name)
             continue
         typer.echo(f"{p.name:<14} {p.provider:<7} {p.description}")
     for reason, names in hidden.items():
