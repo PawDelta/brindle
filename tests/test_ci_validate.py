@@ -217,10 +217,14 @@ def test_met_needs_a_test_in_the_diff_or_passing_output(pr_repo, gh):
         "unknown", "unverified: output shows '3 passed'")   # too short to prove anything
     assert v.substantiate("met", "the run printed `tests/test_health.py::test_health PASSED`", checks, set())[0] == "met"
     assert v.substantiate("met", "test_health", [], tests)[0] == "unknown"   # nothing ran it
-    failed = [v.Check("pytest", False, "", "$ pytest\nFAILED test_health\n(exit 1)")]
+    failed = [v.Check("pytest", False, "", "$ pytest\nFAILED test_health - assert 404 == 200\n(exit 1)")]
     assert v.substantiate("met", "test_health", failed + checks, tests)[0] == "unknown"
-    assert v.substantiate("unmet", "FAILED test_health", failed, tests)[0] == "unmet"
-    assert v.substantiate("unmet", "FAILED test_health", checks, tests)[0] == "unknown"
+    assert v.substantiate("unmet", "FAILED test_health - assert 404 == 200", failed, tests)[0] == "unmet"
+    assert v.substantiate("unmet", "see 'test_health - assert 404 == 200'", failed, tests)[0] == "unmet"  # long enough
+    assert v.substantiate("unmet", "FAILED test_health - assert 404 == 200", checks, tests)[0] == "unknown"
+    # Naming a failing test is not evidence about this criterion; a failure line is.
+    assert v.substantiate("unmet", "test_health", failed, tests)[0] == "unknown"
+    assert v.substantiate("unmet", "test_health fails", failed, tests)[0] == "unknown"
     assert v.substantiate("unknown", "whatever it says here", checks, tests) == (
         "unknown", "unverified: whatever it says here")
 
@@ -266,10 +270,12 @@ def test_secrets_are_withheld_before_the_prs_code_runs(pr_repo, gh, monkeypatch)
     monkeypatch.setenv("GITHUB_TOKEN", "ghs_read2")
     monkeypatch.setenv("BRINDLE_PRO_TOKEN", "cpc_x")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    monkeypatch.setenv("MY_LOCAL_KEY", "local-x")
+    monkeypatch.setenv("CI", "true")
     seen = {}
 
     def run_check(cmd, cwd, env, timeout):
-        seen["check_env"] = {**os.environ, **env}
+        seen["check_env"] = env
         seen["check_cwd"] = cwd
         return True, "ok"
 
@@ -278,16 +284,44 @@ def test_secrets_are_withheld_before_the_prs_code_runs(pr_repo, gh, monkeypatch)
         seen["review_cwd"] = cwd
         return reply(), None
 
-    verdict = validate(pr_repo, run_check=run_check, ask_fn=ask_fn)
+    local = Profile("rev-local", "", "native", "p", api="openai", base_url="http://x", model="m",
+                    api_key_env="MY_LOCAL_KEY")
+    verdict = validate(pr_repo, run_check=run_check, ask_fn=ask_fn, reviewers=[reviewer(), local])
     assert verdict.status == "neutral"
     for key in ("check_env", "reviewer_env"):
-        env = seen[key]
-        assert not any(k in env for k in ci.WITHHELD_ENV), key
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-x"
+        assert not any(k in seen[key] for k in ci.WITHHELD_ENV), key
+    # The reviewer keeps the model key; the PR's checks never see it.
+    assert seen["reviewer_env"]["ANTHROPIC_API_KEY"] == "sk-ant-x"
+    check_env = seen["check_env"]
+    assert "ANTHROPIC_API_KEY" not in check_env and "MY_LOCAL_KEY" not in check_env
+    assert check_env["CI"] == "true" and check_env["PATH"] == os.environ["PATH"]
     assert all(k not in os.environ for k in ci.WITHHELD_ENV)
     # The PR's code ran in the fresh worktree, not the trusted checkout.
     assert seen["check_cwd"] == seen["review_cwd"] != str(pr_repo[0])
     assert "brindle-validate-3-" in seen["check_cwd"]
+
+
+def test_a_real_check_cannot_read_the_model_key(pr_repo, gh, monkeypatch):
+    repo, _ = pr_repo
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-leak")
+    monkeypatch.setenv("SOME_SERVICE_TOKEN", "tok-leak")
+    monkeypatch.setenv("HARMLESS", "kept")
+    (repo / ".brindle" / "config.json").write_text(json.dumps(
+        {"checks": ["echo key=$ANTHROPIC_API_KEY tok=$SOME_SERVICE_TOKEN keep=$HARMLESS"]}))
+    verdict = validate(pr_repo, run_check=None)
+    (check,) = verdict.checks
+    assert check.passed and "key= tok= keep=kept" in check.excerpt
+    assert "leak" not in json.dumps(verdict.to_dict())
+
+
+def test_check_env_scrubs_by_name():
+    env = {"PATH": "/bin", "HOME": "/h", "CI": "1", "GITHUB_REPOSITORY": "o/r", "GITHUB_TOKEN": "t",
+           "ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "NPM_TOKEN": "t", "DB_PASSWORD": "p",
+           "AWS_SECRET_ACCESS_KEY": "s", "MY_PAT": "p", "AUTH_HEADER": "a", "KEYBOARD": "fine",
+           "AUTHOR": "fine", "LOCAL_MODEL_KEY": "k"}
+    scrubbed = v.check_env([Profile("l", "", "native", "", api_key_env="LOCAL_MODEL_KEY")], env)
+    assert scrubbed == {"PATH": "/bin", "HOME": "/h", "CI": "1", "GITHUB_REPOSITORY": "o/r",
+                        "KEYBOARD": "fine", "AUTHOR": "fine"}
 
 
 def test_hostile_pr_body_is_data_not_instructions(pr_repo, gh):
@@ -314,8 +348,6 @@ def test_hostile_pr_body_is_data_not_instructions(pr_repo, gh):
 
 def test_the_pr_cannot_rewrite_the_checks(pr_repo, gh, tmp_path):
     """The trusted checkout's config decides what runs, not the PR's tree."""
-    from brindle import autopilot
-
     repo, _ = pr_repo
     marker = tmp_path / "pwned"
     sh("git checkout -q feature", repo)
@@ -323,7 +355,7 @@ def test_the_pr_cannot_rewrite_the_checks(pr_repo, gh, tmp_path):
     sh("git add -A && git commit -qm 'helpful config' && git push -q origin HEAD:refs/pull/3/head", repo)
     gh["pr"]["headRefOid"] = sh("git rev-parse HEAD", repo)
     sh("git checkout -q main", repo)
-    verdict = validate(pr_repo, run_check=autopilot.run_check)
+    verdict = validate(pr_repo, run_check=None)    # the real runner
     assert [c.command for c in verdict.checks] == ["echo trusted-check"]
     assert verdict.checks[0].passed and "trusted-check" in verdict.checks[0].excerpt
     assert not marker.exists()
@@ -344,12 +376,14 @@ def test_hooks_never_run_and_the_worktree_is_removed(pr_repo, gh, tmp_path):
     assert "brindle-validate" not in worktrees
 
 
-def test_the_worktree_is_removed_even_when_a_step_blows_up(pr_repo, gh):
+def test_a_step_blowing_up_is_an_error_verdict_and_the_worktree_is_removed(pr_repo, gh, tmp_path):
     def boom(cmd, cwd, env, timeout):
         raise RuntimeError("the check runner itself broke")
 
-    with pytest.raises(RuntimeError):
-        validate(pr_repo, run_check=boom)
+    verdict = validate(pr_repo, mode="blocking", run_check=boom)
+    assert verdict.status == "error" and verdict.head_sha == pr_repo[1]
+    assert verdict.summary == "brindle ci validate: RuntimeError: the check runner itself broke"
+    assert v.check_schema(json.loads(verdict.write(tmp_path / "v.json").read_text())) == []
     assert "brindle-validate" not in sh("git worktree list --porcelain", pr_repo[0])
 
 
@@ -377,7 +411,8 @@ def test_pr_view_refuses_junk(monkeypatch):
 def test_a_moved_head_is_an_error_not_a_different_commit(pr_repo, gh):
     gh["pr"]["headRefOid"] = "f" * 40     # gh says one commit; the ref holds another
     verdict = validate(pr_repo)
-    assert verdict.status == "error" and "moved" in verdict.summary
+    assert verdict.status == "error" and "no longer reachable" in verdict.summary
+    assert verdict.head_sha == "f" * 40
 
 
 # -- reviewers --------------------------------------------------------------------
@@ -516,18 +551,22 @@ def test_cli_writes_the_verdict_and_exits_by_status(monkeypatch, tmp_path):
     res = CliRunner().invoke(app, ["ci", "validate", "--pr", "3", "--out", str(out), "--mode", "blocking"])
     assert res.exit_code == 1 and json.loads(out.read_text())["status"] == "fail"
 
+    out.unlink()
     res = CliRunner().invoke(app, ["ci", "validate", "--pr", "3", "--out", str(out), "--mode", "loud"])
-    assert res.exit_code == 2 and "advisory or blocking" in res.output
+    assert res.exit_code == 2 and "advisory or blocking" in res.output and not out.exists()
 
 
-def test_cli_needs_the_ci_entitlement(monkeypatch, tmp_path):
+def test_cli_needs_the_ci_entitlement_and_still_writes_the_verdict(monkeypatch, tmp_path):
     def refuse(client=None, entitlement_file=None):
         raise ci.CIError("brindle ci needs brindle Team")
 
     monkeypatch.setattr(ci, "require_ci", refuse)
-    res = CliRunner().invoke(app, ["ci", "validate", "--pr", "3", "--out", str(tmp_path / "v.json")])
-    assert res.exit_code == 2 and "needs brindle Team" in res.output
-    assert not (tmp_path / "v.json").exists()
+    out = tmp_path / "v.json"
+    res = CliRunner().invoke(app, ["ci", "validate", "--pr", "3", "--out", str(out), "--mode", "blocking"])
+    assert res.exit_code == 2 and "error: brindle ci needs brindle Team" in res.output
+    data = json.loads(out.read_text())
+    assert v.check_schema(data) == []
+    assert (data["status"], data["pr"], data["mode"], data["head_sha"]) == ("error", 3, "blocking", "")
 
 
 def test_cli_reads_the_entitlement_file(monkeypatch, tmp_path):

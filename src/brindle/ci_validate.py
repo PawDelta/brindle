@@ -20,10 +20,11 @@ request is untrusted, so:
   ``true`` or review itself with a profile it wrote;
 - before anything from the pull request runs (its tests are its code), the
   GitHub tokens are taken out of this process's environment with
-  ``ci.withhold_secrets`` and never passed on. The reviewer's process gets
-  the model key the job holds (``ANTHROPIC_API_KEY``, say) and nothing else
-  from the withheld set; see ``model_credentials`` for where a per-run
-  credential will be injected instead;
+  ``ci.withhold_secrets`` and never passed on. The checks run with a
+  scrubbed environment (``check_env``): no model key, no variable named
+  like a secret. Only the reviewer's process gets the model key the job
+  holds (``ANTHROPIC_API_KEY``, say); see ``model_credentials`` for where a
+  per-run credential will be injected instead;
 - the pull request body, the issue text and the diff are data in the
   reviewer's prompt, marked as untrusted, never instructions to brindle.
 
@@ -77,6 +78,7 @@ MAX_CRITERIA = 30
 MAX_CRITERION_CHARS = 300
 REVIEW_TIMEOUT = 900         # seconds for one reviewer's run
 MIN_QUOTE_CHARS = 10         # a quoted output line shorter than this proves nothing
+LONG_QUOTE_CHARS = 20        # part of an output line counts as a quote from this length
 PR_REF = "refs/brindle-ci/pr-{n}"
 BASE_REF = "refs/brindle-ci/base-{n}"
 # The built-in reviewers tried besides cfg.reviewer when no review_profile is forced.
@@ -321,11 +323,13 @@ def fetch_head(repo_root: str, pr: PullRequest, dest: str) -> str:
     _git([*_AS_GH, "fetch", "--no-tags", "--quiet", "--", "origin",
           f"+refs/pull/{n}/head:{head_ref}", f"+refs/heads/{pr.base_branch}:{base_ref}"], repo_root)
     fetched = _git(["rev-parse", "--verify", "--quiet", f"{head_ref}^{{commit}}"], repo_root).stdout.strip()
-    if fetched != pr.head_sha:
-        # The ref moved between gh's answer and the fetch; validate the commit gh named.
-        if not git.ok(["cat-file", "-e", f"{pr.head_sha}^{{commit}}"], repo_root):
-            raise CIError(f"brindle ci validate: pull request #{n} moved from {pr.head_sha[:8]} to "
-                          f"{fetched[:8]} while it was being read; run again")
+    # The commit gh named is the one validated. If the ref moved on since (a
+    # push), the old tip usually came along as an ancestor and is used; after a
+    # force-push it is gone, and guessing at the new tip isn't an option.
+    if fetched != pr.head_sha and not git.ok(["cat-file", "-e", f"{pr.head_sha}^{{commit}}"], repo_root):
+        raise CIError(f"brindle ci validate: gh named commit {pr.head_sha[:8]} for pull request #{n}, "
+                      f"but refs/pull/{n}/head now points at {fetched[:8]} and {pr.head_sha[:8]} is no "
+                      "longer reachable (force-pushed?); run again")
     _git(["worktree", "add", "--detach", "--quiet", dest, pr.head_sha], repo_root)
     base = _git(["rev-parse", "--verify", "--quiet", f"{base_ref}^{{commit}}"], repo_root).stdout.strip()
     proc = subprocess.run(["git", *_NO_HOOKS, "merge-base", base, pr.head_sha], cwd=repo_root,
@@ -374,16 +378,47 @@ def _excerpt(output: str) -> str:
     return "... (truncated)\n" + output[-EXCERPT_CHARS:]
 
 
-def run_checks(cfg: RepoConfig, worktree: str, run_check=None) -> list[Check]:
-    """Run each of the trusted config's ``checks`` in the pull request's
-    worktree. The environment is this process's, from which the tokens were
-    already withheld."""
-    from brindle import autopilot
+# Variables a check never sees: the withheld GitHub/CI tokens, the model keys
+# the reviewers need (ANTHROPIC_API_KEY and the like), and anything whose name
+# says it is a secret. The checks are the pull request's own code.
+SECRET_NAME = re.compile(r"(^|_)(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)(_|$)|API_KEY|_PAT$", re.I)
+MODEL_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY")
 
-    run_check = run_check or autopilot.run_check
+
+def check_env(reviewers: list[Profile] = (), environ=None) -> dict[str, str]:
+    """The environment the pull request's checks run in: this process's
+    without the withheld tokens, the model keys (every reviewer's
+    ``api_key_env`` included) and any variable named like a secret. PATH,
+    HOME, CI's own variables and the rest stay, so tools still work."""
+    environ = os.environ if environ is None else environ
+    drop = {*ci.WITHHELD_ENV, *MODEL_KEYS, *(p.api_key_env for p in reviewers if p.api_key_env)}
+    return {k: v for k, v in environ.items() if k not in drop and not SECRET_NAME.search(k)}
+
+
+def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    """Run one check with exactly ``env`` as its environment (unlike
+    ``autopilot.run_check``, which merges this process's environment in).
+    Returns (passed, the tail of its output)."""
+    from brindle.autopilot import tail
+
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=cwd, env=env, capture_output=True, text=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return False, f"$ {cmd}\n(timed out after {timeout}s)"
+    output = tail((proc.stdout or "") + (proc.stderr or ""))
+    status = "" if proc.returncode == 0 else f"(exit {proc.returncode})"
+    return proc.returncode == 0, "\n".join(p for p in (f"$ {cmd}", output, status) if p)
+
+
+def run_checks(cfg: RepoConfig, worktree: str, env: dict[str, str], run_check_fn=None) -> list[Check]:
+    """Run each of the trusted config's ``checks`` in the pull request's
+    worktree with ``env`` (see ``check_env``) as the whole environment."""
+    run_check_fn = run_check_fn or run_check
     checks = []
     for cmd in cfg.checks:
-        ok, out = run_check(cmd, worktree, {}, cfg.check_timeout)
+        ok, out = run_check_fn(cmd, worktree, env, cfg.check_timeout)
         checks.append(Check(cmd, bool(ok), _excerpt(out or ""), out or ""))
     return checks
 
@@ -512,8 +547,11 @@ def review_prompt(pr: PullRequest, diff: str, checks: list[Check], criteria: lis
 def ask(profile: Profile, prompt: str, cwd: str) -> tuple[str, int | None]:
     """One headless turn of ``profile`` on ``prompt`` in ``cwd`` (the pull
     request's worktree): (its reply text, tokens used if known). No brindle
-    MCP server, no hooks, no settings from the checkout; a Claude reviewer
-    gets only the profile's read-only tools and refuses the rest."""
+    MCP server, no hooks, no settings from the checkout (``--setting-sources
+    user``); a Claude reviewer gets only the profile's read-only tools and
+    refuses the rest. Claude Code still reads a CLAUDE.md in the checkout,
+    one more place the pull request can talk to the reviewer from; like the
+    diff itself, it can only sway opinions, which never fail the check."""
     from brindle import providers
 
     env = _reviewer_env(profile)
@@ -688,7 +726,11 @@ def _quotes(evidence: str) -> list[str]:
 
 
 def _in_output(evidence: str, check: Check) -> bool:
-    return any(q in check.output for q in _quotes(evidence))
+    """Whether ``evidence`` quotes a line of the check's output: a whole line
+    of it, or a long enough stretch of one. A bare identifier that merely
+    occurs somewhere in the output (a test's name, say) is not a quote."""
+    lines = {ln.strip() for ln in check.output.splitlines()}
+    return any(q in lines or (len(q) >= LONG_QUOTE_CHARS and q in check.output) for q in _quotes(evidence))
 
 
 def _names_test(evidence: str, tests: set[str]) -> set[str]:
@@ -699,8 +741,9 @@ def substantiate(result: str, evidence: str, checks: list[Check], tests: set[str
     """The (result, evidence) the verdict may carry. ``met`` needs a test the
     diff adds or changes while every check passed (and one ran), or a line
     of a passing check's output; ``unmet`` needs a line of a failing check's
-    output or a test named in one. Anything else is ``unknown``, keeping the
-    reviewer's words marked as unverified."""
+    output (naming a failing test isn't enough: the line must show the
+    failure). Anything else is ``unknown``, keeping the reviewer's words
+    marked as unverified."""
     evidence = (evidence or "").strip()
     passed = [c for c in checks if c.passed]
     failed = [c for c in checks if not c.passed]
@@ -715,15 +758,11 @@ def substantiate(result: str, evidence: str, checks: list[Check], tests: set[str
                 return "met", f"`{c.command}` passed; its output has: {evidence}"
     elif result == "unmet":
         for c in failed:
-            if _in_output(evidence, c) or _names_test(evidence, _tests_in_output(c.output)):
+            if _in_output(evidence, c):
                 return "unmet", f"`{c.command}` failed; its output has: {evidence}"
     if not evidence:
         return "unknown", "no evidence"
     return "unknown", f"unverified: {evidence}"
-
-
-def _tests_in_output(output: str) -> set[str]:
-    return set(re.findall(r"\b(test\w+)\b", output))
 
 
 def judge(criteria: list[str], reviews: list[Review], checks: list[Check], tests: set[str]) -> list[Criterion]:
@@ -817,9 +856,10 @@ def validate(repo_path: str, number: int, *, mode: str = "advisory", gh_cwd: str
         for title, body in issue_texts:
             criteria += [c for c in extract_criteria(body, title) if c not in criteria]
         criteria = criteria[:MAX_CRITERIA]
-        verdict.checks = run_checks(cfg, dest, run_check)
-        diff = diff_text(repo_root, base, pr.head_sha)
         profiles = usable_reviewers(cfg, repo_root) if reviewers is None else reviewers
+        # The checks are the pull request's code: they get no model key either.
+        verdict.checks = run_checks(cfg, dest, check_env(profiles), run_check)
+        diff = diff_text(repo_root, base, pr.head_sha)
         prompt = review_prompt(pr, diff, verdict.checks, criteria)
         reviews = run_reviews(profiles, prompt, dest, len(criteria), ask_fn)
         verdict.findings = merge_findings(reviews)
@@ -829,6 +869,9 @@ def validate(repo_path: str, number: int, *, mode: str = "advisory", gh_cwd: str
         verdict.tokens = sum(counted) if counted else None
         verdict.status, verdict.summary = decide(mode, verdict.checks, verdict.criteria,
                                                  bool(verdict.models))
+    except Exception as e:  # noqa: BLE001 - whatever broke, the verdict says so
+        verdict.status = "error"
+        verdict.summary = f"brindle ci validate: {type(e).__name__}: {e}"
     finally:
         remove_worktree(repo_root, dest)
     return verdict
@@ -837,18 +880,24 @@ def validate(repo_path: str, number: int, *, mode: str = "advisory", gh_cwd: str
 def validate_cli(pr: int, out: str, mode: str = "advisory", echo=print, cwd: str | None = None,
                  entitlement: str | None = None) -> int:
     """``brindle ci validate``: writes the verdict to ``out`` whatever happens
-    (an ``error`` verdict too, so the reporter can say so) and exits 0 on
-    pass or neutral, 1 on fail, 2 on error. ``entitlement`` is the file
-    ``brindle ci entitle`` wrote, so this job needs no CI token either."""
+    short of a bad ``--mode`` or an unwritable ``out`` (an ``error`` verdict
+    too, so the reporter can say so) and exits 0 on pass or neutral, 1 on
+    fail, 2 on error. ``entitlement`` is the file ``brindle ci entitle``
+    wrote, so this job needs no CI token either."""
     cwd = cwd or os.getcwd()
+    if mode not in MODES:
+        echo(f"brindle ci validate: --mode must be advisory or blocking, not {mode!r}")
+        return 2
     try:
-        if mode not in MODES:
-            raise CIError(f"brindle ci validate: --mode must be advisory or blocking, not {mode!r}")
         if entitlement is not None:
             ci.require_ci(entitlement_file=entitlement)
         else:
             ci.require_ci()
+    except CIError as e:
+        verdict = Verdict(pr, "", mode, "error", str(e))
+    else:
         verdict = validate(cwd, pr, mode=mode)
+    try:
         verdict.write(out)
     except CIError as e:
         echo(str(e))
