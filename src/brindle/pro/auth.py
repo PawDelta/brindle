@@ -128,6 +128,18 @@ class JSONBody(dict):
     """A request body to send as JSON rather than urlencoded."""
 
 
+class RawBody(dict):
+    """A request body to send as given bytes with its own content type (a
+    multipart upload). A dict so transports and fakes see one shape."""
+
+    def __init__(self, data: bytes, content_type: str) -> None:
+        super().__init__(content_type=content_type, size=len(data))
+        self.data, self.content_type = data, content_type
+
+
+TEXT_KEY = "text"   # a text/* response body comes back under this key
+
+
 class Transport(Protocol):
     def request(self, method: str, url: str, form: dict | None,
                 headers: dict) -> tuple[int, dict]:
@@ -174,7 +186,10 @@ class UrllibTransport:
         check_url(url)
         hdrs = {"Accept": "application/json", "User-Agent": USER_AGENT, **headers}
         data = None
-        if isinstance(form, JSONBody):
+        if isinstance(form, RawBody):
+            data = form.data
+            hdrs["Content-Type"] = form.content_type
+        elif isinstance(form, JSONBody):
             data = json.dumps(form, separators=(",", ":")).encode()
             hdrs["Content-Type"] = "application/json"
         elif form is not None:
@@ -198,6 +213,9 @@ class UrllibTransport:
                 raise TransportError("error reading the backend response") from e
         if len(body) > self.max_bytes:
             raise TransportError("backend response too large")
+        ctype = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if ctype.startswith("text/"):
+            return status, {TEXT_KEY: body.decode("utf-8", "replace")}
         try:
             obj = json.loads(body.decode("utf-8")) if body else {}
         except (UnicodeDecodeError, ValueError):

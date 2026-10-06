@@ -1,0 +1,732 @@
+"""The brindle CI client against a fake server: start, run (continue / stop /
+escalate), the result upload, validate (including ``more``), plan
+verification failures, secret scrubbing, air-gap mode and doctor."""
+
+import json
+import os
+import subprocess
+import time
+
+import pytest
+
+from brindle import ci_adapters, ci_client
+from brindle.ci_client import CIError
+from brindle.db import DB, Agent
+from conftest import sh
+from pro_fixtures import BASE, TEST_KID, FakeTransport, b64, pro_env, sign, signing_key  # noqa: F401
+
+REPO = "acme/widgets"
+RUN_TOKEN = "cpr_" + "r" * 32
+CI_TOKEN = "cpc_" + "c" * 32
+PLAN_HEADER = {"typ": "brindle-ci-plan+jwt"}
+
+
+def plan_claims(kind: str, **over) -> dict:
+    now = int(time.time())
+    c = {"iss": BASE, "aud": "brindle-pro", "sub": "ci:ct_1", "org_id": "org_1", "kid": TEST_KID,
+         "jti": "p1", "iat": now, "exp": now + 3600, "token_use": "ci_plan", "plan_kind": kind,
+         "repo": REPO}
+    if kind == "run":
+        c.update({"id": "run_1", "goal": {"title": "Fix it", "detail": "d", "source": "issue", "ref": "#1"},
+                  "branch": "brindle/ci-1", "base_branch": "main", "base_sha": "0" * 40,
+                  "milestones": [{"id": 1, "title": "tests pass", "check": "true"}],
+                  "instructions": "do the thing", "provider": "claude", "profile": None,
+                  "limits": {"timeout_min": 10, "token_budget": 1000, "heartbeat_s": 1}, "attempt": 1})
+    else:
+        c.update({"id": "val_1", "pr": 7, "head_sha": "0" * 40,
+                  "checks": [{"id": "c1", "command": "echo ok", "timeout_s": 30}],
+                  "reviewers": [{"id": "r1", "provider": "claude", "instructions": "review it"}],
+                  "criteria": [{"id": "k1", "text": "works"}], "mode": "advisory",
+                  "limits": {"token_budget": 1000}})
+    c.update(over)
+    return {k: v for k, v in c.items() if v is not ...}
+
+
+@pytest.fixture
+def plan(signing_key):  # noqa: F811 - the fixture
+    def make(kind="run", header=None, **over):
+        return sign(signing_key, plan_claims(kind, **over), {**PLAN_HEADER, **(header or {})})
+    return make
+
+
+@pytest.fixture
+def ci_repo(repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    return repo
+
+
+def head(repo) -> str:
+    return sh("git rev-parse HEAD", repo)
+
+
+class FakeAdapter(ci_adapters.Adapter):
+    """Launches record a root agent in the DB (no process); the test moves
+    the autopilot's state through ``on_launch``."""
+
+    def __init__(self, name, *, commit=None, on_launch=None, reply="LGTM", available=True, kind="api_key"):
+        self.name, self.commit, self.on_launch = name, commit, on_launch
+        self.reply, self._available, self._kind = reply, available, kind
+        self.launched, self.stopped, self.env_at_launch, self.reviews = [], [], [], []
+
+    def installed(self, env=None):
+        return self._available
+
+    def credential(self, env):
+        return ci_adapters.Credential(self._kind if self._available else None, ("FAKE_KEY",))
+
+    def launch(self, db, ws, instructions, profile):
+        aid = f"{self.name[:2]}{len(self.launched)}00000"
+        db.add_agent(Agent(id=aid, workspace_id=ws.id, profile=profile or "supervisor", provider=self.name,
+                           parent_id=None, mode="interactive", status="idle", tmux_window="", result=None,
+                           created_at=time.time(), task=instructions))
+        db.add_autopilot(aid)
+        self.launched.append((aid, instructions, profile))
+        self.env_at_launch.append(dict(os.environ))
+        if self.commit:
+            self.commit(ws)
+        if self.on_launch:
+            self.on_launch(db, aid)
+        return db.get_agent(aid)
+
+    def stop(self, db, root_id):
+        self.stopped.append(root_id)
+
+    def alive(self, db, root):
+        return True
+
+    def usage(self, db, root_id):
+        return {"fake-model": {"input": 10, "output": 5, "cache_read": 0}}
+
+    def review(self, instructions, cwd, env, *, timeout=0, profile=None):
+        self.reviews.append((instructions, dict(env)))
+        return ci_adapters.Review(self.reply, model="fake-model", exit=0,
+                                  usage={"fake-model": {"input": 3, "output": 2, "cache_read": 1}})
+
+
+def commit_file(ws):
+    path = os.path.join(ws.path, "fix.txt")
+    with open(path, "w") as f:
+        f.write("fixed\n")
+    sh("git add fix.txt && git commit -qm fix", ws.path)
+
+
+class Server:
+    """A fake brindle CI server: records every request, scripts the answers."""
+
+    def __init__(self, plan_token, *, actions=None, result=None, validation_plan=None, evidence=None):
+        self.plan_token = plan_token
+        self.actions = list(actions or [])
+        self.events = []
+        self.results = []
+        self.evidence = list(evidence or [{"status": "posted", "conclusion": "success",
+                                           "check_url": "https://gh.test/check"}])
+        self.evidence_calls = []
+        self.validation_plan = validation_plan
+        self.result = result or {"status": "published", "pr": 9, "url": "https://gh.test/pr/9", "draft": False}
+        self.transport = FakeTransport({
+            "POST /ci/runs": self._start, "POST /ci/runs/run_1/events": self._events,
+            "PUT /ci/runs/run_1/result": self._result, "POST /ci/validations": self._validation,
+            "PUT /ci/validations/val_1/evidence": self._evidence,
+        })
+        self.client = ci_client.Client(BASE, self.transport)
+
+    def _start(self, form, headers):
+        assert headers["Authorization"] == f"Bearer {CI_TOKEN}"
+        return 201, {"run_id": "run_1", "plan": self.plan_token, "run_token": RUN_TOKEN}
+
+    def _events(self, form, headers):
+        assert headers["Authorization"] == f"Bearer {RUN_TOKEN}"
+        self.events.append(form)
+        if self.actions:
+            return 200, self.actions.pop(0)
+        return 200, {"action": "continue"}
+
+    def _result(self, form, headers):
+        assert headers["Authorization"] == f"Bearer {RUN_TOKEN}"
+        body = form.data
+        self.results.append(body)
+        return 200, self.result
+
+    def _validation(self, form, headers):
+        assert headers["Authorization"] == f"Bearer {CI_TOKEN}"
+        return 201, {"validation_id": "val_1", "plan": self.validation_plan, "run_token": RUN_TOKEN}
+
+    def _evidence(self, form, headers):
+        assert headers["Authorization"] == f"Bearer {RUN_TOKEN}"
+        self.evidence_calls.append(json.loads(json.dumps(form)))   # a copy: the client reuses its lists
+        return 200, self.evidence.pop(0) if len(self.evidence) > 1 else self.evidence[0]
+
+
+def evidence_of(body: bytes) -> dict:
+    """The evidence JSON part of a multipart result upload."""
+    marker = b'name="evidence"'
+    i = body.index(marker)
+    start = body.index(b"\r\n\r\n", i) + 4
+    end = body.index(b"\r\n--", start)
+    return json.loads(body[start:end])
+
+
+def run_env(**extra):
+    env = {"GITHUB_REPOSITORY": REPO, "PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/"),
+           "BRINDLE_PRO_TOKEN": CI_TOKEN, "GH_TOKEN": "ghp_secret", "GITHUB_TOKEN": "ghs_secret"}
+    env.update(extra)
+    return env
+
+
+def token_file(tmp_path):
+    p = tmp_path / "run_token"
+    p.write_text(RUN_TOKEN + "\n")
+    return p
+
+
+# -- start -----------------------------------------------------------------------------------
+
+
+def test_start_writes_plan_and_token(plan, tmp_path):
+    token = plan()
+    server = Server(token)
+    said = []
+    code = ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path / "out", client=server.client,
+                           token=CI_TOKEN, providers=["claude"], say=said.append)
+    assert code == 0
+    assert (tmp_path / "out" / "plan.jwt").read_text() == token
+    assert (tmp_path / "out" / "run_token").read_text().strip() == RUN_TOKEN
+    assert oct((tmp_path / "out" / "run_token").stat().st_mode)[-3:] == "600"
+    assert RUN_TOKEN not in "\n".join(said) and token not in "\n".join(said)
+    key, form, _ = server.transport.calls[0]
+    assert form["repo"] == REPO and form["providers_available"] == ["claude"] and "client" in form
+
+
+def test_start_duplicate_exits_zero_and_errors_raise(plan, tmp_path):
+    t = FakeTransport({"POST /ci/runs": [(409, {"error": "duplicate", "existing": {"pr": 5}}),
+                                         (403, {"error": "repo_not_linked", "message": "install the app"})]})
+    client = ci_client.Client(BASE, t)
+    said = []
+    assert ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=client, token=CI_TOKEN,
+                           providers=[], say=said.append) == 0
+    assert "#5" in said[0]
+    with pytest.raises(CIError, match="repo_not_linked") as e:
+        ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=client, token=CI_TOKEN,
+                        providers=[], say=said.append)
+    assert e.value.code == "repo_not_linked"
+    assert not (tmp_path / "plan.jwt").exists()
+
+
+def test_trigger_for():
+    assert ci_client.trigger_for(3, None, None) == {"kind": "issue", "issue": 3}
+    assert ci_client.trigger_for(None, "Title\nmore", None) == {"kind": "text", "title": "Title", "detail": "more"}
+    assert ci_client.trigger_for(None, None, "run_abc1") == {"kind": "dispatch", "run_id": "run_abc1"}
+    with pytest.raises(CIError, match="exactly one"):
+        ci_client.trigger_for(1, "x", None)
+
+
+# -- run ---------------------------------------------------------------------------------------
+
+
+def finish_after(db, adapter, n):
+    """A ``sleep`` for the run loop: ``adapter``'s latest supervisor reaches
+    the goal (autopilot ``done``) on the ``n``-th heartbeat after its launch."""
+    state = {"root": None, "beats": 0}
+
+    def sleep(seconds):
+        root = adapter.launched[-1][0] if adapter.launched else None
+        if root != state["root"]:
+            state.update(root=root, beats=0)
+        if root is None:
+            return
+        state["beats"] += 1
+        if state["beats"] >= n:
+            db.update_autopilot(root, state="done")
+    return sleep
+
+
+def test_run_heartbeats_until_finished_and_uploads_bundle(plan, ci_repo, tmp_path, monkeypatch):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    server = Server(token)
+    db = DB()
+    adapter = FakeAdapter("claude", commit=commit_file)
+    env = run_env()
+    monkeypatch.setenv("BRINDLE_PRO_TOKEN", CI_TOKEN)
+    monkeypatch.setenv("GH_TOKEN", "ghp_secret")
+    tf = token_file(tmp_path)
+    said = []
+    result = ci_client.run(token, tf, cwd=str(ci_repo), env=env, client=server.client, db=db,
+                           adapters={"claude": adapter}, sleep=finish_after(db, adapter, 2), say=said.append)
+    assert result["status"] == "published"
+    assert not tf.exists(), "the run token file is deleted once read"
+    assert "BRINDLE_PRO_TOKEN" not in env and "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env
+    assert env["GITHUB_REPOSITORY"] == REPO
+    snap = adapter.env_at_launch[0]
+    assert "BRINDLE_PRO_TOKEN" not in snap and "GH_TOKEN" not in snap
+    assert adapter.launched[0][1] == "do the thing" and adapter.launched[0][2] is None
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-1"
+    # the goal came from the plan
+    ms = db.milestones(adapter.launched[0][0])
+    assert [(m.title, m.check_cmd) for m in ms] == [("tests pass", "true")]
+    # heartbeats carry state, milestones and usage; the last one says finished
+    assert server.events[0]["state"] == "working"
+    assert server.events[0]["milestones"][0] == {"id": 1, "status": "pending", "exit": None, "output_tail": ""}
+    assert server.events[0]["usage"] == {"fake-model": {"input": 10, "output": 5, "cache_read": 0}}
+    assert server.events[-1]["state"] == "finished"
+    assert all(e["commits"] == 1 and e["provider_error"] is None for e in server.events)
+    assert adapter.stopped == [adapter.launched[0][0]]
+    body = server.results[0]
+    ev = evidence_of(body)
+    assert ev["final_state"] == "finished" and ev["commits"] == 1 and ev["providers"] == ["claude"]
+    assert b'name="bundle"' in body and b"# v2 git bundle" in body
+    assert "https://gh.test/pr/9" in said[-1]
+    for _, form, hdrs in server.transport.calls:
+        assert CI_TOKEN not in json.dumps(form, default=str) and "ghp_secret" not in json.dumps(form, default=str)
+
+
+def test_run_obeys_stop(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    server = Server(token, actions=[{"action": "continue"}, {"action": "stop", "reason": "budget"}])
+    adapter = FakeAdapter("claude")
+    result = ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                           db=DB(), adapters={"claude": adapter}, sleep=lambda s: None, say=lambda s: None)
+    assert len(server.events) == 2
+    assert adapter.stopped == [adapter.launched[0][0]]
+    ev = evidence_of(server.results[0])
+    assert ev["final_state"] == "budget" and ev["commits"] == 0
+    assert b'name="bundle"' not in server.results[0], "no commits: no bundle"
+    assert result["status"] == "published"
+
+
+def test_run_escalates_to_a_new_provider_in_the_same_worktree(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    second = plan(base_sha=base, provider="codex", attempt=2, instructions="try again", jti="p2",
+                  limits={"timeout_min": 10, "token_budget": 1000, "heartbeat_s": 1})
+    server = Server(token, actions=[{"action": "escalate", "plan": second}])
+    claude = FakeAdapter("claude")
+    codex = FakeAdapter("codex", commit=commit_file)
+    db = DB()
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=db, adapters={"claude": claude, "codex": codex}, sleep=finish_after(db, codex, 1),
+                  say=lambda s: None)
+    assert claude.stopped == [claude.launched[0][0]]
+    assert codex.launched[0][1] == "try again"
+    assert codex.launched[0][0] != claude.launched[0][0]
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-1"
+    ev = evidence_of(server.results[0])
+    assert ev["providers"] == ["claude", "codex"] and ev["final_state"] == "finished" and ev["commits"] == 1
+
+
+def test_escalation_plan_must_be_the_same_run(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    other = plan(base_sha=base, provider="codex", id="run_2", jti="p2")
+    server = Server(token, actions=[{"action": "escalate", "plan": other}])
+    with pytest.raises(CIError, match="another run"):
+        ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                      db=DB(), adapters={"claude": FakeAdapter("claude"), "codex": FakeAdapter("codex")},
+                      sleep=lambda s: None, say=lambda s: None)
+
+
+def test_run_reports_needs_user(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+
+    db, adapter = DB(), FakeAdapter("claude")
+
+    def ask(seconds):
+        db.update_autopilot(adapter.launched[0][0], state="blocked", note="which database?")
+    server = Server(token, actions=[{"action": "stop", "reason": "cancelled"}])
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=db, adapters={"claude": adapter}, sleep=ask, say=lambda s: None)
+    assert server.events[0]["state"] == "needs_user" and server.events[0]["question"] == "which database?"
+    ev = evidence_of(server.results[0])
+    assert ev["final_state"] == "needs_user" and ev["question"] == "which database?"
+
+
+def test_run_reports_provider_errors(plan, ci_repo, tmp_path, monkeypatch):
+    from brindle import providers
+
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    db, adapter = DB(), FakeAdapter("claude")
+    adapter.provider_error = lambda db_, root: ci_adapters.Adapter.provider_error(adapter, db_, root)
+    beats = []
+
+    def sleep(seconds):
+        root = adapter.launched[0][0]
+        beats.append(1)
+        if len(beats) == 1:
+            db.update_autopilot(root, state="usage_paused", note="Claude's usage limit was reached")
+        elif len(beats) == 2:
+            db.update_autopilot(root, state="running", note=None)
+            monkeypatch.setattr(providers, "signed_out", lambda provider, env=None: "signed out")
+    server = Server(token, actions=[{"action": "continue"}, {"action": "continue"},
+                                    {"action": "stop", "reason": "cancelled"}])
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=db, adapters={"claude": adapter}, sleep=sleep, say=lambda s: None)
+    assert [(e["state"], e["provider_error"]) for e in server.events] == [
+        ("needs_user", "rate_limit"), ("working", "auth"), ("working", "auth")]
+    assert all(e["commits"] == 0 for e in server.events)
+
+
+def test_run_rejects_a_checkout_not_at_base(plan, ci_repo, tmp_path):
+    token = plan(base_sha="1" * 40)
+    tf = token_file(tmp_path)
+    with pytest.raises(CIError, match="not the plan's base"):
+        ci_client.run(token, tf, cwd=str(ci_repo), env=run_env(), client=Server(token).client, db=DB(),
+                      adapters={"claude": FakeAdapter("claude")}, sleep=lambda s: None)
+    assert tf.exists(), "the token file is only read once the plan checks out"
+
+
+def test_run_keeps_going_when_a_heartbeat_fails(plan, ci_repo, tmp_path):
+    from brindle.pro.auth import TransportError
+
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    server = Server(token, actions=[{"action": "continue"}, {"action": "stop", "reason": "timeout"}])
+    flaky = [TransportError("down")]
+    real = server._events
+
+    def events(form, headers):
+        if flaky:
+            raise flaky.pop()
+        return real(form, headers)
+    server.transport.routes["POST /ci/runs/run_1/events"] = events
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=DB(), adapters={"claude": FakeAdapter("claude")}, sleep=lambda s: None, say=lambda s: None)
+    assert evidence_of(server.results[0])["final_state"] == "timeout"
+
+
+def test_run_ends_past_the_plan_timeout_without_the_server(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+    server = Server(token)
+    clock = {"t": time.time()}
+
+    def tick(s):
+        clock["t"] += 15 * 60
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=DB(), adapters={"claude": FakeAdapter("claude")}, clock=lambda: clock["t"], sleep=tick,
+                  say=lambda s: None)
+    assert evidence_of(server.results[0])["final_state"] == "timeout"
+    assert len(server.events) <= 3
+
+
+# -- plan verification ---------------------------------------------------------------------------
+
+
+def test_plan_verification_failures(plan, signing_key):  # noqa: F811
+    now = time.time()
+    good = plan()
+    assert ci_client.verify_plan(good, repo=REPO)["id"] == "run_1"
+    with pytest.raises(CIError, match="not a plan"):
+        ci_client.verify_plan(plan(header={"typ": "brindle-entitlement+jwt"}), repo=REPO)
+    with pytest.raises(CIError, match="not a plan"):
+        ci_client.verify_plan(plan(token_use="entitlement"), repo=REPO)
+    with pytest.raises(CIError, match="repository other/repo, not"):
+        ci_client.verify_plan(plan(repo="other/repo"), repo=REPO)
+    h, p, s = good.split(".")
+    with pytest.raises(CIError, match="signature is invalid"):
+        ci_client.verify_plan(f"{h}.{p}.{s[:-4]}AAAA", repo=REPO)
+    forged = b64(json.dumps(plan_claims("run", goal={"title": "evil"})).encode())
+    with pytest.raises(CIError, match="signature is invalid"):
+        ci_client.verify_plan(f"{h}.{forged}.{s}", repo=REPO)
+    with pytest.raises(CIError, match="expired"):
+        ci_client.verify_plan(plan(iat=int(now) - 7200, exp=int(now) - 3600), repo=REPO)
+    with pytest.raises(CIError, match="not valid yet"):
+        ci_client.verify_plan(plan(iat=int(now) + 7200, exp=int(now) + 9000), repo=REPO)
+    with pytest.raises(CIError, match="unknown key"):
+        ci_client.verify_plan(plan(header={"kid": "nope"}, kid="nope"), repo=REPO)
+    with pytest.raises(CIError, match="unknown provider"):
+        ci_client.verify_plan(plan(provider="gemini"), repo=REPO)
+    with pytest.raises(CIError, match="no instructions"):
+        ci_client.verify_plan(plan(instructions=""), repo=REPO)
+    with pytest.raises(CIError, match="missing claims: id"):
+        ci_client.verify_plan(plan(id=...), repo=REPO)
+    with pytest.raises(CIError, match="unknown kind"):
+        ci_client.verify_plan(plan(plan_kind="other"), repo=REPO)
+    with pytest.raises(CIError, match="malformed"):
+        ci_client.verify_plan("not.a.jwt", repo=REPO)
+
+
+def test_plan_errors_never_quote_the_token(plan):
+    bad = plan(repo="other/repo")
+    with pytest.raises(CIError) as e:
+        ci_client.verify_plan(bad, repo=REPO)
+    assert bad[:20] not in str(e.value)
+
+
+def test_plan_defaults_limits(plan):
+    c = ci_client.verify_plan(plan(limits=...), repo=REPO)
+    assert c["limits"] == {"timeout_min": 100, "token_budget": 0, "heartbeat_s": 60}
+
+
+# -- secrets ---------------------------------------------------------------------------------------
+
+
+def test_scrub_secrets_and_check_env():
+    env = {"BRINDLE_PRO_TOKEN": "x", "GH_TOKEN": "y", "GH_HOST": "github.com", "GITHUB_TOKEN": "z",
+           "GITHUB_REPOSITORY": REPO, "ANTHROPIC_API_KEY": "k", "CLAUDE_CODE_OAUTH_TOKEN": "o", "PATH": "/bin",
+           "MY_SERVICE_TOKEN": "t"}
+    gone = ci_client.scrub_secrets(env)
+    assert gone == ["BRINDLE_PRO_TOKEN", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN"]
+    assert set(env) == {"GITHUB_REPOSITORY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "PATH",
+                        "MY_SERVICE_TOKEN"}
+    assert set(ci_client.check_env(env)) == {"GITHUB_REPOSITORY", "PATH"}
+
+
+def test_read_run_token_deletes_the_file(tmp_path):
+    p = token_file(tmp_path)
+    assert ci_client.read_run_token(p) == RUN_TOKEN
+    assert not p.exists()
+    with pytest.raises(CIError, match="can't read"):
+        ci_client.read_run_token(p)
+    p.write_text("garbage")
+    with pytest.raises(CIError, match="doesn't hold a run token"):
+        ci_client.read_run_token(p)
+    assert not p.exists()
+
+
+def test_ci_token_from_env():
+    assert ci_client.ci_token({"BRINDLE_PRO_TOKEN": CI_TOKEN}) == CI_TOKEN
+    with pytest.raises(CIError, match="isn't set"):
+        ci_client.ci_token({})
+    with pytest.raises(CIError, match="isn't an org CI token"):
+        ci_client.ci_token({"BRINDLE_PRO_TOKEN": "nope"})
+
+
+# -- validate ----------------------------------------------------------------------------------------
+
+
+def test_validate_runs_checks_scrubbed_and_asks_reviewers(plan, ci_repo, monkeypatch):
+    sha = head(ci_repo)
+    vplan = plan("validation", head_sha=sha,
+                 checks=[{"id": "c1", "command": "echo ok; printenv ANTHROPIC_API_KEY GH_TOKEN; exit 0", "timeout_s": 30},
+                         {"id": "c2", "command": "echo nope >&2; exit 3", "timeout_s": 30}])
+    server = Server(plan(), validation_plan=vplan)
+    adapter = FakeAdapter("claude", reply="Looks fine.")
+    env = run_env(ANTHROPIC_API_KEY="sk-secret-value")
+    monkeypatch.setenv("BRINDLE_PRO_TOKEN", CI_TOKEN)
+    said = []
+    result = ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=env, client=server.client, token=CI_TOKEN,
+                                adapters={"claude": adapter}, org=False, say=said.append)
+    assert result["status"] == "posted" and "success" in said[-1]
+    start = server.transport.calls[0][1]
+    assert start == {"repo": REPO, "pr": 7, "head_sha": sha, "fork": False, "providers_available": ["claude"]}
+    assert "BRINDLE_PRO_TOKEN" not in env and "GH_TOKEN" not in env
+    assert "BRINDLE_PRO_TOKEN" not in os.environ
+    assert env["ANTHROPIC_API_KEY"] == "sk-secret-value", "model keys stay for the reviewers"
+    ev = server.evidence_calls[0]
+    c1, c2 = ev["checks"]
+    assert c1["id"] == "c1" and c1["exit"] == 0 and "sk-secret-value" not in c1["output_excerpt"] \
+        and "ghp_secret" not in c1["output_excerpt"] and "ok" in c1["output_excerpt"]
+    assert c2["exit"] == 3 and "nope" in c2["output_excerpt"] and isinstance(c2["duration_s"], float)
+    assert ev["reviews"] == [{"id": "r1", "provider": "claude", "model": "fake-model", "reply": "Looks fine."}]
+    assert ev["usage"] == {"fake-model": {"input": 3, "output": 2, "cache_read": 1}}
+    assert adapter.reviews[0][0] == "review it"
+    assert "sk-secret-value" not in json.dumps(server.transport.calls, default=str)
+
+
+def test_validate_fills_the_check_results_slot(plan, ci_repo):
+    sha = head(ci_repo)
+    vplan = plan("validation", head_sha=sha,
+                 checks=[{"id": "c1", "command": "echo all good", "timeout_s": 30},
+                         {"id": "c2", "command": "echo broken >&2; exit 2", "timeout_s": 30}],
+                 reviewers=[{"id": "r1", "provider": "claude",
+                             "instructions": "Review.\n\n{{brindle.check_results}}\n\nBe brief. {{other.slot}}"},
+                            {"id": "r2", "provider": "claude", "instructions": "No slot here"}])
+    server = Server(plan(), validation_plan=vplan)
+    adapter = FakeAdapter("claude")
+    ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client, token=CI_TOKEN,
+                       adapters={"claude": adapter}, org=False, say=lambda s: None)
+    filled = adapter.reviews[0][0]
+    assert filled.startswith("Review.\n\ncheck c1: exit 0 (") and "all good" in filled
+    assert "check c2: exit 2 (" in filled and "broken" in filled
+    assert "{{brindle.check_results}}" not in filled and filled.endswith("Be brief. {{other.slot}}")
+    assert adapter.reviews[1][0] == "No slot here"
+    assert ci_client.render_check_results([]) == "(no checks were run)"
+
+
+def test_validate_handles_more(plan, ci_repo):
+    sha = head(ci_repo)
+    first = plan("validation", head_sha=sha)
+    second = plan("validation", head_sha=sha, jti="p2",
+                  reviewers=[{"id": "r1", "provider": "claude", "instructions": "review it"},
+                             {"id": "r2", "provider": "codex", "instructions": "second opinion"}])
+    server = Server(plan(), validation_plan=first,
+                    evidence=[{"status": "more", "plan": second},
+                              {"status": "posted", "conclusion": "failure", "check_url": "https://gh.test/c"}])
+    claude, codex = FakeAdapter("claude", reply="A"), FakeAdapter("codex", reply="B")
+    result = ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client,
+                                token=CI_TOKEN, adapters={"claude": claude, "codex": codex}, org=False,
+                                say=lambda s: None)
+    assert result["conclusion"] == "failure"
+    assert len(server.evidence_calls) == 2
+    assert [r["id"] for r in server.evidence_calls[0]["reviews"]] == ["r1"]
+    assert [r["id"] for r in server.evidence_calls[1]["reviews"]] == ["r1", "r2"]
+    assert len(claude.reviews) == 1 and len(codex.reviews) == 1, "each reviewer is asked once"
+    assert server.evidence_calls[1]["usage"]["fake-model"]["input"] == 6
+
+
+def test_validate_records_an_unusable_reviewer(plan, ci_repo):
+    sha = head(ci_repo)
+    server = Server(plan(), validation_plan=plan("validation", head_sha=sha))
+    sub = FakeAdapter("claude", kind="subscription")
+    ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client, token=CI_TOKEN,
+                       adapters={"claude": sub}, org=True, say=lambda s: None)
+    assert server.transport.calls[0][1]["providers_available"] == []
+    row = server.evidence_calls[0]["reviews"][0]
+    assert row["reply"] == "" and "personal subscription" in row["error"] and not sub.reviews
+
+
+def test_validate_skipped_for_forks(plan, ci_repo, tmp_path, monkeypatch):
+    sha = head(ci_repo)
+    t = FakeTransport({"POST /ci/validations": [(200, {"skipped": "fork"})]})
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": {"head": {"repo": {"full_name": "someone/widgets", "fork": True}}}}))
+    said = []
+    out = ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(GITHUB_EVENT_PATH=str(event)),
+                             client=ci_client.Client(BASE, t), token=CI_TOKEN, adapters={}, org=False,
+                             say=said.append)
+    assert out == {"skipped": "fork"} and "skipped: fork" in said[0]
+    assert t.calls[0][1]["fork"] is True
+
+
+def test_validate_rejects_the_wrong_head(plan, ci_repo):
+    sha = head(ci_repo)
+    server = Server(plan(), validation_plan=plan("validation", head_sha="2" * 40))
+    with pytest.raises(CIError, match="not the plan's head"):
+        ci_client.validate(REPO, 7, sha, cwd=str(ci_repo), env=run_env(), client=server.client, token=CI_TOKEN,
+                           adapters={}, org=False, say=lambda s: None)
+
+
+def test_run_check_times_out(ci_repo):
+    row = ci_client.run_check({"id": "slow", "command": "sleep 5", "timeout_s": 1}, str(ci_repo), {"PATH": os.environ["PATH"]})
+    assert row["exit"] == 124 and "timed out after 1s" in row["output_excerpt"]
+
+
+# -- air-gap, doctor, the CLI ------------------------------------------------------------------------
+
+
+def test_airgap_refuses(plan, monkeypatch):
+    monkeypatch.setenv("BRINDLE_AIRGAP", "1")
+    with pytest.raises(CIError, match="air-gap mode") as e:
+        ci_client.refuse_airgap()
+    assert e.value.code == "airgap"
+    server = Server(plan())
+    with pytest.raises(CIError) as e:
+        server.client.events(RUN_TOKEN, "run_1", {"state": "working"})
+    assert e.value.code == "airgap" and not server.events
+
+
+def test_doctor_names_credentials_but_never_values(ci_repo):
+    env = {"ANTHROPIC_API_KEY": "sk-ant-very-secret", "OPENAI_API_KEY": "sk-oa-very-secret", "PATH": "/nonexistent"}
+    text = ci_client.doctor(env, REPO, str(ci_repo), org=True)
+    assert "ANTHROPIC_API_KEY" in text and "OPENAI_API_KEY" in text
+    assert "very-secret" not in text
+    assert "owner is an organization" in text and "claude: cli claude missing" in text
+
+
+def test_cli_doctor_and_help(ci_repo, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-very-secret")
+    monkeypatch.setenv("PATH", "/nonexistent")
+    monkeypatch.setattr(ci_adapters, "repo_is_org", lambda env, repo=None, run=None: False)
+    result = CliRunner().invoke(app, ["ci", "doctor", "--repo", REPO])
+    assert result.exit_code == 0, result.output
+    assert "ANTHROPIC_API_KEY" in result.output and "very-secret" not in result.output
+    assert "personal account" in result.output
+    for cmd in ("start", "run", "validate", "doctor", "init"):
+        assert CliRunner().invoke(app, ["ci", cmd, "--help"]).exit_code == 0
+
+
+def test_cli_run_fails_cleanly_on_a_bad_plan(ci_repo, tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    (tmp_path / "plan.jwt").write_text("not.a.plan")
+    tf = token_file(tmp_path)
+    result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
+    assert result.exit_code == 1 and "brindle ci: malformed plan" in result.output
+    assert tf.exists()
+
+
+def test_cli_start_needs_the_token(ci_repo, tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    monkeypatch.delenv("BRINDLE_PRO_TOKEN", raising=False)
+    result = CliRunner().invoke(app, ["ci", "start", "--repo", REPO, "--issue", "1", "--out", str(tmp_path)])
+    assert result.exit_code == 1 and "BRINDLE_PRO_TOKEN isn't set" in result.output
+
+
+# -- init ---------------------------------------------------------------------------------------------
+
+
+def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
+    calls = []
+
+    class Proc:
+        def __init__(self, out="", code=0):
+            self.stdout, self.stderr, self.returncode = out, "", code
+
+    def run(argv, **kw):
+        calls.append((argv, kw.get("input")))
+        if argv[:2] == ["gh", "repo"]:
+            return Proc(REPO + "\n")
+        if argv[:2] == ["gh", "api"] and argv[2].startswith("repos/"):
+            return Proc("true\n")
+        if argv[:2] == ["gh", "api"]:
+            return Proc("Organization\n")
+        if argv[:3] == ["gh", "pr", "create"]:
+            return Proc("https://gh.test/pr/1\n")
+        return Proc()
+
+    class Plugin:
+        store = object()
+
+        def _team_org(self, org):
+            return org or "org_1"
+
+        def _client(self, base):
+            return object()
+
+    from brindle.pro import auth
+
+    monkeypatch.setattr(auth, "create_ci_token", lambda client, store, org, name: {
+        "token": CI_TOKEN, "token_id": "ct_1", "org_id": org, "name": name})
+    t = FakeTransport({"GET /ci/workflow?kind=issue": [(200, {"text": "name: issue\n"})],
+                       "GET /ci/workflow?kind=validate": [(200, {"text": "name: validate\n"})],
+                       "GET /ci/workflow?kind=fix": [(404, {"error": "not_found"})]})
+    opened, said = [], []
+    pushed = []
+    from brindle import git as git_mod
+
+    real_run = git_mod.run
+
+    def git_run(args, cwd, check=True):
+        if args[0] == "push":
+            pushed.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return real_run(args, cwd, check)
+    monkeypatch.setattr(git_mod, "run", git_run)
+    ci_client.init(repo=None, org=None, providers=["claude"], cwd=str(ci_repo), env={"PATH": os.environ["PATH"]},
+                   run=run, open_url=opened.append, account=Plugin(), client=ci_client.Client(BASE, t),
+                   say=said.append)
+    text = "\n".join(said)
+    assert CI_TOKEN not in text and "ct_1" in text
+    assert opened == [BASE + "/github/install"]
+    secret_calls = [c for c in calls if c[0][:3] == ["gh", "secret", "set"]]
+    assert secret_calls[0][0][3] == "BRINDLE_PRO_TOKEN" and secret_calls[0][1] == CI_TOKEN
+    assert secret_calls[1][0][3] == "ANTHROPIC_API_KEY" and secret_calls[1][1] is None, "the person pastes it into gh"
+    assert (ci_repo / ".github/workflows/brindle-ci-issue.yml").read_text() == "name: issue\n"
+    assert (ci_repo / ".github/workflows/brindle-ci-validate.yml").read_text() == "name: validate\n"
+    assert not (ci_repo / ".github/workflows/brindle-ci-fix.yml").exists()
+    assert pushed and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-setup"
+    assert "https://gh.test/pr/1" in text and "owner is an organization" in text
+    assert "6/6 doctor" in text
