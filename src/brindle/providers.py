@@ -284,19 +284,30 @@ class ClaudeCode(Provider):
     # on screen, a first-run question is only quoted in the transcript.
     INPUT_FOOTER = re.compile(r"\? for shortcuts|esc to interrupt|⏵⏵|⏸|mode on")
 
-    # A turn that ended on an API error Claude Code won't retry: a bad
-    # request, a rejected key or a forbidden one. Only the last reply counts.
+    # A turn that ended on an API error ("API Error: 529 Overloaded", ...).
+    # Only the last reply counts: one earlier in the transcript is history.
+    API_ERROR = re.compile(r"\A\s*API Error\b")
+    # The ones Claude Code won't retry: a bad request, a rejected key or a
+    # forbidden one. It then sits at its prompt for good.
     FATAL_API_ERROR = re.compile(r"\A\s*API Error: 40[013]\b")
+    TURN_RUNNING = re.compile(r"esc to interrupt")
+
+    @classmethod
+    def api_error(cls, screen: str) -> str | None:
+        """The API error the last reply on ``screen`` ended on (on one line),
+        or None, also while a new turn is running after it."""
+        last = screen.rsplit("●", 1)[-1] if "●" in screen else ""
+        if not cls.API_ERROR.match(last) or cls.TURN_RUNNING.search(last):
+            return None
+        text = re.split(r"\n\s*(?:✻|─{3}|[❯>] )", last, maxsplit=1)[0]
+        return " ".join(text.split())
 
     @classmethod
     def fatal_api_error(cls, screen: str) -> str | None:
         """The API error the last reply on ``screen`` ended on, if Claude Code
-        won't retry it (it then sits at its prompt for good), else None."""
-        last = screen.rsplit("●", 1)[-1] if "●" in screen else ""
-        if not cls.FATAL_API_ERROR.match(last):
-            return None
-        text = re.split(r"\n\s*(?:✻|─{3})", last, maxsplit=1)[0]
-        return " ".join(text.split())
+        won't retry it, else None."""
+        error = cls.api_error(screen)
+        return error if error and cls.FATAL_API_ERROR.match(error) else None
 
     @classmethod
     def first_run_screen(cls, screen: str) -> str | None:

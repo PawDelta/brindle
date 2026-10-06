@@ -885,6 +885,15 @@ def test_scrub_secrets_drops_empty_keys():
     assert env == {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}
 
 
+def test_custom_headers_are_not_scrubbed():
+    """An organization-level key's anthropic-workspace-id header reaches
+    every claude process; it is not a secret."""
+    env = {"ANTHROPIC_CUSTOM_HEADERS": "anthropic-workspace-id: wrkspc_1", "BRINDLE_PRO_TOKEN": "x"}
+    ci_client.scrub_secrets(env)
+    assert env == {"ANTHROPIC_CUSTOM_HEADERS": "anthropic-workspace-id: wrkspc_1"}
+    assert ci_adapters.claude_env(env) == env
+
+
 def test_read_run_token_deletes_the_file(tmp_path):
     p = token_file(tmp_path)
     assert ci_client.read_run_token(p) == RUN_TOKEN
@@ -1293,6 +1302,39 @@ def test_init_key_credential_sets_the_secret(init_run):
     calls, _ = init_run(credential="key")
     assert [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]] == ["BRINDLE_PRO_TOKEN", "ANTHROPIC_API_KEY"]
     assert not [c for c in calls if c[:2] == ["gh", "variable"]]
+
+
+def test_init_key_asks_for_an_org_keys_workspace_after_the_key(init_run):
+    asked = []
+
+    def ask(q, default):
+        asked.append(q)
+        return "wrkspc_01AbC-d" if q.startswith("workspace ID") else default
+    calls, said = init_run(credential="key", ask=ask)
+    assert asked[-1] == ci_client.WORKSPACE_QUESTION
+    gh = [c for c in calls if c[:3] in (["gh", "secret", "set"], ["gh", "variable", "set"])]
+    assert gh[-2][3] == "ANTHROPIC_API_KEY", "asked after the key"
+    assert gh[-1][1:] == ["variable", "set", "ANTHROPIC_WORKSPACE_ID", "--repo", REPO, "--body", "wrkspc_01AbC-d"]
+    assert any("anthropic-workspace-id" in s for s in said)
+
+
+@pytest.mark.parametrize("kw", [
+    {"workspace_id": "wrkspc_1",
+     "ask": lambda q, d: pytest.fail(f"asked {q!r}") if q.startswith("workspace") else d},
+    {"env": {"PATH": os.environ["PATH"], "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}},
+], ids=["option", "environment"])
+def test_init_key_workspace_from_the_option_or_the_environment(init_run, kw):
+    calls, _ = init_run(credential="key", **kw)
+    assert [c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]] == ["wrkspc_1"]
+
+
+def test_init_rejects_a_bad_workspace_id(init_run):
+    with pytest.raises(CIError, match="workspace ID looks like wrkspc_"):
+        init_run(credential="key", workspace_id="ws 1; rm")
+    assert not init_run.calls, "nothing ran before the bad option was caught"
+    with pytest.raises(CIError, match="workspace ID looks like wrkspc_"):
+        init_run(credential="key", ask=lambda q, d: "1234" if q.startswith("workspace") else d)
+    assert not [c for c in init_run.calls if c[:2] == ["gh", "variable"]]
 
 
 def test_init_rejects_an_unknown_credential_first(init_run):

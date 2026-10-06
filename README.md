@@ -802,6 +802,15 @@ workflows call these commands:
 Credential names are reported, never values. On a repository owned by a GitHub
 organization, a provider signed in only with a personal subscription is not used.
 
+An Anthropic API key is either a workspace key (scoped to one workspace) or an
+organization-level key (not scoped to a workspace). An organization-level key
+needs the workspace in every request, so after the key `brindle ci init` asks for
+its workspace ID (`wrkspc_...`; leave it blank for a workspace key, or pass
+`--workspace-id`, default `$ANTHROPIC_WORKSPACE_ID`) and stores it as the Actions
+variable `ANTHROPIC_WORKSPACE_ID`. The workflow then sets
+`ANTHROPIC_CUSTOM_HEADERS="anthropic-workspace-id: <id>"`, which reaches every
+Claude Code process the run starts.
+
 With identity federation the repository stores no Anthropic key: the workflow
 exchanges GitHub's OIDC token once for a short-lived Anthropic token, as a
 Claude Console service account (billed as API, so it is allowed on

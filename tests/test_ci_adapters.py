@@ -610,3 +610,76 @@ def test_stuck_screen_reports_a_fatal_api_error(db, repo, monkeypatch):
     _, root, _ = _launch_showing(monkeypatch, db, repo, [WORKSPACE_KEY_ERROR])
     stuck = ClaudeAdapter().stuck_screen(db, root)
     assert "won't retry" in stuck and "not scoped to a workspace" in stuck
+
+
+OVERLOADED = WORKSPACE_KEY_ERROR.replace(
+    "400 This API key is not scoped to a workspace, so this\n  request must include the anthropic-workspace-id "
+    "header with the ID of\n  the workspace to use. Add the header, or use an API key that is scoped\n  to a "
+    "workspace.", "529 Overloaded")
+
+
+def test_an_api_error_is_ignored_once_a_new_turn_runs():
+    from brindle.providers import ClaudeCode
+
+    assert ClaudeCode.api_error(OVERLOADED) == "API Error: 529 Overloaded"
+    running = OVERLOADED.replace("✻ Cooked for 1s · done 8:19 PM", "> carry on\n✻ Thinking… (esc to interrupt)")
+    assert ClaudeCode.api_error(running) is None
+    assert ClaudeCode.fatal_api_error(OVERLOADED) is None
+
+
+def test_a_transient_api_error_ends_the_run_only_after_two_minutes(db, repo, monkeypatch):
+    _, root, _ = _launch_showing(monkeypatch, db, repo, [OVERLOADED])
+    now = [1000.0]
+    a = ClaudeAdapter(clock=lambda: now[0])
+    assert a.stuck_screen(db, root) is None, "Claude Code retries a 529 itself"
+    now[0] += 119
+    assert a.stuck_screen(db, root) is None
+    now[0] += 2
+    stuck = a.stuck_screen(db, root)
+    assert stuck.startswith("Claude Code has been stopped on an API error for 121s") and stuck.endswith(
+        "API Error: 529 Overloaded")
+
+
+def test_a_transient_api_error_that_clears_starts_over(db, repo, monkeypatch):
+    _, root, _ = _launch_showing(monkeypatch, db, repo, [OVERLOADED, PROMPT, OVERLOADED])
+    now = [0.0]
+    a = ClaudeAdapter(clock=lambda: now[0])
+    for _ in range(3):
+        assert a.stuck_screen(db, root) is None
+        now[0] += 100
+    assert a.stuck_screen(db, root) is None, "seen again only 100s ago"
+
+
+def test_stuck_screen_reads_a_reviewers_pane(db, repo, monkeypatch):
+    from brindle import tmux
+    from brindle.db import Agent
+
+    ws, root, _ = _launch_showing(monkeypatch, db, repo, [PROMPT])
+    db.add_agent(root)
+    db.add_agent(Agent(id="rev00000", workspace_id=ws.id, profile="reviewer", provider="claude",
+                       parent_id=root.id, mode="review", status="working", tmux_window="%10", result=None,
+                       created_at=2.0))
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: WORKSPACE_KEY_ERROR if target == "%10" else PROMPT)
+    stuck = ClaudeAdapter().stuck_screen(db, root)
+    assert stuck.startswith("reviewer rev00000's Claude Code stopped on an error it won't retry: API Error: 400")
+
+
+def test_an_api_error_line_is_capped_and_has_no_secrets():
+    from brindle.ci_adapters import api_error_line
+
+    line = api_error_line("API Error: 401 invalid x-api-key sk-ant-api03-abcDEF_123 (Bearer eyJhbGc.x.y) “bad” "
+                          + "more detail " * 40)
+    assert "sk-ant" not in line and "eyJ" not in line and "[redacted]" in line
+    assert len(line) == 300 and line.isascii()
+
+
+def test_custom_headers_reach_the_reviewer(monkeypatch, tmp_path):
+    seen = {}
+
+    def run(argv, **kw):
+        seen["env"] = kw.get("env")
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+    monkeypatch.setattr(ci_adapters.subprocess, "run", run)
+    env = {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_CUSTOM_HEADERS": "anthropic-workspace-id: wrkspc_1"}
+    ClaudeAdapter().review("review this", str(tmp_path), env)
+    assert seen["env"]["ANTHROPIC_CUSTOM_HEADERS"] == "anthropic-workspace-id: wrkspc_1"
