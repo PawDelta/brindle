@@ -63,7 +63,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from brindle import agents, git, tmux, workspaces
+from brindle import agents, ci_budget, git, tmux, workspaces
 from brindle.db import DB, Agent, Workspace
 
 CI_FEATURE = "ci"
@@ -325,7 +325,7 @@ def _repo_slug(remote: str | None) -> str | None:
 
 @dataclass
 class Outcome:
-    status: str                     # done | need_user | timeout | stalled | exited | error
+    status: str                     # done | need_user | timeout | budget | stalled | exited | error
     goal: Goal
     branch: str
     milestones: list[dict] = field(default_factory=list)
@@ -333,6 +333,7 @@ class Outcome:
     pr_url: str | None = None
     elapsed: float = 0.0
     bundle: str | None = None       # with --bundle: the file `brindle ci publish` takes
+    usage: dict | None = None       # tokens, models, profiles: ci_budget.Tracker.summary()
 
     @property
     def ok(self) -> bool:
@@ -344,7 +345,7 @@ class Outcome:
             "issue": self.goal.issue, "branch": self.branch, "pr_url": self.pr_url,
             "bundle": self.bundle,
             "note": self.note, "elapsed_seconds": round(self.elapsed),
-            "milestones": self.milestones,
+            "milestones": self.milestones, "usage": self.usage,
         }
 
     def describe(self) -> str:
@@ -358,6 +359,8 @@ class Outcome:
                 lines.append(f"  {mark} {m['title']}{check}")
         if self.note:
             lines.append(f"  {self.note}")
+        if self.usage:
+            lines.append(ci_budget.describe_line(self.usage))
         if self.pr_url:
             lines.append(f"  pull request: {self.pr_url}")
         if self.bundle:
@@ -634,6 +637,7 @@ def pr_body(outcome: Outcome) -> str:
         box = "x" if m["status"] == "passed" else " "
         check = f" (`{m['check']}`)" if m.get("check") else ""
         lines.append(f"- [{box}] {m['title']}{check}")
+    lines += ci_budget.pr_section(outcome.usage)
     if g.issue is not None:
         lines += ["", f"Closes #{g.issue}"]
     lines += ["", "🤖 Opened by `brindle ci`"]
@@ -662,11 +666,13 @@ def _poll(db: DB, root_id: str) -> tuple[str, str | None] | None:
 def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIMEOUT_MIN,
         max_workers: int | None = None, base: str | None = None, pr: bool = True,
         poll_seconds: float = POLL_SECONDS, clock=time.time, sleep=time.sleep,
-        secrets: dict[str, str] | None = None, bundle: str | Path | None = None) -> Outcome:
+        secrets: dict[str, str] | None = None, bundle: str | Path | None = None,
+        budget: int | None = None) -> Outcome:
     """Run ``goal`` to a verified end (or not) and, with ``pr``, open the pull
     request; with ``bundle``, write the branch to that file instead (nothing
-    is pushed: ``brindle ci publish`` does that elsewhere). The session is
-    always stopped before this returns."""
+    is pushed: ``brindle ci publish`` does that elsewhere). With ``budget``
+    (tokens), the run stops like at the timeout once it has used more. The
+    session is always stopped before this returns."""
     from brindle import autopilot as pilot
 
     if timeout_min <= 0:
@@ -693,11 +699,16 @@ def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIME
     started = clock()
     deadline = started + timeout_min * 60
     outcome = Outcome("error", goal, branch)
+    spend = ci_budget.Tracker(db, root.id, budget)
     try:
         while True:
             found = _poll(db, root.id)
             if found:
                 outcome.status, outcome.note = found
+                break
+            over = ci_budget.check(spend)
+            if over:
+                outcome.status, outcome.note = ci_budget.BUDGET_STATUS, over
                 break
             if clock() >= deadline:
                 outcome.status = "timeout"
@@ -710,6 +721,8 @@ def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIME
     finally:
         outcome.milestones = milestone_rows(db, root.id)
         outcome.elapsed = clock() - started
+        spend.update()
+        outcome.usage = spend.summary()
         try:
             _stop(db, root.id)
         except Exception as e:  # noqa: BLE001 - the outcome matters more than the stop
@@ -756,11 +769,12 @@ def resolve_goal(goal: str | None, goal_file: str | None, issue: int | None, cwd
 def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
             timeout_min: float, max_workers: int | None, base: str | None, pr: bool,
             echo=print, cwd: str | None = None, bundle: str | None = None,
-            entitlement: str | None = None) -> int:
+            entitlement: str | None = None, budget: str | None = None) -> int:
     """``brindle ci run``: 0 on a verified goal (and its PR or bundle), 1 otherwise."""
     cwd = cwd or os.getcwd()
     try:
         g = resolve_goal(goal, goal_file, issue, cwd)
+        tokens = ci_budget.parse_budget(budget)
         if entitlement is not None:
             require_ci(entitlement_file=entitlement)
         else:
@@ -769,9 +783,11 @@ def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
         db = DB()
         # The bundle path is resolved now: the run changes nothing about where it goes.
         kw = {"bundle": Path(bundle).resolve()} if bundle is not None else {}
+        if tokens is not None:
+            kw["budget"] = tokens
         outcome = run(db, cwd, g, timeout_min=timeout_min, max_workers=max_workers,
                       base=base, pr=pr and bundle is None, secrets=secrets, **kw)
-    except (CIError, git.GitError, workspaces.WorkspaceError, agents.AgentError, tmux.TmuxError) as e:
+    except (CIError, ci_budget.BudgetError, git.GitError, workspaces.WorkspaceError, agents.AgentError, tmux.TmuxError) as e:
         echo(str(e))
         return 1
     echo(outcome.describe())

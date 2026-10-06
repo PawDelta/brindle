@@ -1579,6 +1579,7 @@ def ci_run(
     no_pr: bool = typer.Option(False, "--no-pr", help="Don't push or open a pull request; just report."),
     bundle: Optional[str] = typer.Option(None, "--bundle", help="Write the verified branch to this git bundle (and PATH.json) for `brindle ci publish`, instead of pushing; implies --no-pr. This run then needs no token that can write to GitHub."),
     entitlement: Optional[str] = typer.Option(None, "--entitlement", help="Read the entitlement from this file (written by `brindle ci entitle`) instead of exchanging BRINDLE_PRO_TOKEN."),
+    budget: Optional[str] = typer.Option(None, "--budget", help="Token cap for the whole run, supervisor and workers together (e.g. 2m, 500k); past it the run stops with status budget."),
 ) -> None:
     """Run a supervisor with autopilot on, unattended, until the goal is verified; then open a PR.
 
@@ -1596,7 +1597,7 @@ def ci_run(
 
     raise typer.Exit(ci.run_cli(goal=goal, goal_file=goal_file, issue=issue, timeout_min=timeout,
                                 max_workers=max_workers, base=base, pr=not no_pr, echo=typer.echo,
-                                bundle=bundle, entitlement=entitlement))
+                                bundle=bundle, entitlement=entitlement, budget=budget))
 
 
 @ci_app.command("entitle")
