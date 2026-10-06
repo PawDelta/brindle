@@ -200,6 +200,10 @@ def checks(repo_root: str | None) -> list[Check]:
             subprocess.run(cmd, capture_output=True, timeout=10)
             focus = tmux._tmux("show-options", "-gs", "focus-events", check=False).stdout.strip()
             out.append(Check(OK, "tmux focus-events", focus or "not set yet (brindle sets it at launch)"))
+        except tmux.TmuxTimeout as e:
+            # The server accepts connections but answers nothing: every
+            # brindle command would hang on it until it is stopped.
+            out.append(Check(FAIL, "tmux server", str(e)))
         except Exception as e:  # noqa: BLE001
             out.append(Check(WARN, "tmux focus-events", str(e)))
 

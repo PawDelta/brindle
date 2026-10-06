@@ -121,6 +121,32 @@ def test_a_dead_servers_socket_file_is_removed():
     assert not sock.exists()
 
 
+def test_the_test_harness_reaps_what_a_test_forgot(tmp_path):
+    """conftest stops and removes, after each test, the private servers and
+    sockets it left behind (a test that made its own server and never
+    reaped it), but not another run's live test server."""
+    from conftest import _reap_run_leftovers
+
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    known = {p.name for p in tmux.socket_dir().iterdir()}
+    forgotten = f"brindle-e2e-forgotten-{os.getpid()}"
+    dead = f"brindle-dead-{os.getpid()}"
+    other_run = f"brindle-test-{sleeper.pid}"
+    try:
+        start_server(forgotten, str(tmp_path))
+        start_server(other_run, str(tmp_path))
+        (tmux.socket_dir() / dead).touch()
+        assert _reap_run_leftovers(known) == sorted([dead, forgotten])
+        assert not server_up(forgotten) and not (tmux.socket_dir() / forgotten).exists()
+        assert not (tmux.socket_dir() / dead).exists()
+        assert server_up(other_run)                       # its run (the sleeper) is alive
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+        tmux.reap_server(other_run)
+        tmux.reap_server(forgotten)
+
+
 def test_detached_helpers_stop_when_their_brindle_home_is_gone(tmp_path, monkeypatch):
     gone = tmp_path / "gone-home"
     monkeypatch.setenv("BRINDLE_HOME", str(gone))

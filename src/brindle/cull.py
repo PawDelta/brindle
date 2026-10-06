@@ -29,6 +29,10 @@ another server, such as the person's real sessions seen from a demo
 recording's private server, is left alone, since its pane id means nothing
 here. A sweep run with BRINDLE_TMUX_SOCKET set once stopped three live
 workers that way.
+
+A tmux server that isn't answering (tmux.TmuxTimeout, raised by the pane
+list rather than returned as "no panes") ends a sweep before it judges
+anything: no pane list is not the same as every pane being dead.
 """
 
 from __future__ import annotations
@@ -420,7 +424,13 @@ def orphan_servers() -> list[str]:
     all belong to a BRINDLE_HOME that no longer exists."""
     done = []
     for name in tmux.other_servers():
-        homes = tmux.server_homes(name)
+        try:
+            homes = tmux.server_homes(name)
+        except tmux.TmuxTimeout:
+            # Listening but not answering: not "nothing listening", so its
+            # socket stays, and nothing gets killed on a guess.
+            done.append(f"left tmux server {name} alone: it isn't answering")
+            continue
         m = re.fullmatch(r"brindle-test-(\d+)", name)
         if homes is None:
             tmux.remove_socket(name)  # nothing listening: just the file

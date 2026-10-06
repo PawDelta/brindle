@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -23,6 +24,49 @@ def _reap_dead_test_servers() -> None:
             tmux.reap_server(name)
 
 
+def _socket_names() -> set[str]:
+    from brindle import tmux
+
+    try:
+        return {p.name for p in tmux.socket_dir().iterdir()}
+    except OSError:
+        return set()
+
+
+# Every socket seen in tmux's socket directory so far: at the start of the
+# run, then after each test. A test's leftovers are what is new since.
+_KNOWN_SOCKETS: set[str] = set()
+
+
+def _reap_run_leftovers(known: set[str]) -> list[str]:
+    """Stop and remove the tmux servers and sockets a test left behind: any
+    ``brindle-*`` socket that wasn't there before and is dead, or is a test
+    server's (``brindle-test-*`` of a run that is over, ``brindle-e2e-*``).
+    A live server of another kind (a demo recording's, say) and another
+    run's live ``brindle-test-<pid>`` are left alone. Returns the names."""
+    from brindle import procs, tmux
+
+    found = []
+    for name in sorted(_socket_names() - known):
+        if not name.startswith("brindle-"):
+            continue
+        m = re.fullmatch(r"brindle-test-(\d+)", name)
+        if m and procs.alive(int(m.group(1))):
+            continue
+        try:
+            listening = tmux.server_homes(name) is not None
+        except tmux.TmuxError:
+            continue  # not answering: nothing to be done with it from here
+        if listening and not name.startswith(("brindle-test-", "brindle-e2e-")):
+            continue
+        try:
+            tmux.reap_server(name)
+        except tmux.TmuxError:
+            continue
+        found.append(name)
+    return found
+
+
 @pytest.fixture(scope="session", autouse=True)
 def private_tmux_server():
     """Run every test's tmux sessions on a private server, so parallel test
@@ -34,6 +78,7 @@ def private_tmux_server():
     from brindle import tmux
 
     _reap_dead_test_servers()
+    _KNOWN_SOCKETS.update(_socket_names())
     old = os.environ.get("BRINDLE_TMUX_SOCKET")
     name = f"brindle-test-{os.getpid()}"
     os.environ["BRINDLE_TMUX_SOCKET"] = name
@@ -61,8 +106,10 @@ def private_tmux_server():
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item, nextitem):
     """Each test's sessions end with it, so none outlive the test that made
-    them (or leak into the next one). Runs after every fixture's teardown,
-    so a test's monkeypatching (of subprocess, say) is undone by then."""
+    them (or leak into the next one), and a private server or socket a test
+    made and forgot is stopped and removed, with a warning naming the test.
+    Runs after every fixture's teardown, so a test's monkeypatching (of
+    subprocess, say) is undone by then."""
     import os
 
     from brindle import tmux
@@ -73,6 +120,11 @@ def pytest_runtest_teardown(item, nextitem):
             tmux.kill_server()
         except tmux.TmuxError:
             pass
+    leaked = _reap_run_leftovers(_KNOWN_SOCKETS)
+    if leaked:
+        item.warn(pytest.PytestWarning(
+            f"{item.nodeid} left tmux server(s) or socket(s) behind, now removed: {', '.join(leaked)}"))
+    _KNOWN_SOCKETS.update(_socket_names())
 
 
 @pytest.fixture(autouse=True)

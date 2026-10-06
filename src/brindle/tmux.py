@@ -17,6 +17,39 @@ class TmuxError(RuntimeError):
     pass
 
 
+class TmuxTimeout(TmuxError):
+    """The tmux server took longer than ``timeout()`` to answer one command:
+    it is hung (one accepted connections but answered nothing for 17 minutes
+    after a client attached to it from inside one of its own panes), or the
+    machine is badly overloaded. Never a verdict about any pane or session:
+    a caller that would otherwise judge agents by the answer (a cull, a
+    pause, a session drop) must give up instead, which is why list_panes
+    raises this rather than returning an empty snapshot."""
+
+
+DEFAULT_TIMEOUT = 30.0
+
+
+def timeout() -> float:
+    """How long one tmux command may take, in seconds (BRINDLE_TMUX_TIMEOUT,
+    default DEFAULT_TIMEOUT). Without a limit, a wedged server hung every
+    brindle process that touched it: `brindle` at its first has-session,
+    the sidebar's refresh, `brindle doctor`, every hook."""
+    try:
+        return float(os.environ.get("BRINDLE_TMUX_TIMEOUT") or DEFAULT_TIMEOUT)
+    except ValueError:
+        return DEFAULT_TIMEOUT
+
+
+def _hung(base: list[str], args: tuple[str, ...]) -> TmuxTimeout:
+    server = f"the tmux server -L {base[2]}" if len(base) > 2 else "the default tmux server"
+    return TmuxTimeout(
+        f"tmux {args[0] if args else ''} got no answer within {timeout():g}s: {server} is not "
+        "responding, so every tmux command on it hangs. If it stays stuck, `tmux kill-server` "
+        "(or, failing that, `pkill -x tmux`) restarts it, at the cost of every session on it."
+    )
+
+
 def current_server() -> str | None:
     """The private tmux server brindle is using (BRINDLE_TMUX_SOCKET: the
     test suite's, or a demo recording's), or None for the default server.
@@ -46,7 +79,11 @@ def _tmux(*args: str, input: str | None = None, check: bool = True,
     if not shutil.which("tmux"):
         raise TmuxError("tmux is not installed (macOS: `brew install tmux`)")
     base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
-    proc = subprocess.run([*base, *args], capture_output=True, text=True, input=input)
+    try:
+        proc = subprocess.run([*base, *args], capture_output=True, text=True, input=input,
+                              timeout=timeout())
+    except subprocess.TimeoutExpired:
+        raise _hung(base, args) from None
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)}: {proc.stderr.strip()}")
     return proc
@@ -265,6 +302,8 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
     fmt = "\t".join(["#{window_id}", "#{pane_id}", "#{pane_dead}", *(f"#{{{k}}}" for k in PANE_TAGS)])
     try:
         proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
+    except TmuxTimeout:
+        raise  # a hung server says nothing about its panes: never "all dead"
     except TmuxError:
         return result
     if proc.returncode != 0:
@@ -468,13 +507,30 @@ def bind_session_keys(session: str) -> None:
     _tmux("bind-key", "S", "if-shell", "-F", "#{@brindle}", toggle, "", check=False)
 
 
+# The default server's socket name: the one `tmux` without -L uses. It holds
+# the person's own sessions and every brindle session started without a
+# private socket, so nothing in brindle may stop it or remove its socket.
+DEFAULT_SOCKET = "default"
+
+
+def _ours(server: str | None) -> str:
+    """``server`` as a private server brindle may stop, or TmuxError."""
+    if not server or server == DEFAULT_SOCKET:
+        raise TmuxError("refusing to stop the default tmux server: it holds sessions that "
+                        "aren't brindle's to end (only a private -L server, such as a test "
+                        "run's, is)")
+    return server
+
+
 def kill_server() -> None:
+    """Stop the private tmux server brindle is using (BRINDLE_TMUX_SOCKET: a
+    test run's, a demo recording's) and remove its socket. Never the default
+    server: TmuxError when no private socket is selected."""
+    sock = _ours(current_server())
     _tmux("kill-server", check=False)
-    sock = os.environ.get("BRINDLE_TMUX_SOCKET")
-    if sock:
-        # tmux leaves a killed server's socket file behind; a private
-        # server's is ours to tidy (the default server's never is).
-        remove_socket(sock)
+    # tmux leaves a killed server's socket file behind; a private server's
+    # is ours to tidy.
+    remove_socket(sock)
 
 
 def socket_dir() -> Path:
@@ -483,6 +539,9 @@ def socket_dir() -> Path:
 
 
 def remove_socket(name: str) -> None:
+    """Remove a private server's socket file (never the default server's)."""
+    if not name or name == DEFAULT_SOCKET:
+        return
     try:
         (socket_dir() / name).unlink()
     except OSError:
@@ -500,12 +559,18 @@ def other_servers(prefix: str = "brindle-") -> list[str]:
 
 
 def _on(server: str, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["tmux", "-L", server, *args], capture_output=True, text=True)
+    base = ["tmux", "-L", server]
+    try:
+        return subprocess.run([*base, *args], capture_output=True, text=True, timeout=timeout())
+    except subprocess.TimeoutExpired:
+        raise _hung(base, args) from None
 
 
 def server_homes(server: str) -> list[str | None] | None:
     """The BRINDLE_HOME of each session on the named ``server`` (None for a
-    session without one), or None when no server is listening there."""
+    session without one), or None when no server is listening there. A
+    server that is listening but not answering raises TmuxTimeout: it is
+    not "nothing listening", and its socket must stay."""
     if not shutil.which("tmux"):
         return None
     proc = _on(server, "list-sessions", "-F", "#{session_name}")
@@ -520,7 +585,9 @@ def server_homes(server: str) -> list[str | None] | None:
 
 
 def reap_server(server: str) -> None:
-    """Stop the named ``server`` (if it's running) and remove its socket."""
+    """Stop the named private ``server`` (if it's running) and remove its
+    socket. Never the default server (TmuxError)."""
+    server = _ours(server)
     if shutil.which("tmux"):
         _on(server, "kill-server")
     remove_socket(server)
@@ -528,9 +595,11 @@ def reap_server(server: str) -> None:
 
 def list_sessions() -> list[tuple[str, bool]]:
     """``(name, attached)`` for every session on brindle's server; empty when
-    there is no server."""
+    there is no server (a hung one raises TmuxTimeout instead)."""
     try:
         proc = _tmux("list-sessions", "-F", "#{session_name} #{session_attached}", check=False)
+    except TmuxTimeout:
+        raise
     except TmuxError:
         return []
     if proc.returncode != 0:
@@ -608,6 +677,28 @@ def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
 def attach_command(session: str, window: str | None = None) -> list[str]:
     target = f"={session}" if window is None else window
     return [*_base(), "attach-session", "-t", target]
+
+
+def inside_this_server() -> bool:
+    """Whether this process runs in a pane of the tmux server brindle is
+    using. TMUX is set in every pane; a launcher that unset it to get past
+    tmux's nesting check (``env -u TMUX brindle``, run in a pane) still
+    leaves TMUX_PANE, which this server will recognise. From inside, a
+    session is opened with switch_client, never by attaching a second
+    client from within one of the server's own panes: a client nested in
+    its own server that way sat on the default server for 17 minutes while
+    every other tmux command on it hung."""
+    if os.environ.get("TMUX"):
+        return True
+    pane = os.environ.get("TMUX_PANE")
+    return bool(pane) and pane_session(pane) is not None
+
+
+def switch_client(target: str) -> None:
+    """Point the client this process runs under at ``target`` (a session,
+    ``=name``, or a window or pane id). TmuxError if there is no such client
+    (a pane nobody is attached to)."""
+    _tmux("switch-client", "-t", target)
 
 
 def select_window(target: str) -> None:

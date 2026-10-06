@@ -20,7 +20,20 @@ from brindle.config import write_template
 from brindle.db import DB, Workspace
 from brindle.profiles import list_profiles, load_profile
 
-app = typer.Typer(add_completion=False, help="""brindle: run coding agents in parallel, each on its own git branch.
+class _App(typer.Typer):
+    """`brindle` as a command. A tmux server that isn't answering (see
+    tmux.TmuxTimeout) is reported in one line, whichever command it bit,
+    instead of as a traceback: nothing can be done with it from here."""
+
+    def __call__(self, *args, **kwargs):
+        try:
+            return super().__call__(*args, **kwargs)
+        except tmux.TmuxTimeout as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise SystemExit(1)
+
+
+app = _App(add_completion=False, help="""brindle: run coding agents in parallel, each on its own git branch.
 
 Run `brindle` with no arguments to open (or reopen) a supervisor chat here, with
 the live dashboard underneath. Outside a git repo it starts a scratch session;
@@ -52,13 +65,21 @@ def _ws(db: DB, ref: Optional[str]) -> Workspace:
 
 
 def _attach(ws: Workspace, window: str | None = None) -> None:
-    if not tmux.has_session(ws.tmux_session):
-        tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-    if window:
-        tmux.select_window(window)
-    if os.environ.get("TMUX"):
-        subprocess.run([*tmux._base(), "switch-client", "-t", window or f"={ws.tmux_session}"])
-        return
+    try:
+        if not tmux.has_session(ws.tmux_session):
+            tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
+        if window:
+            tmux.select_window(window)
+        if tmux.inside_this_server():
+            # From inside one of this server's panes (TMUX set, or only
+            # TMUX_PANE left after `env -u TMUX brindle`): switch the client
+            # there. Never attach a second client from within the server's
+            # own pane, which hung the whole server once (see
+            # tmux.inside_this_server).
+            tmux.switch_client(window or f"={ws.tmux_session}")
+            return
+    except tmux.TmuxError as e:
+        _fail(str(e))
     subprocess.run(tmux.attach_command(ws.tmux_session))
     _after_detach(ws)
 
