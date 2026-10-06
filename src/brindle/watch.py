@@ -684,8 +684,13 @@ def _attach(agent: dict, ws: dict, db: DB) -> None:
         return
     tmux.select_window(agent["window"])
     curses.endwin()
-    if os.environ.get("TMUX"):
-        subprocess.run([*tmux._base(), "switch-client", "-t", agent["window"]])
+    if tmux.inside_this_server():
+        # Never a second client attached from inside this server's own pane
+        # (see tmux.inside_this_server): switch the one we're in.
+        try:
+            tmux.switch_client(agent["window"])
+        except tmux.TmuxError:
+            pass
     else:
         subprocess.run(tmux.attach_command(record.tmux_session))
 
@@ -802,9 +807,15 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
         h, w = stdscr.getmaxyx()
         width = max(1, w - 2)  # text starts at column 1, after the selection bar
         if stale:
-            panes = tmux.list_panes()
-            snap = view.snapshot(db, repo_root, panes=panes)
-            pilot = view.autopilot_entry(db, repo_root, panes=panes)
+            try:
+                panes = tmux.list_panes()
+            except tmux.TmuxTimeout as e:
+                # A hung server: keep the last snapshot on screen (an empty
+                # pane list would show every agent as stopped) and say so.
+                state.notice = f"{str(e).partition(':')[0]}; showing the last snapshot"
+            else:
+                snap = view.snapshot(db, repo_root, panes=panes)
+                pilot = view.autopilot_entry(db, repo_root, panes=panes)
             stale = False
         # Re-rendered every pass: folding, filtering and `?` change it between refreshes.
         if state.help:
