@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from brindle import agents, cull, procs, workspaces
+from brindle import agents, cull, procs, tmux, workspaces
 from brindle.db import Agent
 
 SLEEPER = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
@@ -151,4 +151,131 @@ def test_another_brindle_homes_agents_are_left_alone(proc_cleanup, monkeypatch):
     time.sleep(0.5)
     assert "fedcba98" not in procs.all_agent_ids()
     assert procs.agent_pids(["fedcba98"]) == {}
+
+
+# -- another tmux server's pane list says nothing about this agent -----------
+#
+# The incident: `brindle demo`, recorded on a private tmux server
+# (BRINDLE_TMUX_SOCKET) but against the person's real BRINDLE_HOME, ran a
+# sweep. Its pane list had none of the real agents' panes, so every real
+# worker past the launch grace period looked stopped: the sweep marked them
+# paused and SIGTERMed their processes.
+
+
+@pytest.fixture
+def other_server():
+    """A second private tmux server, as a demo recording would use, for the
+    cull to run on; the agents under test stay on the test run's server."""
+    name = f"brindle-test-{os.getpid()}-other"
+    yield name
+    tmux.reap_server(name)
+
+
+def live_pane(ws, agent_id):
+    """A real, running pane on the current server, tagged as ``agent_id``'s."""
+    tmux.ensure_session(ws.tmux_session, ws.path, {})
+    return tmux.new_window(ws.tmux_session, agent_id, ws.path, ["sleep", "60"], {},
+                           tag=(agents.AGENT_TAG, agent_id))
+
+
+def test_sweep_on_another_server_leaves_a_live_agent_alone(db, ws, proc_cleanup, other_server,
+                                                           monkeypatch):
+    here = tmux.current_server()
+    pane = live_pane(ws, "abc12345")
+    add(db, ws, "abc12345", status="processing", tmux_window=pane)
+    a = db.get_agent("abc12345")
+    assert a.tmux_server == here and agents.is_alive(a)
+    p = launch_as("abc12345")
+    proc_cleanup.append(p)
+
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    assert not tmux.list_panes()  # that server knows nothing of the agent's pane
+    notes = cull.sweep(db)
+    time.sleep(0.5)
+
+    assert notes == []
+    assert alive(p.pid), "its process was stopped"
+    a = db.get_agent("abc12345")
+    assert a.status == "processing" and a.dismissed_at is None
+    # Asked from the other server, it is still known to be running: the
+    # answer comes from its own server, not the other one's pane list.
+    assert agents.is_alive(a) and agents.is_alive(a, tmux.list_panes())
+
+
+def test_sweep_on_another_server_leaves_a_stale_looking_worker_alone(db, ws, other_server,
+                                                                     monkeypatch):
+    # A reported, long-idle worker (closed after stale_after on its own
+    # server) and one that would look stopped: both are the other server's
+    # to judge. A pane id that happens to exist on both servers must not
+    # make the other server's agent look like this one's.
+    add(db, ws, "w1", result="done", tmux_window="%0")
+    add(db, ws, "w2", status="processing", tmux_window="%1")
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    assert cull.sweep(db) == []
+    assert cull.prune_stale_agents(db) == []
+    for aid in ("w1", "w2"):
+        a = db.get_agent(aid)
+        assert a.dismissed_at is None and a.status == ("idle" if aid == "w1" else "processing")
+
+
+def test_sweep_on_another_server_never_judges_a_row_without_a_server(db, ws, proc_cleanup,
+                                                                     other_server, monkeypatch):
+    # A row an older brindle made (no tmux_server) counts as the default
+    # server's: a private server's pane list is still not its own.
+    add(db, ws, "abc12345", status="processing")
+    with db.tx() as c:
+        c.execute("UPDATE agents SET tmux_server=NULL WHERE id='abc12345'")
+    p = launch_as("abc12345")
+    proc_cleanup.append(p)
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    assert cull.sweep(db) == []
+    time.sleep(0.5)
+    assert alive(p.pid)
+    assert db.get_agent("abc12345").status == "processing"
+
+
+def test_pane_ownership_is_per_server(db, ws, other_server, monkeypatch):
+    # The same pane id on two servers: neither agent is a claim on the
+    # other's pane, and stopping one never touches the other's window.
+    here = tmux.current_server()
+    pane = live_pane(ws, "mine")
+    add(db, ws, "mine", status="processing", tmux_window=pane, created_at=time.time())
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    add(db, ws, "theirs", status="processing", tmux_window=pane, created_at=time.time())
+    assert db.get_agent("theirs").tmux_server == other_server
+    assert agents.owns_pane(db, db.get_agent("mine"))
+    assert agents.owns_pane(db, db.get_agent("theirs"))
+    assert not agents.is_alive(db.get_agent("theirs"))  # nothing on its own server
+    agents.close(db, "theirs")
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", here)
+    assert tmux.window_alive(pane), "closing the other server's agent killed this server's pane"
+    assert agents.is_alive(db.get_agent("mine"))
+
+
+def test_pane_reads_and_keys_go_to_the_agents_own_server(db, ws, other_server, monkeypatch):
+    # Reading an agent's screen or typing into its pane goes to the server
+    # its window is on, whatever server brindle is using at the time: on any
+    # other server the same pane id would be some other pane (or nothing).
+    tmux.ensure_session(ws.tmux_session, ws.path, {})
+    pane = tmux.new_window(ws.tmux_session, "abc12345", ws.path, ["cat"], {},
+                           tag=(agents.AGENT_TAG, "abc12345"))
+    add(db, ws, "abc12345", status="processing", tmux_window=pane)
+    a = db.get_agent("abc12345")
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    with pytest.raises(tmux.TmuxError):
+        tmux.capture(pane, lines=5)  # nothing of the sort on this server
+    tmux.send_keys(pane, "-l", "hello from brindle", server=agents.server_of(a))
+    deadline = time.time() + 5
+    screen = ""
+    while time.time() < deadline and "hello from brindle" not in screen:
+        time.sleep(0.1)
+        screen = tmux.capture(pane, lines=5, server=agents.server_of(a))
+    assert "hello from brindle" in screen
+    assert tmux.window_activity(pane, server=agents.server_of(a)) is not None
+    assert tmux.window_activity(pane) is None
+
+
+def test_agents_record_the_server_they_were_launched_on(db, ws):
+    add(db, ws, "abc12345")
+    assert db.get_agent("abc12345").tmux_server == tmux.current_server() == f"brindle-test-{os.getpid()}"
 

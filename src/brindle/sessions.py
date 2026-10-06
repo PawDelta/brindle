@@ -127,7 +127,10 @@ def _forget(db: DB, s: Session) -> None:
         # given to a newer session's pane (see agents.owns_pane) -- which,
         # on a freshly started tmux server, is usually the very chat being
         # launched right now.
-        if a.tmux_window and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners):
+        # And only on this tmux server: another server's pane id would name
+        # some other pane here (see agents.same_server).
+        if (a.tmux_window and agents.same_server(a, panes) and agents.is_alive(a, panes)
+                and agents.owns_pane(db, a, owners)):
             tmux.kill_window(a.tmux_window)
         if a.id != s.root.id:
             ws = db.get_workspace(a.workspace_id)
