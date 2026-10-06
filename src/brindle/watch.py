@@ -234,15 +234,18 @@ def matching_agents(ws: dict, text: str) -> list[dict] | None:
     return kept or None
 
 
-def group_title(ws: dict, count: int, needing: int, width: int, collapsed: bool) -> str:
+def group_title(ws: dict, count: int, needing: int, width: int, collapsed: bool,
+                repo: str | None = None) -> str:
     """A workspace's header: its branch, elided in the middle to fit, and on a
-    folded group how many agents (and how many needing you) it hides."""
+    folded group how many agents (and how many needing you) it hides. In a
+    session spanning several repos ``repo`` names the branch's repo."""
     arrow = "▸ " if collapsed else "▾ "
     suffix = f" ({count})" + (f" {needing}◆" if needing else "") if collapsed else ""
     room = width - len(arrow) - len(suffix)
     tags = ("  (your checkout)", " (yours)") if ws.get("name") == "root" else ()
-    tag = next((t for t in tags if len(ws["branch"]) + len(t) <= room), "")
-    return fit(arrow + elide_middle(ws["branch"], max(room - len(tag), 1)) + tag + suffix, width)
+    title = f"{repo} · {ws['branch']}" if repo else ws["branch"]
+    tag = next((t for t in tags if len(title) + len(t) <= room), "")
+    return fit(arrow + elide_middle(title, max(room - len(tag), 1)) + tag + suffix, width)
 
 
 def render_agent(a: dict, ws: dict, now: float, width: int) -> list[Line]:
@@ -282,11 +285,12 @@ def render_agent(a: dict, ws: dict, now: float, width: int) -> list[Line]:
     return lines
 
 
-def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: bool) -> list[Line]:
+def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: bool,
+                 repo: str | None = None) -> list[Line]:
     """A workspace header and, unless folded, its agents: the ones needing
     you first, otherwise in their usual order."""
     needing = sum(bool(needs_you(a, ws)) for a in ags)
-    lines = [Line(group_title(ws, len(ags), needing, width, collapsed),
+    lines = [Line(group_title(ws, len(ags), needing, width, collapsed, repo),
                   "alert" if collapsed and needing else "bold", workspace=ws, group=ws["id"],
                   needs=needing if collapsed else 0)]
     if collapsed:
@@ -303,6 +307,9 @@ def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: b
 def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = None,
            state: NavState | None = None) -> list[Line]:
     state = state or NavState()
+    # A workspace id is "<repo slug>/<name>": a session spanning several
+    # repos (brindle.repos) labels each group with its repo.
+    several = len({ws["id"].partition("/")[0] for ws in snap if "/" in ws["id"]}) > 1
     agents_ = [a for ws in snap for a in ws["agents"]]
     needing = any(needs_you(a, ws) for ws in snap for a in ws["agents"])
     lines = [Line(fit(summary(snap), width), "alert" if needing else "bold")]
@@ -321,7 +328,8 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
         lines += [Line(t, "dim") for t in _wrap(f"Nothing matches “{state.filter}”.", width, "")]
         return lines
     for ws, ags in shown:
-        lines += render_group(ws, ags, now, width, ws["id"] in state.collapsed)
+        lines += render_group(ws, ags, now, width, ws["id"] in state.collapsed,
+                              ws["id"].partition("/")[0] if several else None)
         lines.append(Line(""))
     return lines
 

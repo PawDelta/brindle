@@ -14,6 +14,7 @@ import typer
 
 from brindle import agents, git, tmux, view, workspaces
 from brindle import history as history_mod
+from brindle import repo_cmds
 from brindle.usage import format_tokens
 from brindle.config import write_template
 from brindle.db import DB, Workspace
@@ -29,6 +30,7 @@ Paid features (hosted learning, per-worktree services, team policies, CI):
 `brindle account` shows what you have and how to get the rest.""")
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
+app.add_typer(repo_cmds.app, name="repo")
 
 
 def _fail(msg: str) -> None:
@@ -783,7 +785,7 @@ def list_cmd(
             repo_root = git.main_repo_root(os.getcwd())
         except git.GitError:
             pass
-    rows = db.find_workspaces(repo_root)
+    rows = view.session_workspaces(db, repo_root)
     panes = tmux.list_panes()
     if as_json:
         typer.echo(json.dumps([view.workspace_entry(db, ws, panes=panes) for ws in rows], indent=2))
@@ -791,7 +793,12 @@ def list_cmd(
     if not rows:
         typer.echo("no workspaces")
         return
+    several = len({ws.repo_root for ws in rows}) > 1
+    shown_repo = None
     for ws in rows:
+        if several and ws.repo_root != shown_repo:
+            shown_repo = ws.repo_root
+            typer.secho(f"{os.path.basename(ws.repo_root.rstrip(os.sep))}  ({ws.repo_root})", fg="cyan")
         if not os.path.isdir(ws.path):
             typer.secho(f"{ws.id}  (missing: {ws.path})", fg="red")
             continue

@@ -311,6 +311,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle delegation [conservative\|balanced\|fast]` | how readily the supervisor delegates: fewest tokens, the default, or quickest |
 | `brindle transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `brindle ls [--all]` | workspaces and agents |
+| `brindle repo add PATH [--name ALIAS] / rm ALIAS / ls` | attach other local repos to the current session so workers can go there (brindle Pro; see "Several repos in one session") |
 | `brindle history [--limit N] [--kind K] [--all]` | durable log of worker results, reviews, merges and milestone checks |
 | `brindle history --share [--session ID]` | a few lines about this session to paste into Slack or a post: goal, milestones verified, workers, merges, reviews (and how many by a different model), parallel speedup, tokens |
 | `brindle permissions list / check / suggestions / accept / allow / deny / forget / reset` | the rules brindle answers workers' permission requests with, and what it suggests from your approvals (see "Permission policy") |
@@ -346,6 +347,7 @@ knowing them helps when you tell the supervisor how to work.
 | `send_message` | any agent | message another agent; delivered when it's idle |
 | `read_messages` | supervisor | read the messages agents and brindle sent you and mark them read; with `message_delivery` `"pull"` (the default) you get a one-line "N new messages" notice instead of each message |
 | `list_agents` / `list_tasks` / `list_agent_profiles` | supervisor | who's running, what's queued, which profiles exist |
+| `list_repos` | supervisor | the repos attached to the session (brindle Pro); `repo=<alias>` on `assign`/`handoff` puts a worker there |
 | `cancel_task` | supervisor | cancel a queued task (and its dependents) to re-plan |
 | `workspace_diff` | supervisor | a worker branch's changes against its base |
 | `request_review` / `submit_review` | supervisor / reviewer | start a reviewer on a branch / record its verdict |
@@ -638,6 +640,7 @@ how to use them, and the next step to get the rest:
 |---|---|---|
 | hosted learning | Pro | on by itself; `brindle learning` |
 | per-worktree services | Pro | `"services"` in `.brindle/config.json` |
+| several repos in one session | Pro | `brindle repo add <path>` |
 | org policies + audit feed | Team | `brindle account org policy` |
 | Brindle-CI | Team | back in a later release |
 | audit log, air-gap | Enterprise | `brindle audit verify`, `"airgap": true` |
@@ -653,6 +656,21 @@ brindle account org list   # the orgs you belong to; `org use <id>` switches, `o
 brindle account org policy # the org's policy, its per-role overrides, and the policy that applies to you
 brindle account org member policy-role <member> <role|none>   # give a member a policy role (admin; Enterprise)
 brindle account org company [link <org_id> | unlink]          # link orgs you own into one company; learning is pooled only within it
+```
+
+### Several repos in one session (brindle Pro)
+
+A session can work across several repos. Attach another local repo you own
+to the running session and the supervisor can put workers there: each gets a
+worktree in that repo, that repo's own checks and review, and merges into that
+repo's branch. A task may depend on one in another repo, a milestone check can
+run in another repo (`check@<alias>: <command>` in `goals.md`, or `repo` in
+`set_goal`), and the sidebar and `brindle ls` group workers by repo.
+
+```sh
+brindle repo add ../pawdelta-web --name web   # attach a repo to the current session (alias: web)
+brindle repo ls                               # the repos attached to this session
+brindle repo rm web                           # detach it (its worktrees and branches stay)
 ```
 
 Setting up a team takes no sign-up form:

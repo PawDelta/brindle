@@ -129,10 +129,27 @@ def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
     become merged, so ``unmet_dependencies`` must treat it as a hard failure
     rather than something to keep waiting on. An untracked dependency (e.g. a
     branch never assigned through brindle) falls back to a git ancestry check
-    in ``unmet_dependencies``."""
+    in ``unmet_dependencies``.
+
+    A dependency may live in another repo of the session (brindle.repos): an
+    agent id is found wherever its task is, but a bare branch name only
+    matches within ``repo_root``, since two repos may have a branch of the
+    same name."""
     branch = _dep_branch(db, dep)
     candidates = [t for t in db.list_tasks(repo_root) if t.agent_id == dep or t.branch == branch]
+    if not candidates:
+        candidates = [t for t in db.list_tasks() if t.agent_id == dep]
     return max(candidates, key=lambda t: t.created_at) if candidates else None
+
+
+def _same_repo(db: DB, repo_root: str, dep: str) -> bool:
+    """Whether ``dep`` (an agent id) belongs to ``repo_root``; a bare branch
+    name is taken to."""
+    agent = db.get_agent(dep)
+    if not agent:
+        return True
+    ws = db.get_workspace(agent.workspace_id)
+    return ws is None or ws.repo_root == repo_root
 
 
 def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | None) -> list[str]:
@@ -156,6 +173,13 @@ def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | Non
                 raise agents.AgentError(f"dependency {dep} was cancelled and will never merge")
             if task.state != "merged":
                 unmet.append(dep)
+        elif not _same_repo(db, caller_ws.repo_root, dep):
+            # A worker in another repo that brindle isn't tracking as a task:
+            # its branch can't be an ancestor here; judge it by its merge record.
+            agent = db.get_agent(dep)
+            ws = db.get_workspace(agent.workspace_id) if agent else None
+            if ws is None or not db.merged_sha(ws.id):
+                unmet.append(dep)
         elif not git.ok(["merge-base", "--is-ancestor", _dep_branch(db, dep), "HEAD"], caller_ws.path):
             unmet.append(dep)
     return unmet
@@ -165,10 +189,14 @@ def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:
     return dep == ws.branch or (worker_id is not None and dep == worker_id)
 
 
-def _refers_to(dep: str, t: Task) -> bool:
+def _refers_to(dep: str, t: Task, from_repo: str | None = None) -> bool:
     """Whether a ``depends_on`` entry names task ``t``: its worker's agent id
-    (once it has one) or its declared branch."""
-    return dep == t.branch or (t.agent_id is not None and dep == t.agent_id)
+    (once it has one), from any repo, or its declared branch, only from the
+    same repo (``from_repo``: the depending task's; two repos may have a
+    branch of the same name)."""
+    if t.agent_id is not None and dep == t.agent_id:
+        return True
+    return dep == t.branch and (from_repo is None or from_repo == t.repo_root)
 
 
 def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
@@ -190,8 +218,8 @@ def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
             )
         except agents.AgentError:
             pass
-    for dependent in db.list_tasks(t.repo_root, state="pending"):
-        if any(_refers_to(d, t) for d in _loads(dependent.depends_on)):
+    for dependent in db.list_tasks(state="pending"):   # any repo of the session may wait on it
+        if any(_refers_to(d, t, dependent.repo_root) for d in _loads(dependent.depends_on)):
             cancelled += _cancel(
                 db, dependent.id, f"its dependency {t.id} ({t.branch or t.id}) was cancelled")
     return cancelled
@@ -284,16 +312,20 @@ def on_merged(db: DB, ws: Workspace) -> None:
     """``ws``'s branch was just merged into its base: mark its own task
     'merged' (so dependents judge it correctly, and it stops counting as
     started), then start any pending task that was only waiting on it and now
-    has every dependency merged, and tell its caller."""
+    has every dependency merged, and tell its caller. A pending task may be
+    in another repo of the session (brindle.repos); a branch-name dependency
+    only matches within ``ws``'s own repo."""
     worker = agents.workspace_worker(db, ws)
     dep_ref = worker.id if worker else ws.branch
     if worker:
         for t in db.list_tasks(ws.repo_root, state="started"):
             if t.agent_id == worker.id:
                 db.update_task(t.id, state="merged")
-    for t in db.list_tasks(ws.repo_root, state="pending"):
+    for t in db.list_tasks(state="pending"):
         deps = _loads(t.depends_on)
-        if not any(_dep_matches(d, ws, worker.id if worker else None) for d in deps):
+        worker_id = worker.id if worker else None
+        if not any(_dep_matches(d, ws, worker_id) and (d == worker_id or t.repo_root == ws.repo_root)
+                   for d in deps):
             continue
         caller_ws = db.get_workspace(t.caller_ws_id)
         if not caller_ws:
@@ -326,8 +358,10 @@ def on_removed_unmerged(db: DB, ws: Workspace) -> None:
     task that in turn depends on those -- and tell each one's caller."""
     worker = agents.workspace_worker(db, ws)
     dep_ref = worker.id if worker else ws.branch
-    for t in db.list_tasks(ws.repo_root, state="pending"):
-        if any(_dep_matches(d, ws, worker.id if worker else None) for d in _loads(t.depends_on)):
+    worker_id = worker.id if worker else None
+    for t in db.list_tasks(state="pending"):
+        if any(_dep_matches(d, ws, worker_id) and (d == worker_id or t.repo_root == ws.repo_root)
+               for d in _loads(t.depends_on)):
             _cancel(db, t.id, f"it was waiting on {dep_ref}, which was removed unmerged.")
 
 
