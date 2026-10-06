@@ -1027,9 +1027,10 @@ brindle only offers a profile whose CLI is installed and signed in. A profile on
 CLI that isn't signed in is left out of the supervisor's profile list and of
 routing by weight, and naming it directly stops with how to sign in
 (`claude auth login`, `codex login`) instead of opening the CLI's login screen.
-`brindle doctor` shows, for each installed CLI, how it's signed in (its own
-login, an environment key by name, never its value, or signed out) and whether
-a quota limit is in effect. Keys set in the environment
+`brindle doctor` shows, for each installed CLI, how it's signed in and whether
+a quota limit is in effect. Sign-in is its own login, an environment key (by
+name, never its value) set in your shell or in a profile's `env.NAME: value`
+lines, signed out, or unknown for a CLI with no status check. Keys set in the environment
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and the like) count as signed in.
 `agy` has no sign-in status command, so brindle can't tell when it's signed out:
 sign in once by running `agy` yourself. A worker that no hook reports on (Codex)
@@ -1050,7 +1051,8 @@ worker: when it expires or its quota runs out, every worker on it stalls until
 someone signs in again in a browser. A key gives workers their own limits and
 needs no browser step. Put the key in your environment, or in a profile's
 `env.NAME: value` lines in `~/.brindle/agents` (never in the repo), and
-`brindle doctor` shows which variable each CLI is using.
+`brindle doctor` names the variable each CLI gets, from your shell or from
+which profiles.
 
 ### Cheap workers
 

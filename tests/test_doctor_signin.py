@@ -23,16 +23,44 @@ def installed(monkeypatch, tmp_path):
             monkeypatch.delenv(k, raising=False)
 
 
-def lines():
-    return {c.name: c for c in doctor.signin_checks()}
+def lines(repo_root=None):
+    return {c.name: c for c in doctor.signin_checks(repo_root)}
 
 
-def test_doctor_lists_each_installed_cli(installed):
+SIGNED_IN = {"auth": (0, json.dumps({"loggedIn": True})), "login": (0, "Logged in using ChatGPT\n")}
+
+
+def test_doctor_lists_each_installed_cli(installed, monkeypatch):
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv: SIGNED_IN.get(argv[1]))
     got = lines()
     assert set(got) == {"Claude Code sign-in", "Codex sign-in", "Google Antigravity sign-in"}
-    for c in got.values():
-        assert c.level == doctor.OK
-        assert c.detail == "its own login (no sign-in problem found); quota: no limit in effect"
+    for name in ("Claude Code sign-in", "Codex sign-in"):
+        assert got[name].level == doctor.OK
+        assert got[name].detail == "its own login; quota: no limit in effect"
+    # agy has no status check, so brindle can't say it's signed in.
+    agy = got["Google Antigravity sign-in"]
+    assert agy.level == doctor.OK
+    assert agy.detail == "sign-in unknown (no status check for this CLI); quota: no limit in effect"
+
+
+def test_doctor_unknown_when_the_status_check_gives_no_answer(installed):
+    # conftest's probe answers nothing, like an older CLI without the command.
+    assert lines()["Claude Code sign-in"].detail.startswith("sign-in unknown")
+
+
+def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv: SIGNED_IN.get(argv[1]))
+    agents = repo / ".brindle" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "keyed.md").write_text(
+        "---\nname: keyed\nprovider: codex\nenv.CODEX_API_KEY: sk-profile-secret\n---\nWork.\n")
+    (agents / "cleared.md").write_text(
+        "---\nname: cleared\nprovider: claude\nenv.ANTHROPIC_API_KEY:\n---\nWork.\n")
+    got = lines(str(repo))
+    assert got["Codex sign-in"].detail.startswith(
+        "its own login; profile keyed: environment key CODEX_API_KEY;")
+    assert "profile" not in got["Claude Code sign-in"].detail   # an empty value clears the key
+    assert "sk-profile-secret" not in doctor.render(doctor.signin_checks(str(repo)))
 
 
 def test_doctor_skips_clis_not_installed(installed, monkeypatch):

@@ -89,11 +89,34 @@ def signin_providers() -> list[str]:
     return out
 
 
-def signin_checks() -> list[Check]:
+def _profile_keys(provider: str, repo_root: str | None) -> dict[str, list[str]]:
+    """The environment keys (from providers._ENV_AUTH) that profiles on
+    ``provider`` set in their ``env.NAME: value`` lines, with the profiles
+    setting each. An empty value clears a key, so it doesn't count."""
+    from brindle import providers
+    from brindle.profiles import list_profiles
+
+    keys = providers._ENV_AUTH.get(provider, ())
+    out: dict[str, list[str]] = {}
+    try:
+        profiles = list_profiles(repo_root)
+    except Exception:  # noqa: BLE001 - a bad profile is reported elsewhere
+        return out
+    for p in profiles:
+        if p.provider != provider:
+            continue
+        key = next((k for k in keys if p.env.get(k)), None)
+        if key:
+            out.setdefault(key, []).append(p.name)
+    return out
+
+
+def signin_checks(repo_root: str | None = None) -> list[Check]:
     """For each installed CLI: how it's signed in (its own login, a key from
     the environment, or signed out) and whether a quota limit is in effect.
     The environment keys come from providers._ENV_AUTH, so a provider listed
-    there shows its key here; only the variable's name is shown."""
+    there shows its key here, whether it's set in brindle's environment or in
+    a profile's env lines; only the variable's name is shown."""
     from brindle import providers, quota
 
     out = []
@@ -106,8 +129,14 @@ def signin_checks() -> list[Check]:
         elif why:
             level = FAIL if provider == "claude" else WARN
             signin = f"signed out: {why}"
+        elif provider in providers._SIGNED_IN:
+            # Only a status check that answered "signed in" records this.
+            signin = "its own login"
         else:
-            signin = "its own login (no sign-in problem found)"
+            signin = "sign-in unknown (no status check for this CLI)"
+        if not env:
+            for key, names in _profile_keys(provider, repo_root).items():
+                signin += f"; profile{'s' if len(names) > 1 else ''} {', '.join(names)}: environment key {key}"
         limit = quota.note(provider)
         if limit and quota.headroom(provider) <= 10 and level == OK:
             level = WARN
@@ -131,7 +160,7 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(_tool("codex", False, "only needed for Codex agents (reviewer-codex)",
                      install=CLI_INSTALL["codex"][1]))
     out.append(_tool("agy", False, "only needed for Google Antigravity agents"))
-    out.extend(signin_checks())
+    out.extend(signin_checks(repo_root))
     out.append(_tool("gh", False, "only needed for `brindle pr` and `brindle new --pr`"))
     out.append(_tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"))
     out.append(_tool("graphify", False, "only needed for the code map agents can query"))
