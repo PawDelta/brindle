@@ -17,7 +17,7 @@ brindle demo        # watch it finish a practice repo in a few minutes
 
 ![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://pawdelta.com/brindle/brindle-demo.gif)
 
-*`brindle demo`, recorded on brindle 0.14.6 (sped up 4×): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
+*`brindle demo`, recorded on brindle 0.0.2 (sped up 4×): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
 
 - **Done means a command passed.** A goal is split into milestones, each with a
   check command that brindle runs itself. A milestone is verified when its check exits
@@ -59,12 +59,8 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.11.5`). A session started before an upgrade keeps
+session shows it too (`brindle 0.0.2`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
-
-### Upgrading from copse
-
-brindle was called copse until 0.0.1, and it doesn't read anything copse saved. Install `brindle`, then move `~/.copse` to `~/.brindle` and each repo's `.copse/` to `.brindle/`. Until you do, saved permission rules, policy and config there don't apply. `brindle doctor` lists every leftover it finds, including old `copse` entries in `.agents/hooks.json` and `mcp_config.json` to remove.
 
 ## Quick start
 
@@ -781,6 +777,7 @@ brindle ci run --issue 42                      # the goal is the issue's title a
 brindle ci run --goal "Add a /health endpoint" # or typed; a goals.md-shaped text brings its milestones
 brindle ci run --goal-file .brindle/goals.md --timeout 90 --max-workers 2 --base develop --no-pr
 brindle ci init --label brindle                  # the GitHub Actions workflow (see below)
+brindle ci doctor || true                        # in a CI job: which agent CLIs and keys are there (names only)
 
 # The same run in three steps, so no secret worth stealing is near the agents:
 brindle ci entitle --out ent.jwt                                      # uses BRINDLE_PRO_TOKEN, then exits
@@ -1057,12 +1054,32 @@ brindle only offers a profile whose CLI is installed and signed in. A profile on
 CLI that isn't signed in is left out of the supervisor's profile list and of
 routing by weight, and naming it directly stops with how to sign in
 (`claude auth login`, `codex login`) instead of opening the CLI's login screen.
-`brindle doctor` shows each CLI's sign-in. Keys set in the environment
+`brindle doctor` shows, for each installed CLI, how it's signed in and whether
+a quota limit is in effect. Sign-in is its own login, an environment key (by
+name, never its value) set in your shell or in a profile's `env.NAME: value`
+lines, signed out, or unknown for a CLI with no status check. Keys set in the environment
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and the like) count as signed in.
 `agy` has no sign-in status command, so brindle can't tell when it's signed out:
 sign in once by running `agy` yourself. A worker that no hook reports on (Codex)
 and that shows nothing new for 10 minutes without reporting, for example because
 it's signed in without a plan that includes it, is reported to its supervisor.
+
+#### Key login
+
+| Provider | Key login (environment variables) |
+|---|---|
+| `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
+| `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY` |
+| `antigravity` | browser login (`agy`'s own sign-in) |
+
+Workers that run unattended should use key login where the CLI supports it.
+A personal login is one interactive session with one quota shared by every
+worker: when it expires or its quota runs out, every worker on it stalls until
+someone signs in again in a browser. A key gives workers their own limits and
+needs no browser step. Put the key in your environment, or in a profile's
+`env.NAME: value` lines in `~/.brindle/agents` (never in the repo), and
+`brindle doctor` names the variable each CLI gets, from your shell or from
+which profiles.
 
 ### Cheap workers
 

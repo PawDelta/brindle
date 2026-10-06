@@ -1012,7 +1012,7 @@ def test_the_entitlement_file_is_gone_before_agents_start(tmp_path, signing_key)
 
 
 OUTCOME_KEYS = {"status", "ok", "goal", "issue", "branch", "pr_url", "bundle", "bundle_status",
-                "note", "elapsed_seconds", "milestones"}
+                "note", "elapsed_seconds", "milestones", "usage"}
 
 
 def test_cli_run_always_writes_the_outcome(db, repo, monkeypatch, tmp_path, signing_key):
@@ -1150,6 +1150,23 @@ def test_a_stall_and_a_question_keep_commits_too(db, repo, monkeypatch, tmp_path
     assert "need_user: Postgres or SQLite?" in json.loads(Path(str(bundle) + ".json").read_text())["body"]
 
 
+def test_the_token_budget_keeps_commits_too(db, repo, monkeypatch, tmp_path):
+    from brindle import ci_budget
+
+    polls = []
+    monkeypatch.setattr(ci_budget, "check", lambda tracker: polls.append(tracker) and None if len(polls) < 2
+                        else "used 6k tokens, over the budget of 5k")
+    _, out, bundle = _partial_run(db, repo, monkeypatch, tmp_path, lambda session, root_id: None,
+                                  budget=5000)
+    assert out.status == "budget" and not out.ok and out.bundle_status == "partial"
+    meta = json.loads(Path(str(bundle) + ".json").read_text())
+    assert meta["status"] == "partial" and "budget: used 6k tokens" in meta["body"]
+    assert "## Usage" in meta["body"]
+    assert out.summary()["usage"]["budget"] == 5000
+    assert ci.write_outcome(out.summary(), tmp_path / "outcome.json")
+    assert json.loads((tmp_path / "outcome.json").read_text())["status"] == "budget"
+
+
 def test_no_commits_means_no_partial_bundle(db, repo, monkeypatch, tmp_path):
     s = FakeSession(db, monkeypatch)
     bundle = tmp_path / "brindle.bundle"
@@ -1238,7 +1255,8 @@ def test_load_outcome_keeps_only_the_expected_fields(tmp_path):
     }))
     o = ci.load_outcome(path, "acme/app")
     assert set(o) == {"status", "goal", "issue", "note", "pr_url", "bundle_status", "elapsed_seconds",
-                      "milestones"}
+                      "milestones", "usage"}
+    assert o["usage"] is None
     assert o["status"] == "need_user" and o["issue"] == 42 and o["elapsed_seconds"] == 1234
     assert o["pr_url"] is None and o["bundle_status"] == "partial"
     assert "\x00" not in o["goal"] and "\x1b" not in o["goal"] and "\n" not in o["goal"]
@@ -1252,6 +1270,19 @@ def test_load_outcome_keeps_only_the_expected_fields(tmp_path):
     assert ci.load_outcome(path, "other/repo")["pr_url"] is None
     path.write_text(json.dumps({"status": "done", "pr_url": "https://github.com/acme/app/pull/12/evil"}))
     assert ci.load_outcome(path)["pr_url"] is None
+
+    # Usage: counts and names only, bounded; junk shapes become nothing.
+    path.write_text(json.dumps({"status": "budget", "usage": {
+        "tokens": {"total": 7_500_000.0, "input": -1, "output": "x", "cache_read": True},
+        "budget": 5_000_000, "models": ["opus", HOSTILE, 3] + ["m"] * 50, "profiles": "nope",
+        "untracked": ["a", "b"], "agents": [{"id": "secret"}], "estimated_cost_usd": 1e9}}))
+    u = ci.load_outcome(path)["usage"]
+    assert u["tokens"] == {"total": 7_500_000, "input": 0, "output": 0, "cache_read": 0, "cache_creation": 0}
+    assert u["budget"] == 5_000_000 and u["profiles"] == [] and u["untracked"] == 2
+    assert u["models"] == ["opus"] + ["m"] * 17     # twenty looked at; a non-name and a number dropped
+    assert "agents" not in u and "estimated_cost_usd" not in u
+    path.write_text(json.dumps({"status": "done", "usage": "lots"}))
+    assert ci.load_outcome(path)["usage"] is None
 
     # Unknown, missing and broken outcomes are outcomes too: errors.
     path.write_text(json.dumps({"status": "pwned", "issue": True, "elapsed_seconds": -3,
@@ -1328,6 +1359,20 @@ def test_report_comment_per_outcome(tmp_path):
     assert "draft" not in nothing and "No milestones were recorded." in nothing
 
     assert "## brindle ci: the supervisor exited" in comment({"status": "exited", "note": "gone"})
+    # Stopped at the token budget: the status, and what was spent on which models.
+    usage = {"tokens": {"total": 5_200_000, "input": 5_000_000, "output": 200_000},
+             "budget": 5_000_000, "models": ["opus", "son|net", "gpt-5.5"], "profiles": ["supervisor"],
+             "untracked": ["w3"]}
+    spent = comment({"status": "budget", "note": "used 5200k tokens, over the budget of 5000k",
+                     "milestones": ms, "bundle_status": "partial", "usage": usage},
+                    pr_url="https://github.com/acme/app/pull/9")
+    assert "<!-- brindle-ci: budget -->\n## brindle ci: went over its token budget" in spent
+    assert "```text\nused 5200k tokens, over the budget of 5000k\n```" in spent
+    assert "draft pull request: https://github.com/acme/app/pull/9" in spent
+    assert "Used 5200k tokens of a 5000k budget on `opus`, `gpt-5.5` (1 agent(s) not counted)." in spent
+    assert "son|net" not in spent
+    assert "Used 12k tokens." in comment({"status": "done", "usage": {"tokens": {"total": 12_000}}})
+    assert "Used" not in comment({"status": "done", "usage": {"tokens": {"total": 0}}})
     assert "start the workflow again" in comment({"status": "need_user", "note": "Which?"})
 
     # Jobs that failed around the run: the entitlement, a cancelled run, no outcome at all.

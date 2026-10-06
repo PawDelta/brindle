@@ -75,19 +75,73 @@ def preflight(provider: str) -> list[str]:
     return problems
 
 
-def signin_checks() -> list[Check]:
-    """Whether each installed CLI that has a sign-in status is signed in."""
+def signin_providers() -> list[str]:
+    """The provider CLIs installed here, in CLI_INSTALL order."""
+    from brindle import antigravity, providers
+
+    binaries = {"claude": providers.claude_binary, "codex": providers.codex_binary,
+                "antigravity": antigravity.binary}
+    out = []
+    for provider in CLI_INSTALL:
+        exe = binaries[provider]()
+        if shutil.which(exe) or os.path.isfile(exe):
+            out.append(provider)
+    return out
+
+
+def _profile_keys(provider: str, repo_root: str | None) -> dict[str, list[str]]:
+    """The environment keys (from providers._ENV_AUTH) that profiles on
+    ``provider`` set in their ``env.NAME: value`` lines, with the profiles
+    setting each. An empty value clears a key, so it doesn't count."""
     from brindle import providers
+    from brindle.profiles import list_profiles
+
+    keys = providers._ENV_AUTH.get(provider, ())
+    out: dict[str, list[str]] = {}
+    try:
+        profiles = list_profiles(repo_root)
+    except Exception:  # noqa: BLE001 - a bad profile is reported elsewhere
+        return out
+    for p in profiles:
+        if p.provider != provider:
+            continue
+        key = next((k for k in keys if p.env.get(k)), None)
+        if key:
+            out.setdefault(key, []).append(p.name)
+    return out
+
+
+def signin_checks(repo_root: str | None = None) -> list[Check]:
+    """For each installed CLI: how it's signed in (its own login, a key from
+    the environment, or signed out) and whether a quota limit is in effect.
+    The environment keys come from providers._ENV_AUTH, so a provider listed
+    there shows its key here, whether it's set in brindle's environment or in
+    a profile's env lines; only the variable's name is shown."""
+    from brindle import providers, quota
 
     out = []
-    for provider, binary, required in (("claude", providers.claude_binary, True),
-                                       ("codex", providers.codex_binary, False)):
-        exe = binary()
-        if not (shutil.which(exe) or os.path.isfile(exe)):
-            continue
-        why = providers.signed_out(provider)
-        name = f"{CLI_INSTALL[provider][0]} sign-in"
-        out.append(Check((FAIL if required else WARN) if why else OK, name, why or "no sign-in problem found"))
+    for provider in signin_providers():
+        level = OK
+        env = next((k for k in providers._ENV_AUTH.get(provider, ()) if os.environ.get(k)), None)
+        why = None if env else providers.signed_out(provider)
+        if env:
+            signin = f"environment key {env}"
+        elif why:
+            level = FAIL if provider == "claude" else WARN
+            signin = f"signed out: {why}"
+        elif provider in providers._SIGNED_IN:
+            # Only a status check that answered "signed in" records this.
+            signin = "its own login"
+        else:
+            signin = "sign-in unknown (no status check for this CLI)"
+        if not env:
+            for key, names in _profile_keys(provider, repo_root).items():
+                signin += f"; profile{'s' if len(names) > 1 else ''} {', '.join(names)}: environment key {key}"
+        limit = quota.note(provider)
+        if limit and quota.headroom(provider) <= 10 and level == OK:
+            level = WARN
+        out.append(Check(level, f"{CLI_INSTALL[provider][0]} sign-in",
+                         f"{signin}; quota: {limit or 'no limit in effect'}"))
     return out
 
 
@@ -106,7 +160,7 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(_tool("codex", False, "only needed for Codex agents (reviewer-codex)",
                      install=CLI_INSTALL["codex"][1]))
     out.append(_tool("agy", False, "only needed for Google Antigravity agents"))
-    out.extend(signin_checks())
+    out.extend(signin_checks(repo_root))
     out.append(_tool("gh", False, "only needed for `brindle pr` and `brindle new --pr`"))
     out.append(_tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"))
     out.append(_tool("graphify", False, "only needed for the code map agents can query"))
@@ -384,12 +438,14 @@ def pro_checks() -> list[Check]:
 
 def quota_checks(repo_root: str | None) -> list[Check]:
     """One line per provider that has quota data (a warning past 90% used or
-    while limited). The local model server has its own checks above."""
+    while limited). The local model server has its own checks above, and an
+    installed CLI's quota is on its sign-in line."""
     from brindle import quota
 
     out = []
+    shown = set(signin_providers())
     for p in quota.PROVIDERS:
-        if p == "native":
+        if p == "native" or p in shown:
             continue
         n = quota.note(p)
         if n:
