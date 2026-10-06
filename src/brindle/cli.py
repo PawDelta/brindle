@@ -1582,6 +1582,7 @@ def ci_run(
     bundle: Optional[str] = typer.Option(None, "--bundle", help="Write the verified branch to this git bundle (and PATH.json) for `brindle ci publish`, instead of pushing; implies --no-pr. This run then needs no token that can write to GitHub."),
     entitlement: Optional[str] = typer.Option(None, "--entitlement", help="Read the entitlement from this file (written by `brindle ci entitle`) instead of exchanging BRINDLE_PRO_TOKEN."),
     budget: Optional[str] = typer.Option(None, "--budget", help="Token cap for the whole run, supervisor and workers together (e.g. 2m, 500k); past it the run stops with status budget."),
+    outcome: Optional[str] = typer.Option(None, "--outcome", help="Write the outcome (status, note, milestones, usage) as JSON to this file whatever happens, for `brindle ci report`."),
 ) -> None:
     """Run a supervisor with autopilot on, unattended, until the goal is verified; then open a PR.
 
@@ -1599,7 +1600,8 @@ def ci_run(
 
     raise typer.Exit(ci.run_cli(goal=goal, goal_file=goal_file, issue=issue, timeout_min=timeout,
                                 max_workers=max_workers, base=base, pr=not no_pr, echo=typer.echo,
-                                bundle=bundle, entitlement=entitlement, budget=budget))
+                                bundle=bundle, entitlement=entitlement, budget=budget,
+                                outcome_path=outcome))
 
 
 @ci_app.command("entitle")
@@ -1624,16 +1626,42 @@ def ci_publish(
     path: str = typer.Argument(..., help="The bundle `brindle ci run --bundle` wrote (PATH.json sits next to it)."),
     repo: Optional[str] = typer.Option(None, "--repo", help="owner/name on github.com (default: $GITHUB_REPOSITORY)."),
     base: Optional[str] = typer.Option(None, "--base", help="Branch the pull request targets (default: the repository's default branch; never the bundle's say)."),
+    if_present: bool = typer.Option(False, "--if-present", help="Exit 0 with nothing done when there is no bundle at PATH (a run that left no commits)."),
 ) -> None:
     """Push a bundle from `brindle ci run --bundle` and open its pull request.
 
     This is the step that holds the token that can push, so run it where no
     agent ran. It verifies the bundle, takes only its `brindle/ci-` branch into
-    a fresh bare repo, pushes it and opens the PR with gh. It never checks out
-    or runs repo code, hooks or agents."""
+    a fresh bare repo, pushes it and opens the PR with gh: a draft one when the
+    bundle is marked partial (the run ended before every milestone was
+    verified). It never checks out or runs repo code, hooks or agents."""
     from brindle import ci
 
-    raise typer.Exit(ci.publish_cli(path, repo, base, echo=typer.echo))
+    raise typer.Exit(ci.publish_cli(path, repo, base, echo=typer.echo, if_present=if_present))
+
+
+@ci_app.command("report")
+def ci_report(
+    path: str = typer.Argument(..., help="The outcome file `brindle ci run --outcome` wrote (a missing one is reported as an error)."),
+    issue: int = typer.Option(..., "--issue", help="The issue to comment on."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="owner/name on github.com (default: $GITHUB_REPOSITORY)."),
+    pr_url: Optional[str] = typer.Option(None, "--pr-url", help="The pull request `brindle ci publish` opened, if any."),
+    run_url: Optional[str] = typer.Option(None, "--run-url", help="The workflow run, linked from the comment."),
+    label: Optional[str] = typer.Option(None, "--label", help="The label that starts a run: named when the supervisor asked a question."),
+    entitle_result: Optional[str] = typer.Option(None, "--entitle-result", help="The entitle job's result (success, failure, skipped, cancelled)."),
+    run_result: Optional[str] = typer.Option(None, "--run-result", help="The run job's result."),
+    publish_result: Optional[str] = typer.Option(None, "--publish-result", help="The publish job's result."),
+) -> None:
+    """Comment a run's outcome on its issue: the pull request, the supervisor's question, a stall, the timeout or the error, and the milestones.
+
+    Run it where no agent ran, with a token that can only comment. The outcome
+    file was written on the agents' machine, so only its expected fields are
+    read and their text is rendered as code, never as markdown."""
+    from brindle import ci
+
+    raise typer.Exit(ci.report_cli(path, issue, repo, pr_url=pr_url, run_url=run_url, label=label,
+                                   entitle_result=entitle_result, run_result=run_result,
+                                   publish_result=publish_result, echo=typer.echo))
 
 
 @ci_app.command("init")
@@ -1641,7 +1669,7 @@ def ci_init(
     label: str = typer.Option("brindle", "--label", help="Issues given this label start a run."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing workflow file."),
 ) -> None:
-    """Write .github/workflows/brindle.yml: `brindle ci run` on labelled issues, publishing from a second job."""
+    """Write .github/workflows/brindle.yml: `brindle ci run` on labelled issues, publishing and reporting from jobs of their own."""
     from brindle import ci
 
     root = _run(git.main_repo_root, os.getcwd())

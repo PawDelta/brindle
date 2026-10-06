@@ -781,8 +781,9 @@ brindle ci doctor || true                        # in a CI job: which agent CLIs
 
 # The same run in three steps, so no secret worth stealing is near the agents:
 brindle ci entitle --out ent.jwt                                      # uses BRINDLE_PRO_TOKEN, then exits
-brindle ci run --issue 42 --entitlement ent.jwt --bundle out/brindle.bundle   # no CI token, no push token
+brindle ci run --issue 42 --entitlement ent.jwt --bundle out/brindle.bundle --outcome out/outcome.json   # no CI token, no push token
 brindle ci publish out/brindle.bundle --repo acme/api                   # elsewhere: pushes and opens the PR
+brindle ci report out/outcome.json --issue 42 --repo acme/api           # elsewhere: comments the outcome on the issue
 ```
 
 With `--issue` and `--goal`, the supervisor derives the milestones and their
@@ -804,20 +805,42 @@ isn't on the machine while agents run. So the work can be split:
    on hosted runners agents have sudo, and the runner holds every secret of
    the job they run in. `brindle ci run` reads the file and deletes it before
    any agent starts.
-2. `brindle ci run --entitlement FILE --bundle PATH` does the work with no CI
-   token and no token that can write to GitHub (`--issue` needs one that can
-   read). When the goal is verified it writes the new commits to PATH as a git
-   bundle, and `PATH.json` with the branch, base, title and body of the pull
-   request. `--bundle` implies `--no-pr`: nothing is pushed.
+2. `brindle ci run --entitlement FILE --bundle PATH --outcome FILE` does the
+   work with no CI token and no token that can write to GitHub (`--issue`
+   needs one that can read). When the goal is verified it writes the new
+   commits to PATH as a git bundle, and `PATH.json` with the branch, base,
+   title and body of the pull request. When it ends any other way (a
+   question, a stall, the timeout) but commits were made, it writes the same
+   bundle marked `partial`, so the work isn't lost. `--bundle` implies
+   `--no-pr`: nothing is pushed. Whatever happened, `--outcome FILE` gets a
+   JSON record of it (status, note, milestones), even when the run couldn't
+   start.
 3. `brindle ci publish PATH [--repo owner/name]` runs where no agent ever ran,
    with the token that can push. It verifies the bundle, fetches its one
    `brindle/ci-…` branch into a fresh bare repo, pushes that branch to
    `https://github.com/<repo>` (default: `$GITHUB_REPOSITORY`) and opens the
-   pull request with `gh`. It never checks out or runs repo code, hooks or
+   pull request with `gh`: a draft one, listing which milestones passed, for
+   a `partial` bundle. A re-run that adds to the branch updates the open
+   pull request instead (and marks a draft ready once the goal is verified).
+   It never checks out or runs repo code, hooks or
    agents, and it refuses a bundle whose branch isn't a `brindle/ci-` branch, so
    a run can't publish over `main`. The pull request targets `--base`, else
    the repository's default branch; the bundle doesn't get to choose. A
    hostile run can still add commits to an existing `brindle/ci-` branch.
+   `--if-present` makes a missing bundle (a run that left no commits) a
+   no-op rather than an error.
+4. `brindle ci report FILE --issue N [--repo owner/name]` runs where no agent
+   ever ran, with a token that can only comment on issues. It comments the
+   outcome on the issue: the pull request (`--pr-url`, from the publish
+   step), the supervisor's question, the stall, the timeout or the error,
+   and a table of the milestones. The outcome file was written on the
+   agents' machine, so only its expected fields are read, every text is
+   bounded, and all of it is rendered as code: nothing in it becomes
+   markdown, a mention, a link or HTML. To answer the supervisor's question,
+   comment on the issue and add the label again: the next run reads the
+   comments made after brindle's question and continues on the same branch.
+   Only comments by the repo's owner, org members and collaborators count,
+   since they steer the agents too; anyone else's are left out.
 
 The workflow `brindle ci init` writes pins brindle to the version that wrote it,
 since the publishing job holds a write token. The short-lived entitlement
@@ -831,7 +854,7 @@ steer the agents.
 
 `brindle ci init` writes `.github/workflows/brindle.yml`, which runs on
 `workflow_dispatch` and whenever an issue gets the label (`brindle` by
-default). It has three jobs:
+default). It has four jobs:
 
 - `entitle` (no permissions) runs `brindle ci entitle` with `BRINDLE_PRO_TOKEN`
   on a machine that checks out and runs nothing from the repo. It hands the
@@ -840,13 +863,20 @@ default). It has three jobs:
 - `run` (permissions: `contents: read`, `issues: read`) checks the repo out
   without keeping credentials, installs tmux, brindle (pinned to the version
   that wrote the workflow) and Claude Code, then runs `brindle ci run --issue
-  <number> --entitlement … --bundle …` with only `ANTHROPIC_API_KEY` and a
-  read-only `GH_TOKEN`. brindle deletes the entitlement file before any agent
-  starts. The job uploads the bundle as an artifact.
+  <number> --entitlement … --bundle … --outcome …` with only `ANTHROPIC_API_KEY`
+  and a read-only `GH_TOKEN`. brindle deletes the entitlement file before any
+  agent starts. However the run ends, the job uploads the outcome, and the
+  bundle when there are commits, as an artifact.
 - `publish` (permissions:
   `contents: write`, `pull-requests: write`) starts on a fresh machine, checks
   nothing out, downloads the artifact and runs `brindle ci publish`, targeting
-  the repository's default branch.
+  the repository's default branch. It runs after a failed run too, so partial
+  work becomes a draft pull request.
+- `report` (permissions: `issues: write`) runs last, whatever happened, on a
+  fresh machine with no checkout, and runs `brindle ci report`: a comment on
+  the issue with the outcome, the pull request, the supervisor's question
+  and the milestones. It runs even when the run never started (a refused CI
+  token), never for an unrelated label.
 
 `brindle ci init` won't
 overwrite an existing file without `--force`. The workflow needs two secrets,

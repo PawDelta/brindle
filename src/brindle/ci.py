@@ -23,24 +23,38 @@ work is split into three steps, and the dangerous token is in the last one:
    machine than the agents (in the workflow, its own job: on hosted runners
    agents have sudo and the runner holds the secrets of the job they run in).
    ``brindle ci run`` reads the file and deletes it before any agent starts.
-2. ``brindle ci run --entitlement FILE --bundle PATH`` does the work. It needs
-   no CI token and no token that can write to GitHub. When the goal is
-   verified it writes a git bundle of the new commits to PATH, and PATH.json
-   with the branch, base, title and body of the pull request. Nothing is
-   pushed.
+2. ``brindle ci run --entitlement FILE --bundle PATH --outcome FILE`` does the
+   work. It needs no CI token and no token that can write to GitHub. When
+   the goal is verified it writes a git bundle of the new commits to PATH,
+   and PATH.json with the branch, base, title and body of the pull request.
+   When it ends any other way (a question, a stall, the timeout) but
+   commits were made, it writes the same bundle marked ``partial``. Nothing
+   is pushed. Whatever happened, ``--outcome FILE`` gets a JSON record of it
+   (status, note, milestones), even when the run couldn't start.
 3. ``brindle ci publish PATH`` runs somewhere no agent ever ran (in the
    workflow: a second job, on a fresh machine, with no checkout). It holds
    the token that can push. The pull request targets ``--base`` or the
    repository's default branch, never what the bundle names. It treats the
    bundle as data: verifies it,
    fetches the one ``brindle/ci-`` branch into a fresh bare repo, pushes that
-   branch and opens the pull request with ``gh``. It never checks out or
+   branch and opens the pull request with ``gh``: a draft one, listing which
+   milestones passed, for a ``partial`` bundle. It never checks out or
    runs repo code, hooks or agents.
+4. ``brindle ci report FILE --issue N`` runs in a job of its own with a token
+   that can only comment on issues, no checkout, and nothing from the repo.
+   It comments the outcome on the issue: the pull request, the supervisor's
+   question, the stall, the timeout or the error, and the milestone table.
+   The outcome file was written where agents ran, so it is data: only the
+   expected fields are read, every text is bounded and rendered as code so
+   nothing in it becomes markdown, a mention or a link. A question is
+   answered in a comment on the issue; when the label is added again,
+   ``goal_from_issue`` hands the comments after brindle's question to the
+   next run as context.
 
 ``brindle ci run`` without ``--bundle`` still pushes and opens the pull request
 itself, as before; use it only where the repo's code is trusted.
 
-``brindle ci init`` writes the three-job workflow that does this when an issue
+``brindle ci init`` writes the four-job workflow that does this when an issue
 gets a label.
 
 Entitlement: ``ci`` must be in the brindle Pro entitlement. In CI there is no
@@ -89,6 +103,7 @@ class Goal:
     detail: str | None = None
     issue: int | None = None
     source: str = "goal"           # goal | file | issue
+    context: str | None = None     # an issue's comments since brindle last reported
 
     @property
     def slug(self) -> str:
@@ -119,14 +134,67 @@ def _gh_json(args: list[str], cwd: str) -> dict:
     return data
 
 
+REPORT_MARKER = "<!-- brindle-ci:"
+
+
 def goal_from_issue(number: int, cwd: str) -> Goal:
-    """The issue's title and body, through ``gh issue view``."""
-    data = _gh_json(["issue", "view", str(number), "--json", "number,title,body"], cwd)
+    """The issue's title and body, through ``gh issue view``, plus the
+    comments made since brindle's last report on the issue (an answer to its
+    question, a steer) as ``context``."""
+    data = _gh_json(["issue", "view", str(number), "--json", "number,title,body,comments"], cwd)
     title = str(data.get("title") or "").strip()
     if not title:
         raise CIError(f"issue #{number} has no title")
     body = str(data.get("body") or "").strip() or None
-    return Goal(title, body, issue=number, source="issue")
+    return Goal(title, body, issue=number, source="issue", context=issue_context(data.get("comments")))
+
+
+TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+
+
+def _login(comment: dict) -> str:
+    author = comment.get("author") if isinstance(comment.get("author"), dict) else {}
+    return str(author.get("login") or "").strip()
+
+
+def _trusted(comment: dict) -> bool:
+    """A comment by someone with a say over the repo: its owner, a member
+    of the org or a collaborator. Anyone can comment on a public issue, and
+    these comments steer an agent, so the rest are left out."""
+    return comment.get("authorAssociation") in TRUSTED_ASSOCIATIONS
+
+
+def _is_report(comment: dict) -> bool:
+    """brindle's own report: the marker, posted by the workflow's bot (or by
+    a trusted person running `brindle ci report` themselves)."""
+    if REPORT_MARKER not in str(comment.get("body") or ""):
+        return False
+    login = _login(comment)
+    return login == "github-actions" or login.endswith("[bot]") or _trusted(comment)
+
+
+def issue_context(comments) -> str | None:
+    """The comments after brindle's last report (the one carrying
+    ``REPORT_MARKER``), each with its author, as text for the supervisor;
+    None when brindle never reported or nobody answered. Only comments by
+    the repo's owner, org members and collaborators count: they steer an
+    unattended agent."""
+    if not isinstance(comments, list):
+        return None
+    comments = [c for c in comments if isinstance(c, dict)]
+    since = None
+    for i, c in enumerate(comments):
+        if _is_report(c):
+            since = i
+    if since is None:
+        return None
+    parts = []
+    for c in comments[since + 1:]:
+        text = str(c.get("body") or "").strip()
+        if not text or REPORT_MARKER in text or not _trusted(c):
+            continue
+        parts.append(f"{_login(c) or 'someone'} wrote:\n{text}")
+    return "\n\n".join(parts) or None
 
 
 def goal_from_text(text: str) -> Goal:
@@ -333,6 +401,7 @@ class Outcome:
     pr_url: str | None = None
     elapsed: float = 0.0
     bundle: str | None = None       # with --bundle: the file `brindle ci publish` takes
+    bundle_status: str | None = None  # done | partial: what the bundle holds
     usage: dict | None = None       # tokens, models, profiles: ci_budget.Tracker.summary()
 
     @property
@@ -343,7 +412,7 @@ class Outcome:
         return {
             "status": self.status, "ok": self.ok, "goal": self.goal.title,
             "issue": self.goal.issue, "branch": self.branch, "pr_url": self.pr_url,
-            "bundle": self.bundle,
+            "bundle": self.bundle, "bundle_status": self.bundle_status,
             "note": self.note, "elapsed_seconds": round(self.elapsed),
             "milestones": self.milestones, "usage": self.usage,
         }
@@ -364,7 +433,8 @@ class Outcome:
         if self.pr_url:
             lines.append(f"  pull request: {self.pr_url}")
         if self.bundle:
-            lines.append(f"  bundle: {self.bundle} (publish it with `brindle ci publish`)")
+            what = "partial work" if self.bundle_status == BUNDLE_PARTIAL else "bundle"
+            lines.append(f"  {what}: {self.bundle} (publish it with `brindle ci publish`)")
         return "\n".join(lines)
 
 
@@ -374,8 +444,15 @@ decisions you can yourself and prefer small, reviewable changes. When every \
 milestone is verified, stop: brindle opens the pull request from this branch.
 
 Goal{where}: {title}
-{detail}
+{detail}{context}
 {instruction}"""
+
+CONTEXT = """
+Comments on the issue since brindle last reported (answers to its question, \
+or how to continue; take them into account):
+
+{context}
+"""
 
 DERIVE = ("Call set_goal now with this goal and the milestones you derive from it, each "
           "with a check command that verifies it (tests you add count), then drive it to "
@@ -387,7 +464,8 @@ RECORDED = ("The goal and its milestones are already recorded (get_progress show
 def kickoff(goal: Goal, recorded: bool) -> str:
     where = f" (from issue #{goal.issue})" if goal.issue is not None else ""
     detail = f"\n{goal.detail}\n" if goal.detail and not recorded else ""
-    return UNATTENDED.format(where=where, title=goal.title, detail=detail,
+    context = CONTEXT.format(context=goal.context) if goal.context else ""
+    return UNATTENDED.format(where=where, title=goal.title, detail=detail, context=context,
                              instruction=RECORDED if recorded else DERIVE)
 
 
@@ -457,13 +535,53 @@ def _create_pr(ws: Workspace, base: str, title: str, body: str,
                     _github_env(secrets))
 
 
-def _open_pr(slug: str, base: str, branch: str, title: str, body: str, env: dict[str, str]) -> str:
+def _existing_pr(slug: str, branch: str, env: dict[str, str], cwd: str) -> dict | None:
+    """The open pull request from ``branch`` of this repository, if a run
+    already opened one (a re-run after a question or a partial result adds
+    to its branch). A pull request from a fork with a branch of the same
+    name is somebody else's: never touched."""
+    proc = subprocess.run(
+        ["gh", "pr", "list", "--repo", slug, "--head", branch, "--state", "open",
+         "--json", "url,isDraft,isCrossRepository,headRefName", "--limit", "10"],
+        cwd=cwd, capture_output=True, text=True, env=env)
+    if proc.returncode != 0:
+        return None
+    try:
+        found = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if not isinstance(found, list):
+        return None
+    for pr in found:
+        if (isinstance(pr, dict) and isinstance(pr.get("url"), str)
+                and pr.get("isCrossRepository") is False and pr.get("headRefName") == branch
+                and re.fullmatch(_PR_URL.format(slug=re.escape(slug)), pr["url"])):
+            return pr
+    return None
+
+
+def _open_pr(slug: str, base: str, branch: str, title: str, body: str, env: dict[str, str],
+             draft: bool = False) -> str:
+    """Open the pull request (a draft one with ``draft``), or when the branch
+    already has one open, update its title and body and, if it was a draft
+    and the work is now complete, mark it ready."""
     # --repo, and not a worktree as cwd: gh would otherwise read the
     # agents' git config to decide where the pull request goes.
     with tempfile.TemporaryDirectory(prefix="brindle-pr-") as tmp:
+        existing = _existing_pr(slug, branch, env, tmp)
+        if existing:
+            url = existing["url"]
+            steps = [["gh", "pr", "edit", url, "--repo", slug, "--title", title, "--body", body]]
+            if existing.get("isDraft") and not draft:
+                steps.append(["gh", "pr", "ready", url, "--repo", slug])
+            for cmd in steps:
+                proc = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, env=env)
+                if proc.returncode != 0:
+                    raise CIError(f"gh pr {cmd[2]} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+            return url
         proc = subprocess.run(
             ["gh", "pr", "create", "--repo", slug, "--base", base, "--head", branch,
-             "--title", title, "--body", body],
+             "--title", title, "--body", body, *(["--draft"] if draft else [])],
             cwd=tmp, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
         raise CIError(f"gh pr create failed: {proc.stderr.strip() or proc.stdout.strip()}")
@@ -475,7 +593,9 @@ def _open_pr(slug: str, base: str, branch: str, title: str, body: str, env: dict
 
 # -- the bundle: the run's result, handed to another trust domain -------------------
 
-BUNDLE_STATUS = "done"
+BUNDLE_STATUS = "done"            # every milestone verified: a pull request
+BUNDLE_PARTIAL = "partial"        # commits, but the run ended otherwise: a draft
+BUNDLE_STATUSES = (BUNDLE_STATUS, BUNDLE_PARTIAL)
 _SLUG = r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
 
 
@@ -492,11 +612,19 @@ def _safe_branch(name) -> bool:
             and not name.endswith(("/", ".", ".lock")) and "/." not in name)
 
 
+def has_commits(ws: Workspace, base_ref: str) -> bool:
+    """Whether the branch has commits past ``base_ref``: anything to bundle."""
+    proc = git.run(["rev-list", "--count", f"{base_ref}..refs/heads/{ws.branch}"], ws.path, check=False)
+    return proc.returncode == 0 and proc.stdout.strip() not in ("", "0")
+
+
 def write_bundle(ws: Workspace, base_ref: str, base_branch: str, path: str | Path,
-                 title: str, body: str) -> Path:
+                 title: str, body: str, status: str = BUNDLE_STATUS) -> Path:
     """Write the commits of ``base_ref..branch`` as a git bundle at ``path``,
-    and ``path``.json saying what pull request they are for. This needs no
-    token: `brindle ci publish` pushes it, somewhere no agent ever ran."""
+    and ``path``.json saying what pull request they are for (a draft, when
+    ``status`` is partial). This needs no token: `brindle ci publish` pushes
+    it, somewhere no agent ever ran."""
+    assert status in BUNDLE_STATUSES, status
     path = Path(path).resolve()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -505,7 +633,7 @@ def write_bundle(ws: Workspace, base_ref: str, base_branch: str, path: str | Pat
     git.run(["-c", "core.hooksPath=/dev/null", "bundle", "create", str(path),
              f"refs/heads/{ws.branch}", f"^{base_ref}"], ws.path)
     meta = {"branch": ws.branch, "base": base_branch, "title": title,
-            "body": workspaces.with_footer(body, ws.repo_root), "status": BUNDLE_STATUS}
+            "body": workspaces.with_footer(body, ws.repo_root), "status": status}
     try:
         bundle_meta_path(path).write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     except OSError as e:
@@ -517,7 +645,7 @@ def read_bundle_meta(path: str | Path) -> dict:
     """``path``.json, checked: it was written on a machine where agents ran,
     so nothing in it is trusted. The branch must be a ``brindle/ci-`` branch
     (a bundle can't be published over ``main``), and only a verified goal
-    is published."""
+    (``done``) or work marked ``partial`` (published as a draft) is."""
     meta_path = bundle_meta_path(path)
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -527,9 +655,10 @@ def read_bundle_meta(path: str | Path) -> dict:
         raise CIError(f"{meta_path} is not JSON") from e
     if not isinstance(meta, dict):
         raise CIError(f"{meta_path} is not a JSON object")
-    if meta.get("status") != BUNDLE_STATUS:
-        raise CIError(f"not publishing: the run's status is {meta.get('status')!r}, not "
-                      f"{BUNDLE_STATUS!r}")
+    status = meta.get("status")
+    if status not in BUNDLE_STATUSES:
+        raise CIError(f"not publishing: the run's status is {status!r}, not one of "
+                      f"{', '.join(BUNDLE_STATUSES)}")
     branch, base, title, body = (meta.get(k) for k in ("branch", "base", "title", "body"))
     if not _safe_branch(branch) or not branch.startswith(BRANCH_PREFIX):
         raise CIError(f"not publishing: the branch must be a {BRANCH_PREFIX}* branch")
@@ -540,7 +669,7 @@ def read_bundle_meta(path: str | Path) -> dict:
     if not isinstance(body, str):
         raise CIError("not publishing: the pull request body is not text")
     return {"branch": branch, "base": base, "title": title.strip(), "body": body,
-            "status": BUNDLE_STATUS}
+            "status": status}
 
 
 def _default_branch(url: str, env: dict, cwd: str) -> str:
@@ -559,9 +688,11 @@ _BRANCH_NAME = re.compile(r"[A-Za-z0-9._/-]{1,100}")
 
 
 def publish(path: str | Path, repo: str | None = None, *, base: str | None = None,
-            remote: str | None = None, environ=None) -> str:
+            remote: str | None = None, environ=None, if_present: bool = False) -> str | None:
     """``brindle ci publish``: push the bundle's branch to github.com/``repo``
-    and open the pull request; returns its URL.
+    and open the pull request (a draft, for a partial bundle); returns its
+    URL. With ``if_present``, no bundle at ``path`` (a run that left no
+    commits) is not an error: returns None.
 
     This is the only step that holds a token that can write, so it treats
     the bundle as data: it is verified and fetched into a fresh bare repo
@@ -576,6 +707,8 @@ def publish(path: str | Path, repo: str | None = None, *, base: str | None = Non
                       "(default: $GITHUB_REPOSITORY)")
     bundle = Path(path).resolve()
     if not bundle.is_file():
+        if if_present:
+            return None
         raise CIError(f"brindle ci publish: no bundle at {bundle}")
     meta = read_bundle_meta(bundle)
     url = remote or f"https://github.com/{slug}.git"
@@ -611,7 +744,8 @@ def publish(path: str | Path, repo: str | None = None, *, base: str | None = Non
             if proc.returncode != 0:
                 raise CIError(f"brindle ci publish: git {what} failed: "
                               f"{proc.stderr.strip() or proc.stdout.strip()}")
-    return _open_pr(slug, meta["base"], meta["branch"], meta["title"], meta["body"], env)
+    return _open_pr(slug, meta["base"], meta["branch"], meta["title"], meta["body"], env,
+                    draft=meta["status"] == BUNDLE_PARTIAL)
 
 
 def set_max_workers(repo_root: str, n: int) -> Path:
@@ -628,7 +762,11 @@ def milestone_rows(db: DB, root_id: str) -> list[dict]:
 
 
 def pr_body(outcome: Outcome) -> str:
+    """The pull request's description: the goal, the milestones with their
+    checks ticked when verified, and for partial work (the run ended before
+    every milestone was) why it stopped and how far it got."""
     g = outcome.goal
+    partial = outcome.status != "done"
     lines = ["## Goal", "", g.title]
     if g.detail and not g.plan():
         lines += ["", g.detail]
@@ -637,9 +775,16 @@ def pr_body(outcome: Outcome) -> str:
         box = "x" if m["status"] == "passed" else " "
         check = f" (`{m['check']}`)" if m.get("check") else ""
         lines.append(f"- [{box}] {m['title']}{check}")
+    if not outcome.milestones:
+        lines.append("(none recorded)")
+    if partial:
+        done = sum(m["status"] == "passed" for m in outcome.milestones)
+        why = f"{outcome.status}: {outcome.note}" if outcome.note else outcome.status
+        lines += ["", f"**Partial work.** The run stopped ({why}) with {done} of "
+                      f"{len(outcome.milestones)} milestones verified, so this is a draft."]
     lines += ci_budget.pr_section(outcome.usage)
     if g.issue is not None:
-        lines += ["", f"Closes #{g.issue}"]
+        lines += ["", f"Part of #{g.issue}" if partial else f"Closes #{g.issue}"]
     lines += ["", "🤖 Opened by `brindle ci`"]
     return "\n".join(lines) + "\n"
 
@@ -733,13 +878,48 @@ def run(db: DB, repo_path: str, goal: Goal, *, timeout_min: float = DEFAULT_TIME
             outcome.pr_url = _create_pr(ws, base_branch, goal.title, pr_body(outcome), secrets, remote)
         except (git.GitError, CIError) as e:
             outcome.note = str(e)
-    if outcome.status == "done" and bundle is not None:
+    if bundle is not None and (outcome.status == "done" or has_commits(ws, base_ref)):
+        # A verified goal: the pull request. Anything else with commits (a
+        # question, a stall, the timeout): the same bundle, marked partial,
+        # which `brindle ci publish` opens as a draft so the work isn't lost.
+        status = BUNDLE_STATUS if outcome.status == "done" else BUNDLE_PARTIAL
         try:
             outcome.bundle = str(write_bundle(ws, base_ref, base_branch, bundle, goal.title,
-                                              pr_body(outcome)))
+                                              pr_body(outcome), status))
+            outcome.bundle_status = status
         except (git.GitError, CIError) as e:
-            outcome.note = str(e)
+            if outcome.status == "done":
+                outcome.note = str(e)
+            else:
+                outcome.note = f"{outcome.note}; keeping the partial work failed: {e}"
     return outcome
+
+
+STATUSES = ("done", "need_user", "timeout", ci_budget.BUDGET_STATUS, "stalled", "exited", "error",
+            "cancelled")
+
+
+def error_outcome(note: str, goal: Goal | None = None, issue: int | None = None) -> dict:
+    """The outcome record of a run that never started (a refused entitlement,
+    a bad goal): the same shape as ``Outcome.summary()``."""
+    return {
+        "status": "error", "ok": False, "goal": goal.title if goal else None,
+        "issue": goal.issue if goal else issue, "branch": goal.branch if goal else None,
+        "pr_url": None, "bundle": None, "bundle_status": None, "note": note,
+        "elapsed_seconds": 0, "milestones": [], "usage": None,
+    }
+
+
+def write_outcome(data: dict, path: str | Path) -> Path:
+    """Write the outcome record (``Outcome.summary()`` or ``error_outcome``)
+    as JSON to ``path``: what `brindle ci report` comments on the issue."""
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        raise CIError(f"cannot write the outcome to {path}: {e.strerror}") from e
+    return path
 
 
 def write_step_summary(outcome: Outcome, path: str | None = None) -> Path | None:
@@ -769,9 +949,15 @@ def resolve_goal(goal: str | None, goal_file: str | None, issue: int | None, cwd
 def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
             timeout_min: float, max_workers: int | None, base: str | None, pr: bool,
             echo=print, cwd: str | None = None, bundle: str | None = None,
-            entitlement: str | None = None, budget: str | None = None) -> int:
-    """``brindle ci run``: 0 on a verified goal (and its PR or bundle), 1 otherwise."""
+            entitlement: str | None = None, budget: str | None = None,
+            outcome_path: str | None = None) -> int:
+    """``brindle ci run``: 0 on a verified goal (and its PR or bundle), 1
+    otherwise. With ``outcome_path``, the outcome is written there as JSON
+    whatever happened, even when the run couldn't start."""
     cwd = cwd or os.getcwd()
+    # Resolved now, like the bundle: the run changes nothing about where it goes.
+    outcome_path = Path(outcome_path).resolve() if outcome_path is not None else None
+    g = None
     try:
         g = resolve_goal(goal, goal_file, issue, cwd)
         tokens = ci_budget.parse_budget(budget)
@@ -781,7 +967,6 @@ def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
             require_ci()
         secrets = withhold_secrets()
         db = DB()
-        # The bundle path is resolved now: the run changes nothing about where it goes.
         kw = {"bundle": Path(bundle).resolve()} if bundle is not None else {}
         if tokens is not None:
             kw["budget"] = tokens
@@ -789,26 +974,245 @@ def run_cli(*, goal: str | None, goal_file: str | None, issue: int | None,
                       base=base, pr=pr and bundle is None, secrets=secrets, **kw)
     except (CIError, ci_budget.BudgetError, git.GitError, workspaces.WorkspaceError, agents.AgentError, tmux.TmuxError) as e:
         echo(str(e))
+        if outcome_path is not None:
+            write_outcome(error_outcome(str(e), g, issue), outcome_path)
         return 1
+    except BaseException as e:   # a bug or Ctrl-C: still an outcome to report
+        if outcome_path is not None:
+            write_outcome(error_outcome(f"{type(e).__name__}: {e}", g, issue), outcome_path)
+        raise
     echo(outcome.describe())
     if outcome.pr_url:
         echo(outcome.pr_url)
     write_step_summary(outcome)
+    if outcome_path is not None:
+        write_outcome(outcome.summary(), outcome_path)
     return 0 if outcome.ok else 1
 
 
-def publish_cli(path: str, repo: str | None = None, base: str | None = None, echo=print) -> int:
-    """``brindle ci publish``: 0 with the pull request's URL, 1 with what failed."""
+def publish_cli(path: str, repo: str | None = None, base: str | None = None, echo=print,
+                if_present: bool = False) -> int:
+    """``brindle ci publish``: 0 with the pull request's URL (also set as the
+    step output ``pr_url`` in GitHub Actions), 1 with what failed."""
     try:
-        url = publish(path, repo, base=base)
+        url = publish(path, repo, base=base, if_present=if_present)
     except CIError as e:
         echo(str(e))
         return 1
+    if url is None:
+        echo("nothing to publish: the run left no commits")
+        return 0
     echo(url)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(f"## brindle ci: pull request\n\n{url}\n")
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as f:
+            f.write(f"pr_url={url}\n")
+    return 0
+
+
+# -- the report: the outcome, as a comment on the issue ---------------------------
+
+# What the comment may hold from the outcome file, which was written where
+# agents ran. Everything else in it is ignored, every text is cut to a size,
+# and every text is rendered as code so that nothing in it is markdown, a
+# mention, a link or HTML.
+MAX_NOTE, MAX_TITLE, MAX_CHECK, MAX_MILESTONES = 2000, 200, 300, 50
+MILESTONE_STATUSES = ("passed", "failed", "pending")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f  ]")
+_PR_URL = r"https://github\.com/{slug}/pull/[0-9]+"
+
+
+def _text(value, limit: int, inline: bool = False) -> str | None:
+    """``value`` as bounded plain text: not a string, or empty, is None;
+    control characters go, newlines too when ``inline``."""
+    if not isinstance(value, str):
+        return None
+    text = _CONTROL.sub("", value.replace("\r\n", "\n").replace("\r", "\n"))
+    if inline:
+        text = " ".join(text.split())
+    text = text.strip()
+    if not text:
+        return None
+    return text[:limit].rstrip() + "…" if len(text) > limit else text
+
+
+def _code(text: str) -> str:
+    """``text`` as a code span that can't be closed early (the run longer
+    than any in it), fit for a table cell (no pipes, one line)."""
+    text = " ".join(text.split()).replace("|", "\\|")
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def _block(text: str) -> str:
+    """``text`` as a fenced code block that it can't close early."""
+    longest = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def load_outcome(path: str | Path, slug: str | None = None) -> dict:
+    """The outcome file, reduced to the expected fields and shapes. A missing
+    or broken file is itself an outcome (``error``), since the run is
+    reported whatever happened."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError:
+        data = {"status": "error", "note": "the run left no outcome: did it start? See the workflow run."}
+    except ValueError:
+        data = {"status": "error", "note": "the run's outcome file is not JSON"}
+    if not isinstance(data, dict):
+        data = {"status": "error", "note": "the run's outcome file is not a JSON object"}
+    status = data.get("status")
+    issue = data.get("issue")
+    pr_url = data.get("pr_url")
+    milestones = []
+    for m in (data.get("milestones") if isinstance(data.get("milestones"), list) else [])[:MAX_MILESTONES]:
+        if not isinstance(m, dict):
+            continue
+        title = _text(m.get("title"), MAX_TITLE, inline=True)
+        if title is None:
+            continue
+        milestones.append({
+            "title": title, "check": _text(m.get("check"), MAX_CHECK, inline=True),
+            "status": m.get("status") if m.get("status") in MILESTONE_STATUSES else "pending",
+        })
+    elapsed = data.get("elapsed_seconds")
+    return {
+        "status": status if status in STATUSES else "error",
+        "goal": _text(data.get("goal"), MAX_TITLE, inline=True),
+        "issue": issue if isinstance(issue, int) and not isinstance(issue, bool) and issue > 0 else None,
+        "note": _text(data.get("note"), MAX_NOTE),
+        "pr_url": pr_url if isinstance(pr_url, str) and slug
+        and re.fullmatch(_PR_URL.format(slug=re.escape(slug)), pr_url) else None,
+        "bundle_status": data.get("bundle_status") if data.get("bundle_status") in BUNDLE_STATUSES else None,
+        "elapsed_seconds": int(elapsed) if isinstance(elapsed, (int, float))
+        and not isinstance(elapsed, bool) and 0 <= elapsed < 10 ** 7 else None,
+        "milestones": milestones,
+        "usage": ci_budget.clean_usage(data.get("usage")),
+    }
+
+
+HEADLINES = {
+    "done": "done", "need_user": "needs a decision", "timeout": "ran out of time",
+    ci_budget.BUDGET_STATUS: "went over its token budget", "stalled": "stalled",
+    "exited": "the supervisor exited", "error": "error", "cancelled": "cancelled",
+}
+
+
+def report_comment(outcome: dict, *, pr_url: str | None = None, run_url: str | None = None,
+                   label: str | None = None, results: dict[str, str] | None = None) -> str:
+    """The issue comment for an outcome from ``load_outcome``. ``pr_url`` is
+    the pull request `brindle ci publish` opened (trusted: it comes from
+    that job, not the run); ``results`` the workflow's job results
+    (``entitle``, ``run``, ``publish``), so a job that failed before or
+    after the run is reported too."""
+    results = results or {}
+    status, note = outcome["status"], outcome["note"]
+    pr_url = pr_url or outcome.get("pr_url")
+    if status == "error" and results.get("entitle") == "failure":
+        note = ("the entitlement step failed: BRINDLE_PRO_TOKEN is missing, was refused, or the "
+                "org's plan no longer includes brindle Team. See the workflow run.")
+    elif status == "error" and results.get("run") == "cancelled":
+        status, note = "cancelled", None
+    partial = status != "done"
+    lines = [f"<!-- brindle-ci: {status} -->", f"## brindle ci: {HEADLINES[status]}", ""]
+    if outcome["goal"]:
+        lines += [f"Goal: {_code(outcome['goal'])}", ""]
+    if status == "done":
+        if pr_url:
+            lines += [f"Every milestone is verified. Pull request: {pr_url}", ""]
+        elif results.get("publish") == "failure":
+            lines += ["Every milestone is verified, but publishing the pull request failed. "
+                      "See the workflow run.", ""]
+        else:
+            lines += ["Every milestone is verified.", ""]
+    elif status == "need_user":
+        lines += ["The supervisor stopped with a question:", ""]
+    if note and status != "done":
+        lines += [_block(note), ""]
+    if status == "need_user":
+        again = f"add the {_code(label)} label again" if label else "start the workflow again"
+        lines += [f"Answer in a comment here, then {again}: the next run reads the comments "
+                  "after this one and continues on the same branch.", ""]
+    if partial:
+        if pr_url:
+            lines += [f"The work so far is in a draft pull request: {pr_url}", ""]
+        elif outcome["bundle_status"] == BUNDLE_PARTIAL and results.get("publish") == "failure":
+            lines += ["There is partial work, but publishing it as a draft failed. "
+                      "See the workflow run.", ""]
+    if outcome["milestones"]:
+        done = sum(m["status"] == "passed" for m in outcome["milestones"])
+        lines += [f"{done} of {len(outcome['milestones'])} milestones verified:", "",
+                  "| Milestone | Check | Status |", "|---|---|---|"]
+        marks = {"passed": "✓ passed", "failed": "✗ failed", "pending": "○ pending"}
+        for m in outcome["milestones"]:
+            check = _code(m["check"]) if m["check"] else ""
+            lines.append(f"| {_code(m['title'])} | {check} | {marks[m['status']]} |")
+        lines.append("")
+    elif status not in ("error", "cancelled"):
+        lines += ["No milestones were recorded.", ""]
+    tail = []
+    if outcome["elapsed_seconds"]:
+        tail.append(f"Ran for {max(1, round(outcome['elapsed_seconds'] / 60))} min.")
+    spent = ci_budget.report_line(outcome.get("usage"))
+    if spent:
+        tail.append(spent)
+    if run_url and run_url.startswith("https://"):
+        tail.append(f"Workflow run: {run_url}")
+    if tail:
+        lines += [" ".join(tail), ""]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def report(path: str | Path, issue: int, repo: str | None = None, *, pr_url: str | None = None,
+           run_url: str | None = None, label: str | None = None,
+           results: dict[str, str] | None = None, environ=None) -> str:
+    """``brindle ci report``: comment the outcome at ``path`` on issue
+    ``issue`` of github.com/``repo`` with ``gh``; returns the comment. It
+    runs with a token that can only comment, outside any checkout."""
+    environ = os.environ if environ is None else environ
+    slug = (repo or environ.get("GITHUB_REPOSITORY") or "").strip()
+    if not re.fullmatch(_SLUG, slug):
+        raise CIError("brindle ci report: name the repository with --repo owner/name "
+                      "(default: $GITHUB_REPOSITORY)")
+    if not isinstance(issue, int) or issue <= 0:
+        raise CIError("brindle ci report: --issue must be a positive number")
+    if pr_url and not re.fullmatch(_PR_URL.format(slug=re.escape(slug)), pr_url):
+        raise CIError(f"brindle ci report: --pr-url is not a pull request of {slug}")
+    body = report_comment(load_outcome(path, slug), pr_url=pr_url or None, run_url=run_url or None,
+                          label=label or None, results=results)
+    with tempfile.TemporaryDirectory(prefix="brindle-report-") as tmp:
+        body_file = Path(tmp) / "comment.md"
+        body_file.write_text(body, encoding="utf-8")
+        proc = subprocess.run(
+            ["gh", "issue", "comment", str(issue), "--repo", slug, "--body-file", str(body_file)],
+            cwd=tmp, capture_output=True, text=True, env=dict(environ))
+    if proc.returncode != 0:
+        raise CIError(f"gh issue comment failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return body
+
+
+def report_cli(path: str, issue: int, repo: str | None = None, *, pr_url: str | None = None,
+               run_url: str | None = None, label: str | None = None,
+               entitle_result: str | None = None, run_result: str | None = None,
+               publish_result: str | None = None, echo=print) -> int:
+    """``brindle ci report``: 0 once the comment is posted, 1 with what failed."""
+    results = {k: v for k, v in (("entitle", entitle_result), ("run", run_result),
+                                 ("publish", publish_result)) if v}
+    try:
+        body = report(path, issue, repo, pr_url=pr_url, run_url=run_url, label=label, results=results)
+    except CIError as e:
+        echo(str(e))
+        return 1
+    headline = next((line for line in body.splitlines() if line.startswith("## ")), "").lstrip("# ")
+    echo(f"commented on #{issue}: {headline}")
     return 0
 
 
@@ -827,17 +1231,21 @@ WORKFLOW = """\
 # agents can read it just as they can read ANTHROPIC_API_KEY: use a key scoped to CI.
 # In the repo's Actions settings, allow GitHub Actions to create pull requests.
 #
-# Three jobs, because agents run the repo's own code and can reach anything on
+# Four jobs, because agents run the repo's own code and can reach anything on
 # their machine. `entitle` alone holds the CI token and runs nothing from the
 # repo; `run` does the work with a read-only token and hands over a git
-# bundle; `publish` holds the token that can push, and never checks out or
-# runs anything from the repo.
+# bundle and the outcome; `publish` holds the token that can push, and never
+# checks out or runs anything from the repo; `report` holds a token that can
+# only comment, and tells the issue how it went (the pull request, the
+# supervisor's question, a stall, the timeout). Partial work becomes a draft
+# pull request. A question is answered in a comment on the issue: add the
+# label again and the next run continues with the comments as context.
 #
-# The issue body steers an unattended agent whose work becomes a pull request:
-# only people you trust with write access should be able to apply the label.
-# Pull requests opened with GITHUB_TOKEN don't trigger other workflows; to run
-# your CI on them, set GH_TOKEN in the publish job to a GitHub App or personal
-# access token.
+# The issue body and its comments steer an unattended agent whose work becomes
+# a pull request: only people you trust with write access should be able to
+# apply the label. Pull requests opened with GITHUB_TOKEN don't trigger other
+# workflows; to run your CI on them, set GH_TOKEN in the publish job to a
+# GitHub App or personal access token.
 name: brindle
 
 on:
@@ -914,35 +1322,73 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{{{ secrets.ANTHROPIC_API_KEY }}}}
           GH_TOKEN: ${{{{ github.token }}}}
-        run: brindle ci run --issue ${{{{ github.event.issue.number || inputs.issue }}}} --timeout 100 --entitlement "$RUNNER_TEMP/brindle-entitlement/entitlement.jwt" --bundle "$RUNNER_TEMP/brindle-out/brindle.bundle"
+        run: brindle ci run --issue ${{{{ github.event.issue.number || inputs.issue }}}} --timeout 100 --entitlement "$RUNNER_TEMP/brindle-entitlement/entitlement.jwt" --bundle "$RUNNER_TEMP/brindle-out/brindle.bundle" --outcome "$RUNNER_TEMP/brindle-out/outcome.json"
+      # However it went: the outcome, and the bundle when there are commits.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: brindle-bundle
+          name: brindle-out
           path: ${{{{ runner.temp }}}}/brindle-out/
           if-no-files-found: error
           retention-days: 1
 
   publish:
     needs: run
+    # After the run, however it ended: partial work is published as a draft.
+    if: always() && (needs.run.result == 'success' || needs.run.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      pr_url: ${{{{ steps.publish.outputs.pr_url }}}}
     steps:
       # No checkout: nothing from the repo runs in the job that can push.
       - uses: astral-sh/setup-uv@v10.2.0
       - name: Install brindle
         run: uv tool install {package}
       - uses: actions/download-artifact@v4
+        continue-on-error: true   # nothing uploaded when the run died early
         with:
-          name: brindle-bundle
+          name: brindle-out
           path: ${{{{ runner.temp }}}}/brindle-out
       # The base comes from the repository, not from the run's bundle.
       - name: Open the pull request
+        id: publish
         env:
           GH_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
-        run: brindle ci publish "$RUNNER_TEMP/brindle-out/brindle.bundle" --base "${{{{ github.event.repository.default_branch }}}}"
+        run: brindle ci publish "$RUNNER_TEMP/brindle-out/brindle.bundle" --base "${{{{ github.event.repository.default_branch }}}}" --if-present
+
+  report:
+    needs: [entitle, run, publish]
+    # Every outcome, including a run that never started; not an unrelated label.
+    if: always() && (needs.run.result != 'skipped' || needs.entitle.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      # No checkout: nothing from the repo runs in the job that can comment.
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Install brindle
+        run: uv tool install {package}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true   # no outcome at all when the run never started
+        with:
+          name: brindle-out
+          path: ${{{{ runner.temp }}}}/brindle-out
+      # The outcome file comes from the agents' machine: brindle reads only
+      # the fields it expects and renders their text as code, never markdown.
+      - name: Comment on the issue
+        env:
+          GH_TOKEN: ${{{{ github.token }}}}
+          PR_URL: ${{{{ needs.publish.outputs.pr_url }}}}
+          RUN_URL: ${{{{ github.server_url }}}}/${{{{ github.repository }}}}/actions/runs/${{{{ github.run_id }}}}
+          ENTITLE_RESULT: ${{{{ needs.entitle.result }}}}
+          RUN_RESULT: ${{{{ needs.run.result }}}}
+          PUBLISH_RESULT: ${{{{ needs.publish.result }}}}
+        run: brindle ci report "$RUNNER_TEMP/brindle-out/outcome.json" --issue ${{{{ github.event.issue.number || inputs.issue }}}} --label "{label}" --pr-url "$PR_URL" --run-url "$RUN_URL" --entitle-result "$ENTITLE_RESULT" --run-result "$RUN_RESULT" --publish-result "$PUBLISH_RESULT"
 """
 
 

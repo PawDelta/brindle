@@ -178,3 +178,51 @@ def pr_section(spend: dict | None) -> list[str]:
     if spend.get("untracked"):
         lines.append(f"- Not counted: {len(spend['untracked'])} agent(s) with no transcript")
     return lines
+
+
+# -- the usage as the report job reads it: data from the agents' machine ----------
+
+MAX_NAMES = 20
+_NAME = re.compile(r"[A-Za-z0-9._:/-]{1,60}")
+_COUNTS = ("total", "input", "output", "cache_read", "cache_creation")
+
+
+def clean_usage(value) -> dict | None:
+    """``Tracker.summary()`` as read back from an outcome file written where
+    agents ran: integer counts only, model and profile names that look like
+    names (at most ``MAX_NAMES`` each), the number of untracked agents, and
+    nothing else. None when there is no usable usage."""
+    if not isinstance(value, dict):
+        return None
+    tokens = value.get("tokens") if isinstance(value.get("tokens"), dict) else {}
+
+    def count(v) -> int:
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 10 ** 13
+        return int(v) if ok else 0
+
+    def names(v) -> list[str]:
+        items = v if isinstance(v, list) else []
+        return [x for x in items[:MAX_NAMES] if isinstance(x, str) and _NAME.fullmatch(x)]
+
+    untracked = value.get("untracked")
+    return {
+        "tokens": {k: count(tokens.get(k)) for k in _COUNTS},
+        "budget": count(value.get("budget")) or None,
+        "models": names(value.get("models")), "profiles": names(value.get("profiles")),
+        "untracked": len(untracked) if isinstance(untracked, list) else 0,
+    }
+
+
+def report_line(spend: dict | None) -> str | None:
+    """The issue comment's sentence about the spend (``clean_usage`` output),
+    or None when nothing was counted. Names are rendered as code."""
+    if not spend or not spend["tokens"]["total"]:
+        return None
+    text = f"Used {format_tokens(spend['tokens']['total'])} tokens"
+    if spend["budget"]:
+        text += f" of a {format_tokens(spend['budget'])} budget"
+    if spend["models"]:
+        text += " on " + ", ".join(f"`{m}`" for m in spend["models"])
+    if spend["untracked"]:
+        text += f" ({spend['untracked']} agent(s) not counted)"
+    return text + "."
