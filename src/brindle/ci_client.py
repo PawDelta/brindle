@@ -30,6 +30,7 @@ mode (:mod:`brindle.airgap`) nothing is sent and every command refuses.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -58,6 +59,7 @@ PLAN_COMMON = ("iss", "aud", "sub", "org_id", "kid", "jti", "iat", "exp", "token
 RUN_TOKEN_RE = re.compile(r"^crt_[A-Za-z0-9_-]{16,256}$")
 CI_TOKEN_RE = re.compile(r"^cpc_[A-Za-z0-9_-]{16,256}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 ORIGIN_RE = re.compile(r"[:/]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@")   # user:token@ in a remote URL
@@ -88,6 +90,10 @@ OIDC_TTL = 240
 OIDC_EXP_MARGIN = 30             # stop sending a token this long before its exp
 OIDC_RETRY_DELAYS = (1.0, 3.0)   # between tries of a failed OIDC fetch
 PLAN_FILE = "plan.jwt"
+# A plan too big to sign inline carries instructions_sha256 in place of a
+# large instructions text; the texts come beside the JWT (the answer's
+# plan_texts, {sha256: text}), and the start job saves them next to the plan.
+PLAN_TEXTS_FILE = "plan_texts.json"
 CONCLUSIONS = ("success", "failure", "cancelled")
 KILL_GRACE_S = 10.0              # wait this long for a killed check's output pipe to close
 TOKEN_FILE = "run_token"
@@ -211,7 +217,37 @@ def _limits(raw, defaults: dict) -> dict:
     return out
 
 
-def _check_run_plan(c: dict) -> None:
+def _plan_texts(raw) -> dict[str, str]:
+    """The texts sent beside a plan ({sha256: text}); none is ``{}``."""
+    if raw is None:
+        return {}
+    if not (isinstance(raw, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items())):
+        raise CIError("plan texts are malformed", code="bad_plan")
+    return raw
+
+
+def _resolve_instructions(obj: dict, texts: Mapping[str, str], what: str) -> None:
+    """Put the instructions of ``obj`` (a run plan or a reviewer) in
+    ``obj["instructions"]``: inline, or the text in ``texts`` whose SHA-256
+    is the signed ``instructions_sha256``."""
+    if "instructions_sha256" not in obj:
+        if not _str(obj.get("instructions")):
+            raise CIError(f"{what} has no instructions")
+        return
+    if "instructions" in obj:
+        raise CIError(f"{what} has both instructions and instructions_sha256")
+    digest = obj["instructions_sha256"]
+    if not (isinstance(digest, str) and SHA256_RE.match(digest)):
+        raise CIError(f"{what} instructions_sha256 is malformed")
+    text = texts.get(digest)
+    if not _str(text):
+        raise CIError(f"{what} instructions text is missing", code="bad_plan")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != digest:
+        raise CIError(f"{what} instructions text doesn't match its hash", code="bad_plan")
+    obj["instructions"] = text
+
+
+def _check_run_plan(c: dict, texts: Mapping[str, str]) -> None:
     goal = c.get("goal")
     if not (isinstance(goal, dict) and _str(goal.get("title"))):
         raise CIError("run plan has no goal")
@@ -227,8 +263,7 @@ def _check_run_plan(c: dict) -> None:
             if not (isinstance(m, dict) and _is_int(m.get("id")) and _str(m.get("title"))
                     and (m.get("check") is None or _str(m.get("check")))):
                 raise CIError("run plan milestones are malformed")
-    if not _str(c.get("instructions")):
-        raise CIError("run plan has no instructions")
+    _resolve_instructions(c, texts, "run plan")
     if c.get("provider") not in PROVIDERS:
         raise CIError("run plan names an unknown provider")
     if not (c.get("profile") is None or _str(c["profile"])):
@@ -242,7 +277,7 @@ def _check_run_plan(c: dict) -> None:
         raise CIError("run plan continuation is malformed")
 
 
-def _check_validation_plan(c: dict) -> None:
+def _check_validation_plan(c: dict, texts: Mapping[str, str]) -> None:
     if not _is_int(c.get("pr")):
         raise CIError("validation plan names no pull request")
     if not (isinstance(c.get("head_sha"), str) and SHA_RE.match(c["head_sha"])):
@@ -258,18 +293,21 @@ def _check_validation_plan(c: dict) -> None:
     if not isinstance(reviewers, list):
         raise CIError("validation plan reviewers are malformed")
     for r in reviewers:
-        if not (isinstance(r, dict) and _str(r.get("id")) and r.get("provider") in PROVIDERS
-                and _str(r.get("instructions"))):
+        if not (isinstance(r, dict) and _str(r.get("id")) and r.get("provider") in PROVIDERS):
             raise CIError("validation plan reviewers are malformed")
+        _resolve_instructions(r, texts, f"validation plan reviewer {auth._sanitize(r['id'], 40)}")
     c["limits"] = _limits(c.get("limits"), {"token_budget": 0})
 
 
-def verify_plan(token: str, *, repo: str, now: float | None = None) -> dict:
+def verify_plan(token: str, *, repo: str, now: float | None = None, texts=None) -> dict:
     """Verify a plan JWT against the pinned keys and return its claims. It
     must be a plan (``typ``, ``token_use``), for ``repo``, current, and
-    well-formed for its ``plan_kind``. Raises :class:`CIError`; the
-    message never includes the token."""
+    well-formed for its ``plan_kind``. ``texts`` are the plan texts sent
+    beside it ({sha256: text}): each signed ``instructions_sha256`` is
+    replaced by its text, in ``instructions``, once the hash checks out.
+    Raises :class:`CIError`; the message never includes the token."""
     now = time.time() if now is None else now
+    texts = _plan_texts(texts)
     try:
         c = license.verify_signed(token, typ=PLAN_TYP, token_use=PLAN_TOKEN_USE, what="plan",
                                   max_bytes=MAX_PLAN_BYTES)
@@ -290,9 +328,9 @@ def verify_plan(token: str, *, repo: str, now: float | None = None) -> dict:
         raise CIError(f"plan is for repository {c['repo']}, not {repo}", code="bad_plan")
     kind = c["plan_kind"]
     if kind == "run":
-        _check_run_plan(c)
+        _check_run_plan(c, texts)
     elif kind == "validation":
-        _check_validation_plan(c)
+        _check_validation_plan(c, texts)
     else:
         raise CIError("plan has an unknown kind", code="bad_plan")
     return c
@@ -593,10 +631,36 @@ def _write_plan_files(out_dir: str | Path, body: dict, id_key: str) -> str:
     the_id, plan, run_token = body.get(id_key), body.get("plan"), body.get("run_token")
     if not (_str(the_id) and _str(plan) and isinstance(run_token, str) and RUN_TOKEN_RE.match(run_token)):
         raise CIError("the server's answer is malformed", code="bad_response")
+    try:
+        texts = _plan_texts(body.get("plan_texts"))
+    except CIError:
+        raise CIError("the server's answer is malformed", code="bad_response") from None
     out = Path(out_dir)
     write_private(out / PLAN_FILE, plan)
+    if texts:
+        write_private(out / PLAN_TEXTS_FILE, json.dumps(texts))
+    else:
+        (out / PLAN_TEXTS_FILE).unlink(missing_ok=True)
     write_private(out / TOKEN_FILE, run_token + "\n")
     return auth._sanitize(the_id, 80)
+
+
+def read_plan_texts(plan_path: str | Path):
+    """The plan texts the start job saved beside the plan file at
+    ``plan_path``: None when there are none. They are checked against the
+    plan's signed hashes by :func:`verify_plan`, which rejects anything that
+    isn't a mapping (an unparsable file comes back as its raw text, so the
+    rejection happens after the run token is read and deleted)."""
+    try:
+        raw = (Path(plan_path).parent / PLAN_TEXTS_FILE).read_text("utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise CIError(f"can't read the plan texts: {e.strerror or e}") from e
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
 
 
 def start(repo: str, trigger: dict, out_dir: str | Path, *, client: Client, token: str,
@@ -822,10 +886,11 @@ def make_bundle(cwd: str, base_sha: str, branch: str) -> tuple[int, bytes | None
 def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMapping[str, str],
         client: Client, db=None, adapters: Mapping[str, ci_adapters.Adapter] | None = None,
         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
-        org: bool | None = None, say: Callable[[str], None] = print) -> dict:
+        org: bool | None = None, texts=None, say: Callable[[str], None] = print) -> dict:
     """``brindle ci run``: the run job. A run plan runs the supervisor and
     uploads the result; a validation plan runs the checks and reviewers and
-    uploads the evidence. Returns the server's answer to the upload."""
+    uploads the evidence. ``texts`` are the plan texts saved beside the plan
+    (:func:`read_plan_texts`). Returns the server's answer to the upload."""
     from brindle import workspaces
     from brindle.db import DB
 
@@ -833,7 +898,7 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     # The token file goes first, whatever happens to the plan: a rejected
     # plan must not leave a run token on the runner's disk.
     run_token = read_run_token(token_path)
-    plan = verify_plan(plan_token, repo=repo, now=clock())
+    plan = verify_plan(plan_token, repo=repo, now=clock(), texts=texts)
     if plan["plan_kind"] == "validation":
         check_validation_checkout(plan, cwd)
         gone = scrub_secrets(env)
@@ -895,7 +960,7 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
             final = reason if reason in ("budget", "timeout") else event["state"] if event["state"] != "working" else "failed"
             say(f"the server stopped the run ({auth._sanitize(reason or '?', 40)})")
         elif action == "escalate":
-            new = verify_plan(answer.get("plan") or "", repo=repo, now=clock())
+            new = verify_plan(answer.get("plan") or "", repo=repo, now=clock(), texts=answer.get("plan_texts"))
             if new["plan_kind"] != "run" or new["id"] != run_id or new["base_sha"] != base_sha \
                     or new["branch"] != branch:
                 raise CIError("the escalation plan is for another run", code="bad_plan")
@@ -1058,7 +1123,7 @@ def run_validation(plan: dict, run_token: str, *, cwd: str, env: MutableMapping[
     review_all(plan)
     result = client.put_evidence(run_token, validation_id, {"checks": checks, "reviews": reviews, "usage": usage})
     if result.get("status") == "more":
-        more = verify_plan(result.get("plan") or "", repo=repo, now=clock())
+        more = verify_plan(result.get("plan") or "", repo=repo, now=clock(), texts=result.get("plan_texts"))
         if more["plan_kind"] != "validation" or more["id"] != validation_id:
             raise CIError("the follow-up plan is for another validation", code="bad_plan")
         review_all(more)
