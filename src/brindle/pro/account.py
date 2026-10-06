@@ -19,7 +19,7 @@ FEATURES = (
      '"services" in .brindle/config.json'),
     ("multi_repo", "pro", "work across several repos in one session", "`brindle repo add <path>`"),
     ("team", "team", "org policies + team audit feed", "`brindle account org policy`"),
-    ("ci", "team", "Brindle-CI: fixes builds, issues into verified PRs", "back in a later release"),
+    ("ci", "team", "Brindle-CI: fixes builds, issues into verified PRs", "`brindle ci init`"),
     ("audit", "enterprise", "tamper-evident local audit log", "`brindle audit verify`"),
     ("airgap", "enterprise", "air-gapped mode, local models only",
      '"airgap": true in .brindle/config.json'),
