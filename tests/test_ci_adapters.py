@@ -45,6 +45,14 @@ def test_claude_credential_kinds(env, kind, names):
     assert ClaudeAdapter().credential_kind(env) == kind
 
 
+def test_claude_federation_token_is_an_api_key():
+    """Identity federation reaches the job as ANTHROPIC_AUTH_TOKEN (the
+    workflow did the exchange); an unset ANTHROPIC_API_KEY secret is empty."""
+    cred = ClaudeAdapter().credential({"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x",
+                                       "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1"})
+    assert (cred.kind, cred.names) == (API_KEY, ("ANTHROPIC_AUTH_TOKEN",))
+
+
 def test_codex_credential_kinds(tmp_path):
     home = tmp_path / "codex"
     home.mkdir()
@@ -198,6 +206,16 @@ def test_subscription_only_is_unusable_on_org_repos(bins):
     assert usable(a, {**key, "PATH": "/nonexistent"}, org=False) == (False, "claude isn't installed")
 
 
+def test_federation_token_is_usable_on_org_repos(bins):
+    """A federated Console service account is billed as API, not a
+    personal subscription: fine on an organization's repository."""
+    fed = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": str(bins)}
+    a = ClaudeAdapter()
+    assert usable(a, fed, org=True) == (True, "")
+    assert usable(a, fed, org=None) == (True, "")
+    assert "claude" in providers_available({"claude": a}, fed, org=True)
+
+
 def test_providers_available(bins):
     env = {"CLAUDE_CODE_OAUTH_TOKEN": "o", "OPENAI_API_KEY": "k", "PATH": str(bins)}
     adapters = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
@@ -265,6 +283,20 @@ def test_claude_review_parses_json_output(monkeypatch, tmp_path):
                          usage={"claude-x": {"input": 7, "output": 3, "cache_read": 1}})
     assert seen["argv"][1:] == ["-p", "--output-format", "json"] and seen["stdin"] == "review this"
     assert seen["env"] == {"ANTHROPIC_API_KEY": "k"} and seen["cwd"] == str(tmp_path)
+
+
+def test_claude_review_env_drops_empty_keys(monkeypatch, tmp_path):
+    seen = {}
+
+    def run(argv, **kw):
+        seen["env"] = kw.get("env")
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+    monkeypatch.setattr(ci_adapters.subprocess, "run", run)
+    env = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}
+    ClaudeAdapter().review("review this", str(tmp_path), env)
+    assert seen["env"] == {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}, \
+        "an empty key would shadow the federation token in Claude Code"
+    assert env["ANTHROPIC_API_KEY"] == "", "the caller's env is left alone"
 
 
 def test_claude_review_keeps_raw_text_when_not_json(monkeypatch, tmp_path):

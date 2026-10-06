@@ -757,6 +757,16 @@ def test_scrub_secrets_and_check_env():
     assert set(ci_client.check_env(env)) == {"GITHUB_REPOSITORY", "PATH"}
 
 
+def test_scrub_secrets_drops_empty_keys():
+    """The workflow sets ANTHROPIC_API_KEY from a secret that may not exist
+    (an empty string), which Claude Code would take over the federation
+    token in ANTHROPIC_AUTH_TOKEN."""
+    env = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "BRINDLE_PRO_TOKEN": "x",
+           "PATH": "/bin"}
+    assert ci_client.scrub_secrets(env) == ["ANTHROPIC_API_KEY", "BRINDLE_PRO_TOKEN"]
+    assert env == {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}
+
+
 def test_read_run_token_deletes_the_file(tmp_path):
     p = token_file(tmp_path)
     assert ci_client.read_run_token(p) == RUN_TOKEN
@@ -1051,6 +1061,7 @@ def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
             return subprocess.CompletedProcess(args, 0, "", "")
         return real_run(args, cwd, check)
     monkeypatch.setattr(git_mod, "run", git_run)
+    sh(f"git remote set-url origin git@github.com:{REPO}.git", ci_repo)
     ci_client.init(repo=None, org=None, providers=["claude"], cwd=str(ci_repo), env={"PATH": os.environ["PATH"]},
                    run=run, open_url=opened.append, account=Plugin(), client=ci_client.Client(BASE, t),
                    say=said.append)
@@ -1066,6 +1077,155 @@ def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
     assert pushed and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-setup"
     assert "https://gh.test/pr/1" in text and "owner is an organization" in text
     assert "6/6 doctor" in text
+
+
+@pytest.fixture
+def init_run(ci_repo, monkeypatch):
+    """Runs ``ci_client.init`` against a fake gh, server and Pro account;
+    returns (gh calls, said lines)."""
+    from brindle import git as git_mod
+    from brindle.pro import auth
+
+    class Proc:
+        def __init__(self, out=""):
+            self.stdout, self.stderr, self.returncode = out, "", 0
+
+    calls, said = [], []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[:2] == ["gh", "api"] and argv[2].startswith("repos/"):
+            return Proc("true\n")
+        if argv[:2] == ["gh", "api"]:
+            return Proc("Organization\n")
+        if argv[:3] == ["gh", "pr", "create"]:
+            return Proc("https://gh.test/pr/1\n")
+        return Proc()
+
+    class Plugin:
+        store = object()
+
+        def _team_org(self, org):
+            return "org_1"
+
+        def _client(self, base):
+            return object()
+
+    monkeypatch.setattr(auth, "create_ci_token", lambda client, store, org, name: {
+        "token": CI_TOKEN, "token_id": "ct_1", "org_id": org, "name": name})
+    real_run = git_mod.run
+    monkeypatch.setattr(git_mod, "run", lambda args, cwd, check=True: (
+        subprocess.CompletedProcess(args, 0, "", "") if args[0] == "push" else real_run(args, cwd, check)))
+    sh(f"git remote set-url origin https://github.com/{REPO}.git", ci_repo)
+
+    def go(**kw):
+        t = FakeTransport({"GET /ci/workflow?kind=issue": [(200, {"text": "name: issue\n"})],
+                           "GET /ci/workflow?kind=validate": [(404, {"error": "not_found"})],
+                           "GET /ci/workflow?kind=fix": [(404, {"error": "not_found"})]})
+        kw.setdefault("env", {"PATH": os.environ["PATH"]})
+        ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), run=run,
+                       open_url=lambda url: None, account=Plugin(), client=ci_client.Client(BASE, t),
+                       say=said.append, **kw)
+        return calls, said
+    go.calls = calls
+    return go
+
+
+def test_init_federation_sets_the_variables(init_run):
+    answers = {"Claude: API key or identity federation? (key, federation)": "federation",
+               "federation rule id (fdrl_...)": "fdrl_1", "Anthropic organization id (uuid)": "org-uuid",
+               "service account id (svac_...)": "svac_1", "workspace id (wrkspc_..., optional)": ""}
+    asked = []
+
+    def ask(q, default):
+        asked.append(q)
+        return answers.get(q, default)
+    calls, said = init_run(ask=ask)
+    assert asked[0] == "Claude: API key or identity federation? (key, federation)"
+    variables = [c[3:] for c in calls if c[:3] == ["gh", "variable", "set"]]
+    assert variables == [["ANTHROPIC_FEDERATION_RULE_ID", "--repo", REPO, "--body", "fdrl_1"],
+                         ["ANTHROPIC_ORGANIZATION_ID", "--repo", REPO, "--body", "org-uuid"],
+                         ["ANTHROPIC_SERVICE_ACCOUNT_ID", "--repo", REPO, "--body", "svac_1"]]
+    secrets = [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]]
+    assert secrets == ["BRINDLE_PRO_TOKEN"], "no ANTHROPIC_API_KEY secret with federation"
+    text = "\n".join(said)
+    assert f"subject prefix repo:{REPO}:*" in text and "https://api.anthropic.com" in text and "7200 s" in text
+    assert (f'condition claims.repository == "{REPO}" && '
+            f'claims.workflow_ref.startsWith("{REPO}/.github/workflows/brindle-ci-")') in text
+    assert "forks never get a token" in text
+
+
+def test_init_federation_non_interactive(init_run):
+    """--credential federation with the IDs in the environment asks nothing."""
+    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
+           "ANTHROPIC_ORGANIZATION_ID": "org-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
+           "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
+    calls, _ = init_run(credential="federation", env=env)
+    variables = {c[3]: c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]}
+    assert variables == {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": "org-uuid",
+                         "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1", "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
+
+
+def test_init_federation_needs_the_ids(init_run):
+    with pytest.raises(CIError, match="ANTHROPIC_FEDERATION_RULE_ID is required"):
+        init_run(credential="federation")
+
+
+def test_init_key_credential_sets_the_secret(init_run):
+    calls, _ = init_run(credential="key")
+    assert [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]] == ["BRINDLE_PRO_TOKEN", "ANTHROPIC_API_KEY"]
+    assert not [c for c in calls if c[:2] == ["gh", "variable"]]
+
+
+def test_init_rejects_an_unknown_credential_first(init_run):
+    with pytest.raises(CIError, match="credential must be key or federation"):
+        init_run(credential="password")
+    assert not init_run.calls, "nothing ran before the bad option was caught"
+
+
+@pytest.mark.parametrize("url", ["https://github.com/someone/brindle.git", None])
+def test_init_refuses_a_checkout_of_another_repo(ci_repo, url):
+    """--repo names one repository, the checkout here is another (or has no
+    origin): init stops before gh or git does anything, rather than pushing
+    the setup branch to the wrong repository."""
+    sh(f"git remote set-url origin {url}" if url else "git remote remove origin", ci_repo)
+    before = sh("git rev-parse --abbrev-ref HEAD", ci_repo)
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        raise AssertionError("gh must not run")
+    with pytest.raises(CIError, match=f"run this inside a checkout of {REPO}"):
+        ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), env={}, run=run,
+                       open_url=lambda url: None, client=ci_client.Client(BASE, FakeTransport({})),
+                       say=lambda s: None)
+    assert not calls and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == before
+
+
+@pytest.mark.parametrize("url", [f"git@github.com:{REPO}.git", f"https://github.com/{REPO}",
+                                 f"ssh://git@github.com/{REPO}.git/", "https://github.com/ACME/Widgets.git"])
+def test_origin_repo_matches_any_url_form(ci_repo, url):
+    sh(f"git remote set-url origin {url}", ci_repo)
+    ci_client.check_checkout(REPO, str(ci_repo))
+
+
+def test_check_checkout_shows_an_unreadable_origin_without_credentials(ci_repo):
+    sh("git remote set-url origin https://user:s3cret@git.example.test", ci_repo)
+    with pytest.raises(CIError) as e:
+        ci_client.check_checkout(REPO, str(ci_repo))
+    msg = str(e.value)
+    assert "origin here (https://git.example.test) isn't a GitHub owner/name" in msg
+    assert "s3cret" not in msg and "user" not in msg
+
+
+def test_check_checkout_when_git_fails(ci_repo, monkeypatch):
+    from brindle import git as git_mod
+
+    def boom(args, cwd, check=True):
+        raise git_mod.GitError("git remote get-url origin: timed out")
+    monkeypatch.setattr(git_mod, "run", boom)
+    with pytest.raises(CIError, match=f"run this inside a checkout of {REPO} \\(no origin remote here\\)"):
+        ci_client.check_checkout(REPO, str(ci_repo))
 
 
 def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
@@ -1099,6 +1259,7 @@ def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
         raise Stop
     monkeypatch.setattr(auth, "create_ci_token", create_ci_token)
     said, opened = [], []
+    sh(f"git remote set-url origin https://github.com/{REPO}.git", ci_repo)
     with pytest.raises(Stop):
         ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), env={},
                        run=run, open_url=opened.append, client=ci_client.Client(BASE, FakeTransport({})),

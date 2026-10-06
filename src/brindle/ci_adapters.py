@@ -9,7 +9,9 @@ An adapter answers four questions and does three things:
 * ``credential(env)``: which credential *names* are present (never values) and
   what kind they are: an API key, a cloud sign-in (Bedrock, Vertex, ...), an
   endpoint without a key, or a personal subscription (``CLAUDE_CODE_OAUTH_TOKEN``;
-  a ChatGPT login for Codex).
+  a ChatGPT login for Codex). Anthropic workload identity federation reaches
+  here as an API key: the workflow exchanges GitHub's OIDC token once and
+  gives the job ``ANTHROPIC_AUTH_TOKEN``.
 * ``available(env)``: installed and holding some credential.
 * ``launch``: start a brindle autopilot supervisor with the plan's instructions.
 * ``review``: ask the model one question (the plan's instructions) and return
@@ -37,7 +39,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, MutableMapping
 
 
 from brindle import providers
@@ -209,6 +211,26 @@ def _run(argv: list[str], cwd: str, env: Mapping[str, str], stdin: str, timeout:
     return Review(proc.stdout or "", exit=proc.returncode)
 
 
+def drop_empty_keys(env: MutableMapping[str, str]) -> list[str]:
+    """Remove Claude key variables set to an empty string from ``env`` in
+    place (a workflow's ``${{ secrets.ANTHROPIC_API_KEY }}`` when the secret
+    isn't set): an empty key still wins Claude Code's precedence, over the
+    ``ANTHROPIC_AUTH_TOKEN`` that identity federation gives the job.
+    Returns the names removed."""
+    gone = [k for k in CLAUDE_API_KEYS if k in env and not env[k]]
+    for k in gone:
+        del env[k]
+    return gone
+
+
+def claude_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The environment the claude CLI runs in: ``env`` without empty key
+    variables."""
+    out = dict(env)
+    drop_empty_keys(out)
+    return out
+
+
 class ClaudeAdapter(Adapter):
     name = "claude"
     cli = "claude"
@@ -231,7 +253,7 @@ class ClaudeAdapter(Adapter):
     def review(self, instructions: str, cwd: str, env: Mapping[str, str], *,
                timeout: float = REVIEW_TIMEOUT, profile: str | None = None) -> Review:
         argv = [self.binary() or "claude", "-p", "--output-format", "json"]
-        rev = _run(argv, cwd, env, instructions, timeout)
+        rev = _run(argv, cwd, claude_env(env), instructions, timeout)
         try:
             data = json.loads(rev.reply)
         except ValueError:
@@ -529,5 +551,6 @@ def format_doctor(rows: list[dict], repo: str | None, org: bool | None) -> str:
 
 __all__ = ["Adapter", "AdapterError", "ClaudeAdapter", "CodexAdapter", "Credential", "NativeAdapter",
            "Review", "default_adapters", "doctor", "format_doctor", "merge_usage", "providers_available",
-           "repo_is_org", "usable", "API_KEY", "CLOUD", "ENDPOINT", "SUBSCRIPTION"]
+           "repo_is_org", "usable", "claude_env", "drop_empty_keys", "API_KEY", "CLOUD", "ENDPOINT",
+           "SUBSCRIPTION"]
 

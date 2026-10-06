@@ -786,7 +786,11 @@ hosted control plane decides what each run does and what it reports. The
 workflows call these commands:
 
 - `brindle ci init`: set a repository up in one go (the GitHub App, the secrets,
-  the workflows as a pull request, then a doctor check).
+  the workflows as a pull request, then a doctor check). Run it inside a
+  checkout of the repository. For Claude it asks whether to use an API key
+  (the `ANTHROPIC_API_KEY` secret) or Anthropic
+  [workload identity federation](https://platform.claude.com/docs/en/manage-claude/wif-reference)
+  (`--credential key|federation` answers without asking).
 - `brindle ci doctor`: which provider CLIs and credential names a runner has, and
   which providers CI may use on this repository.
 - `brindle ci start`: start a run for an issue, a goal text or a dispatched run,
@@ -797,6 +801,27 @@ workflows call these commands:
 
 Credential names are reported, never values. On a repository owned by a GitHub
 organization, a provider signed in only with a personal subscription is not used.
+
+With identity federation the repository stores no Anthropic key: the workflow
+exchanges GitHub's OIDC token once for a short-lived Anthropic token, as a
+Claude Console service account (billed as API, so it is allowed on
+organization repositories), and gives the job `ANTHROPIC_AUTH_TOKEN`. `brindle
+ci init` stores the rule, organization, service account and optional workspace
+IDs as the Actions variables `ANTHROPIC_FEDERATION_RULE_ID`,
+`ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
+`ANTHROPIC_WORKSPACE_ID`. Create the federation rule in the Claude Console with
+subject prefix `repo:<owner>/<name>:*`, the condition
+
+```text
+claims.repository == "<owner>/<name>" && claims.workflow_ref.startsWith("<owner>/<name>/.github/workflows/brindle-ci-")
+```
+
+audience `https://api.anthropic.com`, and a token lifetime of at least 7200
+seconds. The condition lets only brindle's workflows mint tokens. On pull
+requests the pull request's own copy of the validate workflow runs, so give
+write access only to people you trust (forks never get a token). Leave the `ANTHROPIC_API_KEY` secret
+unset: a key takes precedence (brindle drops an empty one before Claude Code
+starts).
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `brindle close <id>` to stop it and hide it. Stopping means

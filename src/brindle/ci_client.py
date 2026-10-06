@@ -58,6 +58,8 @@ RUN_TOKEN_RE = re.compile(r"^crt_[A-Za-z0-9_-]{16,256}$")
 CI_TOKEN_RE = re.compile(r"^cpc_[A-Za-z0-9_-]{16,256}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+ORIGIN_RE = re.compile(r"[:/]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
+URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@")   # user:token@ in a remote URL
 PROVIDERS = ("claude", "codex", "native")
 
 # Secrets a CI job holds that no agent may see.
@@ -90,6 +92,20 @@ SETUP_KINDS = ("issue", "validate", "fix")
 SETUP_DIR = ".github/workflows"
 SETUP_BRANCH = "brindle/ci-setup"
 ENV_TOKEN = "BRINDLE_PRO_TOKEN"
+# How init sets Claude up: the ANTHROPIC_API_KEY secret, or workload identity
+# federation (the IDs as Actions variables; the workflow exchanges GitHub's
+# OIDC token with them once and gives the job ANTHROPIC_AUTH_TOKEN).
+KEY = "key"
+FEDERATION = "federation"
+CREDENTIALS = (KEY, FEDERATION)
+FEDERATION_VARS = (   # (variable, question, required)
+    ("ANTHROPIC_FEDERATION_RULE_ID", "federation rule id (fdrl_...)", True),
+    ("ANTHROPIC_ORGANIZATION_ID", "Anthropic organization id (uuid)", True),
+    ("ANTHROPIC_SERVICE_ACCOUNT_ID", "service account id (svac_...)", True),
+    ("ANTHROPIC_WORKSPACE_ID", "workspace id (wrkspc_..., optional)", False),
+)
+FEDERATION_AUDIENCE = "https://api.anthropic.com"
+FEDERATION_MIN_LIFETIME_S = 7200
 
 
 class CIError(Exception):
@@ -114,11 +130,12 @@ def is_model_key(name: str) -> bool:
 
 def scrub_secrets(env: MutableMapping[str, str]) -> list[str]:
     """Remove the job's secrets from ``env`` in place (before any agent
-    starts). Returns the names removed."""
+    starts), and Claude key variables set to an empty string, which Claude
+    Code would take over the federation token. Returns the names removed."""
     gone = sorted(k for k in env if is_job_secret(k))
     for k in gone:
         del env[k]
-    return gone
+    return sorted(gone + ci_adapters.drop_empty_keys(env))
 
 
 def check_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -1029,25 +1046,102 @@ def _gh(args: list[str], *, run=subprocess.run, input: str | None = None, intera
     return out
 
 
+def origin_url(cwd: str) -> str | None:
+    """``cwd``'s ``origin`` remote URL, or None when there is none (or git
+    can't tell: not installed, timed out)."""
+    try:
+        proc = git.run(["remote", "get-url", "origin"], cwd, check=False)
+    except git.GitError:
+        return None
+    url = (proc.stdout or "").strip()
+    return url if proc.returncode == 0 and url else None
+
+
+def origin_repo(url: str) -> str | None:
+    """The ``owner/name`` an https, ssh or scp-style remote URL names, or None."""
+    m = ORIGIN_RE.search(url)
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def check_checkout(repo: str, cwd: str) -> None:
+    """init builds the setup pull request from the checkout in ``cwd``: it
+    must be a checkout of ``repo``, or the workflows would be committed and
+    pushed to another repository."""
+    url = origin_url(cwd)
+    if url is None:
+        raise CIError(f"run this inside a checkout of {repo} (no origin remote here)")
+    origin = origin_repo(url)
+    if origin is None:
+        shown = auth._sanitize(URL_USERINFO_RE.sub(r"\1", url), 200)
+        raise CIError(f"run this inside a checkout of {repo} (origin here ({shown}) isn't a GitHub owner/name)")
+    if origin.lower() != repo.lower():
+        raise CIError(f"run this inside a checkout of {repo} (origin here is {origin})")
+
+
+def _claude_credential(given: str | None, ask: Callable[[str, str], str] | None) -> str:
+    choice = given or (ask or (lambda q, d: d))("Claude: API key or identity federation? (key, federation)", KEY)
+    choice = choice.strip().lower()
+    if choice not in CREDENTIALS:
+        raise CIError(f"credential must be {' or '.join(CREDENTIALS)}, not {auth._sanitize(choice, 40)!r}")
+    return choice
+
+
+def _set_federation(repo: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None, *,
+                    run=subprocess.run, say: Callable[[str], None] = print) -> None:
+    """Store Claude's workload identity federation IDs as the repository's
+    Actions variables (they aren't secrets). Each question defaults to the
+    variable in ``env``, so a scripted init can pass them that way."""
+    asker = ask or (lambda q, d: d)
+    say("   claude: identity federation; the IDs are stored as Actions variables")
+    for name, question, required in FEDERATION_VARS:
+        value = asker(question, env.get(name) or "").strip()
+        if not value:
+            if required:
+                raise CIError(f"{name} is required for identity federation")
+            continue
+        _gh(["variable", "set", name, "--repo", repo, "--body", value], run=run)
+        say(f"   {name} set")
+    say(f"   create the federation rule in the Claude Console: subject prefix repo:{repo}:*, "
+        f"condition {federation_condition(repo)}, audience {FEDERATION_AUDIENCE}, "
+        f"token lifetime at least {FEDERATION_MIN_LIFETIME_S} s")
+    say("   this lets only brindle's workflows mint tokens; on pull requests the PR's copy of the validate "
+        "workflow runs, so only give write access to people you trust (forks never get a token)")
+
+
+def federation_condition(repo: str) -> str:
+    """The CEL condition init recommends for the federation rule: the
+    repository's own brindle CI workflows, not any workflow in it."""
+    return (f'claims.repository == "{repo}" && '
+            f'claims.workflow_ref.startsWith("{repo}/{SETUP_DIR}/brindle-ci-")')
+
+
 def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd: str, env: Mapping[str, str],
          base: str | None = None, run=subprocess.run, open_url: Callable[[str], None] | None = None,
          ask: Callable[[str, str], str] | None = None, account=None, client: Client | None = None,
-         say: Callable[[str], None] = print) -> None:
+         credential: str | None = None, say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
     :class:`brindle.pro.account.ProAccount` (the person's brindle Pro
     login; built with ``make`` when not given), ``ask(question, default)`` asks the person, ``open_url`` opens
-    the browser."""
+    the browser. ``credential`` is how Claude signs in (``key`` or
+    ``federation``; asked when not given)."""
     import webbrowser
 
     from brindle.pro import account as account_mod
 
     refuse_airgap()
+    if credential is not None:
+        credential = _claude_credential(credential, None)
+    if repo:
+        if not REPO_RE.match(repo):
+            raise CIError("repository must be owner/name (pass --repo)")
+        check_checkout(repo, cwd)
     say("1/6 checking the GitHub CLI and your rights on the repository")
     _gh(["auth", "status"], run=run)
     if not repo:
         repo = _gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], run=run).strip()
-    if not REPO_RE.match(repo or ""):
-        raise CIError("repository must be owner/name (pass --repo)")
+        if not REPO_RE.match(repo or ""):
+            raise CIError("repository must be owner/name (pass --repo)")
+        check_checkout(repo, cwd)
     admin = _gh(["api", f"repos/{repo}", "--jq", ".permissions.admin"], run=run).strip().lower()
     if admin != "true":
         raise CIError(f"you need admin rights on {repo} to set its secrets and workflows")
@@ -1072,6 +1166,9 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         providers = [p.strip() for p in answer.split(",") if p.strip()]
     secret_names = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
     for p in providers:
+        if p == "claude" and _claude_credential(credential, ask) == FEDERATION:
+            _set_federation(repo, env, ask, run=run, say=say)
+            continue
         name = secret_names.get(p)
         if not name:
             say(f"   {p}: no secret to set here (configure a native profile in the repo)")
