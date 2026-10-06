@@ -1029,8 +1029,9 @@ routing by weight, and naming it directly stops with how to sign in
 (`claude auth login`, `codex login`, running `agy`) instead of opening the CLI's
 login screen. `brindle doctor` shows each CLI's sign-in. Keys set in the environment
 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` and the like) count as
-signed in; `agy` reads `GEMINI_API_KEY` only with `"modelProvider": "gemini"` in
-its settings (see [Google Antigravity](#google-antigravity)). A worker that no hook reports on (Codex)
+signed in, from your environment or a profile's `env` lines; `agy` reads
+`GEMINI_API_KEY` only with `"modelProvider": "gemini"` in its settings (see
+[Google Antigravity](#google-antigravity)). A worker that no hook reports on (Codex)
 and that shows nothing new for 10 minutes without reporting, for example because
 it's signed in without a plan that includes it, is reported to its supervisor.
 

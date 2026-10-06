@@ -552,31 +552,35 @@ _ENV_AUTH = {
 AGY_SETTINGS = "~/.gemini/antigravity-cli/settings.json"
 
 
-def _auth_probe(argv: list[str]) -> tuple[int, str] | None:
+def _auth_probe(argv: list[str], env: dict[str, str] | None = None) -> tuple[int, str] | None:
     import subprocess
 
     try:
         out = subprocess.run(argv, capture_output=True, text=True, timeout=10,
-                             stdin=subprocess.DEVNULL)
+                             stdin=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return out.returncode, (out.stdout or "") + (out.stderr or "")
 
 
-def signed_out(provider: str) -> str | None:
+def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     """Why ``provider``'s CLI can't run an agent because it isn't signed in,
     or None when it is, or when that can't be told (a provider with no status
     command, an older CLI, a timeout, credentials from the environment): only
-    a definite "not signed in" stops a launch. Without this check a signed-out CLI opens on
-    its login screen, and the prompt brindle types in lands there."""
-    if any(os.environ.get(k) for k in _ENV_AUTH.get(provider, ())):
+    a definite "not signed in" stops a launch. Without this check a signed-out
+    CLI opens on its login screen, and the prompt brindle types in lands there.
+    ``env`` is a profile's ``env.NAME: value`` lines: the agent runs with them
+    over brindle's own environment, so a key set there counts, and the probe
+    sees them too."""
+    full_env = {**os.environ, **env} if env else os.environ
+    if any(full_env.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
     seen = _SIGNED_IN.get(provider)
     if seen and time.time() - seen < SIGNED_IN_TTL:
         return None
     reason = None
     if provider == "claude":
-        res = _auth_probe([claude_binary(), "auth", "status"])
+        res = _auth_probe([claude_binary(), "auth", "status"], full_env)
         if res:
             try:
                 data = json.loads(res[1])
@@ -586,7 +590,7 @@ def signed_out(provider: str) -> str | None:
                 reason = ("Claude Code isn't signed in: run `claude auth login` "
                           "(or start `claude` and log in), then try again")
     elif provider == "codex":
-        res = _auth_probe([codex_binary(), "login", "status"])
+        res = _auth_probe([codex_binary(), "login", "status"], full_env)
         if res and res[0] != 0 and "not logged in" in res[1].lower():
             reason = "Codex isn't signed in: run `codex login`, then try again"
     elif provider == "antigravity":
@@ -596,7 +600,7 @@ def signed_out(provider: str) -> str | None:
         # settings.json selects the Gemini API but GEMINI_API_KEY isn't set.
         from brindle import antigravity
 
-        res = _auth_probe([antigravity.binary(), "models"])
+        res = _auth_probe([antigravity.binary(), "models"], full_env)
         if res and res[0] != 0:
             text = res[1].lower()
             if "gemini_api_key" in text and "not set" in text:
@@ -604,7 +608,7 @@ def signed_out(provider: str) -> str | None:
                           f"{AGY_SETTINGS}) but GEMINI_API_KEY isn't set: set it in the "
                           "environment or a profile's `env`, or remove modelProvider and run "
                           "`agy` to sign in, then try again")
-            elif "sign in" in text or "not logged in" in text:
+            elif "please sign in" in text or "not logged in" in text:
                 reason = ("Antigravity isn't signed in: run `agy` and sign in with your Google "
                           "account (or set GEMINI_API_KEY with modelProvider \"gemini\" in "
                           f"{AGY_SETTINGS}), then try again")
@@ -623,9 +627,10 @@ SUPERVISOR_PROVIDERS = ("claude", "codex", "antigravity")
 NOT_SUPERVISOR = ("native", "subagent")
 
 
-def unusable(provider: str) -> str | None:
+def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
     """Why ``provider`` can't run an agent here (its CLI isn't installed or
-    isn't signed in), or None. Profiles on such a provider aren't offered."""
+    isn't signed in), or None. Profiles on such a provider aren't offered.
+    ``env`` is a profile's own environment, as for signed_out."""
     import shutil
 
     from brindle import antigravity
@@ -636,7 +641,7 @@ def unusable(provider: str) -> str | None:
         exe = binary()
         if not (shutil.which(exe) or os.path.isfile(exe)):
             return f"{exe} isn't installed"
-    return signed_out(provider)
+    return signed_out(provider, env)
 
 
 class Codex(Provider):
