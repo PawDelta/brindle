@@ -642,7 +642,7 @@ how to use them, and the next step to get the rest:
 | per-worktree services | Pro | `"services"` in `.brindle/config.json` |
 | several repos in one session | Pro | `brindle repo add <path>` |
 | org policies + audit feed | Team | `brindle account org policy` |
-| Brindle-CI | Team | back in a later release |
+| Brindle-CI | Team | `brindle ci init` |
 | audit log, air-gap | Enterprise | `brindle audit verify`, `"airgap": true` |
 
 ```sh

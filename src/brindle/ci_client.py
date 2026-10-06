@@ -1034,8 +1034,8 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
          ask: Callable[[str, str], str] | None = None, account=None, client: Client | None = None,
          say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
-    :class:`brindle.pro.account.AccountPlugin` (the person's brindle Pro
-    login), ``ask(question, default)`` asks the person, ``open_url`` opens
+    :class:`brindle.pro.account.ProAccount` (the person's brindle Pro
+    login; built with ``make`` when not given), ``ask(question, default)`` asks the person, ``open_url`` opens
     the browser."""
     import webbrowser
 
@@ -1052,7 +1052,7 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     if admin != "true":
         raise CIError(f"you need admin rights on {repo} to set its secrets and workflows")
 
-    plugin = account or account_mod.AccountPlugin(cwd)
+    plugin = account or account_mod.make(cwd)
     api = client or Client(base)
     install_url = api.base + "/github/install"
     say(f"2/6 install the brindle GitHub App for {repo}: {install_url}")

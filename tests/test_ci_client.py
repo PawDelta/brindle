@@ -1066,3 +1066,44 @@ def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
     assert pushed and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-setup"
     assert "https://gh.test/pr/1" in text and "owner is an organization" in text
     assert "6/6 doctor" in text
+
+
+def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
+    """Without ``account=``, init builds the brindle Pro account the way the
+    ``brindle.account`` entry point does (it once called a class that didn't
+    exist and crashed after step 2)."""
+    from brindle.pro import account, auth, credentials
+
+    class Proc:
+        def __init__(self, out=""):
+            self.stdout, self.stderr, self.returncode = out, "", 0
+
+    def run(argv, **kw):
+        if argv[:2] == ["gh", "api"]:
+            return Proc("true\n")
+        return Proc()
+
+    class Store:
+        def load(self):
+            return {"org_id": "org_1", "base_url": BASE}
+
+    store = Store()
+    monkeypatch.setattr(credentials, "default_store", lambda *a, **kw: store)
+    got = {}
+
+    class Stop(Exception):
+        pass
+
+    def create_ci_token(client, s, org, name):
+        got.update(client=client, store=s, org=org, name=name)
+        raise Stop
+    monkeypatch.setattr(auth, "create_ci_token", create_ci_token)
+    said = []
+    with pytest.raises(Stop):
+        ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), env={},
+                       run=run, open_url=lambda url: None, client=ci_client.Client(BASE, FakeTransport({})),
+                       say=said.append)
+    assert any(s.startswith("3/6") for s in said)
+    assert got["store"] is store and got["org"] == "org_1" and got["name"] == f"ci:{REPO}"
+    assert isinstance(got["client"], auth.Client)
+    assert isinstance(account.make(str(ci_repo)), account.ProAccount)
