@@ -2,6 +2,7 @@
 escalate), the result upload, validate (including ``more``), plan
 verification failures, secret scrubbing, air-gap mode and doctor."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -114,8 +115,10 @@ def commit_file(ws):
 class Server:
     """A fake brindle CI server: records every request, scripts the answers."""
 
-    def __init__(self, plan_token, *, actions=None, result=None, validation_plan=None, evidence=None):
+    def __init__(self, plan_token, *, actions=None, result=None, validation_plan=None, evidence=None,
+                 plan_texts=None):
         self.plan_token = plan_token
+        self.plan_texts = plan_texts
         self.actions = list(actions or [])
         self.events = []
         self.results = []
@@ -150,7 +153,10 @@ class Server:
 
     def _validation(self, form, headers):
         assert headers["Authorization"] == f"Bearer {CI_TOKEN}"
-        return 201, {"validation_id": "val_1", "plan": self.validation_plan, "run_token": RUN_TOKEN}
+        body = {"validation_id": "val_1", "plan": self.validation_plan, "run_token": RUN_TOKEN}
+        if self.plan_texts is not None:
+            body["plan_texts"] = self.plan_texts
+        return 201, body
 
     def _evidence(self, form, headers):
         assert headers["Authorization"] == f"Bearer {RUN_TOKEN}"
@@ -861,6 +867,53 @@ def test_plan_defaults_limits(plan):
     assert c["limits"] == {"timeout_min": 100, "token_budget": 0, "heartbeat_s": 60}
 
 
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_plan_instructions_inline_or_by_hash(plan):
+    assert ci_client.verify_plan(plan(), repo=REPO)["instructions"] == "do the thing"
+    text = "review this diff: ✓\n" + "x" * 8000
+    h = sha256(text)
+    c = ci_client.verify_plan(plan(instructions=..., instructions_sha256=h), repo=REPO, texts={h: text})
+    assert c["instructions"] == text
+    reviewers = [{"id": "r1", "provider": "claude", "instructions_sha256": h},
+                 {"id": "r2", "provider": "codex", "instructions": "inline"}]
+    v = ci_client.verify_plan(plan("validation", reviewers=reviewers), repo=REPO, texts={h: text, "f" * 64: "spare"})
+    assert [r["instructions"] for r in v["reviewers"]] == [text, "inline"]
+
+
+def test_plan_instructions_by_hash_are_checked(plan):
+    text = "a long issue body"
+    h = sha256(text)
+    by_hash = plan(instructions=..., instructions_sha256=h)
+    with pytest.raises(CIError, match="instructions text is missing"):
+        ci_client.verify_plan(by_hash, repo=REPO)
+    with pytest.raises(CIError, match="instructions text is missing"):
+        ci_client.verify_plan(by_hash, repo=REPO, texts={sha256("other"): "other"})
+    with pytest.raises(CIError, match="doesn't match its hash") as e:
+        ci_client.verify_plan(by_hash, repo=REPO, texts={h: text + " and more"})
+    assert e.value.code == "bad_plan"
+    for bad in (h.upper(), h[:-1], 12, ""):
+        with pytest.raises(CIError, match="instructions_sha256 is malformed"):
+            ci_client.verify_plan(plan(instructions=..., instructions_sha256=bad), repo=REPO, texts={h: text})
+    with pytest.raises(CIError, match="both instructions and instructions_sha256"):
+        ci_client.verify_plan(plan(instructions_sha256=h), repo=REPO, texts={h: text})
+    with pytest.raises(CIError, match="plan texts are malformed"):
+        ci_client.verify_plan(by_hash, repo=REPO, texts=[text])
+    with pytest.raises(CIError, match="plan texts are malformed"):
+        ci_client.verify_plan(by_hash, repo=REPO, texts="{not json")
+    with pytest.raises(CIError, match="isn't valid UTF-8") as e:
+        ci_client.verify_plan(by_hash, repo=REPO, texts={h: "lone \ud800 surrogate"})
+    assert e.value.code == "bad_plan"
+    tampered = [{"id": "r1", "provider": "claude", "instructions_sha256": h}]
+    with pytest.raises(CIError, match="reviewer r1 instructions text doesn't match"):
+        ci_client.verify_plan(plan("validation", reviewers=tampered), repo=REPO, texts={h: "evil"})
+    both = [{"id": "r1", "provider": "claude", "instructions_sha256": h, "instructions": text}]
+    with pytest.raises(CIError, match="reviewer r1 has both"):
+        ci_client.verify_plan(plan("validation", reviewers=both), repo=REPO, texts={h: text})
+
+
 # -- secrets ---------------------------------------------------------------------------------------
 
 
@@ -933,7 +986,43 @@ def validate(server, ci_repo, tmp_path, *, adapters, env=None, org=False, say=No
         return None
     plan_token = (out / "plan.jwt").read_text()
     return ci_client.run(plan_token, out / "run_token", cwd=str(ci_repo), env=env, client=server.client,
-                         adapters=adapters, org=org, say=said.append)
+                         adapters=adapters, org=org, texts=lambda: ci_client.read_plan_texts(out / "plan.jwt"),
+                         say=said.append)
+
+
+def test_plan_texts_are_saved_beside_the_plan_and_rechecked(plan, ci_repo, tmp_path):
+    text = "Review this pull request.\n" + "+ a diff line\n" * 2000
+    h = sha256(text)
+    vplan = plan("validation", head_sha=head(ci_repo),
+                 reviewers=[{"id": "r1", "provider": "claude", "instructions_sha256": h}])
+    server = Server(plan(), validation_plan=vplan, plan_texts={h: text})
+    adapter = FakeAdapter("claude")
+    assert validate(server, ci_repo, tmp_path, adapters={"claude": adapter})["status"] == "posted"
+    assert adapter.reviews[0][0] == text
+    out = tmp_path / "out"
+    assert json.loads((out / "plan_texts.json").read_text()) == {h: text}
+    assert oct((out / "plan_texts.json").stat().st_mode)[-3:] == "600"
+
+    trigger = {"kind": "validate", "pr": 7, "head_sha": head(ci_repo), "fork": False}
+    assert ci_client.start(REPO, trigger, out, client=server.client, token=CI_TOKEN, providers=["claude"],
+                           say=lambda s: None) == 0
+    (out / "plan_texts.json").write_text(json.dumps({h: text + "tampered"}))
+    with pytest.raises(CIError, match="doesn't match its hash"):
+        ci_client.run((out / "plan.jwt").read_text(), out / "run_token", cwd=str(ci_repo), env=run_env(),
+                      client=server.client, adapters={"claude": adapter},
+                      texts=ci_client.read_plan_texts(out / "plan.jwt"), say=lambda s: None)
+    assert not (out / "run_token").exists(), "the run token never stays on disk"
+
+    server.plan_texts = None    # a plan that fits inline: no texts, and none left over
+    assert ci_client.start(REPO, trigger, out, client=server.client, token=CI_TOKEN, providers=["claude"],
+                           say=lambda s: None) == 0
+    assert not (out / "plan_texts.json").exists() and ci_client.read_plan_texts(out / "plan.jwt") is None
+
+    server.plan_texts = {h: 5}
+    with pytest.raises(CIError, match="malformed") as e:
+        ci_client.start(REPO, trigger, tmp_path / "other", client=server.client, token=CI_TOKEN,
+                        providers=["claude"], say=lambda s: None)
+    assert e.value.code == "bad_response" and not (tmp_path / "other" / "plan.jwt").exists()
 
 
 def test_validate_runs_checks_scrubbed_and_asks_reviewers(plan, ci_repo, tmp_path, monkeypatch):
@@ -1124,6 +1213,25 @@ def test_cli_run_fails_cleanly_on_a_bad_plan(ci_repo, tmp_path, monkeypatch):
     tf = token_file(tmp_path)
     result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
     assert result.exit_code == 1 and "brindle ci: malformed plan" in result.output
+    assert not tf.exists(), "the run token never stays on disk"
+
+
+@pytest.mark.parametrize("make, error", [
+    (lambda p: p.mkdir(), "can't read the plan texts"),
+    (lambda p: p.write_text("{not json"), "plan texts are malformed"),
+    (lambda p: p.write_bytes(b'{"\xff": 1}'), "plan texts are malformed"),
+])
+def test_cli_run_reads_plan_texts_after_the_run_token(plan, ci_repo, tmp_path, monkeypatch, make, error):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    (tmp_path / "plan.jwt").write_text(plan())
+    make(tmp_path / "plan_texts.json")
+    tf = token_file(tmp_path)
+    result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
+    assert result.exit_code == 1 and error in result.output
     assert not tf.exists(), "the run token never stays on disk"
 
 

@@ -1663,7 +1663,7 @@ def ci_run(
         except OSError as e:
             raise ci_client.CIError(f"can't read the plan: {e.strerror or e}")
         ci_client.run(token, run_token_file, cwd=os.getcwd(), env=os.environ, client=ci_client.Client(),
-                      say=typer.echo)
+                      texts=lambda: ci_client.read_plan_texts(plan), say=typer.echo)
 
     _ci_call(go)
 
