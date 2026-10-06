@@ -31,6 +31,7 @@ detection, no rendering. The server does that.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -43,6 +44,8 @@ from typing import Mapping, MutableMapping
 
 
 from brindle import providers
+
+log = logging.getLogger(__name__)
 
 API_KEY = "api_key"
 CLOUD = "cloud"
@@ -261,7 +264,13 @@ class ClaudeAdapter(Adapter):
         """Answer Claude Code's first-run screens ahead of time (a fresh
         runner has no Claude Code state, and nobody is there to answer them),
         trusting the checkout ``cwd``. brindle's own worktrees are trusted
-        when they're made (providers.trust_folder), now that the file exists."""
+        when they're made (providers.trust_folder), now that the file exists.
+        Only on a CI runner (``GITHUB_ACTIONS`` or ``CI`` is ``"true"`` in
+        ``env``): anywhere else Claude Code's state is the person's own, and
+        is left alone."""
+        if "true" not in (env.get("GITHUB_ACTIONS"), env.get("CI")):
+            log.info("brindle ci: not on a CI runner, leaving Claude Code's state alone")
+            return
         try:
             providers.seed_ci_config([cwd], env.get("ANTHROPIC_API_KEY") or None)
         except (OSError, ValueError) as e:

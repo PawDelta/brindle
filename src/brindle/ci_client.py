@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -482,7 +483,13 @@ def _jwt_exp(token: str) -> float | None:
         exp = claims.get("exp")
     except (IndexError, ValueError, AttributeError, TypeError):
         return None
-    return float(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        return None
+    try:
+        value = float(exp)   # an int too big for a float overflows
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
 
 
 class Client:

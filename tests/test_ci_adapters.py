@@ -458,14 +458,33 @@ PROMPT = """────────────────
 """
 
 
+ON_CI = {"GITHUB_ACTIONS": "true"}
+
+
 def _config(tmp_path):
     return json.loads((tmp_path / "claude-config" / ".claude.json").read_text())
+
+
+@pytest.mark.parametrize("env", [{}, {"GITHUB_ACTIONS": "false", "CI": "1"}])
+def test_prepare_leaves_claude_state_alone_off_ci(tmp_path, repo, env, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="brindle.ci_adapters")
+    ClaudeAdapter.prepare(str(repo), {**env, "ANTHROPIC_API_KEY": KEY})
+    assert not (tmp_path / "claude-config" / ".claude.json").exists()
+    assert "not on a CI runner" in caplog.text
+
+
+@pytest.mark.parametrize("env", [{"GITHUB_ACTIONS": "true"}, {"CI": "true"}])
+def test_prepare_seeds_on_either_ci_marker(tmp_path, repo, env):
+    ClaudeAdapter.prepare(str(repo), env)
+    assert _config(tmp_path)["hasCompletedOnboarding"] is True
 
 
 def test_prepare_seeds_a_missing_claude_config(tmp_path, repo):
     import stat
 
-    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_API_KEY": KEY})
+    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_API_KEY": KEY})
     path = tmp_path / "claude-config" / ".claude.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     data = _config(tmp_path)
@@ -481,8 +500,8 @@ def test_prepare_merges_into_existing_state(tmp_path, repo):
     path.write_text(json.dumps({"numStartups": 3, "theme": "light", "projects": {"/elsewhere": {"x": 1}},
                                 "customApiKeyResponses": {"approved": ["other"], "rejected": [KEY[-20:]]}}))
     path.chmod(0o644)
-    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_API_KEY": KEY})
-    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_API_KEY": KEY})   # idempotent
+    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_API_KEY": KEY})
+    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_API_KEY": KEY})   # idempotent
     data = _config(tmp_path)
     assert data["numStartups"] == 3 and data["theme"] == "light"
     assert data["projects"]["/elsewhere"] == {"x": 1}
@@ -491,7 +510,7 @@ def test_prepare_merges_into_existing_state(tmp_path, repo):
 
 
 def test_prepare_without_a_key_approves_none(tmp_path, repo):
-    ClaudeAdapter.prepare(str(repo), {"ANTHROPIC_AUTH_TOKEN": "federated"})
+    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_AUTH_TOKEN": "federated"})
     assert "customApiKeyResponses" not in _config(tmp_path)
 
 
@@ -500,14 +519,14 @@ def test_prepare_refuses_a_config_that_isnt_an_object(tmp_path, repo):
     path.parent.mkdir()
     path.write_text("[]")
     with pytest.raises(ci_adapters.AdapterError, match="couldn't set up Claude Code's state"):
-        ClaudeAdapter.prepare(str(repo), {})
+        ClaudeAdapter.prepare(str(repo), ON_CI)
     assert path.read_text() == "[]"
 
 
 def test_worktrees_are_trusted_once_ci_seeded_the_config(tmp_path, repo):
     from brindle.providers import trust_folder
 
-    ClaudeAdapter.prepare(str(repo), {})
+    ClaudeAdapter.prepare(str(repo), ON_CI)
     wt = tmp_path / "wt"
     wt.mkdir()
     assert trust_folder(str(wt)) is True
@@ -527,6 +546,7 @@ def _launch_showing(monkeypatch, db, repo, screens):
     from brindle import agents, tmux, workspaces
     from brindle.db import Agent
 
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     ws = workspaces.adopt_root(db, str(repo))
     root = Agent(id="root0000", workspace_id=ws.id, profile="supervisor", provider="claude", parent_id=None,
                  mode="interactive", status="idle", tmux_window="%9", result=None, created_at=1.0)

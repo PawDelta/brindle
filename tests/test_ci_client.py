@@ -321,6 +321,17 @@ def test_oidc_refreshes_before_the_token_expires():
     assert len(fetched) == 2
 
 
+@pytest.mark.parametrize("exp", ["NaN", "Infinity", "-Infinity", "1e999", "10" + "0" * 400, '"soon"', "true",
+                                 "null"])
+def test_jwt_exp_ignores_a_non_finite_or_non_numeric_exp(exp):
+    import base64
+
+    payload = base64.urlsafe_b64encode(('{"exp": %s}' % exp).encode()).decode().rstrip("=")
+    assert ci_client._jwt_exp(f"h.{payload}.s") is None
+    assert ci_client._jwt_exp(_jwt(2000)) == 2000.0
+    assert ci_client._jwt_exp("not-a-jwt") is None
+
+
 def test_oidc_fetch_says_why_it_failed(monkeypatch):
     import io
     import urllib.error
