@@ -1512,13 +1512,15 @@ def agent_profiles() -> None:
         pass
     from brindle.providers import unusable
 
-    why: dict[str, str | None] = {}
+    why: dict[tuple, str | None] = {}
     hidden: dict[str, list[str]] = {}
     for p in list_profiles(root):
-        if p.provider not in why:
-            why[p.provider] = unusable(p.provider)
-        if why[p.provider]:
-            hidden.setdefault(why[p.provider], []).append(p.name)
+        # A profile's env can carry the CLI's key, so one on a signed-out CLI can still run.
+        key = (p.provider, tuple(sorted(p.env.items())))
+        if key not in why:
+            why[key] = unusable(p.provider, p.env)
+        if why[key]:
+            hidden.setdefault(why[key], []).append(p.name)
             continue
         typer.echo(f"{p.name:<14} {p.provider:<7} {p.description}")
     for reason, names in hidden.items():
@@ -1579,6 +1581,7 @@ def ci_run(
     no_pr: bool = typer.Option(False, "--no-pr", help="Don't push or open a pull request; just report."),
     bundle: Optional[str] = typer.Option(None, "--bundle", help="Write the verified branch to this git bundle (and PATH.json) for `brindle ci publish`, instead of pushing; implies --no-pr. This run then needs no token that can write to GitHub."),
     entitlement: Optional[str] = typer.Option(None, "--entitlement", help="Read the entitlement from this file (written by `brindle ci entitle`) instead of exchanging BRINDLE_PRO_TOKEN."),
+    budget: Optional[str] = typer.Option(None, "--budget", help="Token cap for the whole run, supervisor and workers together (e.g. 2m, 500k); past it the run stops with status budget."),
 ) -> None:
     """Run a supervisor with autopilot on, unattended, until the goal is verified; then open a PR.
 
@@ -1596,7 +1599,7 @@ def ci_run(
 
     raise typer.Exit(ci.run_cli(goal=goal, goal_file=goal_file, issue=issue, timeout_min=timeout,
                                 max_workers=max_workers, base=base, pr=not no_pr, echo=typer.echo,
-                                bundle=bundle, entitlement=entitlement))
+                                bundle=bundle, entitlement=entitlement, budget=budget))
 
 
 @ci_app.command("entitle")
@@ -1672,7 +1675,22 @@ def ci_init(
     typer.echo("Add the BRINDLE_PRO_TOKEN secret (from `brindle account org ci-token create`) and "
                "ANTHROPIC_API_KEY, and allow GitHub Actions to create pull requests in the repo's "
                "Actions settings. Only people you trust with write access should be able to apply "
-               "the label.")
+               "the label. Optional: OPENAI_API_KEY or CODEX_API_KEY also installs Codex for "
+               "routing to pick from.")
+
+
+@ci_app.command("doctor")
+def ci_doctor(
+    entitlement: Optional[str] = typer.Option(None, "--entitlement", help="The entitlement file to look for (default: where the workflow puts it under $RUNNER_TEMP)."),
+) -> None:
+    """In a CI job: which agent CLIs and keys are present, and whether the entitlement file or BRINDLE_PRO_TOKEN is set.
+
+    Prints names and set/not set only, never a value. Exits 1 when no agent CLI
+    can run; in a workflow step, run `brindle ci doctor || true` so a report
+    doesn't fail the job."""
+    from brindle import ci_providers
+
+    raise typer.Exit(ci_providers.doctor(entitlement, echo=typer.echo))
 
 
 # -- internal ----------------------------------------------------------------

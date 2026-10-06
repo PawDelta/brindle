@@ -120,7 +120,7 @@ def cli_sign_in_unknown(monkeypatch):
 
     from brindle import antigravity
 
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv: None)
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: None)
     monkeypatch.setattr(providers, "_SIGNED_IN", {})
     # Only what a test puts on PATH counts as installed, not an app's own copy.
     monkeypatch.setattr(providers, "CODEX_BUNDLED", "/nonexistent/codex")

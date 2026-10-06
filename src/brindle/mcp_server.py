@@ -543,9 +543,11 @@ def list_agent_profiles() -> str:
     usable = {}
     lines = []
     for p in list_profiles(here.repo_root):
-        if p.provider not in usable:
-            usable[p.provider] = unusable(p.provider) is None
-        if usable[p.provider]:
+        # A profile's env can carry the CLI's key, so one on a signed-out CLI can still run.
+        key = (p.provider, tuple(sorted(p.env.items())))
+        if key not in usable:
+            usable[key] = unusable(p.provider, p.env) is None
+        if usable[key]:
             lines.append(f"{p.name} ({p.provider}): {p.description}")
     return "\n".join(lines)
 
