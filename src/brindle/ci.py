@@ -807,6 +807,8 @@ WORKFLOW = """\
 # `brindle account org ci-token create`) and ANTHROPIC_API_KEY (for Claude Code).
 # Optional: OPENAI_API_KEY or CODEX_API_KEY also installs Codex, so routing can
 # pick it; `brindle ci doctor` in a job lists the CLIs and keys it finds.
+# `codex login` stores that key in ~/.codex/auth.json on the run machine, where
+# agents can read it just as they can read ANTHROPIC_API_KEY: use a key scoped to CI.
 # In the repo's Actions settings, allow GitHub Actions to create pull requests.
 #
 # Three jobs, because agents run the repo's own code and can reach anything on

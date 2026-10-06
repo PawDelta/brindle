@@ -6,7 +6,11 @@ provider brindle routes to, so routing and learning can pick among them:
 - Claude Code, always (the baseline: ``ANTHROPIC_API_KEY``).
 - Codex, when ``OPENAI_API_KEY`` or ``CODEX_API_KEY`` is set as a secret. The
   key is handed to ``codex login --with-api-key`` on stdin, so the CLI brindle
-  starts in tmux finds a stored login instead of its sign-in screen.
+  starts in tmux finds a stored login instead of its sign-in screen. The
+  install step gets no key; only the separate sign-in step does. ``codex
+  login`` stores the key in ``~/.codex/auth.json`` on the run machine, where
+  agents can read it just as they can read ``ANTHROPIC_API_KEY``: use a key
+  scoped to CI.
 
 Antigravity is left out: it takes only ``GEMINI_API_KEY``, and only with
 ``modelProvider: "gemini"`` in its settings, which its CLI can't be given
@@ -94,16 +98,17 @@ def workflow_steps() -> str:
 
 
 def _install_optional(p: CIProvider) -> str:
-    head = (f"      - name: Install {p.label}\n"
-            f"        if: steps.providers.outputs.{p.name} == 'true'\n"
-            f"        env:{_env_block(p.keys, '        ')}\n"
-            "        run: |\n"
-            f"          npm install -g {p.package}\n")
-    if p is CODEX:
-        # On stdin, never argv: the stored login is what the CLI brindle starts reads.
-        return head + ('          printf \'%s\' "${CODEX_API_KEY:-$OPENAI_API_KEY}" '
-                       "| codex login --with-api-key")
-    return head.rstrip("\n")
+    when = f"        if: steps.providers.outputs.{p.name} == 'true'\n"
+    # No key env here: npm's install scripts never see the keys.
+    install = (f"      - name: Install {p.label}\n" + when
+               + f"        run: npm install -g {p.package}")
+    if p is not CODEX:
+        return install
+    # On stdin, never argv: the stored login is what the CLI brindle starts reads.
+    return install + (f"\n      - name: Sign in to {p.label}\n" + when
+                      + f"        env:{_env_block(p.keys, '        ')}\n"
+                      + "        run: printf '%s' \"${CODEX_API_KEY:-$OPENAI_API_KEY}\" "
+                        "| codex login --with-api-key")
 
 
 # -- brindle ci doctor --------------------------------------------------------------

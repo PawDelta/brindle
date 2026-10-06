@@ -1660,7 +1660,9 @@ def ci_doctor(
 ) -> None:
     """In a CI job: which agent CLIs and keys are present, and whether the entitlement file or BRINDLE_PRO_TOKEN is set.
 
-    Prints names and set/not set only, never a value. Exits 1 when no agent CLI can run."""
+    Prints names and set/not set only, never a value. Exits 1 when no agent CLI
+    can run; in a workflow step, run `brindle ci doctor || true` so a report
+    doesn't fail the job."""
     from brindle import ci_providers
 
     raise typer.Exit(ci_providers.doctor(entitlement, echo=typer.echo))

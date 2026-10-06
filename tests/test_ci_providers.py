@@ -37,15 +37,25 @@ def test_codex_is_installed_only_when_its_key_is_a_secret():
     detect = _step(run_job, "Which agent CLIs to install")
     assert "id: providers" in detect
     assert _env_keys(detect) == {"OPENAI_API_KEY", "CODEX_API_KEY"}
+    when = "if: steps.providers.outputs.codex == 'true'"
     install = _step(run_job, "Install Codex")
-    assert "if: steps.providers.outputs.codex == 'true'" in install
-    assert "npm install -g @openai/codex" in install
-    assert _env_keys(install) == {"OPENAI_API_KEY", "CODEX_API_KEY"}
+    assert when in install and "npm install -g @openai/codex" in install
+    # npm's install scripts never see the keys.
+    assert "env:" not in install and "API_KEY" not in install
+    login = _step(run_job, "Sign in to Codex")
+    assert when in login and "npm" not in login
+    assert _env_keys(login) == {"OPENAI_API_KEY", "CODEX_API_KEY"}
     # The key goes in on stdin, never on the command line.
-    assert "| codex login --with-api-key" in install
-    # Detection runs before the install, and both before brindle starts agents.
+    assert "| codex login --with-api-key" in login
+    # Detection, install, sign-in, all before brindle starts agents.
     assert (run_job.index("Which agent CLIs") < run_job.index("Install Codex")
-            < run_job.index("brindle ci run --issue"))
+            < run_job.index("Sign in to Codex") < run_job.index("brindle ci run --issue"))
+
+
+def test_the_stored_codex_key_is_called_out():
+    text = ci.workflow_text()
+    assert "~/.codex/auth.json" in text and "scoped to CI" in text
+    assert "~/.codex/auth.json" in ci_providers.__doc__ and "scoped to CI" in ci_providers.__doc__
 
 
 def test_keys_go_only_where_they_are_needed():
@@ -53,7 +63,7 @@ def test_keys_go_only_where_they_are_needed():
     for key in ("OPENAI_API_KEY", "CODEX_API_KEY"):
         assert f"secrets.{key}" not in _job(text, "entitle")
         assert f"secrets.{key}" not in _job(text, "publish")
-        # Detection and install only: not the step that runs the agents.
+        # Detection and sign-in only: not the install, nor the step that runs the agents.
         assert text.count(f"secrets.{key}") == 2
     run_job = _job(text, "run")
     assert "OPENAI_API_KEY" not in _step(run_job, "Run brindle")
@@ -155,3 +165,5 @@ def test_ci_doctor_command(tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     assert "ANTHROPIC_API_KEY set" in res.output and SECRET not in res.output
     assert "entitlement  missing" in res.output
+    help_text = CliRunner().invoke(cli.app, ["ci", "doctor", "--help"]).output
+    assert "|| true" in help_text
