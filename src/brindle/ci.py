@@ -149,28 +149,51 @@ def goal_from_issue(number: int, cwd: str) -> Goal:
     return Goal(title, body, issue=number, source="issue", context=issue_context(data.get("comments")))
 
 
+TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+
+
+def _login(comment: dict) -> str:
+    author = comment.get("author") if isinstance(comment.get("author"), dict) else {}
+    return str(author.get("login") or "").strip()
+
+
+def _trusted(comment: dict) -> bool:
+    """A comment by someone with a say over the repo: its owner, a member
+    of the org or a collaborator. Anyone can comment on a public issue, and
+    these comments steer an agent, so the rest are left out."""
+    return comment.get("authorAssociation") in TRUSTED_ASSOCIATIONS
+
+
+def _is_report(comment: dict) -> bool:
+    """brindle's own report: the marker, posted by the workflow's bot (or by
+    a trusted person running `brindle ci report` themselves)."""
+    if REPORT_MARKER not in str(comment.get("body") or ""):
+        return False
+    login = _login(comment)
+    return login == "github-actions" or login.endswith("[bot]") or _trusted(comment)
+
+
 def issue_context(comments) -> str | None:
     """The comments after brindle's last report (the one carrying
     ``REPORT_MARKER``), each with its author, as text for the supervisor;
-    None when brindle never reported or nobody answered."""
+    None when brindle never reported or nobody answered. Only comments by
+    the repo's owner, org members and collaborators count: they steer an
+    unattended agent."""
     if not isinstance(comments, list):
         return None
+    comments = [c for c in comments if isinstance(c, dict)]
     since = None
     for i, c in enumerate(comments):
-        if isinstance(c, dict) and REPORT_MARKER in str(c.get("body") or ""):
+        if _is_report(c):
             since = i
     if since is None:
         return None
     parts = []
     for c in comments[since + 1:]:
-        if not isinstance(c, dict):
-            continue
         text = str(c.get("body") or "").strip()
-        if not text or REPORT_MARKER in text:
+        if not text or REPORT_MARKER in text or not _trusted(c):
             continue
-        author = c.get("author") if isinstance(c.get("author"), dict) else {}
-        login = str(author.get("login") or "someone").strip()
-        parts.append(f"{login} wrote:\n{text}")
+        parts.append(f"{_login(c) or 'someone'} wrote:\n{text}")
     return "\n\n".join(parts) or None
 
 
@@ -510,11 +533,13 @@ def _create_pr(ws: Workspace, base: str, title: str, body: str,
 
 
 def _existing_pr(slug: str, branch: str, env: dict[str, str], cwd: str) -> dict | None:
-    """The open pull request from ``branch``, if a run already opened one (a
-    re-run after a question or a partial result adds to its branch)."""
+    """The open pull request from ``branch`` of this repository, if a run
+    already opened one (a re-run after a question or a partial result adds
+    to its branch). A pull request from a fork with a branch of the same
+    name is somebody else's: never touched."""
     proc = subprocess.run(
         ["gh", "pr", "list", "--repo", slug, "--head", branch, "--state", "open",
-         "--json", "url,isDraft", "--limit", "1"],
+         "--json", "url,isDraft,isCrossRepository,headRefName", "--limit", "10"],
         cwd=cwd, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
         return None
@@ -522,9 +547,13 @@ def _existing_pr(slug: str, branch: str, env: dict[str, str], cwd: str) -> dict 
         found = json.loads(proc.stdout)
     except ValueError:
         return None
-    if isinstance(found, list) and found and isinstance(found[0], dict) \
-            and isinstance(found[0].get("url"), str):
-        return found[0]
+    if not isinstance(found, list):
+        return None
+    for pr in found:
+        if (isinstance(pr, dict) and isinstance(pr.get("url"), str)
+                and pr.get("isCrossRepository") is False and pr.get("headRefName") == branch
+                and re.fullmatch(_PR_URL.format(slug=re.escape(slug)), pr["url"])):
+            return pr
     return None
 
 
@@ -1160,7 +1189,8 @@ def report_cli(path: str, issue: int, repo: str | None = None, *, pr_url: str | 
     except CIError as e:
         echo(str(e))
         return 1
-    echo(f"commented on #{issue}: {body.splitlines()[1]}")
+    headline = next((line for line in body.splitlines() if line.startswith("## ")), "").lstrip("# ")
+    echo(f"commented on #{issue}: {headline}")
     return 0
 
 
@@ -1294,6 +1324,7 @@ jobs:
       - name: Install brindle
         run: uv tool install {package}
       - uses: actions/download-artifact@v4
+        continue-on-error: true   # nothing uploaded when the run died early
         with:
           name: brindle-out
           path: ${{{{ runner.temp }}}}/brindle-out

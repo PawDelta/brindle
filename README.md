@@ -842,7 +842,8 @@ isn't on the machine while agents run. So the work can be split:
    markdown, a mention, a link or HTML. To answer the supervisor's question,
    comment on the issue and add the label again: the next run reads the
    comments made after brindle's question and continues on the same branch.
-   Read the thread before you do, since those comments steer the agents too.
+   Only comments by the repo's owner, org members and collaborators count,
+   since they steer the agents too; anyone else's are left out.
 
 The workflow `brindle ci init` writes pins brindle to the version that wrote it,
 since the publishing job holds a write token. The short-lived entitlement
