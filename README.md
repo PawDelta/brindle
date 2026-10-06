@@ -15,7 +15,7 @@ curl -fsSL pawdelta.com/brindle/install | sh
 brindle demo        # watch it finish a practice repo in a few minutes
 ```
 
-![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://pawdelta.com/brindle/brindle-demo.gif)
+![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://pawdelta.com/brindle/brindle-demo.gif?v=0.0.2)
 
 *`brindle demo`, recorded on brindle 0.0.2 (sped up 4×): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
 
