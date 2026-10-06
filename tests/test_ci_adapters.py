@@ -579,3 +579,34 @@ def test_stuck_screen_reads_the_supervisors_pane(db, repo, monkeypatch):
     _, root, _ = _launch_showing(monkeypatch, db, repo, [PROMPT])
     assert ClaudeAdapter().stuck_screen(db, root) is None
     assert CodexAdapter().stuck_screen(db, root) is None
+
+
+WORKSPACE_KEY_ERROR = """\
+  completion: delegate, review, merge, check_milestone.
+● API Error: 400 This API key is not scoped to a workspace, so this
+  request must include the anthropic-workspace-id header with the ID of
+  the workspace to use. Add the header, or use an API key that is scoped
+  to a workspace.
+✻ Cooked for 1s · done 8:19 PM
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · gh auth login for PR status · ← for agents
+"""
+
+
+def test_a_fatal_api_error_is_recognised_only_as_the_last_reply():
+    from brindle.providers import ClaudeCode
+
+    error = ClaudeCode.fatal_api_error(WORKSPACE_KEY_ERROR)
+    assert error.startswith("API Error: 400 This API key is not scoped") and error.endswith("scoped to a workspace.")
+    assert ClaudeCode.fatal_api_error(WORKSPACE_KEY_ERROR.replace("400", "529")) is None, "Claude Code retries those"
+    moved_on = WORKSPACE_KEY_ERROR.replace("✻ Cooked", "● Retrying with a new key.\n✻ Cooked")
+    assert ClaudeCode.fatal_api_error(moved_on) is None
+    assert ClaudeCode.fatal_api_error(PROMPT) is None
+
+
+def test_stuck_screen_reports_a_fatal_api_error(db, repo, monkeypatch):
+    _, root, _ = _launch_showing(monkeypatch, db, repo, [WORKSPACE_KEY_ERROR])
+    stuck = ClaudeAdapter().stuck_screen(db, root)
+    assert "won't retry" in stuck and "not scoped to a workspace" in stuck

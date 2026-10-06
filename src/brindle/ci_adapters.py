@@ -293,8 +293,12 @@ class ClaudeAdapter(Adapter):
             time.sleep(1)
 
     def stuck_screen(self, db, root) -> str | None:
-        why = providers.ClaudeCode.first_run_screen(self._screen(root) or "")
-        return f"Claude Code is on {why}, which nobody in CI can answer" if why else None
+        screen = self._screen(root) or ""
+        why = providers.ClaudeCode.first_run_screen(screen)
+        if why:
+            return f"Claude Code is on {why}, which nobody in CI can answer"
+        error = providers.ClaudeCode.fatal_api_error(screen)
+        return f"Claude Code stopped on an error it won't retry: {error}" if error else None
 
     @staticmethod
     def _screen(root) -> str | None:
