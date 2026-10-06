@@ -1,14 +1,16 @@
 name: CI
 
-# One Linux and one macOS job on every pull request and push to main (a push
-# or PR that only changes docs runs nothing). The local pre-push tests are off
-# for now; scripts/ci_local.sh still works by hand.
+# One Linux and one macOS job on every pull request and push to main. A push
+# that only changes docs runs nothing. A pull request always gets both test
+# checks, because they are required to merge: when it only changes docs, the
+# jobs start and skip their steps, so the checks report success under their
+# usual names. The local pre-push tests are off for now; scripts/ci_local.sh
+# still works by hand.
 on:
   push:
     branches: [main]
     paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md"]
   pull_request:
-    paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md"]
   workflow_dispatch:
   workflow_call:   # a release runs the same two jobs
 
@@ -16,21 +18,58 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          code=false
+          while IFS= read -r f; do
+            case "$f" in
+              *.md|docs/*|assets/*|LICENSE|CLA.md) ;;
+              *) code=true ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA"...HEAD)
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code changed: $code"
+
   test:
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.12"]
     runs-on: ${{ matrix.os }}
+    env:
+      CODE: ${{ needs.changes.outputs.code }}
     steps:
+      - name: Docs-only change
+        if: env.CODE != 'true'
+        run: echo "Only docs changed; tests skipped."
       - uses: actions/checkout@v7
+        if: env.CODE == 'true'
       - name: Install tmux
+        if: env.CODE == 'true'
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -q && sudo apt-get install -yq tmux
           else brew install tmux; fi
       - uses: astral-sh/setup-uv@v10.2.0
+        if: env.CODE == 'true'
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
+        if: env.CODE == 'true'
       - run: uv run pytest -q
+        if: env.CODE == 'true'

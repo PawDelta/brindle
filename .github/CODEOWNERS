@@ -1,0 +1,11 @@
+# Files that control releases, licensing and trust. The "baseline" ruleset
+# requires a code owner's approval for any pull request that changes them, so
+# even brindle-bot's own PRs need a person here. Everything else has no code
+# owner and merges on green CI.
+/.github/                @hmlerner
+/pyproject.toml          @hmlerner
+/uv.lock                 @hmlerner
+/LICENSE                 @hmlerner
+/SCHEDULE-A              @hmlerner
+/CLA.md                  @hmlerner
+/src/brindle/pro/        @hmlerner
