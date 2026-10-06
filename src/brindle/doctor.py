@@ -75,19 +75,44 @@ def preflight(provider: str) -> list[str]:
     return problems
 
 
+def signin_providers() -> list[str]:
+    """The provider CLIs installed here, in CLI_INSTALL order."""
+    from brindle import antigravity, providers
+
+    binaries = {"claude": providers.claude_binary, "codex": providers.codex_binary,
+                "antigravity": antigravity.binary}
+    out = []
+    for provider in CLI_INSTALL:
+        exe = binaries[provider]()
+        if shutil.which(exe) or os.path.isfile(exe):
+            out.append(provider)
+    return out
+
+
 def signin_checks() -> list[Check]:
-    """Whether each installed CLI that has a sign-in status is signed in."""
-    from brindle import providers
+    """For each installed CLI: how it's signed in (its own login, a key from
+    the environment, or signed out) and whether a quota limit is in effect.
+    The environment keys come from providers._ENV_AUTH, so a provider listed
+    there shows its key here; only the variable's name is shown."""
+    from brindle import providers, quota
 
     out = []
-    for provider, binary, required in (("claude", providers.claude_binary, True),
-                                       ("codex", providers.codex_binary, False)):
-        exe = binary()
-        if not (shutil.which(exe) or os.path.isfile(exe)):
-            continue
-        why = providers.signed_out(provider)
-        name = f"{CLI_INSTALL[provider][0]} sign-in"
-        out.append(Check((FAIL if required else WARN) if why else OK, name, why or "no sign-in problem found"))
+    for provider in signin_providers():
+        level = OK
+        env = next((k for k in providers._ENV_AUTH.get(provider, ()) if os.environ.get(k)), None)
+        why = None if env else providers.signed_out(provider)
+        if env:
+            signin = f"environment key {env}"
+        elif why:
+            level = FAIL if provider == "claude" else WARN
+            signin = f"signed out: {why}"
+        else:
+            signin = "its own login (no sign-in problem found)"
+        limit = quota.note(provider)
+        if limit and quota.headroom(provider) <= 10 and level == OK:
+            level = WARN
+        out.append(Check(level, f"{CLI_INSTALL[provider][0]} sign-in",
+                         f"{signin}; quota: {limit or 'no limit in effect'}"))
     return out
 
 
@@ -384,12 +409,14 @@ def pro_checks() -> list[Check]:
 
 def quota_checks(repo_root: str | None) -> list[Check]:
     """One line per provider that has quota data (a warning past 90% used or
-    while limited). The local model server has its own checks above."""
+    while limited). The local model server has its own checks above, and an
+    installed CLI's quota is on its sign-in line."""
     from brindle import quota
 
     out = []
+    shown = set(signin_providers())
     for p in quota.PROVIDERS:
-        if p == "native":
+        if p == "native" or p in shown:
             continue
         n = quota.note(p)
         if n:
