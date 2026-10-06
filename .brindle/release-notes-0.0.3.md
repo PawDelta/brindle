@@ -6,8 +6,8 @@ brindle 0.0.3 adds multi-repo sessions, turns `brindle ci` into the client for t
 - **New in the brindle CI service** (hosted by PawDelta; works with the 0.0.3 client):
   - **Issue to pull request (Team).** Label an issue, and brindle runs the work in your GitHub Actions and opens a PR. brindle never merges.
   - **Pull request checks (Team).** brindle checks pull requests and reports the results.
-  - **Fixes broken builds (Pro and Team).** When CI fails, brindle opens a fix PR, proven by your own CI. Pro covers 1 repo with a monthly quota; Team covers every repo and branch.
-  - **Repo knowledge (Pro and Team).** brindle learns what works in each repo, uses it in later runs, and can propose updates to your agent instructions file.
+  - **Fixes broken builds (Pro).** When CI fails, brindle opens a fix PR, proven by your own CI. On Pro: 1 repo, with a monthly quota.
+  - **Repo knowledge (Pro).** brindle learns what works in each repo, uses it in later runs, and can propose updates to your agent instructions file.
   - **Jira trigger (Team).** Start brindle runs from Jira tickets and get status back on the ticket. No Atlassian app needed.
 - **Sign-in checks in `brindle doctor`.** For each installed agent CLI (Claude Code, Codex, Antigravity), `brindle doctor` shows how it's signed in and whether a quota limit is in effect. It names a key's environment variable, never its value.
 - **Antigravity sign-in.** Antigravity works with `GEMINI_API_KEY`, including a key kept only in a profile's `env` lines. A worker whose Antigravity is signed out is refused with a clear message instead of sitting on its login screen.
