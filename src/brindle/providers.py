@@ -284,6 +284,20 @@ class ClaudeCode(Provider):
     # on screen, a first-run question is only quoted in the transcript.
     INPUT_FOOTER = re.compile(r"\? for shortcuts|esc to interrupt|⏵⏵|⏸|mode on")
 
+    # A turn that ended on an API error Claude Code won't retry: a bad
+    # request, a rejected key or a forbidden one. Only the last reply counts.
+    FATAL_API_ERROR = re.compile(r"\A\s*API Error: 40[013]\b")
+
+    @classmethod
+    def fatal_api_error(cls, screen: str) -> str | None:
+        """The API error the last reply on ``screen`` ended on, if Claude Code
+        won't retry it (it then sits at its prompt for good), else None."""
+        last = screen.rsplit("●", 1)[-1] if "●" in screen else ""
+        if not cls.FATAL_API_ERROR.match(last):
+            return None
+        text = re.split(r"\n\s*(?:✻|─{3})", last, maxsplit=1)[0]
+        return " ".join(text.split())
+
     @classmethod
     def first_run_screen(cls, screen: str) -> str | None:
         """Which first-run screen ``screen`` shows, or None."""
