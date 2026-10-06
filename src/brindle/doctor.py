@@ -77,11 +77,12 @@ def preflight(provider: str) -> list[str]:
 
 def signin_checks() -> list[Check]:
     """Whether each installed CLI that has a sign-in status is signed in."""
-    from brindle import providers
+    from brindle import antigravity, providers
 
     out = []
     for provider, binary, required in (("claude", providers.claude_binary, True),
-                                       ("codex", providers.codex_binary, False)):
+                                       ("codex", providers.codex_binary, False),
+                                       ("antigravity", antigravity.binary, False)):
         exe = binary()
         if not (shutil.which(exe) or os.path.isfile(exe)):
             continue

@@ -538,11 +538,18 @@ _SIGNED_IN: dict[str, float] = {}
 SIGNED_IN_TTL = 600
 
 # Credentials a CLI takes from the environment instead of its own login.
+# agy (1.1.13 and later) reads GEMINI_API_KEY only when its settings.json
+# (~/.gemini/antigravity-cli/settings.json) has ``"modelProvider": "gemini"``;
+# the key alone is ignored and agy still opens its sign-in screen. It takes no
+# other key or token from the environment (its enterprise, Workforce Identity
+# and Application Default Credentials sign-ins are chosen on that screen).
 _ENV_AUTH = {
     "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
                "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"),
     "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+    "antigravity": ("GEMINI_API_KEY",),
 }
+AGY_SETTINGS = "~/.gemini/antigravity-cli/settings.json"
 
 
 def _auth_probe(argv: list[str]) -> tuple[int, str] | None:
@@ -558,9 +565,9 @@ def _auth_probe(argv: list[str]) -> tuple[int, str] | None:
 
 def signed_out(provider: str) -> str | None:
     """Why ``provider``'s CLI can't run an agent because it isn't signed in,
-    or None when it is, or when that can't be told (no status command, an
-    older CLI, credentials from the environment): only a definite "not
-    signed in" stops a launch. Without this check a signed-out CLI opens on
+    or None when it is, or when that can't be told (a provider with no status
+    command, an older CLI, a timeout, credentials from the environment): only
+    a definite "not signed in" stops a launch. Without this check a signed-out CLI opens on
     its login screen, and the prompt brindle types in lands there."""
     if any(os.environ.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
@@ -582,6 +589,25 @@ def signed_out(provider: str) -> str | None:
         res = _auth_probe([codex_binary(), "login", "status"])
         if res and res[0] != 0 and "not logged in" in res[1].lower():
             reason = "Codex isn't signed in: run `codex login`, then try again"
+    elif provider == "antigravity":
+        # agy has no status command; `agy models` fails before fetching anything
+        # when it isn't signed in ("Error: Please sign in to view available
+        # models. Launch the CLI without arguments to sign in."), or when
+        # settings.json selects the Gemini API but GEMINI_API_KEY isn't set.
+        from brindle import antigravity
+
+        res = _auth_probe([antigravity.binary(), "models"])
+        if res and res[0] != 0:
+            text = res[1].lower()
+            if "gemini_api_key" in text and "not set" in text:
+                reason = ("Antigravity is set to the Gemini API (modelProvider \"gemini\" in "
+                          f"{AGY_SETTINGS}) but GEMINI_API_KEY isn't set: set it in the "
+                          "environment or a profile's `env`, or remove modelProvider and run "
+                          "`agy` to sign in, then try again")
+            elif "sign in" in text or "not logged in" in text:
+                reason = ("Antigravity isn't signed in: run `agy` and sign in with your Google "
+                          "account (or set GEMINI_API_KEY with modelProvider \"gemini\" in "
+                          f"{AGY_SETTINGS}), then try again")
     else:
         return None
     if reason is None and res is not None:
