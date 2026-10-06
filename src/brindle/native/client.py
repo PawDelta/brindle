@@ -18,6 +18,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
@@ -117,6 +118,29 @@ class Endpoint:
         if self.api == "anthropic":
             return base + ("/messages" if base.endswith("/v1") else "/v1/messages")
         return base + "/chat/completions"
+
+
+class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to the same scheme, host and port. The request
+    carries the endpoint's key, which must never travel to another host on
+    the endpoint's say-so."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlsplit(req.full_url)
+        try:
+            new = urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
+            same = (old.scheme, (old.hostname or "").lower(), old.port) == \
+                   (new.scheme, (new.hostname or "").lower(), new.port)
+        except ValueError:
+            same = False
+        if not same:
+            raise urllib.error.HTTPError(req.full_url, code, "refusing a redirect to another host",
+                                         headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(_SameOriginRedirects())
 
 
 class ClientError(Exception):
@@ -296,7 +320,7 @@ class Client:
             req = urllib.request.Request(self.endpoint.url(), data=data, headers=self._headers(),
                                          method="POST")
             try:
-                with urllib.request.urlopen(req, timeout=self.endpoint.timeout) as resp:
+                with _opener().open(req, timeout=self.endpoint.timeout) as resp:
                     if read is not None:
                         return read(resp)
                     body = resp.read().decode("utf-8", "replace")

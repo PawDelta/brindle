@@ -102,19 +102,17 @@ def test_command_help_has_no_hard_wraps():
     assert not ragged, f"summary paragraph spans lines in: {', '.join(ragged)}"
 
 
-@pytest.mark.parametrize("args", [["ci"], ["ci", "run", "--issue", "42"], ["ci", "init"]])
-def test_ci_is_a_stub_until_it_returns(args):
-    """`brindle ci` is documented as on its way back; every form of it says so and fails."""
-    from typer.testing import CliRunner
-
-    from brindle.cli import CI_MOVED
-
-    result = CliRunner().invoke(app, args)
-    assert result.exit_code == 1
-    assert result.output.strip() == CI_MOVED
-    assert CI_MOVED == ("brindle CI is part of brindle Team. It is moving to a hosted control "
-                        "plane and will be back in a later release.")
-    assert "`brindle ci` says so and exits 1" in README.read_text()
+def test_ci_section_says_what_not_how():
+    """The Brindle-CI section lists the commands with a line each and nothing
+    about the protocol, the prompts or the server's rules."""
+    text = README.read_text()
+    section = text[text.index("### Brindle-CI"):]
+    section = section[:section.index("\n**Closing and cleaning up.**")]
+    for cmd in ("init", "doctor", "start", "run", "report"):
+        assert f"`brindle ci {cmd}`" in section
+    for word in ("heartbeat", "/ci/", "jwt", "signature", "verdict", "stall", "prompt", "instructions"):
+        assert word not in section.lower(), word
+    assert "on its way back" not in section and "exits 1" not in section
 
 
 @pytest.mark.parametrize("page", _pages(), ids=lambda p: p.name)

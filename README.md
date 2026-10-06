@@ -781,9 +781,22 @@ the entitlement, so a log keeps its value after a plan lapses.
 
 Brindle-CI (brindle Team) brings brindle into your CI: it fixes broken builds,
 turns issues into pull requests whose checks it has verified, and reviews pull
-requests with evidence. It runs on your own CI with your own model keys. It is
-moving to a hosted control plane and will be back in a later release; until
-then `brindle ci` says so and exits 1.
+requests with evidence. It runs on your own CI with your own model keys; the
+hosted control plane decides what each run does and what it reports. The
+workflows call these commands:
+
+- `brindle ci init`: set a repository up in one go (the GitHub App, the secrets,
+  the workflows as a pull request, then a doctor check).
+- `brindle ci doctor`: which provider CLIs and credential names a runner has, and
+  which providers CI may use on this repository.
+- `brindle ci start`: start a run for an issue, a goal text or a dispatched run,
+  or a validation of a pull request.
+- `brindle ci run`: run what was started: the supervisor and the result upload,
+  or the pull request's checks and reviews and the evidence upload.
+- `brindle ci report`: tell the service how the workflow's jobs ended.
+
+Credential names are reported, never values. On a repository owned by a GitHub
+organization, a provider signed in only with a personal subscription is not used.
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `brindle close <id>` to stop it and hide it. Stopping means

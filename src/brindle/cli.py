@@ -1572,15 +1572,123 @@ def mcp() -> None:
 
 # -- brindle ci (brindle Team) ---------------------------------------------------
 
-CI_MOVED = ("brindle CI is part of brindle Team. It is moving to a hosted control plane "
-            "and will be back in a later release.")
+ci_app = typer.Typer(no_args_is_help=True,
+                     help="brindle CI (brindle Team): the client the CI workflows run. "
+                          "`brindle ci init` sets a repository up.")
+app.add_typer(ci_app, name="ci")
 
 
-@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
-def ci(ctx: typer.Context) -> None:
-    """brindle CI (brindle Team): not available in this release."""
-    typer.echo(CI_MOVED)
-    raise typer.Exit(1)
+def _ci_call(fn, *args, **kwargs):
+    from brindle.ci_client import CIError, refuse_airgap
+
+    try:
+        refuse_airgap()
+        return fn(*args, **kwargs)
+    except CIError as e:
+        _fail(f"brindle ci: {e}")
+
+
+def _ci_providers(env, repo: Optional[str], names: Optional[str]) -> list[str]:
+    from brindle import ci_adapters
+
+    if names:
+        return sorted({n.strip() for n in names.split(",") if n.strip()})
+    return ci_adapters.providers_available(ci_adapters.default_adapters(os.getcwd()), env,
+                                           ci_adapters.repo_is_org(env, repo))
+
+
+@ci_app.command("start")
+def ci_start(
+    repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: GITHUB_REPOSITORY)."),
+    out: str = typer.Option(..., "--out", help="Directory for the plan and run token (the run job's artifact)."),
+    providers: Optional[str] = typer.Option(None, "--providers", help="Comma-separated provider names whose keys the workflow found."),
+    issue: Optional[int] = typer.Option(None, "--issue", help="Work on this issue."),
+    goal_text: Optional[str] = typer.Option(None, "--goal-text", help="Work on this text (first line: title)."),
+    dispatch: Optional[str] = typer.Option(None, "--dispatch", help="Claim a run the server created (run_...)."),
+    validate: bool = typer.Option(False, "--validate", help="Validate a pull request instead (with --pr and --head)."),
+    pr: Optional[int] = typer.Option(None, "--pr", help="The pull request to validate."),
+    head: Optional[str] = typer.Option(None, "--head", help="Its head commit (40 hex)."),
+    fork: Optional[str] = typer.Option(None, "--fork", help="true when the pull request comes from a fork."),
+) -> None:
+    """Start a brindle CI run or validation and write its plan and run token to --out (needs BRINDLE_PRO_TOKEN)."""
+    from brindle import ci_client
+
+    def go():
+        full = ci_client.github_repo(os.environ, repo)
+        is_fork = ci_client.parse_bool(fork)
+        if validate and is_fork is None:
+            is_fork = ci_client.pr_is_fork(os.environ, full)
+        trigger = ci_client.trigger_for(issue, goal_text, dispatch, validate=validate, pr=pr, head=head,
+                                        fork=is_fork)
+        code = ci_client.start(full, trigger, out, client=ci_client.Client(),
+                               token=ci_client.ci_token(os.environ),
+                               providers=_ci_providers(os.environ, full, providers), say=typer.echo)
+        raise typer.Exit(code)
+
+    _ci_call(go)
+
+
+@ci_app.command("run")
+def ci_run(
+    plan: str = typer.Option(..., "--plan", help="The plan file written by `brindle ci start`."),
+    run_token_file: str = typer.Option(..., "--run-token-file", help="The run token file (deleted once read)."),
+) -> None:
+    """Run a started brindle CI run or validation here, then upload the result or the evidence."""
+    from brindle import ci_client
+
+    def go():
+        try:
+            token = Path(plan).read_text("utf-8").strip()
+        except OSError as e:
+            raise ci_client.CIError(f"can't read the plan: {e.strerror or e}")
+        ci_client.run(token, run_token_file, cwd=os.getcwd(), env=os.environ, client=ci_client.Client(),
+                      say=typer.echo)
+
+    _ci_call(go)
+
+
+@ci_app.command("report")
+def ci_report(
+    plan_dir: str = typer.Option(..., "--plan-dir", help="The directory `brindle ci start` wrote to."),
+    start: Optional[str] = typer.Option(None, "--start", help="How the start job ended: success, failure or cancelled."),
+    run: Optional[str] = typer.Option(None, "--run", help="How the run job ended: success, failure or cancelled."),
+) -> None:
+    """Report how the start and run jobs ended (needs BRINDLE_PRO_TOKEN)."""
+    from brindle import ci_client
+
+    def go():
+        ci_client.report(plan_dir, client=ci_client.Client(), token=ci_client.ci_token(os.environ),
+                         start=start, run=run, say=typer.echo)
+
+    _ci_call(go)
+
+
+@ci_app.command("doctor")
+def ci_doctor(
+    repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: GITHUB_REPOSITORY)."),
+) -> None:
+    """Which provider CLIs and credential names are here, and which providers CI may use on this repository."""
+    from brindle import ci_client
+
+    def go():
+        full = os.environ.get("GITHUB_REPOSITORY") or repo
+        typer.echo(ci_client.doctor(os.environ, full, os.getcwd()))
+
+    _ci_call(go)
+
+
+@ci_app.command("init")
+def ci_init(
+    repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: the repository here)."),
+    org: Optional[str] = typer.Option(None, "--org", help="The brindle Team org whose CI token to use."),
+    providers: Optional[str] = typer.Option(None, "--providers", help="Comma-separated providers to set keys for (asked otherwise)."),
+) -> None:
+    """Set a repository up for brindle CI: the GitHub App, the secrets, the workflows (as a pull request), then doctor."""
+    from brindle import ci_client
+
+    names = [p.strip() for p in providers.split(",") if p.strip()] if providers else None
+    _ci_call(ci_client.init, repo=repo, org=org, providers=names, cwd=os.getcwd(), env=os.environ,
+             ask=lambda q, d: typer.prompt(q, default=d), say=typer.echo)
 
 
 # -- internal ----------------------------------------------------------------

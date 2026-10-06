@@ -148,30 +148,74 @@ def _test_signing_key(kid: str, public_key: Ed25519PublicKey):
 # -- verification ----------------------------------------------------------------------
 
 
-def _b64decode(part: str) -> bytes:
+def _b64decode(part: str, what: str = "entitlement") -> bytes:
     if not part or any(c not in _B64URL for c in part) or len(part) % 4 == 1:
-        raise LicenseError("malformed entitlement")
+        raise LicenseError(f"malformed {what}")
     try:
         return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
     except (binascii.Error, ValueError) as e:
-        raise LicenseError("malformed entitlement") from e
+        raise LicenseError(f"malformed {what}") from e
 
 
 _B64URL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
 
-def _json_object(raw: bytes) -> dict:
+def _json_object(raw: bytes, what: str = "entitlement") -> dict:
     try:
         obj = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as e:
-        raise LicenseError("malformed entitlement") from e
+        raise LicenseError(f"malformed {what}") from e
     if not isinstance(obj, dict):
-        raise LicenseError("malformed entitlement")
+        raise LicenseError(f"malformed {what}")
     return obj
 
 
 def _is_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
+
+
+def verify_signed(token: str, *, typ: str, token_use: str, what: str = "entitlement",
+                  max_bytes: int = MAX_TOKEN_BYTES) -> dict:
+    """The claims of ``token`` once its signature checks out against a pinned
+    key and its header says ``typ``, its ``token_use`` claim says
+    ``token_use``, its ``kid`` claim matches the header and its audience is
+    brindle Pro. Nothing else is checked (no ``exp``, ``iat`` or issuer):
+    callers do that for their own token kind. ``what`` names the token kind
+    in errors. Raises :class:`LicenseError`."""
+    if not isinstance(token, str) or len(token) > max_bytes:
+        raise LicenseError(f"malformed {what}")
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise LicenseError(f"malformed {what}")
+    header = _json_object(_b64decode(parts[0], what), what)
+    if header.get("alg") != ALG:
+        raise LicenseError(f"{what} uses an unsupported algorithm")
+    if header.get("typ") != typ:
+        raise LicenseError(f"token is not an {what}" if what[0] in "aeiou" else f"token is not a {what}")
+    if "crit" in header:
+        raise LicenseError(f"{what} has unsupported critical headers")
+    kid = header.get("kid")
+    if not isinstance(kid, str) or not kid:
+        raise LicenseError(f"{what} names no key")
+    key = _trusted_key(kid)
+    sig = _b64decode(parts[2], what)
+    try:
+        key.verify(sig, f"{parts[0]}.{parts[1]}".encode("ascii"))
+    except InvalidSignature as e:
+        raise LicenseError(f"{what} signature is invalid") from e
+    # Only now is the payload trusted enough to parse.
+    claims = _json_object(_b64decode(parts[1], what), what)
+    missing = [c for c in ("aud", "kid", "token_use") if c not in claims]
+    if missing:
+        raise LicenseError(f"{what} is missing claims: {', '.join(missing)}")
+    if claims["kid"] != kid:
+        raise LicenseError(f"{what} kid mismatch")
+    if claims["token_use"] != token_use:
+        raise LicenseError(f"token is not an {what}" if what[0] in "aeiou" else f"token is not a {what}")
+    aud = claims.get("aud")
+    if not (aud == AUDIENCE or (isinstance(aud, list) and AUDIENCE in aud)):
+        raise LicenseError(f"{what} is for a different audience")
+    return claims
 
 
 def verify(token: str, *, issuer: str | None, now: float | None = None,
@@ -180,41 +224,13 @@ def verify(token: str, *, issuer: str | None, now: float | None = None,
     :class:`LicenseError`. ``issuer`` is the base URL it must come from
     (``None`` skips that check); ``grace=0`` disables the offline grace."""
     now = time.time() if now is None else now
-    if not isinstance(token, str) or len(token) > MAX_TOKEN_BYTES:
-        raise LicenseError("malformed entitlement")
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise LicenseError("malformed entitlement")
-    header = _json_object(_b64decode(parts[0]))
-    if header.get("alg") != ALG:
-        raise LicenseError("entitlement uses an unsupported algorithm")
-    if header.get("typ") != TYP:
-        raise LicenseError("token is not an entitlement")
-    if "crit" in header:
-        raise LicenseError("entitlement has unsupported critical headers")
-    kid = header.get("kid")
-    if not isinstance(kid, str) or not kid:
-        raise LicenseError("entitlement names no key")
-    key = _trusted_key(kid)
-    sig = _b64decode(parts[2])
-    try:
-        key.verify(sig, f"{parts[0]}.{parts[1]}".encode("ascii"))
-    except InvalidSignature as e:
-        raise LicenseError("entitlement signature is invalid") from e
-    # Only now is the payload trusted enough to parse.
-    claims = _json_object(_b64decode(parts[1]))
+    claims = verify_signed(token, typ=TYP, token_use=TOKEN_USE)
     missing = [c for c in _REQUIRED if c not in claims]
     if missing:
         raise LicenseError(f"entitlement is missing claims: {', '.join(missing)}")
-    if claims["kid"] != kid:
-        raise LicenseError("entitlement kid mismatch")
-    if claims["token_use"] != TOKEN_USE:
-        raise LicenseError("token is not an entitlement")
+    kid = claims["kid"]
     if issuer is not None and claims["iss"] != issuer.rstrip("/"):
         raise LicenseError("entitlement is from a different issuer")
-    aud = claims["aud"]
-    if not (aud == AUDIENCE or (isinstance(aud, list) and AUDIENCE in aud)):
-        raise LicenseError("entitlement is for a different audience")
     feats = claims["features"]
     if not (all(isinstance(claims[c], str) and claims[c] for c in ("sub", "org_id", "plan", "status"))
             and isinstance(feats, list) and all(isinstance(f, str) for f in feats)
