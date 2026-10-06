@@ -347,10 +347,54 @@ def head_sha(cwd: str) -> str:
         raise CIError(f"not a git checkout: {e}") from e
 
 
-def check_run_checkout(plan: dict, cwd: str) -> None:
-    head = head_sha(cwd)
-    if head != plan["base_sha"]:
-        raise CIError(f"the checkout is at {head[:12]}, not the plan's base {plan['base_sha'][:12]}")
+def _has_commit(cwd: str, sha: str) -> bool:
+    return git.ok(["cat-file", "-e", f"{sha}^{{commit}}"], cwd)
+
+
+def _fetch_commit(cwd: str, sha: str, pr: int | None) -> str | None:
+    """Fetch ``sha`` from origin (one commit deep in a shallow clone), else,
+    for a pull request, its ``refs/pull/N/head``. None once the commit is
+    here, else why not."""
+    shallow = git.out(["rev-parse", "--is-shallow-repository"], cwd) == "true"
+    depth = ["--depth=1"] if shallow else []
+    errors = []
+    for ref in [sha] + ([f"refs/pull/{pr}/head"] if pr else []):
+        proc = git.run(["fetch", "--no-tags", "--quiet", *depth, "origin", ref], cwd, check=False)
+        if proc.returncode == 0 and _has_commit(cwd, sha):
+            return None
+        errors.append(f"{ref[:40]}: {(proc.stderr.strip() or proc.stdout.strip() or 'not that commit')[:200]}")
+    return "can't fetch it from origin (" + "; ".join(errors) + ")"
+
+
+def ensure_checkout(cwd: str, sha: str, *, what: str, pr: int | None = None,
+                    say: Callable[[str], None] = print) -> None:
+    """Put the checkout at ``sha``, the signed plan's commit: the workflow may
+    have checked out something else (GitHub's merge commit for a pull
+    request, or a branch that moved since). A worktree with uncommitted
+    changes is never switched."""
+    actual = head_sha(cwd)
+    if actual == sha:
+        return
+    wrong = f"the checkout is at {actual[:12]}, not the plan's {what} {sha[:12]}"
+    dirty = git.dirty_files(cwd, tracked_only=True)
+    if dirty:
+        raise CIError(f"{wrong}, and it has uncommitted changes ({', '.join(dirty[:5])}), so it isn't switched")
+    if not _has_commit(cwd, sha):
+        why = _fetch_commit(cwd, sha, pr)
+        if why:
+            raise CIError(f"{wrong}, and it {why}")
+    try:
+        git.run(["checkout", "--quiet", "--detach", sha], cwd)
+    except git.GitError as e:
+        raise CIError(f"{wrong}, and checking it out failed: {e}") from e
+    now = head_sha(cwd)
+    if now != sha:
+        raise CIError(f"{wrong}, and after checking it out the checkout is at {now[:12]}")
+    say(f"checked out the plan's {what} {sha[:12]} (the workflow had {actual[:12]})")
+
+
+def check_run_checkout(plan: dict, cwd: str, say: Callable[[str], None] = print) -> None:
+    ensure_checkout(cwd, plan["base_sha"], what="base", say=say)
 
 
 def branch_tip(cwd: str, branch: str) -> str | None:
@@ -366,7 +410,7 @@ def branch_tip(cwd: str, branch: str) -> str | None:
     return None
 
 
-def prepare_branch(plan: dict, cwd: str) -> None:
+def prepare_branch(plan: dict, cwd: str, say: Callable[[str], None] = print) -> None:
     """Put the checkout on the plan's branch. A new run cuts the branch from
     the checkout, which must be at ``base_sha``. A continuation (the plan
     carries ``continuation``) checks the existing branch out at its tip,
@@ -374,7 +418,7 @@ def prepare_branch(plan: dict, cwd: str) -> None:
     anything else means the branch moved since."""
     branch, base_sha = plan["branch"], plan["base_sha"]
     if not plan.get("continuation"):
-        check_run_checkout(plan, cwd)
+        check_run_checkout(plan, cwd, say=say)
         try:
             git.run(["checkout", "-B", branch], cwd)
         except git.GitError as e:
@@ -394,10 +438,9 @@ def prepare_branch(plan: dict, cwd: str) -> None:
         raise CIError(f"continuation: the checkout is at {head[:12]}, not {base_sha[:12]}")
 
 
-def check_validation_checkout(plan: dict, cwd: str, head: str | None = None) -> None:
-    actual = head_sha(cwd)
-    if actual != plan["head_sha"]:
-        raise CIError(f"the checkout is at {actual[:12]}, not the plan's head {plan['head_sha'][:12]}")
+def check_validation_checkout(plan: dict, cwd: str, head: str | None = None,
+                              say: Callable[[str], None] = print) -> None:
+    ensure_checkout(cwd, plan["head_sha"], what="head", pr=plan["pr"], say=say)
     if head and head != plan["head_sha"]:
         raise CIError("the plan's head_sha isn't the one asked for")
 
@@ -908,13 +951,13 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
         texts = texts()
     plan = verify_plan(plan_token, repo=repo, now=clock(), texts=texts)
     if plan["plan_kind"] == "validation":
-        check_validation_checkout(plan, cwd)
+        check_validation_checkout(plan, cwd, say=say)
         gone = scrub_secrets(env)
         for k in gone:
             os.environ.pop(k, None)
         return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
                               org=org, clock=clock, say=say)
-    prepare_branch(plan, cwd)
+    prepare_branch(plan, cwd, say=say)
     gone = scrub_secrets(env)
     for k in gone:
         os.environ.pop(k, None)
@@ -1108,8 +1151,8 @@ def run_validation(plan: dict, run_token: str, *, cwd: str, env: MutableMapping[
     evidence when the server answers ``more``. The job's secrets are
     already scrubbed by the caller."""
     repo = plan["repo"]
-    check_validation_checkout(plan, cwd)
-    adapters = adapters or ci_adapters.default_adapters(cwd)
+    check_validation_checkout(plan, cwd, say=say)
+    adapters =adapters or ci_adapters.default_adapters(cwd)
     if org is None:
         org = ci_adapters.repo_is_org(env, repo)
     validation_id = plan["id"]
