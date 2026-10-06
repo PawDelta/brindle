@@ -1138,6 +1138,62 @@ def test_pr_is_fork_from_the_event_payload(tmp_path):
     assert ci_client.pr_is_fork({}, REPO) is False
 
 
+def pr_checkout(repo, tmp_path, pr=7) -> tuple:
+    """A PR (head pushed as refs/pull/N/head, GitHub's merge commit as
+    refs/pull/N/merge) and a shallow clone that checked out the merge commit,
+    the way an older workflow does. Returns (clone, head sha, merge sha)."""
+    origin = tmp_path / "origin.git"
+    sh("git checkout -q -b feature", repo)
+    (repo / "feature.py").write_text("x = 1\n")
+    sh("git add -A && git commit -qm feature", repo)
+    pr_head = head(repo)
+    sh("git checkout -q main", repo)
+    (repo / "other.py").write_text("y = 2\n")
+    sh("git add -A && git commit -qm other && git push -q origin main", repo)
+    sh("git merge -q --no-ff --no-edit feature", repo)
+    merge = head(repo)
+    sh(f"git push -q origin {pr_head}:refs/pull/{pr}/head {merge}:refs/pull/{pr}/merge", repo)
+    clone = tmp_path / "runner"
+    sh(f"git clone -q --depth 1 --no-local file://{origin} {clone}", tmp_path)
+    sh(f"git fetch -q --depth 1 origin refs/pull/{pr}/merge && git checkout -q --detach FETCH_HEAD", clone)
+    return clone, pr_head, merge
+
+
+def test_checkout_switches_from_the_merge_commit_to_the_plans_head(repo, tmp_path):
+    clone, pr_head, merge = pr_checkout(repo, tmp_path)
+    assert head(clone) == merge
+    said = []
+    ci_client.check_validation_checkout({"head_sha": pr_head, "pr": 7}, str(clone), say=said.append)
+    assert head(clone) == pr_head
+    assert said == [f"checked out the plan's head {pr_head[:12]} (the workflow had {merge[:12]})"]
+    said.clear()
+    ci_client.check_validation_checkout({"head_sha": pr_head, "pr": 7}, str(clone), say=said.append)
+    assert head(clone) == pr_head and said == [], "already at the head: nothing to do"
+
+
+def test_checkout_switches_a_run_to_the_plans_base(repo, tmp_path):
+    clone, _, merge = pr_checkout(repo, tmp_path)
+    base = sh("git rev-parse origin/main", repo)
+    said = []
+    ci_client.check_run_checkout({"base_sha": base}, str(clone), say=said.append)
+    assert head(clone) == base and said == [f"checked out the plan's base {base[:12]} (the workflow had {merge[:12]})"]
+
+
+def test_checkout_refuses_an_unreachable_head(repo, tmp_path):
+    clone, _, merge = pr_checkout(repo, tmp_path)
+    with pytest.raises(CIError, match=r"not the plan's head 222222222222, and it can't fetch it from origin \("):
+        ci_client.check_validation_checkout({"head_sha": "2" * 40, "pr": 7}, str(clone), say=lambda s: None)
+    assert head(clone) == merge
+
+
+def test_checkout_never_switches_a_dirty_worktree(repo, tmp_path):
+    clone, pr_head, merge = pr_checkout(repo, tmp_path)
+    (clone / "app.py").write_text("changed\n")
+    with pytest.raises(CIError, match=r"not the plan's head .*uncommitted changes \(app.py\), so it isn't switched"):
+        ci_client.check_validation_checkout({"head_sha": pr_head, "pr": 7}, str(clone), say=lambda s: None)
+    assert head(clone) == merge and (clone / "app.py").read_text() == "changed\n"
+
+
 def test_validate_rejects_the_wrong_head(plan, ci_repo, tmp_path):
     server = Server(plan(), validation_plan=plan("validation", head_sha="2" * 40))
     with pytest.raises(CIError, match="not the plan's head"):
