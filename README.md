@@ -17,7 +17,7 @@ brindle demo        # watch it finish a practice repo in a few minutes
 
 ![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://pawdelta.com/brindle/brindle-demo.gif)
 
-*`brindle demo`, recorded on brindle 0.14.6 (sped up 4×): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
+*`brindle demo`, recorded on brindle 0.0.2 (sped up 4×): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
 
 - **Done means a command passed.** A goal is split into milestones, each with a
   check command that brindle runs itself. A milestone is verified when its check exits

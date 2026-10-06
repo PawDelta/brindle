@@ -81,7 +81,7 @@ TMUX_CMD=(tmux -L "$BRINDLE_TMUX_SOCKET")
 "${TMUX_CMD[@]}" set-option -g default-size "${COLS}x${ROWS}"
 
 # The demo repo is textkit-<stamp>, new every run: whatever appears under
-# ~/.brindle/demo after we start is ours.
+# $BRINDLE_HOME/demo (a throwaway home) after we start is ours.
 before=$(ls -1 "$DEMO_HOME" 2>/dev/null || true)
 new_demo_dir() {
     comm -13 <(printf '%s\n' "$before" | sort) <(ls -1 "$DEMO_HOME" | sort) | head -n 1
