@@ -101,7 +101,8 @@ def org_limits(repo_root: str | None) -> Limits | None:
     spent = p.spend_seat_usd
     if spent is not None and p.spend_month != time.strftime("%Y-%m", time.gmtime()):
         spent = None                      # last month's number
-    lim = Limits(goal_usd=p.budget_goal_usd, month_usd=p.budget_seat_month_usd, seat_spent_usd=spent)
+    lim = Limits(task_usd=p.budget_task_usd, goal_usd=p.budget_goal_usd,
+                 month_usd=p.budget_seat_month_usd, seat_spent_usd=spent)
     return lim if lim.any() else None
 
 
@@ -125,6 +126,7 @@ def limits(cfg, repo_root: str | None = None) -> Limits | None:
         org = Limits(month_usd=0.0, goal_usd=0.0)
     if org is not None:
         lim.org = True
+        lim.task_usd = _tighter(lim.task_usd, org.task_usd)
         lim.goal_usd = _tighter(lim.goal_usd, org.goal_usd)
         lim.month_usd = _tighter(lim.month_usd, org.month_usd)
         lim.seat_spent_usd = org.seat_spent_usd

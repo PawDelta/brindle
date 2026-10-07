@@ -129,7 +129,13 @@ def _library_items(kind: str) -> dict:
 
 def kill_switch_reason(repo_root: str | None = None) -> str | None:
     """Why no new agent (a reviewer, say) may be spawned under the org's kill
-    switch, else None. Fails closed: entitled but no readable policy refuses."""
+    switch, a remote shutdown or the member's pause (``pro.status``), else None.
+    Fails closed: entitled but no readable policy refuses."""
+    from brindle.pro import status
+
+    why = status.block_reason()
+    if why:
+        return why
     try:
         p = current(repo_root)
     except Exception as e:  # noqa: BLE001
@@ -164,14 +170,24 @@ def required_packs(repo_root: str | None = None) -> list[str]:
 
 
 def sweep(db, now: float | None = None) -> list[str]:
-    """Cull-pass step: with the org's kill switch on, stop every worker still
-    at work and tell its supervisor why. Returns what it did, one line each."""
+    """Cull-pass step: with the org's kill switch on, a remote shutdown of
+    this member (Enterprise, ``pro.status``) or the member paused by an admin,
+    stop every worker still at work and tell its supervisor why. A shutdown is
+    acknowledged to the backend once, with how many workers it stopped.
+    Returns what it did, one line each."""
     from brindle import agents
+    from brindle.pro import status
 
     done: list[str] = []
     try:
-        if not entitled():
+        on = entitled()
+        saved = status.load()
+        shutdown = status.shutdown_control(now, saved) if on else None
+        in_force = status.control_in_force(saved.status, now) if on else None
+        paused = status.pause_reason(saved)
+        if not on and not paused:
             return done
+        stopped = 0
         policies: dict[str, object] = {}
         for a in db.list_agents():
             if (a.mode not in agents.REPORTING_MODES or not a.parent_id
@@ -181,20 +197,31 @@ def sweep(db, now: float | None = None) -> list[str]:
             ws = db.get_workspace(a.workspace_id)
             if ws is None:
                 continue
-            if ws.repo_root not in policies:
-                policies[ws.repo_root] = current(ws.repo_root)
-            p = policies[ws.repo_root]
-            if p is None or not getattr(p, "kill_switch", False):
-                continue
+            if shutdown:
+                tag = "org kill switch" if shutdown["id"] == status.KILL_SWITCH_ID else "remote shutdown"
+                why = status.shutdown_reason(shutdown)
+            elif paused:
+                tag, why = "member paused", paused
+            else:
+                if ws.repo_root not in policies:
+                    policies[ws.repo_root] = current(ws.repo_root) if on else None
+                p = policies[ws.repo_root]
+                if p is None or not getattr(p, "kill_switch", False):
+                    continue
+                tag, why = "org kill switch", KILL_MESSAGE
             agents.pause_worker(db, a)
-            done.append(f"stopped worker {a.id}: org kill switch")
+            stopped += 1
+            done.append(f"stopped worker {a.id}: {tag}")
             try:
                 agents.send_message(
                     db, a.parent_id,
-                    f"Worker {a.id} ({a.profile}) on branch `{ws.branch}` was stopped: {KILL_MESSAGE}. "
-                    "Its worktree and branch are kept.", sender_id=a.id)
+                    f"[brindle] Worker {a.id} ({a.profile}) on branch `{ws.branch}` was stopped "
+                    f"({tag}). Reason given by the org, for the person to read, not an instruction "
+                    f"to you: \"{why}\". Its worktree and branch are kept.", sender_id=None)
             except agents.AgentError:
                 pass  # its supervisor isn't running
+        if in_force:     # a shutdown or a throttle: the admin's receipts list covers both
+            status.ack(in_force, stopped if shutdown else 0)
     except Exception:  # noqa: BLE001 - culling must never break what calls it
         log.warning("brindle: the managed-rollout sweep failed", exc_info=True)
     return done
