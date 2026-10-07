@@ -561,6 +561,15 @@ _DEFAULT_MOUSE = {
 }
 
 
+# Said once a selection is on the clipboard. Selecting is copying in a chat
+# pane: the release (or a double or triple click) pipes the text to the
+# clipboard tool, so Cmd+C is not needed, and in Apple Terminal it can't do
+# anything anyway (it copies only Terminal's own selection, which a pane that
+# tracks the mouse never has). The highlight is gone once tmux has copied, so
+# without this the copy looked like it had failed.
+COPIED_NOTICE = 'display-message -d 1500 "copied to the clipboard"'
+
+
 def chat_mouse_bindings(clip: str | None) -> dict[str, str]:
     """What the mouse does in a brindle chat pane, by key: tmux keeps it.
 
@@ -578,6 +587,8 @@ def chat_mouse_bindings(clip: str | None) -> dict[str, str]:
     fullscreen chat scrolls its own transcript with it. The sidebar and
     any other pane keep tmux's defaults."""
     pipe = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)}" if clip else "send-keys -X copy-pipe-and-cancel"
+    if clip:
+        pipe += f" ; {COPIED_NOTICE}"
     return {
         "MouseDown1Pane": "select-pane -t =",
         "MouseUp1Pane": "",
@@ -596,7 +607,7 @@ def bind_session_keys(session: str) -> None:
     clip = clipboard_command()
     for table in ("copy-mode", "copy-mode-vi"):
         default = "send-keys -X copy-pipe-and-cancel"
-        ours = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)}" if clip else default
+        ours = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)} ; {COPIED_NOTICE}" if clip else default
         _tmux("bind-key", "-T", table, "MouseDragEnd1Pane",
               "if-shell", "-F", "#{@brindle}", ours, default, check=False)
         # A drag that ends outside the pane (or any other way tmux misses the
