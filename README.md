@@ -811,7 +811,8 @@ Fix builds only fix the default branch's *required* status checks, and a new
 repository has none. When the default branch requires none, `brindle ci init`
 warns and, for each job in your workflows, asks whether to make it required
 (`--required-check NAME` picks one without asking, `--no-required-check` only
-warns). It adds the check to the branch's existing protection, or protects the
+warns; run without a terminal, init only makes a check required when
+`--required-check` names it). It adds the check to the branch's existing protection, or protects the
 branch with just that check. GitHub only allows branch protection on a private
 repository with a paid plan; when it refuses, init says how to require the
 check yourself (Settings > Branches, "Require status checks to pass").
@@ -836,7 +837,10 @@ IDs as the Actions variables `ANTHROPIC_FEDERATION_RULE_ID`,
 `--service-account-id` and `--workspace-id` or else asked (defaulting to those
 environment variables). Without a terminal on stdin, init asks nothing and
 takes the options and the environment, so it can run unattended; a missing or
-malformed ID stops it before it creates the CI token. Create the federation rule in the Claude Console with
+malformed ID (rule `fdrl_...`, organization a UUID, service account
+`svac_...`, workspace `wrkspc_...`) stops it before it creates the CI token.
+The ID options imply `--credential federation` and can't be combined with
+`--credential key`. Create the federation rule in the Claude Console with
 subject prefix `repo:<owner>/<name>:*`, the condition
 
 ```text

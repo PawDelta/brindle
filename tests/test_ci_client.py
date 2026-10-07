@@ -5,6 +5,7 @@ verification failures, secret scrubbing, air-gap mode and doctor."""
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -18,6 +19,7 @@ from conftest import sh
 from pro_fixtures import BASE, TEST_KID, FakeTransport, b64, pro_env, sign, signing_key  # noqa: F401
 
 REPO = "acme/widgets"
+ORG_UUID = "0f8e2b1c-6a4d-4e3b-9c7a-1d2e3f4a5b6c"
 RUN_TOKEN = "crt_" + "r" * 32
 CI_TOKEN = "cpc_" + "c" * 32
 PLAN_HEADER = {"typ": "brindle-ci-plan+jwt"}
@@ -1458,7 +1460,7 @@ def init_run(ci_repo, monkeypatch):
 
 def test_init_federation_sets_the_variables(init_run):
     answers = {"Claude: API key or identity federation? (key, federation)": "federation",
-               "federation rule id (fdrl_...)": "fdrl_1", "Anthropic organization id (uuid)": "org-uuid",
+               "federation rule id (fdrl_...)": "fdrl_1", "Anthropic organization id (uuid)": ORG_UUID,
                "service account id (svac_...)": "svac_1", "workspace id (wrkspc_..., optional)": ""}
     asked = []
 
@@ -1469,7 +1471,7 @@ def test_init_federation_sets_the_variables(init_run):
     assert asked[0] == "Claude: API key or identity federation? (key, federation)"
     variables = [c[3:] for c in calls if c[:3] == ["gh", "variable", "set"]]
     assert variables == [["ANTHROPIC_FEDERATION_RULE_ID", "--repo", REPO, "--body", "fdrl_1"],
-                         ["ANTHROPIC_ORGANIZATION_ID", "--repo", REPO, "--body", "org-uuid"],
+                         ["ANTHROPIC_ORGANIZATION_ID", "--repo", REPO, "--body", ORG_UUID],
                          ["ANTHROPIC_SERVICE_ACCOUNT_ID", "--repo", REPO, "--body", "svac_1"]]
     secrets = [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]]
     assert secrets == ["BRINDLE_PRO_TOKEN"], "no ANTHROPIC_API_KEY secret with federation"
@@ -1483,11 +1485,11 @@ def test_init_federation_sets_the_variables(init_run):
 def test_init_federation_non_interactive(init_run):
     """--credential federation with the IDs in the environment asks nothing."""
     env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
-           "ANTHROPIC_ORGANIZATION_ID": "org-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
+           "ANTHROPIC_ORGANIZATION_ID": ORG_UUID, "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
            "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
     calls, _ = init_run(credential="federation", env=env)
     variables = {c[3]: c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]}
-    assert variables == {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": "org-uuid",
+    assert variables == {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": ORG_UUID,
                          "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1", "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
 
 
@@ -1502,7 +1504,7 @@ def test_init_federation_needs_the_ids(init_run):
 
 def test_init_bad_federation_workspace_stops_before_the_token(init_run):
     env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
-           "ANTHROPIC_ORGANIZATION_ID": "org-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
+           "ANTHROPIC_ORGANIZATION_ID": ORG_UUID, "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
            "ANTHROPIC_WORKSPACE_ID": "nope"}
     with pytest.raises(CIError, match="workspace ID looks like wrkspc_"):
         init_run(credential="federation", env=env)
@@ -1516,18 +1518,19 @@ def test_init_federation_from_options_asks_nothing(init_run):
         if "required" in q:
             return d
         pytest.fail(f"asked {q!r}")
-    calls, _ = init_run(ask=never, rule_id="fdrl_2", organization_id="org-2", service_account_id="svac_2",
+    calls, _ = init_run(ask=never, rule_id="fdrl_2", organization_id=ORG_UUID, service_account_id="svac_2",
                         workspace_id="wrkspc_2",
                         env={"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_env"})
     assert {c[3]: c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]} == {
-        "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_2", "ANTHROPIC_ORGANIZATION_ID": "org-2",
+        "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_2", "ANTHROPIC_ORGANIZATION_ID": ORG_UUID,
         "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_2", "ANTHROPIC_WORKSPACE_ID": "wrkspc_2"}
     assert [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]] == ["BRINDLE_PRO_TOKEN"]
 
 
 def test_cli_init_without_a_terminal_never_prompts(ci_repo, monkeypatch):
-    """Unattended (stdin not a terminal), every question takes its default
-    instead of aborting, and the federation options reach init."""
+    """Unattended (stdin not a terminal), a question takes its default
+    instead of aborting, except that a [Y/n] one, which changes the
+    repository's settings, is no; the federation options reach init."""
     from typer.testing import CliRunner
 
     from brindle.cli import app
@@ -1540,12 +1543,44 @@ def test_cli_init_without_a_terminal_never_prompts(ci_repo, monkeypatch):
                           kw["ask"]("Mark 'Tests' as required so brindle can fix it when it fails? [Y/n]", "y")]
     monkeypatch.setattr(ci_client, "init", init)
     result = CliRunner().invoke(app, ["ci", "init", "--credential", "federation", "--rule-id", "fdrl_1",
-                                      "--organization-id", "org-1", "--service-account-id", "svac_1",
+                                      "--organization-id", ORG_UUID, "--service-account-id", "svac_1",
                                       "--workspace-id", "wrkspc_1"], input="")
     assert result.exit_code == 0, result.output
-    assert "Aborted" not in result.output and got["answers"] == ["fdrl_env", "y"]
+    assert "Aborted" not in result.output and got["answers"] == ["fdrl_env", "n"]
     assert (got["credential"], got["rule_id"], got["organization_id"], got["service_account_id"],
-            got["workspace_id"]) == ("federation", "fdrl_1", "org-1", "svac_1", "wrkspc_1")
+            got["workspace_id"]) == ("federation", "fdrl_1", ORG_UUID, "svac_1", "wrkspc_1")
+
+
+def test_init_unattended_requires_no_check_without_the_option(init_run, ci_repo):
+    """With the CLI's unattended answers, the branch is only protected when
+    --required-check names the check."""
+    commit_workflow(ci_repo)
+    unattended = lambda q, d: "n" if q.endswith("[Y/n]") else d  # noqa: E731
+    _, said = init_run(credential="key", ask=unattended)
+    assert not protection_writes(init_run) and "Require status checks to pass" in "\n".join(said)
+    init_run(credential="key", ask=unattended, required_check="Tests")
+    assert [w[2]["required_status_checks"]["contexts"] for w in protection_writes(init_run)] == [["Tests"]]
+
+
+@pytest.mark.parametrize("kw, error", [
+    ({"rule_id": "rule-1"}, "ANTHROPIC_FEDERATION_RULE_ID looks like fdrl_..., not 'rule-1'"),
+    ({"organization_id": "org-1"}, "ANTHROPIC_ORGANIZATION_ID looks like a UUID, not 'org-1'"),
+    ({"service_account_id": "sa_1"}, "ANTHROPIC_SERVICE_ACCOUNT_ID looks like svac_..., not 'sa_1'"),
+    ({"credential": "key", "rule_id": "fdrl_1", "service_account_id": "svac_1"},
+     "--rule-id, --service-account-id configure identity federation, not --credential key"),
+])
+def test_init_rejects_bad_federation_options_first(init_run, kw, error):
+    with pytest.raises(CIError, match=re.escape(error)):
+        init_run(**kw)
+    assert not init_run.calls, "nothing ran before the bad option was caught"
+
+
+def test_init_checks_federation_ids_from_the_environment(init_run):
+    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
+           "ANTHROPIC_ORGANIZATION_ID": "not-a-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1"}
+    with pytest.raises(CIError, match="ANTHROPIC_ORGANIZATION_ID looks like a UUID"):
+        init_run(credential="federation", env=env)
+    assert not [c for c in init_run.calls if c[:2] == ["gh", "secret"]]
 
 
 def test_init_key_credential_sets_the_secret(init_run):
@@ -1607,6 +1642,32 @@ def test_init_refuses_to_start_on_the_setup_branch(init_run, ci_repo):
     with pytest.raises(CIError, match="switch off brindle/ci-setup first"):
         init_run(credential="key")
     assert not init_run.calls
+
+
+def test_init_refuses_a_symlink_where_it_writes(init_run, ci_repo, tmp_path):
+    (ci_repo / ".github").mkdir()
+    (ci_repo / ".github/workflows").symlink_to(tmp_path)
+    sh("git add -A && git commit -qm link", ci_repo)   # tracked, but still a symlink
+    with pytest.raises(CIError, match=".github/workflows is a symlink"):
+        init_run(credential="key")
+    assert not init_run.calls and not list(tmp_path.glob("brindle-ci-*"))
+
+
+@pytest.mark.parametrize("kind, error", [("file", "move .github/workflows/brindle-ci-issue.yml away first"),
+                                         ("dangling symlink", "brindle-ci-issue.yml is a symlink")])
+def test_push_setup_branch_checks_the_paths_again(ci_repo, kind, error):
+    """A file that appeared after init's first check (even a dangling
+    symlink, which exists() misses) still stops the write."""
+    (ci_repo / ".github/workflows").mkdir(parents=True)
+    target = ci_repo / ".github/workflows/brindle-ci-issue.yml"
+    if kind == "file":
+        target.write_text("mine\n")
+    else:
+        target.symlink_to(ci_repo / "nowhere")
+    with pytest.raises(CIError, match=error):
+        ci_client.push_setup_branch(str(ci_repo), {".github/workflows/brindle-ci-issue.yml": "name: issue\n"})
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "main"
+    assert sh("git branch --list brindle/ci-setup", ci_repo) == "" and not (ci_repo / "nowhere").exists()
 
 
 def test_init_refuses_an_untracked_file_where_it_writes(init_run, ci_repo):

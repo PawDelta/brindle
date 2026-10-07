@@ -1708,12 +1708,12 @@ def ci_init(
     rule_id: Optional[str] = typer.Option(None, "--rule-id", help="Identity federation: the rule ID (fdrl_...; asked otherwise, defaulting to $ANTHROPIC_FEDERATION_RULE_ID)."),
     organization_id: Optional[str] = typer.Option(None, "--organization-id", help="Identity federation: the Anthropic organization ID (asked otherwise, defaulting to $ANTHROPIC_ORGANIZATION_ID)."),
     service_account_id: Optional[str] = typer.Option(None, "--service-account-id", help="Identity federation: the service account ID (svac_...; asked otherwise, defaulting to $ANTHROPIC_SERVICE_ACCOUNT_ID)."),
-    required_check: Optional[str] = typer.Option(None, "--required-check", metavar="NAME", help="When the default branch requires no status checks: make this check (a workflow job's name) required, without asking. brindle only fixes builds where a required check fails."),
+    required_check: Optional[str] = typer.Option(None, "--required-check", metavar="NAME", help="When the default branch requires no status checks: make this check (a workflow job's name) required, without asking. brindle only fixes builds where a required check fails. Unattended (no terminal), this is the only way init makes a check required."),
     no_required_check: bool = typer.Option(False, "--no-required-check", help="When the default branch requires no status checks: only warn, don't offer to make a job required."),
 ) -> None:
     """Set a repository up for brindle CI: the GitHub App, the secrets, the issue label, a required check, the workflows (as a pull request), then doctor.
 
-    Without a terminal on stdin nothing is asked: each question takes its default (the options, then the environment)."""
+    Without a terminal on stdin nothing is asked: each question takes its default (the options, then the environment), and a yes/no question that would change the repository's settings is answered no."""
     from brindle import ci_client
 
     if required_check and no_required_check:
@@ -1722,7 +1722,8 @@ def ci_init(
 
     def ask(question: str, default: str) -> str:
         if not sys.stdin.isatty():
-            return default
+            # a [Y/n] question changes the repository's settings: unattended, only an option says yes
+            return "n" if question.endswith("[Y/n]") else default
         # a [Y/n] question shows its own default
         return typer.prompt(question, default=default, show_default=not question.endswith("[Y/n]"))
 

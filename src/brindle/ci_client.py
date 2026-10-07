@@ -129,6 +129,12 @@ FEDERATION_OPTIONS = {   # the init option that gives each one without asking
 WORKSPACE_VAR = "ANTHROPIC_WORKSPACE_ID"
 WORKSPACE_QUESTION = "workspace ID (only for an organization-level key; leave blank for a workspace key)"
 WORKSPACE_ID_RE = re.compile(r"^wrkspc_[A-Za-z0-9_-]+$")
+FEDERATION_ID_FORMATS = {   # variable: (pattern, what it looks like)
+    "ANTHROPIC_FEDERATION_RULE_ID": (re.compile(r"^fdrl_[A-Za-z0-9_-]+$"), "fdrl_..."),
+    "ANTHROPIC_ORGANIZATION_ID": (re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$"), "a UUID"),
+    "ANTHROPIC_SERVICE_ACCOUNT_ID": (re.compile(r"^svac_[A-Za-z0-9_-]+$"), "svac_..."),
+    "ANTHROPIC_WORKSPACE_ID": (WORKSPACE_ID_RE, "wrkspc_..."),
+}
 FEDERATION_AUDIENCE = "https://api.anthropic.com"
 FEDERATION_MIN_LIFETIME_S = 7200
 
@@ -1442,9 +1448,18 @@ def check_clean(cwd: str) -> None:
                       f"{auth._sanitize(dirty[0], 100)}): init commits the workflows on a branch of its own")
     if git.current_branch(cwd) == SETUP_BRANCH:
         raise CIError(f"switch off {SETUP_BRANCH} first: init recreates that branch")
-    for kind in SETUP_KINDS:   # a file there that git doesn't track would be overwritten, then removed
-        rel = f"{SETUP_DIR}/brindle-ci-{kind}.yml"
-        if (Path(cwd) / rel).exists() and not git.ok(["ls-files", "--error-unmatch", rel], cwd):
+    check_setup_paths(cwd, [f"{SETUP_DIR}/brindle-ci-{kind}.yml" for kind in SETUP_KINDS])
+
+
+def check_setup_paths(cwd: str, rels) -> None:
+    """Refuse to write a workflow over a file git doesn't track (it would be
+    overwritten, then removed) or through a symlink (the write would land
+    outside the checkout's workflows)."""
+    for rel in rels:
+        for part in [*Path(rel).parents[:-1], Path(rel)]:
+            if os.path.islink(Path(cwd) / part):
+                raise CIError(f"{part} is a symlink: init won't write {rel} through it")
+        if os.path.lexists(Path(cwd) / rel) and not git.ok(["ls-files", "--error-unmatch", rel], cwd):
             raise CIError(f"move {rel} away first: init writes the workflow there, and git doesn't track it")
 
 
@@ -1453,8 +1468,9 @@ def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
     checkout back where it was (also when a step fails) and delete the local
     setup branch, so the next ``git pull`` after the setup pull request is
     squash-merged doesn't diverge."""
+    check_setup_paths(cwd, files)   # again: the tree may have changed since init started
     start = git.current_branch(cwd)
-    back = ["checkout", "--quiet", start] if start else ["checkout", "--quiet", "--detach", head_sha(cwd)]
+    back =["checkout", "--quiet", start] if start else ["checkout", "--quiet", "--detach", head_sha(cwd)]
     git.run(["checkout", "-B", SETUP_BRANCH], cwd)
     committed = False
     new: list[Path] = []   # files and folders init creates, which git can't restore
@@ -1517,6 +1533,18 @@ def _set_key_workspace(repo: str, value: str, *, run=subprocess.run, say: Callab
     say(f"   {WORKSPACE_VAR} set: requests carry the anthropic-workspace-id header")
 
 
+def _federation_id(name: str, value: str) -> str:
+    """``value`` stripped, or :class:`CIError` when it isn't blank and doesn't
+    look like the ID ``name`` holds."""
+    if name == WORKSPACE_VAR:
+        return _workspace_id(value)
+    value = value.strip()
+    pattern, looks = FEDERATION_ID_FORMATS[name]
+    if value and not pattern.match(value):
+        raise CIError(f"{name} looks like {looks}, not {auth._sanitize(value, 40)!r}")
+    return value
+
+
 def federation_ids(env: Mapping[str, str], ask: Callable[[str, str], str] | None,
                    given: Mapping[str, str | None]) -> dict[str, str]:
     """Claude's workload identity federation IDs, by variable name: from
@@ -1527,9 +1555,7 @@ def federation_ids(env: Mapping[str, str], ask: Callable[[str, str], str] | None
     values = {}
     for name, question, required in FEDERATION_VARS:
         value = given.get(name)
-        value = (asker(question, env.get(name) or "") if value is None else value).strip()
-        if name == WORKSPACE_VAR:
-            value = _workspace_id(value)
+        value = _federation_id(name, asker(question, env.get(name) or "") if value is None else value)
         if not value:
             if required:
                 raise CIError(f"{name} is required for identity federation "
@@ -1590,6 +1616,12 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         workspace_id = _workspace_id(workspace_id)
     given_ids = {"ANTHROPIC_FEDERATION_RULE_ID": rule_id, "ANTHROPIC_ORGANIZATION_ID": organization_id,
                  "ANTHROPIC_SERVICE_ACCOUNT_ID": service_account_id, WORKSPACE_VAR: workspace_id}
+    fed_options = [FEDERATION_OPTIONS[k] for k, v in given_ids.items() if v is not None and k != WORKSPACE_VAR]
+    if fed_options and credential == KEY:
+        raise CIError(f"{', '.join(fed_options)} configure identity federation, not --credential key")
+    for name, value in given_ids.items():
+        if value is not None:
+            given_ids[name] = _federation_id(name, value)
     if repo:
         if not REPO_RE.match(repo):
             raise CIError("repository must be owner/name (pass --repo)")
@@ -1619,7 +1651,7 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         providers = [p.strip() for p in answer.split(",") if p.strip()]
     federation = workspace = None
     if "claude" in providers:
-        if credential is None and any(v is not None for k, v in given_ids.items() if k != WORKSPACE_VAR):
+        if credential is None and fed_options:
             credential = FEDERATION   # a federation ID option answers the question
         if _claude_credential(credential, ask) == FEDERATION:
             federation = federation_ids(env, ask, given_ids)
