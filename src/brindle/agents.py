@@ -1801,9 +1801,18 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
         return
     supervisor_id = reviewer.parent_id
     sha = gates.head(ws)  # label with the commit the checks ran on
+
+    def settled() -> bool:
+        # The reviewer already gave its verdict on this commit, or the branch
+        # moved on: nobody is waiting for this run, so don't hold a slot.
+        review = db.latest_review(ws.id, sha)
+        return (review is not None and review.reviewer_id == reviewer_id) or gates.head(ws) != sha
+
     try:
-        summary = gates.check_summary(db, ws, cfg)
+        summary = gates.check_summary(db, ws, cfg, cancel=settled)
         failed = gates.summary_failed(summary)
+    except gates.Abandoned:
+        return
     except Exception as e:
         summary, failed = f"(running the checks crashed: {e})", True
 

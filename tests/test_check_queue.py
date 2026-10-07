@@ -224,6 +224,128 @@ def test_a_slow_milestone_check_in_the_supervisors_checkout_reaches_it(db, sessi
     assert gates.supervisor_id(db, ws) == "boss"
 
 
+def test_slow_warning_fires_at_75_percent_of_a_short_timeout(db, repo, monkeypatch):
+    ws = branch(db, repo, "one")
+    started = []
+
+    class FakeTimer:
+        def __init__(self, after, fn, args=()):
+            started.append(after)
+            self.daemon = False
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(gates.threading, "Timer", FakeTimer)
+    monkeypatch.setattr(db, "path", "/some/real.db", raising=False)
+    # slow_after(100) = 200, past the 120s timeout: warn at 75% of it instead.
+    assert gates._watch_slow(db, ws, "suite", 100.0, 120) is not None
+    assert started == [90.0]
+    # A long timeout keeps the usual mark.
+    gates._watch_slow(db, ws, "suite", 100.0, 10_000)
+    assert started[-1] == gates.slow_after(100.0)
+
+
+# -- stale and redundant runs ----------------------------------------------------------
+
+
+def test_a_run_on_a_commit_the_branch_left_gives_up_and_frees_its_slot(db, repo, monkeypatch):
+    configure(repo, check_concurrency=1)
+    monkeypatch.setattr(autopilot, "CANCEL_POLL", 0.05)
+    ws = branch(db, repo, "one")
+    sha = gates.head(ws)
+    (Path(ws.path) / "more.py").write_text("y = 1\n")
+    sh("git add -A && git commit -qm more", Path(ws.path))   # the head moves on
+    t0 = time.monotonic()
+    with pytest.raises(gates.Abandoned):
+        gates.run_checked(db, ws, "sleep 30", {}, 60, cancel=lambda: gates.head(ws) != sha)
+    assert time.monotonic() - t0 < 10
+    with gates._check_slot(1):   # would hang if the stale run still held the slot
+        pass
+
+
+def test_warm_checks_gives_up_when_the_head_moves(db, repo, monkeypatch):
+    from brindle import cli
+
+    ws = branch(db, repo, "one")
+    seen = {}
+
+    def fake_summary(db_, ws_, cfg, cancel=None):
+        seen["before"] = cancel()
+        (Path(ws.path) / "more.py").write_text("y = 1\n")
+        sh("git add -A && git commit -qm more", Path(ws.path))
+        seen["after"] = cancel()
+        raise gates.Abandoned("x")
+
+    monkeypatch.setattr(gates, "check_summary", fake_summary)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    cli.warm_checks_cmd(ws.id)    # swallows Abandoned
+    assert seen == {"before": False, "after": True}
+
+
+def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monkeypatch):
+    configure(repo, check_concurrency=0)
+    ws = branch(db, repo, "one")
+    calls = []
+
+    def failing(cmd, cwd, env, timeout, **kw):
+        calls.append(cmd)
+        time.sleep(0.3)
+        return False, "boom (timed out)"
+
+    monkeypatch.setattr(autopilot, "run_check", failing)
+    results = []
+
+    def run(i):
+        time.sleep(0.05 * i)
+        results.append(gates.run_checked(DB(), ws, "suite", {}, 30))
+
+    in_threads(3, run)
+    assert calls == ["suite"]
+    assert results == [(False, "boom (timed out)")] * 3
+
+
+def test_a_failure_from_before_the_wait_is_not_reused(db, repo, monkeypatch):
+    configure(repo, check_concurrency=0)
+    ws = branch(db, repo, "one")
+    calls = []
+    monkeypatch.setattr(autopilot, "run_check",
+                        lambda *a, **kw: (calls.append(1), (False, "no"))[1])
+    gates.run_checked(db, ws, "suite", {}, 30)
+    gates.run_checked(db, ws, "suite", {}, 30)    # a plain retry still runs
+    assert len(calls) == 2
+
+
+def test_deliver_checks_exits_once_the_reviewer_has_reviewed_this_commit(db, session, monkeypatch):
+    root, ws = session
+    configure(Path(ws.repo_root), check_concurrency=1)
+    monkeypatch.setattr(autopilot, "CANCEL_POLL", 0.05)
+    add(db, ws, "rev", "review", "reviewer", parent="boss", status="processing")
+    sha = gates.head(ws)
+    threading.Timer(0.3, lambda: DB().add_review(ws.id, sha, "rev", True, "ok")).start()
+    t0 = time.monotonic()
+    agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=["sleep 30"], check_timeout=60))
+    assert time.monotonic() - t0 < 10
+    assert inbox(db, "rev") == [] and inbox(db, "boss") == []
+    with gates._check_slot(1):   # the slot was freed
+        pass
+
+
+def test_deliver_checks_exits_while_waiting_for_a_slot(db, session, monkeypatch):
+    root, ws = session
+    configure(Path(ws.repo_root), check_concurrency=1)
+    monkeypatch.setattr(gates, "SLOT_POLL", 0.02)
+    add(db, ws, "rev", "review", "reviewer", parent="boss", status="processing")
+    db.add_review(ws.id, gates.head(ws), "rev", True, "ok")
+    monkeypatch.setattr(autopilot, "run_check", lambda *a, **kw: pytest.fail("must not run"))
+    with gates._check_slot(1):    # the slot is taken, so the run has to wait
+        agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=["suite"]))
+    assert inbox(db, "rev") == []
+
+
 # -- a summary that arrives after the review -------------------------------------------
 
 
