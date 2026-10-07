@@ -1629,6 +1629,30 @@ def _audit_repo(repo: Optional[str]) -> str:
         return os.path.abspath(start)
 
 
+org_app = typer.Typer(help="Your org's messages (brindle Pro Team).")
+app.add_typer(org_app, name="org")
+
+
+@org_app.command("messages")
+def org_messages(
+    keep: bool = typer.Option(False, "--keep", help="Don't mark the messages read."),
+) -> None:
+    """List the notices your org's admins sent you, and mark them read."""
+    from brindle.pro import status
+
+    notes, fresh = status.fetch_messages()
+    if not notes:
+        typer.echo("No new messages." if fresh else "No messages (couldn't reach the org; "
+                   "these are the last ones seen).")
+        return
+    for n in notes:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(n["at"])) if n["at"] else ""
+        who = n["from_role"] + (" (to everyone)" if n["scope"] == "org" else "")
+        typer.echo(f"{when}  {who}: {n['text']}".strip())
+    if fresh and not keep:
+        status.mark_read([n["id"] for n in notes])
+
+
 @audit_app.command("verify")
 def audit_verify(
     repo: Optional[str] = typer.Option(None, "--repo", help="The repo whose log to verify (default: here)."),

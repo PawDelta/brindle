@@ -714,10 +714,11 @@ how to use them, and the next step to get the rest:
 | Brindle-CI (fixes builds, issues into verified pull requests, validation) | Team | `brindle ci init` |
 | org profile and rule-pack library, pinned so a repo can't loosen it | Team | `brindle account org profiles` |
 | org budgets and protected paths | Team | `budget`, `protected_paths` in your org policy (`brindle account org policy`) |
+| per-member budgets, pause, and admin messages (sidebar "Messages", the bottom bar, `brindle org messages`) | Team | `brindle org messages [--keep]` lists and marks read the notices your admins sent you; a pause refuses new workers and stops running ones |
 | audit log, air-gap | Enterprise | `brindle audit verify`, `"airgap": true` |
 | audit export | Enterprise | `"audit_export"` in `~/.brindle/config.json`, `brindle audit ship` |
 | managed models | Enterprise | `provider_config`, `deny_personal_keys` in your org policy (see "Managed models" below) |
-| wider CI, cost centers, managed rollout | Enterprise | `brindle ci init --host gitlab`, `brindle cost request`, and `min_version`, required packs and the kill switch in your org policy |
+| wider CI, cost centers, managed rollout | Enterprise | `brindle ci init --host gitlab`, `brindle cost request`, and `min_version`, required packs and the kill switch in your org policy; admins can also shut down or throttle a member, role or org remotely (it arrives within about a minute) |
 
 `brindle ci init` checks your plan before it changes anything: it refuses
 without Brindle-CI on the org you're using, and on Pro it sets up only the fix

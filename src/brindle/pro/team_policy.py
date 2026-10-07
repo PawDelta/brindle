@@ -34,6 +34,7 @@ from dataclasses import dataclass, field, replace
 from brindle.policy import AssignInfo, Decision, MergeInfo, PolicyPlugin, allow, deny
 
 from brindle.pro._files import private_dir, read_private, write_private
+from brindle.pro.status import clean
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +95,15 @@ class OrgPolicy:
     # backend counts it (``spend``, next to the policy).
     budget_seat_month_usd: float | None = None
     budget_goal_usd: float | None = None
+    budget_task_usd: float | None = None      # per task (a missing one: no limit, old servers)
     protected_paths: tuple[str, ...] = ()
+    # Per-member budgets: the caller's resolved ``paused`` throttle, where each budget
+    # field came from ("everyone" | "role" | "custom_role" | "member"), and, for
+    # admins only, the per-member overrides.
+    paused: bool = False
+    paused_reason: str | None = None
+    budget_sources: dict = field(default_factory=dict)
+    member_overrides: dict = field(default_factory=dict)
     spend_seat_usd: float | None = None
     spend_month: str | None = None
     # Enterprise "managed_rollout" (see brindle.pro.rollout): org-wide, so the
@@ -118,8 +127,12 @@ class OrgPolicy:
 
     def budgets(self) -> dict:
         return {"budget": {"seat_month_usd": self.budget_seat_month_usd,
-                           "goal_usd": self.budget_goal_usd},
-                "protected_paths": list(self.protected_paths)}
+                           "goal_usd": self.budget_goal_usd,
+                           "task_usd": self.budget_task_usd},
+                "protected_paths": list(self.protected_paths),
+                "paused": self.paused, "paused_reason": self.paused_reason,
+                "budget_sources": dict(self.budget_sources),
+                "member_overrides": {k: dict(v) for k, v in self.member_overrides.items()}}
 
     def rollout(self) -> dict:
         return {"min_version": self.min_version,
@@ -198,9 +211,26 @@ def _budgets(p: dict) -> dict:
     if (not isinstance(paths, list) or len(paths) > MAX_PROTECTED_PATHS
             or not all(isinstance(g, str) and g.strip() for g in paths)):
         raise PolicyUnavailable("malformed protected_paths")
+    paused = p.get("paused", False)
+    if paused is None:
+        paused = False
+    if not isinstance(paused, bool):
+        raise PolicyUnavailable("malformed paused")
+    reason = p.get("paused_reason")
+    sources = p.get("budget_sources")
+    overrides = p.get("member_overrides")
+    if not (sources is None or isinstance(sources, dict)) or not (
+            overrides is None or isinstance(overrides, dict)):
+        raise PolicyUnavailable("malformed budget sources")
     return {"budget_seat_month_usd": _usd(budget.get("seat_month_usd"), "budget"),
             "budget_goal_usd": _usd(budget.get("goal_usd"), "budget"),
-            "protected_paths": tuple(paths)}
+            "budget_task_usd": _usd(budget.get("task_usd"), "budget"),
+            "protected_paths": tuple(paths), "paused": paused,
+            "paused_reason": (clean(reason)[:200] or None) if isinstance(reason, str) else None,
+            "budget_sources": {k: v for k, v in (sources or {}).items()
+                               if isinstance(k, str) and isinstance(v, str)},
+            "member_overrides": {k: v for k, v in list((overrides or {}).items())[:4096]
+                                 if isinstance(k, str) and isinstance(v, dict)}}
 
 
 def _rollout(p: dict) -> dict:
@@ -453,7 +483,11 @@ class ProPolicy(PolicyPlugin):
         from brindle import airgap
 
         try:
-            return current_policy(ent, self._client, self._store, self.repo_root).enforced
+            from brindle.pro import status
+
+            # A throttle from the org's remote control narrows the member's own policy.
+            return status.narrow(current_policy(ent, self._client, self._store,
+                                                self.repo_root).enforced)
         except PolicyUnavailable as e:
             if airgap.enabled():
                 return deny(f"air-gap mode: no usable offline team policy for org {ent.org_id} "
@@ -502,11 +536,14 @@ class ProPolicy(PolicyPlugin):
         p = self.policy()
         if isinstance(p, Decision):
             return p
-        from brindle.pro import rollout
+        from brindle.pro import rollout, status
 
         why = rollout.refusal(p) if rollout.entitled() else None
         if why:
             return deny(why)
+        why = status.block_reason(p)       # paused, or shut down remotely
+        if why:
+            return deny(f"org {p.org_id}: {why}")
         who = f"profile {info.profile!r}" if info.profile else "this delegation"
         if p.allowed_providers is not None and info.provider not in p.allowed_providers:
             got = f"provider {info.provider!r}" if info.provider else "an undeclared provider"
