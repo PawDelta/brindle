@@ -56,6 +56,7 @@ class Event:
     workspace_id: str | None = None
     reason: str | None = None
     cost_usd: float | None = None   # what the worker's task cost (a ``remove`` of a Team org member)
+    by_model: dict | None = None    # that cost split by model: {model: {"tokens", "usd"}}
 
 
 class EventsPlugin(ABC):
@@ -117,6 +118,44 @@ def _cost(kind: str, worker: Agent | None, repo_root: str) -> float | None:
         return None
 
 
+def _by_model(kind: str, worker: Agent | None, repo_root: str,
+              cost_usd: float | None = None) -> dict | None:
+    """``{model: {"tokens", "usd"}}`` for the spend ``_cost`` covers, under the
+    same conditions. Unpriced tokens count with ``usd`` 0. When ``cost_usd``
+    (which can include live usage) exceeds what the history rows add up to,
+    the remainder is an "unknown model" entry with no tokens, so the split
+    sums to ``cost_usd``."""
+    if kind != "remove" or worker is None:
+        return None
+    try:
+        from brindle import cost
+        from brindle.db import DB
+        from brindle.pro import license
+
+        if not license.has("org_budgets"):
+            return None
+        db = DB()
+        pricer = cost.Pricer(repo_root)
+        out: dict[str, dict] = {}
+        for r in cost.rows_since(db, repo_root, 0.0):
+            if r.agent_id != worker.id:
+                continue
+            p = pricer.row(r)
+            if p is None:
+                continue
+            slot = out.setdefault(cost.model_label(p), {"tokens": 0, "usd": 0.0})
+            slot["tokens"] += p.tokens
+            slot["usd"] += p.dollars or 0.0
+        rest = round((cost_usd or 0.0) - sum(b["usd"] for b in out.values()), 4)
+        if rest > 0:
+            slot = out.setdefault("unknown model", {"tokens": 0, "usd": 0.0})
+            slot["usd"] += rest
+        return out or None
+    except Exception:
+        log.debug("brindle: couldn't split %s by model for the event", worker.id, exc_info=True)
+        return None
+
+
 def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None, *,
          actor: Agent | str | None = None, approved: bool | None = None,
          merged: bool | None = None) -> None:
@@ -124,13 +163,15 @@ def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None,
     ``ws``. Does nothing without a plugin, and never raises."""
     try:
         who = actor.id if isinstance(actor, Agent) else (actor or "user")
+        cost_usd = _cost(kind, worker, ws.repo_root)
         _dispatch(cfg, Event(
             kind=kind, repo_root=ws.repo_root, agent_id=worker.id if worker else None,
             branch=ws.branch, profile=worker.profile if worker else None,
             provider=worker.provider if worker else None,
             model=_model(worker.profile if worker else None, ws.repo_root),
             actor=who, approved=approved, merged=merged, workspace_id=ws.id,
-            cost_usd=_cost(kind, worker, ws.repo_root),
+            cost_usd=cost_usd,
+            by_model=_by_model(kind, worker, ws.repo_root, cost_usd),
         ))
     except Exception:
         log.exception("brindle: the events plugin failed on a %s event", kind)
