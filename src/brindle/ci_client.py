@@ -117,6 +117,12 @@ FEDERATION_VARS = (   # (variable, question, required)
     ("ANTHROPIC_SERVICE_ACCOUNT_ID", "service account id (svac_...)", True),
     ("ANTHROPIC_WORKSPACE_ID", "workspace id (wrkspc_..., optional)", False),
 )
+FEDERATION_OPTIONS = {   # the init option that gives each one without asking
+    "ANTHROPIC_FEDERATION_RULE_ID": "--rule-id",
+    "ANTHROPIC_ORGANIZATION_ID": "--organization-id",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID": "--service-account-id",
+    "ANTHROPIC_WORKSPACE_ID": "--workspace-id",
+}
 # An organization-level API key (not scoped to a workspace) needs the
 # workspace in every request: the workflow sends it as an
 # anthropic-workspace-id header (ANTHROPIC_CUSTOM_HEADERS) from this variable.
@@ -1492,36 +1498,53 @@ def _workspace_id(value: str) -> str:
     return value
 
 
-def _set_key_workspace(repo: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None,
-                       given: str | None, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
-    """For an organization-level API key, store its workspace as the
-    ``ANTHROPIC_WORKSPACE_ID`` Actions variable (not a secret), which the
-    workflow turns into the anthropic-workspace-id header. ``given`` (from
-    --workspace-id) skips the question, which defaults to the variable in ``env``."""
+def key_workspace(env: Mapping[str, str], ask: Callable[[str, str], str] | None, given: str | None) -> str:
+    """An organization-level API key's workspace ("" for a workspace key).
+    ``given`` (from --workspace-id) skips the question, which defaults to
+    the variable in ``env``."""
     if given is None:
         given = (ask or (lambda q, d: d))(WORKSPACE_QUESTION, env.get(WORKSPACE_VAR) or "")
-    value = _workspace_id(given)
+    return _workspace_id(given)
+
+
+def _set_key_workspace(repo: str, value: str, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
+    """Store the :func:`key_workspace` as the ``ANTHROPIC_WORKSPACE_ID``
+    Actions variable (not a secret), which the workflow turns into the
+    anthropic-workspace-id header."""
     if not value:
         return
     _gh(["variable", "set", WORKSPACE_VAR, "--repo", repo, "--body", value], run=run)
     say(f"   {WORKSPACE_VAR} set: requests carry the anthropic-workspace-id header")
 
 
-def _set_federation(repo: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None, *,
-                    run=subprocess.run, say: Callable[[str], None] = print) -> None:
-    """Store Claude's workload identity federation IDs as the repository's
-    Actions variables (they aren't secrets). Each question defaults to the
-    variable in ``env``, so a scripted init can pass them that way."""
+def federation_ids(env: Mapping[str, str], ask: Callable[[str, str], str] | None,
+                   given: Mapping[str, str | None]) -> dict[str, str]:
+    """Claude's workload identity federation IDs, by variable name: from
+    ``given`` (the --rule-id, ... options), else asked with the variable in
+    ``env`` as the default, so a scripted init can pass them either way.
+    Raises :class:`CIError` for a missing or malformed one."""
     asker = ask or (lambda q, d: d)
-    say("   claude: identity federation; the IDs are stored as Actions variables")
+    values = {}
     for name, question, required in FEDERATION_VARS:
-        value = asker(question, env.get(name) or "").strip()
+        value = given.get(name)
+        value = (asker(question, env.get(name) or "") if value is None else value).strip()
         if name == WORKSPACE_VAR:
             value = _workspace_id(value)
         if not value:
             if required:
-                raise CIError(f"{name} is required for identity federation")
+                raise CIError(f"{name} is required for identity federation "
+                              f"(pass {FEDERATION_OPTIONS[name]} or set ${name})")
             continue
+        values[name] = value
+    return values
+
+
+def _set_federation(repo: str, values: Mapping[str, str], *, run=subprocess.run,
+                    say: Callable[[str], None] = print) -> None:
+    """Store the :func:`federation_ids` as the repository's Actions variables
+    (they aren't secrets)."""
+    say("   claude: identity federation; the IDs are stored as Actions variables")
+    for name, value in values.items():
         _gh(["variable", "set", name, "--repo", repo, "--body", value], run=run)
         say(f"   {name} set")
     say(f"   create the federation rule in the Claude Console: subject prefix repo:{repo}:*, "
@@ -1541,14 +1564,19 @@ def federation_condition(repo: str) -> str:
 def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd: str, env: Mapping[str, str],
          base: str | None = None, run=subprocess.run, open_url: Callable[[str], None] | None = None,
          ask: Callable[[str, str], str] | None = None, account=None, client: Client | None = None,
-         credential: str | None = None, workspace_id: str | None = None, required_check: str | None = None,
-         no_required_check: bool = False, say: Callable[[str], None] = print) -> None:
+         credential: str | None = None, workspace_id: str | None = None, rule_id: str | None = None,
+         organization_id: str | None = None, service_account_id: str | None = None,
+         required_check: str | None = None, no_required_check: bool = False,
+         say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
     :class:`brindle.pro.account.ProAccount` (the person's brindle Pro
     login; built with ``make`` when not given), ``ask(question, default)`` asks the person, ``open_url`` opens
     the browser. ``credential`` is how Claude signs in (``key`` or
     ``federation``; asked when not given). ``workspace_id`` is the workspace
-    of an organization-level API key (asked after the key when not given).
+    of an organization-level API key or of federation, and ``rule_id``,
+    ``organization_id``, ``service_account_id`` the federation IDs (each
+    asked when not given). Every credential input is settled before step 3
+    creates the CI token, so a missing or bad one never leaves a token behind.
     ``required_check`` / ``no_required_check`` answer the required-check
     question (see :func:`setup_required_checks`)."""
     import webbrowser
@@ -1560,6 +1588,8 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         credential = _claude_credential(credential, None)
     if workspace_id is not None:
         workspace_id = _workspace_id(workspace_id)
+    given_ids = {"ANTHROPIC_FEDERATION_RULE_ID": rule_id, "ANTHROPIC_ORGANIZATION_ID": organization_id,
+                 "ANTHROPIC_SERVICE_ACCOUNT_ID": service_account_id, WORKSPACE_VAR: workspace_id}
     if repo:
         if not REPO_RE.match(repo):
             raise CIError("repository must be owner/name (pass --repo)")
@@ -1583,6 +1613,19 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     say(f"2/8 install the brindle GitHub App for {repo}: {install_url}")
     (open_url or webbrowser.open)(install_url)
 
+    if providers is None:
+        installed = [n for n, a in ci_adapters.default_adapters(cwd).items() if a.cli and a.installed()]
+        answer = (ask or (lambda q, d: d))("which providers? (claude, codex)", ",".join(installed) or "claude")
+        providers = [p.strip() for p in answer.split(",") if p.strip()]
+    federation = workspace = None
+    if "claude" in providers:
+        if credential is None and any(v is not None for k, v in given_ids.items() if k != WORKSPACE_VAR):
+            credential = FEDERATION   # a federation ID option answers the question
+        if _claude_credential(credential, ask) == FEDERATION:
+            federation = federation_ids(env, ask, given_ids)
+        else:
+            workspace = key_workspace(env, ask, workspace_id)
+
     say("3/8 creating the org CI token and storing it as the BRINDLE_PRO_TOKEN secret")
     got = auth.create_ci_token(plugin._client(base), plugin.store, org_id, f"ci:{repo}")
     cpc = got["token"]
@@ -1590,14 +1633,10 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     say(f"   token {got['token_id']} created for org {got['org_id']} (the value is only in the secret)")
 
     say("4/8 model keys: each one goes into gh's own prompt; brindle never sees it")
-    if providers is None:
-        installed = [n for n, a in ci_adapters.default_adapters(cwd).items() if a.cli and a.installed()]
-        answer = (ask or (lambda q, d: d))("which providers? (claude, codex)", ",".join(installed) or "claude")
-        providers = [p.strip() for p in answer.split(",") if p.strip()]
     secret_names = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
     for p in providers:
-        if p == "claude" and _claude_credential(credential, ask) == FEDERATION:
-            _set_federation(repo, env, ask, run=run, say=say)
+        if p == "claude" and federation is not None:
+            _set_federation(repo, federation, run=run, say=say)
             continue
         name = secret_names.get(p)
         if not name:
@@ -1606,7 +1645,7 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         say(f"   {p}: paste the key for {name}")
         _gh(["secret", "set", name, "--repo", repo], run=run, interactive=True)
         if p == "claude":
-            _set_key_workspace(repo, env, ask, workspace_id, run=run, say=say)
+            _set_key_workspace(repo, workspace or "", run=run, say=say)
 
     say(f"5/8 creating the '{TRIGGER_LABEL}' issue label")
     create_label(repo, run=run, say=say)

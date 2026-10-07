@@ -832,7 +832,11 @@ organization repositories), and gives the job `ANTHROPIC_AUTH_TOKEN`. `brindle
 ci init` stores the rule, organization, service account and optional workspace
 IDs as the Actions variables `ANTHROPIC_FEDERATION_RULE_ID`,
 `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
-`ANTHROPIC_WORKSPACE_ID`. Create the federation rule in the Claude Console with
+`ANTHROPIC_WORKSPACE_ID`, from `--rule-id`, `--organization-id`,
+`--service-account-id` and `--workspace-id` or else asked (defaulting to those
+environment variables). Without a terminal on stdin, init asks nothing and
+takes the options and the environment, so it can run unattended; a missing or
+malformed ID stops it before it creates the CI token. Create the federation rule in the Claude Console with
 subject prefix `repo:<owner>/<name>:*`, the condition
 
 ```text

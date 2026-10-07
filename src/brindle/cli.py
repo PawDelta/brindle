@@ -1704,22 +1704,32 @@ def ci_init(
     org: Optional[str] = typer.Option(None, "--org", help="The brindle Team org whose CI token to use."),
     providers: Optional[str] = typer.Option(None, "--providers", help="Comma-separated providers to set keys for (asked otherwise)."),
     credential: Optional[str] = typer.Option(None, "--credential", help="How Claude signs in: key (the ANTHROPIC_API_KEY secret) or federation (workload identity federation; asked otherwise)."),
-    workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="With an organization-level API key: its workspace (wrkspc_...), stored as the ANTHROPIC_WORKSPACE_ID variable (asked otherwise, defaulting to $ANTHROPIC_WORKSPACE_ID)."),
+    workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="With an organization-level API key or identity federation: the workspace (wrkspc_...), stored as the ANTHROPIC_WORKSPACE_ID variable (asked otherwise, defaulting to $ANTHROPIC_WORKSPACE_ID)."),
+    rule_id: Optional[str] = typer.Option(None, "--rule-id", help="Identity federation: the rule ID (fdrl_...; asked otherwise, defaulting to $ANTHROPIC_FEDERATION_RULE_ID)."),
+    organization_id: Optional[str] = typer.Option(None, "--organization-id", help="Identity federation: the Anthropic organization ID (asked otherwise, defaulting to $ANTHROPIC_ORGANIZATION_ID)."),
+    service_account_id: Optional[str] = typer.Option(None, "--service-account-id", help="Identity federation: the service account ID (svac_...; asked otherwise, defaulting to $ANTHROPIC_SERVICE_ACCOUNT_ID)."),
     required_check: Optional[str] = typer.Option(None, "--required-check", metavar="NAME", help="When the default branch requires no status checks: make this check (a workflow job's name) required, without asking. brindle only fixes builds where a required check fails."),
     no_required_check: bool = typer.Option(False, "--no-required-check", help="When the default branch requires no status checks: only warn, don't offer to make a job required."),
 ) -> None:
-    """Set a repository up for brindle CI: the GitHub App, the secrets, the issue label, a required check, the workflows (as a pull request), then doctor."""
+    """Set a repository up for brindle CI: the GitHub App, the secrets, the issue label, a required check, the workflows (as a pull request), then doctor.
+
+    Without a terminal on stdin nothing is asked: each question takes its default (the options, then the environment)."""
     from brindle import ci_client
 
     if required_check and no_required_check:
         _fail("--required-check and --no-required-check don't go together")
     names = [p.strip() for p in providers.split(",") if p.strip()] if providers else None
+
+    def ask(question: str, default: str) -> str:
+        if not sys.stdin.isatty():
+            return default
+        # a [Y/n] question shows its own default
+        return typer.prompt(question, default=default, show_default=not question.endswith("[Y/n]"))
+
     _ci_call(ci_client.init, repo=repo, org=org, providers=names, cwd=os.getcwd(), env=os.environ,
-             credential=credential, workspace_id=workspace_id, required_check=required_check,
-             no_required_check=no_required_check,
-             # a [Y/n] question shows its own default
-             ask=lambda q, d: typer.prompt(q, default=d, show_default=not q.endswith("[Y/n]")),
-             say=typer.echo)
+             credential=credential, workspace_id=workspace_id, rule_id=rule_id, organization_id=organization_id,
+             service_account_id=service_account_id, required_check=required_check,
+             no_required_check=no_required_check, ask=ask, say=typer.echo)
 
 
 # -- internal ----------------------------------------------------------------

@@ -1452,7 +1452,7 @@ def init_run(ci_repo, monkeypatch):
                        open_url=lambda url: None, account=Plugin(), client=ci_client.Client(BASE, t),
                        say=said.append, **kw)
         return calls, said
-    go.calls, go.inputs = calls, inputs
+    go.calls, go.inputs, go.said = calls, inputs, said
     return go
 
 
@@ -1492,8 +1492,60 @@ def test_init_federation_non_interactive(init_run):
 
 
 def test_init_federation_needs_the_ids(init_run):
-    with pytest.raises(CIError, match="ANTHROPIC_FEDERATION_RULE_ID is required"):
+    """A missing ID stops init before step 3 creates the CI token, so none is left orphaned."""
+    with pytest.raises(CIError, match=r"ANTHROPIC_FEDERATION_RULE_ID is required for identity federation "
+                                      r"\(pass --rule-id or set \$ANTHROPIC_FEDERATION_RULE_ID\)"):
         init_run(credential="federation")
+    assert not [c for c in init_run.calls if c[:2] in (["gh", "secret"], ["gh", "variable"])]
+    assert not [s for s in init_run.said if s.startswith("3/8")]
+
+
+def test_init_bad_federation_workspace_stops_before_the_token(init_run):
+    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
+           "ANTHROPIC_ORGANIZATION_ID": "org-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
+           "ANTHROPIC_WORKSPACE_ID": "nope"}
+    with pytest.raises(CIError, match="workspace ID looks like wrkspc_"):
+        init_run(credential="federation", env=env)
+    assert not [c for c in init_run.calls if c[:2] == ["gh", "secret"]]
+
+
+def test_init_federation_from_options_asks_nothing(init_run):
+    """--rule-id, --organization-id, --service-account-id (and --workspace-id)
+    give the IDs, and imply federation when --credential isn't given."""
+    def never(q, d):
+        if "required" in q:
+            return d
+        pytest.fail(f"asked {q!r}")
+    calls, _ = init_run(ask=never, rule_id="fdrl_2", organization_id="org-2", service_account_id="svac_2",
+                        workspace_id="wrkspc_2",
+                        env={"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_env"})
+    assert {c[3]: c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]} == {
+        "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_2", "ANTHROPIC_ORGANIZATION_ID": "org-2",
+        "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_2", "ANTHROPIC_WORKSPACE_ID": "wrkspc_2"}
+    assert [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]] == ["BRINDLE_PRO_TOKEN"]
+
+
+def test_cli_init_without_a_terminal_never_prompts(ci_repo, monkeypatch):
+    """Unattended (stdin not a terminal), every question takes its default
+    instead of aborting, and the federation options reach init."""
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    got = {}
+
+    def init(**kw):
+        got.update(kw)
+        got["answers"] = [kw["ask"]("federation rule id (fdrl_...)", "fdrl_env"),
+                          kw["ask"]("Mark 'Tests' as required so brindle can fix it when it fails? [Y/n]", "y")]
+    monkeypatch.setattr(ci_client, "init", init)
+    result = CliRunner().invoke(app, ["ci", "init", "--credential", "federation", "--rule-id", "fdrl_1",
+                                      "--organization-id", "org-1", "--service-account-id", "svac_1",
+                                      "--workspace-id", "wrkspc_1"], input="")
+    assert result.exit_code == 0, result.output
+    assert "Aborted" not in result.output and got["answers"] == ["fdrl_env", "y"]
+    assert (got["credential"], got["rule_id"], got["organization_id"], got["service_account_id"],
+            got["workspace_id"]) == ("federation", "fdrl_1", "org-1", "svac_1", "wrkspc_1")
 
 
 def test_init_key_credential_sets_the_secret(init_run):
