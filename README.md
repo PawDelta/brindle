@@ -847,12 +847,25 @@ subject prefix `repo:<owner>/<name>:*`, the condition
 claims.repository == "<owner>/<name>" && claims.workflow_ref.startsWith("<owner>/<name>/.github/workflows/brindle-ci-")
 ```
 
-audience `https://api.anthropic.com`, and a token lifetime of at least 7200
+audience `https://api.anthropic.com`, and a token lifetime of at least 600
 seconds. The condition lets only brindle's workflows mint tokens. On pull
 requests the pull request's own copy of the validate workflow runs, so give
 write access only to people you trust (forks never get a token). Leave the `ANTHROPIC_API_KEY` secret
 unset: a key takes precedence (brindle drops an empty one before Claude Code
 starts).
+
+A federated token lives at most about ten minutes, however long the rule
+allows: Anthropic caps it at twice what remains of GitHub's OIDC token. So
+the run job doesn't rely on the workflow's one exchange: `brindle ci run`
+fetches a fresh OIDC token and exchanges it again at 70% of each token's
+life, and lends the current token to the agents through a proxy on the
+runner's loopback interface. The agents get `ANTHROPIC_BASE_URL` pointing at
+it and a random per-run secret as `ANTHROPIC_AUTH_TOKEN`; the Anthropic token
+itself stays in the `brindle ci run` process, and the GitHub token endpoint
+(`ACTIONS_ID_TOKEN_REQUEST_URL` and its token) is scrubbed before any agent or
+check starts. If the first exchange fails, the run goes on with the
+workflow's token as before; `BRINDLE_CI_FEDERATION_REFRESH=0` in the job's
+environment turns the refresh off.
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `brindle close <id>` to stop it and hide it. Stopping means

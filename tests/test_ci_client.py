@@ -949,6 +949,133 @@ def test_custom_headers_are_not_scrubbed():
     assert ci_adapters.claude_env(env) == env
 
 
+FEDERATION = {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": "org-uuid",
+              "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1", "ANTHROPIC_WORKSPACE_ID": "wrkspc_1",
+              "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test/x", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req-secret",
+              "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-from-the-workflow"}
+FRESH = "sk-ant-oat01-minted-by-the-run"
+
+
+@pytest.fixture
+def federation(monkeypatch):
+    """A job set up for identity federation: a fake exchange, and the
+    variables the run sets on this process restored afterwards."""
+    from brindle import ci_federation
+
+    calls = {"fetch": [], "exchange": [], "refuse": None}
+
+    def fetch(url, request_token):
+        calls["fetch"].append((url, request_token))
+        return "h.p.s"
+
+    def exchange(assertion, ids):
+        calls["exchange"].append((assertion, dict(ids)))
+        if calls["refuse"]:
+            raise ci_federation.FederationError(calls["refuse"])
+        return FRESH, 598.0
+    monkeypatch.setattr(ci_federation, "fetch_identity_token", fetch)
+    monkeypatch.setattr(ci_federation, "exchange_token", exchange)
+    for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+        monkeypatch.setenv(k, "placeholder")   # so monkeypatch restores their absence
+        monkeypatch.delenv(k)
+    return calls
+
+
+def _port_closed(base_url: str) -> bool:
+    import socket
+
+    host, port = base_url.split("://", 1)[1].split(":")
+    try:
+        socket.create_connection((host, int(port)), timeout=2).close()
+    except OSError:
+        return True
+    return False
+
+
+def test_run_lends_a_refreshed_federated_token_through_its_proxy(plan, ci_repo, tmp_path, federation):
+    base = head(ci_repo)
+    server = Server(plan(base_sha=base))
+    db = DB()
+    adapter = FakeAdapter("claude", commit=commit_file)
+    env = run_env(**FEDERATION)
+    said = []
+    result = ci_client.run(plan(base_sha=base), token_file(tmp_path), cwd=str(ci_repo), env=env, client=server.client,
+                           db=db, adapters={"claude": adapter}, sleep=finish_after(db, adapter, 2), say=said.append)
+    assert result["status"] == "published"
+    assert federation["fetch"] == [("https://token.actions.test/x", "req-secret")]
+    assert federation["exchange"][0][1] == {k: FEDERATION[k] for k in ("ANTHROPIC_FEDERATION_RULE_ID",
+                                                                        "ANTHROPIC_ORGANIZATION_ID",
+                                                                        "ANTHROPIC_SERVICE_ACCOUNT_ID",
+                                                                        "ANTHROPIC_WORKSPACE_ID")}
+    snap = adapter.env_at_launch[0]
+    assert snap["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+    secret = snap["ANTHROPIC_AUTH_TOKEN"]
+    assert secret not in (FRESH, FEDERATION["ANTHROPIC_AUTH_TOKEN"]) and len(secret) >= 32
+    assert env["ANTHROPIC_BASE_URL"] == snap["ANTHROPIC_BASE_URL"] and env["ANTHROPIC_AUTH_TOKEN"] == secret
+    for e in (snap, env):
+        assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in e and "ACTIONS_ID_TOKEN_REQUEST_URL" not in e
+        assert FRESH not in e.values() and "req-secret" not in e.values()
+    assert "ANTHROPIC_BASE_URL" not in os.environ and "ANTHROPIC_AUTH_TOKEN" not in os.environ \
+        or _port_closed(snap["ANTHROPIC_BASE_URL"])
+    assert _port_closed(snap["ANTHROPIC_BASE_URL"]), "the proxy is gone with the run"
+    assert any("refreshes its Anthropic token itself" in s for s in said)
+    everything = "\n".join(said) + json.dumps(server.transport.calls, default=str)
+    assert FRESH not in everything and secret not in everything and "req-secret" not in everything
+
+
+def test_run_keeps_the_workflow_token_when_the_exchange_fails(plan, ci_repo, tmp_path, federation):
+    federation["refuse"] = "the Anthropic token exchange failed (HTTP 401: Authentication failed)"
+    base = head(ci_repo)
+    server = Server(plan(base_sha=base))
+    db = DB()
+    adapter = FakeAdapter("claude", commit=commit_file)
+    env = run_env(**FEDERATION)
+    said = []
+    result = ci_client.run(plan(base_sha=base), token_file(tmp_path), cwd=str(ci_repo), env=env, client=server.client,
+                           db=db, adapters={"claude": adapter}, sleep=finish_after(db, adapter, 2), say=said.append)
+    assert result["status"] == "published"
+    snap = adapter.env_at_launch[0]   # this process's environment, which the agents inherit
+    assert "ANTHROPIC_AUTH_TOKEN" not in snap and "ANTHROPIC_BASE_URL" not in snap
+    assert env["ANTHROPIC_AUTH_TOKEN"] == FEDERATION["ANTHROPIC_AUTH_TOKEN"] and "ANTHROPIC_BASE_URL" not in env
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in snap
+    assert any("HTTP 401" in s and "using the workflow's token" in s for s in said)
+
+
+def test_run_without_federation_leaves_the_credential_alone(plan, ci_repo, tmp_path, federation):
+    base = head(ci_repo)
+    server = Server(plan(base_sha=base))
+    db = DB()
+    adapter = FakeAdapter("claude", commit=commit_file)
+    env = run_env(ANTHROPIC_API_KEY="sk-ant-api03-key", **{k: v for k, v in FEDERATION.items()
+                                                           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")})
+    ci_client.run(plan(base_sha=base), token_file(tmp_path), cwd=str(ci_repo), env=env, client=server.client,
+                  db=db, adapters={"claude": adapter}, sleep=finish_after(db, adapter, 2), say=lambda s: None)
+    assert federation["exchange"] == [], "a key wins in Claude Code, so there is nothing to refresh"
+    snap = adapter.env_at_launch[0]
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-api03-key" and "ANTHROPIC_BASE_URL" not in env
+    assert "ANTHROPIC_BASE_URL" not in snap and "ANTHROPIC_AUTH_TOKEN" not in snap
+
+
+def test_validate_reviewers_use_the_proxy_and_checks_see_no_secret(plan, ci_repo, tmp_path, federation):
+    sha = head(ci_repo)
+    vplan = plan("validation", head_sha=sha,
+                 checks=[{"id": "c1", "command": "printenv ANTHROPIC_AUTH_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN "
+                                                 "ANTHROPIC_BASE_URL; exit 0", "timeout_s": 30}])
+    server = Server(plan(), validation_plan=vplan)
+    adapter = FakeAdapter("claude", reply="Looks fine.")
+    env = run_env(**FEDERATION)
+    result = validate(server, ci_repo, tmp_path, adapters={"claude": adapter}, env=env)
+    assert result["status"] == "posted"
+    _, review_env = adapter.reviews[0]
+    assert review_env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+    secret = review_env["ANTHROPIC_AUTH_TOKEN"]
+    assert secret not in (FRESH, FEDERATION["ANTHROPIC_AUTH_TOKEN"])
+    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in review_env
+    out = server.evidence_calls[0]["checks"][0]["output_excerpt"]
+    assert secret not in out and "req-secret" not in out and FRESH not in out
+    assert _port_closed(review_env["ANTHROPIC_BASE_URL"])
+
+
 def test_read_run_token_deletes_the_file(tmp_path):
     p = token_file(tmp_path)
     assert ci_client.read_run_token(p) == RUN_TOKEN
@@ -1476,7 +1603,7 @@ def test_init_federation_sets_the_variables(init_run):
     secrets = [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]]
     assert secrets == ["BRINDLE_PRO_TOKEN"], "no ANTHROPIC_API_KEY secret with federation"
     text = "\n".join(said)
-    assert f"subject prefix repo:{REPO}:*" in text and "https://api.anthropic.com" in text and "7200 s" in text
+    assert f"subject prefix repo:{REPO}:*" in text and "https://api.anthropic.com" in text and "600 s" in text
     assert (f'condition claims.repository == "{REPO}" && '
             f'claims.workflow_ref.startsWith("{REPO}/.github/workflows/brindle-ci-")') in text
     assert "forks never get a token" in text

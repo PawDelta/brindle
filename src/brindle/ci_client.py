@@ -13,7 +13,9 @@ Commands (``brindle ci ...``; see :mod:`brindle.cli`):
   and run token for the run job.
 * ``run``: verify the plan, scrub the job's secrets, start a supervisor with
   the plan's instructions, send heartbeats, obey ``continue`` / ``stop`` /
-  ``escalate``, then upload the git bundle and the evidence.
+  ``escalate``, then upload the git bundle and the evidence. With Anthropic
+  identity federation, the job keeps its own short-lived token fresh and
+  lends it to the agents through a loopback proxy (:mod:`brindle.ci_federation`).
 * ``validate``: start a validation, run its checks in a scrubbed environment,
   ask each reviewer, and upload the evidence (and a second time when the
   server asks for ``more``).
@@ -45,7 +47,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable, Mapping, MutableMapping
 
-from brindle import airgap, ci_adapters, git
+from brindle import airgap, ci_adapters, ci_federation, git
 from brindle.pro import auth, license
 
 log = logging.getLogger(__name__)
@@ -107,7 +109,8 @@ TRIGGER_LABEL_DESCRIPTION = "brindle CI picks this up"
 ENV_TOKEN = "BRINDLE_PRO_TOKEN"
 # How init sets Claude up: the ANTHROPIC_API_KEY secret, or workload identity
 # federation (the IDs as Actions variables; the workflow exchanges GitHub's
-# OIDC token with them once and gives the job ANTHROPIC_AUTH_TOKEN).
+# OIDC token with them once and gives the job ANTHROPIC_AUTH_TOKEN, and the
+# run job keeps its own token fresh from then on: brindle.ci_federation).
 KEY = "key"
 FEDERATION = "federation"
 CREDENTIALS = (KEY, FEDERATION)
@@ -136,7 +139,10 @@ FEDERATION_ID_FORMATS = {   # variable: (pattern, what it looks like)
     "ANTHROPIC_WORKSPACE_ID": (WORKSPACE_ID_RE, "wrkspc_..."),
 }
 FEDERATION_AUDIENCE = "https://api.anthropic.com"
-FEDERATION_MIN_LIFETIME_S = 7200
+# A federated token never outlives GitHub's OIDC token by much (about ten
+# minutes) whatever the rule says; the run job refreshes it, so the rule
+# only needs to allow the refresh interval.
+FEDERATION_MIN_LIFETIME_S = 600
 
 
 class CIError(Exception):
@@ -496,12 +502,13 @@ def multipart(fields: list[tuple[str, str, bytes, str]]) -> auth.RawBody:
     return auth.RawBody(bytes(out), f"multipart/form-data; boundary={boundary}")
 
 
-def _fetch_oidc(url: str, request_token: str, timeout: float = 15.0) -> str:
-    """Ask the Actions runtime for an OIDC token for brindle's audience."""
+def _fetch_oidc(url: str, request_token: str, timeout: float = 15.0, audience: str = OIDC_AUDIENCE) -> str:
+    """Ask the Actions runtime for an OIDC token for ``audience`` (brindle's
+    own by default; Anthropic's for :mod:`brindle.ci_federation`)."""
     import urllib.error
     import urllib.request
 
-    full = url + ("&" if "?" in url else "?") + "audience=" + urllib.parse.quote(OIDC_AUDIENCE, safe="")
+    full = url + ("&" if "?" in url else "?") + "audience=" + urllib.parse.quote(audience, safe="")
     if urllib.parse.urlsplit(full).scheme != "https":
         raise CIError("the OIDC token request URL isn't https", code="oidc")
     req = urllib.request.Request(full, headers={"Authorization": f"bearer {request_token}",
@@ -956,9 +963,6 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     uploads the evidence. ``texts`` are the plan texts saved beside the plan,
     or a function that reads them (:func:`read_plan_texts`), called once the
     run token is gone from disk. Returns the server's answer to the upload."""
-    from brindle import workspaces
-    from brindle.db import DB
-
     repo = github_repo(env)
     # The token file goes first, whatever happens to the plan: a rejected
     # plan must not leave a run token on the runner's disk.
@@ -966,17 +970,58 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     if callable(texts):
         texts = texts()
     plan = verify_plan(plan_token, repo=repo, now=clock(), texts=texts)
-    if plan["plan_kind"] == "validation":
-        check_validation_checkout(plan, cwd, say=say)
-        gone = scrub_secrets(env)
-        for k in gone:
-            os.environ.pop(k, None)
-        return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
-                              org=org, clock=clock, say=say)
-    prepare_branch(plan, cwd, say=say)
+    # Before the scrub: the refresher needs the Actions token endpoint,
+    # which no agent may see.
+    federation = start_federation(env, say=say)
+    try:
+        if plan["plan_kind"] == "validation":
+            check_validation_checkout(plan, cwd, say=say)
+            scrub_job(env, federation)
+            return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
+                                  org=org, clock=clock, say=say)
+        prepare_branch(plan, cwd, say=say)
+        scrub_job(env, federation)
+        return _run_session(plan, run_token, repo=repo, cwd=cwd, env=env, client=client, db=db,
+                            adapters=adapters, clock=clock, sleep=sleep, say=say)
+    finally:
+        if federation is not None:
+            federation.stop()
+
+
+def start_federation(env: Mapping[str, str], say: Callable[[str], None] = print) -> ci_federation.Federation | None:
+    """The run's own token refresher and credential proxy
+    (:mod:`brindle.ci_federation`), when the job is set up for it; else
+    None, also when the first exchange fails (the run then keeps the
+    credential the workflow gave it, as before)."""
+    if not ci_federation.configured(env):
+        return None
+    try:
+        fed = ci_federation.start(env)
+    except ci_federation.FederationError as e:
+        log.warning("brindle ci: identity federation: %s", e)
+        say(f"identity federation: {e}; using the workflow's token for the whole run")
+        return None
+    say("identity federation: the run refreshes its Anthropic token itself")
+    return fed
+
+
+def scrub_job(env: MutableMapping[str, str], federation: ci_federation.Federation | None) -> None:
+    """Scrub the job's secrets from ``env`` and this process (what every
+    agent inherits), then point both at the credential proxy if there is one."""
     gone = scrub_secrets(env)
     for k in gone:
         os.environ.pop(k, None)
+    if federation is not None:
+        federation.apply(env, os.environ)
+
+
+def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: MutableMapping[str, str],
+                 client: Client, db, adapters, clock: Callable[[], float], sleep: Callable[[float], None],
+                 say: Callable[[str], None]) -> dict:
+    """The run plan's job proper, once the job is scrubbed (see :func:`run`)."""
+    from brindle import workspaces
+    from brindle.db import DB
+
     run_id, base_sha, branch = plan["id"], plan["base_sha"], plan["branch"]
     db = db or DB()
     ws = workspaces.adopt_root(db, cwd)
@@ -1575,7 +1620,7 @@ def _set_federation(repo: str, values: Mapping[str, str], *, run=subprocess.run,
         say(f"   {name} set")
     say(f"   create the federation rule in the Claude Console: subject prefix repo:{repo}:*, "
         f"condition {federation_condition(repo)}, audience {FEDERATION_AUDIENCE}, "
-        f"token lifetime at least {FEDERATION_MIN_LIFETIME_S} s")
+        f"token lifetime at least {FEDERATION_MIN_LIFETIME_S} s (the run refreshes its token itself)")
     say("   this lets only brindle's workflows mint tokens; on pull requests the PR's copy of the validate "
         "workflow runs, so only give write access to people you trust (forks never get a token)")
 
