@@ -359,12 +359,13 @@ knowing them helps when you tell the supervisor how to work.
 
 | Tool | Used by | |
 |---|---|---|
-| `assign` / `handoff` / `wait_for_worker` | supervisor | start a worker (return now / wait for its result / keep waiting) |
+| `assign` / `handoff` / `wait_for_worker` | supervisor | start a worker (return now / wait for its result / keep waiting); `dry_run=true` on `assign`/`handoff` starts nothing and reports the profile, what each `files` glob matches, overlaps and whether it would queue |
 | `send_message` | any agent | message another agent; delivered when it's idle |
 | `read_messages` | supervisor | read the messages agents and brindle sent you and mark them read; with `message_delivery` `"pull"` (the default) you get a one-line "N new messages" notice instead of each message |
-| `list_agents` / `list_tasks` / `list_agent_profiles` | supervisor | who's running, what's queued, which profiles exist |
+| `list_agents` / `list_tasks` / `list_agent_profiles` | supervisor | who's running, what's queued, which profiles exist; `list_tasks(full=true)` also shows each task's brief and `done_when` |
 | `list_repos` | supervisor | the repos attached to the session (brindle Pro); `repo=<alias>` on `assign`/`handoff` puts a worker there |
 | `cancel_task` | supervisor | cancel a queued task (and its dependents) to re-plan |
+| `requeue` | supervisor | queue a cancelled task again with the same brief, files and profile; `depends_on` replaces its dependencies |
 | `workspace_diff` | supervisor | a worker branch's changes against its base |
 | `request_review` / `submit_review` | supervisor / reviewer | start a reviewer on a branch / record its verdict |
 | `merge_workspace` / `remove_workspace` | supervisor | merge through the gates / delete the worktree |

@@ -12,6 +12,10 @@ from typer.testing import CliRunner
 
 from conftest import sh
 from brindle import cull, procs, tmux, view, workspaces
+
+# These start servers named after a dead pytest run, which every other
+# xdist worker's teardown would reap first: run them in the serial pass.
+pytestmark = pytest.mark.serial
 from brindle.cli import app
 from brindle.config import brindle_home, worktrees_dir
 from brindle.db import Agent

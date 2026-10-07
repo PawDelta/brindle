@@ -25,7 +25,13 @@ def launch_as(agent_id, *, argv_config=True, env_only=False):
     if env_only:
         env["BRINDLE_AGENT_ID"] = agent_id
     proc = subprocess.Popen(args, env=env, start_new_session=True)
-    time.sleep(0.5)
+    # Wait for its child: a fixed sleep loses the race on a loaded machine
+    # (a parallel test run).
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True).stdout.strip():
+            break
+        time.sleep(0.05)
     return proc
 
 
