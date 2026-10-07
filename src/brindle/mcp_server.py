@@ -226,8 +226,13 @@ async def handoff(
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
+    dry_run: bool = False,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
+
+    dry_run=true starts and queues nothing: it reports the resolved profile,
+    the files each `files` glob matches (warning for any that match none),
+    overlaps with active workers, and whether it would queue.
 
     repo: the alias (or path) of a repo attached to this session (brindle Pro;
     see list_repos) to put the worker in instead of this one. It then gets a
@@ -290,6 +295,9 @@ async def handoff(
         refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch)
         if refused:
             return refused
+        if dry_run:
+            return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
+                                      load_repo_config(ws.repo_root).overlap)
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
@@ -351,9 +359,13 @@ async def assign(
     agent_profile: str = "", task: str = "", isolate: bool = True, branch: str | None = None,
     done_when: str | None = None, files: list[str] | None = None,
     depends_on: list[str] | None = None, plan_first: bool | None = None,
-    weight: str | None = None, repo: str | None = None,
+    weight: str | None = None, repo: str | None = None, dry_run: bool = False,
 ) -> str:
     """Start a worker agent on a task and return immediately.
+
+    dry_run=true starts and queues nothing: it reports the resolved profile,
+    the files each `files` glob matches (warning for any that match none),
+    overlaps with active workers, and whether it would queue.
 
     repo: the alias (or path) of a repo attached to this session (brindle Pro;
     see list_repos) to put the worker in instead of this one. It then gets a
@@ -408,6 +420,9 @@ async def assign(
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, weight, branch)
         if refused:
             return refused
+        if dry_run:
+            return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
+                                      load_repo_config(ws.repo_root).overlap)
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
@@ -592,14 +607,29 @@ def list_agents(repo: str | None = None) -> str:
 
 
 @mcp.tool()
-def list_tasks(repo: str | None = None) -> str:
+def list_tasks(repo: str | None = None, full: bool = False) -> str:
     """Coordination tasks (assign/handoff calls given files or depends_on)
     that are queued or were cancelled: what a queued one is waiting on, and
     why a cancelled one was cancelled. Started tasks show in list_agents.
-    Covers every repo of the session; repo: only that one (alias or path)."""
+    Covers every repo of the session; repo: only that one (alias or path).
+    full=true also shows each task's brief (task_text) and done_when."""
     db = DB()
     caller, here = _caller(db)
-    return _per_repo(db, caller, here, repo, lambda root: tasks.list_text(db, root))
+    return _per_repo(db, caller, here, repo, lambda root: tasks.list_text(db, root, full))
+
+
+@mcp.tool()
+def requeue(task_id: str, depends_on: list[str] | None = None) -> str:
+    """Queue a cancelled task again as a new task with the same brief,
+    done_when, files, profile, weight and dependencies. depends_on replaces
+    the dependencies (an empty list for none); with nothing left to wait on
+    it starts at once. Only a cancelled task can be requeued."""
+    db = DB()
+    caller, here = _caller(db)
+    try:
+        return tasks.requeue(db, caller, here, task_id, depends_on)
+    except ValueError as e:
+        return f"Error: {e}"
 
 
 @mcp.tool()
