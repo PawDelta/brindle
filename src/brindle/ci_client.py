@@ -1139,6 +1139,15 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
     deadline = started + (plan["limits"]["timeout_min"] + TIMEOUT_MARGIN_MIN) * 60
     final: str | None = None
     event: dict = {"state": "working", "milestones": [], "usage": {}}
+    spent_before = 0.0   # what earlier attempts (before an escalation) cost: the limit is for the whole run
+
+    def over_limit() -> bool:
+        limit = plan.get("budget_usd")
+        if limit is None or usage_usd(event["usage"], cwd) + spent_before < limit:
+            return False
+        say(f"the run has spent the org's {pricing.money(limit)} limit")
+        return True
+
     while final is None:
         sleep(plan["limits"]["heartbeat_s"])
         event = session_event(db, root.id, adapter, cwd=cwd, base_sha=base_sha, branch=branch,
@@ -1151,6 +1160,8 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
             log.warning("brindle ci: heartbeat failed (%s): %s", e.code, e)
             if clock() > deadline:
                 final = "timeout"
+            elif over_limit():   # the org's limit is checked here, so an unreachable server can't lift it
+                final = "budget"
             continue
         action = answer.get("action")
         if action == "continue":
@@ -1170,6 +1181,8 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
                     or new["branch"] != branch:
                 raise CIError("the escalation plan is for another run", code="bad_plan")
             adapter.stop(db, root.id)
+            spent_before += usage_usd(event["usage"], cwd)
+            event = {**event, "usage": {}}   # the new supervisor starts its own count
             # An escalation may only tighten the org's limits, never drop or raise them.
             paths = list(dict.fromkeys((plan.get("protected_paths") or []) + (new.get("protected_paths") or [])))
             if paths:
@@ -1183,10 +1196,8 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
         else:
             raise CIError("the server sent an unknown action", code="bad_response")
         # The org's dollar limit for the run (Team org_budgets), on top of the server's tokens.
-        limit = plan.get("budget_usd")
-        if final is None and limit is not None and usage_usd(event["usage"], cwd) >= limit:
+        if final is None and over_limit():
             final = "budget"
-            say(f"the run has spent the org's {pricing.money(limit)} limit")
     adapter.stop(db, root.id)
     event = session_event(db, root.id, adapter, cwd=cwd, base_sha=base_sha, branch=branch,
                           milestone_ids=[m["id"] for m in plan.get("milestones") or []])

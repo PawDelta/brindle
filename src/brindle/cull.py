@@ -446,11 +446,18 @@ def orphan_servers() -> list[str]:
             # socket stays, and nothing gets killed on a guess.
             done.append(f"left tmux server {name} alone: it isn't answering")
             continue
-        m = re.fullmatch(r"brindle-test-(\d+)", name)
+        m = re.fullmatch(r"brindle-test-(\d+)(-.*)?", name)
+        if m and procs.alive(int(m.group(1))):
+            # A live test run's server (or one it made on purpose, ``-other``):
+            # its sessions often have no BRINDLE_HOME, or one not yet created,
+            # which would read as "its brindle home is gone", and one still
+            # starting can read as "nothing listening". Either way it is a
+            # server another pytest run is using right now.
+            continue
         if homes is None:
             tmux.remove_socket(name)  # nothing listening: just the file
             continue
-        if m and not procs.alive(int(m.group(1))):
+        if m:
             reason = "its test run is over"
         elif homes and all(h is None or not os.path.isdir(h) for h in homes):
             reason = "its brindle home is gone"

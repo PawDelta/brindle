@@ -306,8 +306,10 @@ def _estimate(p: Period) -> str:
         return (f"not enough data yet ({p.compared} of the {MIN_TASKS} finished tasks "
                 "picked by learning that an estimate needs)")
     if p.dollars:
-        return (f"{pricing.money(p.actual_cost)} against an estimated "
-                f"{pricing.money(p.baseline_cost)} on the baseline profiles "
+        # exactly $0 here means every row was priced at zero (a local model): Free, not "$0.00"
+        usd = lambda x: pricing.money(x) if x else pricing.FREE_LABEL  # noqa: E731
+        return (f"{usd(p.actual_cost)} against an estimated "
+                f"{usd(p.baseline_cost)} on the baseline profiles "
                 f"({_percent(p.saved_fraction)}), over {p.compared} tasks picked by learning")
     return (f"estimated {_percent(p.saved_fraction)} than the baseline profiles, over "
             f"{p.compared} tasks picked by learning")

@@ -363,11 +363,22 @@ class _OrgCommands:
         if "team" not in ent.features:
             self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced.")
             return 0
+        from brindle import airgap
+
         try:
-            p = team_policy.fetch_policy(ent.org_id, client, self.store,
-                                         cached_for=(ent.role, ent.policy_role))
-            note = ""
+            if airgap.enabled():     # nothing is fetched: the policy is the offline file's
+                p = team_policy.with_role_overrides(
+                    team_policy.load_offline(self.repo_root, ent.org_id), ent.role, ent.policy_role)
+                note = f" (offline: {airgap.policy_path(self.repo_root)})"
+            else:
+                p = team_policy.fetch_policy(ent.org_id, client, self.store,
+                                             cached_for=(ent.role, ent.policy_role))
+                note = ""
         except team_policy.PolicyUnavailable as e:
+            if airgap.enabled():
+                self._say(f"brindle account: no usable offline policy for {ent.org_id} ({e}); "
+                          f"delegations and merges are refused until it is at .brindle/{airgap.POLICY_FILE}.")
+                return 1
             p = team_policy.load_cached(ent.org_id)
             if p is None:
                 self._say(f"brindle account: couldn't fetch the policy for {ent.org_id} ({e}), "

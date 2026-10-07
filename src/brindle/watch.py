@@ -248,7 +248,7 @@ def group_title(ws: dict, count: int, needing: int, width: int, collapsed: bool,
     return fit(arrow + elide_middle(title, max(room - len(tag), 1)) + tag + suffix, width)
 
 
-def render_agent(a: dict, ws: dict, now: float, width: int, spend: float | None = None) -> list[Line]:
+def render_agent(a: dict, ws: dict, now: float, width: int, spend: float | str | None = None) -> list[Line]:
     icon, label = STATUS_LABEL.get(a["status"], ("·", a["status"]))
     style = STATUS_STYLE.get(a["status"], "normal")
     if a["status"] == "idle" and a.get("reported"):
@@ -273,7 +273,7 @@ def render_agent(a: dict, ws: dict, now: float, width: int, spend: float | None 
     if a.get("tokens"):
         detail.append(a["tokens"])
     if spend is not None:
-        detail.append(pricing.money(spend))
+        detail.append(spend if isinstance(spend, str) else pricing.money(spend))
     detail.append(a["id"][:6])
     lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
     for sub in a.get("subagents") or []:
@@ -288,7 +288,7 @@ def render_agent(a: dict, ws: dict, now: float, width: int, spend: float | None 
 
 
 def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: bool,
-                 repo: str | None = None, spend: dict[str, float] | None = None) -> list[Line]:
+                 repo: str | None = None, spend: dict[str, float | str] | None = None) -> list[Line]:
     """A workspace header and, unless folded, its agents: the ones needing
     you first, otherwise in their usual order."""
     needing = sum(bool(needs_you(a, ws)) for a in ags)

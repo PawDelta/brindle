@@ -252,12 +252,17 @@ def distributions(all_runs: list[Run]) -> dict[tuple[str, str | None, str | None
 # -- pricing --------------------------------------------------------------------------------------
 
 
-def default_price() -> PriceFn:
-    """brindle.pricing's ``price``, or one that knows no prices."""
-    try:
-        from brindle.pricing import price
-    except Exception:  # noqa: BLE001 - not there yet: tokens only
-        return lambda model, i, o, cw, cr: None
+def default_price(repo_root: str | None = None) -> PriceFn:
+    """A ``PriceFn`` over brindle.pricing's list prices (and the ``pricing``
+    overrides in force for ``repo_root``); an unknown model costs None."""
+    from brindle import pricing
+
+    extra = pricing.repo_overrides(repo_root)
+
+    def price(model, input, output, cache_write, cache_read):
+        p = pricing.price_for(model, extra)
+        return None if p is None else p.cost(input, output, cache_write, cache_read)
+
     return price
 
 
@@ -372,7 +377,7 @@ def describe(tasks: list[TaskSpec], reviewer: str, *, repo_root: str | None, db:
     """The estimate as a few lines for a reply or the CLI."""
     if not tasks:
         return "Cost estimate: nothing to estimate."
-    price = price or default_price()
+    price = price or default_price(repo_root)
     if all_runs is None:
         all_runs = runs(db, repo_root) if db is not None and repo_root else []
     dists = distributions(all_runs)

@@ -1358,11 +1358,16 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
             agent=agent, usage=u, branch=ws.branch, task=agent.task, result=result,
         )
     if u and u.total:
+        free = False
         try:
-            dollars = usage_mod.usage_cost(u, pricing.repo_overrides(ws.repo_root if ws else None))
+            root = ws.repo_root if ws else None
+            extra = pricing.repo_overrides(root)
+            price = pricing.price_for(u.model, extra) or pricing.profile_price(agent.profile, root, extra)
+            dollars = usage_mod.usage_cost(u, extra, fallback=price)
+            free = price == pricing.FREE
         except Exception:  # noqa: BLE001 - a price is an extra too
             dollars = None
-        forwarded = f"{result}\n\n{usage_mod.summary_line(u, dollars)}"
+        forwarded = f"{result}\n\n{usage_mod.summary_line(u, dollars, free)}"
     else:
         forwarded = result
     if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
