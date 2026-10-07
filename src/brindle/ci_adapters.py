@@ -11,7 +11,8 @@ An adapter answers four questions and does three things:
   endpoint without a key, or a personal subscription (``CLAUDE_CODE_OAUTH_TOKEN``;
   a ChatGPT login for Codex). Anthropic workload identity federation reaches
   here as an API key: the workflow exchanges GitHub's OIDC token once and
-  gives the job ``ANTHROPIC_AUTH_TOKEN``.
+  gives the job ``ANTHROPIC_AUTH_TOKEN``; during the run that variable holds
+  the secret of brindle's own credential proxy (:mod:`brindle.ci_federation`).
 * ``available(env)``: installed and holding some credential.
 * ``launch``: start a brindle autopilot supervisor with the plan's instructions.
 * ``review``: ask the model one question (the plan's instructions) and return

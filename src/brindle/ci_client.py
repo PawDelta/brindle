@@ -13,7 +13,9 @@ Commands (``brindle ci ...``; see :mod:`brindle.cli`):
   and run token for the run job.
 * ``run``: verify the plan, scrub the job's secrets, start a supervisor with
   the plan's instructions, send heartbeats, obey ``continue`` / ``stop`` /
-  ``escalate``, then upload the git bundle and the evidence.
+  ``escalate``, then upload the git bundle and the evidence. With Anthropic
+  identity federation, the job keeps its own short-lived token fresh and
+  lends it to the agents through a loopback proxy (:mod:`brindle.ci_federation`).
 * ``validate``: start a validation, run its checks in a scrubbed environment,
   ask each reviewer, and upload the evidence (and a second time when the
   server asks for ``more``).
@@ -45,7 +47,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable, Mapping, MutableMapping
 
-from brindle import airgap, ci_adapters, git
+from brindle import airgap, ci_adapters, ci_federation, git
 from brindle.pro import auth, license
 
 log = logging.getLogger(__name__)
@@ -100,10 +102,15 @@ TOKEN_FILE = "run_token"
 SETUP_KINDS = ("issue", "validate", "fix")
 SETUP_DIR = ".github/workflows"
 SETUP_BRANCH = "brindle/ci-setup"
+# Labelling an issue with this hands it to the issue workflow.
+TRIGGER_LABEL = "brindle"
+TRIGGER_LABEL_COLOR = "2E7D32"
+TRIGGER_LABEL_DESCRIPTION = "brindle CI picks this up"
 ENV_TOKEN = "BRINDLE_PRO_TOKEN"
 # How init sets Claude up: the ANTHROPIC_API_KEY secret, or workload identity
 # federation (the IDs as Actions variables; the workflow exchanges GitHub's
-# OIDC token with them once and gives the job ANTHROPIC_AUTH_TOKEN).
+# OIDC token with them once and gives the job ANTHROPIC_AUTH_TOKEN, and the
+# run job keeps its own token fresh from then on: brindle.ci_federation).
 KEY = "key"
 FEDERATION = "federation"
 CREDENTIALS = (KEY, FEDERATION)
@@ -113,14 +120,29 @@ FEDERATION_VARS = (   # (variable, question, required)
     ("ANTHROPIC_SERVICE_ACCOUNT_ID", "service account id (svac_...)", True),
     ("ANTHROPIC_WORKSPACE_ID", "workspace id (wrkspc_..., optional)", False),
 )
+FEDERATION_OPTIONS = {   # the init option that gives each one without asking
+    "ANTHROPIC_FEDERATION_RULE_ID": "--rule-id",
+    "ANTHROPIC_ORGANIZATION_ID": "--organization-id",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID": "--service-account-id",
+    "ANTHROPIC_WORKSPACE_ID": "--workspace-id",
+}
 # An organization-level API key (not scoped to a workspace) needs the
 # workspace in every request: the workflow sends it as an
 # anthropic-workspace-id header (ANTHROPIC_CUSTOM_HEADERS) from this variable.
 WORKSPACE_VAR = "ANTHROPIC_WORKSPACE_ID"
 WORKSPACE_QUESTION = "workspace ID (only for an organization-level key; leave blank for a workspace key)"
 WORKSPACE_ID_RE = re.compile(r"^wrkspc_[A-Za-z0-9_-]+$")
+FEDERATION_ID_FORMATS = {   # variable: (pattern, what it looks like)
+    "ANTHROPIC_FEDERATION_RULE_ID": (re.compile(r"^fdrl_[A-Za-z0-9_-]+$"), "fdrl_..."),
+    "ANTHROPIC_ORGANIZATION_ID": (re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$"), "a UUID"),
+    "ANTHROPIC_SERVICE_ACCOUNT_ID": (re.compile(r"^svac_[A-Za-z0-9_-]+$"), "svac_..."),
+    "ANTHROPIC_WORKSPACE_ID": (WORKSPACE_ID_RE, "wrkspc_..."),
+}
 FEDERATION_AUDIENCE = "https://api.anthropic.com"
-FEDERATION_MIN_LIFETIME_S = 7200
+# A federated token never outlives GitHub's OIDC token by much (about ten
+# minutes) whatever the rule says; the run job refreshes it, so the rule
+# only needs to allow the refresh interval.
+FEDERATION_MIN_LIFETIME_S = 600
 
 
 class CIError(Exception):
@@ -480,12 +502,13 @@ def multipart(fields: list[tuple[str, str, bytes, str]]) -> auth.RawBody:
     return auth.RawBody(bytes(out), f"multipart/form-data; boundary={boundary}")
 
 
-def _fetch_oidc(url: str, request_token: str, timeout: float = 15.0) -> str:
-    """Ask the Actions runtime for an OIDC token for brindle's audience."""
+def _fetch_oidc(url: str, request_token: str, timeout: float = 15.0, audience: str = OIDC_AUDIENCE) -> str:
+    """Ask the Actions runtime for an OIDC token for ``audience`` (brindle's
+    own by default; Anthropic's for :mod:`brindle.ci_federation`)."""
     import urllib.error
     import urllib.request
 
-    full = url + ("&" if "?" in url else "?") + "audience=" + urllib.parse.quote(OIDC_AUDIENCE, safe="")
+    full = url + ("&" if "?" in url else "?") + "audience=" + urllib.parse.quote(audience, safe="")
     if urllib.parse.urlsplit(full).scheme != "https":
         raise CIError("the OIDC token request URL isn't https", code="oidc")
     req = urllib.request.Request(full, headers={"Authorization": f"bearer {request_token}",
@@ -940,9 +963,6 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     uploads the evidence. ``texts`` are the plan texts saved beside the plan,
     or a function that reads them (:func:`read_plan_texts`), called once the
     run token is gone from disk. Returns the server's answer to the upload."""
-    from brindle import workspaces
-    from brindle.db import DB
-
     repo = github_repo(env)
     # The token file goes first, whatever happens to the plan: a rejected
     # plan must not leave a run token on the runner's disk.
@@ -950,17 +970,58 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     if callable(texts):
         texts = texts()
     plan = verify_plan(plan_token, repo=repo, now=clock(), texts=texts)
-    if plan["plan_kind"] == "validation":
-        check_validation_checkout(plan, cwd, say=say)
-        gone = scrub_secrets(env)
-        for k in gone:
-            os.environ.pop(k, None)
-        return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
-                              org=org, clock=clock, say=say)
-    prepare_branch(plan, cwd, say=say)
+    # Before the scrub: the refresher needs the Actions token endpoint,
+    # which no agent may see.
+    federation = start_federation(env, say=say)
+    try:
+        if plan["plan_kind"] == "validation":
+            check_validation_checkout(plan, cwd, say=say)
+            scrub_job(env, federation)
+            return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
+                                  org=org, clock=clock, say=say)
+        prepare_branch(plan, cwd, say=say)
+        scrub_job(env, federation)
+        return _run_session(plan, run_token, repo=repo, cwd=cwd, env=env, client=client, db=db,
+                            adapters=adapters, clock=clock, sleep=sleep, say=say)
+    finally:
+        if federation is not None:
+            federation.stop()
+
+
+def start_federation(env: Mapping[str, str], say: Callable[[str], None] = print) -> ci_federation.Federation | None:
+    """The run's own token refresher and credential proxy
+    (:mod:`brindle.ci_federation`), when the job is set up for it; else
+    None, also when the first exchange fails (the run then keeps the
+    credential the workflow gave it, as before)."""
+    if not ci_federation.configured(env):
+        return None
+    try:
+        fed = ci_federation.start(env)
+    except ci_federation.FederationError as e:
+        log.warning("brindle ci: identity federation: %s", e)
+        say(f"identity federation: {e}; using the workflow's token for the whole run")
+        return None
+    say("identity federation: the run refreshes its Anthropic token itself")
+    return fed
+
+
+def scrub_job(env: MutableMapping[str, str], federation: ci_federation.Federation | None) -> None:
+    """Scrub the job's secrets from ``env`` and this process (what every
+    agent inherits), then point both at the credential proxy if there is one."""
     gone = scrub_secrets(env)
     for k in gone:
         os.environ.pop(k, None)
+    if federation is not None:
+        federation.apply(env, os.environ)
+
+
+def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: MutableMapping[str, str],
+                 client: Client, db, adapters, clock: Callable[[], float], sleep: Callable[[float], None],
+                 say: Callable[[str], None]) -> dict:
+    """The run plan's job proper, once the job is scrubbed (see :func:`run`)."""
+    from brindle import workspaces
+    from brindle.db import DB
+
     run_id, base_sha, branch = plan["id"], plan["base_sha"], plan["branch"]
     db = db or DB()
     ws = workspaces.adopt_root(db, cwd)
@@ -1222,6 +1283,171 @@ def _gh(args: list[str], *, run=subprocess.run, input: str | None = None, intera
     return out
 
 
+def _gh_api(path: str, *, run=subprocess.run, method: str | None = None, body: dict | None = None,
+            jq: str | None = None) -> str | None:
+    """``gh api path``: its output, or None when GitHub answers 404."""
+    args = ["api", path]
+    if method:
+        args += ["-X", method]
+    if jq:
+        args += ["--jq", jq]
+    if body is not None:
+        args += ["--input", "-"]
+    try:
+        return _gh(args, run=run, input=json.dumps(body) if body is not None else None)
+    except CIError as e:
+        if "HTTP 404" in str(e):
+            return None
+        raise
+
+
+def create_label(repo: str, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
+    """The label that hands an issue to brindle CI (``--force``: running init
+    again updates it rather than failing)."""
+    _gh(["label", "create", TRIGGER_LABEL, "--repo", repo, "--color", TRIGGER_LABEL_COLOR,
+         "--description", TRIGGER_LABEL_DESCRIPTION, "--force"], run=run)
+    say(f"   label '{TRIGGER_LABEL}' ready: label an issue with it and brindle CI picks the issue up")
+
+
+def _yaml_scalar(text: str) -> str:
+    text = re.split(r"\s+#", text, maxsplit=1)[0].strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    return text
+
+
+def workflow_jobs(text: str) -> list[str]:
+    """The check names a workflow's jobs report as: each job's ``name``, or
+    its id. A line scan of the top-level ``jobs:`` mapping (brindle has no
+    YAML parser); a name computed by an expression is left out, since its
+    check name is only known when it runs."""
+    names: list[str] = []
+    in_jobs = False
+    job_indent = body_indent = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent == 0:
+            in_jobs = re.match(r"jobs\s*:\s*(#.*)?$", line) is not None
+            continue
+        if not in_jobs:
+            continue
+        if job_indent is None:
+            job_indent = indent
+        if indent == job_indent:
+            m = re.match(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(#.*)?$", line)
+            names.append(m.group(1) if m else "")
+            body_indent = None
+        elif indent > job_indent and names:
+            if body_indent is None:
+                body_indent = indent
+            m = re.match(r"name\s*:\s*(.+)$", line)
+            if indent == body_indent and m:
+                names[-1] = _yaml_scalar(m.group(1))
+    return [n for n in names if n and "${{" not in n]
+
+
+def repo_jobs(cwd: str) -> list[str]:
+    """The check names of the jobs in the checkout's workflows, brindle's own left out."""
+    found: list[str] = []
+    folder = Path(cwd) / SETUP_DIR
+    files = sorted([*folder.glob("*.yml"), *folder.glob("*.yaml")]) if folder.is_dir() else []
+    for path in files:
+        if path.name.startswith("brindle-ci-"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        found += [j for j in workflow_jobs(text) if j not in found]
+    return found
+
+
+def required_checks(repo: str, branch: str, *, run=subprocess.run) -> list[str]:
+    """The status checks ``branch`` requires (none when it isn't protected or
+    requires none)."""
+    out = _gh_api(f"repos/{repo}/branches/{branch}/protection/required_status_checks", run=run)
+    if out is None:
+        return []
+    try:
+        got = json.loads(out)
+    except ValueError:
+        return []
+    if not isinstance(got, dict):
+        return []
+    names = [n for n in got.get("contexts") or [] if isinstance(n, str)]
+    names += [c["context"] for c in got.get("checks") or []
+              if isinstance(c, dict) and isinstance(c.get("context"), str) and c["context"] not in names]
+    return [n for n in names if n]
+
+
+def _require_checks(repo: str, branch: str, names: list[str], *, run=subprocess.run) -> None:
+    """Make ``names`` required on ``branch``: on top of its protection when it
+    has some (only the status checks change), else a protection of just them.
+    Raises :class:`CIError` with what to tell the person when GitHub refuses."""
+    plan = "private repositories need a paid GitHub plan for branch protection"
+    protection = f"repos/{repo}/branches/{branch}/protection"
+    try:
+        if _gh_api(protection, run=run) is None:
+            body = {"required_status_checks": {"strict": False, "contexts": names}, "enforce_admins": False,
+                    "required_pull_request_reviews": None, "restrictions": None}
+            if _gh_api(protection, run=run, method="PUT", body=body) is None:   # GitHub's 404 for "not allowed"
+                raise CIError(f"GitHub refused to protect {branch} (404: no admin rights, or {plan})", "refused")
+        elif _gh_api(f"{protection}/required_status_checks", run=run, method="PATCH",
+                     body={"contexts": names}) is None:
+            raise CIError(f"this branch is protected but doesn't require status checks; add "
+                          f"{', '.join(names)} under Settings > Branches", "refused")
+    except CIError as e:
+        if e.code == "refused":
+            raise
+        raise CIError(f"GitHub didn't let brindle require {', '.join(names)}: {e} ({plan})", "refused") from e
+
+
+def setup_required_checks(repo: str, *, cwd: str, run=subprocess.run,
+                          ask: Callable[[str, str], str] | None = None, required_check: str | None = None,
+                          no_required_check: bool = False, say: Callable[[str], None] = print) -> None:
+    """Fix builds only fix the default branch's required checks, and a new
+    repository has none: offer to make its workflow jobs required.
+    ``required_check`` (--required-check) names the one to require without
+    asking; ``no_required_check`` (--no-required-check) only warns."""
+    branch = _gh(["api", f"repos/{repo}", "--jq", ".default_branch"], run=run).strip() or "main"
+    have = required_checks(repo, branch, run=run)
+    if have:
+        say(f"   {branch} requires {', '.join(have)}: brindle fixes builds where one of them fails")
+        return
+    settings = (f"   to do it yourself: Settings > Branches on github.com/{repo}, add a rule for {branch}, "
+                f"turn on 'Require status checks to pass' and pick the check")
+    say(f"   warning: {branch} requires no status checks, and brindle only fixes builds where a required "
+        "check fails, so fix builds won't run")
+    if no_required_check:
+        say(settings)
+        return
+    if required_check:
+        names = [required_check]
+    else:
+        jobs = repo_jobs(cwd)
+        if not jobs:
+            say(f"   no workflow jobs in {SETUP_DIR} to require; once you have CI, mark its job as required")
+            say(settings)
+            return
+        asker = ask or (lambda q, d: d)
+        names = [job for job in jobs
+                 if not asker(f"Mark '{job}' as required so brindle can fix it when it fails? [Y/n]", "y")
+                 .strip().lower().startswith("n")]
+        if not names:
+            say(settings)
+            return
+    try:
+        _require_checks(repo, branch, names, run=run)
+    except CIError as e:
+        say(f"   {e}")
+        say(settings)
+        return
+    say(f"   {branch} now requires {', '.join(names)}")
+
+
 def origin_url(cwd: str) -> str | None:
     """``cwd``'s ``origin`` remote URL, or None when there is none (or git
     can't tell: not installed, timed out)."""
@@ -1254,6 +1480,70 @@ def check_checkout(repo: str, cwd: str) -> None:
         raise CIError(f"run this inside a checkout of {repo} (origin here is {origin})")
 
 
+def check_clean(cwd: str) -> None:
+    """init commits the workflows on a branch of its own and comes back:
+    with uncommitted changes it stops before doing anything, so they're
+    never carried along or lost."""
+    try:
+        dirty = git.dirty_files(cwd, tracked_only=True)
+    except git.GitError as e:
+        raise CIError(f"not a git checkout: {e}") from e
+    if dirty:
+        raise CIError(f"commit or stash your changes first ({len(dirty)} uncommitted, e.g. "
+                      f"{auth._sanitize(dirty[0], 100)}): init commits the workflows on a branch of its own")
+    if git.current_branch(cwd) == SETUP_BRANCH:
+        raise CIError(f"switch off {SETUP_BRANCH} first: init recreates that branch")
+    check_setup_paths(cwd, [f"{SETUP_DIR}/brindle-ci-{kind}.yml" for kind in SETUP_KINDS])
+
+
+def check_setup_paths(cwd: str, rels) -> None:
+    """Refuse to write a workflow over a file git doesn't track (it would be
+    overwritten, then removed) or through a symlink (the write would land
+    outside the checkout's workflows)."""
+    for rel in rels:
+        for part in [*Path(rel).parents[:-1], Path(rel)]:
+            if os.path.islink(Path(cwd) / part):
+                raise CIError(f"{part} is a symlink: init won't write {rel} through it")
+        if os.path.lexists(Path(cwd) / rel) and not git.ok(["ls-files", "--error-unmatch", rel], cwd):
+            raise CIError(f"move {rel} away first: init writes the workflow there, and git doesn't track it")
+
+
+def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
+    """Commit ``files`` on :data:`SETUP_BRANCH` and push it, then put the
+    checkout back where it was (also when a step fails) and delete the local
+    setup branch, so the next ``git pull`` after the setup pull request is
+    squash-merged doesn't diverge."""
+    check_setup_paths(cwd, files)   # again: the tree may have changed since init started
+    start = git.current_branch(cwd)
+    back =["checkout", "--quiet", start] if start else ["checkout", "--quiet", "--detach", head_sha(cwd)]
+    git.run(["checkout", "-B", SETUP_BRANCH], cwd)
+    committed = False
+    new: list[Path] = []   # files and folders init creates, which git can't restore
+    try:
+        for rel, text in files.items():
+            for part in [*reversed(Path(rel).parents[:-1]), Path(rel)]:   # outermost folder first
+                full = Path(cwd) / part
+                if not full.exists() and full not in new:
+                    new.append(full)
+            path = Path(cwd) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            git.run(["add", rel], cwd)
+        git.run(["commit", "-q", "-m", "Add brindle CI workflows"], cwd)
+        committed = True
+        git.run(["push", "-u", "origin", SETUP_BRANCH], cwd)
+    finally:
+        if not committed:   # the tree was clean, so this only drops what was written here
+            git.run(["reset", "-q", "--hard"], cwd, check=False)
+            for p in reversed(new):
+                try:
+                    p.rmdir() if p.is_dir() else p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        git.run(back, cwd)
+        git.run(["branch", "-D", SETUP_BRANCH], cwd, check=False)
+
+
 def _claude_credential(given: str | None, ask: Callable[[str, str], str] | None) -> str:
     choice = given or (ask or (lambda q, d: d))("Claude: API key or identity federation? (key, federation)", KEY)
     choice = choice.strip().lower()
@@ -1269,41 +1559,68 @@ def _workspace_id(value: str) -> str:
     return value
 
 
-def _set_key_workspace(repo: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None,
-                       given: str | None, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
-    """For an organization-level API key, store its workspace as the
-    ``ANTHROPIC_WORKSPACE_ID`` Actions variable (not a secret), which the
-    workflow turns into the anthropic-workspace-id header. ``given`` (from
-    --workspace-id) skips the question, which defaults to the variable in ``env``."""
+def key_workspace(env: Mapping[str, str], ask: Callable[[str, str], str] | None, given: str | None) -> str:
+    """An organization-level API key's workspace ("" for a workspace key).
+    ``given`` (from --workspace-id) skips the question, which defaults to
+    the variable in ``env``."""
     if given is None:
         given = (ask or (lambda q, d: d))(WORKSPACE_QUESTION, env.get(WORKSPACE_VAR) or "")
-    value = _workspace_id(given)
+    return _workspace_id(given)
+
+
+def _set_key_workspace(repo: str, value: str, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
+    """Store the :func:`key_workspace` as the ``ANTHROPIC_WORKSPACE_ID``
+    Actions variable (not a secret), which the workflow turns into the
+    anthropic-workspace-id header."""
     if not value:
         return
     _gh(["variable", "set", WORKSPACE_VAR, "--repo", repo, "--body", value], run=run)
     say(f"   {WORKSPACE_VAR} set: requests carry the anthropic-workspace-id header")
 
 
-def _set_federation(repo: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None, *,
-                    run=subprocess.run, say: Callable[[str], None] = print) -> None:
-    """Store Claude's workload identity federation IDs as the repository's
-    Actions variables (they aren't secrets). Each question defaults to the
-    variable in ``env``, so a scripted init can pass them that way."""
+def _federation_id(name: str, value: str) -> str:
+    """``value`` stripped, or :class:`CIError` when it isn't blank and doesn't
+    look like the ID ``name`` holds."""
+    if name == WORKSPACE_VAR:
+        return _workspace_id(value)
+    value = value.strip()
+    pattern, looks = FEDERATION_ID_FORMATS[name]
+    if value and not pattern.match(value):
+        raise CIError(f"{name} looks like {looks}, not {auth._sanitize(value, 40)!r}")
+    return value
+
+
+def federation_ids(env: Mapping[str, str], ask: Callable[[str, str], str] | None,
+                   given: Mapping[str, str | None]) -> dict[str, str]:
+    """Claude's workload identity federation IDs, by variable name: from
+    ``given`` (the --rule-id, ... options), else asked with the variable in
+    ``env`` as the default, so a scripted init can pass them either way.
+    Raises :class:`CIError` for a missing or malformed one."""
     asker = ask or (lambda q, d: d)
-    say("   claude: identity federation; the IDs are stored as Actions variables")
+    values = {}
     for name, question, required in FEDERATION_VARS:
-        value = asker(question, env.get(name) or "").strip()
-        if name == WORKSPACE_VAR:
-            value = _workspace_id(value)
+        value = given.get(name)
+        value = _federation_id(name, asker(question, env.get(name) or "") if value is None else value)
         if not value:
             if required:
-                raise CIError(f"{name} is required for identity federation")
+                raise CIError(f"{name} is required for identity federation "
+                              f"(pass {FEDERATION_OPTIONS[name]} or set ${name})")
             continue
+        values[name] = value
+    return values
+
+
+def _set_federation(repo: str, values: Mapping[str, str], *, run=subprocess.run,
+                    say: Callable[[str], None] = print) -> None:
+    """Store the :func:`federation_ids` as the repository's Actions variables
+    (they aren't secrets)."""
+    say("   claude: identity federation; the IDs are stored as Actions variables")
+    for name, value in values.items():
         _gh(["variable", "set", name, "--repo", repo, "--body", value], run=run)
         say(f"   {name} set")
     say(f"   create the federation rule in the Claude Console: subject prefix repo:{repo}:*, "
         f"condition {federation_condition(repo)}, audience {FEDERATION_AUDIENCE}, "
-        f"token lifetime at least {FEDERATION_MIN_LIFETIME_S} s")
+        f"token lifetime at least {FEDERATION_MIN_LIFETIME_S} s (the run refreshes its token itself)")
     say("   this lets only brindle's workflows mint tokens; on pull requests the PR's copy of the validate "
         "workflow runs, so only give write access to people you trust (forks never get a token)")
 
@@ -1318,14 +1635,21 @@ def federation_condition(repo: str) -> str:
 def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd: str, env: Mapping[str, str],
          base: str | None = None, run=subprocess.run, open_url: Callable[[str], None] | None = None,
          ask: Callable[[str, str], str] | None = None, account=None, client: Client | None = None,
-         credential: str | None = None, workspace_id: str | None = None,
+         credential: str | None = None, workspace_id: str | None = None, rule_id: str | None = None,
+         organization_id: str | None = None, service_account_id: str | None = None,
+         required_check: str | None = None, no_required_check: bool = False,
          say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
     :class:`brindle.pro.account.ProAccount` (the person's brindle Pro
     login; built with ``make`` when not given), ``ask(question, default)`` asks the person, ``open_url`` opens
     the browser. ``credential`` is how Claude signs in (``key`` or
     ``federation``; asked when not given). ``workspace_id`` is the workspace
-    of an organization-level API key (asked after the key when not given)."""
+    of an organization-level API key or of federation, and ``rule_id``,
+    ``organization_id``, ``service_account_id`` the federation IDs (each
+    asked when not given). Every credential input is settled before step 3
+    creates the CI token, so a missing or bad one never leaves a token behind.
+    ``required_check`` / ``no_required_check`` answer the required-check
+    question (see :func:`setup_required_checks`)."""
     import webbrowser
 
     from brindle.pro import account as account_mod
@@ -1335,11 +1659,20 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         credential = _claude_credential(credential, None)
     if workspace_id is not None:
         workspace_id = _workspace_id(workspace_id)
+    given_ids = {"ANTHROPIC_FEDERATION_RULE_ID": rule_id, "ANTHROPIC_ORGANIZATION_ID": organization_id,
+                 "ANTHROPIC_SERVICE_ACCOUNT_ID": service_account_id, WORKSPACE_VAR: workspace_id}
+    fed_options = [FEDERATION_OPTIONS[k] for k, v in given_ids.items() if v is not None and k != WORKSPACE_VAR]
+    if fed_options and credential == KEY:
+        raise CIError(f"{', '.join(fed_options)} configure identity federation, not --credential key")
+    for name, value in given_ids.items():
+        if value is not None:
+            given_ids[name] = _federation_id(name, value)
     if repo:
         if not REPO_RE.match(repo):
             raise CIError("repository must be owner/name (pass --repo)")
         check_checkout(repo, cwd)
-    say("1/6 checking the GitHub CLI and your rights on the repository")
+    check_clean(cwd)
+    say("1/8 checking the GitHub CLI and your rights on the repository")
     _gh(["auth", "status"], run=run)
     if not repo:
         repo = _gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], run=run).strip()
@@ -1354,24 +1687,33 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     api = client or Client(base)
     org_id = plugin._team_org(org)
     install_url = api.base + "/github/install?" + urllib.parse.urlencode({"org_id": org_id})
-    say(f"2/6 install the brindle GitHub App for {repo}: {install_url}")
+    say(f"2/8 install the brindle GitHub App for {repo}: {install_url}")
     (open_url or webbrowser.open)(install_url)
 
-    say("3/6 creating the org CI token and storing it as the BRINDLE_PRO_TOKEN secret")
+    if providers is None:
+        installed = [n for n, a in ci_adapters.default_adapters(cwd).items() if a.cli and a.installed()]
+        answer = (ask or (lambda q, d: d))("which providers? (claude, codex)", ",".join(installed) or "claude")
+        providers = [p.strip() for p in answer.split(",") if p.strip()]
+    federation = workspace = None
+    if "claude" in providers:
+        if credential is None and fed_options:
+            credential = FEDERATION   # a federation ID option answers the question
+        if _claude_credential(credential, ask) == FEDERATION:
+            federation = federation_ids(env, ask, given_ids)
+        else:
+            workspace = key_workspace(env, ask, workspace_id)
+
+    say("3/8 creating the org CI token and storing it as the BRINDLE_PRO_TOKEN secret")
     got = auth.create_ci_token(plugin._client(base), plugin.store, org_id, f"ci:{repo}")
     cpc = got["token"]
     _gh(["secret", "set", ENV_TOKEN, "--repo", repo], run=run, input=cpc)
     say(f"   token {got['token_id']} created for org {got['org_id']} (the value is only in the secret)")
 
-    say("4/6 model keys: each one goes into gh's own prompt; brindle never sees it")
-    if providers is None:
-        installed = [n for n, a in ci_adapters.default_adapters(cwd).items() if a.cli and a.installed()]
-        answer = (ask or (lambda q, d: d))("which providers? (claude, codex)", ",".join(installed) or "claude")
-        providers = [p.strip() for p in answer.split(",") if p.strip()]
+    say("4/8 model keys: each one goes into gh's own prompt; brindle never sees it")
     secret_names = {"claude": "ANTHROPIC_API_KEY", "codex": "OPENAI_API_KEY"}
     for p in providers:
-        if p == "claude" and _claude_credential(credential, ask) == FEDERATION:
-            _set_federation(repo, env, ask, run=run, say=say)
+        if p == "claude" and federation is not None:
+            _set_federation(repo, federation, run=run, say=say)
             continue
         name = secret_names.get(p)
         if not name:
@@ -1380,9 +1722,16 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         say(f"   {p}: paste the key for {name}")
         _gh(["secret", "set", name, "--repo", repo], run=run, interactive=True)
         if p == "claude":
-            _set_key_workspace(repo, env, ask, workspace_id, run=run, say=say)
+            _set_key_workspace(repo, workspace or "", run=run, say=say)
 
-    say("5/6 fetching the workflows and opening a pull request with them")
+    say(f"5/8 creating the '{TRIGGER_LABEL}' issue label")
+    create_label(repo, run=run, say=say)
+
+    say("6/8 checking the default branch's required status checks")
+    setup_required_checks(repo, cwd=cwd, run=run, ask=ask, required_check=required_check,
+                          no_required_check=no_required_check, say=say)
+
+    say("7/8 fetching the workflows and opening a pull request with them")
     files = {}
     for kind in SETUP_KINDS:
         try:
@@ -1393,19 +1742,14 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
             raise
     if not files:
         raise CIError("the server offered no workflow for this org")
-    git.run(["checkout", "-B", SETUP_BRANCH], cwd)
-    for rel, text in files.items():
-        path = Path(cwd) / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        git.run(["add", rel], cwd)
-    git.run(["commit", "-q", "-m", "Add brindle CI workflows"], cwd)
-    git.run(["push", "-u", "origin", SETUP_BRANCH], cwd)
+    push_setup_branch(cwd, files)
     url = _gh(["pr", "create", "--repo", repo, "--head", SETUP_BRANCH, "--title", "Add brindle CI",
                "--body", "Workflows from `brindle ci init`."], run=run).strip()
     say(f"   pull request: {auth._sanitize(url, 200)}")
+    say(f"   you're back on {git.current_branch(cwd) or 'the commit you started on'}; "
+        f"merge the pull request, then pull")
 
-    say("6/6 doctor")
+    say("8/8 doctor")
     say(doctor(env, repo, cwd, org=ci_adapters.repo_is_org(env, repo, run=run)))
 
 
