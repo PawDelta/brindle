@@ -488,8 +488,9 @@ HAS_SIDEBAR_SHELL = "tmux list-panes -t '#{window_id}' -F '##{@brindle_sidebar}'
 # it reads the pane under the mouse, not the active one.
 CHAT_PANE = "#{&&:#{@brindle},#{!:#{@brindle_sidebar}}}"
 
-# tmux's own root-table mouse bindings (3.7), the fallback for every other
-# pane. Each hands the event to the program when it tracks the mouse itself
+# Mirrors tmux 3.x's own root-table mouse bindings: the fallback that keeps
+# every non-brindle pane (and the sidebar) on tmux's default behaviour. Each
+# hands the event to the program when it tracks the mouse itself
 # (``mouse_any_flag``), and selects text in copy mode otherwise.
 _DEFAULT_MOUSE = {
     "MouseDown1Pane": "select-pane -t = ; send-keys -M",

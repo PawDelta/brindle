@@ -124,7 +124,9 @@ click only focuses the pane (and can't park Claude Code's focus in a dialog wher
 Esc stops working); the wheel still scrolls the chat. If Claude Code's Settings
 dialog (`/usage`, `/config`) ever ignores Esc, its filter box has the focus: press
 Esc up to three times (clear, leave the box, close), or `↓` then Esc. Don't reach
-for Ctrl-C twice, which quits Claude Code and pauses the session. `h` in the sidebar hides it without quitting brindle
+for Ctrl-C twice, which quits Claude Code and pauses the session.
+
+**Hiding the sidebar.** `h` in the sidebar hides it without quitting brindle
 (the chat zooms; `Ctrl-b S` brings it back), and `Ctrl-b z` zooms the chat by hand.
 If the sidebar got left behind in another tmux session, `Ctrl-b S` in a window
 without one pulls it here, as does `brindle sidebar` (it restarts a sidebar that was closed).
