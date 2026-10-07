@@ -152,6 +152,54 @@ def test_resuming_lifts_the_pause(org):
     assert status.block_reason() is None
 
 
+def test_the_policy_kill_switch_control_stops_workers_and_is_acked(rollout_on, org, db, worker):
+    stopped, _ = worker
+    poll(org, control=control("shutdown", cid=status.KILL_SWITCH_ID, reason="Org shutdown"))
+    assert rollout.sweep(db) == ["stopped worker w1: org kill switch"] and stopped == ["w1"]
+    acks = [c for c in org.calls if c[1].endswith("/status/ack")]
+    assert acks[0][2]["control_id"] == "policy-kill-switch"
+
+
+def test_a_throttle_is_acked_once_with_no_workers_stopped(rollout_on, org, db, worker):
+    stopped, _ = worker
+    poll(org, control=control("throttle", cid="t1", throttle={"max_parallel_workers": 1}))
+    rollout.sweep(db)
+    rollout.sweep(db)
+    acks = [c[2] for c in org.calls if c[1].endswith("/status/ack")]
+    assert len(acks) == 1 and acks[0]["control_id"] == "t1" and acks[0]["stopped_workers"] == 0
+    assert not stopped
+
+
+def test_the_ack_session_is_a_valid_id(rollout_on, org, db, worker, monkeypatch):
+    import socket
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "Hannah's Mac.local")
+    poll(org, control=control("shutdown", cid="c9"))
+    rollout.sweep(db)
+    sess = next(c[2]["session"] for c in org.calls if c[1].endswith("/ack"))
+    assert sess == "Hannah-s-Mac-local"
+
+
+def test_a_404_ack_means_the_control_is_gone_and_is_not_retried(rollout_on, org, db, worker, monkeypatch):
+    from brindle.pro import auth
+
+    poll(org, control=control("shutdown", cid="gone"))
+    monkeypatch.setattr(auth, "authed", lambda *a, **k: (404, {"error": "not_found"}))
+    rollout.sweep(db)
+    assert status.load().acked == ["gone"]
+
+
+def test_the_sweep_stops_workers_when_the_cached_policy_says_paused(org, db, worker, monkeypatch):
+    stopped, _ = worker
+    monkeypatch.setattr(license, "has", lambda feature: False)
+    team_policy.save_cached(team_policy.parse_policy(ORG, {
+        "org_id": ORG, "version": 2, "policy": {},
+        "effective": {"paused": True, "paused_reason": "budget review"}}))
+    poll(org)                                    # the status poll itself says: not paused
+    assert rollout.sweep(db) == ["stopped worker w1: member paused"] and stopped == ["w1"]
+    assert "budget review" in status.block_reason()
+
+
 # -- throttle -------------------------------------------------------------------------------------------
 
 
@@ -163,18 +211,18 @@ def test_a_throttle_narrows_the_effective_policy(rollout_on, org):
     base = policy_of(allowed_models=["opus", "sonnet", "haiku"], max_parallel_workers=8,
                      budget={"seat_month_usd": 100, "goal_usd": 50})
     poll(org, control=throttle(allowed_models=["sonnet", "haiku", "other"], max_parallel_workers=2,
-                               budget={"seat_month_usd": 30, "task_usd": 1}))
+                               seat_month_usd=30))
     p = status.narrow(base.enforced)
     assert p.allowed_models == ("sonnet", "haiku")
     assert p.max_parallel_workers == 2
-    assert (p.budget_seat_month_usd, p.budget_goal_usd, p.budget_task_usd) == (30.0, 50.0, 1.0)
+    assert (p.budget_seat_month_usd, p.budget_goal_usd, p.budget_task_usd) == (30.0, 50.0, None)
 
 
 def test_a_throttle_never_widens(rollout_on, org):
     base = policy_of(allowed_models=["haiku"], max_parallel_workers=1,
                      budget={"seat_month_usd": 10})
     poll(org, control=throttle(allowed_models=["opus", "haiku"], max_parallel_workers=9,
-                               budget={"seat_month_usd": 500}))
+                               seat_month_usd=500))
     p = status.narrow(base.enforced)
     assert p.allowed_models == ("haiku",) and p.max_parallel_workers == 1
     assert p.budget_seat_month_usd == 10.0

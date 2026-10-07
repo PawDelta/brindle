@@ -77,6 +77,17 @@ def test_a_notice_goes_into_the_chat_once(org, db, boss):
     assert len(boss) == 2 and "Another" in boss[1][1]
 
 
+def test_concurrent_deliveries_send_a_notice_once(org, db, boss):
+    import threading
+
+    saved = poll(org, notices=[notice("n1"), notice("n2")])
+    threads = [threading.Thread(target=status.deliver_notices, args=(db, "boss", saved))
+               for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(boss) == 2
+
+
 def test_a_notice_waits_while_there_is_no_supervisor(org, db, monkeypatch):
     def gone(db, to, body, sender_id=None, person=False):
         raise agents.AgentError("not running")

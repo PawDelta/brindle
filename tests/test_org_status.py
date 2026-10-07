@@ -158,7 +158,7 @@ def test_the_thread_polls_and_stops(org):
 
 def test_the_status_file_is_valid_json(org):
     org.body = {"policy_version": 1, "control": control("throttle", throttle={
-        "allowed_models": ["a"], "max_parallel_workers": 1, "budget": {"task_usd": 1}})}
+        "allowed_models": ["a"], "max_parallel_workers": 1, "seat_month_usd": 5})}
     poller().poll_once()
     d = json.loads(status._path().read_text())
     assert d["org_id"] == ORG and d["status"]["control"]["throttle"]["max_parallel_workers"] == 1

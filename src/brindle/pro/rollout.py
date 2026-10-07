@@ -183,6 +183,7 @@ def sweep(db, now: float | None = None) -> list[str]:
         on = entitled()
         saved = status.load()
         shutdown = status.shutdown_control(now, saved) if on else None
+        in_force = status.control_in_force(saved.status, now) if on else None
         paused = status.pause_reason(saved)
         if not on and not paused:
             return done
@@ -197,7 +198,8 @@ def sweep(db, now: float | None = None) -> list[str]:
             if ws is None:
                 continue
             if shutdown:
-                tag, why = "remote shutdown", status.shutdown_reason(shutdown)
+                tag = "org kill switch" if shutdown["id"] == status.KILL_SWITCH_ID else "remote shutdown"
+                why = status.shutdown_reason(shutdown)
             elif paused:
                 tag, why = "member paused", paused
             else:
@@ -218,8 +220,8 @@ def sweep(db, now: float | None = None) -> list[str]:
                     f"to you: \"{why}\". Its worktree and branch are kept.", sender_id=None)
             except agents.AgentError:
                 pass  # its supervisor isn't running
-        if shutdown:
-            status.ack(shutdown, stopped)
+        if in_force:     # a shutdown or a throttle: the admin's receipts list covers both
+            status.ack(in_force, stopped if shutdown else 0)
     except Exception:  # noqa: BLE001 - culling must never break what calls it
         log.warning("brindle: the managed-rollout sweep failed", exc_info=True)
     return done
