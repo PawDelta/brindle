@@ -5,13 +5,12 @@
 - **`brindle profile`.** `new`, `lint` and `show` write a profile, check every profile you have, and print one as brindle resolves it.
 - **Rewind a worker.** `brindle agent rewind` puts a worker's worktree back to how it was after an earlier turn and restarts it from there with a note. Works with any provider.
 - **Conflict-aware merging.** Branches that touch the same files merge one at a time, and a conflict goes back to the worker that owns it. `protected_paths` keeps chosen files for you to resolve.
-- **Secrets stay out of local workers.** Local workers no longer inherit brindle's own secrets or CI tokens.
 - **`brindle cost`.** A summary of what your agents spent.
 - **Sign in with Google or GitHub.**
 
 **Behavior change**
 
-- A profile whose `api_key_env` names a job secret (such as `GITHUB_TOKEN`) no longer receives it.
+- A profile's `api_key_env` can't be `GITHUB_TOKEN` or another CI token; give the key its own variable name.
 
 **Pro**
 
@@ -34,4 +33,4 @@
 
 **Fixes**
 
-- Agent environment variables are no longer passed on the tmux command line.
+- Security improvements.
