@@ -956,6 +956,23 @@ def test_a_run_stops_at_the_orgs_dollar_budget(plan, ci_repo, tmp_path, monkeypa
     assert any("org's $1.00 limit" in s for s in said)
 
 
+def test_usage_the_org_budget_cant_price_counts_as_over_it(tmp_path, monkeypatch):
+    from brindle import pricing
+
+    monkeypatch.setitem(pricing.PRICES, "known", pricing.Price(1_000_000, 0, 0, 0))
+    cwd = str(tmp_path)
+    assert ci_client.usage_usd({"known": {"input": 2, "output": 0, "cache_read": 0}}, cwd) == 2.0
+    # a model with no price must not make a run free
+    assert ci_client.usage_usd({"mystery": {"input": 5, "output": 0, "cache_read": 0}}, cwd) == float("inf")
+    assert ci_client.usage_usd({"mystery": {"input": 0, "output": 0, "cache_read": 0}}, cwd) == 0.0
+    # unreadable counts fail closed, and negative ones can't offset real spend
+    assert ci_client.usage_usd({"known": {"input": "lots"}}, cwd) == float("inf")
+    assert ci_client.usage_usd({"known": "x"}, cwd) == float("inf")
+    both = {"known": {"input": 2}, "other": {"input": -10**9}}
+    monkeypatch.setitem(pricing.PRICES, "other", pricing.Price(1_000_000, 0, 0, 0))
+    assert ci_client.usage_usd(both, cwd) == 2.0
+
+
 def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

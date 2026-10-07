@@ -258,3 +258,42 @@ def test_sweep_does_nothing_without_the_feature(db, repo, worker, monkeypatch):
     spend(db, repo, 5, agent="w1")
     monkeypatch.setattr(license, "has", lambda feature: False)
     assert budget.sweep(db) == [] and not sent and not closed
+
+
+# -- fail closed (security review) --------------------------------------------------------------------
+
+
+def org_budget(monkeypatch, **kw):
+    from brindle.pro import team_policy
+
+    monkeypatch.setattr(team_policy, "org_budgets",
+                        lambda root: team_policy.OrgPolicy(org_id="org_acme", version=1, **kw))
+
+
+def gate(db, repo):
+    return budget.Gate(db, load_repo_config(repo), str(repo), "boss")
+
+
+def test_an_unpriced_profile_does_not_slip_past_an_org_budget(db, repo, boss, monkeypatch):
+    profile(repo, "mystery", "no-such-model")
+    config(repo)
+    org_budget(monkeypatch, budget_seat_month_usd=1000.0)
+    assert "no known price" in gate(db, repo).why_not("mystery", "medium")
+
+
+def test_an_unpriced_profile_is_still_never_skipped_by_a_repo_budget(db, repo, boss):
+    profile(repo, "mystery", "no-such-model")
+    config(repo, budget={"task_usd": 1})
+    assert gate(db, repo).why_not("mystery", "medium") is None
+
+
+def test_a_goal_whose_spend_cant_be_totalled_fails_the_goal_budget(db, repo, boss, monkeypatch):
+    from brindle import cost
+
+    config(repo, budget={"goal_usd": 1000})
+
+    def boom(*a, **k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(cost, "priced_rows", boom)
+    assert "can't be totalled" in gate(db, repo).why_not("small", "medium")

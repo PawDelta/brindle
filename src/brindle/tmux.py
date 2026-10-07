@@ -108,22 +108,30 @@ def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
 MAX_COMMAND = 8000
 
 
-def _short(command: list[str]) -> list[str]:
-    """``command``, or, when it is too long for tmux, a private script
-    that runs it: written 0600 under brindle's home, it deletes itself as it
-    starts and then execs the original argv, so nothing else changes."""
-    if sum(len(a.encode()) + 1 for a in command) <= MAX_COMMAND:
+def _short(command: list[str], env: dict[str, str] | None = None) -> list[str]:
+    """``command``, or, when it is too long for tmux or ``env`` is given, a
+    private script that runs it: written 0600 under brindle's home, it
+    deletes itself as it starts, exports ``env`` and then execs the original
+    argv, so nothing else changes. ``env`` goes this way, never as tmux ``-e
+    NAME=VALUE`` arguments, which any user can read in ``ps``."""
+    if not env and sum(len(a.encode()) + 1 for a in command) <= MAX_COMMAND:
         return command
+    import re
     import shlex
     import tempfile
 
     from brindle.config import brindle_home
 
+    exports = ""
+    for k, v in (env or {}).items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            raise TmuxError(f"not a valid environment variable name: {k!r}")
+        exports += f"export {k}={shlex.quote(v)}\n"
     d = brindle_home() / "launch"
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, path = tempfile.mkstemp(prefix="launch-", suffix=".sh", dir=d)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(f'#!/bin/sh\nrm -f "$0"\nexec {shlex.join(command)}\n')
+        f.write(f'#!/bin/sh\nrm -f "$0"\n{exports}exec {shlex.join(command)}\n')
     return ["/bin/sh", path]
 
 
@@ -179,11 +187,10 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     if exempt:
         env = {**env, **exempt}
     deny = secrets.pane_deny(deny, env)
-    env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     unset = secrets.pane_unset(inherited_names(session), keep=(*keep, *env), allow=allow, deny=deny)
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
-        "-n", name, "-c", cwd, *env_args, "--", *_short(scrubbed(command, unset)),
+        "-n", name, "-c", cwd, "--", *_short(scrubbed(command, unset), env),
     )
     target = proc.stdout.strip()
     if tag:

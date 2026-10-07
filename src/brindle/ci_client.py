@@ -1000,17 +1000,26 @@ def token_budget_usd(plan: dict, cwd: str) -> float | None:
 
 
 def usage_usd(usage: Mapping, cwd: str) -> float:
-    """What a usage report (``{model: {input, output, cache_read}}``) costs; a
-    model brindle has no price for counts as nothing."""
+    """What a usage report (``{model: {input, output, cache_read}}``) costs.
+    Fails closed, for the org's dollar limit: tokens of a model brindle has no
+    price for, or counts it can't read, make the cost infinite, never nothing."""
     from brindle import pricing
 
     extra = pricing.repo_overrides(cwd)
     total = 0.0
     for model, u in usage.items():
-        price = pricing.price_for(model, extra) if isinstance(u, Mapping) else None
-        if price is not None:
-            total += price.cost(int(u.get("input") or 0), int(u.get("output") or 0), 0,
-                                int(u.get("cache_read") or 0))
+        if not isinstance(u, Mapping):
+            return math.inf
+        try:
+            counts = [max(0, int(u.get(k) or 0)) for k in ("input", "output", "cache_read")]
+        except (TypeError, ValueError, OverflowError):
+            return math.inf
+        if not any(counts):
+            continue
+        price = pricing.price_for(model, extra)
+        if price is None:
+            return math.inf
+        total += price.cost(counts[0], counts[1], 0, counts[2])
     return total
 
 

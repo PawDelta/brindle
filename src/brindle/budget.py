@@ -46,6 +46,7 @@ class Limits:
     month_usd: float | None = None
     stop: bool = False      # close a worker that reaches task_usd (default: only warn)
     seat_spent_usd: float | None = None   # this month's spend as the org counts it (org budgets)
+    org: bool = False       # an org budget is part of these limits: it can't be skipped for want of a price
 
     def any(self) -> bool:
         return any(getattr(self, k) is not None for k in KEYS)
@@ -123,6 +124,7 @@ def limits(cfg, repo_root: str | None = None) -> Limits | None:
         log.warning("brindle: the org budget can't be read (%s); treating it as exhausted", e)
         org = Limits(month_usd=0.0, goal_usd=0.0)
     if org is not None:
+        lim.org = True
         lim.goal_usd = _tighter(lim.goal_usd, org.goal_usd)
         lim.month_usd = _tighter(lim.month_usd, org.month_usd)
         lim.seat_spent_usd = org.seat_spent_usd
@@ -192,6 +194,7 @@ class Gate:
         self.extra = pricing.repo_overrides(repo_root)
         self._month: float | None = None
         self._goal: float | None = None
+        self._goal_failed = False
 
     @property
     def active(self) -> bool:
@@ -230,35 +233,43 @@ class Gate:
         except Exception:  # noqa: BLE001
             return self.lim.goal_usd
 
-    def goal_spend(self) -> float:
+    def goal_spend(self) -> float | None:
+        """The goal's spend so far, or None when it can't be totalled (a goal
+        budget can't be met by spend nobody could count)."""
         if self._goal is None:
             from brindle import cost
 
-            self._goal = 0.0
+            total = 0.0
             try:
                 goal = self.goal_text()
                 if goal:
                     cache: dict = {}
                     for p in cost.priced_rows(self.db, self.repo_root, 0):
                         if p.dollars and cost._goal_of(self.db, p.row.agent_id, cache) == goal:
-                            self._goal += p.dollars
+                            total += p.dollars
+                self._goal = total
             except Exception:  # noqa: BLE001
                 log.exception("brindle: couldn't total the goal's spend")
-        return self._goal
+                self._goal_failed = True
+        return None if self._goal_failed else self._goal
 
     def why_not(self, profile: str, weight: str | None) -> str | None:
         """Why ``profile`` doesn't fit the budget, or None when it does."""
         if self.lim is None:
             return None
         est = estimate(self.db, self.repo_root, profile, weight, self.extra)
-        if est is None:
-            return None
         lim = self.lim
+        if est is None:
+            if lim.org:      # an org's budget isn't skipped because a profile has no known price
+                return f"{profile} has no known price, so it can't be shown to fit the org's budget"
+            return None
         m = pricing.money
         if lim.task_usd is not None and est > lim.task_usd:
             return f"a {profile} task costs about {m(est)}, over the {m(lim.task_usd)} task budget"
         if lim.goal_usd is not None:
             spent, cap = self.goal_spend(), self.goal_limit()
+            if spent is None:
+                return f"the goal's spend can't be totalled, so {profile} can't be shown to fit its budget"
             if spent + est > cap:
                 return (f"{profile} at about {m(est)} would take the goal to {m(spent + est)}, "
                         f"over its {m(cap)} budget")
