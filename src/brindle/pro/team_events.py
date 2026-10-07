@@ -53,6 +53,7 @@ PAYLOAD_KEYS = ("kind", "agent_ref", "branch_ref", "profile", "provider", "model
 MAX_EVENT_COST_USD = 100_000     # the backend refuses more
 MAX_BY_MODEL = 32
 MAX_MODEL_NAME = 128
+MAX_MODEL_TOKENS = 10**12        # the backend refuses more per model
 BATCH = 100
 BATCH_BYTES = 48 * 1024          # backend caps the body at 64 KiB
 QUEUE_SIZE = 64
@@ -106,10 +107,12 @@ def _by_model(v) -> dict | None:
         tokens = b.get("tokens")
         if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
             continue
-        usd = _usd(b.get("usd")) or 0.0
+        usd = b.get("usd")
+        usd = (min(float(usd), MAX_EVENT_COST_USD)
+               if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd >= 0 else 0.0)
         slot = out.setdefault(name[:MAX_MODEL_NAME], {"tokens": 0, "usd": 0.0})
-        slot["tokens"] += tokens
-        slot["usd"] = round(slot["usd"] + usd, 4)
+        slot["tokens"] = min(slot["tokens"] + tokens, MAX_MODEL_TOKENS)
+        slot["usd"] = round(min(slot["usd"] + usd, MAX_EVENT_COST_USD), 4)
     if len(out) > MAX_BY_MODEL:
         top = sorted(out.items(), key=lambda kv: -kv[1]["tokens"])[:MAX_BY_MODEL]
         out = dict(top)

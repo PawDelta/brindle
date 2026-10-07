@@ -123,3 +123,11 @@ def test_model_label_falls_back_to_profile_then_unknown():
     assert cost.model_label(cost.Priced(_row("a", "m1", 1), "m1", 1, None)) == "m1"
     assert cost.model_label(cost.Priced(_row("a", None, 1, profile="dev"), None, 1, None)) == "profile dev"
     assert cost.model_label(cost.Priced(_row("a", None, 1, profile=None), None, 1, None)) == "unknown model"
+
+
+def test_tokens_and_usd_are_capped_at_the_backend_limits():
+    cap, tok = team_events.MAX_EVENT_COST_USD, 10**12
+    body = payload({"big": {"tokens": 10**15, "usd": 10**9},
+                    "x" * 128 + "a": {"tokens": tok, "usd": cap}, "x" * 128 + "b": {"tokens": tok, "usd": cap}})
+    assert body["by_model"]["big"] == {"tokens": tok, "usd": float(cap)}
+    assert body["by_model"]["x" * 128] == {"tokens": tok, "usd": float(cap)}
