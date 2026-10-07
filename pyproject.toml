@@ -49,7 +49,10 @@ audit = "brindle.pro.audit_chain:make"
 audit_export = "brindle.pro.audit_export:make"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3.8.0",
+]
 
 [build-system]
 requires = ["hatchling>=1.27"]
@@ -69,3 +72,4 @@ only-include = ["src", "README.md", "LICENSE", "SCHEDULE-A", "pyproject.toml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+markers = ["serial: run outside xdist (`pytest -m serial`); the parallel pass skips these"]
