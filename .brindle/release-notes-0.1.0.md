@@ -7,6 +7,7 @@
 - **Conflict-aware merging.** Branches that touch the same files merge one at a time, and a conflict goes back to the worker that owns it. `protected_paths` keeps chosen files for you to resolve.
 - **Secrets stay out of local workers.** Local workers no longer inherit brindle's own secrets or CI tokens.
 - **`brindle cost`.** A summary of what your agents spent.
+- **Sign in with Google, GitHub, SAML or OIDC.** Single sign-on for your account.
 
 **Behavior change**
 
@@ -22,11 +23,11 @@
 
 - **Org library.** Admins share profiles and rule packs with everyone in the org.
 - **Org budgets and protected paths.** Set in your org policy.
-- **Single sign-on.** Sign in with Google, GitHub, SAML or OIDC, available on every tier; admins can require it.
+- **Require single sign-on.** Admins can require SSO for their org.
 
 **Enterprise**
 
-- **Cost centers.** Track spend per center and request approval for more.
+- **Cost centers.** Track spend per cost center and approve overruns.
 - **Managed models and rollout.** Set the models your org uses and control which versions run.
 - **Audit export.** Ship the audit log to your SIEM.
 - **SCIM.** Provision and remove members from your identity provider.
@@ -34,4 +35,3 @@
 **Fixes**
 
 - Agent environment variables are no longer passed on the tmux command line.
-- Org budgets no longer let spend through when a model's price is unknown.
