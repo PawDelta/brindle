@@ -605,7 +605,8 @@ class CheckCancelled(Exception):
     """``cancel()`` turned true while a check command was running."""
 
 
-CANCEL_POLL = 1.0   # seconds between looks at ``cancel`` while a check runs
+KILL_WAIT = 5.0     # seconds to wait for a killed check's pipes to close
+CANCEL_POLL = 1.0  # seconds between looks at ``cancel`` while a check runs
 
 
 def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
@@ -637,7 +638,10 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
             timed_out = time.monotonic() >= deadline
             if timed_out or cancel():
                 _kill_group(proc)
-                proc.communicate()
+                try:
+                    proc.communicate(timeout=KILL_WAIT)
+                except subprocess.TimeoutExpired:
+                    pass   # a grandchild still holds the pipes; don't hang on it
                 if timed_out:
                     return False, f"$ {cmd}\n(timed out after {timeout}s)"
                 raise CheckCancelled(cmd)

@@ -309,7 +309,10 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
     for cmd in cfg.checks:
-        ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel)
+        if cancel is None:
+            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+        else:
+            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel=cancel)
         if ok:
             lines.append(f"PASS `{cmd}`")
             continue
