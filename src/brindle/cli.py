@@ -2576,7 +2576,14 @@ def warm_checks_cmd(workspace_id: str) -> None:
     ws = db.get_workspace(workspace_id)
     if ws is None:
         return
-    gates.check_summary(db, ws, load_repo_config(ws.repo_root))
+    sha = gates.head(ws)
+    try:
+        # A new commit makes this run's result useless (the review and the
+        # gate want the new head), so give up and free the check slot.
+        gates.check_summary(db, ws, load_repo_config(ws.repo_root),
+                            cancel=lambda: gates.head(ws) != sha)
+    except gates.Abandoned:
+        pass
 
 
 @app.command("_pool-fill", hidden=True)

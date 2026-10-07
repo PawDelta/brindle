@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import threading
 import time
 from contextlib import contextmanager
@@ -49,7 +50,11 @@ def head(ws: Workspace) -> str:
     return git.out(["rev-parse", "HEAD"], ws.path)
 
 
-def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int) -> tuple[bool, str]:
+Abandoned = autopilot.CheckCancelled   # raised when a run's ``cancel`` turns true
+
+
+def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
+                cancel=None) -> tuple[bool, str]:
     """Run ``cmd`` in ``ws``, or reuse the cached PASSING result for the same
     (workspace, HEAD sha, command) if the tree was clean when that result was
     cached. A dirty tree always runs fresh and is never cached, since the
@@ -57,22 +62,54 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     timeout is never cached either, so a retry always re-runs it; and a
     result is only cached if the sha and clean state still hold *after* the
     command ran, in case it took long enough for something else to commit or
-    leave files behind."""
+    leave files behind.
+
+    ``cancel`` (optional) is polled while waiting for the lock or a slot and
+    while the command runs; once it is true the run is given up and
+    ``Abandoned`` raised, so a run nobody wants any more frees its slot.
+
+    A process that waited on the lock while the holder failed or timed out
+    reuses that outcome instead of re-running the whole command."""
     sha = head(ws)
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
-        return _run_queued(db, ws, cmd, env, timeout)
+        return _run_queued(db, ws, cmd, env, timeout, cancel)
     # One run at a time per (workspace, commit, command): a check warmed when
     # the worker reported, a reviewer's summary and the merge gate can all
     # want the same result at once; the later ones wait, then reuse it.
-    with _check_lock(ws.id, sha, cmd):
+    waiting_since = time.time()
+    with _check_lock(ws.id, sha, cmd, cancel) as result_file:
         cached = db.get_check(ws.id, sha, cmd)
         if cached is not None and cached.ok:
             return True, cached.output or ""
-        ok, out = _run_queued(db, ws, cmd, env, timeout)
-        if ok and head(ws) == sha and not git.dirty_files(ws.path):
-            db.set_check(ws.id, sha, cmd, ok, out)
+        if (shared := _read_outcome(result_file, waiting_since)) is not None:
+            return shared
+        ok, out = _run_queued(db, ws, cmd, env, timeout, cancel)
+        if head(ws) == sha and not git.dirty_files(ws.path):
+            if ok:
+                db.set_check(ws.id, sha, cmd, ok, out)
+            else:
+                _write_outcome(result_file, ok, out)
         return ok, out
+
+
+def _read_outcome(path, since: float) -> tuple[bool, str] | None:
+    """The failure another process recorded after ``since`` (while we waited
+    for the lock), else None."""
+    try:
+        data = json.loads(path.read_text())
+        if data["finished"] >= since:
+            return bool(data["ok"]), str(data["output"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _write_outcome(path, ok: bool, output: str) -> None:
+    try:
+        path.write_text(json.dumps({"ok": ok, "output": output, "finished": time.time()}))
+    except OSError:
+        pass
 
 
 # -- the queue: check runs share the machine -------------------------------------
@@ -80,6 +117,7 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
 SLOT_POLL = 1.0          # seconds between tries for a free slot
 SLOW_FACTOR = 2.0        # a run is "far past" its last duration at this multiple of it...
 SLOW_MIN_EXTRA = 60.0    # ...and at least this many seconds over
+SLOW_TIMEOUT_FRACTION = 0.75   # but never later than this share of check_timeout
 
 
 def _concurrency(ws: Workspace) -> int:
@@ -92,7 +130,7 @@ def _concurrency(ws: Workspace) -> int:
 
 
 @contextmanager
-def _check_slot(limit: int):
+def _check_slot(limit: int, cancel=None):
     """Hold one of ``limit`` machine-wide slots for a check run, waiting for
     one to come free: several branches' full suites at once swap the machine,
     and every run then takes hours. The slots are lock files under the brindle
@@ -118,6 +156,8 @@ def _check_slot(limit: int):
                 held = True
                 break
             else:
+                if cancel is not None and cancel():
+                    raise Abandoned("slot")
                 time.sleep(SLOT_POLL)
         yield
     finally:
@@ -125,16 +165,20 @@ def _check_slot(limit: int):
             f.close()   # closing releases the slot
 
 
-def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int) -> tuple[bool, str]:
+def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
+                cancel=None) -> tuple[bool, str]:
     """Run ``cmd`` once a slot is free (``timeout`` covers the run, not the
     wait). A run that goes far past the command's last passing duration in
     this repo is reported to the supervisor while it is still running."""
-    with _check_slot(_concurrency(ws)):
+    with _check_slot(_concurrency(ws), cancel):
         last = db.check_duration(ws.repo_root, cmd)
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
         try:
-            ok, out = autopilot.run_check(cmd, ws.path, env, timeout)
+            if cancel is None:
+                ok, out = autopilot.run_check(cmd, ws.path, env, timeout)
+            else:
+                ok, out = autopilot.run_check(cmd, ws.path, env, timeout, cancel=cancel)
         finally:
             if watch:
                 watch.cancel()
@@ -149,9 +193,11 @@ def slow_after(last: float) -> float:
 
 
 def _watch_slow(db: DB, ws: Workspace, cmd: str, last: float, timeout: int) -> threading.Timer | None:
-    after = slow_after(last)
-    if after >= timeout or db.path == ":memory:":
-        return None   # check_timeout ends the run first, and that failure is reported anyway
+    # Warn before check_timeout ends the run, even if the usual "far past" mark
+    # lies beyond it: at ~75% of the timeout at the latest.
+    after = min(slow_after(last), SLOW_TIMEOUT_FRACTION * timeout)
+    if db.path == ":memory:":
+        return None
     timer = threading.Timer(after, _report_slow, args=(db.path, ws, cmd, last, after, timeout))
     timer.daemon = True
     timer.start()
@@ -205,16 +251,29 @@ def tell(db: DB, to_id: str, text: str, sender_id: str | None = None) -> None:
 
 
 @contextmanager
-def _check_lock(ws_id: str, sha: str, cmd: str):
+def _check_lock(ws_id: str, sha: str, cmd: str, cancel=None):
+    """Exclusive lock for one (workspace, sha, cmd); yields the path of the
+    file where a holder leaves a failed outcome for the waiters. With
+    ``cancel``, waiting for the lock is given up (``Abandoned``) once it is true."""
     from brindle.config import brindle_home
 
     key = hashlib.sha1(f"{ws_id}\0{sha}\0{cmd}".encode()).hexdigest()[:16]
     lock_dir = brindle_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"check-{key}.lock", "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        if cancel is None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if cancel():
+                        raise Abandoned("lock")
+                    time.sleep(SLOT_POLL)
         try:
-            yield
+            yield lock_dir / f"check-{key}.result"
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
@@ -238,7 +297,7 @@ def rule_summary(db: DB, ws: Workspace) -> str:
     return result.summary() if result else ""
 
 
-def check_summary(db: DB, ws: Workspace, cfg: RepoConfig) -> str:
+def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     """Run the worker's rule packs and each of ``cfg.checks`` (cached by sha)
     and produce a short pass/fail summary for a reviewer, with output only
     for the ones that failed, capped so one big failure can't blow up the
@@ -250,7 +309,10 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig) -> str:
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
     for cmd in cfg.checks:
-        ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+        if cancel is None:
+            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+        else:
+            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel=cancel)
         if ok:
             lines.append(f"PASS `{cmd}`")
             continue
