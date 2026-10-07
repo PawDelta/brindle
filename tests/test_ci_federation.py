@@ -208,6 +208,18 @@ def test_refresher_retries_a_failed_refresh_while_the_old_token_works(caplog):
     assert r.tick() == pytest.approx(420.0), "the failure count starts over"
 
 
+def test_refresher_survives_an_unexpected_error_and_names_only_its_class(caplog):
+    clock = {"t": 1000.0}
+    r, _, _ = make_refresher(clock, answers=["sk-ant-oat01-first", RuntimeError("body: sk-ant-oat01-leak"),
+                                             "sk-ant-oat01-second"])
+    r.exchange_now()
+    with caplog.at_level(logging.WARNING, logger="brindle.ci_federation"):
+        assert r.tick() == ci_federation.RETRY_DELAYS[0]
+    assert r.token() == "sk-ant-oat01-first"
+    assert "unexpected RuntimeError" in caplog.text and "leak" not in caplog.text and "sk-ant-oat01" not in caplog.text
+    assert r.tick() == pytest.approx(420.0) and r.token() == "sk-ant-oat01-second"
+
+
 def test_refresher_never_refreshes_faster_than_the_floor():
     clock = {"t": 1000.0}
     r, _, _ = make_refresher(clock, expires_in=20.0)
@@ -382,6 +394,40 @@ def test_proxy_is_not_an_open_proxy(proxy, upstream):
         s.close()
         assert answer.startswith(b"HTTP/1.1 400") or answer.startswith(b"HTTP/1.1 501"), line
     assert upstream.requests == []
+
+
+def test_proxy_forwards_a_repeated_header_as_one_list(proxy, upstream):
+    p, _ = proxy
+    host, port = p.base_url.split("://", 1)[1].split(":")
+    s = socket.create_connection((host, int(port)), timeout=10)
+    s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer run-secret\r\n"
+              b"anthropic-beta: one\r\nAnthropic-Beta: two\r\nContent-Length: 2\r\n\r\n{}")
+    answer = b""
+    while True:
+        part = s.recv(4096)
+        if not part:
+            break
+        answer += part
+    s.close()
+    assert answer.startswith(b"HTTP/1.1 200")
+    assert upstream.requests[0][1]["anthropic-beta"] == "one, two"
+
+
+def test_proxy_drops_a_client_that_never_sends_its_body(upstream):
+    p = CredentialProxy(lambda: WIF, upstream=upstream.url, secret="run-secret", idle_timeout=0.5)
+    p.start()
+    try:
+        host, port = p.base_url.split("://", 1)[1].split(":")
+        s = socket.create_connection((host, int(port)), timeout=10)
+        s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer run-secret\r\n"
+                  b"Content-Length: 10\r\n\r\n")
+        assert s.recv(4096) == b"", "closed on the idle timeout, nothing forwarded"
+        s.close()
+        assert upstream.requests == []
+        resp, data = call(p.base_url, "POST", "/v1/messages", body=b"{}", headers={"Authorization": "Bearer run-secret"})
+        assert resp.status == 200, "still serving"
+    finally:
+        p.stop()
 
 
 def test_proxy_caps_the_request_body(proxy, upstream, monkeypatch):

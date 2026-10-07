@@ -68,6 +68,7 @@ RETRY_DELAYS = (5.0, 15.0, 45.0)   # after a failed refresh, while the old token
 RETRY_EVERY_S = 60.0
 EXCHANGE_TIMEOUT = 30.0
 UPSTREAM_TIMEOUT = 600.0           # a long reply streams for minutes
+IDLE_TIMEOUT = 60.0                # a client that stops sending (a declared body that never comes)
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 CHUNK = 64 * 1024
 HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
@@ -194,12 +195,16 @@ class TokenRefresher:
         return expires_in
 
     def tick(self) -> float:
-        """One refresh attempt; how long to wait before the next."""
+        """One refresh attempt; how long to wait before the next. Any
+        failure is a failed refresh (the thread must not die): a
+        :class:`FederationError` is logged as is, anything else by its
+        class name only, since its text could quote a response."""
         try:
             expires_in = self.exchange_now()
-        except FederationError as e:
+        except Exception as e:   # noqa: BLE001 - see the docstring
             self._failures += 1
-            log.warning("brindle ci: refreshing the Anthropic token failed (%s); retrying", e)
+            why = str(e) if isinstance(e, FederationError) else f"unexpected {type(e).__name__}"
+            log.warning("brindle ci: refreshing the Anthropic token failed (%s); retrying", why)
             n = self._failures
             return RETRY_DELAYS[n - 1] if n <= len(RETRY_DELAYS) else RETRY_EVERY_S
         self._failures = 0
@@ -228,6 +233,7 @@ class TokenRefresher:
 class _Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     proxy: "CredentialProxy"
+    timeout = IDLE_TIMEOUT   # the socket's: a read that waits this long ends the request
 
     def log_message(self, format, *args) -> None:   # noqa: A002 - the base class's name
         """Nothing: a request line or an error could quote a header."""
@@ -256,7 +262,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._error(503, "api_error", "the run's Anthropic token isn't available right now")
             return
         body = self.rfile.read(length) if length else b""
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in NOT_FORWARDED}
+        headers: dict[str, str] = {}
+        for k, v in self.headers.items():
+            name = k.lower()
+            if name not in NOT_FORWARDED:   # a repeated header is one list, not the last value
+                headers[name] = f"{headers[name]}, {v}" if name in headers else v
         headers["Authorization"] = f"Bearer {token}"
         if body:
             headers["Content-Length"] = str(len(body))
@@ -318,13 +328,13 @@ class CredentialProxy:
     fixed upstream, paths only."""
 
     def __init__(self, token: Callable[[], str | None], *, upstream: str = UPSTREAM,
-                 secret: str | None = None) -> None:
+                 secret: str | None = None, idle_timeout: float = IDLE_TIMEOUT) -> None:
         self.token = token
         self.secret = secret or secrets.token_urlsafe(32)
         self._upstream = urllib.parse.urlsplit(upstream)
         if self._upstream.scheme not in ("http", "https") or not self._upstream.hostname:
             raise ValueError("the proxy's upstream must be an http(s) URL")
-        handler = type("Handler", (_Handler,), {"proxy": self})
+        handler = type("Handler", (_Handler,), {"proxy": self, "timeout": idle_timeout})
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self._server.daemon_threads = True
         self._thread: threading.Thread | None = None
