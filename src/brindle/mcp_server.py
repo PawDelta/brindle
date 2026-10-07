@@ -1011,11 +1011,13 @@ def transfer_to_repo(target_path: str, branch: str | None = None) -> str:
     from brindle import scratch
 
     db = DB()
-    _, ws = _caller(db)
+    caller, ws = _caller(db)
     if not scratch.is_scratch(ws.path):
         return "This isn't a scratch session; the work is already in a real repository."
     try:
-        t = scratch.transfer(db, ws, target_path, branch)
+        # This chat stays up to deliver the reply; the next session started in
+        # the target repo pauses it (scratch.pause_transferred_to).
+        t = scratch.transfer(db, ws, target_path, branch, keep_running=caller.id if caller else None)
     except (scratch.ScratchError, git.GitError, workspaces.WorkspaceError) as e:
         return f"Transfer failed: {e}"
     return (f"Moved {t.commits} commit(s) onto branch {t.workspace.branch} in {t.workspace.repo_root} "

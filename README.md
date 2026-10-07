@@ -508,7 +508,7 @@ Autopilot, merge gates and cleanup:
 | `protected_paths` | `[]` | paths or globs (`"migrations/"`, `"*.lock"`) whose merge conflicts brindle never hands to a worker to resolve: the branch waits for you instead (see "Conflict-aware merging") |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 | `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
-| `local_models` | `false` | `true`: when a native profile points at Ollama on this machine and it isn't running, `brindle` starts `ollama serve` in the background (with the context length the profiles need) and loads their models. Off, brindle uses a server that's already running and never starts or preloads one |
+| `local_models` | `true` | When a native profile points at Ollama on this machine and it isn't running, `brindle` starts `ollama serve` in the background (with the context length the profiles need) and loads their models, then stops it when the last session closes. `false`: brindle uses a server that's already running and never starts or preloads one |
 | `sidebar` | `"left"` | where the dashboard sits in each window: `"left"` of the chat, or `"bottom"` (full-width rows under it) |
 | `delegation` | `"balanced"` | how readily the supervisor hands work to workers. `"conservative"` does most work in its own chat (fewest tokens), `"fast"` splits any multi-part request across parallel workers straight away (quickest, most tokens). `brindle delegation fast` saves it for every repo and session (in `~/.brindle/config.json`; `--repo` for this repo only) and tells a running supervisor |
 | `delete_merged_branches` | `true` | removing a worktree (after a merge, `brindle rm`, `brindle prune`, session cleanup) also deletes its branch once every commit is in its base, so finished branches don't pile up. An unmerged branch is always kept; `false` keeps them all. If GitHub keeps merged PR branches, the first `brindle pr` in a repo offers to turn on its automatic deletion with your `gh` login (repo admins only) |
@@ -1518,9 +1518,9 @@ ollama pull qwen3-coder:30b
 brindle doctor                   # "model qwen3-coder:30b ... is available"
 ```
 
-Run `ollama serve` yourself, or let brindle do it: a 30B model holds about 20 GB
-of GPU memory, so brindle doesn't start or preload one unless you set
-`"local_models": true`. Then, when `brindle` (or `brindle continue`)
+Run `ollama serve` yourself, or let brindle do it, with no setup. A 30B model holds
+about 20 GB of GPU memory, so set `"local_models": false` if you don't want brindle
+to start or preload one. When `brindle` (or `brindle continue`)
 starts and a native profile points at Ollama on this machine that isn't answering,
 brindle starts it in the background with `OLLAMA_CONTEXT_LENGTH` set to the largest
 `context_tokens` any profile asks of it plus room for the reply (40960 for the
