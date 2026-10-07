@@ -599,6 +599,12 @@ def bind_session_keys(session: str) -> None:
         ours = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)}" if clip else default
         _tmux("bind-key", "-T", table, "MouseDragEnd1Pane",
               "if-shell", "-F", "#{@brindle}", ours, default, check=False)
+        # A drag that ends outside the pane (or any other way tmux misses the
+        # release) leaves a chat pane in copy mode, where C-c only cancels the
+        # mode: the chat never saw it, so Ctrl+C looked dead. In a chat pane
+        # it leaves copy mode and passes the key on, as the person meant it.
+        _tmux("bind-key", "-T", table, "C-c", "if-shell", "-F", CHAT_PANE,
+              "send-keys -X cancel ; send-keys C-c", "send-keys -X cancel", check=False)
     # The mouse stays tmux's in a chat pane (see chat_mouse_bindings), even
     # when the chat asks to track it.
     for key, ours in chat_mouse_bindings(clip).items():
