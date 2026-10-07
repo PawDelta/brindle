@@ -17,6 +17,7 @@ Two kinds of figures, kept apart so the screen never waits on the network:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -244,8 +245,15 @@ def shares(models: list[tuple[str, int]]) -> list[tuple[str, int]]:
     return [(name, p) for (name, _), p in zip(rows, pct)]
 
 
+def short(label: str) -> str:
+    """A model label as the narrow sidebar shows it: no ``claude-`` prefix and no
+    trailing date stamp (``claude-opus-4-1-20250805`` -> ``opus-4-1``)."""
+    name = label.removeprefix("claude-")
+    return re.sub(r"-\d{8}$", "", name) or label
+
+
 def share_rows(models: list[tuple[str, int]], width: int) -> list[str]:
-    rows = shares(models)
+    rows = [(short(n), p) for n, p in shares(models)]
     name_w = min(max((len(n) for n, _ in rows), default=0), max(width - BAR_WIDTH - 6, 4))
     out = []
     for name, p in rows:
@@ -258,7 +266,9 @@ def share_rows(models: list[tuple[str, int]], width: int) -> list[str]:
 def title(collapsed: bool, width: int, local_: Local | None) -> str:
     arrow = "▸ " if collapsed else "▾ "
     top = shares(local_.models)[:1] if collapsed and local_ else []
-    tail = f" ({top[0][0]} {top[0][1]}%)" if top else ""
+    tail = f" ({short(top[0][0])} {top[0][1]}%)" if top else ""
+    if len(arrow) + len("Costs") + len(tail) > width:
+        tail = ""    # the title stays whole; the top model shows when unfolded
     return arrow + "Costs"[:max(width - len(arrow) - len(tail), 1)] + tail
 
 

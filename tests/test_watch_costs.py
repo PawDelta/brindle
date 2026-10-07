@@ -261,3 +261,17 @@ def test_a_failing_collector_leaves_an_empty_remote():
     feed.wait()
     remote = feed.get()
     assert remote is not None and remote.org is None and remote.limits is None
+
+
+def test_model_names_are_shortened_for_the_sidebar():
+    assert watch_costs.short("claude-opus-4-1-20250805") == "opus-4-1"
+    assert watch_costs.short("claude-sonnet-5-5") == "sonnet-5-5"
+    assert watch_costs.short("gpt-5") == "gpt-5"
+    assert watch_costs.short("other") == "other"
+    rows = watch_costs.share_rows([("claude-opus-5-5", 2), ("claude-haiku-5-5", 1)], 28)
+    assert rows[0].startswith("opus-5-5 ") and rows[1].startswith("haiku-5-5")
+
+
+def test_a_narrow_folded_header_drops_the_model_rather_than_cut_the_title():
+    local_ = Local(models=[("claude-opus-5-5", 1)])
+    assert watch_costs.title(True, 14, local_) == "▸ Costs"

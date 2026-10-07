@@ -18,9 +18,9 @@ def test_by_model_rides_next_to_cost_usd():
     assert "by_model" in team_events.PAYLOAD_KEYS
 
 
-def test_absent_by_model_is_none():
-    assert payload(None)["by_model"] is None
-    assert payload({})["by_model"] is None
+def test_absent_by_model_is_left_out():
+    assert "by_model" not in payload(None)
+    assert "by_model" not in payload({})
 
 
 def test_names_are_cut_to_128_chars():

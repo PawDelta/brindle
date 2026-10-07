@@ -120,8 +120,8 @@ def _by_model(v) -> dict | None:
 
 
 def event_payload(key: OrgKey, identity: str | None, ev: Event, repo: str | None = None) -> dict | None:
-    """The exact wire form of ``ev`` (always all of ``PAYLOAD_KEYS``, plus
-    ``repo`` when given), or None for an unknown kind. ``identity`` is the repo
+    """The exact wire form of ``ev`` (all of ``PAYLOAD_KEYS`` but ``by_model``,
+    which is sent only when there is a split, plus ``repo`` when given), or None for an unknown kind. ``identity`` is the repo
     identity (None: no branch ref). ``repo`` is ``owner/name``, sent only with
     the ``cost_centers`` feature so spend is attributed to the repo's center."""
     if ev.kind not in KINDS:
@@ -145,8 +145,9 @@ def event_payload(key: OrgKey, identity: str | None, ev: Event, repo: str | None
         "approved": _flag(ev.approved),
         "merged": _flag(ev.merged),
         "cost_usd": _usd(ev.cost_usd),
-        "by_model": _by_model(ev.by_model),
     }
+    if (split := _by_model(ev.by_model)) is not None:
+        body["by_model"] = split    # left out when empty: a backend older than by_model refuses the key
     if repo:
         body["repo"] = repo
     return body
@@ -414,6 +415,10 @@ class ProEvents(EventsPlugin):
                     return True
                 org, batch = head
                 status = self._post(org, batch)
+                if status == 422 and any("by_model" in e for e in batch):
+                    # A backend older than by_model refuses the key: keep the rest of the event.
+                    status = self._post(org, [{k: v for k, v in e.items() if k != "by_model"}
+                                              for e in batch])
                 if status in (200, 201, 202):
                     self.spool.pop(org, len(batch))
                     self._delay = 0.0
