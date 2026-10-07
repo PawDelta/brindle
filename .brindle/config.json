@@ -1,3 +1,4 @@
 {
-  "checks": ["uv run pytest -q"]
+  "checks": ["uv run pytest -q"],
+  "check_timeout": 1800
 }
