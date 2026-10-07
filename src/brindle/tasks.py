@@ -423,8 +423,86 @@ def on_removed_unmerged(db: DB, ws: Workspace) -> None:
             _cancel(db, t.id, f"it was waiting on {dep_ref}, which was removed unmerged.")
 
 
-def list_text(db: DB, repo_root: str) -> str:
-    """Pending and cancelled tasks: started ones already show in list_agents."""
+def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
+            depends_on: list[str] | None = None) -> str:
+    """Make a new task from a cancelled one: same brief, done_when, files,
+    profile, weight and (unless ``depends_on`` overrides them) dependencies.
+    It starts at once when nothing is left to wait on. Raises ``ValueError``
+    if the task is unknown or not cancelled, or a dependency can never merge."""
+    old = db.get_task(task_id)
+    if old is None:
+        raise ValueError(f"No task {task_id}. list_tasks shows what's queued.")
+    if old.state != "cancelled":
+        raise ValueError(f"Task {task_id} is {old.state}, not cancelled: only a cancelled task can be requeued.")
+    ws = db.get_workspace(old.caller_ws_id) or caller_ws
+    deps = _loads(old.depends_on) if depends_on is None else list(depends_on)
+    try:
+        unmet = unmet_dependencies(db, ws, deps)
+    except agents.AgentError as e:
+        raise ValueError(f"{e}. Pass depends_on to replace the dependencies (an empty list for none).") from e
+    new = enqueue(
+        db, caller, ws, old.profile, old.task_text, old.mode, isolate=bool(old.isolate),
+        branch=old.branch, done_when=old.done_when, files=_loads(old.files), depends_on=deps,
+        plan_first=None if old.plan_first is None else bool(old.plan_first), weight=old.weight,
+    )
+    if unmet:
+        return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
+    try:
+        worker = start_queued(db, new)
+    except agents.AgentError as e:
+        _cancel(db, new.id, f"it could not start: {e}")
+        raise ValueError(f"Nothing left to wait on, but the worker could not start: {e}") from e
+    return f"Requeued task {old.id} as {new.id}: nothing to wait on, started worker {worker.id}."
+
+
+def _matches(glob: str, path: str) -> bool:
+    g = _normpath(glob)
+    return _glob_match(g, path) or path.startswith(g.rstrip("/") + "/")
+
+
+def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: list[str] | None,
+                 depends_on: list[str] | None, overlap: str) -> str:
+    """What ``assign``/``handoff`` would do, without doing it: the profile, the
+    files each glob matches in ``ws``'s checked-out branch, overlaps with
+    active workers, and whether it would queue."""
+    lines = ["Dry run: nothing started or queued.", f"profile: {profile}"]
+    lines += [f"profile: {w}" for w in why]
+    if files:
+        tracked = git.paths(["ls-files"], ws.path)
+        for glob in files:
+            hits = [p for p in tracked if _matches(glob, p)]
+            if hits:
+                shown = ", ".join(hits[:5]) + (f" and {len(hits) - 5} more" if len(hits) > 5 else "")
+                lines.append(f"files: {glob} matches {len(hits)}: {shown}")
+            else:
+                lines.append(f"Warning: files glob {glob!r} matches nothing in {ws.branch}, "
+                             "so overlap detection won't cover it")
+    else:
+        lines.append("files: none declared, so overlap detection won't cover this task")
+    warning = overlap_warning(db, ws, files)
+    if warning:
+        lines.append(f"overlap: this task {warning} ({'refused' if overlap == 'block' else 'warned'} "
+                     f"by the repo's overlap setting)")
+    else:
+        lines.append("overlap: none")
+    try:
+        unmet = unmet_dependencies(db, ws, depends_on)
+    except agents.AgentError as e:
+        lines.append(f"queue: would not start: {e}")
+    else:
+        if unmet:
+            lines.append(f"queue: would queue until {', '.join(unmet)} merge"
+                         f"{'s' if len(unmet) == 1 else ''}")
+        elif warning and overlap == "block":
+            lines.append("queue: would not start (overlap)")
+        else:
+            lines.append("queue: would start now")
+    return "\n".join(lines)
+
+
+def list_text(db: DB, repo_root: str, full: bool = False) -> str:
+    """Pending and cancelled tasks: started ones already show in list_agents.
+    ``full`` adds each one's brief and done_when."""
     lines = []
     for t in db.list_tasks(repo_root):
         if t.state not in ("pending", "cancelled"):
@@ -435,5 +513,10 @@ def list_text(db: DB, repo_root: str) -> str:
             parts.append(f"depends_on={','.join(deps)}")
         if t.files:
             parts.append(f"files={','.join(_loads(t.files))}")
-        lines.append(" ".join(parts))
+        line = " ".join(parts)
+        if full:
+            line += f"\n  task_text: {t.task_text}"
+            if t.done_when:
+                line += f"\n  done_when: {t.done_when}"
+        lines.append(line)
     return "\n".join(lines) or "No pending or cancelled tasks."
