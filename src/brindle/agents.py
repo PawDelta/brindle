@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 
-from brindle import git, tmux, workspaces
+from brindle import git, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import load_profile, missing_add_dirs
@@ -136,16 +136,39 @@ def worker_guidance(ws: Workspace) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None) -> dict[str, str]:
+def managed(repo_root: str):
+    """The org's managed-models settings for ``repo_root`` (Enterprise, see
+    brindle.pro.managed_models), None when there are none. Raises
+    ``AgentError`` when they apply but can't be read: no agent starts
+    unmanaged then."""
+    from brindle.pro import managed_models
+
+    try:
+        return managed_models.current(repo_root)
+    except managed_models.ManagedUnavailable as e:
+        raise AgentError(f"managed models: {e}") from e
+
+
+_UNREAD = object()   # a ``managed`` argument not passed: read the org's settings now
+
+
+def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
+              m=_UNREAD) -> dict[str, str]:
     env = {**workspaces.workspace_env(ws), "BRINDLE_AGENT_ID": agent_id}
     if agent is not None:
         # The profile's ``env.NAME: value`` lines: how a Claude Code profile
         # points at another backend (ANTHROPIC_BASE_URL, ...), or any CLI at
-        # a key it needs. Set before brindle's own variables, which win.
+        # a key it needs. Set before brindle's own variables, which win; an
+        # org's managed provider (Enterprise) comes between the two.
+        from brindle.pro import managed_models
+
         try:
-            env = {**load_profile(agent.profile, ws.repo_root).env, **env}
+            profile_env = load_profile(agent.profile, ws.repo_root).env
         except KeyError:
-            pass
+            profile_env = {}
+        if m is _UNREAD:
+            m = managed(ws.repo_root)
+        env = {**profile_env, **managed_models.agent_env(m, agent.provider), **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -243,7 +266,15 @@ def spawn(
                 f"profile {profile.name!r} uses the {provider.name} provider, which runs in "
                 "a supervisor's own Agent tool: use it through the brindle handoff or assign tools"
             )
-        prompt = raw_task = subagent_prompt(profile.prompt, prompt or "", ws, done_when)
+        from brindle import guardrails
+        from brindle.profiles import load_rule_packs, rules_prompt
+
+        # A subagent never goes through _profile_for: its rule packs and
+        # write scope join here (the scope is still checked on the diff).
+        rules = "\n\n".join(p for p in (rules_prompt(load_rule_packs(profile, ws.repo_root)),
+                                        guardrails.scope_prompt(guardrails.effective(profile))) if p)
+        full = f"{profile.prompt.strip()}\n\n{rules}".strip() if rules else profile.prompt
+        prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
                                         plan_first=plan_first)
@@ -290,7 +321,20 @@ def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
     return ["/bin/sh", "-c", script, "brindle-agent", *argv]
 
 
-def _profile_for(db: DB, agent: Agent, ws: Workspace):
+def _guarded_profile(agent: Agent, ws: Workspace | None):
+    """``agent``'s profile with its guardrails as they apply (cleared, with a
+    warning, without the Pro feature: see guardrails.effective); None when
+    it can't be loaded."""
+    from brindle import guardrails
+    from brindle.profiles import ProfileError
+
+    try:
+        return guardrails.effective(load_profile(agent.profile, ws.repo_root if ws else None))
+    except (KeyError, ProfileError):
+        return None
+
+
+def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     """``agent``'s profile as launched: autopilot sessions add their guide, a
     supervisor gets the rules for acting on findings, the person's standing
     ``rules`` and the repo's delegation rule, and a chat (a supervisor)
@@ -301,7 +345,17 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace):
     from brindle import autopilot as pilot
     from brindle.config import load_repo_config
 
-    profile = load_profile(agent.profile, ws.repo_root)
+    from brindle import guardrails
+    from brindle.profiles import load_rule_packs, rules_prompt
+
+    profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
+    # The profile's rule packs: their text joins the prompt here, for every
+    # provider; their mechanical rules are checked by brindle.rule_checks.
+    # So do its guardrails (write and read scope), which that check enforces.
+    rules = "\n\n".join(p for p in (rules_prompt(load_rule_packs(profile, ws.repo_root)),
+                                    guardrails.scope_prompt(profile)) if p)
+    if rules:
+        profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{rules}".strip())
     cfg = load_repo_config(ws.repo_root)
     autopilot_on = db.get_autopilot(agent.id) is not None
     if autopilot_on:
@@ -320,20 +374,44 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace):
             profile = replace(profile, prompt=f"{profile.prompt}\n\n{attached}".strip())
     if agent.headless:
         profile = replace(profile, headless=True)
+    # An org's managed models (Enterprise): a profile pointing elsewhere is
+    # refused, the rest run against the managed provider.
+    from brindle.pro import managed_models
+
+    if m is _UNREAD:
+        m = managed(ws.repo_root)
+    if m is not None:
+        why = managed_models.refusal(m, profile)
+        if why:
+            raise AgentError(f"managed models: {why}")
+        profile = managed_models.apply_profile(m, profile)
     return profile
 
 
 def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str],
-                 watch_pane: bool) -> str:
-    """Run ``argv`` for ``agent`` in a new window of ``ws``'s tmux session."""
+                 watch_pane: bool, *, m=_UNREAD) -> str:
+    """Run ``argv`` for ``agent`` in a new window of ``ws``'s tmux session.
+    ``m`` is the launch's managed-models settings (``managed``) when it has
+    already read them; left out, they're read here (fail closed)."""
     if agent.mode == "interactive":
         argv = _pause_when_done(agent.id, argv)
     from brindle import inbox
 
     argv = inbox.without_launcher_inbox(argv)
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id, agent),
-                             tag=(AGENT_TAG, agent.id))
+    # A profile's env_allow (brindle Pro guardrails): the pane starts with
+    # only those variables, brindle's own and the provider's sign-in.
+    guarded = _guarded_profile(agent, ws)
+    allow = guarded.env_allow if guarded is not None else None
+    # An org's deny_personal_keys (Enterprise): the person's own keys never
+    # reach the pane, kept or not.
+    if m is _UNREAD:
+        m = managed(ws.repo_root)
+    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id, agent, m),
+                             tag=(AGENT_TAG, agent.id),
+                             keep=secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root),
+                             **({"allow": allow} if allow is not None else {}),
+                             **({"deny": m.denied_keys} if m is not None and m.denied_keys else {}))
     # The pane id only means anything on the server that issued it (a
     # resumed agent may come back on a different one), so record both.
     server = tmux.current_server()
@@ -487,7 +565,8 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
     whatever the mode: a worker, a reviewer, a subagent or the chat itself."""
-    profile = _profile_for(db, agent, ws)
+    m = managed(ws.repo_root)   # read once for this launch
+    profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)
     provider = get_provider(agent.provider)
     if not provider.launches_process:
@@ -496,7 +575,13 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.set_status(agent.id, status)
         agent.status = status
         return
-    why = signed_out(provider.name, profile.env)
+    # What the agent will run with: the managed provider's variables, and
+    # no personal keys (blank, so the launcher's own copy doesn't count).
+    from brindle.pro import managed_models
+
+    why = signed_out(provider.name, {**profile.env, **managed_models.agent_env(m, provider.name),
+                                     **{k: "" for k in secrets.pane_deny(m.denied_keys if m else (),
+                                                                         {**profile.env, **managed_models.agent_env(m, provider.name)})}})
     if why:
         raise AgentError(why)
     # Here rather than in spawn, so a resume checks too: a directory can be
@@ -508,7 +593,7 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     if warning:
         print(f"brindle: {warning}", file=sys.stderr)
     if agent.headless:
-        _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane)
+        _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
         # Typed in once it's ready, after any warm-up message.
@@ -529,7 +614,8 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         trust_folder(ws.path)  # no trust dialog for nobody to answer
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first)))
-    target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane)
+    target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
+                          **({"m": m} if m is not None else {}))
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)
@@ -578,7 +664,7 @@ HEADLESS_CONTINUE = (
 
 
 def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
-                     resume: str | None, watch_pane: bool) -> None:
+                     resume: str | None, watch_pane: bool, m=_UNREAD) -> None:
     from brindle.providers import brindle_invocation
 
     if prompt:
@@ -592,7 +678,8 @@ def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     agent.status = status
     runner = get_provider(agent.provider).runner
     argv = [*brindle_invocation(), runner, agent.id, *(["--resume", resume] if resume else [])]
-    _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane)
+    _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane,
+                 **({"m": m} if m is not None else {}))
 
 
 def _preview(text: str, lines: int = 6) -> str:
@@ -1251,7 +1338,7 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     with ``forward``, it's sent to the parent as a message. ``removed`` is a
     reviewer and workspace the pipeline has just removed, loaded before that:
     the result is then only recorded in the history."""
-    from brindle import history, pipeline, usage as usage_mod
+    from brindle import history, pipeline, pricing, usage as usage_mod
 
     if removed and db.get_agent(agent_id) is None:
         agent, ws = removed
@@ -1270,7 +1357,14 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
             db, ws.repo_root, "review" if agent.mode == "review" else "worker_result",
             agent=agent, usage=u, branch=ws.branch, task=agent.task, result=result,
         )
-    forwarded = f"{result}\n\n{usage_mod.summary_line(u)}" if u and u.total else result
+    if u and u.total:
+        try:
+            dollars = usage_mod.usage_cost(u, pricing.repo_overrides(ws.repo_root if ws else None))
+        except Exception:  # noqa: BLE001 - a price is an extra too
+            dollars = None
+        forwarded = f"{result}\n\n{usage_mod.summary_line(u, dollars)}"
+    else:
+        forwarded = result
     if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
         warm_checks(ws)
         if forward and pipeline.on_report(db, agent, ws, forwarded):
@@ -1391,10 +1485,17 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         pipeline.note_review(db, ws, approved, reviewer=caller)
         verdict = "APPROVED" if approved else "CHANGES REQUESTED"
         text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
-        handled = pipeline.on_review(db, caller, ws, approved, summary)
-        # A merge the pipeline just made removes this reviewer's own record.
-        report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
+    # Outside the lock: an approval merges every ready branch of the base,
+    # taking each one's lock in turn, and holding this branch's lock while
+    # waiting for that would deadlock with a drain that wants it.
+    handled = pipeline.on_review(db, caller, ws, approved, summary)
+    # A merge the pipeline just made removes this reviewer's own record.
+    report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
     close_later(caller.id)
+    if not approved:
+        from brindle import learned_rules
+
+        learned_rules.refresh_later(ws.repo_root)   # the finding just landed in the history
     if handled:
         return f"Review recorded ({verdict}); brindle takes it from here. You're done."
     return f"Review recorded ({verdict}) and sent to your supervisor. You're done."
@@ -1609,7 +1710,11 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     when that's a plain diff (see ``is_linear_since``)."""
     from brindle import gates
     from brindle.config import load_repo_config
+    from brindle.pro import rollout
 
+    why_not = rollout.kill_switch_reason(ws.repo_root)   # Enterprise managed rollout
+    if why_not:
+        raise AgentError(f"No reviewer started: {why_not}")
     cfg = cfg or load_repo_config(ws.repo_root)
     sha = gates.head(ws)
     for old in db.list_agents(ws.id):
@@ -1809,8 +1914,9 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     the native loop gives those rules. Claude Code matches a rule against a
     compound command as a whole, so ``cd sub && git status`` would prompt
     even with ``Bash(git status:*)`` allowed. None leaves the decision to
-    Claude Code as usual. The one denial: a file edit by a plan_first worker
-    whose plan isn't approved yet."""
+    Claude Code as usual. The denials: a file edit by a plan_first worker
+    whose plan isn't approved yet, and a file tool outside the profile's
+    write or read scope (brindle.guardrails)."""
     if payload.get("tool_name") in PLAN_GATED_TOOLS and agent.plan_first and agent.plan_state != "approved":
         return {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -1820,7 +1926,23 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                 "(brindle MCP server) with your plan and wait for your supervisor's approval, "
                 "which arrives as a message."),
         }}
-    if payload.get("tool_name") != "Bash":
+    from brindle import guardrails
+
+    tool = payload.get("tool_name")
+    if tool in (*guardrails.WRITE_TOOLS, *guardrails.READ_TOOLS):
+        # A write or read outside the profile's scope (brindle Pro guardrails).
+        # Best effort: Bash can still reach any file; the diff check holds.
+        ws = db.get_workspace(agent.workspace_id)
+        profile = _guarded_profile(agent, ws)
+        if ws is not None and profile is not None:
+            why = guardrails.tool_denial(profile, str(tool), payload.get("tool_input") or {}, ws.path)
+            if why:
+                return {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": why,
+                }}
+    if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
     ws = db.get_workspace(agent.workspace_id)
@@ -2005,6 +2127,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # ready), and the inbox in that environment is the launcher's own.
         if agent.provider == "claude":
             inbox.record_from_environment(db, agent_id)
+        mark_baseline(db, agent)
         db.set_status(agent_id, "idle", only_if="starting")
         # 'waiting' before the session even started was its trust dialog
         # (see screen_status), which has now been answered.
@@ -2056,11 +2179,20 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         db.set_status(agent_id, "processing", only_if="idle")  # see "pre-tool"
         note_permission_outcome(db, agent, payload)
     elif event == "stop":
-        from brindle import inbox
+        from brindle import inbox, tasks
 
         # A request left to the person with no PostToolUse by the end of the
         # turn wasn't approved (or we can't tell): drop it, learn nothing.
         db.clear_permission_requests(agent_id)
+        # A worker's turn is over: its branch may now share changed files
+        # with another running branch, which the supervisor hears about now
+        # rather than at merge time.
+        if agent.mode in ("assign", "handoff", "handoff_detached") and agent.result is None:
+            tasks.warn_predicted_conflicts(db, agent)
+
+        # The turn is over: a worker's worktree is snapshotted (brindle.rewind)
+        # before anything below could start its next turn.
+        snapshot_turn(db, agent)
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
         # Where a person watches (an interactive agent with an inbox), brindle
@@ -2077,12 +2209,16 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # stop, so a queued message is typed into the pane instead.
         from brindle import quota
 
+        thread = payload.get("thread-id")
+        if isinstance(thread, str) and thread and thread != agent.session_ref:
+            db.update_agent(agent_id, session_ref=thread)   # names its rollout (brindle.usage)
         try:
             quota.refresh_codex()
         except OSError:
             pass
         if payload.get("type") == "agent-turn-complete":
             db.set_status(agent_id, "idle")
+            snapshot_turn(db, agent)
             if agent.mode == "interactive" and not db.pending_count(agent_id):
                 # What the Stop hook does for Claude Code: an autopilot
                 # supervisor that stops short is told to keep going (capped
@@ -2113,6 +2249,36 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if sub_id:
             db.stop_native_subagent(str(sub_id))
     return None
+
+
+def mark_baseline(db: DB, agent: Agent) -> None:
+    """Remember where a worker started (brindle.rewind), at its session
+    start. Never fails the hook."""
+    from brindle import rewind
+
+    if agent.mode not in rewind.SNAPSHOT_MODES:
+        return
+    try:
+        ws = db.get_workspace(agent.workspace_id)
+        if ws:
+            rewind.mark_baseline(agent, ws)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't record %s's starting commit", agent.id)
+
+
+def snapshot_turn(db: DB, agent: Agent) -> int | None:
+    """Snapshot a worker's worktree at the end of a turn (brindle.rewind), if
+    it changed. A hook must never fail over this, so any error is logged."""
+    from brindle import rewind
+
+    if agent.mode not in rewind.SNAPSHOT_MODES:
+        return None
+    try:
+        ws = db.get_workspace(agent.workspace_id)
+        return rewind.snapshot(db, agent, ws) if ws else None
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't snapshot %s's turn", agent.id)
+        return None
 
 
 def agent_for_session(db: DB, session_id: object) -> str | None:

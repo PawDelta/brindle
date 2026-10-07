@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -873,6 +874,131 @@ def history(
     typer.echo(f"\ntotal tokens: {format_tokens(total)}")
 
 
+# -- brindle cost (dollar spend from history; see brindle.cost) ------------------------------------
+
+cost_app = typer.Typer(invoke_without_command=True,
+                       help="Dollar spend at list prices: bare `brindle cost` is the last 30 days; "
+                            "`brindle cost report` (brindle Pro) breaks it down.")
+app.add_typer(cost_app, name="cost")
+
+
+def _cost_repo(all_repos: bool) -> str | None:
+    if all_repos:
+        return None
+    repo_root = _here_repo()
+    if repo_root is None:
+        typer.echo("not in a git repo: showing all repos")
+    return repo_root
+
+
+@cost_app.callback()
+def cost_cmd(
+    ctx: typer.Context,
+    days: int = typer.Option(30, "--days", min=1, help="How many days back."),
+    all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
+) -> None:
+    """Spend over the last 30 days, by model."""
+    if ctx.invoked_subcommand is not None:
+        return
+    from brindle import cost
+
+    repo_root = _cost_repo(all_repos)
+    typer.echo(cost.describe_summary(cost.summary(DB(), repo_root, days=days), repo_root))
+
+
+@cost_app.command("report")
+def cost_report(
+    days: int = typer.Option(30, "--days", min=1, help="How many days back."),
+    all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
+) -> None:
+    """brindle Pro: spend by day, profile and goal, cost per merged branch, review pass rates."""
+    from brindle import cost
+
+    try:
+        cost.require_entitled()
+    except cost.NotEntitled as e:
+        _fail(str(e))
+    repo_root = _cost_repo(all_repos)
+    typer.echo(cost.describe_report(cost.report(DB(), repo_root, days=days), repo_root))
+
+
+@cost_app.command("request")
+def cost_request_cmd(
+    usd: float = typer.Option(..., "--usd", help="How many more dollars you need."),
+    reason: str = typer.Option(..., "--reason", help="Why, for the admin who approves it."),
+    goal: Optional[str] = typer.Option(None, "--goal", help="Raise this goal's budget (its first line) "
+                                       "instead of this month's."),
+) -> None:
+    """brindle Enterprise: ask an admin to approve spend over your budget."""
+    from brindle.pro import cost_centers
+
+    repo_root = _here_repo()
+    if repo_root is None:
+        _fail("not in a git repo")
+    first = (goal or "").strip().splitlines()[0] if (goal or "").strip() else None
+    try:
+        rec = cost_centers.request(usd, reason, repo_root, scope="goal" if first else "month", goal=first)
+    except cost_centers.CostCenterError as e:
+        _fail(str(e))
+    typer.echo(f"Filed request {rec['id']} for ${rec['amount_usd']:.2f}. Once an admin approves it, "
+               f"the {rec['scope']} limit goes up by that much; check with `brindle cost requests`.")
+
+
+@cost_app.command("requests")
+def cost_requests_cmd() -> None:
+    """brindle Enterprise: your cost approval requests; checks the pending ones with the server."""
+    from brindle.pro import cost_centers
+
+    if not cost_centers.held():
+        _fail('cost centers are an Enterprise feature ("cost_centers"); your plan doesn\'t include it. '
+              "See `brindle account`.")
+    for line in cost_centers.poll():
+        typer.echo(line)
+    typer.echo(cost_centers.describe(cost_centers.tracked()))
+
+
+@cost_app.command("estimate")
+def cost_estimate_cmd(
+    tasks_n: Optional[int] = typer.Option(
+        None, "--tasks", help="How many tasks. Default: the current goal's unverified milestones, else 1."),
+    weight: Optional[str] = typer.Option(None, "--weight", help="light, medium or heavy."),
+    profile: Optional[str] = typer.Option(None, "--profile", help="Worker profile (default: the repo's default_agent)."),
+    reviewer: Optional[str] = typer.Option(None, "--reviewer", help="Reviewer profile (default: the repo's reviewer)."),
+) -> None:
+    """Estimate a goal's cost from this repo's history: a range, and a cheaper alternative."""
+    from brindle import cost_estimate
+    from brindle.config import WEIGHTS, load_repo_config
+
+    if not cost_estimate.entitled():
+        _fail("cost estimates are a brindle Pro feature (\"cost\"); your plan doesn't include it. "
+              "See `brindle account`.")
+    if weight is not None and weight not in WEIGHTS:
+        _fail(f"--weight must be one of {', '.join(WEIGHTS)}")
+    try:
+        repo_root = git.main_repo_root(os.getcwd())
+    except git.GitError:
+        _fail("not in a git repo")
+    db = DB()
+    cfg = load_repo_config(repo_root)
+    specs = []
+    if tasks_n is None:
+        try:
+            live = agents.find_running(db, workspaces.adopt_root(db, os.getcwd()), "supervisor")
+        except git.GitError:
+            live = None
+        root_id = live.id if live else None
+        if root_id:
+            specs = [cost_estimate.TaskSpec(profile or m.profile or cfg.default_agent, weight)
+                     for m in db.milestones(root_id) if m.status != "passed"]
+        if not specs:
+            tasks_n = 1
+    if tasks_n is not None:
+        if tasks_n < 1:
+            _fail("--tasks must be at least 1")
+        specs = [cost_estimate.TaskSpec(profile or cfg.default_agent, weight)] * tasks_n
+    typer.echo(cost_estimate.describe(specs, reviewer or cfg.reviewer, repo_root=repo_root, db=db))
+
+
 # -- brindle permissions (the permission policy; see brindle.permissions) -------------------------
 
 permissions_app = typer.Typer(no_args_is_help=True,
@@ -1134,6 +1260,289 @@ def permissions_install_codex_hook(
     typer.echo("trusted: Codex workers get brindle's permission hook while permission_policy is on")
 
 
+# -- brindle profile (agent profiles: extends, rule packs) ----------------------------------
+
+profile_app = typer.Typer(no_args_is_help=True,
+                          help="Agent profiles: create one, check them, see one resolved "
+                               "(its `extends` parent and rule packs folded in).")
+app.add_typer(profile_app, name="profile")
+
+PROFILE_TEMPLATE = """---
+name: {name}
+description: {description}
+{extends}{rules}---
+{prompt}
+"""
+
+
+@profile_app.command("new")
+def profile_new(
+    name: str = typer.Argument(..., help="The profile's name (its file is <name>.md)."),
+    extends: Optional[str] = typer.Option(None, "--extends", "-e", help="Parent profile to build on (e.g. developer)."),
+    rules: Optional[str] = typer.Option(None, "--rules", "-r", help="Rule packs, comma-separated (e.g. security/backend,style/minimal-diff)."),
+    description: str = typer.Option("", "--description", "-d"),
+    user: bool = typer.Option(False, "--user", help="Write to ~/.brindle/agents instead of this repo's .brindle/agents."),
+) -> None:
+    """Write a new profile file to .brindle/agents/ (or ~/.brindle/agents with --user)."""
+    from brindle.config import user_profiles_dir
+    from brindle.profiles import ProfileError, load_profile, load_rule_pack
+
+    if not _PROFILE_NAME.match(name):
+        _fail(f"profile name {name!r}: use letters, digits, '-', '_' and '.'")
+    repo = _here_repo()
+    if user:
+        target_dir = user_profiles_dir()
+    elif repo:
+        target_dir = Path(repo) / ".brindle" / "agents"
+    else:
+        _fail("not in a git repository: run this in the repo, or pass --user for ~/.brindle/agents")
+    target = target_dir / f"{name}.md"
+    if target.exists():
+        _fail(f"{target} already exists")
+    if extends:
+        try:
+            load_profile(extends, repo)
+        except (KeyError, ProfileError) as e:
+            _fail(f"--extends {extends}: {e}")
+    packs = [p.strip() for p in (rules or "").split(",") if p.strip()]
+    for pack in packs:
+        try:
+            load_rule_pack(pack, repo)
+        except (KeyError, ProfileError) as e:
+            _fail(f"--rules {pack}: {e}")
+    if extends:
+        prompt = ("Additional instructions for this role go here; they follow the parent's prompt.")
+    else:
+        prompt = "You are an agent running under brindle. Describe the role here."
+    text = PROFILE_TEMPLATE.format(
+        name=name,
+        description=description or f"A {name} agent",
+        extends=f"extends: {extends}\n" if extends else "provider: claude\n",
+        rules=f"rules: {', '.join(packs)}\n" if packs else "",
+        prompt=prompt,
+    )
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    typer.echo(f"✓ wrote {target}")
+    typer.echo(f"  check it with: brindle profile show {name}")
+
+
+_PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _lint_one(name: str, repo: str | None) -> tuple[list[str], list[str]]:
+    """(errors, warnings) for one profile."""
+    from brindle import providers
+    from brindle.profiles import (ProfileError, load_profile, load_rule_pack, missing_add_dirs)
+    from brindle.rule_checks import compile_patterns
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        p = load_profile(name, repo)
+    except (KeyError, ProfileError) as e:
+        return [str(e)], []
+    try:
+        providers.get_provider(p.provider)
+    except KeyError as e:
+        errors.append(str(e))
+    for pack_name in p.rules:
+        try:
+            pack = load_rule_pack(pack_name, repo)
+        except (KeyError, ProfileError) as e:
+            errors.append(str(e))
+            continue
+        _, bad = compile_patterns(pack)
+        errors.extend(f"rule pack {pack_name}: deny_patterns entry doesn't compile: {b}" for b in bad)
+        if not pack.prompt and not pack.mechanical:
+            warnings.append(f"rule pack {pack_name} is empty")
+    errors.extend(f"permission_denies: invalid entry {e}" for e in p.permission_denies_errors)
+    if not p.prompt.strip():
+        warnings.append("the prompt is empty")
+    for d in missing_add_dirs(p):
+        warnings.append(f"add_dirs entry doesn't exist: {d}")
+    return errors, warnings
+
+
+@profile_app.command("lint")
+def profile_lint(
+    name: Optional[str] = typer.Argument(None, help="One profile; default: every profile visible here."),
+) -> None:
+    """Check profiles: extends chains, rule packs, patterns, providers and permission denies."""
+    from brindle.profiles import profile_names
+
+    repo = _here_repo()
+    names = [name] if name else profile_names(repo)
+    failed = 0
+    for n in names:
+        errors, warnings = _lint_one(n, repo)
+        if errors:
+            failed += 1
+            typer.secho(f"✗ {n}", fg="red")
+        elif warnings:
+            typer.secho(f"! {n}", fg="yellow")
+        else:
+            typer.echo(f"✓ {n}")
+        for e in errors:
+            typer.secho(f"    error: {e}", fg="red")
+        for w in warnings:
+            typer.secho(f"    warning: {w}", fg="yellow")
+    if failed:
+        raise typer.Exit(1)
+
+
+@profile_app.command("show")
+def profile_show(
+    name: str,
+    prompt_only: bool = typer.Option(False, "--prompt", help="Print only the resolved prompt (with the rule packs' text)."),
+) -> None:
+    """Print a profile as brindle resolves it: fields, extends chain, rule packs and prompt."""
+    from dataclasses import MISSING, fields
+
+    from brindle.profiles import (ProfileError, load_profile, load_rule_packs, profile_source,
+                                  rules_prompt)
+
+    repo = _here_repo()
+    try:
+        p = load_profile(name, repo)
+        packs = load_rule_packs(p, repo)
+    except (KeyError, ProfileError) as e:
+        _fail(str(e))
+    full = f"{p.prompt.strip()}\n\n{rules_prompt(packs)}".strip() if packs else p.prompt.strip()
+    if prompt_only:
+        typer.echo(full)
+        return
+    typer.echo(f"{p.name}: {p.description}")
+    typer.echo(f"  source    {profile_source(name, repo)}")
+    chain, parent = [], p.extends
+    while parent:
+        chain.append(parent)
+        try:
+            parent = load_profile(parent, repo).extends
+        except (KeyError, ProfileError):
+            break
+    if chain:
+        typer.echo(f"  extends   {' -> '.join(chain)}")
+    skip = {"name", "description", "prompt", "extends", "rules", "permission_denies_errors"}
+    for f in fields(p):
+        if f.name in skip:
+            continue
+        value = getattr(p, f.name)
+        default = f.default if f.default_factory is MISSING else f.default_factory()  # type: ignore[misc]
+        if value in (None, False, [], {}) or value == default:
+            continue
+        shown = ", ".join(value) if isinstance(value, list) else (
+            " ".join(f"{k}={v}" for k, v in value.items()) if isinstance(value, dict) else str(value))
+        typer.echo(f"  {f.name:<9} {shown}")
+    if packs:
+        typer.echo("  rules")
+        for pack in packs:
+            typer.echo(f"    {pack.name:<22} {pack.description}  [{pack.source}]")
+            if pack.deny_deps:
+                typer.echo(f"      deny_deps: {', '.join(pack.deny_deps)}")
+            if pack.require_tests_for:
+                typer.echo(f"      require_tests_for: {', '.join(pack.require_tests_for)}")
+            for pat in pack.deny_patterns:
+                typer.echo(f"      deny_pattern: {pat}")
+    typer.echo("")
+    typer.echo(full)
+
+
+# -- brindle rules (learned rules, brindle Pro) ----------------------------------------------
+
+rules_app = typer.Typer(no_args_is_help=True,
+                        help="Learned rules (brindle Pro): rules suggested from review findings "
+                             "that keep recurring, to add to .brindle/rules/learned.md or reject.")
+app.add_typer(rules_app, name="rules")
+
+
+def _rules_repo() -> str:
+    try:
+        return git.main_repo_root(os.getcwd())
+    except git.GitError:
+        _fail("not in a git repo")
+
+
+@rules_app.command("suggest")
+def rules_suggest(
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh",
+                                 help="Group new review findings first (one call to a cheap or local model)."),
+) -> None:
+    """Show the rules suggested from review findings that recurred across tasks."""
+    from brindle import learned_rules
+
+    repo = _rules_repo()
+    db = DB()
+    try:
+        learned_rules.require_entitled()
+        if refresh:
+            done = learned_rules.refresh(db, repo)
+            if done.called:
+                typer.echo(f"grouped {done.findings} new review finding(s)")
+    except learned_rules.LearnedRulesError as e:
+        _fail(str(e))
+    found = learned_rules.suggestions(db, repo)
+    if not found:
+        n = learned_rules.repeats(repo)
+        typer.echo(f"no suggestions: a rule is suggested once the same review finding has come "
+                   f"up in {n} tasks of one profile's work")
+        return
+    for r in found:
+        typer.echo(f"{r.key}  {r.title}  ({learned_rules.task_count(r)} tasks, profile {r.profile})")
+        typer.echo(f"    {r.rule}")
+        for k, items in learned_rules.checks_of(r).items():
+            typer.echo(f"    {k}: {', '.join(items)}")
+    typer.echo("\naccept one with `brindle rules accept <key>` (adds it to .brindle/rules/learned.md), "
+               "or `brindle rules reject <key>` so it isn't suggested again")
+
+
+@rules_app.command("accept")
+def rules_accept(key: str = typer.Argument(..., help="The suggestion's key (or its start).")) -> None:
+    """Add a suggested rule to .brindle/rules/learned.md, which every profile in the repo uses."""
+    from brindle import learned_rules
+
+    repo = _rules_repo()
+    try:
+        r, path = learned_rules.accept(DB(), repo, key)
+    except learned_rules.LearnedRulesError as e:
+        _fail(str(e))
+    typer.echo(f"✓ added rule {r.key} to {path}")
+    typer.echo("  commit it so the rule is reviewed and shared; check it with "
+               "`brindle profile show developer`")
+
+
+@rules_app.command("reject")
+def rules_reject(key: str = typer.Argument(..., help="The suggestion's key (or its start).")) -> None:
+    """Reject a suggested rule: it is remembered and never suggested again."""
+    from brindle import learned_rules
+
+    try:
+        r = learned_rules.reject(DB(), _rules_repo(), key)
+    except learned_rules.LearnedRulesError as e:
+        _fail(str(e))
+    typer.echo(f"✓ rejected rule {r.key}; it won't be suggested again")
+
+
+@app.command("_learn-rules", hidden=True)
+def learn_rules_cmd(repo_root: str) -> None:
+    """Group new review findings in the background (learned_rules.refresh_later)."""
+    import fcntl
+
+    from brindle import learned_rules
+    from brindle.config import brindle_home
+
+    db = _helper_db()
+    with open(brindle_home() / "learned-rules.lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return      # another refresh is at it; it picks this finding up too, or the next one does
+        try:
+            learned_rules.refresh(db, repo_root)
+        except learned_rules.LearnedRulesError as e:
+            typer.echo(f"brindle: learned rules: {e}", err=True)
+
+
 @app.command()
 def learning() -> None:
     """What brindle Pro's hosted learner has learned about which profiles fit which tasks (nothing is learned on this machine)."""
@@ -1245,6 +1654,63 @@ def audit_export(
         raise typer.Exit(2)
     sys.stdout.write(out)
     sys.stdout.flush()
+
+
+@audit_app.command("ship")
+def audit_ship(
+    force: bool = typer.Option(False, "--force", help="Retry sinks that are backing off now."),
+) -> None:
+    """Send the audit records to the configured sinks now (brindle Enterprise, audit_export); exit 1 if a sink failed."""
+    from brindle.pro import audit_export
+
+    exporter = audit_export.AuditExporter()
+    try:
+        cfg = exporter.config()
+    except audit_export.NotConfigured as e:
+        typer.echo(f"audit: {e}")
+        raise typer.Exit(2)
+    if not cfg.sinks:
+        typer.echo('audit: no sinks; add "audit_export": {"sinks": [...]} to ~/.brindle/config.json')
+        raise typer.Exit(2)
+    if not exporter.entitled():
+        typer.echo("audit: your plan doesn't include audit export (brindle Enterprise)")
+        raise typer.Exit(2)
+    failed = False
+    for name, res in exporter.flush(force=force).items():
+        failed = failed or bool(res.error)
+        typer.echo(f"{name}: sent {res.sent}" + (f", dropped {res.dropped}" if res.dropped else "")
+                   + (f"; FAILED: {res.error}" if res.error else ""))
+    if failed:
+        raise typer.Exit(1)
+
+
+@audit_app.command("prune")
+def audit_prune(
+    repo: Optional[str] = typer.Option(None, "--repo", help="The repo whose log to prune (default: every log)."),
+    days: Optional[float] = typer.Option(None, "--days", help="Keep this many days (default: audit_export.retention_days)."),
+) -> None:
+    """Drop audit records older than the retention, leaving a signed checkpoint so `brindle audit verify` still passes."""
+    from brindle.pro import audit_chain, audit_export
+
+    exporter = audit_export.AuditExporter()
+    try:
+        keep = days if days is not None else exporter.config().retention_days
+    except audit_export.NotConfigured as e:
+        typer.echo(f"audit: {e}")
+        raise typer.Exit(2)
+    if not keep or keep <= 0:
+        typer.echo('audit: give --days or set "audit_export": {"retention_days": N} in ~/.brindle/config.json')
+        raise typer.Exit(2)
+    if not exporter.entitled():
+        typer.echo("audit: your plan doesn't include audit export (brindle Enterprise)")
+        raise typer.Exit(2)
+    try:
+        dropped = exporter.prune(keep, repo_root=_audit_repo(repo) if repo else None)
+    except audit_chain.AuditError as e:
+        typer.echo(f"audit: {e}")
+        raise typer.Exit(2)
+    typer.echo(f"pruned {sum(dropped.values())} record(s) older than {keep:g} day(s)"
+               + "".join(f"\n  {n}: {k}" for n, k in dropped.items()))
 
 
 @audit_app.command("pubkey")
@@ -1575,6 +2041,45 @@ def agent_peek(agent_id: str, lines: int = typer.Option(40, "--lines", "-n")) ->
     typer.echo(tmux.capture(a.tmux_window, lines=lines).rstrip())
 
 
+@agent_app.command("turns")
+def agent_turns(agent_id: str) -> None:
+    """List a worker's turn snapshots (what `brindle agent rewind --to` can go back to)."""
+    from brindle import rewind
+
+    db = DB()
+    a = _run(agents.get, db, agent_id)
+    ws = db.get_workspace(a.workspace_id)
+    if ws is None:
+        _fail(f"{a.id}'s workspace is gone")
+    typer.echo(rewind.format_turns(ws.repo_root, a.id))
+
+
+@agent_app.command("rewind")
+def agent_rewind(
+    agent_id: str,
+    to: int = typer.Option(..., "--to", help="the turn to go back to (see `brindle agent turns`)"),
+    profile: Optional[str] = typer.Option(None, "--profile", "-p", help="run the fresh session with this profile"),
+    note: Optional[str] = typer.Option(None, "--note", help="what to tell the fresh session"),
+) -> None:
+    """Rewind a worker to the state after turn N and start a fresh session there.
+
+    Its worktree (branch, uncommitted edits, untracked files) goes back to how
+    it was after that turn, the worker is stopped, and a fresh session starts in
+    its workspace briefed on the original task, turns 1..N and your note.
+    """
+    from brindle import rewind
+
+    db = DB()
+    try:
+        fresh = rewind.rewind(db, agent_id, to, profile=profile, note=note)
+    except (rewind.RewindError, agents.AgentError, git.GitError, FileNotFoundError, ValueError) as e:
+        _fail(str(e))
+        raise AssertionError
+    ws = db.get_workspace(fresh.workspace_id)
+    typer.echo(f"✓ rewound {agent_id} to turn {to}; {fresh.id} ({fresh.profile}/{fresh.provider}) "
+               f"continues in {ws.id if ws else fresh.workspace_id}")
+
+
 @app.command()
 def send(agent_id: str, message: str) -> None:
     """Send a message to an agent (queued until it's idle)."""
@@ -1609,13 +2114,13 @@ def _ci_call(fn, *args, **kwargs):
         _fail(f"brindle ci: {e}")
 
 
-def _ci_providers(env, repo: Optional[str], names: Optional[str]) -> list[str]:
+def _ci_providers(env, repo: Optional[str], names: Optional[str], org: Optional[bool] = None) -> list[str]:
     from brindle import ci_adapters
 
     if names:
         return sorted({n.strip() for n in names.split(",") if n.strip()})
     return ci_adapters.providers_available(ci_adapters.default_adapters(os.getcwd()), env,
-                                           ci_adapters.repo_is_org(env, repo))
+                                           ci_adapters.repo_is_org(env, repo) if org is None else org)
 
 
 @ci_app.command("start")
@@ -1635,15 +2140,18 @@ def ci_start(
     from brindle import ci_client
 
     def go():
-        full = ci_client.github_repo(os.environ, repo)
+        from brindle import ci_hosts
+
+        host = ci_hosts.get_host(env=os.environ)
+        full = host.repo(os.environ, repo)
         is_fork = ci_client.parse_bool(fork)
         if validate and is_fork is None:
-            is_fork = ci_client.pr_is_fork(os.environ, full)
+            is_fork = host.is_fork(os.environ, full)
         trigger = ci_client.trigger_for(issue, goal_text, dispatch, validate=validate, pr=pr, head=head,
                                         fork=is_fork)
-        code = ci_client.start(full, trigger, out, client=ci_client.Client(),
+        code = ci_client.start(full, trigger, out, client=host.client(os.environ),
                                token=ci_client.ci_token(os.environ),
-                               providers=_ci_providers(os.environ, full, providers), say=typer.echo)
+                               providers=_ci_providers(os.environ, full, providers, host.org_hint), say=typer.echo)
         raise typer.Exit(code)
 
     _ci_call(go)
@@ -1662,7 +2170,11 @@ def ci_run(
             token = Path(plan).read_text("utf-8").strip()
         except OSError as e:
             raise ci_client.CIError(f"can't read the plan: {e.strerror or e}")
-        ci_client.run(token, run_token_file, cwd=os.getcwd(), env=os.environ, client=ci_client.Client(),
+        from brindle import ci_hosts
+
+        host = ci_hosts.get_host(env=os.environ)
+        ci_client.run(token, run_token_file, cwd=os.getcwd(), env=os.environ, client=host.client(os.environ),
+                      repo=host.repo(os.environ), org=host.org_hint,
                       texts=lambda: ci_client.read_plan_texts(plan), say=typer.echo)
 
     _ci_call(go)
@@ -1678,7 +2190,10 @@ def ci_report(
     from brindle import ci_client
 
     def go():
-        ci_client.report(plan_dir, client=ci_client.Client(), token=ci_client.ci_token(os.environ),
+        from brindle import ci_hosts
+
+        host = ci_hosts.get_host(env=os.environ)
+        ci_client.report(plan_dir, client=host.client(os.environ), token=ci_client.ci_token(os.environ),
                          start=start, run=run, say=typer.echo)
 
     _ci_call(go)
@@ -1704,6 +2219,8 @@ def ci_init(
     org: Optional[str] = typer.Option(None, "--org", help="The brindle Team org whose CI token to use."),
     providers: Optional[str] = typer.Option(None, "--providers", help="Comma-separated providers to set keys for (asked otherwise)."),
     credential: Optional[str] = typer.Option(None, "--credential", help="How Claude signs in: key (the ANTHROPIC_API_KEY secret) or federation (workload identity federation; asked otherwise)."),
+    host: str = typer.Option("github", "--host", help="github (default) or gitlab (brindle Enterprise: writes .gitlab-ci.yml)."),
+    force: bool = typer.Option(False, "--force", help="With --host gitlab: replace an existing .gitlab-ci.yml."),
     workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="With an organization-level API key or identity federation: the workspace (wrkspc_...), stored as the ANTHROPIC_WORKSPACE_ID variable (asked otherwise, defaulting to $ANTHROPIC_WORKSPACE_ID)."),
     rule_id: Optional[str] = typer.Option(None, "--rule-id", help="Identity federation: the rule ID (fdrl_...; asked otherwise, defaulting to $ANTHROPIC_FEDERATION_RULE_ID)."),
     organization_id: Optional[str] = typer.Option(None, "--organization-id", help="Identity federation: the Anthropic organization ID (asked otherwise, defaulting to $ANTHROPIC_ORGANIZATION_ID)."),
@@ -1714,8 +2231,16 @@ def ci_init(
     """Set a repository up for brindle CI: the GitHub App, the secrets, the issue label, a required check, the workflows (as a pull request), then doctor.
 
     Without a terminal on stdin nothing is asked: each question takes its default (the options, then the environment), and a yes/no question that would change the repository's settings is answered no."""
-    from brindle import ci_client
+    from brindle import ci_client, ci_hosts
 
+    host = host.strip().lower()
+    if host == ci_hosts.GITLAB:
+        _ci_call(ci_hosts.init_gitlab, cwd=os.getcwd(), force=force, say=typer.echo)
+        return
+    if host != ci_hosts.GITHUB:
+        _fail(f"brindle ci: host must be {' or '.join(ci_hosts.HOSTS)}")
+    if force:
+        _fail("brindle ci: --force only applies with --host gitlab")
     if required_check and no_required_check:
         _fail("--required-check and --no-required-check don't go together")
     names = [p.strip() for p in providers.split(",") if p.strip()] if providers else None

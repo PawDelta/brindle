@@ -240,7 +240,9 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
     saved = conversation_path(agent_id)
     db.update_agent(agent_id, transcript_path=str(transcript), session_ref=str(saved))
 
-    toolbox = Toolbox().add(*core_tools(ws.path)).add(*brindle_tools(db, agent_id, ws, agent.mode))
+    # _profile_for already cleared the scopes if guardrails isn't entitled.
+    toolbox = Toolbox().add(*core_tools(ws.path, write_scope=profile.write_scope,
+                                        read_scope=profile.read_scope)).add(*brindle_tools(db, agent_id, ws, agent.mode))
     permissions = Permissions(profile.permission_mode, [*(profile.allowed_tools or []), *codemap.ALLOWED_TOOLS])
     system = "\n\n".join(filter(None, [profile.prompt, NATIVE_NOTE, DELIVERY_NOTE]))
     config = LoopConfig(context_tokens=profile.context_tokens or DEFAULT_CONTEXT_TOKENS)

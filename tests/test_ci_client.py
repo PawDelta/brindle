@@ -869,6 +869,93 @@ def test_plan_defaults_limits(plan):
     assert c["limits"] == {"timeout_min": 100, "token_budget": 0, "heartbeat_s": 60}
 
 
+# -- the org's protected paths and dollar budget (Team org_budgets) --------------------------------
+
+
+@pytest.mark.parametrize("over", [{"protected_paths": "infra/"}, {"protected_paths": [""]},
+                                  {"protected_paths": [1]}, {"protected_paths": ["x"] * 65},
+                                  {"budget_usd": "5"}, {"budget_usd": -1}, {"budget_usd": True}])
+def test_plan_org_limits_must_be_well_formed(plan, over):
+    with pytest.raises(CIError, match="malformed"):
+        ci_client.verify_plan(plan(**over), repo=REPO)
+
+
+def test_plan_org_limits_are_optional_and_kept(plan):
+    c = ci_client.verify_plan(plan(protected_paths=["infra/"], budget_usd=5), repo=REPO)
+    assert c["protected_paths"] == ["infra/"] and c["budget_usd"] == 5
+    assert "protected_paths" not in ci_client.verify_plan(plan(), repo=REPO)
+
+
+def test_the_token_budget_is_priced_in_dollars(plan, monkeypatch):
+    from brindle import pricing
+
+    monkeypatch.setattr(pricing, "profile_price", lambda name, root, extra=None: pricing.Price(10, 50, 12.5, 1))
+    c = ci_client.verify_plan(plan(profile="big"), repo=REPO)
+    # a typical task (200k in, 40k out, 600k cache read) is $4.60 for 840k tokens
+    assert ci_client.token_budget_usd(c, ".") == pytest.approx(4.6 * 1000 / 840_000)
+    monkeypatch.setattr(pricing, "profile_price", lambda name, root, extra=None: None)
+    assert ci_client.token_budget_usd(c, ".") is None
+
+
+def test_a_run_that_changes_a_protected_path_publishes_nothing(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base, protected_paths=["fix.txt"])
+    server = Server(token)
+    db = DB()
+    adapter = FakeAdapter("claude", commit=commit_file)
+    said = []
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client, db=db,
+                  adapters={"claude": adapter}, sleep=finish_after(db, adapter, 1), say=said.append)
+    ev = evidence_of(server.results[0])
+    assert ev["final_state"] == "failed" and ev["commits"] == 0
+    assert "fix.txt" in ev["question"] and "protected" in ev["question"]
+    assert b'name="bundle"' not in server.results[0]
+
+
+def test_a_run_outside_the_protected_paths_is_published(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base, protected_paths=["infra/", ".github/workflows"])
+    server = Server(token)
+    db = DB()
+    adapter = FakeAdapter("claude", commit=commit_file)
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client, db=db,
+                  adapters={"claude": adapter}, sleep=finish_after(db, adapter, 1), say=lambda s: None)
+    ev = evidence_of(server.results[0])
+    assert ev["final_state"] == "finished" and ev["commits"] == 1
+    assert b'name="bundle"' in server.results[0]
+
+
+def test_an_escalation_plan_cannot_drop_the_orgs_limits(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    first = plan(base_sha=base, protected_paths=["fix.txt"], budget_usd=5)
+    esc = plan(base_sha=base, provider="codex", attempt=2, budget_usd=50)    # no protected_paths
+    server = Server(first, actions=[{"action": "escalate", "plan": esc}])
+    db = DB()
+    claude = FakeAdapter("claude")
+    codex = FakeAdapter("codex", commit=commit_file)
+    ci_client.run(first, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client, db=db,
+                  adapters={"claude": claude, "codex": codex}, sleep=finish_after(db, codex, 1),
+                  say=lambda s: None)
+    ev = evidence_of(server.results[0])
+    assert ev["final_state"] == "failed" and "fix.txt" in ev["question"]
+
+
+def test_a_run_stops_at_the_orgs_dollar_budget(plan, ci_repo, tmp_path, monkeypatch):
+    from brindle import pricing
+
+    monkeypatch.setitem(pricing.PRICES, "fake-model", pricing.Price(1_000_000, 1_000_000, 0, 0))
+    base = head(ci_repo)
+    token = plan(base_sha=base, budget_usd=1)
+    server = Server(token)
+    adapter = FakeAdapter("claude")
+    said = []
+    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                  db=DB(), adapters={"claude": adapter}, sleep=lambda s: None, say=said.append)
+    assert len(server.events) == 1
+    assert evidence_of(server.results[0])["final_state"] == "budget"
+    assert any("org's $1.00 limit" in s for s in said)
+
+
 def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -1434,6 +1521,22 @@ def test_cli_start_needs_the_token(ci_repo, tmp_path, monkeypatch):
 # -- init ---------------------------------------------------------------------------------------------
 
 
+@pytest.fixture
+def ci_entitled(monkeypatch):
+    """The person's verified entitlement includes ``ci`` (org_1); returns the
+    keyword arguments each ``license.current`` call got."""
+    from brindle.pro import license
+
+    seen = []
+
+    def current(**kw):
+        seen.append(kw)
+        return license.Entitlement(sub="user_1", org_id="org_1", plan="team", status="active",
+                                   features=frozenset({"ci"}), seats=5, iat=0, exp=0, kid=TEST_KID)
+    monkeypatch.setattr(license, "current", current)
+    return seen
+
+
 class GhProc:
     def __init__(self, out="", code=0, err=""):
         self.stdout, self.stderr, self.returncode = out, err, code
@@ -1463,7 +1566,7 @@ def gh_repo_api(argv, *, required=(), protected=False, refuse=None, branch="main
     return GhProc("{}") if protected else GhProc(code=1, err=NOT_FOUND)
 
 
-def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
+def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch, ci_entitled):
     calls = []
     Proc = GhProc
 
@@ -1534,7 +1637,7 @@ def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def init_run(ci_repo, monkeypatch):
+def init_run(ci_repo, monkeypatch, ci_entitled):
     """Runs ``ci_client.init`` against a fake gh, server and Pro account;
     returns (gh calls, said lines). ``gh={...}`` sets :func:`gh_repo_api`'s
     answers; ``go.inputs`` holds what each gh call got on stdin."""
@@ -2007,7 +2110,7 @@ def test_check_checkout_when_git_fails(ci_repo, monkeypatch):
         ci_client.check_checkout(REPO, str(ci_repo))
 
 
-def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
+def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch, ci_entitled):
     """Without ``account=``, init builds the brindle Pro account the way the
     ``brindle.account`` entry point does (it once called a class that didn't
     exist and crashed after step 2)."""
@@ -2047,5 +2150,6 @@ def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
     # The install page needs the org: the server answers 400 "org_id is required" without it.
     assert opened == [BASE + "/github/install?org_id=org_1"]
     assert got["store"] is store and got["org"] == "org_1" and got["name"] == f"ci:{REPO}"
+    assert ci_entitled and ci_entitled[0]["store"] is store, "the entitlement checked is the account's"
     assert isinstance(got["client"], auth.Client)
     assert isinstance(account.make(str(ci_repo)), account.ProAccount)

@@ -122,6 +122,21 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     done.extend(autopilot.usage_sweep(db, now))
 
+    # 1c. Workers at their dollar budget (brindle Pro): warn, or stop if asked to.
+    from brindle import budget
+
+    done.extend(budget.sweep(db, now))
+
+    # 1d. The org's kill switch (Enterprise managed rollout): stop running workers.
+    from brindle.pro import rollout
+
+    done.extend(rollout.sweep(db, now))
+
+    # 1e. Cost-center approvals an admin has decided (Enterprise): raise the limit.
+    from brindle.pro import cost_centers
+
+    done.extend(cost_centers.poll(only_due=True, now=now))
+
     # 2. Workers nobody needs any more.
     limits: dict[str, float] = {}
     for a in db.list_agents():

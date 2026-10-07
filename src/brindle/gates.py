@@ -7,7 +7,8 @@ Checked by the ``merge_workspace`` MCP tool, in the worker's worktree:
 3. pre-commit (the framework) passes over the branch's changes, when the repo
    has a ``.pre-commit-config.yaml``. Plain git hooks already ran when each
    commit was made.
-4. Every command in ``checks`` exits 0.
+4. The branch passes the worker's profile rule packs (``brindle.rule_checks``).
+5. Every command in ``checks`` exits 0.
 
 brindle runs these itself, so "done" means verified, not just claimed. People
 merging with ``brindle merge`` aren't gated: that's their own call.
@@ -226,14 +227,27 @@ def summary_failed(summary: str) -> bool:
     return any(line.startswith("FAIL `") for line in summary.splitlines())
 
 
-def check_summary(db: DB, ws: Workspace, cfg: RepoConfig) -> str:
-    """Run each of ``cfg.checks`` (cached by sha) and produce a short pass/fail
-    summary for a reviewer, with output only for the ones that failed, capped
-    so one big failure can't blow up the reviewer's prompt."""
-    if not cfg.checks:
+def rule_summary(db: DB, ws: Workspace) -> str:
+    """The worker's rule packs checked against the branch, as PASS/FAIL lines
+    in the form of ``check_summary``; empty when the worker has no packs."""
+    from brindle import rule_checks
+
+    if db is None:   # no agents to look up a worker in (a bare check run)
         return ""
+    result = rule_checks.run(db, ws)
+    return result.summary() if result else ""
+
+
+def check_summary(db: DB, ws: Workspace, cfg: RepoConfig) -> str:
+    """Run the worker's rule packs and each of ``cfg.checks`` (cached by sha)
+    and produce a short pass/fail summary for a reviewer, with output only
+    for the ones that failed, capped so one big failure can't blow up the
+    reviewer's prompt."""
+    rules = rule_summary(db, ws)
+    if not cfg.checks:
+        return rules
     env = workspaces.workspace_env(ws)
-    lines = []
+    lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
     for cmd in cfg.checks:
         ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
@@ -277,6 +291,14 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
         return r.fail(problem)
     if cfg.pre_commit and _has_pre_commit(ws) and shutil.which("pre-commit"):
         r.passed.append("pre-commit passed")
+
+    from brindle import rule_checks
+
+    rules = rule_checks.run(db, ws)
+    if problem := rule_checks.gate_problem(rules, ws.branch):
+        return r.fail(problem)
+    if rules:
+        r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
     env = workspaces.workspace_env(ws)
     for cmd in cfg.checks:

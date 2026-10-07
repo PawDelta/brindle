@@ -11,7 +11,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-from brindle import agents, autopilot, codex_hook, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, workspaces
+from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, workspaces
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import list_profiles
@@ -453,6 +453,9 @@ async def assign(
                 text += f"\nWarning: {w}"
         for n in quota.notes(wws.repo_root):
             text += f"\nNote: {n}."
+        estimate = cost_estimate.reply_note(db, wws.repo_root, [cost_estimate.TaskSpec(profile, weight)])
+        if estimate:
+            text += f"\n{estimate}"
         return text
 
     return await asyncio.to_thread(run)
@@ -791,6 +794,68 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
     return f"Removed {ws.id}. {removed.branch_note or 'branch deleted'}"
 
 
+@mcp.tool()
+def agent_turns(agent_id: str) -> str:
+    """A worker's turn snapshots: after every turn in which it changed files,
+    brindle saved its worktree. Each line is a turn `rewind_agent` can go
+    back to, with the files it changed and the first line of what it said."""
+    from brindle import rewind
+
+    db = DB()
+    a = db.get_agent(agent_id)
+    if a is None:
+        return f"No agent {agent_id}."
+    ws = db.get_workspace(a.workspace_id)
+    if ws is None:
+        return f"{agent_id}'s workspace is gone."
+    return rewind.format_turns(ws.repo_root, agent_id)
+
+
+@mcp.tool()
+async def rewind_agent(agent_id: str, to: int, agent_profile: str = "", note: str = "") -> str:
+    """Rewind a worker to an earlier turn: its worktree (branch, commits,
+    uncommitted edits, untracked files) goes back to exactly how it was after
+    turn `to` (see agent_turns), the worker is stopped, and a FRESH worker
+    starts in its workspace with a brief: the original task, a summary of
+    turns 1..`to`, and your `note` (what to do differently). Works for every
+    provider, Codex included. agent_profile: run the fresh worker with a
+    different profile (default: the same one). The new worker reports to you
+    like an assign: its result arrives as a message. Use it when a worker
+    went down a wrong path: cheaper than starting over, and the good turns
+    are kept."""
+    from brindle import rewind
+
+    def run() -> str:
+        db = DB()
+        caller, _ = _caller(db)
+        target = db.get_agent(agent_id)
+        if target is None:
+            return f"Not rewound: no agent {agent_id}."
+        if caller is not None:
+            # Like cancel_task: a worker is only its supervisor's (or the session
+            # root's) to stop and restart, and nobody rewinds themselves mid-call.
+            mine = caller.id == target.parent_id or (
+                target.parent_id is not None and autopilot.root_of(db, target.parent_id) == caller.id)
+            if caller.id == target.id or not mine:
+                return (f"Not rewound: {agent_id} isn't yours to rewind: only the supervisor that "
+                        "started it (or its session root) can.")
+        try:
+            fresh = rewind.rewind(db, agent_id, to, profile=agent_profile or None, note=note or None)
+        except (rewind.RewindError, agents.AgentError, git.GitError, FileNotFoundError, ValueError) as e:
+            return f"Not rewound: {e}"
+        ws = db.get_workspace(fresh.workspace_id)
+        where = f"workspace {ws.id} (branch {ws.branch})" if ws else fresh.workspace_id
+        text = (f"Rewound {agent_id} to turn {to}. Worker {fresh.id} ({fresh.profile}/{fresh.provider}) "
+                f"continues from there in {where}; its result will arrive as a message.")
+        if ws:
+            missing = agents.add_dirs_warning(fresh, ws)
+            if missing:
+                text += f"\n\nWarning: {missing}"
+        return text
+
+    return await asyncio.to_thread(run)
+
+
 def _session(db: DB) -> tuple[str, Workspace] | str:
     """The caller's session root and the checkout it works in, or an error."""
     caller, _ = _caller(db)
@@ -837,7 +902,12 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
         autopilot.set_goal(db, root_id, goal, items, detail)
     except autopilot.AutopilotError as e:
         return str(e)
-    return autopilot.progress(db, root_id)
+    text = autopilot.progress(db, root_id)
+    repo_root = found[1].repo_root
+    default = load_repo_config(repo_root).default_agent
+    note = cost_estimate.reply_note(
+        db, repo_root, [cost_estimate.TaskSpec(profile or default) for _, _, _, profile, _ in items])
+    return f"{text}\n\n{note}" if note else text
 
 
 @mcp.tool()
@@ -873,8 +943,12 @@ def get_progress() -> str:
     found = _session(db)
     if isinstance(found, str):
         return found
+    from brindle import learned_rules
+
     text = autopilot.progress(db, found[0])
-    return "\n".join([text, *(f"Note: {n}." for n in quota.notes(found[1].repo_root))])
+    repo_root = found[1].repo_root
+    return "\n".join([text, *(f"Note: {n}." for n in
+                              [*quota.notes(repo_root), *learned_rules.notes(db, repo_root)])])
 
 
 @mcp.tool()

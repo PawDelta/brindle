@@ -10,6 +10,8 @@ HMAC refs (``brindle-ref-v1``, under the org's learning key; see
 ``"user"`` stays ``"user"``; a branch ref needs a repo identity),
 profile/provider/model when they are plain identifiers, the timestamp and
 the review/merge flags. Never a raw branch name, agent id, repo path or task.
+With the Enterprise ``cost_centers`` feature the payload also carries ``repo``
+(``owner/name`` of the origin remote) so the org can attribute spend.
 
 Delivery: ``emit`` puts the payload on a small bounded queue; a background
 thread moves it into a durable spool (``$BRINDLE_HOME/pro/events-spool.jsonl``,
@@ -47,7 +49,8 @@ log = logging.getLogger(__name__)
 FEATURE = "team"
 KINDS = ("assign", "handoff", "review", "escalated", "merge", "remove")
 PAYLOAD_KEYS = ("kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref",
-                "at", "approved", "merged")
+                "at", "approved", "merged", "cost_usd")
+MAX_EVENT_COST_USD = 100_000     # the backend refuses more
 BATCH = 100
 BATCH_BYTES = 48 * 1024          # backend caps the body at 64 KiB
 QUEUE_SIZE = 64
@@ -81,10 +84,18 @@ def _flag(v) -> bool | None:
     return v if isinstance(v, bool) else None
 
 
-def event_payload(key: OrgKey, identity: str | None, ev: Event) -> dict | None:
-    """The exact wire form of ``ev`` (always all of ``PAYLOAD_KEYS``), or
-    None for an unknown kind. ``identity`` is the repo identity (None: no
-    branch ref)."""
+def _usd(v) -> float | None:
+    """A cost the backend accepts: a finite number from 0 to the cap, else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return round(float(v), 4) if 0 <= v <= MAX_EVENT_COST_USD else None
+
+
+def event_payload(key: OrgKey, identity: str | None, ev: Event, repo: str | None = None) -> dict | None:
+    """The exact wire form of ``ev`` (always all of ``PAYLOAD_KEYS``, plus
+    ``repo`` when given), or None for an unknown kind. ``identity`` is the repo
+    identity (None: no branch ref). ``repo`` is ``owner/name``, sent only with
+    the ``cost_centers`` feature so spend is attributed to the repo's center."""
     if ev.kind not in KINDS:
         return None
     actor = ev.actor
@@ -94,7 +105,7 @@ def event_payload(key: OrgKey, identity: str | None, ev: Event) -> dict | None:
         at = time.time()
     if not 1_000_000_000 <= at <= 10_000_000_000:
         at = time.time()
-    return {
+    body = {
         "kind": ev.kind,
         "agent_ref": agent_ref(key, ev.agent_id) if ev.agent_id else None,
         "branch_ref": branch_ref(key, identity, ev.branch) if ev.branch and identity else None,
@@ -105,7 +116,11 @@ def event_payload(key: OrgKey, identity: str | None, ev: Event) -> dict | None:
         "at": at,
         "approved": _flag(ev.approved),
         "merged": _flag(ev.merged),
+        "cost_usd": _usd(ev.cost_usd),
     }
+    if repo:
+        body["repo"] = repo
+    return body
 
 
 # -- the spool -----------------------------------------------------------------------------------------
@@ -285,7 +300,8 @@ class ProEvents(EventsPlugin):
                 if key is None:
                     self.dropped_no_key += 1
                 else:
-                    self.spool.append(org, [event_payload(key, self._identity(event.repo_root), event)])
+                    self.spool.append(org, [event_payload(key, self._identity(event.repo_root), event,
+                                                          self._slug(event.repo_root))])
             self._wake.set()
         except Exception:  # noqa: BLE001 - never fail the operation being reported
             log.warning("brindle Pro: couldn't record an audit event", exc_info=True)
@@ -297,6 +313,20 @@ class ProEvents(EventsPlugin):
             self._identities[repo_root] = repo_identity(repo_root)
         return self._identities[repo_root]
 
+    def _slug(self, repo_root: str) -> str | None:
+        """``owner/name`` for cost-center attribution, only when the plan has
+        ``cost_centers`` (fails closed)."""
+        from brindle.pro import cost_centers, license
+
+        try:
+            ent = (self._entitlement() if self._entitlement
+                   else license.current(refresh=False, store=self._store))
+            if cost_centers.FEATURE not in ent.features:
+                return None
+            return cost_centers.repo_slug(repo_root)
+        except Exception:  # noqa: BLE001
+            return None
+
     def _drain_queue(self) -> None:
         pending: dict[str, list[dict]] = {}
         order: list[str] = []
@@ -307,7 +337,8 @@ class ProEvents(EventsPlugin):
                 break
             try:
                 key = self.keys.get(org)
-                body = event_payload(key, self._identity(event.repo_root), event)
+                body = event_payload(key, self._identity(event.repo_root), event,
+                                     self._slug(event.repo_root))
             except Exception as e:  # noqa: BLE001 - no org key: send nothing
                 log.info("brindle Pro: no org key (%s); audit event dropped", type(e).__name__)
                 self.dropped_no_key += 1

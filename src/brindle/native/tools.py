@@ -2,7 +2,8 @@
 profile's ``allowed_tools`` reads the same for either provider.
 
 Every file tool is confined to the worker's directory (its worktree): a
-path that resolves outside it is refused. Bash runs there too, with a
+path that resolves outside it is refused, and so is one outside the
+profile's write or read scope (brindle Pro guardrails). Bash runs there too, with a
 timeout and a cap on captured output, and its exit code is reported so the
 model doesn't have to guess.
 """
@@ -79,7 +80,15 @@ def clip(text: str, limit: int) -> str:
 
 # -- the core tools -----------------------------------------------------------
 
-def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
+def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | None = None,
+               read_scope: list[str] | None = None) -> list[Tool]:
+    """The file and shell tools, confined to ``cwd``. ``write_scope`` and
+    ``read_scope`` (a profile's guardrails, brindle Pro; see
+    brindle.guardrails) narrow the file tools further: Write and Edit refuse
+    a path outside the write scope, Read refuses one outside the read scope,
+    and Glob and Grep leave such files out. Bash is not confined by either."""
+    from brindle import guardrails
+
     root = Path(cwd).resolve()
     # Files the model has looked at (Read, or Edit, which reads to match).
     # Write replaces a file whole, so on an existing file it's only allowed
@@ -93,8 +102,30 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
             raise PermissionError(f"{raw} is outside the working directory {root}")
         return p
 
+    def rel(p: Path) -> str:
+        return "" if p == root else p.relative_to(root).as_posix()
+
+    def readable(p: Path) -> bool:
+        # Judged by where the file really is: Glob and Grep walk the tree
+        # without resolving, and a symlink in scope must not let Grep read
+        # the file outside it that the link points at.
+        if not read_scope:
+            return True
+        real = p.resolve()
+        if real != root and root not in real.parents:
+            return False
+        return guardrails.in_scope(rel(real), read_scope)
+
+    def writable(raw: str) -> Path:
+        path = resolve(raw)
+        if write_scope and not guardrails.in_scope(rel(path), write_scope):
+            raise PermissionError(f"{raw} is outside your write scope ({', '.join(write_scope)})")
+        return path
+
     def read(args: dict) -> ToolResult:
         path = resolve(str(args.get("path") or ""))
+        if not readable(path):
+            raise PermissionError(f"{args.get('path')} is outside your read scope ({', '.join(read_scope or [])})")
         if not path.is_file():
             return ToolResult(f"no such file: {args.get('path')}", True)
         try:
@@ -113,7 +144,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
         return ToolResult(body or "(empty file)")
 
     def write(args: dict) -> ToolResult:
-        path = resolve(str(args.get("path") or ""))
+        path = writable(str(args.get("path") or ""))
         content = args.get("content")
         if not isinstance(content, str):
             return ToolResult("content must be a string", True)
@@ -127,7 +158,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
         return ToolResult(f"{'updated' if existed else 'created'} {args.get('path')} ({len(content.splitlines())} lines)")
 
     def edit(args: dict) -> ToolResult:
-        path = resolve(str(args.get("path") or ""))
+        path = writable(str(args.get("path") or ""))
         old = args.get("old_string")
         new = args.get("new_string")
         if not isinstance(old, str) or not isinstance(new, str):
@@ -158,7 +189,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
         for p in sorted(base.glob(pattern)):
             if any(part in SKIP_DIRS for part in p.relative_to(root).parts):
                 continue
-            if p.is_file():
+            if p.is_file() and readable(p):
                 found.append(str(p.relative_to(root)))
             if len(found) >= MAX_FILES:
                 found.append(f"[stopped at {MAX_FILES} files; narrow the pattern]")
@@ -175,6 +206,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
         files = [base] if base.is_file() else sorted(
             p for p in base.rglob(name_glob or "*")
             if p.is_file() and not any(part in SKIP_DIRS for part in p.relative_to(root).parts))
+        files = [f for f in files if readable(f)]
         hits: list[str] = []
         for f in files:
             try:

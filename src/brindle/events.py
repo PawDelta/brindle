@@ -55,6 +55,7 @@ class Event:
     merged: bool | None = None
     workspace_id: str | None = None
     reason: str | None = None
+    cost_usd: float | None = None   # what the worker's task cost (a ``remove`` of a Team org member)
 
 
 class EventsPlugin(ABC):
@@ -97,6 +98,25 @@ def _model(profile: str | None, repo_root: str) -> str | None:
         return None
 
 
+def _cost(kind: str, worker: Agent | None, repo_root: str) -> float | None:
+    """What ``worker`` spent, for the ``remove`` event that ends it, when the
+    org counts spend (Team ``org_budgets``); None otherwise or when it can't be priced."""
+    if kind != "remove" or worker is None:
+        return None
+    try:
+        from brindle import budget
+        from brindle.db import DB
+        from brindle.pro import license
+
+        if not license.has("org_budgets"):
+            return None
+        spent = budget.worker_spend(DB(), worker, repo_root)
+        return round(spent, 4) if spent else None
+    except Exception:
+        log.debug("brindle: couldn't price %s for the event", worker.id, exc_info=True)
+        return None
+
+
 def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None, *,
          actor: Agent | str | None = None, approved: bool | None = None,
          merged: bool | None = None) -> None:
@@ -110,6 +130,7 @@ def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None,
             provider=worker.provider if worker else None,
             model=_model(worker.profile if worker else None, ws.repo_root),
             actor=who, approved=approved, merged=merged, workspace_id=ws.id,
+            cost_usd=_cost(kind, worker, ws.repo_root),
         ))
     except Exception:
         log.exception("brindle: the events plugin failed on a %s event", kind)

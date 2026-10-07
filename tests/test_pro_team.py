@@ -276,8 +276,9 @@ def test_event_payload_has_exactly_the_contract_keys(team):
     assert p.flush()
     review, remove = team.events
     keys = {"kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref", "at",
-            "approved", "merged"}
+            "approved", "merged", "cost_usd"}
     assert set(review) == set(remove) == keys
+    assert review["cost_usd"] is None
     key = OrgKey(ORG, *team.org_key(ORG))
     assert review["agent_ref"] == team_events.agent_ref(key, AGENT) == key.ref("agent\0" + AGENT)
     assert review["branch_ref"] == key.ref("branch\0" + ROOT_SHA + "\0" + BRANCH)
@@ -476,10 +477,11 @@ def test_entry_points_are_registered():
 
 def test_the_installed_plugins_are_inert_without_an_entitlement(tmp_path):
     """Out of the box: brindle's own policy plugin is selected (the only one
-    installed), both of its events plugins hear every event (the group fans
-    out), and they allow everything, send nothing, write nothing."""
+    installed), all three of its events plugins hear every event (the group
+    fans out), and they allow everything, send nothing, write nothing."""
     from brindle import events, policy
     from brindle.pro.audit_chain import AuditChain, audit_dir
+    from brindle.pro.audit_export import AuditExporter
 
     plugins.reset()
     try:
@@ -487,7 +489,7 @@ def test_the_installed_plugins_are_inert_without_an_entitlement(tmp_path):
         p = plugins.select(plugins.POLICY, cfg, str(tmp_path))
         assert isinstance(p, ProPolicy)
         found = events.plugins_for(cfg, str(tmp_path))
-        assert {type(x) for x in found} == {ProEvents, AuditChain}
+        assert {type(x) for x in found} == {ProEvents, AuditChain, AuditExporter}
         [e] = [x for x in found if isinstance(x, ProEvents)]
         assert policy.check_assign(cfg, str(tmp_path), "developer", "t", "assign").allowed
         for x in found:
@@ -626,3 +628,283 @@ def test_ci_token_create_refuses_a_response_without_a_token(team):
     team.routes[f"POST /orgs/{ORG}/ci-tokens"] = lambda f, h: (200, {"token_id": "ct_1", "name": "x"})
     code, _, err = run(team, "org", "ci-token", "create", "x", "--org", ORG)
     assert code == 1 and "no CI token" in err
+
+
+# -- org budgets and protected paths (Team "org_budgets") ---------------------------------------------
+
+BUDGETS = {"budget": {"seat_month_usd": 50, "goal_usd": 5}, "protected_paths": ["infra/", "*.lock"]}
+
+
+@pytest.fixture
+def budgets(team, monkeypatch):
+    """A member of a team org whose plan has org_budgets, and a policy that sets both."""
+    from brindle import budget  # noqa: F401 - imported so the patch below finds the module loaded
+    from brindle.pro import license, team_policy
+
+    login(team, team_claims(features=["learning", "team", "org_budgets"]))
+    team.policy_body = {**team.policy_body, "policy": {**POLICY, **BUDGETS},
+                        "spend": {"month": time.strftime("%Y-%m", time.gmtime()), "seat_usd": 12.5}}
+    monkeypatch.setattr(license, "has", lambda feature: feature in ("org_budgets", "cost"))
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: plugin(team).org_budgets())
+    return team
+
+
+def test_budget_and_protected_paths_are_parsed_and_cached(budgets):
+    p = plugin(budgets).org_budgets()
+    assert (p.budget_seat_month_usd, p.budget_goal_usd) == (50.0, 5.0)
+    assert p.protected_paths == ("infra/", "*.lock")
+    assert p.spend_seat_usd == 12.5
+    assert plugin(budgets).org_budgets().enforced.protected_paths == ("infra/", "*.lock")
+    assert budgets.paths().count(f"GET /orgs/{ORG}/policy") == 1      # the second came from the cache
+    cached = json.loads((private_dir() / f"policy-{ORG}.json").read_text())
+    assert cached["policy"]["budget"] == {"seat_month_usd": 50.0, "goal_usd": 5.0}
+    assert cached["policy"]["protected_paths"] == ["infra/", "*.lock"]
+
+
+def test_the_members_effective_policy_carries_the_budgets(budgets):
+    budgets.policy_body["effective"] = {**POLICY, "budget": {"seat_month_usd": 20, "goal_usd": None},
+                                        "protected_paths": ["infra/", "*.lock", "secrets/"]}
+    p = plugin(budgets).org_budgets()
+    assert (p.budget_seat_month_usd, p.budget_goal_usd) == (20.0, None)
+    assert p.protected_paths == ("infra/", "*.lock", "secrets/")
+    assert p.spend_seat_usd == 12.5
+
+
+def test_a_policy_without_budgets_has_none(team, monkeypatch):
+    from brindle.pro import license
+
+    login(team, team_claims(features=["learning", "team", "org_budgets"]))
+    monkeypatch.setattr(license, "has", lambda feature: True)
+    p = plugin(team).org_budgets()
+    assert (p.budget_seat_month_usd, p.budget_goal_usd, p.protected_paths) == (None, None, ())
+
+
+def test_without_the_org_budgets_feature_nothing_applies(team, monkeypatch):
+    from brindle.pro import license
+
+    team.policy_body = {**team.policy_body, "policy": {**POLICY, **BUDGETS}}
+    monkeypatch.setattr(license, "has", lambda feature: False)
+    assert plugin(team).org_budgets() is None
+    assert f"GET /orgs/{ORG}/policy" not in team.paths()
+
+
+def test_org_budgets_fail_closed_when_the_policy_was_never_fetched(budgets):
+    budgets.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
+    d = plugin(budgets).org_budgets()
+    assert not d.allowed and "never been fetched" in d.reason
+
+
+@pytest.mark.parametrize("over", [
+    {"budget": "50"}, {"budget": {"seat_month_usd": "50"}}, {"budget": {"goal_usd": -1}},
+    {"budget": {"goal_usd": True}}, {"protected_paths": "infra/"}, {"protected_paths": [""]},
+    {"protected_paths": [3]}, {"protected_paths": ["x"] * 65},
+])
+def test_malformed_budget_fields_fail_closed(team, over):
+    team.policy_body = {**team.policy_body, "policy": {**POLICY, **over}}
+    assert not plugin(team).check_assign(assign()).allowed
+
+
+def cfg_with(**budget):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(budget=budget)
+
+
+def org_policy(**kw):
+    from brindle.pro.team_policy import OrgPolicy
+
+    return OrgPolicy(org_id=ORG, version=1, **kw)
+
+
+def test_the_org_budget_is_merged_by_taking_the_smaller_limit(monkeypatch):
+    from brindle import budget
+    from brindle.pro import team_policy
+
+    monkeypatch.setattr(budget, "entitled", lambda: True)
+    monkeypatch.setattr(team_policy, "org_budgets",
+                        lambda root: org_policy(budget_seat_month_usd=50.0, budget_goal_usd=5.0))
+    # the repo may not loosen the org's limits ...
+    lim = budget.limits(cfg_with(month_usd=500, goal_usd=100, task_usd=7, stop=True), REPO)
+    assert (lim.month_usd, lim.goal_usd, lim.task_usd, lim.stop) == (50.0, 5.0, 7.0, True)
+    # ... but may tighten them
+    lim = budget.limits(cfg_with(month_usd=10, goal_usd=1), REPO)
+    assert (lim.month_usd, lim.goal_usd) == (10.0, 1.0)
+    # and the org's apply with no repo budget at all, and without the cost feature
+    monkeypatch.setattr(budget, "entitled", lambda: False)
+    lim = budget.limits(cfg_with(month_usd=10), REPO)
+    assert (lim.month_usd, lim.goal_usd) == (50.0, 5.0)
+
+
+def test_no_org_budget_leaves_the_repos_alone(monkeypatch):
+    from brindle import budget
+    from brindle.pro import team_policy
+
+    monkeypatch.setattr(budget, "entitled", lambda: True)
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: None)
+    assert budget.limits(cfg_with(month_usd=10), REPO).month_usd == 10.0
+    assert budget.limits(cfg_with(), REPO) is None
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy())    # an org that sets none
+    assert budget.limits(cfg_with(), REPO) is None
+
+
+def test_an_org_budget_that_cant_be_read_exhausts_the_budget(monkeypatch):
+    from brindle import budget
+    from brindle.pro import team_policy
+    from brindle.policy import deny
+
+    monkeypatch.setattr(budget, "entitled", lambda: False)
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: deny("never been fetched"))
+    lim = budget.limits(cfg_with(), REPO)
+    assert (lim.month_usd, lim.goal_usd) == (0.0, 0.0)
+
+    def boom(root):
+        raise RuntimeError("keychain")
+
+    monkeypatch.setattr(team_policy, "org_budgets", boom)
+    assert budget.limits(cfg_with(), REPO).month_usd == 0.0
+
+
+def test_the_orgs_count_of_the_seats_spend_joins_the_months(db, repo, monkeypatch):
+    from brindle import budget
+    from brindle.pro import team_policy
+
+    monkeypatch.setattr(budget, "entitled", lambda: False)
+    month = time.strftime("%Y-%m", time.gmtime())
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(
+        budget_seat_month_usd=50.0, spend_seat_usd=12.5, spend_month=month))
+    gate = budget.Gate(db, cfg_with(), str(repo), None)
+    assert gate.active and gate.month_spend() == 12.5
+    # last month's number is not this month's
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(
+        budget_seat_month_usd=50.0, spend_seat_usd=12.5, spend_month="2000-01"))
+    assert budget.Gate(db, cfg_with(), str(repo), None).month_spend() == 0.0
+
+
+def test_a_remove_event_reports_what_the_worker_cost(budgets, monkeypatch):
+    from brindle import budget, events
+    from brindle.db import Agent
+
+    monkeypatch.setattr(budget, "worker_spend", lambda db, agent, root: 1.234567)
+    worker = Agent(AGENT, "ws1", "developer", "claude", None, "assign", "idle", "@0", None, time.time())
+    assert events._cost("remove", worker, REPO) == 1.2346
+    assert events._cost("merge", worker, REPO) is None            # only the end of a worker's task
+    assert events._cost("remove", None, REPO) is None
+    p = events_plugin(budgets)
+    p.emit(ev("remove", cost_usd=1.2346))
+    p.emit(ev("remove", cost_usd=1e9))                            # more than the backend takes
+    p.emit(ev("remove", cost_usd=-1))
+    assert p.flush()
+    assert [e["cost_usd"] for e in budgets.events] == [1.2346, None, None]
+
+
+def test_no_cost_is_priced_without_the_org_budgets_feature(monkeypatch):
+    from brindle import budget, events
+    from brindle.db import Agent
+    from brindle.pro import license
+
+    monkeypatch.setattr(license, "has", lambda feature: False)
+    monkeypatch.setattr(budget, "worker_spend", lambda *a: pytest.fail("priced without the feature"))
+    worker = Agent(AGENT, "ws1", "developer", "claude", None, "assign", "idle", "@0", None, time.time())
+    assert events._cost("remove", worker, REPO) is None
+
+
+# a real branch through the rule check's protected-paths gate
+
+
+@pytest.fixture
+def protected_branch(db, repo):
+    from pathlib import Path
+
+    from conftest import sh
+    from brindle import workspaces
+
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    path = Path(ws.path)
+    (path / "src").mkdir()
+    (path / "src" / "ok.py").write_text("x = 1\n")
+    sh("git add -A && git commit -qm ok", path)
+    return ws, path
+
+
+def commit(path, name, text="y\n"):
+    from conftest import sh
+
+    (path / name).parent.mkdir(parents=True, exist_ok=True)
+    (path / name).write_text(text)
+    sh("git add -A && git commit -qm more", path)
+
+
+def test_a_change_to_a_protected_path_fails_the_gate(db, protected_branch, monkeypatch):
+    from brindle import rule_checks
+    from brindle.pro import team_policy
+
+    ws, path = protected_branch
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(protected_paths=BUDGETS["protected_paths"]))
+    result = rule_checks.run(db, ws)                       # a worker-less branch is checked too
+    assert result.ok and result.packs == ["protected_paths"]
+    assert result.summary() == "PASS `rules protected_paths`"
+    commit(path, "infra/main.tf")
+    commit(path, "deep/dir/poetry.lock")
+    result = rule_checks.run(db, ws)
+    assert not result.ok
+    assert sorted(v.detail.split(" ")[0] for v in result.violations) == ["deep/dir/poetry.lock", "infra/main.tf"]
+    assert result.summary().startswith("FAIL `rules protected_paths`")
+    assert "protected path" in rule_checks.gate_problem(result, ws.branch)
+
+
+def test_deleting_or_renaming_a_protected_file_fails_too(db, repo, monkeypatch):
+    from pathlib import Path
+
+    from conftest import sh
+    from brindle import rule_checks, workspaces
+    from brindle.pro import team_policy
+
+    (repo / "infra").mkdir()
+    (repo / "infra" / "a.tf").write_text("a\n")
+    sh("git add -A && git commit -qm infra && git push -q origin main", repo)
+    ws = workspaces.create(db, str(repo), "feat2").workspace
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(protected_paths=("infra/",)))
+    sh("git rm -q infra/a.tf && git commit -qm rm", Path(ws.path))
+    result = rule_checks.run(db, ws)
+    assert not result.ok and result.violations[0].detail.startswith("infra/a.tf ")
+
+
+def test_protected_path_matching():
+    from brindle.rule_checks import protected_files
+
+    files = ["infra/a.tf", "src/infra/b.py", ".github/workflows/ci.yml", "Makefile", "docs/Makefile",
+             "src/app.py", "INFRA/c.tf"]
+    assert protected_files(files, ["infra"]) == ["infra/a.tf", "INFRA/c.tf"]
+    assert protected_files(files, ["./.github/workflows/"]) == [".github/workflows/ci.yml"]
+    assert protected_files(files, ["Makefile"]) == ["Makefile", "docs/Makefile"]
+    assert protected_files(files, ["src/**/*.py"]) == ["src/infra/b.py", "src/app.py"]
+    assert protected_files(files, []) == []
+
+
+def test_without_protected_paths_nothing_is_checked(db, protected_branch, monkeypatch):
+    from brindle import rule_checks
+    from brindle.pro import team_policy
+
+    ws, _ = protected_branch
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: None)
+    assert rule_checks.run(db, ws) is None
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy())
+    assert rule_checks.run(db, ws) is None
+
+
+def test_protected_paths_that_cant_be_read_fail_the_gate(db, protected_branch, monkeypatch):
+    from brindle import rule_checks
+    from brindle.policy import deny
+    from brindle.pro import team_policy
+
+    ws, _ = protected_branch
+    monkeypatch.setattr(team_policy, "org_budgets", lambda root: deny("never been fetched"))
+    result = rule_checks.run(db, ws)
+    assert not result.ok and "can't be checked" in result.problem
+    assert "couldn't run" in rule_checks.gate_problem(result, ws.branch)
+
+    def boom(root):
+        raise RuntimeError("keychain")
+
+    monkeypatch.setattr(team_policy, "org_budgets", boom)
+    assert not rule_checks.run(db, ws).ok

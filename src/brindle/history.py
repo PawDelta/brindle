@@ -1,7 +1,8 @@
 """Durable, append-only history of what agents did: a worker's report, a
 reviewer's verdict, a successful merge, and a milestone check. Written at
 ``report_result``, ``submit_review``, ``merge_workspace`` success, and
-``check_milestone``.
+``check_milestone``, plus a ``learned_rules`` row for each grouping call of
+``brindle.learned_rules`` (so its tokens count with the rest).
 
 Session pruning (sessions.py) deletes agent rows (and cascades reviews and
 milestones with them) to keep disk use bounded; history has no foreign keys
@@ -35,7 +36,7 @@ TASK_CHARS = 300
 RESULT_CHARS = 2000
 CAP_PER_REPO = 5000
 
-KINDS = ("worker_result", "review", "merge", "check", "milestone", "permission")
+KINDS = ("worker_result", "review", "merge", "check", "milestone", "permission", "learned_rules")
 
 
 def _trim(text: str | None, limit: int) -> str | None:

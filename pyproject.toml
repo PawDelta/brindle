@@ -46,6 +46,7 @@ pro = "brindle.pro.team_policy:make"
 [project.entry-points."brindle.events"]
 pro = "brindle.pro.team_events:make"
 audit = "brindle.pro.audit_chain:make"
+audit_export = "brindle.pro.audit_export:make"
 
 [dependency-groups]
 dev = ["pytest>=8"]
