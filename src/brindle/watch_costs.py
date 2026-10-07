@@ -60,8 +60,8 @@ class Remote:
 
 
 def local(db: DB, repo_root: str | None, snap: list[dict], now: float | None = None) -> Local:
-    """Spend so far today and this month, and per running worker. Never raises:
-    a figure that can't be had is left out."""
+    """This month's tokens per model and dollars, and dollars per running
+    worker. Never raises: a figure that can't be had is left out."""
     from brindle import cost
 
     now = time.time() if now is None else now
