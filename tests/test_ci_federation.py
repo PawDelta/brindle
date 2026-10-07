@@ -490,6 +490,29 @@ def test_federation_apply_points_envs_at_the_proxy_and_drops_identity_tokens(ups
     p._server.server_close()
 
 
+def test_scrub_job_removes_job_secrets_but_the_agents_still_reach_the_proxy(upstream, monkeypatch):
+    from brindle import ci_client, secrets
+
+    p = CredentialProxy(lambda: WIF, upstream=upstream.url, secret="run-secret")
+    fed = ci_federation.Federation(TokenRefresher(IDS, "https://t", "r", fetch=lambda u, t: "j",
+                                                  exchange=lambda a, i: (WIF, 600.0)), p)
+    env = {"ANTHROPIC_AUTH_TOKEN": WIF, "BRINDLE_PRO_TOKEN": "cpc_x", "GITHUB_TOKEN": "g", "GH_TOKEN": "g",
+           "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "t", "ACTIONS_ID_TOKEN_REQUEST_URL": "https://t", "PATH": "/bin"}
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    ci_client.scrub_job(env, fed)
+    assert env == {"ANTHROPIC_AUTH_TOKEN": "run-secret", "ANTHROPIC_BASE_URL": p.base_url, "PATH": "/bin"}
+    import os
+    assert not any(secrets.is_job_secret(k) for k in os.environ)
+    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "run-secret"
+    # the proxy's URL and secret are a Claude agent's sign-in, so a pane scrub leaves them
+    keep = secrets.provider_credentials("claude")
+    assert {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"} <= keep
+    unset = secrets.pane_unset(env, keep=keep, allow=["PATH"])
+    assert not {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"} & set(unset)
+    p._server.server_close()
+
+
 def test_start_exchanges_first_and_serves_the_token(monkeypatch, upstream):
     monkeypatch.setattr(ci_federation, "fetch_identity_token", lambda url, tok: "h.p.s")
     monkeypatch.setattr(ci_federation, "exchange_token", lambda a, ids: (WIF, 598.0))

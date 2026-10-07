@@ -45,8 +45,9 @@ def test_builtin_profiles_keep_their_defaults():
     # reviewer is deliberately a cheap profile: strict MCP, lean settings, a
     # moderate effort (see tests/test_review_efficiency.py). developer-heavy
     # deliberately sets a model and high effort (weight routing).
+    cheap = {"reviewer", "backend-auditor"}   # backend-auditor extends reviewer
     for p in list_profiles():
-        if p.provider == "claude" and p.name != "reviewer":
+        if p.provider == "claude" and p.name not in cheap:
             assert not p.strict_mcp and not p.headless
             assert p.setting_sources is None and p.add_dirs is None
             if p.name == "developer-heavy":

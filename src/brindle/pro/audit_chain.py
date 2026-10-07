@@ -31,6 +31,12 @@ in place (hash or signature), one removed, inserted or reordered (seq and
 ``prev_hash``), or a truncated tail (the head file). ``export`` writes the
 records as JSONL or CSV, optionally from a point in time.
 
+``prune`` (retention) drops the oldest records and puts one signed
+``checkpoint`` line first in the log: ``{"kind": "checkpoint", "seq": <last
+record dropped>, "through_hash": <its record hash>, "pruned": <total dropped>,
+"ts", "hash", "sig"}``. ``verify`` starts the chain from it instead of from the
+zero anchor, so a pruned log still verifies; the newest record is never pruned.
+
 Like every events plugin, ``emit`` never raises into brindle.
 """
 
@@ -64,6 +70,8 @@ KEY_FILE = "signing.key"
 EVENT_KEYS = ("kind", "agent", "branch", "profile", "provider", "model", "actor", "workspace",
               "repo_root", "at", "approved", "merged", "reason")
 RECORD_KEYS = ("seq", "ts", "event", "prev_hash", "hash", "sig")
+CHECKPOINT_KIND = "checkpoint"
+CHECKPOINT_KEYS = ("kind", "seq", "ts", "through_hash", "pruned")
 CSV_COLUMNS = ("seq", "ts", *EVENT_KEYS, "prev_hash", "hash", "sig")
 TAIL_BYTES = 64 * 1024
 _SAFE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -360,6 +368,70 @@ def append(repo_root: str, event: dict, *, home: Path | None = None,
     return rec
 
 
+# -- retention -----------------------------------------------------------------------------------
+
+
+def checkpoint_hash(cp: dict) -> str:
+    return sha256(canonical({k: cp.get(k) for k in CHECKPOINT_KEYS}))
+
+
+def _checkpoint_problem(cp: dict, pub: Ed25519PublicKey) -> str:
+    """Why the log's checkpoint line can't be trusted ("" when it can)."""
+    if any(k not in cp for k in (*CHECKPOINT_KEYS, "hash", "sig")) or not isinstance(cp["seq"], int) \
+            or not isinstance(cp["through_hash"], str) or cp["seq"] < 1:
+        return "the retention checkpoint is unreadable or missing fields"
+    if checkpoint_hash(cp) != cp["hash"]:
+        return "the retention checkpoint was altered (hash mismatch)"
+    if not isinstance(cp["sig"], str) or not signature_ok(pub, cp["hash"], cp["sig"]):
+        return "the retention checkpoint's signature is invalid"
+    return ""
+
+
+def prune(repo_root: str | None = None, *, retention_days: float, max_seq: int | None = None,
+          path: Path | None = None, home: Path | None = None, now: float | None = None) -> int:
+    """Drop the oldest records, those more than ``retention_days`` old (and,
+    with ``max_seq``, no later than that seq), but never the newest one, and
+    replace them with one signed checkpoint line at the top of the log: the
+    seq of the last record dropped and its hash, which the first record kept
+    must chain to. The chain stays verifiable (a checkpoint can't be forged
+    or edited without the signing key). A log that doesn't verify is left
+    alone. Returns how many records were dropped."""
+    if retention_days <= 0:
+        raise AuditError("retention_days must be positive")
+    if path is None:
+        if repo_root is None:
+            raise AuditError("prune needs a repo or a path")
+        path = log_path(repo_root, home)
+    cutoff = (time.time() if now is None else now) - retention_days * 86400
+    with _locked(path):
+        report = verify(path=path, home=home)
+        if not report.ok:
+            raise AuditError(f"not pruning a log that doesn't verify: {report.describe()}")
+        lines = read_lines(path)
+        old = _parse(lines[0]) if lines else None
+        had_cp = bool(old and old.get("kind") == CHECKPOINT_KIND)
+        body = lines[1:] if had_cp else lines
+        records = [_parse(ln) for ln in body]
+        k = 0
+        while k < len(records) - 1:                       # the newest record always stays
+            rec = records[k]
+            if (max_seq is not None and rec["seq"] > max_seq) \
+                    or parse_time(rec["ts"]).timestamp() >= cutoff:
+                break
+            k += 1
+        if k == 0:
+            return 0
+        key = signing_key(home)
+        through = records[k - 1]
+        cp = {"kind": CHECKPOINT_KIND, "seq": through["seq"], "ts": _iso(), "through_hash": record_hash(through),
+              "pruned": (old["pruned"] if had_cp else 0) + k}
+        cp["hash"] = checkpoint_hash(cp)
+        cp["sig"] = sign(key, cp["hash"])
+        data = b"".join(ln + b"\n" for ln in [canonical(cp).encode("utf-8"), *body[k:]])
+        _write_atomic(path, data)
+    return k
+
+
 # -- verifying ---------------------------------------------------------------------------------
 
 
@@ -369,6 +441,7 @@ class Report:
     records: int
     broken_seq: int | None = None
     reason: str = ""
+    pruned_through: int = 0
 
     @property
     def ok(self) -> bool:
@@ -382,7 +455,10 @@ class Report:
         if not self.exists:
             return f"no audit log at {self.path}"
         if self.ok:
-            return f"{self.path}: {self.records} record(s), chain intact, every signature valid"
+            kept = (f", seq 1-{self.pruned_through} pruned (signed checkpoint)"
+                    if self.pruned_through else "")
+            return (f"{self.path}: {self.records} record(s), chain intact, every signature "
+                    f"valid{kept}")
         return f"{self.path}: BROKEN at seq {self.broken_seq}: {self.reason}"
 
 
@@ -400,33 +476,42 @@ def verify(repo_root: str | None = None, *, path: Path | None = None, home: Path
     if lines and pub is None:
         return Report(path, 0, 1, "no signing key in this install, so nothing can be verified")
     prev = ZERO_HASH
-    count = 0
+    base = 0                                   # seq of the last pruned record (0: none pruned)
+    if lines:
+        cp = _parse(lines[0])
+        if cp is not None and cp.get("kind") == CHECKPOINT_KIND:
+            bad = _checkpoint_problem(cp, pub)
+            if bad:
+                return Report(path, 0, 1, bad)
+            prev, base = cp["through_hash"], cp["seq"]
+            lines = lines[1:]
+    count = base                               # seq of the last record that checked out
     for i, line in enumerate(lines):
-        expected = i + 1
+        expected = base + i + 1
         rec = _parse(line)
         if rec is None or any(k not in rec for k in RECORD_KEYS) or not isinstance(rec["event"], dict):
-            return Report(path, count, expected, "record is unreadable or missing fields")
+            return Report(path, count - base, expected, "record is unreadable or missing fields")
         if rec["seq"] != expected:
-            return Report(path, count, expected,
+            return Report(path, count - base, expected,
                           f"found seq {rec['seq']!r} where {expected} was expected "
                           "(a record was removed, inserted or reordered)")
         if rec["prev_hash"] != prev:
-            return Report(path, count, expected,
+            return Report(path, count - base, expected,
                           "prev_hash does not match the previous record (the chain is broken)")
         if body_hash(rec["seq"], rec["ts"], rec["event"], rec["prev_hash"]) != rec["hash"]:
-            return Report(path, count, expected, "record was altered (hash mismatch)")
+            return Report(path, count - base, expected, "record was altered (hash mismatch)")
         if not isinstance(rec["sig"], str) or not signature_ok(pub, rec["hash"], rec["sig"]):
-            return Report(path, count, expected, "signature is invalid")
+            return Report(path, count - base, expected, "signature is invalid")
         prev = record_hash(rec)
         count = expected
     head = _read_head(path)
     if head and head["seq"] > count:
-        return Report(path, count, count + 1,
+        return Report(path, count - base, count + 1,
                       f"records after seq {count} are missing (the log was truncated; "
                       f"the last one written was seq {head['seq']})")
     if head and head["seq"] == count and count and head.get("hash") != prev:
-        return Report(path, count, count, "the last record does not match the recorded head")
-    return Report(path, count)
+        return Report(path, count - base, count, "the last record does not match the recorded head")
+    return Report(path, count - base, pruned_through=base)
 
 
 # -- exporting -----------------------------------------------------------------------------------
@@ -505,7 +590,7 @@ def make(repo_root: str) -> AuditChain:
     return AuditChain(repo_root)
 
 
-__all__ = ["CSV_COLUMNS", "EVENT_KEYS", "FEATURE", "RECORD_KEYS", "ZERO_HASH", "AuditChain",
-           "AuditError", "Report", "append", "audit_dir", "canonical", "event_record", "export",
-           "key_path", "log_path", "make", "parse_time", "public_key", "public_key_hex",
-           "read_records", "repo_key", "signing_key", "verify"]
+__all__ = ["CHECKPOINT_KIND", "CSV_COLUMNS", "EVENT_KEYS", "FEATURE", "RECORD_KEYS", "ZERO_HASH",
+           "AuditChain", "AuditError", "Report", "append", "audit_dir", "canonical", "event_record",
+           "export", "key_path", "log_path", "make", "parse_time", "prune", "public_key",
+           "public_key_hex", "read_records", "repo_key", "signing_key", "verify"]

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from brindle.pro import auth, credentials, license, loopback
 
 PRICING_URL = "https://pawdelta.com/brindle#pricing"
+ENTERPRISE_URL = "https://pawdelta.com/brindle/enterprise"
 
 # The paid features: (entitlement feature, cheapest plan with it, what it is, how to use it).
 FEATURES = (
@@ -18,11 +19,27 @@ FEATURES = (
     ("services", "pro", "per-worktree Docker services (db, cache)",
      '"services" in .brindle/config.json'),
     ("multi_repo", "pro", "work across several repos in one session", "`brindle repo add <path>`"),
+    ("settings_sync", "pro", "your settings follow you across machines", "`brindle account sync`"),
+    ("ci_fix", "pro", "Brindle-CI build fixing (the fix workflow)", "`brindle ci init`"),
+    ("learned_rules", "pro", "rules suggested from repeated review findings", "`brindle rules suggest`"),
+    ("cost", "pro", "cost estimates, budgets, cost and savings reports", "`brindle cost report`"),
+    ("guardrails", "pro", "write scope and env allowlist per profile",
+     "write_scope, read_scope, env_allow in a profile"),
     ("team", "team", "org policies + team audit feed", "`brindle account org policy`"),
     ("ci", "team", "Brindle-CI: fixes builds, issues into verified PRs", "`brindle ci init`"),
+    ("org_profiles", "team", "org profile and rule-pack library, pinned",
+     "`brindle account org profiles`"),
+    ("org_budgets", "team", "org budgets and protected paths", "`budget`, `protected_paths` in your org policy (`brindle account org policy`)"),
     ("audit", "enterprise", "tamper-evident local audit log", "`brindle audit verify`"),
     ("airgap", "enterprise", "air-gapped mode, local models only",
      '"airgap": true in .brindle/config.json'),
+    ("managed_models", "enterprise", "org-managed provider config (Bedrock, Vertex...)", "`provider_config`, `deny_personal_keys` in your org policy (`brindle account org policy`); `brindle doctor` shows the provider"),
+    ("audit_export", "enterprise", "audit export to webhook, Splunk, Datadog, S3", "`brindle audit ship`"),
+    ("ci_enterprise", "enterprise", "wider CI: no cap, your runners, beyond GitHub", "`brindle ci init --host gitlab`"),
+    ("cost_centers", "enterprise", "spend by cost center, admin-approved overruns",
+     "`brindle cost request`"),
+    ("managed_rollout", "enterprise", "min version, required profiles, kill switch",
+     "`min_version`, `required_profiles`, `required_rule_packs`, `kill_switch` in your org policy (`brindle account org policy`)"),
 )
 
 USAGE = """usage: brindle account [<command>] [--base-url URL]
@@ -49,6 +66,13 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   org use <org_id>  work as a member of <org_id> (`personal` for your own)
   org policy        show the current org's policy, its per-role overrides and the
                     policy that applies to you (and refresh the cached copy)
+  org profiles [list] [--org ORG]
+            list the org's shared profiles and rule packs (and refresh the cached copy)
+  org profiles push <file> [--pack] [--pinned] [--name NAME] [--org ORG]
+            publish a profile (or, with --pack, a rule pack) to the org (admin+);
+            --pinned: a repo or user file can't replace it
+  org profiles rm <name> [--pack] [--org ORG]
+            take a profile (or rule pack) out of the org's library (admin+)
   org member policy-role <member> <role|none> [--org ORG]
             give a member (their account id) a policy role, or none (admin+)
   org company [--org ORG]  show the company this org is linked into
@@ -189,6 +213,54 @@ class _OrgCommands:
         self._say(f"Revoked CI token {rest[0]}; runs using it stop at their next start.")
         return 0
 
+    def cmd_org_profiles(self, base: str | None, action: str = "list", *rest: str,
+                         org: str | None = None, pack: bool = False, pinned: bool = False,
+                         name: str | None = None) -> int:
+        from brindle.pro import org_profiles
+
+        kind = "pack" if pack else "profile"
+        client = org_profiles.client_for(self._client(base).base, self.transport)
+        if action == "list":
+            ent = license.current(store=self.store, client=client)
+            org_id = self._team_org(org) if org else ent.org_id
+            if org_profiles.FEATURE not in ent.features and org_id == ent.org_id:
+                self._say(f"Org {org_id} has no profile library (plan {ent.plan}).")
+                return 0
+            try:
+                lib = org_profiles.fetch_library(org_id, client, self.store)
+                note = ""
+            except org_profiles.LibraryUnavailable as e:
+                lib = org_profiles.load_cached(org_id)
+                if lib is None:
+                    self._say(f"brindle account: couldn't fetch the library for {org_id} ({e}), "
+                              "and none is cached.")
+                    return 1
+                note = f" (cached; couldn't refresh: {e})"
+            self._say(f"Library for org {lib.org_id}, version {lib.version}{note}")
+            for label, group in (("Profiles", lib.profiles), ("Rule packs", lib.packs)):
+                self._say(f"{label}:" + ("" if group else " none"))
+                for item in group.values():
+                    self._say(f"  {auth._sanitize(item.name, 80)}" + ("  (pinned)" if item.pinned else ""))
+            return 0
+        org_id = self._team_org(org)
+        if action == "push":
+            item = org_profiles.read_item(rest[0], kind, name=name, pinned=pinned)
+            got = org_profiles.push(client, self.store, org_id, publish=[item])
+            self._say(f"Published {kind} {item['name']}" + (" (pinned)" if pinned else "")
+                      + f" to org {org_id}; library version {got.get('version')}.")
+        else:
+            if not org_profiles.NAME_RE.match(rest[0]):
+                raise auth.AuthError(f"{rest[0]!r} is not a valid org {kind} name", code="bad_request")
+            got = org_profiles.push(client, self.store, org_id,
+                                    delete=[{"kind": kind, "name": rest[0]}])
+            self._say(f"Removed {kind} {rest[0]} from org {org_id} (if it was there); "
+                      f"library version {got.get('version')}.")
+        try:   # bring this machine's copy up to date
+            org_profiles.fetch_library(org_id, client, self.store)
+        except org_profiles.LibraryUnavailable:
+            pass
+        return 0
+
     def cmd_org_learning_share(self, base: str | None, *state: str, org: str | None = None) -> int:
         from brindle import airgap
 
@@ -258,7 +330,7 @@ class _OrgCommands:
                                        None if role == "none" else role)
         except auth.AuthError as e:
             if e.code == "enterprise_required":
-                raise auth.AuthError(f"{e} (policy roles need brindle Enterprise: {PRICING_URL})",
+                raise auth.AuthError(f"{e} (policy roles need brindle Enterprise: {ENTERPRISE_URL})",
                                      code=e.code) from e
             raise
         if got["policy_role"]:
@@ -372,7 +444,9 @@ class ProAccount(_OrgCommands):
         try:
             opts = {"team": _take(args, "--team", value=False), "seats": _take(args, "--seats"),
                     "org": _take(args, "--org"), "admin": _take(args, "--admin", value=False),
-                    "device": _take(args, "--device", value=False)}
+                    "device": _take(args, "--device", value=False),
+                    "pack": _take(args, "--pack", value=False),
+                    "pinned": _take(args, "--pinned", value=False), "name": _take(args, "--name")}
             seats = int(opts["seats"]) if opts["seats"] is not None else None
         except ValueError:
             print(USAGE, file=self.err)
@@ -394,6 +468,8 @@ class ProAccount(_OrgCommands):
             or (sub == "company" and (rest[1:] in ([], ["unlink"])
                                       or (len(rest) == 3 and rest[1] == "link")))
             or (sub == "member" and len(rest) == 4 and rest[1] == "policy-role")
+            or (sub == "profiles" and (len(rest) == 1 or (rest[1] == "list" and len(rest) == 2)
+                                       or (rest[1] in ("push", "rm") and len(rest) == 3)))
             or (sub == "create" and len(rest) >= 2)
             or (sub == "ci-token" and len(rest) >= 2 and (
                 (rest[1] == "create" and len(rest) >= 3) or (rest[1] == "list" and len(rest) == 2)
@@ -404,6 +480,9 @@ class ProAccount(_OrgCommands):
         flags_ok = {"upgrade": ("team", "seats", "org"), "portal": ("org",), "login": ("device",),
                     "org": ("org", "admin") if sub == "invite"
                     else ("org",) if sub in ("ci-token", "learning-share", "company", "member")
+                    else ("org", "pack", "pinned", "name") if sub == "profiles" and rest[1:2] == ["push"]
+                    else ("org", "pack") if sub == "profiles" and rest[1:2] == ["rm"]
+                    else ("org",) if sub == "profiles"
                     else ()}.get(cmd, ())
         if not ok or any(v is not None and k not in flags_ok for k, v in opts.items()):
             print(USAGE, file=self.err)
@@ -418,6 +497,10 @@ class ProAccount(_OrgCommands):
                     return self.cmd_org_ci_token(base, *rest[1:], org=opts["org"])
                 if sub == "learning-share":
                     return self.cmd_org_learning_share(base, *rest[1:], org=opts["org"])
+                if sub == "profiles":
+                    return self.cmd_org_profiles(base, *rest[1:], org=opts["org"],
+                                                 pack=bool(opts["pack"]), pinned=bool(opts["pinned"]),
+                                                 name=opts["name"])
                 if sub in ("company", "member"):
                     return getattr(self, "cmd_org_" + sub)(base, *rest[1:], org=opts["org"])
                 return getattr(self, "cmd_org_" + sub)(base, *rest[1:])
@@ -483,9 +566,9 @@ class ProAccount(_OrgCommands):
         self._say("")
         for feature, plan, what, how in FEATURES:
             if feature in have:
-                self._say(f"  ✓ {feature:<9} {what:<50} {how}")
+                self._say(f"  ✓ {feature:<15} {what:<50} {how}")
             else:
-                self._say(f"    {feature:<9} {what:<50} needs {plan.capitalize()}")
+                self._say(f"    {feature:<15} {what:<50} needs {plan.capitalize()}")
         self._say("")
         if ent and "learning" in have and not ent.in_grace:
             self._learning_share_line(base, ent.org_id)
@@ -503,7 +586,7 @@ class ProAccount(_OrgCommands):
                       "`brindle account upgrade --team --seats N --org ORG`. "
                       f"Plans: {PRICING_URL}")
         elif "audit" not in have:
-            self._say(f"Enterprise (audit log, air-gap) is sales-led: {PRICING_URL}")
+            self._say(f"Enterprise (managed models, audit export, SCIM, air-gap) is sales-led: {ENTERPRISE_URL}")
         self._say("More: `brindle account status` (your plan), `brindle account --help` (all commands).")
         return 0
 

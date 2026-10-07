@@ -42,6 +42,10 @@ FETCH_TIMEOUT = 5.0
 MAX_CACHE = 64 * 1024
 ORG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+BUDGETS_FEATURE = "org_budgets"
+MANAGED_FEATURE = "managed_models"
+MAX_PROTECTED_PATHS = 64
+PROVIDERS = ("bedrock", "vertex", "azure", "openai-compatible")
 
 
 class PolicyUnavailable(Exception):
@@ -50,6 +54,22 @@ class PolicyUnavailable(Exception):
 
 LISTS = ("allowed_providers", "allowed_models", "allowed_profiles")
 RULES = LISTS + ("require_human_review", "max_parallel_workers")
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    """Enterprise ``managed_models``: the endpoint the org's workers run on
+    (non-secret; the credentials come from the machine's own cloud sign-in)."""
+    provider: str
+    region: str | None = None
+    model_ids: tuple[str, ...] = ()
+    endpoint: str | None = None
+    project: str | None = None     # vertex: the GCP project id
+
+    def to_json(self) -> dict:
+        return {"provider": self.provider, "region": self.region,
+                "model_ids": list(self.model_ids), "endpoint": self.endpoint,
+                "project": self.project}
 
 
 @dataclass(frozen=True)
@@ -69,6 +89,24 @@ class OrgPolicy:
     # The entitlement's (role, policy_role) this copy was fetched for: the
     # cache key next to ``version``, since a role change bumps no version.
     cached_for: tuple[str | None, str | None] | None = None
+    # Team "org_budgets": USD per seat per UTC month and per goal (None: no limit),
+    # globs no branch may change, and the caller's own spend this month as the
+    # backend counts it (``spend``, next to the policy).
+    budget_seat_month_usd: float | None = None
+    budget_goal_usd: float | None = None
+    protected_paths: tuple[str, ...] = ()
+    spend_seat_usd: float | None = None
+    spend_month: str | None = None
+    # Enterprise "managed_rollout" (see brindle.pro.rollout): org-wide, so the
+    # base policy's values are used for the member's effective policy too.
+    min_version: str | None = None
+    required_profiles: tuple[str, ...] = ()
+    required_rule_packs: tuple[str, ...] = ()
+    kill_switch: bool = False
+    # Enterprise "managed_models": the provider the org's workers must use, and
+    # whether personal API keys are stripped from their panes.
+    provider_config: ProviderConfig | None = None
+    deny_personal_keys: bool = False
 
     @property
     def enforced(self) -> OrgPolicy:
@@ -78,16 +116,35 @@ class OrgPolicy:
     def rules(self) -> dict:
         return {k: _list(getattr(self, k)) if k in LISTS else getattr(self, k) for k in RULES}
 
+    def budgets(self) -> dict:
+        return {"budget": {"seat_month_usd": self.budget_seat_month_usd,
+                           "goal_usd": self.budget_goal_usd},
+                "protected_paths": list(self.protected_paths)}
+
+    def rollout(self) -> dict:
+        return {"min_version": self.min_version,
+                "required_profiles": list(self.required_profiles),
+                "required_rule_packs": list(self.required_rule_packs),
+                "kill_switch": self.kill_switch}
+
+    def managed(self) -> dict:
+        return {"provider_config": self.provider_config.to_json() if self.provider_config else None,
+                "deny_personal_keys": self.deny_personal_keys}
+
     def to_json(self) -> dict:
         out = {"org_id": self.org_id, "version": self.version, "fetched_at": self.fetched_at,
-               "policy": {**self.rules(), "roles": {r: {k: _list(v) if k in LISTS else v
-                                                        for k, v in o.items()}
-                                                    for r, o in self.roles.items()}},
+               "policy": {**self.rules(), **self.budgets(), **self.rollout(), **self.managed(),
+                          "roles": {r: {k: _list(v) if k in LISTS else v
+                                        for k, v in o.items()}
+                                    for r, o in self.roles.items()}},
                "role": self.role, "policy_role": self.policy_role}
         if self.effective is not None:
-            out["effective"] = self.effective.rules()
+            out["effective"] = {**self.effective.rules(), **self.effective.budgets(),
+                                **self.effective.rollout(), **self.effective.managed()}
         if self.cached_for is not None:
             out["cached_for"] = list(self.cached_for)
+        if self.spend_seat_usd is not None:
+            out["spend"] = {"month": self.spend_month, "seat_usd": self.spend_seat_usd}
         return out
 
 
@@ -117,6 +174,85 @@ def _rule(name: str, v):
 
 def _rules(p: dict) -> dict:
     return {k: _rule(k, p.get(k, False if k == "require_human_review" else None)) for k in RULES}
+
+
+def _usd(v, what: str) -> float | None:
+    if v is None:
+        return None
+    if not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v < float("inf"):
+        raise PolicyUnavailable(f"malformed {what}")
+    return float(v)
+
+
+def _budgets(p: dict) -> dict:
+    """The ``org_budgets`` fields of a policy (or effective policy) dict, as
+    ``OrgPolicy`` keyword arguments. Malformed ones make the policy unusable."""
+    budget = p.get("budget")
+    if budget is None:
+        budget = {}
+    if not isinstance(budget, dict):
+        raise PolicyUnavailable("malformed budget")
+    paths = p.get("protected_paths")
+    if paths is None:
+        paths = []
+    if (not isinstance(paths, list) or len(paths) > MAX_PROTECTED_PATHS
+            or not all(isinstance(g, str) and g.strip() for g in paths)):
+        raise PolicyUnavailable("malformed protected_paths")
+    return {"budget_seat_month_usd": _usd(budget.get("seat_month_usd"), "budget"),
+            "budget_goal_usd": _usd(budget.get("goal_usd"), "budget"),
+            "protected_paths": tuple(paths)}
+
+
+def _rollout(p: dict) -> dict:
+    """The ``managed_rollout`` fields of a policy dict, as ``OrgPolicy``
+    keyword arguments. Malformed ones make the policy unusable."""
+    from brindle.pro import rollout
+
+    try:
+        return rollout.parse_fields(p)
+    except ValueError as e:
+        raise PolicyUnavailable(str(e)) from e
+
+
+def _text(v, what: str) -> str | None:
+    if v is None:
+        return None
+    if not isinstance(v, str) or not v.strip() or len(v) > 512 or not v.isprintable():
+        raise PolicyUnavailable(f"malformed {what}")
+    return v
+
+
+def _managed(p: dict) -> dict:
+    """The ``managed_models`` fields of a policy dict, as ``OrgPolicy`` keyword
+    arguments. Malformed ones make the policy unusable (fail closed)."""
+    deny = p.get("deny_personal_keys", False)
+    if not isinstance(deny, bool):
+        raise PolicyUnavailable("malformed deny_personal_keys")
+    pc = p.get("provider_config")
+    if pc is None:
+        return {"provider_config": None, "deny_personal_keys": deny}
+    if not isinstance(pc, dict) or pc.get("provider") not in PROVIDERS:
+        raise PolicyUnavailable("malformed provider_config")
+    ids = pc.get("model_ids")
+    if ids is None:
+        ids = []
+    if (not isinstance(ids, list) or len(ids) > 32
+            or not all(isinstance(i, str) and i.strip() and i.isprintable() for i in ids)):
+        raise PolicyUnavailable("malformed provider_config model_ids")
+    return {"provider_config": ProviderConfig(
+        provider=pc["provider"], region=_text(pc.get("region"), "provider_config region"),
+        model_ids=tuple(ids), endpoint=_text(pc.get("endpoint"), "provider_config endpoint"),
+        project=_text(pc.get("project"), "provider_config project")),
+        "deny_personal_keys": deny}
+
+
+def _spend(v) -> dict:
+    if not isinstance(v, dict):
+        return {}
+    usd, month = v.get("seat_usd"), v.get("month")
+    if not isinstance(usd, (int, float)) or isinstance(usd, bool) or not 0 <= usd < float("inf"):
+        return {}
+    return {"spend_seat_usd": float(usd), "spend_month": month if isinstance(month, str) else None}
 
 
 def _roles(v) -> dict:
@@ -157,13 +293,19 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
     key = body.get("cached_for")
     ok_key = isinstance(key, list) and len(key) == 2 and all(k is None or isinstance(k, str)
                                                              for k in key)
-    return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p),
-                     roles=_roles(p.get("roles")),
+    spend = _spend(body.get("spend"))
+    roll = _rollout(p)
+    managed = _managed(p)
+    return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p), **_budgets(p),
+                     **roll, **managed, roles=_roles(p.get("roles")),
                      effective=None if eff is None else OrgPolicy(
-                         org_id=org_id, version=version, fetched_at=at, **_rules(eff)),
+                         org_id=org_id, version=version, fetched_at=at, **_rules(eff),
+                         **_budgets(eff), **roll, **(_managed(eff) if (
+                             "provider_config" in eff or "deny_personal_keys" in eff) else managed),
+                         **spend),
                      role=_role_name(body.get("role")),
                      policy_role=_role_name(body.get("policy_role")),
-                     cached_for=tuple(key) if ok_key else None)
+                     cached_for=tuple(key) if ok_key else None, **spend)
 
 
 def cache_path(org_id: str):
@@ -220,7 +362,12 @@ def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None)
             if v is not None and k in RULES:
                 merged[k] = list(v) if isinstance(v, tuple) else v
     return replace(p, effective=OrgPolicy(org_id=p.org_id, version=p.version,
-                                          fetched_at=p.fetched_at, **_rules(merged)))
+                                          fetched_at=p.fetched_at, **_rules(merged),
+                                          **_budgets(p.budgets()), **_rollout(p.rollout()),
+                                          provider_config=p.provider_config,
+                                          deny_personal_keys=p.deny_personal_keys,
+                                          spend_seat_usd=p.spend_seat_usd,
+                                          spend_month=p.spend_month))
 
 
 def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
@@ -315,10 +462,51 @@ class ProPolicy(PolicyPlugin):
             return deny(f"brindle Pro team policy for org {ent.org_id} has never been fetched "
                         f"({e}); connect to the network and run `brindle account org policy`")
 
+    def org_budgets(self) -> OrgPolicy | Decision | None:
+        """The org policy whose budgets and protected paths apply here: None
+        when the org_budgets feature isn't entitled (:func:`license.has`,
+        fail closed) or there is no team org, a denial when it is but the
+        policy can't be had (the caller must not go on without it)."""
+        from brindle.pro import license
+
+        try:
+            entitled = license.has(BUDGETS_FEATURE)
+        except Exception:  # noqa: BLE001 - no verified entitlement: no org budgets
+            entitled = False
+        if not entitled:
+            return None
+        p = self.policy()
+        if isinstance(p, Decision):
+            return None if p.allowed else p      # allowed: no team entitlement, no org
+        return p
+
+    def managed_models(self) -> OrgPolicy | Decision | None:
+        """The org policy whose ``provider_config`` and ``deny_personal_keys``
+        apply here: None when managed_models isn't entitled
+        (:func:`license.has`, fail closed) or there is no team org, a denial
+        when it is but the policy can't be had."""
+        from brindle.pro import license
+
+        try:
+            entitled = license.has(MANAGED_FEATURE)
+        except Exception:  # noqa: BLE001 - no verified entitlement: nothing managed
+            entitled = False
+        if not entitled:
+            return None
+        p = self.policy()
+        if isinstance(p, Decision):
+            return None if p.allowed else p
+        return p
+
     def check_assign(self, info: AssignInfo) -> Decision:
         p = self.policy()
         if isinstance(p, Decision):
             return p
+        from brindle.pro import rollout
+
+        why = rollout.refusal(p) if rollout.entitled() else None
+        if why:
+            return deny(why)
         who = f"profile {info.profile!r}" if info.profile else "this delegation"
         if p.allowed_providers is not None and info.provider not in p.allowed_providers:
             got = f"provider {info.provider!r}" if info.provider else "an undeclared provider"
@@ -351,3 +539,13 @@ class ProPolicy(PolicyPlugin):
 
 def make(repo_root: str) -> ProPolicy:
     return ProPolicy(repo_root)
+
+
+def managed_models(repo_root: str) -> OrgPolicy | Decision | None:
+    """:meth:`ProPolicy.managed_models` for ``repo_root``."""
+    return ProPolicy(repo_root).managed_models()
+
+
+def org_budgets(repo_root: str) -> OrgPolicy | Decision | None:
+    """:meth:`ProPolicy.org_budgets` for ``repo_root``."""
+    return ProPolicy(repo_root).org_budgets()

@@ -18,7 +18,7 @@ import os
 import time
 from pathlib import PurePath
 
-from brindle import agents, git, savings
+from brindle import agents, conflicts, git, savings
 from brindle.db import DB, Agent, Task, Workspace
 
 
@@ -61,15 +61,7 @@ def _glob_match(a: str, b: str) -> bool:
 def _changed_files(ws: Workspace) -> list[str]:
     """Files ``ws``'s branch has touched relative to its base, cheaply (no
     process beyond a couple of git calls)."""
-    if not ws.base_branch:
-        return []
-    try:
-        mb = git.merge_base(ws.path, git.base_ref(ws.path, ws.base_branch))
-        names = git.out(["diff", "--name-only", mb], ws.path)
-        untracked = git.out(["ls-files", "--others", "--exclude-standard"], ws.path)
-    except git.GitError:
-        return []
-    return [f for f in (*names.splitlines(), *untracked.splitlines()) if f]
+    return conflicts.changed_files(ws)
 
 
 def active_tasks(db: DB, repo_root: str) -> list[Task]:
@@ -84,19 +76,28 @@ def active_tasks(db: DB, repo_root: str) -> list[Task]:
     return out
 
 
+RUNNING = ("starting", "processing", "waiting", "idle", "unknown")
+
+
+def running_tasks(db: DB, repo_root: str) -> list[tuple[Task, Agent, Workspace | None]]:
+    """Active tasks whose worker is still running (not paused, done or
+    exited), with the worker and its workspace."""
+    out = []
+    for t in active_tasks(db, repo_root):
+        agent = db.get_agent(t.agent_id) if t.agent_id else None
+        if agent is None or agent.status not in RUNNING:
+            continue
+        out.append((t, agent, db.get_workspace(agent.workspace_id)))
+    return out
+
+
 def overlap_warning(db: DB, ws: Workspace, files: list[str] | None) -> str | None:
     """A warning if ``files`` overlaps another active task's declared or
     actually-changed files, or None. Still starts the worker regardless: this
     is informational, not a block."""
     if not files:
         return None
-    for t in active_tasks(db, ws.repo_root):
-        other_agent = db.get_agent(t.agent_id) if t.agent_id else None
-        if other_agent is None or other_agent.status not in (
-            "starting", "processing", "waiting", "idle", "unknown"
-        ):
-            continue
-        other_ws = db.get_workspace(other_agent.workspace_id) if other_agent else None
+    for t, _agent, other_ws in running_tasks(db, ws.repo_root):
         candidates = list(_loads(t.files))
         if other_ws:
             candidates += _changed_files(other_ws)
@@ -107,6 +108,63 @@ def overlap_warning(db: DB, ws: Workspace, files: list[str] | None) -> str | Non
                     return (f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
                             "consider depends_on or merging first")
     return None
+
+
+# -- predicted conflicts between running branches -------------------------------
+
+
+def conflict_forecast(db: DB, ws: Workspace, worker: Agent) -> list[tuple[Agent, Workspace, list[str]]]:
+    """Other running branches in ``ws``'s repo that have changed a file
+    ``ws``'s branch has changed too (actual diffs, not declared ``files``):
+    (their worker, their workspace, the shared files). These are the pairs
+    that will conflict when the second of them merges."""
+    mine = _changed_files(ws)
+    if not mine:
+        return []
+    found = []
+    for _t, other, other_ws in running_tasks(db, ws.repo_root):
+        if other.id == worker.id or other_ws is None or other_ws.id == ws.id:
+            continue
+        if other_ws.kind != "worktree" or other_ws.base_branch != ws.base_branch:
+            continue
+        shared = conflicts.shared_files(mine, _changed_files(other_ws))
+        if shared:
+            found.append((other, other_ws, shared))
+    return found
+
+
+def warn_predicted_conflicts(db: DB, worker: Agent) -> str | None:
+    """A worker's turn ended: if its branch now shares changed files with
+    another running branch, tell its supervisor, once per pair of branches
+    (again only when more files join the overlap). Returns the warning sent,
+    or None. Never raises: this runs inside the worker's Stop hook."""
+    try:
+        if worker.mode not in ("assign", "handoff", "handoff_detached") or not worker.parent_id:
+            return None
+        ws = db.get_workspace(worker.workspace_id)
+        if ws is None or ws.kind != "worktree" or db.get_agent(worker.parent_id) is None:
+            return None
+        lines = []
+        for other, other_ws, shared in conflict_forecast(db, ws, worker):
+            told = db.conflict_notice(ws.id, other_ws.id)
+            if told is not None and set(shared) <= set(told):
+                continue
+            db.set_conflict_notice(ws.id, other_ws.id, shared)
+            shown = ", ".join(shared[:6]) + (f" and {len(shared) - 6} more" if len(shared) > 6 else "")
+            lines.append(f"`{ws.branch}` ({worker.id}) and `{other_ws.branch}` ({other.id}) "
+                         f"have both changed {shown}.")
+        if not lines:
+            return None
+        text = ("[brindle] Likely merge conflict: " + " ".join(lines)
+                + " Whichever merges second will have to resolve it (brindle asks that "
+                "branch's worker when the time comes). To head it off: have one worker "
+                "wait for the other's merge, or tell them which one owns those files.")
+        from brindle import gates
+
+        gates.tell(db, worker.parent_id, text)
+        return text
+    except Exception:  # noqa: BLE001 - a forecast must never break a hook
+        return None
 
 
 # -- dependencies ---------------------------------------------------------------

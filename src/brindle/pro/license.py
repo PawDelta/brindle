@@ -347,9 +347,14 @@ _cache: tuple[float, Entitlement] | None = None
 CACHE_SECONDS = 300
 
 
+_clear_hooks: list = []   # callables run by clear_cache: caches that depend on the entitlement
+
+
 def clear_cache() -> None:
     global _cache
     _cache = None
+    for hook in _clear_hooks:
+        hook()
 
 
 def current(*, refresh: bool = True, now: float | None = None, store=None, client=None) -> Entitlement:
@@ -425,10 +430,11 @@ def has(feature: str) -> bool:
     return feature in features()
 
 
-def require(feature: str) -> Entitlement:
-    """The entitlement if it includes ``feature``; raises otherwise."""
+def require(feature: str, *, store=None, client=None) -> Entitlement:
+    """The entitlement if it includes ``feature``; raises otherwise.
+    ``store`` and ``client`` are as for :func:`current`."""
     try:
-        ent = current()
+        ent = current(store=store, client=client)
     except LicenseError:
         raise
     except Exception as e:  # noqa: BLE001 - fail closed on anything

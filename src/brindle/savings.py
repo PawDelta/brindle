@@ -7,13 +7,17 @@ used, and whether learning made the pick. The pipeline adds how the task went
 
 ``report`` turns those rows into what ``brindle account savings`` prints, per
 calendar month. The cost figure is an estimate and is always labelled as one:
-for each finished task learning sent to a different profile, the tokens it
-used (from ``brindle.history``) weighted by its profile's relative cost, against
-what the baseline profile would likely have cost -- this repo's own average
-for that profile and weight when there are at least ``MIN_BASELINE`` such
-tasks, else the same tokens at the baseline's relative cost. Relative cost,
-not money. With fewer than ``MIN_TASKS`` such tasks it says there isn't
-enough data yet instead.
+for each finished task learning sent to a different profile, what it cost
+against what the baseline profile would likely have cost -- this repo's own
+average for that profile and weight when there are at least ``MIN_BASELINE``
+such tasks, else the same tokens at the baseline's price. In dollars, from
+``brindle.pricing``, when every such task in the period could be priced (each
+history row at its recorded model's price, else its profile's; the baseline
+at its profile's): the task's actual spend against an estimated baseline.
+Otherwise in relative cost, not money: the tokens it used (from
+``brindle.history``) weighted by each profile's relative cost
+(``pro.learning.cost_rank``). With fewer than ``MIN_TASKS`` such tasks it
+says there isn't enough data yet instead.
 
 Nothing here is sent anywhere, and nothing here may fail a delegation,
 review or merge: ``record`` and ``note_outcome`` swallow their errors.
@@ -21,14 +25,17 @@ review or merge: ``record`` and ``note_outcome`` swallow their errors.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from brindle import pricing
 from brindle.db import DB, RoutingDecision
 from brindle.history import tokens_total
+from brindle.pricing import Price
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +46,10 @@ ESTIMATE_NOTE = ("Estimates: each task learning sent to a different profile, aga
                  "baseline profile would likely have cost (this repo's average for it at that "
                  "weight when there is one, else the profiles' relative cost). "
                  "Relative cost, not money.")
+DOLLAR_NOTE = ("Dollar figures: each task's actual spend at list prices (brindle.pricing; "
+               "subscriptions and discounts aren't counted), against what the baseline profile "
+               "would likely have cost (this repo's average for it at that weight when there is "
+               "one, else the same tokens at its price). The baseline is an estimate.")
 
 
 # -- recording ------------------------------------------------------------------------------------
@@ -55,7 +66,7 @@ def record(db: DB, repo_root: str, decision: dict | None, *, task_id: str | None
             repo_root, task_id=task_id, agent_id=agent_id, weight=decision.get("weight"),
             baseline_profile=decision.get("baseline") or decision["profile"],
             profile=decision["profile"], learned=bool(decision.get("learned")),
-            prior=decision.get("prior") is True,
+            prior=decision.get("prior") is True, demoted_from=decision.get("demoted_from"),
         )
     except Exception:
         log.exception("brindle: couldn't record the routing decision")
@@ -101,9 +112,10 @@ class Period:
     learned: Picks = field(default_factory=Picks)
     baseline: Picks = field(default_factory=Picks)
     compared: int = 0              # finished tasks learning rerouted, with usage on record
-    actual_cost: float = 0.0       # tokens x relative cost of the profile used
+    actual_cost: float = 0.0       # tokens x relative cost of the profile used (dollars: actual spend)
     baseline_cost: float = 0.0     # the same for the baseline profile, estimated
     from_average: int = 0          # of ``compared``, how many used the repo's own average
+    dollars: bool = False          # the two costs are US dollars, not relative cost
 
     @property
     def enough(self) -> bool:
@@ -140,9 +152,65 @@ def _tokens(db: DB, repo_root: str, rows: list[RoutingDecision]) -> dict[str, in
             for agent, tokens in db.history_tokens(repo_root, ids).items()}
 
 
+def _row_spend(tokens: str, price: Price | None, extra: dict[str, Price]) -> float | None:
+    """One history row's tokens in dollars: at ``price`` when given (the
+    baseline's), else at the row's recorded model's, else None."""
+    try:
+        d = json.loads(tokens)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    if price is None:
+        price = pricing.price_for(d.get("model"), extra)
+    if price is None:
+        return None
+    return price.cost(int(d.get("input") or 0), int(d.get("output") or 0),
+                      int(d.get("cache_creation") or 0), int(d.get("cache_read") or 0))
+
+
+def _spend(rows_tokens: list[str], price: Price | None, fallback: Price | None,
+           extra: dict[str, Price]) -> float | None:
+    """A worker's rows in dollars, or None if any of them can't be priced.
+    ``price`` prices every row (an estimate at another profile's price);
+    without it each row is priced at its model's price, else ``fallback``
+    (the worker's profile's)."""
+    total = 0.0
+    for t in rows_tokens:
+        spent = _row_spend(t, price, extra)
+        if spent is None and price is None and fallback is not None:
+            spent = _row_spend(t, fallback, extra)
+        if spent is None:
+            return None
+        total += spent
+    return total
+
+
+@dataclass
+class _Prices:
+    """Dollar pricing for ``report``: each worker's history rows, and each
+    profile's price (None: unknown)."""
+    rows: dict[str, list[str]]
+    profile: Callable[[str], Price | None]
+    extra: dict[str, Price]
+
+    def actual(self, r: RoutingDecision) -> float | None:
+        return _spend(self.rows.get(r.agent_id or "", []), None, self.profile(r.profile), self.extra)
+
+    def at(self, r: RoutingDecision, profile: str) -> float | None:
+        price = self.profile(profile)
+        if price is None:
+            return None
+        return _spend(self.rows.get(r.agent_id or "", []), price, None, self.extra)
+
+
 def _period(label: str, rows: list[RoutingDecision], tokens: dict[str, int],
-            averages: dict[tuple[str, str | None], float], cost: Callable[[str], int]) -> Period:
+            averages: dict[tuple[str, str | None], float], cost: Callable[[str], int],
+            prices: _Prices | None = None,
+            usd_averages: dict[tuple[str, str | None], float] | None = None) -> Period:
     p = Period(label)
+    usd_actual = usd_baseline = 0.0
+    priced = 0
     for r in rows:
         rerouted = bool(r.learned) and r.profile != r.baseline_profile
         picks = p.learned if rerouted else p.baseline
@@ -158,31 +226,68 @@ def _period(label: str, rows: list[RoutingDecision], tokens: dict[str, int],
         p.from_average += int(average is not None)
         p.actual_cost += used * cost(r.profile)
         p.baseline_cost += (average if average is not None else used) * cost(r.baseline_profile)
+        if prices is not None:
+            actual = prices.actual(r)
+            usd_average = (usd_averages or {}).get((r.baseline_profile, r.weight))
+            baseline = usd_average if usd_average is not None else prices.at(r, r.baseline_profile)
+            if actual is not None and baseline is not None:
+                priced += 1
+                usd_actual += actual
+                usd_baseline += baseline
+    if prices is not None and p.compared and priced == p.compared:
+        p.actual_cost, p.baseline_cost, p.dollars = usd_actual, usd_baseline, True
     return p
 
 
+def _default_prices(db: DB, repo_root: str, rows: list[RoutingDecision]) -> _Prices:
+    extra = pricing.repo_overrides(repo_root)
+    cache: dict[str, Price | None] = {}
+
+    def profile(name: str) -> Price | None:
+        if name not in cache:
+            cache[name] = pricing.profile_price(name, repo_root, extra)
+        return cache[name]
+
+    ids = sorted({r.agent_id for r in rows if r.agent_id})
+    return _Prices(db.history_tokens(repo_root, ids), profile, extra)
+
+
 def report(db: DB, repo_root: str, now: float | None = None,
-           cost: Callable[[str], int] | None = None) -> list[Period]:
-    """This month, last month and all time for ``repo_root``."""
+           cost: Callable[[str], int] | None = None,
+           prices: Callable[[str], Price | None] | None = None) -> list[Period]:
+    """This month, last month and all time for ``repo_root``. In dollars
+    where they can be (see the module docstring) unless ``cost`` (relative
+    cost per profile) is given; ``prices`` (profile -> price) replaces the
+    profiles' real prices."""
     now = time.time() if now is None else now
-    cost = cost or _default_cost(repo_root)
     rows = db.list_routing_decisions(repo_root)
+    usd: _Prices | None = None
+    if cost is None:
+        usd = _default_prices(db, repo_root, rows)
+        if prices is not None:
+            usd.profile = prices
+    cost = cost or _default_cost(repo_root)
     tokens = _tokens(db, repo_root, rows)
-    # what a task on a profile at a weight used here, where enough of them finished
+    # what a task on a profile at a weight used (and spent) here, where enough of them finished
     samples: dict[tuple[str, str | None], list[int]] = {}
+    usd_samples: dict[tuple[str, str | None], list[float]] = {}
     for r in rows:
         used = tokens.get(r.agent_id or "", 0)
         if r.outcome and used > 0:
             samples.setdefault((r.profile, r.weight), []).append(used)
+            spent = usd.actual(r) if usd is not None else None
+            if spent is not None:
+                usd_samples.setdefault((r.profile, r.weight), []).append(spent)
     averages = {k: sum(v) / len(v) for k, v in samples.items() if len(v) >= MIN_BASELINE}
+    usd_averages = {k: sum(v) / len(v) for k, v in usd_samples.items() if len(v) >= MIN_BASELINE}
     this, last = _month_start(now), _month_start(now, 1)
     month = lambda ts: time.strftime("%Y-%m", time.localtime(ts))  # noqa: E731
     return [
         _period(f"This month ({month(this)})", [r for r in rows if r.ts >= this],
-                tokens, averages, cost),
+                tokens, averages, cost, usd, usd_averages),
         _period(f"Last month ({month(last)})", [r for r in rows if last <= r.ts < this],
-                tokens, averages, cost),
-        _period("All time", rows, tokens, averages, cost),
+                tokens, averages, cost, usd, usd_averages),
+        _period("All time", rows, tokens, averages, cost, usd, usd_averages),
     ]
 
 
@@ -200,6 +305,10 @@ def _estimate(p: Period) -> str:
     if p.saved_fraction is None:
         return (f"not enough data yet ({p.compared} of the {MIN_TASKS} finished tasks "
                 "picked by learning that an estimate needs)")
+    if p.dollars:
+        return (f"{pricing.money(p.actual_cost)} against an estimated "
+                f"{pricing.money(p.baseline_cost)} on the baseline profiles "
+                f"({_percent(p.saved_fraction)}), over {p.compared} tasks picked by learning")
     return (f"estimated {_percent(p.saved_fraction)} than the baseline profiles, over "
             f"{p.compared} tasks picked by learning")
 
@@ -230,8 +339,16 @@ def describe(periods: list[Period], repo_root: str) -> str:
         lines.append(f"  failed or escalated  {p.learned.troubled} of {p.learned.tasks} learning · "
                      f"{p.baseline.troubled} of {p.baseline.tasks} baseline")
         lines.append(f"  cost                 {_estimate(p)}")
-    lines.append("")
-    lines.append(ESTIMATE_NOTE)
+    estimated = [p for p in periods if p.learned.tasks + p.baseline.tasks]
+    if any(p.dollars for p in estimated):
+        lines.append("")
+        lines.append(DOLLAR_NOTE)
+        warning = pricing.stale_warning()
+        if warning:
+            lines.append(warning)
+    if not all(p.dollars for p in estimated):
+        lines.append("")
+        lines.append(ESTIMATE_NOTE)
     return "\n".join(lines)
 
 
@@ -246,5 +363,5 @@ def summary_line(periods: list[Period]) -> str:
             "(`brindle account savings`).")
 
 
-__all__ = ["ESTIMATE_NOTE", "MIN_BASELINE", "MIN_TASKS", "Period", "Picks", "attach_agent",
+__all__ = ["DOLLAR_NOTE", "ESTIMATE_NOTE", "MIN_BASELINE", "MIN_TASKS", "Period", "Picks", "attach_agent",
            "describe", "note_outcome", "record", "report", "summary_line"]

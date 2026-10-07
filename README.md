@@ -227,8 +227,8 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    Claude workers run the task as a Claude Code `/goal` with a finish line, so
    they keep going until it's met. `assign`/`handoff` take `files` (the
    paths/globs a task expects to touch, checked for overlap against other
-   active workers' declared and actually-changed files — a warning, not a
-   block) and `depends_on` (earlier tasks, by agent id or branch, that must
+   active workers' declared and actually-changed files; refused by default,
+   a warning with `"overlap": "warn"`) and `depends_on` (earlier tasks, by agent id or branch, that must
    merge first): a task with unmet dependencies is queued instead of started,
    and starts automatically, cut from the updated base, once
    `merge_workspace` resolves them. `list_tasks` shows what's queued.
@@ -321,12 +321,17 @@ your own status line prints, so what you see doesn't change.
 | `brindle ls [--all]` | workspaces and agents |
 | `brindle repo add PATH [--name ALIAS] / rm ALIAS / ls` | attach other local repos to the current session so workers can go there (brindle Pro; see "Several repos in one session") |
 | `brindle history [--limit N] [--kind K] [--all]` | durable log of worker results, reviews, merges and milestone checks |
+| `brindle cost [--days N] [--all]` | dollar spend at list prices over the last 30 days, by model |
+| `brindle cost report [--days N] [--all]` | Pro: spend by day, profile and goal, cost per merged branch, review pass rate per worker profile |
 | `brindle history --share [--session ID]` | a few lines about this session to paste into Slack or a post: goal, milestones verified, workers, merges, reviews (and how many by a different model), parallel speedup, tokens |
 | `brindle permissions list / check / suggestions / accept / allow / deny / forget / reset` | the rules brindle answers workers' permission requests with, and what it suggests from your approvals (see "Permission policy") |
 | `brindle permissions install-codex-hook [--yes]` / `brindle permissions sync-agy` | trust brindle's Codex permission hook now (brindle does it itself when needed); copy your rules into Antigravity's settings (see "Permission policy") |
+| `brindle cost request --usd N --reason "..." [--goal TEXT]` | Enterprise (cost centers): ask an admin to approve spend over your budget. A budget refusal points here. Once approved, this month's limit (or the named goal's) goes up by the approved amount, for the month it was approved in |
+| `brindle cost requests` | Enterprise: your approval requests and their status; checks pending ones with the server (the cull pass also does, every few minutes). With cost centers, spend events also carry the repo (`owner/name`) so the org can total spend per center |
+| `brindle cost estimate [--tasks N] [--weight W] [--profile P] [--reviewer R]` | what the current goal (or N tasks) is likely to cost, as a range from this repo's history (median to p80 of past worker and review runs), plus a cheaper alternative with a different reviewer; says "low confidence" when there's too little history. Also added to `set_goal` and `assign` replies (brindle Pro) |
 | `brindle learning` | whether brindle Pro's hosted learning is on for this repo, and if not, why (nothing is learned on your machine) |
 | `brindle account [login\|logout\|status\|upgrade\|portal\|org]` | paid features: bare `brindle account` shows what your plan has and how to get the rest (see "brindle Pro and Team" below) |
-| `brindle audit verify\|export\|pubkey` | the local tamper-evident audit log (brindle Enterprise; see "Audit log" below) |
+| `brindle audit verify\|export\|pubkey\|ship\|prune` | the local tamper-evident audit log, and shipping it to your SIEM (brindle Enterprise; see "Audit log" below) |
 | `brindle watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks, `x` closes |
 | `brindle sidebar` | bring this session's sidebar into the tmux session you're in (also `Ctrl-b S` in a window without one); restarts it if it was closed |
 | `brindle attach / cd / open [WS]` | tmux session (at the agent waiting on you, else the busiest or newest) / path / editor |
@@ -339,6 +344,9 @@ your own status line prints, so what you see doesn't change.
 | `brindle close AGENT` / `brindle close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `brindle send AGENT MSG` | message an agent; waits in its inbox until it's idle |
 | `brindle agent spawn/kill/peek/profiles` | manage agents |
+| `brindle profile new/lint/show` | write a profile file, check every profile (extends chains, rule packs, patterns), or print one as brindle resolves it |
+| `brindle rules suggest/accept/reject` | (brindle Pro) rules suggested from review findings that keep recurring; accept one into `.brindle/rules/learned.md`, or reject it for good |
+| `brindle agent turns AGENT` / `brindle agent rewind AGENT --to N [--profile P] [--note "..."]` | a worker's worktree is snapshotted after every turn that changed files; rewind puts it back as it was after turn N and starts a fresh session there, briefed on the task, turns 1..N and your note (any provider, Codex included). Supervisors have the `agent_turns` and `rewind_agent` tools |
 | `brindle setup [WS]` | re-run the repo's setup commands in a workspace |
 | `brindle mcp` | the MCP server agents talk to (launched for them; you don't run it) |
 
@@ -389,6 +397,49 @@ it's the place to look for what an agent did after its session is gone. It's
 capped at 5000 rows per repo, oldest dropped first. Recording usage or
 history never blocks a report, merge or check: a failure there is logged and
 skipped.
+
+Codex agents' usage comes from Codex's own session rollouts under
+`~/.codex/sessions/`; agents on other providers (Antigravity) have none, and
+count as unknown.
+
+### Spend in dollars
+
+`brindle cost` prices the last 30 days of history at each model's list price
+(per million tokens: input, output, cache write, cache read), copied from
+Anthropic's and OpenAI's pricing pages and dated; brindle warns when they're
+more than 90 days old. Local models cost $0. A model brindle has no price
+for is shown as unpriced tokens, never guessed. Add or correct prices under
+`pricing` in `~/.brindle/config.json` or `.brindle/config.json`:
+
+```json
+"pricing": {"my-model": {"input": 1, "output": 5, "cache_write": 1.25, "cache_read": 0.1}}
+```
+
+These are list prices: a subscription or a discount makes the real bill
+lower. `brindle cost report` (Pro) breaks spend down by day, profile and goal,
+with the cost per merged branch and each worker profile's review pass rate,
+and a savings section: the cache-hit rate, what routing to cheaper profiles
+saved against running the same tokens on the most expensive profile in your
+routing, and the spend budgets avoided.
+Forwarded results add the dollar figure to their token line, e.g.
+`tokens: 182k in (160k cached, 20k written) · 9k out · sonnet · ~$0.18`.
+
+### Budgets (Pro)
+
+```json
+"budget": {"task_usd": 5, "goal_usd": 40, "month_usd": 200, "stop": false}
+```
+
+Set in `~/.brindle/config.json`, `.brindle/config.json` or `config.local.json`
+(merged per key, the local file last). When a task routed by `weight` would
+take the task, its goal or the month over a limit (a task's cost is estimated
+from this repo's finished tasks on that profile, else a typical token mix at
+list prices), brindle skips that candidate and uses the next cheaper one. If
+none fits it refuses the assign, says why and, in autopilot, asks you. A
+profile you name yourself is never second-guessed. Running workers are
+reported to the supervisor at 80% of `task_usd` and again at 100%; set
+`"stop": true` to close a worker at 100% instead of only warning. Without the
+Pro `cost` feature budgets do nothing.
 
 ## Provider quota
 
@@ -454,6 +505,7 @@ Autopilot, merge gates and cleanup:
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | `"block"` | a task whose `files` overlap a running task's is refused (`"warn"` starts it with a warning) |
+| `protected_paths` | `[]` | paths or globs (`"migrations/"`, `"*.lock"`) whose merge conflicts brindle never hands to a worker to resolve: the branch waits for you instead (see "Conflict-aware merging") |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 | `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
 | `local_models` | `false` | `true`: when a native profile points at Ollama on this machine and it isn't running, `brindle` starts `ollama serve` in the background (with the context length the profiles need) and loads their models. Off, brindle uses a server that's already running and never starts or preloads one |
@@ -464,6 +516,8 @@ Autopilot, merge gates and cleanup:
 | `message_delivery` | `"pull"` | how agent and brindle messages reach an interactive supervisor: `"pull"` keeps them unread and delivers one notice ("brindle (16:25:03): 2 new messages (from 9f742c5c, pipeline). Call read_messages."; the time keeps Claude Code from dropping a repeat; the sidebar shows an unread count), `"push"` delivers each message's text. Messages you send (`brindle send`, typing) and messages to workers are always pushed |
 | `learning` | `"auto"` | hosted learning (brindle Pro, via the API; see below): `"auto"` uses it when your plan includes it and nothing otherwise; `"cloud"`; `"off"`. Any other value means off |
 | `learning_candidates` | `[]` | the profile names the hosted learner may pick from |
+| `learned_rules_repeats` | `3` | learned rules (brindle Pro): how many tasks of one profile's work must get the same review finding before a rule is suggested |
+| `learned_rules_profile` | none | the profile that groups review findings for learned rules (a `native` or `claude` one); unset, a local model that answers, else Claude's cheapest model |
 | `plugins` | `{}` | which installed plugin to use per group, e.g. `{"events": "<name>", "policy": "off"}`; unset, a group uses the only plugin installed in it, except `events`, which uses every installed one (several names: `"pro, audit"`; see "Plugins" below) |
 | `routing` | see below | for each task weight (`light`, `medium`, `heavy`), the profiles `assign`/`handoff` try in order |
 | `services` | `[]` | per-worktree Docker services (brindle Pro; see "Per-worktree services" below) |
@@ -649,9 +703,23 @@ how to use them, and the next step to get the rest:
 | hosted learning | Pro | on by itself; `brindle learning` |
 | per-worktree services | Pro | `"services"` in `.brindle/config.json` |
 | several repos in one session | Pro | `brindle repo add <path>` |
+| settings sync across machines | Pro | `brindle account sync` |
+| Brindle-CI build fixing (the fix workflow) | Pro | `brindle ci init` |
+| learned rules from repeated review findings | Pro | `brindle rules suggest` |
+| cost (estimates, budgets, reports) | Pro | `brindle cost report` |
+| guardrails (write scope, read scope, env allowlist per profile) | Pro | `write_scope`, `read_scope`, `env_allow` in a profile |
 | org policies + audit feed | Team | `brindle account org policy` |
-| Brindle-CI | Team | `brindle ci init` |
+| Brindle-CI (fixes builds, issues into verified pull requests, validation) | Team | `brindle ci init` |
+| org profile and rule-pack library, pinned so a repo can't loosen it | Team | `brindle account org profiles` |
+| org budgets and protected paths | Team | `budget`, `protected_paths` in your org policy (`brindle account org policy`) |
 | audit log, air-gap | Enterprise | `brindle audit verify`, `"airgap": true` |
+| audit export | Enterprise | `"audit_export"` in `~/.brindle/config.json`, `brindle audit ship` |
+| managed models | Enterprise | `provider_config`, `deny_personal_keys` in your org policy (see "Managed models" below) |
+| wider CI, cost centers, managed rollout | Enterprise | `brindle ci init --host gitlab`, `brindle cost request`, and `min_version`, required packs and the kill switch in your org policy |
+
+`brindle ci init` checks your plan before it changes anything: it refuses
+without Brindle-CI on the org you're using, and on Pro it sets up only the fix
+workflow.
 
 ```sh
 brindle account            # paid features: what you have, how to use them, how to get the rest
@@ -662,6 +730,9 @@ brindle account upgrade    # opens the checkout for brindle Pro (and prints its 
 brindle account portal     # opens the billing portal (invoices, seats, cancellation); --org ORG for a team org
 brindle account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
 brindle account org policy # the org's policy, its per-role overrides, and the policy that applies to you
+brindle account org profiles                                  # the org's shared profiles and rule packs, and which are pinned
+brindle account org profiles push <file> [--pack] [--pinned] [--name NAME]   # publish a profile (--pack: a rule pack) to the org (admin)
+brindle account org profiles rm <name> [--pack]               # take one out of the org's library (admin)
 brindle account org member policy-role <member> <role|none>   # give a member a policy role (admin; Enterprise)
 brindle account org company [link <org_id> | unlink]          # link orgs you own into one company; learning is pooled only within it
 ```
@@ -702,6 +773,35 @@ agents and branches are named only by keyed hashes (HMACs under your org's
 key) that the server can't reverse. Never the task text, prompts, diffs,
 file names, paths or branch names. See `src/brindle/pro/learning.py` and
 `src/brindle/pro/team_events.py` for the exact payloads.
+
+### Managed models (brindle Enterprise)
+
+An org policy can pick the provider its workers run on and keep people's own
+model keys out of their panes. Both fields are ignored without the Enterprise
+entitlement.
+
+* `provider_config`: `provider` (`bedrock`, `vertex`, `azure` or
+  `openai-compatible`), plus `region`, `model_ids` and `endpoint` as the
+  provider needs them. For `vertex` set `project` to the GCP project id
+  (brindle passes it to Claude Code as `ANTHROPIC_VERTEX_PROJECT_ID`; an older
+  policy that put the project id in `endpoint` still works). Every agent is
+  launched on that provider, and a profile that points somewhere else is
+  refused with a message saying why.
+* `deny_personal_keys`: the personal model keys (`ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, ...) are taken out of every agent pane, and a profile that
+  sets one is refused.
+
+Two things to know when you turn on `deny_personal_keys`:
+
+* With an `openai-compatible` or `azure` provider, `OPENAI_API_KEY` is
+  stripped like the rest, so give the profile a non-personal key to use: set
+  `api_key_env` to the name of a variable that holds the org's key (not
+  `OPENAI_API_KEY`).
+* It can't block a Claude subscription or keychain login by itself: Claude
+  Code signs in on its own, outside the variables brindle removes. Only a
+  `provider_config` that routes Claude Code to Bedrock, Vertex or Foundry
+  (`azure`) keeps it off that login. Always pair `deny_personal_keys` with a
+  `provider_config`.
 
 ### Air-gapped mode (brindle Enterprise)
 
@@ -785,9 +885,56 @@ one altered in place (hash or signature), one removed, inserted or reordered
 (seq and prev_hash), or a truncated tail. Verifying and exporting never need
 the entitlement, so a log keeps its value after a plan lapses.
 
+#### Audit export (brindle Enterprise)
+
+With a plan that includes `audit_export`, brindle ships the audit records to your
+own logging stack and can prune old ones locally. Configure it under
+`audit_export` in `~/.brindle/config.json`; secrets are never in the config, each
+`*_env` names an environment variable that is read when sending:
+
+```json
+{"audit_export": {
+  "retention_days": 90,
+  "sinks": [
+    {"type": "webhook", "url": "https://siem.example.com/brindle", "secret_env": "BRINDLE_WEBHOOK_SECRET"},
+    {"type": "splunk",  "url": "https://splunk.example.com:8088", "token_env": "SPLUNK_HEC_TOKEN", "index": "audit"},
+    {"type": "datadog", "site": "datadoghq.com", "api_key_env": "DD_API_KEY", "tags": ["env:prod"]},
+    {"type": "s3",      "bucket": "acme-audit", "prefix": "brindle/", "region": "eu-west-1"}]}}
+```
+
+- `webhook`: an HTTPS `POST` of `{"version", "source", "sent_at", "records"}` with
+  `X-Brindle-Signature: sha256=<HMAC-SHA256 of the raw body under the secret>`.
+- `splunk`: the HTTP Event Collector (`Authorization: Splunk <token>`); the path
+  defaults to `/services/collector/event`; `index`, `source`, `sourcetype` are optional.
+- `datadog`: the Logs intake for your `site`, one log per record.
+- `s3`: one JSONL object per batch under `<prefix>YYYY/MM/DD/`. Needs `boto3`
+  (not installed with brindle; without it the sink reports it isn't configured).
+  Credentials are boto3's usual chain, or `access_key_env` / `secret_key_env`.
+
+Two sources are shipped: every record of the local audit chain, as written
+(`seq`, `ts`, the event, `prev_hash`, `hash`, `sig`, plus the log's name, so the
+receiver can re-check the chain against `brindle audit pubkey`), and the Team
+feed's events (the same HMAC refs the Team backend gets, never raw names, each
+with its content `hash` and the `chain_hash` of the matching chain record). Each
+sink has its own cursor, so a slow or failing sink never holds the others back.
+Records go out in batches, in order, at least once; a failed send is retried with
+exponential backoff from what is on disk, so it survives offline periods and
+restarts. A sink that can't be set up (an unset variable, a non-HTTPS URL) is
+reported and skipped. Nothing is sent without the entitlement or in air-gap mode.
+
+`retention_days` prunes local audit records older than that, but only once every
+sink has received them. Pruning replaces the dropped records with one signed
+checkpoint (the last dropped seq and its hash), so `brindle audit verify` still
+passes; the newest record is always kept.
+
+```sh
+brindle audit ship [--force]                       # send now; exit 1 if a sink failed
+brindle audit prune [--repo PATH] [--days N]       # prune now (default: retention_days)
+```
+
 ### Brindle-CI
 
-Brindle-CI (brindle Team) brings brindle into your CI: it fixes broken builds,
+Brindle-CI (brindle Team; build fixing alone is on Pro) brings brindle into your CI: it fixes broken builds,
 turns issues into pull requests whose checks it has verified, and reviews pull
 requests with evidence. It runs on your own CI with your own model keys; the
 hosted control plane decides what each run does and what it reports. The
@@ -901,6 +1048,20 @@ conflict, a failing check, no reviewer) arrives as "needs you" with the details.
 `"pipeline": false` restores the manual flow. Supervisors are also told to keep task
 briefs short: writing a long brief holds up every worker waiting on it.
 
+**Conflict-aware merging.** Declared `files` are a guess; what a branch actually
+changed is the truth. So at the end of each worker turn brindle compares the files
+each running branch has changed (committed or not) and tells the supervisor as soon
+as two branches touch the same file, once per pair, while there's still time to have
+one wait for the other. When several approved branches are ready at once, brindle
+merges the one whose hunks overlap the others' least first, then syncs each of the
+rest onto the new tip (merging the base into it, so its approval carries over) and
+merges it in turn; a conflict then belongs to one branch, not to the pile. That
+branch goes back to its own worker with the conflicting files to resolve, or to a
+light worker started in its worktree if the original has finished; its next report
+starts a fresh review, and the checks run again on the resolved commit before it
+merges. Conflicts in `protected_paths` (migrations, lockfiles, generated code) are
+never handed to a worker: the supervisor gets them as "needs you".
+
 **The completion audit.** A milestone's check can pass without the milestone being
 done: the test asserts too little, or checks the wrong thing. So when every milestone
 passes, autopilot doesn't call the goal reached yet. A read-only reviewer audits everything since the goal was set
@@ -963,7 +1124,8 @@ servers don't collide. Agents also get `BRINDLE_AGENT_ID`.
 ## Agent profiles
 
 Markdown files with frontmatter. brindle looks in `.brindle/agents/`, then
-`~/.brindle/agents/`, then its built-ins (`supervisor`, `developer`, `reviewer`,
+`~/.brindle/agents/`, then your org's library (brindle Team, below), then its
+built-ins (`supervisor`, `developer`, `reviewer`,
 `reviewer-codex`, `developer-local`, `reviewer-local`, `subagent`):
 
 ```markdown
@@ -1090,7 +1252,169 @@ reports the error. Differences from an interactive worker:
 
 Blank values and anything after ` #` are ignored, so frontmatter can carry comments.
 `env.NAME: value` lines set environment variables for the agent's process (see
-"Open-weight models" for what that's for).
+"Open-weight models" for what that's for). A list field takes `a, b`, `[a, b]`,
+or a block list (`- item` lines under the key), which is the form for items that
+contain commas.
+
+### Building on a profile: `extends` and rule packs
+
+A profile can start from another one instead of copying it:
+
+```markdown
+---
+name: backend-auditor
+description: Reviews a branch as a backend security audit
+extends: reviewer
+rules: security/backend
+---
+Audit the change the way a security reviewer would...
+```
+
+`extends` names one parent, found by the same lookup order (the repo's
+`.brindle/agents/`, then `~/.brindle/agents/`, then the built-ins). The child's
+fields override the parent's, field by field; a field the child leaves out is
+the parent's. The child's prompt is appended to the parent's, so the child adds
+to the role rather than restating it. Chains work (`a` extends `b` extends
+`developer`); a cycle is an error that names the loop. `brindle profile show
+<name>` prints the result.
+
+`rules` names **rule packs**: markdown files that give an agent a standing set
+of rules, and brindle a few it can check itself. A pack lives in
+`.brindle/rules/<name>.md` (the repo's), `~/.brindle/rules/<name>.md` (yours),
+or ships with brindle, in that order of precedence; `security/backend` is
+`security/backend.md`. A child's packs are added after its parent's.
+
+```markdown
+---
+name: security/backend
+description: Backend code handles untrusted input, secrets and the shell carefully
+deny_deps: [pickle]              # names that may not be imported or added to a manifest
+require_tests_for: [src/**/*.py] # a change here must come with a test file in the diff
+deny_patterns:                   # regexes no added line may match
+  - shell=True
+  - \beval\(
+---
+Treat every input that crosses a trust boundary as hostile until validated...
+```
+
+The pack's text joins the agent's prompt, for every provider, with the
+mechanical rules spelled out. Those three are checked against the branch's
+diff (what it commits on top of its base) in the same step that runs the repo's
+`checks`: the reviewer's check summary lists each pack as `PASS`/`FAIL` with
+the offending `file:line`, and `merge_workspace` refuses the branch while a
+pack fails, with the violations to send back to the worker, like a failed
+check. `deny_deps` looks at added `import`/`from`/`require` lines and at
+dependency manifests (`pyproject.toml`, `requirements*.txt`, `package.json`,
+`go.mod`, `Cargo.toml` and the like); `require_tests_for` is satisfied by any
+added or changed test file (`tests/`, `test_*`, `*_test.*`, `*.test.*`,
+`*.spec.*`, `__tests__/`). A pack with only prose is a prompt and nothing to
+check. A pack a profile names but that doesn't exist stops the launch, so a
+rule never silently stops applying. These are pattern checks on the diff's
+text: they catch the honest mistake and the obvious shortcut and name the
+line, and a dependency loaded through a name built at run time, or a test
+that tests nothing, is the reviewer's to catch. What they read can't be
+hidden: the diff is taken with git's attributes, drivers and prefixes
+overridden, and a worker whose profile no longer loads fails the gate rather
+than passing with no rules.
+
+Built-in packs: `security/backend` (no shell-outs from input, no `eval`, no
+unsafe deserializing, no secrets in code), `tests/only` (change tests, not the
+code under test: every diff must touch a test file), `style/minimal-diff` (the
+smallest diff that does the job). Built-in profiles that use them:
+`backend-auditor` (`reviewer` plus `security/backend`) and `qa` (`developer`
+plus `tests/only`).
+
+`brindle profile new <name> --extends developer --rules security/backend` writes
+the file; `brindle profile lint` checks every profile it can see (a missing
+parent, a cycle, an unknown pack, a pattern that doesn't compile, an unknown
+provider) and exits 1 if any fails.
+
+### Guardrails: write scope, read scope, env allowlist (brindle Pro)
+
+```markdown
+---
+name: api-dev
+extends: developer
+write_scope: [src/api/**, tests/api/**]
+read_scope: [src/**, tests/**, docs/**]
+env_allow: [NPM_TOKEN, AWS_*]
+---
+```
+
+Globs are relative to the worktree; a trailing `/` or a bare directory name
+means everything under it, `*` crosses `/`, and case counts.
+
+- **`write_scope`** is enforced on the branch: the same step that checks rule
+  packs lists every file the branch changes (deletions, renames and mode
+  changes included) and fails the review and merge gates on any outside the
+  scope. On top of that, best effort: Claude Code's PreToolUse hook denies an
+  Edit or Write outside it, the native runner's file tools refuse one, and the
+  worker is told its scope in its prompt. A shell command can still write
+  anywhere, and Codex and agy get only the prompt, so the diff check is what
+  holds. An empty `write_scope: []` means no limit, not "deny everything".
+- **`read_scope`** is best effort only. The native runner's Read refuses a
+  file outside it and Glob and Grep leave such files out; Claude Code's hook
+  denies a Read outside it, and a Glob or Grep unless the directory searched
+  is wholly in scope (a scope of `src/api/**` can search `src/api/`, not
+  `src/`). A shell command can read anything, other providers only get the
+  prompt, and a read leaves no diff to check afterwards.
+- **`env_allow`** (names or globs): the worker's process starts with only
+  these variables, brindle's own (`BRINDLE_*`), the basics a process needs
+  (`PATH`, `HOME`, `LANG`, `LC_*`, `TERM`, ...), the profile's own `env.NAME`
+  lines and the provider's sign-in (Claude Code's keys and cloud backends,
+  Codex's keys, a native profile's `api_key_env`). brindle's own secrets (the
+  Pro token, GitHub's tokens) never reach a worker, listed or not. Anything
+  else is dropped, so a tool that needs `GIT_*`, the proxy variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) or `NO_COLOR` must have them listed.
+
+Without the `guardrails` feature these keys are ignored, with one warning per
+profile, and the profile runs as if they weren't there.
+
+### Learned rules (brindle Pro)
+
+When reviewers keep asking for the same change, brindle suggests a rule for
+it. Each review that requests changes is a finding, filed under the repo and
+the profile of the worker whose branch it was. After a review like that,
+brindle groups the new findings with one small model call (the repo's
+`learned_rules_profile`, else a local model that answers, else Claude's
+cheapest model; its tokens show up in `brindle history` like any other).
+Once the same finding has come up in `learned_rules_repeats` tasks (3 by
+default), the supervisor's `get_progress` mentions the suggestion and
+`brindle rules suggest` lists it. Nothing changes until you decide:
+
+```sh
+brindle rules suggest            # group new findings, then list the suggestions (--no-refresh: just list)
+brindle rules accept 3f9c2a1b    # add it to .brindle/rules/learned.md
+brindle rules reject 3f9c2a1b    # never suggest it again
+```
+
+`.brindle/rules/learned.md` is an ordinary rule pack that every profile in the
+repo picks up: each accepted rule is a line of its prose, and when the finding
+is a mechanical one (a pattern no added line may match, a dependency not to
+add, paths whose changes need a test), it lands in the pack's `deny_patterns`,
+`deny_deps` or `require_tests_for` and is checked against every branch's diff.
+Commit it so the rule is reviewed and shared; edit or delete lines as with any
+pack. Rejections are remembered on this machine: findings that fall under a
+rejected rule keep it rejected.
+
+### The org library (brindle Team)
+
+With a Team plan, an org's admins can share profiles and rule packs with every
+member. An admin publishes a file with `brindle account org profiles push
+reviewer.md` (a rule pack: `push --pack security.md`, named like
+`security/backend` with `--name`), and `brindle account org profiles rm <name>`
+removes one. `brindle account org profiles` lists what the org shares.
+
+Members get them in the lookup order repo, user, org, built-in (for profiles
+and rule packs alike), so a repo or user file of the same name still wins.
+`push --pinned` changes that for an item: a pinned org profile or pack is used
+over any repo or user file of that name, which is ignored with a warning, so a
+repo can't loosen what the org requires.
+
+The library is signed by the backend and verified before use. A copy is kept
+in `~/.brindle/pro/profiles-<org>/` and used while the backend can't be
+reached (for a week past its signature); with no usable copy brindle uses
+only what it has locally, and says so. Air-gap mode never fetches.
 
 ### Directories outside the workspace
 

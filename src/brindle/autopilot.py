@@ -408,9 +408,11 @@ def set_goal(db: DB, root_id: str, goal: str,
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy"}
 
 
-def _unavailable(name: str, cfg: RepoConfig, repo_root: str) -> str | None:
+def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
+                 weight: str | None = None) -> str | None:
     """Why routing skips profile ``name`` (its CLI isn't installed or
-    signed in, its provider is out of headroom, it doesn't exist), or None if it's usable."""
+    signed in, its provider is out of headroom, it would break a budget
+    (``gate``: a ``brindle.budget.Gate``), it doesn't exist), or None if it's usable."""
     from brindle import quota
     from brindle.providers import signed_out, unusable
 
@@ -418,6 +420,9 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str) -> str | None:
         p = load_profile(name, repo_root)
     except KeyError:
         return f"no profile {name}"
+    over = gate.why_not(name, weight) if gate is not None and gate.active else None
+    if over:
+        return f"over budget, skipped {name} ({over})"
     cli = CLI_FOR_PROVIDER.get(p.provider)
     if cli and unusable(p.provider, p.env):
         return (f"{cli} isn't signed in, skipped {name}" if signed_out(p.provider, p.env)
@@ -436,20 +441,33 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str) -> str | None:
 
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
                      files: list[str] | None,
-                     decision: dict | None = None) -> tuple[str | None, bool, str]:
+                     decision: dict | None = None, gate=None) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
     every candidate for the tier is out. ``decision`` gets the ``baseline``
-    (the pick without learning)."""
+    (the pick without learning), and ``over_budget`` (why each candidate was
+    skipped) when a budget was what ruled every one out, or ``demoted_from``
+    when it moved the task to a cheaper candidate."""
     from brindle import learning
 
     skipped: list[str] = []
     remaining: list[str] = []
-    for name in cfg.routing.get(weight, []):
-        why = _unavailable(name, cfg, repo_root)
+    over: dict[str, str] = {}
+    order = cfg.routing.get(weight, [])
+    for name in order:
+        why = _unavailable(name, cfg, repo_root, gate, weight)
         if why:
             skipped.append(why)
+            if why.startswith("over budget"):
+                over[name] = why
         else:
             remaining.append(name)
+    if over and decision is not None:
+        if not remaining:
+            decision["over_budget"] = list(over.values())
+        else:
+            first = next(iter(over))
+            if order.index(first) < order.index(remaining[0]):
+                decision["demoted_from"] = first
     if not remaining:
         return None, False, f"every {weight} candidate was out ({'; '.join(skipped) or 'none configured'})"
     pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
@@ -492,7 +510,17 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         if weight:
             if weight not in WEIGHTS:
                 raise AutopilotError(f"weight must be one of {', '.join(WEIGHTS)}, not {weight!r}")
-            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed)
+            from brindle import budget
+
+            gate = budget.Gate(db, cfg, repo_root, caller_id)
+            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate)
+            if routed.get("over_budget"):
+                message = budget.refusal(routed["over_budget"])
+                try:
+                    need_user(db, root_of(db, caller_id), message)
+                except Exception:  # noqa: BLE001 - no autopilot session: the refusal is the answer
+                    pass
+                raise AutopilotError(message)
             if picked:
                 name = picked
             else:
@@ -509,7 +537,8 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     if decision is not None:
         decision.update(profile=name, learned=learned, weight=weight,
                         prior=bool(routed.get("prior")),
-                        baseline=routed.get("baseline", name) if learned else name)
+                        baseline=routed.get("baseline", name) if learned else name,
+                        demoted_from=routed.get("demoted_from"))
     try:
         load_profile(name, repo_root)
     except KeyError:

@@ -21,7 +21,10 @@ Commands (``brindle ci ...``; see :mod:`brindle.cli`):
   server asks for ``more``).
 * ``doctor``: which CLIs and credential *names* are here, the credential
   kind per provider, and what the credential rule makes of them.
-* ``init``: the one-command setup.
+* ``init``: the one-command setup. It needs the person's verified
+  entitlement first (:func:`require_ci`: ``ci`` on brindle Team, or
+  ``ci_fix`` on brindle Pro for the fix workflow only). Runners hold only
+  the org CI token, so the server gates the runs themselves.
 
 Plans are JWTs signed with the brindle Pro signing key: they are verified
 with the pinned keys of :mod:`brindle.pro.license`, with their own ``typ``
@@ -49,6 +52,7 @@ from typing import Callable, Mapping, MutableMapping
 
 from brindle import airgap, ci_adapters, ci_federation, git
 from brindle.pro import auth, license
+from brindle.secrets import SECRET_ENV, SECRET_PREFIXES, is_job_secret, scrub_secrets  # noqa: F401
 
 log = logging.getLogger(__name__)
 
@@ -63,18 +67,19 @@ CI_TOKEN_RE = re.compile(r"^cpc_[A-Za-z0-9_-]{16,256}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+PROJECT_RE = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$")   # owner/name, or a GitLab group/sub/name
 ORIGIN_RE = re.compile(r"[:/]([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 URL_USERINFO_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@")   # user:token@ in a remote URL
 PROVIDERS = ("claude", "codex", "native")
 
-# Secrets a CI job holds that no agent may see.
-SECRET_ENV = ("BRINDLE_PRO_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN",
-              "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL")
-SECRET_PREFIXES = ("GH_",)
+# Secrets a CI job holds that no agent may see: SECRET_ENV, SECRET_PREFIXES
+# and scrub_secrets live in brindle.secrets (local workers' panes are
+# scrubbed with the same names, see tmux.new_window).
 # What a check command must not see either: model keys and anything token-like.
 MODEL_KEY_NAMES = ci_adapters.PROVIDER_KEYS
 MODEL_KEY_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_AUTH_TOKEN", "_PASSWORD")
 
+MAX_PROTECTED_PATHS = 64
 DEFAULT_HEARTBEAT_S = 60
 DEFAULT_TIMEOUT_MIN = 100
 TIMEOUT_MARGIN_MIN = 10          # past the plan's timeout: the job ends even if the server is gone
@@ -157,22 +162,8 @@ class CIError(Exception):
 # -- secrets -----------------------------------------------------------------------------------
 
 
-def is_job_secret(name: str) -> bool:
-    return name in SECRET_ENV or name.startswith(SECRET_PREFIXES)
-
-
 def is_model_key(name: str) -> bool:
     return name in MODEL_KEY_NAMES or name.endswith(MODEL_KEY_SUFFIXES)
-
-
-def scrub_secrets(env: MutableMapping[str, str]) -> list[str]:
-    """Remove the job's secrets from ``env`` in place (before any agent
-    starts), and Claude key variables set to an empty string, which Claude
-    Code would take over the federation token. Returns the names removed."""
-    gone = sorted(k for k in env if is_job_secret(k))
-    for k in gone:
-        del env[k]
-    return sorted(gone + ci_adapters.drop_empty_keys(env))
 
 
 def check_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -239,6 +230,19 @@ def _limits(raw, defaults: dict) -> dict:
     return out
 
 
+def _check_org_limits(c: dict) -> None:
+    """The org's Team limits a plan may carry: ``protected_paths`` (globs no
+    change may touch) and ``budget_usd`` (what the run may spend)."""
+    paths = c.get("protected_paths")
+    if paths is not None and not (isinstance(paths, list) and len(paths) <= MAX_PROTECTED_PATHS
+                                  and all(_str(g) and g.strip() for g in paths)):
+        raise CIError("plan protected_paths are malformed")
+    usd = c.get("budget_usd")
+    if usd is not None and (isinstance(usd, bool) or not isinstance(usd, (int, float))
+                            or not 0 <= usd < math.inf):
+        raise CIError("plan budget_usd is malformed")
+
+
 def _plan_texts(raw) -> dict[str, str]:
     """The texts sent beside a plan ({sha256: text}); none is ``{}``."""
     if raw is None:
@@ -274,6 +278,7 @@ def _resolve_instructions(obj: dict, texts: Mapping[str, str], what: str) -> Non
 
 
 def _check_run_plan(c: dict, texts: Mapping[str, str]) -> None:
+    _check_org_limits(c)
     goal = c.get("goal")
     if not (isinstance(goal, dict) and _str(goal.get("title"))):
         raise CIError("run plan has no goal")
@@ -694,6 +699,33 @@ def refuse_airgap() -> None:
                       "backend and can't run here", code="airgap")
 
 
+def require_ci(*, store=None, client=None, org: str | None = None) -> tuple[str, ...]:
+    """The workflow kinds the person's verified entitlement allows them to
+    set up: all of them with ``ci`` (brindle Team), only ``fix`` with
+    ``ci_fix`` (brindle Pro). Fails closed: no entitlement, an unreadable
+    one, or one for an org other than ``org`` raises :class:`CIError`. The
+    server still decides every run; this only stops a setup that can't work."""
+    try:
+        try:
+            ent = license.require("ci", store=store, client=client)
+            kinds = SETUP_KINDS
+        except license.NotEntitled:
+            ent = license.require("ci_fix", store=store, client=client)
+            kinds = ("fix",)
+    except license.NotEntitled as e:
+        raise CIError("brindle CI needs brindle Team (or brindle Pro, for build fixing only); "
+                      "see `brindle account`", code="not_entitled") from e
+    except license.LicenseError as e:
+        raise CIError(f"brindle CI needs brindle Team: {e}", code="not_entitled") from e
+    except Exception as e:  # noqa: BLE001 - fail closed on anything
+        raise CIError("brindle CI needs brindle Team, and the brindle Pro entitlement could not be "
+                      "checked", code="not_entitled") from e
+    if org and org != ent.org_id:
+        raise CIError(f"you are using org {ent.org_id}, not {org}: run `brindle account org use {org}` "
+                      "first", code="not_entitled")
+    return kinds
+
+
 # -- start ------------------------------------------------------------------------------------------
 
 
@@ -816,7 +848,7 @@ def plan_id(plan_token: str) -> tuple[str, str, str]:
     except license.LicenseError as e:
         raise CIError(str(e), code="bad_plan") from e
     if not (_str(c.get("id")) and c.get("plan_kind") in ("run", "validation") and _str(c.get("repo"))
-            and REPO_RE.match(c["repo"])):
+            and PROJECT_RE.match(c["repo"])):
         raise CIError("plan claims are malformed", code="bad_plan")
     return c["plan_kind"], c["id"], c["repo"]
 
@@ -937,6 +969,60 @@ def _set_goal(db, root_id: str, plan: dict) -> None:
                        goal.get("detail") if isinstance(goal.get("detail"), str) else None)
 
 
+def changed_files(cwd: str, base_sha: str, branch: str) -> list[str]:
+    """Every path ``branch`` changes past ``base_sha`` (renames as both sides)."""
+    try:
+        proc = git.run(["-c", "core.quotepath=false", "diff", "--name-only", "-z", "--no-renames",
+                        "--no-ext-diff", base_sha, branch], cwd)
+    except git.GitError as e:
+        raise CIError(f"can't list the changed files: {e}") from e
+    return [p for p in (proc.stdout or "").split("\0") if p]
+
+
+def protected_violations(plan: dict, cwd: str) -> list[str]:
+    """The files the run's branch changed that the plan's ``protected_paths`` protect."""
+    from brindle import rule_checks
+
+    globs = plan.get("protected_paths") or []
+    if not globs:
+        return []
+    return rule_checks.protected_files(changed_files(cwd, plan["base_sha"], plan["branch"]), globs)
+
+
+def token_budget_usd(plan: dict, cwd: str) -> float | None:
+    """The plan's ``token_budget`` in dollars at its profile's list price (a
+    typical token mix), or None when the profile has no known price."""
+    from brindle import budget, pricing
+
+    tokens = (plan.get("limits") or {}).get("token_budget") or 0
+    price = pricing.profile_price(plan.get("profile"), cwd) if tokens else None
+    return None if price is None else budget.price_tokens(price, tokens)
+
+
+def usage_usd(usage: Mapping, cwd: str) -> float:
+    """What a usage report (``{model: {input, output, cache_read}}``) costs.
+    Fails closed, for the org's dollar limit: tokens of a model brindle has no
+    price for, or counts it can't read, make the cost infinite, never nothing."""
+    from brindle import pricing
+
+    extra = pricing.repo_overrides(cwd)
+    total = 0.0
+    for model, u in usage.items():
+        if not isinstance(u, Mapping):
+            return math.inf
+        try:
+            counts = [max(0, int(u.get(k) or 0)) for k in ("input", "output", "cache_read")]
+        except (TypeError, ValueError, OverflowError):
+            return math.inf
+        if not any(counts):
+            continue
+        price = pricing.price_for(model, extra)
+        if price is None:
+            return math.inf
+        total += price.cost(counts[0], counts[1], 0, counts[2])
+    return total
+
+
 def make_bundle(cwd: str, base_sha: str, branch: str) -> tuple[int, bytes | None, str | None]:
     """(commits on the branch past base, the bundle bytes, why there is none)."""
     n = count_commits(cwd, base_sha, branch)
@@ -957,13 +1043,16 @@ def make_bundle(cwd: str, base_sha: str, branch: str) -> tuple[int, bytes | None
 def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMapping[str, str],
         client: Client, db=None, adapters: Mapping[str, ci_adapters.Adapter] | None = None,
         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
-        org: bool | None = None, texts=None, say: Callable[[str], None] = print) -> dict:
+        org: bool | None = None, texts=None, say: Callable[[str], None] = print,
+        repo: str | None = None) -> dict:
     """``brindle ci run``: the run job. A run plan runs the supervisor and
     uploads the result; a validation plan runs the checks and reviewers and
     uploads the evidence. ``texts`` are the plan texts saved beside the plan,
     or a function that reads them (:func:`read_plan_texts`), called once the
-    run token is gone from disk. Returns the server's answer to the upload."""
-    repo = github_repo(env)
+    run token is gone from disk. ``repo`` is the host's project
+    (:mod:`brindle.ci_hosts`); GitHub's when not given. Returns the server's
+    answer to the upload."""
+    repo = repo or github_repo(env)
     # The token file goes first, whatever happens to the plan: a rejected
     # plan must not leave a run token on the runner's disk.
     run_token = read_run_token(token_path)
@@ -1019,7 +1108,7 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
                  client: Client, db, adapters, clock: Callable[[], float], sleep: Callable[[float], None],
                  say: Callable[[str], None]) -> dict:
     """The run plan's job proper, once the job is scrubbed (see :func:`run`)."""
-    from brindle import workspaces
+    from brindle import pricing, workspaces
     from brindle.db import DB
 
     run_id, base_sha, branch = plan["id"], plan["base_sha"], plan["branch"]
@@ -1043,6 +1132,10 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
         return adapter, root
 
     adapter, root = attempt(plan)
+    if (cap := token_budget_usd(plan, cwd)) is not None:
+        say(f"token budget {plan['limits']['token_budget']:,} tokens, about {pricing.money(cap)}"
+            + (f"; the org's limit for this run is {pricing.money(plan['budget_usd'])}"
+               if plan.get("budget_usd") is not None else ""))
     deadline = started + (plan["limits"]["timeout_min"] + TIMEOUT_MARGIN_MIN) * 60
     final: str | None = None
     event: dict = {"state": "working", "milestones": [], "usage": {}}
@@ -1077,19 +1170,38 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
                     or new["branch"] != branch:
                 raise CIError("the escalation plan is for another run", code="bad_plan")
             adapter.stop(db, root.id)
+            # An escalation may only tighten the org's limits, never drop or raise them.
+            paths = list(dict.fromkeys((plan.get("protected_paths") or []) + (new.get("protected_paths") or [])))
+            if paths:
+                new["protected_paths"] = paths
+            caps = [u for u in (plan.get("budget_usd"), new.get("budget_usd")) if u is not None]
+            if caps:
+                new["budget_usd"] = min(caps)
             plan = new
             adapter, root = attempt(plan)
             deadline = started + (plan["limits"]["timeout_min"] + TIMEOUT_MARGIN_MIN) * 60
         else:
             raise CIError("the server sent an unknown action", code="bad_response")
+        # The org's dollar limit for the run (Team org_budgets), on top of the server's tokens.
+        limit = plan.get("budget_usd")
+        if final is None and limit is not None and usage_usd(event["usage"], cwd) >= limit:
+            final = "budget"
+            say(f"the run has spent the org's {pricing.money(limit)} limit")
     adapter.stop(db, root.id)
     event = session_event(db, root.id, adapter, cwd=cwd, base_sha=base_sha, branch=branch,
                           milestone_ids=[m["id"] for m in plan.get("milestones") or []])
     commits, bundle, why = make_bundle(cwd, base_sha, branch)
+    protected = protected_violations(plan, cwd)
+    if protected:
+        # The org's protected paths: a run that touched one uploads no changes.
+        final, commits, bundle = "failed", 0, None
+        shown = ", ".join(protected[:5]) + (" ..." if len(protected) > 5 else "")
+        event["question"] = f"the run changed protected paths of the org ({shown}); nothing was published"
+        say(event["question"])
     evidence = {"final_state": final, "milestones": event["milestones"], "usage": event["usage"],
                 "providers": providers_used, "commits": commits}
     if event.get("question"):
-        evidence["question"] = event["question"]
+        evidence["question"] = tail(event["question"], NOTE_MAX)
     if why and commits:
         log.warning("brindle ci: uploading without a bundle: %s", why)
     result = client.put_result(run_token, run_id, evidence, bundle)
@@ -1672,6 +1784,9 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
             raise CIError("repository must be owner/name (pass --repo)")
         check_checkout(repo, cwd)
     check_clean(cwd)
+    plugin = account or account_mod.make(cwd)
+    org_id = plugin._team_org(org)
+    kinds = require_ci(store=plugin.store, client=plugin._client(base), org=org_id)
     say("1/8 checking the GitHub CLI and your rights on the repository")
     _gh(["auth", "status"], run=run)
     if not repo:
@@ -1683,9 +1798,7 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     if admin != "true":
         raise CIError(f"you need admin rights on {repo} to set its secrets and workflows")
 
-    plugin = account or account_mod.make(cwd)
     api = client or Client(base)
-    org_id = plugin._team_org(org)
     install_url = api.base + "/github/install?" + urllib.parse.urlencode({"org_id": org_id})
     say(f"2/8 install the brindle GitHub App for {repo}: {install_url}")
     (open_url or webbrowser.open)(install_url)
@@ -1733,7 +1846,7 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
 
     say("7/8 fetching the workflows and opening a pull request with them")
     files = {}
-    for kind in SETUP_KINDS:
+    for kind in kinds:
         try:
             files[f"{SETUP_DIR}/brindle-ci-{kind}.yml"] = api.workflow(cpc, kind)
         except CIError as e:

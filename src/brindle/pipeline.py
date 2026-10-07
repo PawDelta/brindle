@@ -9,15 +9,27 @@ With ``pipeline`` on (the default), brindle runs those stages itself:
 
 1. A worker reports (``report_result``). brindle starts the review at once
    and runs the repo's checks in the background.
-2. The reviewer approves: brindle merges (through the same gates
-   ``merge_workspace`` uses), removes the worktree, and sends the supervisor
-   one message: merged, with the worker's report and the review.
+2. The reviewer approves: the branch is ready. brindle merges every ready
+   branch of the same base (through the same gates ``merge_workspace``
+   uses), the one whose hunks overlap the others' least first and the rest
+   synced onto the new tip in turn, removes each worktree, and sends the
+   supervisor one message per branch: merged, with the worker's report and
+   the review.
    The reviewer requests changes: brindle sends the findings straight to the
    worker, which fixes them and reports again, back to step 1; after
    ``review_rounds`` rounds it hands the findings to the supervisor instead.
-3. Anything the pipeline can't settle (a conflict, a failing check, no
-   reviewer available) goes to the supervisor as "needs you", with the
-   details.
+3. A branch whose sync with its base conflicts goes back to its worker to
+   resolve (a light worker in its worktree if that one has finished); its
+   next report starts a fresh review, and the checks run again, before it
+   merges. A conflict in a ``protected_paths`` file is never resolved by a
+   worker: it goes to the supervisor. Anything else the pipeline can't
+   settle (a failing check, no reviewer available) goes to the supervisor
+   as "needs you", with the details.
+
+While workers run, brindle also compares what each running branch has
+actually changed (not just the ``files`` its task declared) and warns the
+supervisor as soon as two of them touch the same file (see
+``tasks.warn_predicted_conflicts``).
 
 The supervisor still plans, assigns, and answers the user; it no longer
 relays between the worker, the reviewer and the merge. ``handoff`` workers
@@ -34,11 +46,15 @@ import subprocess
 import threading
 from contextlib import contextmanager
 
-from brindle import agents, autopilot, codemap, events, gates, git, history, learning, policy, savings, tasks, workspaces
+from brindle import (
+    agents, autopilot, codemap, conflicts, events, gates, git, history, learning, policy, savings,
+    tasks, workspaces,
+)
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import DB, Agent, Workspace
 
 PIPED_MODES = ("assign", "handoff_detached")
+WORKER_MODES = ("handoff", "handoff_detached", "assign")
 
 
 def enabled(cfg: RepoConfig, worker: Agent, ws: Workspace) -> bool:
@@ -219,26 +235,48 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
 # -- stage 2: the review came in ---------------------------------------------------
 
 
+def piped_worker(db: DB, ws: Workspace) -> Agent | None:
+    """The worker whose branch the pipeline is handling in ``ws``: the latest
+    worker there that is in the pipeline's hands (a conflict-resolution
+    worker started in a finished worker's worktree, say), else the one
+    whose task produced the code."""
+    workers = sorted((a for a in db.list_agents(ws.id) if a.mode in WORKER_MODES),
+                     key=lambda a: a.created_at)
+    piped = [a for a in workers if a.pipeline]
+    return piped[-1] if piped else (workers[0] if workers else None)
+
+
 def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: str) -> bool:
     """Act on a verdict for a piped branch. Returns whether the pipeline
     handled it (so the verdict isn't forwarded to the supervisor as a
     message). A verdict that arrives after its branch merged (a second
-    reviewer of the same commit, a repeated submit_review) is dropped."""
+    reviewer of the same commit, a repeated submit_review) is dropped.
+
+    An approval marks the branch ready and then drains every ready branch
+    of the same base (see ``drain``), with no workspace lock held: the
+    drain takes each branch's lock itself, and a caller holding one while
+    waiting for the drain would deadlock with it."""
     with merge_lock(ws.id):
-        return _on_review(db, reviewer, ws, approved, summary)
+        handled, ready = _on_review(db, reviewer, ws, approved, summary)
+    if ready:
+        drain(db, ws.repo_root, ws.base_branch, reviewer=reviewer)
+    return handled
 
 
-def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: str) -> bool:
+def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
+               summary: str) -> tuple[bool, bool]:
+    """(handled, ready): whether the pipeline took the verdict, and whether
+    the branch is now ready to merge (so the caller drains)."""
     # Read under the lock: an earlier verdict may have merged the branch, or
     # handed it to the supervisor, while this one waited.
     if _settled(db, ws):
-        worker = agents.workspace_worker(db, ws)
+        worker = piped_worker(db, ws)
         if worker is not None and worker.pipeline:
             db.update_agent(worker.id, pipeline=None)
-        return True
-    worker = agents.workspace_worker(db, ws)
+        return True, False
+    worker = piped_worker(db, ws)
     if worker is None or not worker.pipeline:
-        return False
+        return False, False
     parent_id = worker.parent_id
     try:
         cfg = load_repo_config(ws.repo_root)
@@ -246,7 +284,6 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: 
         cfg = RepoConfig()
     report = worker.result or ""
     if approved:
-        parent = db.get_agent(parent_id) if parent_id else None
         if not cfg.auto_merge_default_branch and ws.base_branch \
                 and ws.base_branch == git.default_branch(ws.repo_root):
             db.update_agent(worker.id, pipeline=None)
@@ -258,33 +295,28 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: 
                   "(set \"merge_into\" to another branch, or \"auto_merge_default_branch\": true, "
                   f"in .brindle/config.json to change this).\n\nWorker's report:\n{report}\n\n"
                   f"Review ({reviewer.id}): approved.\n{summary}", worker.id)
-            return True
-        text = merge(db, parent, ws)
-        if text.startswith((ALREADY_MERGED, GONE)):
-            db.update_agent(worker.id, pipeline=None)   # reported when it merged; nothing to add
-        elif text.startswith("Merged"):
-            # This runs inside the reviewer's own process, and removing its
-            # workspace must not take that process down half way: record and
-            # announce everything first, then remove without killing the
-            # session the reviewer is in.
-            db.update_agent(worker.id, pipeline=None)
-            db.set_status(reviewer.id, "done")
-            _tell(db, parent_id,
-                  f"[brindle pipeline] {text} Removing the worktree.\n\nWorker's report:\n{report}"
-                  f"\n\nReview ({reviewer.id}): approved.\n{summary}", worker.id)
-            note = _remove(db, ws, keep=reviewer)
-            if not note.startswith("("):
-                note_removed_merged(db, ws, actor=reviewer, worker=worker)
-            if note.startswith("("):
-                _tell(db, parent_id, f"[brindle pipeline] {ws.branch}: {note}", worker.id)
-        else:
+            return True, False
+        # Ready means: the review on record for the branch's current commit
+        # approves it. The verdict argument alone doesn't make it so: the
+        # worker may have committed since the reviewer read the branch, or
+        # a later verdict may have overruled this one.
+        try:
+            recorded = db.latest_review(ws.id, gates.head(ws))
+        except git.GitError:
+            recorded = None
+        if recorded is None or not recorded.approved:
             db.update_agent(worker.id, pipeline=None)
             _escalate(db, ws, worker)
+            why = ("its latest commit hasn't been reviewed" if recorded is None
+                   else "a later review of that commit requested changes")
             _tell(db, parent_id,
-                  f"[brindle pipeline] `{ws.branch}` was approved but couldn't be merged: {text}\n"
-                  "This needs you: fix it (or have the worker fix it with send_message), then "
-                  f"merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}", worker.id)
-        return True
+                  f"[brindle pipeline] {reviewer.id} approved `{ws.branch}`, but {why}, so it "
+                  f"wasn't merged. This needs you: request_review(\"{ws.id}\") again, then "
+                  f"merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}\n\n"
+                  f"Review ({reviewer.id}): approved.\n{summary}", worker.id)
+            return True, False
+        db.update_agent(worker.id, pipeline="ready")
+        return True, True
     rounds = (worker.pipeline_rounds or 0) + 1
     if rounds <= cfg.review_rounds and agents.is_alive(worker):
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
@@ -296,7 +328,7 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: 
                 "again; brindle will have it reviewed again.",
                 sender_id=reviewer.id,
             )
-            return True
+            return True, False
         except agents.AgentError:
             pass
     db.update_agent(worker.id, pipeline=None)
@@ -305,7 +337,214 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: 
           f"[brindle pipeline] `{ws.branch}` still has review findings after {rounds - 1} fix "
           f"round(s). This needs you: decide what to do.\n\nLatest review ({reviewer.id}):\n"
           f"{summary}\n\nWorker's last report:\n{report}", worker.id)
-    return True
+    return True, False
+
+
+# -- stage 3: merging the ready branches, in order ----------------------------------
+
+
+def ready_branches(db: DB, repo_root: str, base: str | None) -> list[tuple[Agent, Workspace]]:
+    """Approved branches of ``base`` in ``repo_root`` that the pipeline has
+    yet to merge, oldest first."""
+    found = []
+    for ws in db.find_workspaces(repo_root):
+        if ws.kind != "worktree" or ws.base_branch != base:
+            continue
+        worker = piped_worker(db, ws)
+        if worker is not None and worker.pipeline == "ready":
+            found.append((worker, ws))
+    found.sort(key=lambda pair: pair[1].created_at)
+    return found
+
+
+def merge_order(ready: list[tuple[Agent, Workspace]]) -> list[tuple[Agent, Workspace]]:
+    """``ready`` in the order to merge them: fewest overlapping hunks first
+    (see conflicts.merge_order). One branch needs no ordering."""
+    if len(ready) < 2:
+        return list(ready)
+    by_id = {ws.id: (worker, ws) for worker, ws in ready}
+    ordered = conflicts.merge_order([(ws, conflicts.hunks(ws)) for _w, ws in ready])
+    return [by_id[ws.id] for ws in ordered]
+
+
+def drain(db: DB, repo_root: str, base: str | None, reviewer: Agent | None = None) -> list[str]:
+    """Merge every ready branch of ``base``: the one whose hunks overlap the
+    others' least first, then each of the rest synced onto the new tip (so
+    its conflicts, if any, are its own) and merged in turn. A sync that
+    conflicts hands the branch to a worker to resolve, or to the person for
+    a protected path (see ``_resolve_conflict``); the review and the checks
+    run again on the resolved branch before it merges. One drain per base at
+    a time, across processes; a second one finds nothing left and returns.
+    ``reviewer`` is the agent running this code, whose session a removal
+    must not take down. Returns one line per branch handled."""
+    lines: list[str] = []
+    key = hashlib.sha1(f"{repo_root}\0{base or ''}".encode()).hexdigest()[:16]
+    with _file_lock("drain-" + key):
+        while True:
+            ready = ready_branches(db, repo_root, base)
+            if not ready:
+                return lines
+            # Branches that become ready while these merge are picked up by
+            # the next round, synced onto whatever tip the round left.
+            for worker, ws in merge_order(ready):
+                lines.append(_finish(db, worker, ws, reviewer))
+
+
+def _finish(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None) -> str:
+    """Merge one ready branch and settle what the result means for its worker
+    and its supervisor. Under the branch's lock from the first look at its
+    state: a branch that stopped being ready since it was listed (its worker
+    reported new commits, a supervisor merged it by hand) is left alone."""
+    with merge_lock(ws.id):
+        current = db.get_agent(worker.id)
+        if current is None or current.pipeline != "ready":
+            return f"Skipped {ws.branch}: no longer ready."
+        return _finish_locked(db, current, ws, reviewer)
+
+
+def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None) -> str:
+    parent_id = worker.parent_id
+    parent = db.get_agent(parent_id) if parent_id else None
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except ValueError:
+        cfg = RepoConfig()
+    report = worker.result or ""
+    try:
+        review = db.latest_review(ws.id, gates.head(ws))
+    except git.GitError:
+        review = None
+    reviewed_by = review.reviewer_id if review and review.reviewer_id else (reviewer.id if reviewer else "?")
+    verdict = f"Review ({reviewed_by}): approved.\n{review.summary or ''}" if review else ""
+    conflicting: list[str] = []
+    try:
+        text = merge(db, parent, ws, conflicts_out=conflicting)
+    except workspaces.WorkspaceError as e:   # one branch's trouble mustn't stall the others
+        text = f"Not merged: {e}"
+    if text.startswith((ALREADY_MERGED, GONE)):
+        if db.get_agent(worker.id):
+            db.update_agent(worker.id, pipeline=None)   # reported when it merged; nothing to add
+    elif text.startswith("Merged"):
+        # This may run inside the approving reviewer's own process, and
+        # removing its workspace must not take that process down half way:
+        # record and announce everything first, then remove without killing
+        # the session the reviewer is in.
+        db.update_agent(worker.id, pipeline=None)
+        keep = reviewer if reviewer is not None and reviewer.workspace_id == ws.id else None
+        if keep is not None:
+            db.set_status(keep.id, "done")
+        _tell(db, parent_id,
+              f"[brindle pipeline] {text} Removing the worktree.\n\nWorker's report:\n{report}"
+              f"\n\n{verdict}", worker.id)
+        note = _remove(db, ws, keep=keep)
+        if not note.startswith("("):
+            note_removed_merged(db, ws, actor=keep or reviewer, worker=worker)
+        if note.startswith("("):
+            _tell(db, parent_id, f"[brindle pipeline] {ws.branch}: {note}", worker.id)
+    elif conflicting:
+        _resolve_conflict(db, worker, ws, cfg, conflicting, report)
+    else:
+        latest = db.get_agent(worker.id)
+        if latest is not None and latest.pipeline not in (None, "ready"):
+            return text   # the worker moved on meanwhile (a new report): its new state stands
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        _tell(db, parent_id,
+              f"[brindle pipeline] `{ws.branch}` was approved but couldn't be merged: {text}\n"
+              "This needs you: fix it (or have the worker fix it with send_message), then "
+              f"merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}", worker.id)
+    return text
+
+
+def resolution_task(ws: Workspace, files: list[str], cfg: RepoConfig) -> str:
+    """The brief for whoever resolves ``ws``'s conflict with its base."""
+    base = ws.base_branch
+    shown = ", ".join(files)
+    tests = f" Then run the repo's checks ({'; '.join(cfg.checks)})." if cfg.checks else ""
+    return (
+        f"Merge conflict: `{base}` has moved on since `{ws.branch}` was approved, and merging "
+        f"it into your branch conflicts in: {shown}.\n\n"
+        f"In {ws.path}, run `git merge {base}`, resolve the conflicts in those files so that "
+        f"both sides' intent survives (keep what `{base}` changed and what this branch "
+        f"changed; don't drop either), make sure no conflict markers remain, run the tests "
+        f"that cover those files{tests} and commit the merge. Then call report_result again: "
+        "brindle will have the branch reviewed and checked again, and merge it. "
+        "Don't change anything else."
+    )
+
+
+def _light_profile(db: DB, parent: Agent | None, ws: Workspace, cfg: RepoConfig,
+                   task: str, files: list[str]) -> str:
+    if parent is None:
+        return cfg.default_agent
+    try:
+        name, _ = autopilot.choose_profile(db, parent.id, ws.repo_root, None, task, files, "light")
+        return name
+    except autopilot.AutopilotError:
+        return cfg.default_agent
+
+
+def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
+                      files: list[str], report: str) -> None:
+    """``ws``'s branch conflicts with its base. A protected path goes to the
+    person; otherwise the branch's own worker is asked to resolve it if it
+    is still running, else a light worker is started in its worktree. Either
+    way the branch leaves 'ready': its next report starts a fresh review."""
+    parent_id = worker.parent_id
+    base = ws.base_branch
+    guarded = conflicts.protected(files, cfg.protected_paths)
+    if guarded:
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        _tell(db, parent_id,
+              f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
+              f"conflicts in protected path{'s' if len(guarded) > 1 else ''}: "
+              f"{', '.join(guarded)} (\"protected_paths\" in .brindle/config.json). brindle never "
+              "resolves those itself. This needs you: resolve the conflict yourself, or decide "
+              f"who should (in {ws.path}: `git merge {base}`, resolve, commit), then "
+              f"request_review and merge_workspace(\"{ws.id}\").\n\nAll conflicting files: "
+              f"{', '.join(files)}\n\nWorker's report:\n{report}", worker.id)
+        return
+    task = resolution_task(ws, files, cfg)
+    if agents.is_alive(worker):
+        db.update_agent(worker.id, pipeline="resolving")
+        try:
+            agents.send_message(db, worker.id, task, sender_id=None)
+            _tell(db, parent_id,
+                  f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
+                  f"conflicts in: {', '.join(files)}. Asked its worker {worker.id} to resolve the "
+                  "conflict; the branch is reviewed and checked again before it merges. "
+                  "Nothing to do unless that fails.", worker.id)
+            return
+        except agents.AgentError:
+            pass
+    parent = db.get_agent(parent_id) if parent_id else None
+    profile = _light_profile(db, parent, ws, cfg, task, files)
+    done_when = (f"`git merge {base}` is resolved and committed on `{ws.branch}` with no conflict "
+                 "markers left, the tests covering the conflicting files pass, and report_result "
+                 "was called")
+    try:
+        resolver, _ws = agents.delegate(db, parent, ws, profile, task, "assign", isolate=False,
+                                        done_when=done_when, plan_first=False)
+    except agents.AgentError as e:
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        _tell(db, parent_id,
+              f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
+              f"conflicts in: {', '.join(files)}, its worker {worker.id} has finished, and no "
+              f"worker could be started to resolve it ({e}). This needs you: resolve it (in "
+              f"{ws.path}: `git merge {base}`, resolve, commit) or assign someone, then "
+              f"request_review and merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}",
+              worker.id)
+        return
+    db.update_agent(worker.id, pipeline=None)
+    db.update_agent(resolver.id, pipeline="resolving")
+    _tell(db, parent_id,
+          f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it conflicts "
+          f"in: {', '.join(files)}. Its worker {worker.id} has finished, so a light worker "
+          f"({resolver.id}, {profile}) is resolving the conflict in its worktree; the branch is "
+          "reviewed and checked again before it merges. Nothing to do unless that fails.",
+          worker.id)
 
 
 def _remove(db: DB, ws: Workspace, keep: Agent | None = None) -> str:
@@ -342,17 +581,20 @@ def busy_worker(db: DB, ws: Workspace, exclude_id: str | None) -> Agent | None:
     return None
 
 
-def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False) -> str:
+def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
+          conflicts_out: list[str] | None = None) -> str:
     """Sync the branch with its base, run the merge gates, and merge. The
     reply starts with "Merged" on success, else "Not merged: ...". Merging is
     idempotent: a branch that already merged at its current commit gets
     "Already merged: ...", and one whose worktree is gone "Nothing to merge:
-    ...", without a gate or a merge being run."""
+    ...", without a gate or a merge being run. When the sync with the base
+    conflicts, the conflicting files are appended to ``conflicts_out``."""
     with merge_lock(ws.id):
-        return _merge(db, caller, ws, squash)
+        return _merge(db, caller, ws, squash, conflicts_out)
 
 
-def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool) -> str:
+def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
+           conflicts_out: list[str] | None = None) -> str:
     settled = _settled(db, ws)
     if settled:
         return settled
@@ -374,6 +616,8 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool) -> str:
     except git.GitError as e:
         return _settled(db, ws) or f"Not merged: {e}"
     if sync_result.status == "conflict":
+        if conflicts_out is not None:
+            conflicts_out.extend(sync_result.conflicts or [])
         files = ", ".join(sync_result.conflicts) or "?"
         return (f"Not merged: {ws.branch} conflicts with {ws.base_branch} in: {files}. "
                 f"Ask the worker to merge {ws.base_branch} and resolve.")

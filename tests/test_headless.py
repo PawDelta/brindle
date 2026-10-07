@@ -125,7 +125,9 @@ def test_session_start_does_not_schedule_typing_for_headless(db, ws, monkeypatch
     started = []
     monkeypatch.setattr(agents.subprocess, "Popen", lambda *a, **k: started.append(a))
     agents.handle_hook(db, "h1", "session-start", {"session_id": "s1"})
-    assert started == []
+    # No detached `brindle _flush` (the hook's own git calls for the turn
+    # baseline, brindle.rewind, go through the same Popen).
+    assert [a for a in started if "_flush" in a[0]] == []
     assert db.get_agent("h1").session_ref == "s1"
 
 

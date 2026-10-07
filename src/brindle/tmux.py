@@ -9,6 +9,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from typing import Iterable
 
 from brindle import __version__
 
@@ -107,37 +108,89 @@ def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
 MAX_COMMAND = 8000
 
 
-def _short(command: list[str]) -> list[str]:
-    """``command``, or, when it is too long for tmux, a private script
-    that runs it: written 0600 under brindle's home, it deletes itself as it
-    starts and then execs the original argv, so nothing else changes."""
-    if sum(len(a.encode()) + 1 for a in command) <= MAX_COMMAND:
+def _short(command: list[str], env: dict[str, str] | None = None) -> list[str]:
+    """``command``, or, when it is too long for tmux or ``env`` is given, a
+    private script that runs it: written 0600 under brindle's home, it
+    deletes itself as it starts, exports ``env`` and then execs the original
+    argv, so nothing else changes. ``env`` goes this way, never as tmux ``-e
+    NAME=VALUE`` arguments, which any user can read in ``ps``."""
+    if not env and sum(len(a.encode()) + 1 for a in command) <= MAX_COMMAND:
         return command
+    import re
     import shlex
     import tempfile
 
     from brindle.config import brindle_home
 
+    exports = ""
+    for k, v in (env or {}).items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            raise TmuxError(f"not a valid environment variable name: {k!r}")
+        exports += f"export {k}={shlex.quote(v)}\n"
     d = brindle_home() / "launch"
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, path = tempfile.mkstemp(prefix="launch-", suffix=".sh", dir=d)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(f'#!/bin/sh\nrm -f "$0"\nexec {shlex.join(command)}\n')
+        f.write(f'#!/bin/sh\nrm -f "$0"\n{exports}exec {shlex.join(command)}\n')
     return ["/bin/sh", path]
 
 
+def inherited_names(session: str) -> set[str]:
+    """The names of every variable a new pane of ``session`` would inherit:
+    the tmux server's global environment, the session's own, and this
+    process's (which started the server, in the common case). Names only,
+    never values."""
+    names = set(os.environ)
+    for scope in (("-g",), ("-t", f"={session}")):
+        proc = _tmux("show-environment", *scope, check=False)
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
+            if line and not line.startswith("-"):   # "-NAME": marked unset already
+                names.add(line.partition("=")[0])
+    return names
+
+
+def scrubbed(command: list[str], unset: list[str]) -> list[str]:
+    """``command`` started without the variables ``unset``: panes inherit the
+    tmux server's whole environment, and tmux has no per-pane way to take a
+    variable out of it, so the pane runs ``env -u NAME ... -- command``
+    (which execs ``command``, so the pane's process is still the command)."""
+    if not unset:
+        return command
+    return ["/usr/bin/env", *(a for n in unset for a in ("-u", n)), "--", *command]
+
+
 def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[str, str],
-               tag: tuple[str, str] | None = None) -> str:
+               tag: tuple[str, str] | None = None, keep: Iterable[str] = (),
+               allow: Iterable[str] | None = None, deny: Iterable[str] = ()) -> str:
     """Open a window running ``command``. Returns the agent's PANE id (``%<n>``),
     not the window's: a window can hold more than one pane (e.g. the watch
     dashboard beside a supervisor), and keys sent to a window go to whichever
     pane happens to be active. ``tag`` (a pane option name and value, see
     set_pane_tag) is set on the pane before this returns, so the pane says
-    whose it is from the moment anything else can see it."""
-    env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
+    whose it is from the moment anything else can see it.
+
+    The pane starts without brindle's secrets (secrets.SECRET_ENV and
+    SECRET_PREFIXES: the Pro token, GitHub's tokens), which it would otherwise
+    inherit from the tmux server. Whatever ``env`` sets (a profile's own key)
+    and the names in ``keep`` (the agent's provider's credentials, see
+    secrets.provider_credentials) are left alone. With ``allow`` (a profile's
+    ``env_allow``), every other inherited variable is taken out too (see
+    secrets.env_allowed). The names in ``deny`` (an org's managed models: the
+    person's own keys) are taken out whatever else says."""
+    from brindle import secrets
+
+    # The federation proxy's token isn't a person's key: set explicitly, so a
+    # tmux-level value can't stand in for it.
+    exempt = secrets.proxy_exempt(env) if deny else {}
+    if exempt:
+        env = {**env, **exempt}
+    deny = secrets.pane_deny(deny, env)
+    unset = secrets.pane_unset(inherited_names(session), keep=(*keep, *env), allow=allow, deny=deny)
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
-        "-n", name, "-c", cwd, *env_args, "--", *_short(command),
+        "-n", name, "-c", cwd, "--", *_short(scrubbed(command, unset), env),
     )
     target = proc.stdout.strip()
     if tag:

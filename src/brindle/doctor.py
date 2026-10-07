@@ -177,6 +177,7 @@ def checks(repo_root: str | None) -> list[Check]:
     out.extend(quota_checks(repo_root))
     out.extend(airgap_checks(repo_root))
     out.extend(pro_checks())
+    out.extend(managed_checks(repo_root))
 
     from brindle import legacy
 
@@ -438,6 +439,22 @@ def pro_checks() -> list[Check]:
         return [Check(OK, "brindle Pro", "not logged in; `brindle account` shows what the paid plans add")]
     return [Check(OK, "brindle Pro", f"plan {ent.plan}, features {', '.join(sorted(ent.features)) or '-'}"
                   + (" (offline grace)" if ent.in_grace else "") + "; details: `brindle account`")]
+
+
+def managed_checks(repo_root: str | None) -> list[Check]:
+    """One line on the org's managed models (Enterprise), when there are any:
+    the provider workers run on, or why the policy can't be read (every
+    launch is refused until it can). Nothing without the feature."""
+    try:
+        from brindle.pro import managed_models
+
+        line = managed_models.doctor_line(repo_root)
+    except Exception:  # noqa: BLE001 - no plan, for whatever reason
+        return []
+    if line is None:
+        return []
+    ok, detail = line
+    return [Check(OK if ok else FAIL, "managed models", detail)]
 
 
 def quota_checks(repo_root: str | None) -> list[Check]:

@@ -47,6 +47,8 @@ import time
 import urllib.parse
 from typing import Callable, Mapping, MutableMapping
 
+from brindle import secrets as secrets_policy
+
 log = logging.getLogger(__name__)
 
 UPSTREAM = "https://api.anthropic.com"
@@ -381,8 +383,11 @@ class Federation:
             env.update(self.agent_env())
             for k in IDENTITY_VARS:
                 env.pop(k, None)
+        # So deny_personal_keys leaves the proxy's token (not a person's key) alone.
+        secrets_policy.register_proxy(self.proxy.base_url, self.proxy.secret)
 
     def stop(self) -> None:
+        secrets_policy.clear_proxy()
         self.proxy.stop()
         self.refresher.stop()
 

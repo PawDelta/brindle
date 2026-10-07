@@ -158,6 +158,16 @@ CREATE TABLE IF NOT EXISTS check_cache (
     created_at REAL NOT NULL,
     PRIMARY KEY (workspace_id, sha, command)
 );
+-- The files two running branches were last reported to have both changed
+-- (see tasks.conflict_forecast): the supervisor hears about a pair once, and
+-- again only when more files join the overlap. Rows go with their workspaces.
+CREATE TABLE IF NOT EXISTS conflict_notices (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    other_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    files TEXT NOT NULL,           -- JSON list
+    created_at REAL NOT NULL,
+    PRIMARY KEY (workspace_id, other_id)
+);
 -- How long a check command's last passing run took in a repo, so a run that
 -- goes far past it can be reported to the supervisor (see gates.run_checked).
 CREATE TABLE IF NOT EXISTS check_durations (
@@ -210,6 +220,30 @@ CREATE TABLE IF NOT EXISTS history (
     tokens TEXT                     -- JSON usage since the agent's previous row, or NULL
 );
 CREATE INDEX IF NOT EXISTS history_repo_root_id ON history(repo_root, id);
+-- Review findings that recur across tasks, grouped per repo and worker
+-- profile (brindle Pro learned_rules; see brindle.learned_rules). A group is
+-- 'forming' until it has recurred often enough to be suggested ('pending'),
+-- then 'accepted' (written to .brindle/rules/learned.md) or 'rejected' (and
+-- never proposed again). No foreign keys, like history: it outlives sessions.
+CREATE TABLE IF NOT EXISTS learned_rules (
+    repo_root TEXT NOT NULL,
+    key TEXT NOT NULL,
+    profile TEXT NOT NULL,          -- the worker profile whose reviews found it
+    title TEXT NOT NULL,
+    rule TEXT NOT NULL,             -- the rule's text for the agent's prompt
+    checks TEXT,                    -- JSON {deny_patterns, deny_deps, require_tests_for}
+    findings TEXT NOT NULL,         -- JSON list of history row ids
+    branches TEXT NOT NULL,         -- JSON list of the distinct branches (tasks) they came from
+    status TEXT NOT NULL,           -- forming | pending | accepted | rejected
+    created_at REAL NOT NULL,
+    decided_at REAL,
+    PRIMARY KEY (repo_root, key)
+);
+-- The last history row the grouping step has seen, per repo.
+CREATE TABLE IF NOT EXISTS learned_rules_mark (
+    repo_root TEXT PRIMARY KEY,
+    last_id INTEGER NOT NULL
+);
 -- Each agent's cumulative usage as of its latest history row, so the next row
 -- stores only the difference and summing rows never double counts. Separate
 -- from history so capping history doesn't lose it. transcript_path is the
@@ -314,7 +348,9 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
     prior INTEGER NOT NULL DEFAULT 0,          -- 1 when that pick drew on other orgs' shared results
     review_rounds INTEGER NOT NULL DEFAULT 0,
     escalations INTEGER NOT NULL DEFAULT 0,
-    outcome TEXT                    -- merged | removed_unmerged, once it's over
+    outcome TEXT,                   -- merged | removed_unmerged, once it's over
+    demoted_from TEXT,              -- the profile a budget moved this task off (brindle.budget)
+    budget_state TEXT               -- warned | over | stopped (brindle.budget.sweep)
 );
 CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
 CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
@@ -440,6 +476,21 @@ class HistoryEntry:
 
 
 @dataclass
+class LearnedRule:
+    repo_root: str
+    key: str
+    profile: str
+    title: str
+    rule: str
+    checks: str | None
+    findings: str
+    branches: str
+    status: str
+    created_at: float
+    decided_at: float | None = None
+
+
+@dataclass
 class RoutingDecision:
     id: int
     repo_root: str
@@ -454,6 +505,8 @@ class RoutingDecision:
     review_rounds: int = 0
     escalations: int = 0
     outcome: str | None = None
+    demoted_from: str | None = None
+    budget_state: str | None = None
 
 
 @dataclass
@@ -611,6 +664,9 @@ class DB:
         routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
         if "prior" not in routing_cols:
             self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
+        for col in ("demoted_from", "budget_state"):
+            if col not in routing_cols:
+                self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} TEXT")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -1108,6 +1164,31 @@ class DB:
             "SELECT sha FROM merges WHERE workspace_id=?", (workspace_id,)).fetchone()
         return row[0] if row else None
 
+    # -- predicted conflicts ---------------------------------------------------
+
+    def conflict_notice(self, workspace_id: str, other_id: str) -> list[str] | None:
+        """The files the supervisor was last told these two branches both
+        changed, or None if it hasn't been told about the pair."""
+        import json
+
+        a, b = sorted((workspace_id, other_id))
+        row = self.conn.execute(
+            "SELECT files FROM conflict_notices WHERE workspace_id=? AND other_id=?", (a, b),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_conflict_notice(self, workspace_id: str, other_id: str, files: list[str]) -> None:
+        import json
+
+        a, b = sorted((workspace_id, other_id))
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO conflict_notices (workspace_id, other_id, files, created_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(workspace_id, other_id) DO UPDATE SET "
+                "files=excluded.files, created_at=excluded.created_at",
+                (a, b, json.dumps(list(files)), time.time()),
+            )
+
     # -- check cache -----------------------------------------------------------
 
     def get_check(self, workspace_id: str, sha: str, command: str) -> CheckResult | None:
@@ -1269,6 +1350,57 @@ class DB:
                      cache_creation_tokens),
                 )
 
+    def history_after(self, repo_root: str, kind: str, after_id: int) -> list[HistoryEntry]:
+        """``repo_root``'s ``kind`` rows newer than ``after_id``, oldest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM history WHERE repo_root=? AND kind=? AND id>? ORDER BY id",
+            (repo_root, kind, after_id))
+        return [_load(HistoryEntry, r) for r in rows]
+
+    def branch_worker_profile(self, repo_root: str, branch: str, before_id: int) -> str | None:
+        """The profile of the worker that last reported on ``branch`` before
+        history row ``before_id``."""
+        row = self.conn.execute(
+            "SELECT profile FROM history WHERE repo_root=? AND branch=? AND kind='worker_result' "
+            "AND id<? AND profile IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (repo_root, branch, before_id)).fetchone()
+        return row["profile"] if row else None
+
+    # -- learned rules (brindle.learned_rules) -------------------------------------
+
+    def learned_rules(self, repo_root: str, status: str | None = None) -> list[LearnedRule]:
+        if status:
+            rows = self.conn.execute(
+                "SELECT * FROM learned_rules WHERE repo_root=? AND status=? ORDER BY created_at, key",
+                (repo_root, status))
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM learned_rules WHERE repo_root=? ORDER BY created_at, key", (repo_root,))
+        return [_load(LearnedRule, r) for r in rows]
+
+    def get_learned_rule(self, repo_root: str, key: str) -> LearnedRule | None:
+        row = self.conn.execute(
+            "SELECT * FROM learned_rules WHERE repo_root=? AND key=?", (repo_root, key)).fetchone()
+        return _load(LearnedRule, row) if row else None
+
+    def save_learned_rule(self, r: LearnedRule) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO learned_rules (repo_root, key, profile, title, rule, checks, "
+                "findings, branches, status, created_at, decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (r.repo_root, r.key, r.profile, r.title, r.rule, r.checks, r.findings, r.branches,
+                 r.status, r.created_at, r.decided_at))
+
+    def learned_rules_mark(self, repo_root: str) -> int:
+        row = self.conn.execute(
+            "SELECT last_id FROM learned_rules_mark WHERE repo_root=?", (repo_root,)).fetchone()
+        return int(row["last_id"]) if row else 0
+
+    def set_learned_rules_mark(self, repo_root: str, last_id: int) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO learned_rules_mark (repo_root, last_id) VALUES (?,?)",
+                      (repo_root, last_id))
+
     def get_usage_mark(self, agent_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM history_usage_mark WHERE agent_id=?", (agent_id,)
@@ -1336,14 +1468,18 @@ class DB:
     def add_routing_decision(self, repo_root: str, *, task_id: str | None, agent_id: str | None,
                              weight: str | None, baseline_profile: str, profile: str,
                              learned: bool, prior: bool = False,
-                             ts: float | None = None) -> None:
+                             ts: float | None = None, demoted_from: str | None = None) -> None:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO routing_decisions (repo_root, ts, task_id, agent_id, weight, "
-                "baseline_profile, profile, learned, prior) VALUES (?,?,?,?,?,?,?,?,?)",
+                "baseline_profile, profile, learned, prior, demoted_from) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time() if ts is None else ts, task_id, agent_id, weight,
-                 baseline_profile, profile, int(learned), int(learned and prior)),
+                 baseline_profile, profile, int(learned), int(learned and prior), demoted_from),
             )
+
+    def set_budget_state(self, agent_id: str, state: str | None) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE routing_decisions SET budget_state=? WHERE agent_id=?", (state, agent_id))
 
     def set_routing_agent(self, task_id: str, agent_id: str) -> None:
         with self.tx() as c:
@@ -1367,6 +1503,16 @@ class DB:
     def list_routing_decisions(self, repo_root: str | None = None) -> list[RoutingDecision]:
         where, args = ("WHERE repo_root=?", (repo_root,)) if repo_root else ("", ())
         rows = self.conn.execute(f"SELECT * FROM routing_decisions {where} ORDER BY id", args)
+        return [_load(RoutingDecision, r) for r in rows]
+
+    def list_routing_decisions_for_live_agents(self) -> list[RoutingDecision]:
+        """Return routing decisions for agents that are currently running (not dismissed or done)."""
+        rows = self.conn.execute(
+            "SELECT rd.* FROM routing_decisions rd "
+            "JOIN agents a ON rd.agent_id = a.id "
+            "WHERE a.dismissed_at IS NULL AND a.status != 'done' "
+            "ORDER BY rd.id"
+        )
         return [_load(RoutingDecision, r) for r in rows]
 
     # -- tasks (brindle.tasks) ---------------------------------------------------

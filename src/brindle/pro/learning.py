@@ -83,10 +83,24 @@ def install_secret(store=None) -> bytes | None:
 # -- cost ------------------------------------------------------------------------------------------
 
 
+# Output $/MTok at or under which a priced model ranks 1, then 2; above the last, 3.
+RANK_BY_OUTPUT_PRICE = (5.0, 15.0)
+
+
+def rank_for_price(price) -> int:
+    """0 (free) to 3 (frontier) from a ``brindle.pricing.Price``."""
+    if price.input == 0 and price.output == 0:
+        return 0
+    cheap, mid = RANK_BY_OUTPUT_PRICE
+    return 1 if price.output <= cheap else 2 if price.output <= mid else 3
+
+
 def cost_rank(name: str, repo_root: str) -> int:
-    """0 (free/local) to 3 (frontier), guessed from the profile's model: the
-    relative cost sent alongside the candidates so close calls can go to the
-    cheaper profile."""
+    """0 (free/local) to 3 (frontier): the relative cost sent alongside the
+    candidates so close calls can go to the cheaper profile. From the
+    profile's model's real price (``brindle.pricing``) when brindle knows it,
+    else guessed from the model's name."""
+    from brindle import pricing
     from brindle.profiles import load_profile
 
     try:
@@ -94,8 +108,11 @@ def cost_rank(name: str, repo_root: str) -> int:
     except Exception:  # noqa: BLE001 - an unknown profile is an average one
         return 2
     model = (p.model or "").lower()
-    if p.base_url and any(h in p.base_url for h in ("localhost", "127.0.0.1")):
+    if pricing.is_local(p.base_url):
         return 0
+    price = pricing.price_for(p.model, pricing.repo_overrides(repo_root))
+    if price is not None:
+        return rank_for_price(price)
     if any(s in model for s in ("haiku", "mini", "flash", "small")):
         return 1
     if any(s in model for s in ("opus", "fable", "gpt-5", "pro")):

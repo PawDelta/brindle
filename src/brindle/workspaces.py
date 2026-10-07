@@ -502,6 +502,9 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 
 
 def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
+    from brindle import rewind
+
+    rewind.forget_workspace(db, ws)  # its workers' turn snapshots (before the agents go)
     db.delete_workspace(ws.id)
     return removed
 

@@ -45,6 +45,7 @@ from typing import Mapping, MutableMapping
 
 
 from brindle import providers
+from brindle.secrets import is_job_secret
 
 log = logging.getLogger(__name__)
 
@@ -454,7 +455,7 @@ class NativeAdapter(Adapter):
             name, _, host = entry.strip().partition("@")
             name, host = name.strip(), host.strip().lower()
             if not name or (host and not HOST_RE.match(host)) or name in PROVIDER_KEYS \
-                    or name.startswith("GH_") or name in ("GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"):
+                    or is_job_secret(name):
                 continue
             out.setdefault(name, set()).update({host} if host else LOOPBACK)
         return {k: frozenset(v) for k, v in out.items()}

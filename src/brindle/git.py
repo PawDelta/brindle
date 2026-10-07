@@ -23,9 +23,16 @@ class GitError(RuntimeError):
 
 
 def run(args: list[str], cwd: str | Path, check: bool = True) -> subprocess.CompletedProcess:
+    return run_env(args, cwd, None, check=check)
+
+
+def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
+            check: bool = True) -> subprocess.CompletedProcess:
+    """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
+    index that leaves the checkout's real index alone; see brindle.rewind)."""
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT, env=env
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
@@ -319,8 +326,17 @@ def commit_all(path: str | Path, message: str) -> str | None:
     return out(["rev-parse", "--short", "HEAD"], path)
 
 
+def paths(args: list[str], cwd: str | Path) -> list[str]:
+    """The paths a ``git diff --name-only`` / ``ls-files`` style command
+    lists, read NUL-separated (``-z``) so a name with a space, a quote or a
+    non-ASCII character arrives as itself: without ``-z`` git C-quotes such
+    names (``"caf\\303\\251.py"``), and a quoted name matches no glob."""
+    proc = run([*args, "-z"], cwd)
+    return [p for p in proc.stdout.split("\0") if p]
+
+
 def conflicting_files(path: str | Path) -> list[str]:
-    return out(["diff", "--name-only", "--diff-filter=U"], path).splitlines()
+    return paths(["diff", "--name-only", "--diff-filter=U"], path)
 
 
 def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:

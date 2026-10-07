@@ -263,6 +263,22 @@ def _replace_json(config: str, data: dict, mode: int) -> None:
             pass
 
 
+def _pre_tool_matcher(ctx: "LaunchContext") -> str:
+    """Which tools Claude Code's PreToolUse hook sees: Bash always, the edit
+    tools for a plan_first worker, and the file tools a profile's write or
+    read scope covers (brindle.guardrails; already cleared without the Pro
+    feature, see agents._profile_for)."""
+    from brindle import guardrails
+
+    tools = ["Bash"]
+    if ctx.plan_first:
+        tools += ["Edit", "Write", "NotebookEdit"]
+    for t in guardrails.hook_matcher(ctx.profile).split("|"):
+        if t and t not in tools:
+            tools.append(t)
+    return "|".join(tools)
+
+
 class ClaudeCode(Provider):
     name = "claude"
     uses_hooks = True
@@ -364,7 +380,9 @@ class ClaudeCode(Provider):
                 # Code's permission system. The one thing brindle denies is a
                 # file edit by a plan_first worker whose plan isn't approved,
                 # so only those agents run the hook on edit tools too.
-                "PreToolUse": [{"matcher": "Bash|Edit|Write|NotebookEdit" if ctx.plan_first else "Bash", **self._hook("pre-tool", ctx.agent_id)[0]}],
+                # A profile's write or read scope (brindle Pro guardrails)
+                # puts the file tools it covers under the hook too.
+                "PreToolUse": [{"matcher": _pre_tool_matcher(ctx), **self._hook("pre-tool", ctx.agent_id)[0]}],
                 # When a tool would prompt, brindle's permission policy (off
                 # unless permission_policy is "on"; see brindle.permissions)
                 # may answer allow or deny from the structured request; no

@@ -87,6 +87,9 @@ class RepoConfig:
     plan_first: bool = False           # workers propose a plan and wait for approval before editing
     permission_policy: str = "off"     # "on": brindle answers workers' permission requests by its rules (see brindle.permissions)
     overlap: str = "block"           # a task whose files overlap a running one: "block" or "warn"
+    # Paths/globs whose merge conflicts brindle never hands to a worker to
+    # resolve (migrations, lockfiles, generated code): they go to the person.
+    protected_paths: list[str] = field(default_factory=list)
     # Worktree pool: pre-built worktrees (checked out, files copied, setup run)
     # that `create` claims instead of doing that work live. None here means
     # "not set"; load_repo_config resolves it to 1 if the repo has `setup`
@@ -111,6 +114,11 @@ class RepoConfig:
     rules: list[str] = field(default_factory=list)
     learning: str = "auto"             # "auto" (brindle Pro's cloud learner when entitled, else off), "cloud" or "off"; hosted only, anything else is off (see brindle.learning)
     learning_candidates: list[str] = field(default_factory=list)  # profiles the learner may pick from
+    # Learned rules (brindle Pro; see brindle.learned_rules): how many tasks a review
+    # finding must recur in before a rule is suggested, and the profile that groups
+    # findings (None: a local model that answers, else the cheapest Claude model).
+    learned_rules_repeats: int = 3
+    learned_rules_profile: str | None = None
     # Which installed plugin to use per group ("events", "policy", "account"), or "off";
     # unset: the only one installed, if exactly one (see brindle.plugins).
     plugins: dict[str, str] = field(default_factory=dict)
@@ -119,6 +127,12 @@ class RepoConfig:
     airgap: bool = False
     # Weight routing: task weight -> profiles to try, in order (see autopilot.choose_profile).
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
+    # Model prices in $/MTok that add to or override brindle's built-in ones (see brindle.pricing):
+    # {"model": {"input", "output", "cache_write"?, "cache_read"?}}, merged per model: user, then repo, then config.local.json.
+    pricing: dict[str, dict] = field(default_factory=dict)
+    # Dollar budgets (brindle Pro; see brindle.budget): {"task_usd", "goal_usd", "month_usd", "stop"?},
+    # merged per key: user, then repo, then config.local.json.
+    budget: dict = field(default_factory=dict)
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -165,7 +179,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     user = user_settings()
 
     cfg = RepoConfig()
-    for key in ("setup", "teardown", "copy", "checks", "add_dirs"):
+    for key in ("setup", "teardown", "copy", "checks", "add_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
@@ -174,7 +188,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
                 "review_rounds", "goal_audit", "overlap", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "sidebar", "pr_footer", "plan_first", "learning",
-                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy"):
+                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
+                "learned_rules_repeats", "learned_rules_profile"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -201,6 +216,16 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
             for tier, names in routing.items():
                 if tier in WEIGHTS and isinstance(names, list):
                     cfg.routing[tier] = [n for n in names if isinstance(n, str)]
+    for source in (user, shared, local):  # per model, so a repo can override one and keep the rest
+        pricing = source.get("pricing")
+        if isinstance(pricing, dict):
+            for model, price in pricing.items():
+                if isinstance(model, str) and isinstance(price, dict):
+                    cfg.pricing[model] = price
+    for source in (user, shared, local):  # per key, so a repo can override one and keep the rest
+        budget = source.get("budget")
+        if isinstance(budget, dict):
+            cfg.budget.update({k: v for k, v in budget.items() if isinstance(k, str)})
     if cfg.pool_size is None:
         cfg.pool_size = 1 if cfg.setup else 0
     # Air-gap mode: either file may turn it on, and neither may turn it off.
