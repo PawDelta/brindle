@@ -186,6 +186,49 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
     assert autopilot.on_stop(db, agent, {}) is None
 
 
+def test_approved_audit_empties_goals_md_and_clears_the_goal(db, repo):
+    (repo / ".brindle").mkdir()
+    goals = repo / ".brindle" / "goals.md"
+    goals.write_text(GOALS)
+    ws = workspaces.adopt_root(db, str(repo))
+    add_agent(db, ws, "boss")
+    autopilot.enable(db, "boss", ws)
+    (repo / "api.txt").write_text("")
+    (repo / "ui.txt").write_text("")
+    commit_all(repo)
+    autopilot.check_milestones(db, "boss", ws)
+    assert "status: passed" in goals.read_text()
+    commit_all(repo, "status")   # goals.md here is tracked; the status sync dirtied it
+    db.update_autopilot("boss", audit_sha=sh("git rev-parse HEAD", repo))
+    out = autopilot.record_audit(db, "boss", True, "all there")
+    assert "goal is reached" in out
+    assert goals.read_text() == ""
+    ap = db.get_autopilot("boss")
+    assert ap.goal is None and ap.goals_file is None and db.milestones("boss") == []
+    # A fresh session in the same checkout starts with no goal.
+    add_agent(db, ws, "next")
+    assert autopilot.enable(db, "next", ws) is None
+    assert db.get_autopilot("next").goal is None
+
+
+def test_unfinished_goals_md_still_loads(db, repo):
+    (repo / ".brindle").mkdir()
+    goals = repo / ".brindle" / "goals.md"
+    goals.write_text(GOALS)
+    ws = workspaces.adopt_root(db, str(repo))
+    add_agent(db, ws, "boss")
+    autopilot.enable(db, "boss", ws)
+    (repo / "api.txt").write_text("")
+    commit_all(repo)
+    autopilot.check_milestones(db, "boss", ws)   # one milestone still failing
+    db.update_autopilot("boss", audit_sha=sh("git rev-parse HEAD", repo))
+    autopilot.record_audit(db, "boss", False, "gaps")
+    assert goals.read_text() != ""
+    add_agent(db, ws, "next")
+    plan = autopilot.enable(db, "next", ws)
+    assert plan and db.get_autopilot("next").goal == "Settings page"
+
+
 def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
     agent, ws = root
     with_goal(db)

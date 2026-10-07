@@ -113,10 +113,41 @@ class Transferred:
     snapshot: bool      # uncommitted work was committed first
 
 
-def transfer(db: DB, scratch: Workspace, target: str, branch: str | None = None) -> Transferred:
+def pause_live(db: DB, scratch: Workspace, keep: str | None = None) -> list[str]:
+    """Pause the live chats in a scratch session whose work has moved on, so it
+    and the repo's own session never run side by side. ``keep``: an agent to
+    leave running (the chat that asked for the transfer, whose reply would
+    otherwise never arrive); ``pause_transferred_to`` gets it later."""
+    from brindle import agents
+
+    owners = agents.pane_owners(db)
+    paused = []
+    for a in db.list_agents(scratch.id):
+        if (a.id != keep and a.mode == "interactive" and a.status not in ("paused", "done")
+                and agents.is_alive(a) and agents.owns_pane(db, a, owners)):
+            agents.pause(db, a.id, stop_local_models=False)
+            paused.append(a.id)
+    return paused
+
+
+def pause_transferred_to(db: DB, repo_root: str) -> list[str]:
+    """Pause live chats in scratch sessions already transferred into
+    ``repo_root``: a session starting there replaces them."""
+    repo_root = str(Path(repo_root).resolve())
+    paused = []
+    for ws in sessions(db):
+        moved = transferred_to(ws.path)
+        if moved and str(Path(moved.split(" ", 1)[0]).resolve()) == repo_root:
+            paused += pause_live(db, ws)
+    return paused
+
+
+def transfer(db: DB, scratch: Workspace, target: str, branch: str | None = None,
+             keep_running: str | None = None) -> Transferred:
     """Replay the scratch session's commits onto a new branch of ``target``,
     as a normal brindle workspace (worktree + branch cut from the repo's base).
-    The scratch repo is left in place, marked as transferred."""
+    The scratch repo is left in place, marked as transferred, and its live
+    chats are paused (all but ``keep_running``)."""
     if not is_scratch(scratch.path):
         raise ScratchError(f"{scratch.id} is not a scratch session")
     try:
@@ -152,4 +183,5 @@ def transfer(db: DB, scratch: Workspace, target: str, branch: str | None = None)
             f"(or `git cherry-pick --abort`)."
         )
     (_git_dir(scratch.path) / TRANSFERRED_FILE).write_text(f"{target_root} {ws.branch}\n")
+    pause_live(db, scratch, keep=keep_running)
     return Transferred(ws, commits, snapshot)

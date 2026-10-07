@@ -334,6 +334,30 @@ def sync_goals_file(db: DB, root_id: str) -> None:
         log.exception("brindle: couldn't sync milestone status to goals.md")
 
 
+def clear_finished_goal(db: DB, root_id: str) -> None:
+    """The goal is reached: empty the goals.md it was loaded from (when that
+    file is still this goal's) and clear the session's goal, so the next
+    session doesn't reload a finished goal. Never raises: a file we can't
+    write must not fail the verdict."""
+    try:
+        ap = db.get_autopilot(root_id)
+        if not ap or not ap.goal:
+            return
+        if ap.goals_file:
+            path = Path(ap.goals_file)
+            try:
+                plan = parse_goals(path.read_bytes().decode("utf-8"))
+            except OSError:
+                plan = None
+            if plan is not None and plan.goal == ap.goal:
+                path.write_bytes(b"")
+        db.set_milestones(root_id, [])
+        db.update_autopilot(root_id, goal=None, detail=None, goals_file=None, goal_sha=None,
+                            audit_sha=None, audit_ok=None, auditor_id=None, note=None)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't clear the finished goal")
+
+
 # -- sessions ----------------------------------------------------------------
 
 
@@ -729,6 +753,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
     if done and audit is None:
         lines.append("\nEvery milestone's check passes: the goal is reached. Tell the user.")
+        clear_finished_goal(db, root_id)
     elif done:
         lines.append("\n" + AUDIT_HOLD[audit].format(note=(ap.note if ap else None) or ""))
     return "\n".join(lines)
@@ -853,7 +878,7 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
     if approved:
         db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None)
         db.bump_progress(root_id)
-        sync_goals_file(db, root_id)
+        clear_finished_goal(db, root_id)
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
                 f"\n\n{summary}")
