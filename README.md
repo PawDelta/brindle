@@ -407,8 +407,10 @@ count as unknown.
 `brindle cost` prices the last 30 days of history at each model's list price
 (per million tokens: input, output, cache write, cache read), copied from
 Anthropic's and OpenAI's pricing pages and dated; brindle warns when they're
-more than 90 days old. Local models cost $0. A model brindle has no price
-for is shown as unpriced tokens, never guessed. Add or correct prices under
+more than 90 days old. Local models cost $0, and usage on a model known to be
+free reads "Free" (its tokens still count; a mix reads "$1.20 (+40k tokens
+free)"). A model brindle has no price for is shown as unpriced tokens, never
+guessed. Add or correct prices under
 `pricing` in `~/.brindle/config.json` or `.brindle/config.json`:
 
 ```json

@@ -193,7 +193,11 @@ def _frontmatter(text: str) -> tuple[dict[str, str], str]:
     body = text
     if not text.startswith("---"):
         return meta, body
-    _, header, body = text.split("---", 2)
+    # the closing fence is a line of its own: a value may contain "---"
+    m = re.match(r"---[^\n]*\n(.*?)^---[ \t]*$(.*)", text, re.S | re.M)
+    if m is None:
+        raise ProfileError("frontmatter opened with '---' is never closed with another '---' line")
+    header, body = m.groups()
     last_key: str | None = None
     for line in header.strip("\n").splitlines():
         if line.lstrip().startswith("#") or not line.strip():
@@ -613,6 +617,9 @@ def list_profiles(repo_root: str | None = None) -> list[Profile]:
             found = _read(name, repo_root)
             if found is None:
                 continue
-            p = replace(_parse(found[0], name), name=name)
+            try:
+                p = replace(_parse(found[0], name), name=name)
+            except ProfileError:
+                continue   # unreadable even as written; `brindle profile lint` reports it
         seen[p.name] = p
     return sorted(seen.values(), key=lambda p: p.name)

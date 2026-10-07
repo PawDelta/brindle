@@ -161,6 +161,12 @@ def test_usage_cost():
     assert line.endswith("· sonnet · ~$0.07")
 
 
+def test_a_free_model_reads_free_in_the_result_line():
+    u = usage.Usage(5000, 500, model="qwen3-coder:30b")
+    assert usage.usage_cost(u, fallback=pricing.FREE) == 0.0
+    assert usage.summary_line(u, 0.0, free=True).endswith("· qwen3-coder · Free")
+
+
 # -- Codex rollouts ----------------------------------------------------------------------------------
 
 
@@ -314,7 +320,7 @@ def test_cost_summary_prices_each_row_and_keeps_unknown_apart(db, root, repo):
     assert s.total.dollars == pytest.approx(3.0) and s.total.unknown == 7000
     res = CliRunner().invoke(app, ["cost"])
     assert res.exit_code == 0, res.output
-    assert "last 30 days: $3.00 (+7k tokens unpriced)" in res.output
+    assert "last 30 days: $3.00 (+5k tokens free) (+7k tokens unpriced)" in res.output
     assert "claude-sonnet-5-5" in res.output and "profile local" in res.output
     assert "gpt-9-mystery" in res.output and "unknown" in res.output
     assert pricing.AS_OF.isoformat() in res.output

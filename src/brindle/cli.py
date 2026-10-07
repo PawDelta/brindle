@@ -1592,7 +1592,8 @@ def learning() -> None:
     typer.echo(p.report())
 
 
-@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True,
+                               "help_option_names": []})   # --help is the plugin's: it lists every subcommand
 def account(ctx: typer.Context) -> None:
     """brindle Pro/Team: paid features, login, upgrade, billing, orgs. Bare `brindle account` shows what you have."""
     from brindle import account as account_mod
@@ -1689,8 +1690,17 @@ def audit_ship(
     if not exporter.entitled():
         typer.echo("audit: your plan doesn't include audit export (brindle Enterprise)")
         raise typer.Exit(2)
+    from brindle import airgap
+
+    if airgap.enabled():
+        typer.echo(f"audit: air-gap mode is on via {airgap.source()}: nothing is sent")
+        raise typer.Exit(2)
+    results = exporter.flush(force=force)
+    if not results:
+        typer.echo("audit: another brindle process is sending right now; run this again in a moment")
+        raise typer.Exit(1)
     failed = False
-    for name, res in exporter.flush(force=force).items():
+    for name, res in results.items():
         failed = failed or bool(res.error)
         typer.echo(f"{name}: sent {res.sent}" + (f", dropped {res.dropped}" if res.dropped else "")
                    + (f"; FAILED: {res.error}" if res.error else ""))
@@ -2218,11 +2228,16 @@ def ci_doctor(
     repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: GITHUB_REPOSITORY)."),
 ) -> None:
     """Which provider CLIs and credential names are here, and which providers CI may use on this repository."""
-    from brindle import ci_client
+    from brindle import ci_client, ci_hosts
 
     def go():
-        full = os.environ.get("GITHUB_REPOSITORY") or repo
-        typer.echo(ci_client.doctor(os.environ, full, os.getcwd()))
+        env = os.environ
+        if ci_hosts.GitLabHost.detect(env) and not ci_hosts.GitHubHost.detect(env):
+            # the job's own project and the host's owner rule, not `gh`
+            full, org = env.get("CI_PROJECT_PATH") or repo, ci_hosts.GitLabHost.org_hint
+        else:
+            full, org = env.get("GITHUB_REPOSITORY") or repo, None
+        typer.echo(ci_client.doctor(env, full, os.getcwd(), org=org))
 
     _ci_call(go)
 

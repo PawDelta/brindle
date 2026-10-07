@@ -333,14 +333,15 @@ def codex_agent_usage(db: DB, agent, home: Path | None = None) -> Usage | None:
 # -- dollars ----------------------------------------------------------------------------------------
 
 
-def usage_cost(u: Usage | None, extra=None) -> float | None:
+def usage_cost(u: Usage | None, extra=None, fallback=None) -> float | None:
     """``u`` in US dollars at its model's price (``extra``: ``pricing``
-    overrides), or None when the model or its price is unknown."""
+    overrides; ``fallback``: the price to use when the model has none, e.g.
+    its profile's), or None when no price is known."""
     from brindle import pricing
 
     if u is None:
         return None
-    price = pricing.price_for(u.model, extra)
+    price = pricing.price_for(u.model, extra) or fallback
     if price is None:
         return None
     return price.cost(u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens)
@@ -369,14 +370,19 @@ def short_model(model: str | None) -> str:
     return model
 
 
-def summary_line(u: Usage, dollars: float | None = None) -> str:
+def summary_line(u: Usage, dollars: float | None = None, free: bool = False) -> str:
     """The one-line summary appended to a forwarded worker/reviewer result,
     e.g. ``tokens: 182k in (160k cached, 20k written) · 9k out · sonnet``,
-    with `` · ~$0.42`` at the end when ``dollars`` is given."""
+    with `` · ~$0.42`` at the end when ``dollars`` is given, or `` · Free``
+    when ``free`` (a model known to cost nothing)."""
     line = (f"tokens: {format_tokens(u.total_in)} in ({format_tokens(u.cache_read_tokens)} cached, "
             f"{format_tokens(u.cache_creation_tokens)} written) "
             f"· {format_tokens(u.output_tokens)} out · {short_model(u.model)}")
-    if dollars is not None:
+    if free:
+        from brindle.pricing import FREE_LABEL
+
+        line += f" · {FREE_LABEL}"
+    elif dollars is not None:
         from brindle.pricing import money
 
         line += f" · ~{money(dollars)}"

@@ -195,7 +195,7 @@ def test_reply_note_fails_closed(db, monkeypatch):
 
 def test_reply_note_when_entitled(db, monkeypatch):
     monkeypatch.setattr(license, "has", lambda feature: feature == "cost")
-    monkeypatch.setattr(ce, "default_price", lambda: price)
+    monkeypatch.setattr(ce, "default_price", lambda *_: price)
     monkeypatch.setattr(ce, "available_reviewers", lambda root: [])
     note = ce.reply_note(db, "/repo", [ce.TaskSpec("developer")])
     assert note.startswith("Cost estimate") and "low confidence" in note
@@ -213,7 +213,7 @@ def boss(db, repo, monkeypatch):
                        "@0", None, time.time()))
     db.add_autopilot("boss")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(ce, "default_price", lambda: price)
+    monkeypatch.setattr(ce, "default_price", lambda *_: price)
     monkeypatch.setattr(ce, "available_reviewers", lambda root: [])
     return ws
 
@@ -249,7 +249,7 @@ def test_assign_reply_has_an_estimate_with_pro(db, boss, monkeypatch):
 
 def test_cli_cost_estimate(db, repo, monkeypatch):
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(ce, "default_price", lambda: price)
+    monkeypatch.setattr(ce, "default_price", lambda *_: price)
     monkeypatch.setattr(ce, "available_reviewers", lambda root: [])
     monkeypatch.setattr(license, "has", lambda feature: False)
     res = CliRunner().invoke(app, ["cost", "estimate", "--tasks", "2"])

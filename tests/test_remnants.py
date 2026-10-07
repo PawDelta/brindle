@@ -102,6 +102,18 @@ def test_a_live_test_runs_server_is_left_alone(tmp_path):
         tmux.reap_server(name)
 
 
+def test_a_live_test_runs_server_is_left_alone_even_without_a_brindle_home(tmp_path):
+    """Concurrent pytest runs share the socket directory: a sweep in one must
+    not stop the other's server because its sessions have no home to show."""
+    name = f"brindle-test-{os.getpid()}-other"
+    start_server(name, str(tmp_path / "deleted-home"))
+    try:
+        assert not any(name in line for line in cull.orphan_servers())
+        assert server_up(name)
+    finally:
+        tmux.reap_server(name)
+
+
 def test_a_server_whose_brindle_home_is_gone_is_reaped(tmp_path):
     name = f"brindle-e2e-remnant-{os.getpid()}"
     start_server(name, str(tmp_path / "deleted-home"))

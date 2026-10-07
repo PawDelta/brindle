@@ -41,22 +41,36 @@ class NotEntitled(Exception):
 @dataclass
 class Bucket:
     dollars: float = 0.0
-    tokens: int = 0            # tokens priced into ``dollars``
+    tokens: int = 0            # tokens priced into ``dollars`` (not the free ones)
     unknown: int = 0           # tokens with no known price
+    free: int = 0              # tokens on models known to be free (priced at exactly zero)
 
-    def add(self, dollars: float | None, tokens: int) -> None:
+    def add(self, dollars: float | None, tokens: int, free: bool = False) -> None:
         if dollars is None:
             self.unknown += tokens
+        elif free:
+            self.free += tokens
         else:
             self.dollars += dollars
             self.tokens += tokens
 
+    @property
+    def all_tokens(self) -> int:
+        return self.tokens + self.free + self.unknown
+
     def show(self) -> str:
-        text = pricing.money(self.dollars) if self.tokens or not self.unknown else "unknown"
+        if self.tokens:
+            text = pricing.money(self.dollars)
+            if self.free:
+                text += f" (+{format_tokens(self.free)} tokens free)"
+            if self.unknown:
+                text += f" (+{format_tokens(self.unknown)} tokens unpriced)"
+            return text
+        if self.free:
+            return "Free" + (f" (+{format_tokens(self.unknown)} tokens unpriced)" if self.unknown else "")
         if self.unknown:
-            text += f" (+{format_tokens(self.unknown)} tokens unpriced)" if self.tokens else \
-                f" ({format_tokens(self.unknown)} tokens unpriced)"
-        return text
+            return f"unknown ({format_tokens(self.unknown)} tokens unpriced)"
+        return pricing.money(self.dollars)
 
 
 @dataclass
@@ -66,6 +80,7 @@ class Priced:
     model: str | None
     tokens: int
     dollars: float | None      # None: no price known
+    free: bool = False         # priced at exactly zero (a local model)
 
 
 class Pricer:
@@ -100,7 +115,7 @@ class Pricer:
         if price is not None:
             dollars = price.cost(int(d.get("input") or 0), int(d.get("output") or 0),
                                  int(d.get("cache_creation") or 0), int(d.get("cache_read") or 0))
-        return Priced(row, model, total, dollars)
+        return Priced(row, model, total, dollars, price is not None and price == pricing.FREE)
 
 
 def rows_since(db: DB, repo_root: str | None, since: float) -> list[HistoryEntry]:
@@ -137,8 +152,8 @@ def summary(db: DB, repo_root: str | None, now: float | None = None, days: int =
     now = time.time() if now is None else now
     s = Summary(days)
     for p in priced_rows(db, repo_root, now - days * 86400):
-        s.total.add(p.dollars, p.tokens)
-        s.by_model.setdefault(model_label(p), Bucket()).add(p.dollars, p.tokens)
+        s.total.add(p.dollars, p.tokens, p.free)
+        s.by_model.setdefault(model_label(p), Bucket()).add(p.dollars, p.tokens, p.free)
     return s
 
 
@@ -160,7 +175,7 @@ def describe_summary(s: Summary, repo_root: str | None) -> str:
     if not s.by_model:
         lines.append("  no agent usage on record")
     for label, b in sorted(s.by_model.items(), key=lambda kv: (-kv[1].dollars, kv[0])):
-        lines.append(f"  {label:<28} {b.show():<24} {format_tokens(b.tokens + b.unknown)} tokens")
+        lines.append(f"  {label:<28} {b.show():<24} {format_tokens(b.all_tokens)} tokens")
     lines += _footer()
     lines.append("By day, profile and goal, cost per merged branch and review pass rates: "
                  "`brindle cost report` (brindle Pro).")
@@ -246,18 +261,18 @@ def report(db: DB, repo_root: str | None, now: float | None = None, days: int = 
     rep = Report(days)
     goals: dict = {}
     for p in priced_rows(db, repo_root, since):
-        rep.total.add(p.dollars, p.tokens)
+        rep.total.add(p.dollars, p.tokens, p.free)
         day = time.strftime("%Y-%m-%d", time.localtime(p.row.ts))
-        rep.by_day.setdefault(day, Bucket()).add(p.dollars, p.tokens)
-        rep.by_profile.setdefault(p.row.profile or "?", Bucket()).add(p.dollars, p.tokens)
-        rep.by_goal.setdefault(_goal_of(db, p.row.agent_id, goals), Bucket()).add(p.dollars, p.tokens)
+        rep.by_day.setdefault(day, Bucket()).add(p.dollars, p.tokens, p.free)
+        rep.by_profile.setdefault(p.row.profile or "?", Bucket()).add(p.dollars, p.tokens, p.free)
+        rep.by_goal.setdefault(_goal_of(db, p.row.agent_id, goals), Bucket()).add(p.dollars, p.tokens, p.free)
     rows = rows_since(db, repo_root, since)
     merged = {(r.repo_root, r.branch) for r in rows if r.kind == "merge" and r.branch}
     rep.merged = len(merged)
     # every row of a merged branch counts toward it, back to before the window began
     for p in priced_rows(db, repo_root, 0):
         if (p.row.repo_root, p.row.branch) in merged:
-            rep.merged_spend.add(p.dollars, p.tokens)
+            rep.merged_spend.add(p.dollars, p.tokens, p.free)
     worker_profile = {(r.repo_root, r.branch): r.profile for r in db.list_history(repo_root, "worker_result", ALL_ROWS)
                       if r.branch and r.profile}   # newest first: keep the oldest (the worker's own)
     for r in rows:
@@ -378,11 +393,17 @@ def describe_report(rep: Report, repo_root: str | None) -> str:
     lines.append("")
     per = rep.per_merged_branch
     if per is None:
-        lines.append(f"Merged branches: {rep.merged}, no priced spend on them" if rep.merged
-                     else "Merged branches: none in this period")
+        if rep.merged and rep.merged_spend.free and not rep.merged_spend.tokens:
+            lines.append(f"Merged branches: {rep.merged}, Free"
+                         + (f" (+{format_tokens(rep.merged_spend.unknown)} tokens unpriced)"
+                            if rep.merged_spend.unknown else ""))
+        else:
+            lines.append(f"Merged branches: {rep.merged}, no priced spend on them" if rep.merged
+                         else "Merged branches: none in this period")
     else:
-        unpriced = (f" (+{format_tokens(rep.merged_spend.unknown)} tokens unpriced)"
-                    if rep.merged_spend.unknown else "")
+        unpriced = ((f" (+{format_tokens(rep.merged_spend.free)} tokens free)" if rep.merged_spend.free else "")
+                    + (f" (+{format_tokens(rep.merged_spend.unknown)} tokens unpriced)"
+                       if rep.merged_spend.unknown else ""))
         lines.append(f"Merged branches: {rep.merged}, {pricing.money(per)} each on average "
                      f"(every row on the branch: worker, reviews, merge){unpriced}")
     lines.append("")

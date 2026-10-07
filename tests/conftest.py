@@ -1,3 +1,4 @@
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -50,8 +51,14 @@ def _reap_run_leftovers(known: set[str]) -> list[str]:
     for name in sorted(_socket_names() - known):
         if not name.startswith("brindle-"):
             continue
-        m = re.fullmatch(r"brindle-test-(\d+)", name)
-        if m and procs.alive(int(m.group(1))):
+        # A test server is named after the pytest process that made it
+        # (``brindle-test-<pid>``, ``-other``, tmux's ``.lock`` file while it
+        # starts, ``brindle-e2e-<what>-<pid>``). Another live run's is never ours to
+        # reap, or to warn about: concurrent runs (brindle workers) share the
+        # socket directory, and these appear there at any moment.
+        m = (re.fullmatch(r"brindle-test-(\d+)(?:[-.].*)?", name)
+             or re.fullmatch(r"brindle-e2e-.*-(\d+)", name))
+        if m and int(m.group(1)) != os.getpid() and procs.alive(int(m.group(1))):
             continue
         try:
             listening = tmux.server_homes(name) is not None

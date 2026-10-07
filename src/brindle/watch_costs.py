@@ -39,7 +39,7 @@ RUNNING = ("processing", "starting", "waiting", "idle")
 class Local:
     month: float = 0.0            # dollars this month, for the budget line
     models: list[tuple[str, int]] = field(default_factory=list)   # (model label, tokens) this month
-    workers: dict[str, float] = field(default_factory=dict)   # agent id -> dollars
+    workers: dict[str, float | str] = field(default_factory=dict)   # agent id -> dollars ("Free" if free)
 
 
 @dataclass
@@ -87,7 +87,13 @@ def local(db: DB, repo_root: str | None, snap: list[dict], now: float | None = N
                 except Exception:  # noqa: BLE001
                     dollars = None
                 if dollars is not None:
-                    out.workers[a["id"]] = dollars
+                    free = False
+                    if not dollars:   # $0 on a known-free profile is "Free", not "$0.00"
+                        try:
+                            free = pricing.profile_price(rec.profile, repo_root) == pricing.FREE
+                        except Exception:  # noqa: BLE001
+                            free = False
+                    out.workers[a["id"]] = pricing.FREE_LABEL if free else dollars
     return out
 
 

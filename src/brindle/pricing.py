@@ -53,6 +53,7 @@ class Price:
 
 
 FREE = Price(0.0, 0.0, 0.0, 0.0)
+FREE_LABEL = "Free"   # what a known-free model's spend reads as, instead of "$0.00"
 
 
 def _anthropic(inp: float, out: float, read: float | None = None) -> Price:
@@ -224,6 +225,6 @@ def money(dollars: float) -> str:
     return f"${dollars:,.2f}"
 
 
-__all__ = ["ALIASES", "AS_OF", "FREE", "PRICES", "Price", "STALE_DAYS", "is_local", "money",
+__all__ = ["ALIASES", "AS_OF", "FREE", "FREE_LABEL", "PRICES", "Price", "STALE_DAYS", "is_local", "money",
            "normalize", "overrides", "price_for", "profile_price", "repo_overrides",
            "stale_warning"]

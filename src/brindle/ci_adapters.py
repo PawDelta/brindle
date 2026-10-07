@@ -66,7 +66,7 @@ LOOPBACK = frozenset({"localhost", "127.0.0.1"})
 HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
 # A base_url written plainly: scheme, host, optional port, optional plain path.
 BASE_URL_RE = re.compile(r"^(?P<scheme>https?)://(?P<host>[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?"
-                         r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$")
+                         r"(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?\Z")
 # Every known provider credential: what a check must not see, and what a
 # repo-supplied native profile may not point at its own endpoint.
 PROVIDER_KEYS = frozenset((*CLAUDE_API_KEYS, *CLAUDE_SUBSCRIPTION, *CODEX_API_KEYS,
