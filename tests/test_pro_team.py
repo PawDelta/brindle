@@ -276,7 +276,7 @@ def test_event_payload_has_exactly_the_contract_keys(team):
     assert p.flush()
     review, remove = team.events
     keys = {"kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref", "at",
-            "approved", "merged", "cost_usd"}
+            "approved", "merged", "cost_usd"}     # by_model only when there is a split
     assert set(review) == set(remove) == keys
     assert review["cost_usd"] is None
     key = OrgKey(ORG, *team.org_key(ORG))
@@ -353,6 +353,23 @@ def test_rejected_batches_are_dropped_not_retried_forever(team):
     p = events_plugin(team)
     p.emit(ev())
     assert p.flush()
+    assert Spool().entries() == []
+
+
+def test_a_backend_without_by_model_gets_the_events_without_it(team):
+    sent = []
+
+    def route(f, h):
+        sent.append(f["events"])
+        return (422, {"error": "invalid_request"}) if any("by_model" in e for e in f["events"]) else (200, {})
+
+    team.routes[f"POST /orgs/{ORG}/events"] = route
+    p = events_plugin(team)
+    key = OrgKey(ORG, "k1", b"k" * 32)
+    Spool().append(ORG, [team_events.event_payload(
+        key, ROOT_SHA, ev(kind="remove", cost_usd=1.0, by_model={"opus": {"tokens": 5, "usd": 1.0}}))])
+    assert p.send_pending()
+    assert len(sent) == 2 and "by_model" not in sent[1][0] and sent[1][0]["cost_usd"] == 1.0
     assert Spool().entries() == []
 
 

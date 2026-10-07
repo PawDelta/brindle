@@ -49,8 +49,11 @@ log = logging.getLogger(__name__)
 FEATURE = "team"
 KINDS = ("assign", "handoff", "review", "escalated", "merge", "remove")
 PAYLOAD_KEYS = ("kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref",
-                "at", "approved", "merged", "cost_usd")
+                "at", "approved", "merged", "cost_usd", "by_model")
 MAX_EVENT_COST_USD = 100_000     # the backend refuses more
+MAX_BY_MODEL = 32
+MAX_MODEL_NAME = 128
+MAX_MODEL_TOKENS = 10**12        # the backend refuses more per model
 BATCH = 100
 BATCH_BYTES = 48 * 1024          # backend caps the body at 64 KiB
 QUEUE_SIZE = 64
@@ -91,9 +94,34 @@ def _usd(v) -> float | None:
     return round(float(v), 4) if 0 <= v <= MAX_EVENT_COST_USD else None
 
 
+def _by_model(v) -> dict | None:
+    """``{name: {"tokens", "usd"}}`` the backend accepts: at most ``MAX_BY_MODEL``
+    entries, names cut to ``MAX_MODEL_NAME`` characters (names that collide are
+    summed), else None."""
+    if not isinstance(v, dict):
+        return None
+    out: dict[str, dict] = {}
+    for name, b in v.items():
+        if not isinstance(name, str) or not name or not isinstance(b, dict):
+            continue
+        tokens = b.get("tokens")
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+            continue
+        usd = b.get("usd")
+        usd = (min(float(usd), MAX_EVENT_COST_USD)
+               if isinstance(usd, (int, float)) and not isinstance(usd, bool) and usd >= 0 else 0.0)
+        slot = out.setdefault(name[:MAX_MODEL_NAME], {"tokens": 0, "usd": 0.0})
+        slot["tokens"] = min(slot["tokens"] + tokens, MAX_MODEL_TOKENS)
+        slot["usd"] = round(min(slot["usd"] + usd, MAX_EVENT_COST_USD), 4)
+    if len(out) > MAX_BY_MODEL:
+        top = sorted(out.items(), key=lambda kv: -kv[1]["tokens"])[:MAX_BY_MODEL]
+        out = dict(top)
+    return out or None
+
+
 def event_payload(key: OrgKey, identity: str | None, ev: Event, repo: str | None = None) -> dict | None:
-    """The exact wire form of ``ev`` (always all of ``PAYLOAD_KEYS``, plus
-    ``repo`` when given), or None for an unknown kind. ``identity`` is the repo
+    """The exact wire form of ``ev`` (all of ``PAYLOAD_KEYS`` but ``by_model``,
+    which is sent only when there is a split, plus ``repo`` when given), or None for an unknown kind. ``identity`` is the repo
     identity (None: no branch ref). ``repo`` is ``owner/name``, sent only with
     the ``cost_centers`` feature so spend is attributed to the repo's center."""
     if ev.kind not in KINDS:
@@ -118,6 +146,8 @@ def event_payload(key: OrgKey, identity: str | None, ev: Event, repo: str | None
         "merged": _flag(ev.merged),
         "cost_usd": _usd(ev.cost_usd),
     }
+    if (split := _by_model(ev.by_model)) is not None:
+        body["by_model"] = split    # left out when empty: a backend older than by_model refuses the key
     if repo:
         body["repo"] = repo
     return body
@@ -385,6 +415,10 @@ class ProEvents(EventsPlugin):
                     return True
                 org, batch = head
                 status = self._post(org, batch)
+                if status == 422 and any("by_model" in e for e in batch):
+                    # A backend older than by_model refuses the key: keep the rest of the event.
+                    status = self._post(org, [{k: v for k, v in e.items() if k != "by_model"}
+                                              for e in batch])
                 if status in (200, 201, 202):
                     self.spool.pop(org, len(batch))
                     self._delay = 0.0

@@ -2,13 +2,14 @@
 
 Two kinds of figures, kept apart so the screen never waits on the network:
 
-* local ones (``local``): today's and this month's spend from the history,
-  and a dollar figure per running worker. Cheap; recomputed on every redraw.
+* local ones (``local``): this month's token share by model from the history
+  (what the section shows), the month's dollars (for the budget line), and a
+  dollar figure per running worker. Cheap; recomputed on every redraw.
 * remote ones (``Feed``): the budget in force (``budget.limits``, which can
   read the org policy over the network) and, for a Team or Enterprise org
-  with ``org_budgets``, the org's month (``GET /orgs/{id}/spend``) for its
-  admins and owners, or a plain member's own seat spend. Collected on a
-  thread, kept for ``CACHE_SECONDS``; any failure just leaves the org line out.
+  with ``org_budgets``, the org's month (``GET /orgs/{id}/spend``). The
+  org's totals and cost centers are not drawn here (the website has them).
+  Collected on a thread, kept for ``CACHE_SECONDS``.
 
 ``render`` knows nothing about curses; it returns ``watch.Line`` rows.
 """
@@ -16,6 +17,7 @@ Two kinds of figures, kept apart so the screen never waits on the network:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -29,13 +31,14 @@ CACHE_SECONDS = 30.0
 GROUP = "@costs"                  # the section's id, for folding (a workspace id always has a "/")
 ADMIN_ROLES = ("owner", "admin")
 BAR_WIDTH = 10
+TOP_MODELS = 3
 RUNNING = ("processing", "starting", "waiting", "idle")
 
 
 @dataclass
 class Local:
-    today: float = 0.0
-    month: float = 0.0
+    month: float = 0.0            # dollars this month, for the budget line
+    models: list[tuple[str, int]] = field(default_factory=list)   # (model label, tokens) this month
     workers: dict[str, float] = field(default_factory=dict)   # agent id -> dollars
 
 
@@ -57,24 +60,20 @@ class Remote:
     at: float = 0.0               # when it was collected
 
 
-def _day_start(now: float) -> float:
-    t = time.localtime(now)
-    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
-
-
 def local(db: DB, repo_root: str | None, snap: list[dict], now: float | None = None) -> Local:
-    """Spend so far today and this month, and per running worker. Never raises:
-    a figure that can't be had is left out."""
+    """This month's tokens per model and dollars, and dollars per running
+    worker. Never raises: a figure that can't be had is left out."""
     from brindle import cost
 
     now = time.time() if now is None else now
     out = Local()
     try:
-        day = _day_start(now)
+        tokens: dict[str, int] = {}
         for p in cost.priced_rows(db, repo_root, budget._month_start(now)):
             out.month += p.dollars or 0.0
-            if p.row.ts >= day:
-                out.today += p.dollars or 0.0
+            label = cost.model_label(p)
+            tokens[label] = tokens.get(label, 0) + p.tokens
+        out.models = sorted(tokens.items(), key=lambda m: (-m[1], m[0]))
     except Exception:  # noqa: BLE001 - the dashboard outlives a bad history row
         log.exception("brindle watch: couldn't total the spend")
     if repo_root:
@@ -229,43 +228,65 @@ def _vs(spent: float, limit: float, width: int, label: str = "") -> tuple[str, s
     return (f"{bar(spent, limit, min(BAR_WIDTH, room))} {text}" if room >= 3 else text), style
 
 
+def shares(models: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """``(label, percent)`` for the top ``TOP_MODELS`` models by tokens, the
+    rest folded into "other". Percents are whole numbers summing to 100."""
+    total = sum(t for _, t in models)
+    if total <= 0:
+        return []
+    ranked = sorted(models, key=lambda m: (-m[1], m[0]))
+    top, rest = ranked[:TOP_MODELS], sum(t for _, t in ranked[TOP_MODELS:])
+    rows = top + ([("other", rest)] if rest else [])
+    pct = [int(t * 100 / total) for _, t in rows]
+    # largest remainders get the leftover points, so the column adds up
+    order = sorted(range(len(rows)), key=lambda i: -(rows[i][1] * 100 % total))
+    for i in order[:100 - sum(pct)]:
+        pct[i] += 1
+    return [(name, p) for (name, _), p in zip(rows, pct)]
+
+
+def short(label: str) -> str:
+    """A model label as the narrow sidebar shows it: no ``claude-`` prefix and no
+    trailing date stamp (``claude-opus-4-1-20250805`` -> ``opus-4-1``)."""
+    name = label.removeprefix("claude-")
+    return re.sub(r"-\d{8}$", "", name) or label
+
+
+def share_rows(models: list[tuple[str, int]], width: int) -> list[str]:
+    rows = [(short(n), p) for n, p in shares(models)]
+    name_w = min(max((len(n) for n, _ in rows), default=0), max(width - BAR_WIDTH - 6, 4))
+    out = []
+    for name, p in rows:
+        room = width - name_w - 6
+        b = bar(p, 100, min(BAR_WIDTH, room)) + " " if room >= 3 else ""
+        out.append(f"{name[:name_w]:<{name_w}} {b}{p}%")
+    return out
+
+
 def title(collapsed: bool, width: int, local_: Local | None) -> str:
     arrow = "▸ " if collapsed else "▾ "
-    tail = f" ({pricing.money(local_.month)})" if collapsed and local_ else ""
+    top = shares(local_.models)[:1] if collapsed and local_ else []
+    tail = f" ({short(top[0][0])} {top[0][1]}%)" if top else ""
+    if len(arrow) + len("Costs") + len(tail) > width:
+        tail = ""    # the title stays whole; the top model shows when unfolded
     return arrow + "Costs"[:max(width - len(arrow) - len(tail), 1)] + tail
 
 
 def render(local_: Local, remote: Remote | None, now: float, width: int,
            collapsed: bool) -> list:
-    """The section: a header and, unless folded, 2 to 4 rows."""
-    from brindle.watch import Line, fit, plural
+    """The section: a header and, unless folded, a row per model and the budget line."""
+    from brindle.watch import Line, fit
 
-    m = pricing.money
     lines = [Line(fit(title(collapsed, width, local_), width), "bold", group=GROUP)]
     if collapsed:
         return lines
-    body = [(f"today {m(local_.today)} · month {m(local_.month)}", "normal")]
+    body = [(t, "normal") for t in share_rows(local_.models, width - 2)]
+    if not body:
+        body.append(("no usage this month", "dim"))
     lim = remote.limits if remote else None
     if lim is not None and lim.month_usd:
         # What the org counts for this seat can be more than what this repo shows.
         spent = max(local_.month, lim.seat_spent_usd or 0.0)
         body.append(_vs(spent, lim.month_usd, width - 2))
-    org = remote.org if remote else None
-    if org is not None:
-        age = f" · updated {max(int(now - remote.at), 0)}s ago"
-        if org.admin:
-            text = (_vs(org.spent, org.limit, width - 2, "org ") if org.limit
-                    else (f"org {m(org.spent)} this month", "normal"))
-            over = f" · {plural(org.seats_over, 'seat')} over" if org.seats_over else ""
-            body.append((text[0] + over + age, "alert" if org.seats_over else text[1]))
-            parts = [f"{n} {m(v)}" + (f" of {m(cap)}" if cap else "")
-                     for n, v, cap in sorted(org.centers, key=lambda c: -c[1])]
-            if org.unattributed > 0:
-                parts.append(f"unattributed {m(org.unattributed)}")
-            if parts:
-                body.append((" · ".join(parts), "dim"))
-        elif not (lim is not None and lim.month_usd):
-            body.append((f"seat {m(org.spent)}" + (f" of {m(org.limit)}" if org.limit else "") + age,
-                         "normal"))
-    lines += [Line(fit("  " + t, width), s) for t, s in body[:4]]
+    lines += [Line(fit("  " + t, width), s) for t, s in body]
     return lines
