@@ -5,6 +5,7 @@ verification failures, secret scrubbing, air-gap mode and doctor."""
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -18,6 +19,7 @@ from conftest import sh
 from pro_fixtures import BASE, TEST_KID, FakeTransport, b64, pro_env, sign, signing_key  # noqa: F401
 
 REPO = "acme/widgets"
+ORG_UUID = "0f8e2b1c-6a4d-4e3b-9c7a-1d2e3f4a5b6c"
 RUN_TOKEN = "crt_" + "r" * 32
 CI_TOKEN = "cpc_" + "c" * 32
 PLAN_HEADER = {"typ": "brindle-ci-plan+jwt"}
@@ -1305,19 +1307,45 @@ def test_cli_start_needs_the_token(ci_repo, tmp_path, monkeypatch):
 # -- init ---------------------------------------------------------------------------------------------
 
 
+class GhProc:
+    def __init__(self, out="", code=0, err=""):
+        self.stdout, self.stderr, self.returncode = out, err, code
+
+
+NOT_FOUND = "gh: Not Found (HTTP 404)"
+PLAN_REFUSAL = "gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)"
+
+
+def gh_repo_api(argv, *, required=(), protected=False, refuse=None, branch="main"):
+    """A fake GitHub's answer to the repository API calls init makes (None
+    for any other call). ``required``: the default branch's required checks;
+    ``protected``: whether it has protection; ``refuse``: the error a
+    protection change gets."""
+    if argv[:2] != ["gh", "api"]:
+        return None
+    path, rest = argv[2], argv[3:]
+    if path == f"repos/{REPO}":
+        return GhProc("true\n" if rest == ["--jq", ".permissions.admin"] else branch + "\n")
+    if not path.startswith(f"repos/{REPO}/branches/{branch}/protection"):
+        return None
+    if "-X" in rest:
+        return GhProc(code=1, err=refuse) if refuse else GhProc("{}")
+    if path.endswith("/required_status_checks"):
+        return GhProc(json.dumps({"strict": False, "contexts": list(required)})) if required \
+            else GhProc(code=1, err=NOT_FOUND)
+    return GhProc("{}") if protected else GhProc(code=1, err=NOT_FOUND)
+
+
 def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
     calls = []
-
-    class Proc:
-        def __init__(self, out="", code=0):
-            self.stdout, self.stderr, self.returncode = out, "", code
+    Proc = GhProc
 
     def run(argv, **kw):
         calls.append((argv, kw.get("input")))
         if argv[:2] == ["gh", "repo"]:
             return Proc(REPO + "\n")
-        if argv[:2] == ["gh", "api"] and argv[2].startswith("repos/"):
-            return Proc("true\n")
+        if got := gh_repo_api(argv):
+            return got
         if argv[:2] == ["gh", "api"]:
             return Proc("Organization\n")
         if argv[:3] == ["gh", "pr", "create"]:
@@ -1348,7 +1376,11 @@ def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
 
     def git_run(args, cwd, check=True):
         if args[0] == "push":
-            pushed.append(args)
+            pushed.append({rel: sh(f"git show HEAD:{rel}", cwd) for rel in (
+                ".github/workflows/brindle-ci-issue.yml", ".github/workflows/brindle-ci-validate.yml")})
+            pushed.append(sh("git rev-parse --abbrev-ref HEAD", cwd))
+            assert sh("git ls-tree --name-only HEAD .github/workflows/", cwd).split() == [
+                ".github/workflows/brindle-ci-issue.yml", ".github/workflows/brindle-ci-validate.yml"]
             return subprocess.CompletedProcess(args, 0, "", "")
         return real_run(args, cwd, check)
     monkeypatch.setattr(git_mod, "run", git_run)
@@ -1362,31 +1394,34 @@ def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch):
     secret_calls = [c for c in calls if c[0][:3] == ["gh", "secret", "set"]]
     assert secret_calls[0][0][3] == "BRINDLE_PRO_TOKEN" and secret_calls[0][1] == CI_TOKEN
     assert secret_calls[1][0][3] == "ANTHROPIC_API_KEY" and secret_calls[1][1] is None, "the person pastes it into gh"
-    assert (ci_repo / ".github/workflows/brindle-ci-issue.yml").read_text() == "name: issue\n"
-    assert (ci_repo / ".github/workflows/brindle-ci-validate.yml").read_text() == "name: validate\n"
-    assert not (ci_repo / ".github/workflows/brindle-ci-fix.yml").exists()
-    assert pushed and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-setup"
+    assert pushed == [{".github/workflows/brindle-ci-issue.yml": "name: issue",
+                       ".github/workflows/brindle-ci-validate.yml": "name: validate"}, "brindle/ci-setup"]
+    # Back where the person started, the setup branch gone: the next pull after the squash merge is clean.
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "main"
+    assert sh("git branch --list brindle/ci-setup", ci_repo) == ""
+    assert not (ci_repo / ".github/workflows").exists() and sh("git status --porcelain", ci_repo) == ""
+    assert ["gh", "label", "create", "brindle", "--repo", REPO, "--color", "2E7D32",
+            "--description", "brindle CI picks this up", "--force"] in [c[0] for c in calls]
     assert "https://gh.test/pr/1" in text and "owner is an organization" in text
-    assert "6/6 doctor" in text
+    assert "back on main" in text and "8/8 doctor" in text
 
 
 @pytest.fixture
 def init_run(ci_repo, monkeypatch):
     """Runs ``ci_client.init`` against a fake gh, server and Pro account;
-    returns (gh calls, said lines)."""
+    returns (gh calls, said lines). ``gh={...}`` sets :func:`gh_repo_api`'s
+    answers; ``go.inputs`` holds what each gh call got on stdin."""
     from brindle import git as git_mod
     from brindle.pro import auth
 
-    class Proc:
-        def __init__(self, out=""):
-            self.stdout, self.stderr, self.returncode = out, "", 0
-
-    calls, said = [], []
+    Proc = GhProc
+    calls, said, inputs, github = [], [], [], {}
 
     def run(argv, **kw):
         calls.append(argv)
-        if argv[:2] == ["gh", "api"] and argv[2].startswith("repos/"):
-            return Proc("true\n")
+        inputs.append(kw.get("input"))
+        if got := gh_repo_api(argv, **github):
+            return got
         if argv[:2] == ["gh", "api"]:
             return Proc("Organization\n")
         if argv[:3] == ["gh", "pr", "create"]:
@@ -1409,7 +1444,8 @@ def init_run(ci_repo, monkeypatch):
         subprocess.CompletedProcess(args, 0, "", "") if args[0] == "push" else real_run(args, cwd, check)))
     sh(f"git remote set-url origin https://github.com/{REPO}.git", ci_repo)
 
-    def go(**kw):
+    def go(gh=None, **kw):
+        github.update(gh or {})
         t = FakeTransport({"GET /ci/workflow?kind=issue": [(200, {"text": "name: issue\n"})],
                            "GET /ci/workflow?kind=validate": [(404, {"error": "not_found"})],
                            "GET /ci/workflow?kind=fix": [(404, {"error": "not_found"})]})
@@ -1418,13 +1454,13 @@ def init_run(ci_repo, monkeypatch):
                        open_url=lambda url: None, account=Plugin(), client=ci_client.Client(BASE, t),
                        say=said.append, **kw)
         return calls, said
-    go.calls = calls
+    go.calls, go.inputs, go.said = calls, inputs, said
     return go
 
 
 def test_init_federation_sets_the_variables(init_run):
     answers = {"Claude: API key or identity federation? (key, federation)": "federation",
-               "federation rule id (fdrl_...)": "fdrl_1", "Anthropic organization id (uuid)": "org-uuid",
+               "federation rule id (fdrl_...)": "fdrl_1", "Anthropic organization id (uuid)": ORG_UUID,
                "service account id (svac_...)": "svac_1", "workspace id (wrkspc_..., optional)": ""}
     asked = []
 
@@ -1435,7 +1471,7 @@ def test_init_federation_sets_the_variables(init_run):
     assert asked[0] == "Claude: API key or identity federation? (key, federation)"
     variables = [c[3:] for c in calls if c[:3] == ["gh", "variable", "set"]]
     assert variables == [["ANTHROPIC_FEDERATION_RULE_ID", "--repo", REPO, "--body", "fdrl_1"],
-                         ["ANTHROPIC_ORGANIZATION_ID", "--repo", REPO, "--body", "org-uuid"],
+                         ["ANTHROPIC_ORGANIZATION_ID", "--repo", REPO, "--body", ORG_UUID],
                          ["ANTHROPIC_SERVICE_ACCOUNT_ID", "--repo", REPO, "--body", "svac_1"]]
     secrets = [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]]
     assert secrets == ["BRINDLE_PRO_TOKEN"], "no ANTHROPIC_API_KEY secret with federation"
@@ -1449,17 +1485,102 @@ def test_init_federation_sets_the_variables(init_run):
 def test_init_federation_non_interactive(init_run):
     """--credential federation with the IDs in the environment asks nothing."""
     env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
-           "ANTHROPIC_ORGANIZATION_ID": "org-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
+           "ANTHROPIC_ORGANIZATION_ID": ORG_UUID, "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
            "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
     calls, _ = init_run(credential="federation", env=env)
     variables = {c[3]: c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]}
-    assert variables == {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": "org-uuid",
+    assert variables == {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": ORG_UUID,
                          "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1", "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
 
 
 def test_init_federation_needs_the_ids(init_run):
-    with pytest.raises(CIError, match="ANTHROPIC_FEDERATION_RULE_ID is required"):
+    """A missing ID stops init before step 3 creates the CI token, so none is left orphaned."""
+    with pytest.raises(CIError, match=r"ANTHROPIC_FEDERATION_RULE_ID is required for identity federation "
+                                      r"\(pass --rule-id or set \$ANTHROPIC_FEDERATION_RULE_ID\)"):
         init_run(credential="federation")
+    assert not [c for c in init_run.calls if c[:2] in (["gh", "secret"], ["gh", "variable"])]
+    assert not [s for s in init_run.said if s.startswith("3/8")]
+
+
+def test_init_bad_federation_workspace_stops_before_the_token(init_run):
+    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
+           "ANTHROPIC_ORGANIZATION_ID": ORG_UUID, "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
+           "ANTHROPIC_WORKSPACE_ID": "nope"}
+    with pytest.raises(CIError, match="workspace ID looks like wrkspc_"):
+        init_run(credential="federation", env=env)
+    assert not [c for c in init_run.calls if c[:2] == ["gh", "secret"]]
+
+
+def test_init_federation_from_options_asks_nothing(init_run):
+    """--rule-id, --organization-id, --service-account-id (and --workspace-id)
+    give the IDs, and imply federation when --credential isn't given."""
+    def never(q, d):
+        if "required" in q:
+            return d
+        pytest.fail(f"asked {q!r}")
+    calls, _ = init_run(ask=never, rule_id="fdrl_2", organization_id=ORG_UUID, service_account_id="svac_2",
+                        workspace_id="wrkspc_2",
+                        env={"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_env"})
+    assert {c[3]: c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]} == {
+        "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_2", "ANTHROPIC_ORGANIZATION_ID": ORG_UUID,
+        "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_2", "ANTHROPIC_WORKSPACE_ID": "wrkspc_2"}
+    assert [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]] == ["BRINDLE_PRO_TOKEN"]
+
+
+def test_cli_init_without_a_terminal_never_prompts(ci_repo, monkeypatch):
+    """Unattended (stdin not a terminal), a question takes its default
+    instead of aborting, except that a [Y/n] one, which changes the
+    repository's settings, is no; the federation options reach init."""
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    got = {}
+
+    def init(**kw):
+        got.update(kw)
+        got["answers"] = [kw["ask"]("federation rule id (fdrl_...)", "fdrl_env"),
+                          kw["ask"]("Mark 'Tests' as required so brindle can fix it when it fails? [Y/n]", "y")]
+    monkeypatch.setattr(ci_client, "init", init)
+    result = CliRunner().invoke(app, ["ci", "init", "--credential", "federation", "--rule-id", "fdrl_1",
+                                      "--organization-id", ORG_UUID, "--service-account-id", "svac_1",
+                                      "--workspace-id", "wrkspc_1"], input="")
+    assert result.exit_code == 0, result.output
+    assert "Aborted" not in result.output and got["answers"] == ["fdrl_env", "n"]
+    assert (got["credential"], got["rule_id"], got["organization_id"], got["service_account_id"],
+            got["workspace_id"]) == ("federation", "fdrl_1", ORG_UUID, "svac_1", "wrkspc_1")
+
+
+def test_init_unattended_requires_no_check_without_the_option(init_run, ci_repo):
+    """With the CLI's unattended answers, the branch is only protected when
+    --required-check names the check."""
+    commit_workflow(ci_repo)
+    unattended = lambda q, d: "n" if q.endswith("[Y/n]") else d  # noqa: E731
+    _, said = init_run(credential="key", ask=unattended)
+    assert not protection_writes(init_run) and "Require status checks to pass" in "\n".join(said)
+    init_run(credential="key", ask=unattended, required_check="Tests")
+    assert [w[2]["required_status_checks"]["contexts"] for w in protection_writes(init_run)] == [["Tests"]]
+
+
+@pytest.mark.parametrize("kw, error", [
+    ({"rule_id": "rule-1"}, "ANTHROPIC_FEDERATION_RULE_ID looks like fdrl_..., not 'rule-1'"),
+    ({"organization_id": "org-1"}, "ANTHROPIC_ORGANIZATION_ID looks like a UUID, not 'org-1'"),
+    ({"service_account_id": "sa_1"}, "ANTHROPIC_SERVICE_ACCOUNT_ID looks like svac_..., not 'sa_1'"),
+    ({"credential": "key", "rule_id": "fdrl_1", "service_account_id": "svac_1"},
+     "--rule-id, --service-account-id configure identity federation, not --credential key"),
+])
+def test_init_rejects_bad_federation_options_first(init_run, kw, error):
+    with pytest.raises(CIError, match=re.escape(error)):
+        init_run(**kw)
+    assert not init_run.calls, "nothing ran before the bad option was caught"
+
+
+def test_init_checks_federation_ids_from_the_environment(init_run):
+    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
+           "ANTHROPIC_ORGANIZATION_ID": "not-a-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1"}
+    with pytest.raises(CIError, match="ANTHROPIC_ORGANIZATION_ID looks like a UUID"):
+        init_run(credential="federation", env=env)
+    assert not [c for c in init_run.calls if c[:2] == ["gh", "secret"]]
 
 
 def test_init_key_credential_sets_the_secret(init_run):
@@ -1505,6 +1626,213 @@ def test_init_rejects_an_unknown_credential_first(init_run):
     with pytest.raises(CIError, match="credential must be key or federation"):
         init_run(credential="password")
     assert not init_run.calls, "nothing ran before the bad option was caught"
+
+
+def test_init_refuses_uncommitted_work_before_doing_anything(init_run, ci_repo):
+    (ci_repo / "app.py").write_text("print('mine')\n")
+    with pytest.raises(CIError, match=r"commit or stash your changes first \(1 uncommitted, e.g. app.py\)"):
+        init_run(credential="key")
+    assert not init_run.calls
+    assert (ci_repo / "app.py").read_text() == "print('mine')\n"
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "main"
+
+
+def test_init_refuses_to_start_on_the_setup_branch(init_run, ci_repo):
+    sh("git checkout -q -b brindle/ci-setup", ci_repo)
+    with pytest.raises(CIError, match="switch off brindle/ci-setup first"):
+        init_run(credential="key")
+    assert not init_run.calls
+
+
+def test_init_refuses_a_symlink_where_it_writes(init_run, ci_repo, tmp_path):
+    (ci_repo / ".github").mkdir()
+    (ci_repo / ".github/workflows").symlink_to(tmp_path)
+    sh("git add -A && git commit -qm link", ci_repo)   # tracked, but still a symlink
+    with pytest.raises(CIError, match=".github/workflows is a symlink"):
+        init_run(credential="key")
+    assert not init_run.calls and not list(tmp_path.glob("brindle-ci-*"))
+
+
+@pytest.mark.parametrize("kind, error", [("file", "move .github/workflows/brindle-ci-issue.yml away first"),
+                                         ("dangling symlink", "brindle-ci-issue.yml is a symlink")])
+def test_push_setup_branch_checks_the_paths_again(ci_repo, kind, error):
+    """A file that appeared after init's first check (even a dangling
+    symlink, which exists() misses) still stops the write."""
+    (ci_repo / ".github/workflows").mkdir(parents=True)
+    target = ci_repo / ".github/workflows/brindle-ci-issue.yml"
+    if kind == "file":
+        target.write_text("mine\n")
+    else:
+        target.symlink_to(ci_repo / "nowhere")
+    with pytest.raises(CIError, match=error):
+        ci_client.push_setup_branch(str(ci_repo), {".github/workflows/brindle-ci-issue.yml": "name: issue\n"})
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "main"
+    assert sh("git branch --list brindle/ci-setup", ci_repo) == "" and not (ci_repo / "nowhere").exists()
+
+
+def test_init_refuses_an_untracked_file_where_it_writes(init_run, ci_repo):
+    (ci_repo / ".github/workflows").mkdir(parents=True)
+    (ci_repo / ".github/workflows/brindle-ci-fix.yml").write_text("mine\n")
+    with pytest.raises(CIError, match="move .github/workflows/brindle-ci-fix.yml away first"):
+        init_run(credential="key")
+    assert not init_run.calls
+    assert (ci_repo / ".github/workflows/brindle-ci-fix.yml").read_text() == "mine\n"
+
+
+@pytest.mark.parametrize("step", ["add", "commit", "push"])
+def test_init_goes_back_to_the_start_branch_when_a_step_fails(init_run, ci_repo, monkeypatch, step):
+    from brindle import git as git_mod
+
+    sh("git checkout -q -b work", ci_repo)
+    patched = git_mod.run
+
+    def git_run(args, cwd, check=True):
+        if args[0] == step:
+            raise git_mod.GitError(f"git {step}: boom")
+        return patched(args, cwd, check)
+    monkeypatch.setattr(git_mod, "run", git_run)
+    with pytest.raises(git_mod.GitError, match="boom"):
+        init_run(credential="key")
+    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "work"
+    assert sh("git branch --list brindle/ci-setup", ci_repo) == ""
+    assert sh("git status --porcelain", ci_repo) == "" and not (ci_repo / ".github").exists()
+
+
+def test_init_goes_back_to_a_detached_head(init_run, ci_repo):
+    start = head(ci_repo)
+    sh("git checkout -q --detach", ci_repo)
+    _, said = init_run(credential="key")
+    assert head(ci_repo) == start and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "HEAD"
+    assert "back on the commit you started on" in "\n".join(said)
+
+
+CI_WORKFLOW = """\
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    name: "Tests"   # the check name
+    runs-on: ubuntu-latest
+    steps:
+      - name: not a job name
+        run: make test
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make lint
+  matrix:
+    name: build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+"""
+
+
+def commit_workflow(repo, name="ci.yml", text=CI_WORKFLOW):
+    (repo / ".github/workflows").mkdir(parents=True, exist_ok=True)
+    (repo / ".github/workflows" / name).write_text(text)
+    sh("git add -A && git commit -qm ci", repo)
+
+
+def test_workflow_jobs_reads_the_check_names():
+    assert ci_client.workflow_jobs(CI_WORKFLOW) == ["Tests", "lint"]
+    assert ci_client.workflow_jobs("on: push\n") == []
+    assert ci_client.workflow_jobs("jobs:\n    a:\n        name: 'A'\n    b: # c\n        x: 1\n") == ["A", "b"]
+
+
+def test_repo_jobs_leaves_brindles_own_workflows_out(ci_repo):
+    commit_workflow(ci_repo)
+    commit_workflow(ci_repo, "brindle-ci-fix.yml", "jobs:\n  fix:\n    runs-on: x\n")
+    commit_workflow(ci_repo, "more.yaml", "jobs:\n  lint:\n    runs-on: x\n  e2e:\n    runs-on: x\n")
+    assert ci_client.repo_jobs(str(ci_repo)) == ["Tests", "lint", "e2e"]
+
+
+def protection_writes(go):
+    return [(c[2], c[c.index("-X") + 1], json.loads(i)) for c, i in zip(go.calls, go.inputs)
+            if c[:2] == ["gh", "api"] and "-X" in c]
+
+
+def test_init_leaves_existing_required_checks_alone(init_run, ci_repo):
+    commit_workflow(ci_repo)
+    _, said = init_run(credential="key", gh={"required": ["build"]},
+                       ask=lambda q, d: pytest.fail(f"asked {q!r}") if "required" in q else d)
+    assert not protection_writes(init_run)
+    assert "main requires build" in "\n".join(said)
+
+
+def test_init_asks_to_require_each_job_and_protects_the_branch(init_run, ci_repo):
+    commit_workflow(ci_repo)
+    asked = []
+
+    def ask(q, d):
+        if "required" in q:
+            asked.append(q)
+            return "n" if "'lint'" in q else ""
+        return d
+    _, said = init_run(credential="key", ask=ask)
+    assert asked == ["Mark 'Tests' as required so brindle can fix it when it fails? [Y/n]",
+                     "Mark 'lint' as required so brindle can fix it when it fails? [Y/n]"]
+    assert protection_writes(init_run) == [(f"repos/{REPO}/branches/main/protection", "PUT", {
+        "required_status_checks": {"strict": False, "contexts": ["Tests"]}, "enforce_admins": False,
+        "required_pull_request_reviews": None, "restrictions": None})]
+    text = "\n".join(said)
+    assert "warning: main requires no status checks" in text and "main now requires Tests" in text
+
+
+def test_init_adds_the_check_to_existing_protection(init_run, ci_repo):
+    commit_workflow(ci_repo)
+    init_run(credential="key", gh={"protected": True, "branch": "trunk"})
+    assert protection_writes(init_run) == [
+        (f"repos/{REPO}/branches/trunk/protection/required_status_checks", "PATCH",
+         {"contexts": ["Tests", "lint"]})]
+
+
+def test_init_required_check_options(init_run, ci_repo):
+    commit_workflow(ci_repo)
+    never = lambda q, d: pytest.fail(f"asked {q!r}") if "required" in q else d  # noqa: E731
+    init_run(credential="key", required_check="e2e", ask=never)
+    assert [w[2] for w in protection_writes(init_run)] == [{
+        "required_status_checks": {"strict": False, "contexts": ["e2e"]}, "enforce_admins": False,
+        "required_pull_request_reviews": None, "restrictions": None}]
+    init_run.calls.clear()
+    init_run.inputs.clear()
+    _, said = init_run(credential="key", no_required_check=True, ask=never)
+    assert not protection_writes(init_run)
+    assert "Require status checks to pass" in "\n".join(said)
+
+
+def test_init_explains_the_settings_when_github_refuses_protection(init_run, ci_repo):
+    commit_workflow(ci_repo)
+    _, said = init_run(credential="key", gh={"refuse": PLAN_REFUSAL})
+    text = "\n".join(said)
+    assert "GitHub didn't let brindle require Tests, lint" in text and "Upgrade to GitHub Pro" in text
+    assert "private repositories need a paid GitHub plan" in text and "now requires" not in text
+    assert f"Settings > Branches on github.com/{REPO}" in text and "Require status checks to pass" in text
+    assert "8/8 doctor" in text, "init carries on"
+
+
+def test_init_reports_a_404_protection_put_as_refused(init_run, ci_repo):
+    """GitHub answers 404 to a protection change by someone without admin
+    rights: that is a refusal, not success."""
+    commit_workflow(ci_repo)
+    _, said = init_run(credential="key", gh={"refuse": NOT_FOUND})
+    text = "\n".join(said)
+    assert "GitHub refused to protect main (404: no admin rights, or private repositories need a paid" in text
+    assert "now requires" not in text and "Require status checks to pass" in text
+
+
+def test_init_reports_protection_without_status_checks(init_run, ci_repo):
+    commit_workflow(ci_repo)
+    _, said = init_run(credential="key", gh={"protected": True, "refuse": NOT_FOUND})
+    text = "\n".join(said)
+    assert ("this branch is protected but doesn't require status checks; "
+            "add Tests, lint under Settings > Branches") in text
+    assert "paid" not in text and "now requires" not in text
+
+
+def test_init_warns_when_there_is_no_job_to_require(init_run):
+    _, said = init_run(credential="key")
+    text = "\n".join(said)
+    assert "warning: main requires no status checks" in text and "no workflow jobs" in text
+    assert not protection_writes(init_run)
 
 
 @pytest.mark.parametrize("url", ["https://github.com/someone/brindle.git", None])
@@ -1588,7 +1916,7 @@ def test_init_builds_the_pro_account_itself(ci_repo, monkeypatch):
         ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), env={},
                        run=run, open_url=opened.append, client=ci_client.Client(BASE, FakeTransport({})),
                        say=said.append)
-    assert any(s.startswith("3/6") for s in said)
+    assert any(s.startswith("3/8") for s in said)
     # The install page needs the org: the server answers 400 "org_id is required" without it.
     assert opened == [BASE + "/github/install?org_id=org_1"]
     assert got["store"] is store and got["org"] == "org_1" and got["name"] == f"ci:{REPO}"
