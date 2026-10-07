@@ -184,6 +184,36 @@ def run_commands(commands: list[str], cwd: str, env: dict[str, str]) -> SetupRes
     return SetupResult(True, "\n".join(log))
 
 
+def live_workers(db: DB, ws: Workspace) -> list:
+    """Agents in ``ws`` whose process is still running."""
+    from brindle import agents
+
+    return [a for a in db.list_agents(ws.id) if agents.is_alive(a)]
+
+
+def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created | None:
+    """A workspace already registered for ``branch``: refuse if a worker is
+    live in it, else hand it back (recreating its worktree if the folder is
+    gone) rather than registering a second row on the same branch and path."""
+    registered = db.workspaces_sharing(repo_root, branch=branch)
+    if not registered:
+        return None
+    for ws in registered:
+        live = live_workers(db, ws)
+        if live:
+            raise WorkspaceError(
+                f"branch {branch!r} already has workspace {ws.id} with a live worker "
+                f"({live[0].id}); message that worker, or wait for it to finish, instead of "
+                "starting another on the same branch"
+            )
+    ws = registered[0]
+    how = "existing"
+    if not os.path.isdir(ws.path):
+        git.run(["worktree", "prune"], repo_root, check=False)
+        how = git.add_worktree(repo_root, ws.path, branch, base)
+    return Created(ws, how, branch, [], None)
+
+
 @dataclass
 class Created:
     workspace: Workspace
@@ -211,6 +241,10 @@ def create(
     base = base or cfg.base_branch or git.default_branch(repo_root)
     if branch == base:
         raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")
+
+    existing = _reuse_registered(db, repo_root, branch, base)
+    if existing is not None:
+        return existing
 
     name = _unique_name(db, repo_root, branch)
 
@@ -454,6 +488,25 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             tmux.kill_session(ws.tmux_session)
         db.delete_workspace(ws.id)
         return Removed(False, "existing checkout left untouched", None)
+
+    sharing = db.workspaces_sharing(ws.repo_root, path=ws.path, exclude_id=ws.id)
+    if sharing:
+        live = [(o, live_workers(db, o)) for o in sharing]
+        live = [(o, w) for o, w in live if w]
+        if live and not force:
+            o = live[0][0]
+            raise WorkspaceError(
+                f"{ws.name} shares its worktree {ws.path} with {o.id}, which has a live "
+                "worker; removing it would delete that worker's checkout. Pass force to "
+                "remove it anyway."
+            )
+        if not live:
+            # Only stale rows share the folder: drop this row, keep the worktree.
+            if not keep_session:
+                _rescue_sidebar(db, ws)
+                tmux.kill_session(ws.tmux_session)
+            return _forget(db, ws, Removed(
+                False, f"worktree kept (shared with {sharing[0].id})", None))
 
     exists = os.path.isdir(ws.path)
     if exists and not force:

@@ -705,6 +705,20 @@ class DB:
         row = self.conn.execute("SELECT * FROM workspaces WHERE path=?", (path,)).fetchone()
         return _load(Workspace, row) if row else None
 
+    def workspaces_sharing(self, repo_root: str, *, path: str | None = None,
+                           branch: str | None = None,
+                           exclude_id: str | None = None) -> list[Workspace]:
+        """Registered worktree workspaces of ``repo_root`` on ``path`` or on
+        ``branch`` (either matches), other than ``exclude_id``."""
+        rows = self.conn.execute(
+            "SELECT * FROM workspaces WHERE repo_root=? AND kind='worktree' ORDER BY created_at",
+            (repo_root,),
+        )
+        found = [_load(Workspace, r) for r in rows]
+        return [w for w in found if w.id != exclude_id
+                and ((path is not None and w.path == path)
+                     or (branch is not None and w.branch == branch))]
+
     def workspace_by_tmux_session(self, session: str) -> Workspace | None:
         row = self.conn.execute(
             "SELECT * FROM workspaces WHERE tmux_session=?", (session,)
