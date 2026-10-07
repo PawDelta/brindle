@@ -39,7 +39,7 @@ def duplicate_row(db, ws, suffix="-2"):
 
 def test_create_reuses_idle_workspace_on_same_branch(db, repo, live):
     first = workspaces.create(db, str(repo), "feat/x").workspace
-    again = workspaces.create(db, str(repo), "feat/x")
+    again = workspaces.create(db, str(repo), "feat/x", reuse_registered=True)
     assert again.workspace.id == first.id and again.how == "existing"
     assert len(db.find_workspaces(first.repo_root)) == 1
 
@@ -47,13 +47,14 @@ def test_create_reuses_idle_workspace_on_same_branch(db, repo, live):
 def test_create_reuses_workspace_whose_worker_is_not_live(db, repo, live):
     first = workspaces.create(db, str(repo), "feat/x").workspace
     add_agent(db, first, "paused1")  # registered but not alive
-    assert workspaces.create(db, str(repo), "feat/x").workspace.id == first.id
+    again = workspaces.create(db, str(repo), "feat/x", reuse_registered=True)
+    assert again.workspace.id == first.id
 
 
 def test_create_recreates_missing_worktree_folder(db, repo, live):
     first = workspaces.create(db, str(repo), "feat/x").workspace
     shutil.rmtree(first.path)
-    again = workspaces.create(db, str(repo), "feat/x").workspace
+    again = workspaces.create(db, str(repo), "feat/x", reuse_registered=True).workspace
     assert again.id == first.id
     assert os.path.isdir(first.path)
     assert git.out(["branch", "--show-current"], first.path) == "feat/x"
@@ -64,8 +65,15 @@ def test_create_refuses_when_a_worker_is_live(db, repo, live):
     add_agent(db, first, "busy1")
     live.add("busy1")
     with pytest.raises(workspaces.WorkspaceError, match="live worker"):
-        workspaces.create(db, str(repo), "feat/x")
+        workspaces.create(db, str(repo), "feat/x", reuse_registered=True)
     assert len(db.find_workspaces(first.repo_root)) == 1
+
+
+def test_plain_create_on_a_taken_branch_still_errors(db, repo, live):
+    # `brindle new` keeps refusing a taken branch.
+    workspaces.create(db, str(repo), "feat/x")
+    with pytest.raises(workspaces.WorkspaceError, match="already exists"):
+        workspaces.create(db, str(repo), "feat/x")
 
 
 def test_distinct_branches_still_get_their_own_workspaces(db, repo, live):

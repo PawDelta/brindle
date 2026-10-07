@@ -233,7 +233,11 @@ def create(
     start: str | None = None,
     run_setup: bool = True,
     apply_prefix: bool = True,
+    reuse_registered: bool = False,
 ) -> Created:
+    """``reuse_registered`` (assign/handoff): a branch that already has a
+    registered workspace reuses it, or is refused while a worker is live in
+    it. Otherwise (``brindle new``) a taken branch is an error from git."""
     repo_root = git.main_repo_root(repo_path)
     cfg: RepoConfig = load_repo_config(repo_root)
     prefix = cfg.branch_prefix if apply_prefix else ""
@@ -242,9 +246,10 @@ def create(
     if branch == base:
         raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")
 
-    existing = _reuse_registered(db, repo_root, branch, base)
-    if existing is not None:
-        return existing
+    if reuse_registered:
+        existing = _reuse_registered(db, repo_root, branch, base)
+        if existing is not None:
+            return existing
 
     name = _unique_name(db, repo_root, branch)
 
