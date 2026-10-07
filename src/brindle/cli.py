@@ -385,12 +385,20 @@ def _say_autopilot(db: DB, root_id: str) -> None:
     typer.echo("  `brindle autopilot off` hands the wheel back to you.")
 
 
+def _live_sessions(db: DB, ws: Workspace) -> list:
+    """The live sessions (interactive agents) in this checkout. An agent whose
+    recorded pane id a newer agent has since taken (tmux reuses ids) isn't
+    live: that pane is the newer agent's."""
+    owners = agents.pane_owners(db)
+    return [a for a in db.list_agents(ws.id)
+            if a.mode == "interactive" and a.status not in ("paused", "done")
+            and agents.is_alive(a) and agents.owns_pane(db, a, owners)]
+
+
 def _running_session(db: DB, ws: Workspace):
     """The live session (its interactive agent) in this checkout, if any."""
-    for a in db.list_agents(ws.id):
-        if a.mode == "interactive" and a.status not in ("paused", "done") and agents.is_alive(a):
-            return a
-    return None
+    live = _live_sessions(db, ws)
+    return live[0] if live else None
 
 
 def _ask_about_running(running) -> str:
@@ -415,12 +423,17 @@ def _session_worktree(db: DB, ws: Workspace) -> Workspace:
 def _pause_running(db: DB, ws: Workspace, stop_procs: bool = True) -> None:
     """At most one live session per checkout: pause any that's still running.
     ``stop_procs=False`` when a detached cull follows (see agents.pause)."""
-    for a in db.list_agents(ws.id):
-        if a.mode == "interactive" and a.status not in ("paused", "done") and agents.is_alive(a):
-            # A session starts here next: keep its local models loaded.
-            agents.pause(db, a.id, stop_procs=stop_procs, stop_local_models=False)
-            typer.echo(f"Paused the session that was still running here ({a.id}); "
-                       f"`brindle continue {a.id}` brings it back.")
+    from brindle import scratch
+
+    for a in _live_sessions(db, ws):
+        # A session starts here next: keep its local models loaded.
+        agents.pause(db, a.id, stop_procs=stop_procs, stop_local_models=False)
+        typer.echo(f"Paused the session that was still running here ({a.id}); "
+                   f"`brindle continue {a.id}` brings it back.")
+    # Chats left running in scratch sessions whose work moved into this repo.
+    for aid in scratch.pause_transferred_to(db, ws.repo_root):
+        typer.echo(f"Paused scratch session chat {aid}: its work moved into this repo; "
+                   f"`brindle continue {aid}` brings it back.")
 
 
 def _describe(s) -> str:
