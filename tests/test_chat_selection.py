@@ -50,6 +50,46 @@ def test_mouse_drag_copies_to_clipboard_only_for_brindle_sessions(session, monke
     assert "@brindle 1" in got
 
 
+def test_chat_pane_keeps_the_mouse_even_when_the_program_tracks_it(session, monkeypatch):
+    """Claude Code 2.1.29x asks for mouse tracking, which made tmux hand every
+    click and drag to it: no drag-to-copy, and a click could park its focus in
+    the Settings dialog's filter box, where Esc never closes the dialog. In a
+    brindle chat pane tmux keeps the mouse; the sidebar, other panes and other
+    sessions get tmux's own default (which defers to ``mouse_any_flag``)."""
+    monkeypatch.setattr(tmux, "clipboard_command", lambda: "pbcopy")
+    tmux.bind_session_keys(session)
+    root = _bindings("root").splitlines()
+    for key in ("MouseDown1Pane", "MouseUp1Pane", "MouseDrag1Pane", "DoubleClick1Pane", "TripleClick1Pane"):
+        line = next(ln for ln in root if f" {key} " in ln)
+        assert tmux.CHAT_PANE in line, key
+        # tmux's default survives as the fallback: it passes the event on
+        # (send-keys -M), for a drag or click only when the program tracks
+        # the mouse (mouse_any_flag).
+        assert "send-keys -M" in line, key
+        if key not in ("MouseDown1Pane", "MouseUp1Pane"):
+            assert "mouse_any_flag" in line, key
+    drag = next(ln for ln in root if " MouseDrag1Pane " in ln)
+    assert "copy-mode -M" in drag
+    down = next(ln for ln in root if " MouseDown1Pane " in ln)
+    assert "select-pane -t =" in down
+    up = next(ln for ln in root if " MouseUp1Pane " in ln)
+    assert tmux.CHAT_PANE in up and up.rstrip().endswith('"send-keys -M"')  # the release: dropped, or passed on
+    for key in ("DoubleClick1Pane", "TripleClick1Pane"):
+        assert "pbcopy" in next(ln for ln in root if f" {key} " in ln)
+    # The guard: a brindle session's pane that isn't the sidebar.
+    assert "@brindle_sidebar" in tmux.CHAT_PANE and "#{@brindle}" in tmux.CHAT_PANE
+
+
+def test_chat_mouse_bindings_never_forward_a_press_or_drag():
+    ours = tmux.chat_mouse_bindings("pbcopy")
+    assert ours["MouseDown1Pane"] == "select-pane -t ="
+    assert "mouse_any_flag" not in ours["MouseDrag1Pane"] and "copy-mode -M" in ours["MouseDrag1Pane"]
+    assert "copy-pipe-and-cancel pbcopy" in ours["DoubleClick1Pane"]
+    assert "copy-pipe-and-cancel pbcopy" in ours["TripleClick1Pane"]
+    plain = tmux.chat_mouse_bindings(None)
+    assert plain["DoubleClick1Pane"].endswith("copy-pipe-and-cancel")
+
+
 def test_no_clipboard_tool_keeps_default_binding(session, monkeypatch):
     monkeypatch.setattr(tmux, "clipboard_command", lambda: None)
     tmux.bind_session_keys(session)
