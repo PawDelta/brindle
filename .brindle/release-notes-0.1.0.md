@@ -7,7 +7,7 @@
 - **Conflict-aware merging.** Branches that touch the same files merge one at a time, and a conflict goes back to the worker that owns it. `protected_paths` keeps chosen files for you to resolve.
 - **Secrets stay out of local workers.** Local workers no longer inherit brindle's own secrets or CI tokens.
 - **`brindle cost`.** A summary of what your agents spent.
-- **Sign in with Google, GitHub, SAML or OIDC.** Single sign-on for your account.
+- **Sign in with Google or GitHub.**
 
 **Behavior change**
 
@@ -23,7 +23,7 @@
 
 - **Org library.** Admins share profiles and rule packs with everyone in the org.
 - **Org budgets and protected paths.** Set in your org policy.
-- **Require single sign-on.** Admins can require SSO for their org.
+- **Single sign-on for your org.** Connect your SAML or OIDC identity provider, and require SSO for members.
 
 **Enterprise**
 
