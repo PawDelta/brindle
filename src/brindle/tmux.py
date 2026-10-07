@@ -482,6 +482,57 @@ def clipboard_command() -> str | None:
 HAS_SIDEBAR_SHELL = "tmux list-panes -t '#{window_id}' -F '##{@brindle_sidebar}' | grep -q ."
 
 
+# A brindle chat pane (an agent's, not the sidebar's), for the mouse bindings
+# below: ``@brindle`` is the session option bind_session_keys sets, and the
+# sidebar's pane carries SIDEBAR_TAG. Evaluated with ``if-shell -F -t =``, so
+# it reads the pane under the mouse, not the active one.
+CHAT_PANE = "#{&&:#{@brindle},#{!:#{@brindle_sidebar}}}"
+
+# tmux's own root-table mouse bindings (3.7), the fallback for every other
+# pane. Each hands the event to the program when it tracks the mouse itself
+# (``mouse_any_flag``), and selects text in copy mode otherwise.
+_DEFAULT_MOUSE = {
+    "MouseDown1Pane": "select-pane -t = ; send-keys -M",
+    "MouseDrag1Pane": ('if-shell -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" '
+                       '{ send-keys -M } { copy-mode -M }'),
+    "DoubleClick1Pane": ('select-pane -t = ; if-shell -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" '
+                         '{ send-keys -M } { copy-mode -H ; send-keys -X select-word ; '
+                         'run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }'),
+    "TripleClick1Pane": ('select-pane -t = ; if-shell -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" '
+                         '{ send-keys -M } { copy-mode -H ; send-keys -X select-line ; '
+                         'run-shell -d 0.3 ; send-keys -X copy-pipe-and-cancel }'),
+    # Unbound in tmux, which then passes the release straight to a program
+    # that tracks the mouse (and drops it otherwise): the same, spelled out.
+    "MouseUp1Pane": "send-keys -M",
+}
+
+
+def chat_mouse_bindings(clip: str | None) -> dict[str, str]:
+    """What the mouse does in a brindle chat pane, by key: tmux keeps it.
+
+    Claude Code (2.1.29x, fullscreen TUI) asks the terminal for mouse
+    tracking, and with ``mouse on`` tmux obliges: every click and drag is
+    forwarded to it and none reaches tmux. That lost brindle's drag-to-copy
+    (the selection never happened), and a click can land Claude Code's
+    focus in a widget that then swallows keys: its Settings dialog (what
+    /usage and /config open) has a filter box in which Esc only clears the
+    text and never closes the dialog, so the "panel" looks frozen. So in a
+    chat pane a press just focuses the pane (and the release goes nowhere:
+    tmux would otherwise still pass it on), a drag selects in copy mode
+    (and MouseDragEnd1Pane copies it to the clipboard), and a double or
+    triple click copies the word or line. The wheel isn't touched: a
+    fullscreen chat scrolls its own transcript with it. The sidebar and
+    any other pane keep tmux's defaults."""
+    pipe = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)}" if clip else "send-keys -X copy-pipe-and-cancel"
+    return {
+        "MouseDown1Pane": "select-pane -t =",
+        "MouseUp1Pane": "",
+        "MouseDrag1Pane": "if-shell -F -t = '#{pane_in_mode}' 'send-keys -M' 'copy-mode -M'",
+        "DoubleClick1Pane": f"select-pane -t = ; copy-mode -H ; send-keys -X select-word ; run-shell -d 0.3 ; {pipe}",
+        "TripleClick1Pane": f"select-pane -t = ; copy-mode -H ; send-keys -X select-line ; run-shell -d 0.3 ; {pipe}",
+    }
+
+
 def bind_session_keys(session: str) -> None:
     """Chat-friendly mouse selection and the sidebar toggle. Key tables are
     server-wide in tmux, so every binding is guarded on the ``@brindle`` session
@@ -494,6 +545,11 @@ def bind_session_keys(session: str) -> None:
         ours = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)}" if clip else default
         _tmux("bind-key", "-T", table, "MouseDragEnd1Pane",
               "if-shell", "-F", "#{@brindle}", ours, default, check=False)
+    # The mouse stays tmux's in a chat pane (see chat_mouse_bindings), even
+    # when the chat asks to track it.
+    for key, ours in chat_mouse_bindings(clip).items():
+        _tmux("bind-key", "-T", "root", key,
+              "if-shell", "-F", "-t", "=", CHAT_PANE, ours, _DEFAULT_MOUSE[key], check=False)
     # prefix S: hide/show the sidebar (unbound in stock tmux); if this window
     # has none (it lives in another session), pull it here instead.
     from brindle.providers import brindle_invocation
