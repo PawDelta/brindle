@@ -1557,7 +1557,16 @@ def test_init_refuses_to_start_on_the_setup_branch(init_run, ci_repo):
     assert not init_run.calls
 
 
-@pytest.mark.parametrize("step", ["commit", "push"])
+def test_init_refuses_an_untracked_file_where_it_writes(init_run, ci_repo):
+    (ci_repo / ".github/workflows").mkdir(parents=True)
+    (ci_repo / ".github/workflows/brindle-ci-fix.yml").write_text("mine\n")
+    with pytest.raises(CIError, match="move .github/workflows/brindle-ci-fix.yml away first"):
+        init_run(credential="key")
+    assert not init_run.calls
+    assert (ci_repo / ".github/workflows/brindle-ci-fix.yml").read_text() == "mine\n"
+
+
+@pytest.mark.parametrize("step", ["add", "commit", "push"])
 def test_init_goes_back_to_the_start_branch_when_a_step_fails(init_run, ci_repo, monkeypatch, step):
     from brindle import git as git_mod
 
@@ -1682,9 +1691,28 @@ def test_init_explains_the_settings_when_github_refuses_protection(init_run, ci_
     _, said = init_run(credential="key", gh={"refuse": PLAN_REFUSAL})
     text = "\n".join(said)
     assert "GitHub didn't let brindle require Tests, lint" in text and "Upgrade to GitHub Pro" in text
-    assert "paid GitHub plan" in text
+    assert "private repositories need a paid GitHub plan" in text and "now requires" not in text
     assert f"Settings > Branches on github.com/{REPO}" in text and "Require status checks to pass" in text
     assert "8/8 doctor" in text, "init carries on"
+
+
+def test_init_reports_a_404_protection_put_as_refused(init_run, ci_repo):
+    """GitHub answers 404 to a protection change by someone without admin
+    rights: that is a refusal, not success."""
+    commit_workflow(ci_repo)
+    _, said = init_run(credential="key", gh={"refuse": NOT_FOUND})
+    text = "\n".join(said)
+    assert "GitHub refused to protect main (404: no admin rights, or private repositories need a paid" in text
+    assert "now requires" not in text and "Require status checks to pass" in text
+
+
+def test_init_reports_protection_without_status_checks(init_run, ci_repo):
+    commit_workflow(ci_repo)
+    _, said = init_run(credential="key", gh={"protected": True, "refuse": NOT_FOUND})
+    text = "\n".join(said)
+    assert ("this branch is protected but doesn't require status checks; "
+            "add Tests, lint under Settings > Branches") in text
+    assert "paid" not in text and "now requires" not in text
 
 
 def test_init_warns_when_there_is_no_job_to_require(init_run):

@@ -1328,14 +1328,24 @@ def required_checks(repo: str, branch: str, *, run=subprocess.run) -> list[str]:
 
 def _require_checks(repo: str, branch: str, names: list[str], *, run=subprocess.run) -> None:
     """Make ``names`` required on ``branch``: on top of its protection when it
-    has some (only the status checks change), else a protection of just them."""
-    if _gh_api(f"repos/{repo}/branches/{branch}/protection", run=run) is None:
-        body = {"required_status_checks": {"strict": False, "contexts": names}, "enforce_admins": False,
-                "required_pull_request_reviews": None, "restrictions": None}
-        _gh_api(f"repos/{repo}/branches/{branch}/protection", run=run, method="PUT", body=body)
-    elif _gh_api(f"repos/{repo}/branches/{branch}/protection/required_status_checks", run=run,
-                 method="PATCH", body={"contexts": names}) is None:
-        raise CIError("the branch's protection doesn't require status checks yet")
+    has some (only the status checks change), else a protection of just them.
+    Raises :class:`CIError` with what to tell the person when GitHub refuses."""
+    plan = "private repositories need a paid GitHub plan for branch protection"
+    protection = f"repos/{repo}/branches/{branch}/protection"
+    try:
+        if _gh_api(protection, run=run) is None:
+            body = {"required_status_checks": {"strict": False, "contexts": names}, "enforce_admins": False,
+                    "required_pull_request_reviews": None, "restrictions": None}
+            if _gh_api(protection, run=run, method="PUT", body=body) is None:   # GitHub's 404 for "not allowed"
+                raise CIError(f"GitHub refused to protect {branch} (404: no admin rights, or {plan})", "refused")
+        elif _gh_api(f"{protection}/required_status_checks", run=run, method="PATCH",
+                     body={"contexts": names}) is None:
+            raise CIError(f"this branch is protected but doesn't require status checks; add "
+                          f"{', '.join(names)} under Settings > Branches", "refused")
+    except CIError as e:
+        if e.code == "refused":
+            raise
+        raise CIError(f"GitHub didn't let brindle require {', '.join(names)}: {e} ({plan})", "refused") from e
 
 
 def setup_required_checks(repo: str, *, cwd: str, run=subprocess.run,
@@ -1375,8 +1385,7 @@ def setup_required_checks(repo: str, *, cwd: str, run=subprocess.run,
     try:
         _require_checks(repo, branch, names, run=run)
     except CIError as e:
-        say(f"   GitHub didn't let brindle require {', '.join(names)}: {e}")
-        say("   (a private repository needs a paid GitHub plan for branch protection)")
+        say(f"   {e}")
         say(settings)
         return
     say(f"   {branch} now requires {', '.join(names)}")
@@ -1427,6 +1436,10 @@ def check_clean(cwd: str) -> None:
                       f"{auth._sanitize(dirty[0], 100)}): init commits the workflows on a branch of its own")
     if git.current_branch(cwd) == SETUP_BRANCH:
         raise CIError(f"switch off {SETUP_BRANCH} first: init recreates that branch")
+    for kind in SETUP_KINDS:   # a file there that git doesn't track would be overwritten, then removed
+        rel = f"{SETUP_DIR}/brindle-ci-{kind}.yml"
+        if (Path(cwd) / rel).exists() and not git.ok(["ls-files", "--error-unmatch", rel], cwd):
+            raise CIError(f"move {rel} away first: init writes the workflow there, and git doesn't track it")
 
 
 def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
@@ -1438,8 +1451,13 @@ def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
     back = ["checkout", "--quiet", start] if start else ["checkout", "--quiet", "--detach", head_sha(cwd)]
     git.run(["checkout", "-B", SETUP_BRANCH], cwd)
     committed = False
+    new: list[Path] = []   # files and folders init creates, which git can't restore
     try:
         for rel, text in files.items():
+            for part in [*reversed(Path(rel).parents[:-1]), Path(rel)]:   # outermost folder first
+                full = Path(cwd) / part
+                if not full.exists() and full not in new:
+                    new.append(full)
             path = Path(cwd) / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
@@ -1450,6 +1468,11 @@ def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
     finally:
         if not committed:   # the tree was clean, so this only drops what was written here
             git.run(["reset", "-q", "--hard"], cwd, check=False)
+            for p in reversed(new):
+                try:
+                    p.rmdir() if p.is_dir() else p.unlink(missing_ok=True)
+                except OSError:
+                    pass
         git.run(back, cwd)
         git.run(["branch", "-D", SETUP_BRANCH], cwd, check=False)
 
