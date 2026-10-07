@@ -16,7 +16,7 @@ import textwrap
 import time
 from dataclasses import dataclass, field
 
-from brindle import agents, pricing, tmux, view, watch_costs
+from brindle import agents, airgap, pricing, tmux, view, watch_costs
 from brindle.db import DB
 
 REFRESH_SECONDS = 2.0
@@ -308,9 +308,11 @@ def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: b
 
 def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = None,
            state: NavState | None = None,
-           costs: tuple[watch_costs.Local, watch_costs.Remote | None] | None = None) -> list[Line]:
+           costs: tuple[watch_costs.Local, watch_costs.Remote | None] | None = None,
+           messages=None) -> list[Line]:
     """``costs`` is the local figures and the (cached) remote ones; without it
-    there is no Costs section."""
+    there is no Costs section. ``messages`` is the org's saved status
+    (``pro.status.Saved``): its unread notices get a Messages section."""
     state = state or NavState()
     spend = costs[0].workers if costs else None
     # A workspace id is "<repo slug>/<name>": a session spanning several
@@ -325,6 +327,12 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
     lines.append(Line(""))
     if pilot:
         lines += render_autopilot(pilot, width)
+    if messages is not None:
+        from brindle.pro import status
+
+        if box := status.render_messages(messages, width, status.GROUP in state.collapsed):
+            lines += box
+            lines.append(Line(""))
     if costs:
         lines += watch_costs.render(costs[0], costs[1], now, width, watch_costs.GROUP in state.collapsed)
         lines.append(Line(""))
@@ -546,6 +554,9 @@ def _toggle_group(state: NavState, lines: list[Line], i: int) -> None:
         if lines[i].group == watch_costs.GROUP:    # the Costs header
             state.collapsed ^= {watch_costs.GROUP}
             state.selected, state.group, state.follow = f"g:{watch_costs.GROUP}", None, True
+        elif lines[i].group == "@messages":        # the Messages header (pro.status.GROUP)
+            state.collapsed ^= {"@messages"}
+            state.selected, state.group, state.follow = "g:@messages", None, True
         return
     state.collapsed ^= {ws["id"]}
     state.selected, state.group, state.follow = f"g:{ws['id']}", ws["id"], True
@@ -793,6 +804,22 @@ def quit_keys(sidebar: bool) -> tuple[int, ...]:
     return (ord("q"),) if sidebar else (ord("q"), 27)
 
 
+def _start_status():
+    """The org status poller for this sidebar, started; None when brindle isn't
+    signed in to a team (or in air-gap mode): the poll only runs while a brindle
+    session is open."""
+    try:
+        from brindle.pro import license, status
+
+        if airgap.enabled() or "team" not in license.current(refresh=False).features:
+            return None
+        # Running workers touch() the activity clock from the loop, which keeps the pace at 60s.
+        poller = status.Poller()
+        return poller if poller.start() else None
+    except Exception:  # noqa: BLE001 - no license, no Pro: no poll
+        return None
+
+
 def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
     # The session this sidebar belongs to: quitting the sidebar quits it.
     own_root = agents.sidebar_root(os.environ.get("TMUX_PANE")) if sidebar else None
@@ -814,7 +841,23 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
     feed = watch_costs.Feed(repo_root)
     spend = watch_costs.Local()
     spend_at = 0.0
+    poller, bar, delivered_at = _start_status(), None, 0.0
+    if poller is not None and os.environ.get("TMUX_PANE"):
+        from brindle.pro import status as org_status
+
+        bar = org_status.Bar(tmux.pane_session(os.environ["TMUX_PANE"]))
     while True:
+        if poller is not None and poller.saved is not None:
+            if bar is not None:
+                bar.publish(poller.saved)      # sets the tmux option only on a change
+            if own_root and time.time() - delivered_at >= 5.0:
+                delivered_at = time.time()
+                try:
+                    from brindle.pro import status as org_status
+
+                    org_status.deliver_notices(db, own_root, poller.saved)
+                except Exception:  # noqa: BLE001 - a notice never takes the sidebar down
+                    pass
         if time.time() - culled_at >= CULL_SECONDS:
             culled_at = time.time()
             _cull_in_background()
@@ -847,7 +890,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
             # doesn't re-total the history); the network ones come from the feed's thread.
             if time.time() - spend_at >= 1.0 or snap_changed:
                 spend, spend_at = watch_costs.local(db, repo_root, snap), time.time()
-            lines = render(snap, time.time(), width, pilot, state, costs=(spend, feed.get()))
+            lines = render(snap, time.time(), width, pilot, state, costs=(spend, feed.get()),
+                           messages=poller.saved if poller is not None else None)
             selected = selection(state, lines)
         if state.notice:
             notice, notice_until, state.notice = state.notice, time.time() + CLOSE_CONFIRM_SECONDS, ""
@@ -891,6 +935,11 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
         stdscr.refresh()
 
         key = stdscr.getch()
+        if key != -1 or any(a["status"] in ("processing", "starting") for ws in snap
+                            for a in ws["agents"]):
+            from brindle.pro import status as org_status
+
+            org_status.touch()          # keeps the org status poll at its 60s pace
         if key == curses.KEY_MOUSE:
             try:
                 _, mx, my, _, bstate = curses.getmouse()

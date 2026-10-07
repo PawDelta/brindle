@@ -674,7 +674,7 @@ def test_budget_and_protected_paths_are_parsed_and_cached(budgets):
     assert plugin(budgets).org_budgets().enforced.protected_paths == ("infra/", "*.lock")
     assert budgets.paths().count(f"GET /orgs/{ORG}/policy") == 1      # the second came from the cache
     cached = json.loads((private_dir() / f"policy-{ORG}.json").read_text())
-    assert cached["policy"]["budget"] == {"seat_month_usd": 50.0, "goal_usd": 5.0}
+    assert cached["policy"]["budget"] == {"seat_month_usd": 50.0, "goal_usd": 5.0, "task_usd": None}
     assert cached["policy"]["protected_paths"] == ["infra/", "*.lock"]
 
 

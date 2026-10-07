@@ -214,6 +214,14 @@ THEME = {
 }
 
 
+def set_alert(session: str, text: str, style: str = "warn") -> None:
+    """Show ``text`` next to the version in ``session``'s status bar (empty: clear it)
+    through the session option the status line reads. Called only when it changes."""
+    colour = "#e0b04a" if style == "warn" else "#e06c5a"
+    value = f"#[fg={colour},bold]{text.replace('#', '##')} #[default]" if text else ""
+    _tmux("set-option", "-t", session, "@brindle_alert", value, check=False)
+
+
 def apply_theme(session: str) -> None:
     """Style one brindle session (never the person's global tmux config)."""
     t = THEME
@@ -222,8 +230,9 @@ def apply_theme(session: str) -> None:
         # Which brindle runs this session: one started before an upgrade keeps
         # running the old code until it is restarted.
         "status-left": (f"#[bg={t['accent']},fg={t['text']},bold] brindle "
-                        f"#[bg={t['bg2']},fg={t['muted2']},nobold] {__version__} "),
-        "status-left-length": "32",
+                        f"#[bg={t['bg2']},fg={t['muted2']},nobold] {__version__} "
+                        "#{@brindle_alert}"),   # org warning/messages, set by pro.status
+        "status-left-length": "120",
         "status-right": f"#[fg={t['muted']}]#{{session_name}}  %H:%M ",
         "status-right-length": "60",
         "window-status-format": f"#[fg={t['muted']}] #W ",
