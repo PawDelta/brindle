@@ -34,6 +34,7 @@ from dataclasses import dataclass, field, replace
 from brindle.policy import AssignInfo, Decision, MergeInfo, PolicyPlugin, allow, deny
 
 from brindle.pro._files import private_dir, read_private, write_private
+from brindle.pro.status import clean
 
 log = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ def _budgets(p: dict) -> dict:
             "budget_goal_usd": _usd(budget.get("goal_usd"), "budget"),
             "budget_task_usd": _usd(budget.get("task_usd"), "budget"),
             "protected_paths": tuple(paths), "paused": paused,
-            "paused_reason": reason[:200] if isinstance(reason, str) and reason.strip() else None,
+            "paused_reason": (clean(reason)[:200] or None) if isinstance(reason, str) else None,
             "budget_sources": {k: v for k, v in (sources or {}).items()
                                if isinstance(k, str) and isinstance(v, str)},
             "member_overrides": {k: v for k, v in list((overrides or {}).items())[:4096]
