@@ -16,7 +16,7 @@ import textwrap
 import time
 from dataclasses import dataclass, field
 
-from brindle import agents, tmux, view
+from brindle import agents, pricing, tmux, view, watch_costs
 from brindle.db import DB
 
 REFRESH_SECONDS = 2.0
@@ -248,7 +248,7 @@ def group_title(ws: dict, count: int, needing: int, width: int, collapsed: bool,
     return fit(arrow + elide_middle(title, max(room - len(tag), 1)) + tag + suffix, width)
 
 
-def render_agent(a: dict, ws: dict, now: float, width: int) -> list[Line]:
+def render_agent(a: dict, ws: dict, now: float, width: int, spend: float | None = None) -> list[Line]:
     icon, label = STATUS_LABEL.get(a["status"], ("·", a["status"]))
     style = STATUS_STYLE.get(a["status"], "normal")
     if a["status"] == "idle" and a.get("reported"):
@@ -272,6 +272,8 @@ def render_agent(a: dict, ws: dict, now: float, width: int) -> list[Line]:
         detail.append(f"✉ {a['unread']} unread")
     if a.get("tokens"):
         detail.append(a["tokens"])
+    if spend is not None:
+        detail.append(pricing.money(spend))
     detail.append(a["id"][:6])
     lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
     for sub in a.get("subagents") or []:
@@ -286,7 +288,7 @@ def render_agent(a: dict, ws: dict, now: float, width: int) -> list[Line]:
 
 
 def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: bool,
-                 repo: str | None = None) -> list[Line]:
+                 repo: str | None = None, spend: dict[str, float] | None = None) -> list[Line]:
     """A workspace header and, unless folded, its agents: the ones needing
     you first, otherwise in their usual order."""
     needing = sum(bool(needs_you(a, ws)) for a in ags)
@@ -300,13 +302,17 @@ def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: b
     if not ags:
         lines.append(Line("  no agents", "dim", workspace=ws))
     for a in sorted(ags, key=lambda a: not needs_you(a, ws)):
-        lines += render_agent(a, ws, now, width)
+        lines += render_agent(a, ws, now, width, (spend or {}).get(a["id"]))
     return lines
 
 
 def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = None,
-           state: NavState | None = None) -> list[Line]:
+           state: NavState | None = None,
+           costs: tuple[watch_costs.Local, watch_costs.Remote | None] | None = None) -> list[Line]:
+    """``costs`` is the local figures and the (cached) remote ones; without it
+    there is no Costs section."""
     state = state or NavState()
+    spend = costs[0].workers if costs else None
     # A workspace id is "<repo slug>/<name>": a session spanning several
     # repos (brindle.repos) labels each group with its repo.
     several = len({ws["id"].partition("/")[0] for ws in snap if "/" in ws["id"]}) > 1
@@ -319,6 +325,9 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
     lines.append(Line(""))
     if pilot:
         lines += render_autopilot(pilot, width)
+    if costs:
+        lines += watch_costs.render(costs[0], costs[1], now, width, watch_costs.GROUP in state.collapsed)
+        lines.append(Line(""))
     if not snap:
         for t in _wrap("Nothing running yet. Start an agent with `brindle new <branch>`.", width, ""):
             lines.append(Line(t, "dim"))
@@ -329,7 +338,7 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
         return lines
     for ws, ags in shown:
         lines += render_group(ws, ags, now, width, ws["id"] in state.collapsed,
-                              ws["id"].partition("/")[0] if several else None)
+                              ws["id"].partition("/")[0] if several else None, spend)
         lines.append(Line(""))
     return lines
 
@@ -344,8 +353,13 @@ def print_once(db: DB, repo_root: str | None, color: bool) -> str:
     out = []
     width = shutil.get_terminal_size().columns - 1
     panes = tmux.list_panes()
-    for line in render(view.snapshot(db, repo_root, panes=panes), time.time(), width,
-                       view.autopilot_entry(db, repo_root, panes=panes)):
+    snap = view.snapshot(db, repo_root, panes=panes)
+    feed = watch_costs.Feed(repo_root)
+    feed.get()
+    feed.wait()                  # a one-shot print has nothing to draw meanwhile
+    costs = (watch_costs.local(db, repo_root, snap), feed.get())
+    for line in render(snap, time.time(), width, view.autopilot_entry(db, repo_root, panes=panes),
+                       costs=costs):
         code = ANSI.get(line.style) if color else None
         out.append(f"\033[{code}m{line.text}\033[0m" if code else line.text)
     return "\n".join(out)
@@ -529,6 +543,9 @@ def selection(state: NavState, lines: list[Line]) -> int | None:
 def _toggle_group(state: NavState, lines: list[Line], i: int) -> None:
     ws = lines[i].workspace
     if not ws:
+        if lines[i].group == watch_costs.GROUP:    # the Costs header
+            state.collapsed ^= {watch_costs.GROUP}
+            state.selected, state.group, state.follow = f"g:{watch_costs.GROUP}", None, True
         return
     state.collapsed ^= {ws["id"]}
     state.selected, state.group, state.follow = f"g:{ws['id']}", ws["id"], True
@@ -794,6 +811,9 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
     armed: tuple[str, float] | None = None
     notice, notice_until = "", 0.0
     culled_at = homed_at = 0.0
+    feed = watch_costs.Feed(repo_root)
+    spend = watch_costs.Local()
+    spend_at = 0.0
     while True:
         if time.time() - culled_at >= CULL_SECONDS:
             culled_at = time.time()
@@ -806,6 +826,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
                 pass
         h, w = stdscr.getmaxyx()
         width = max(1, w - 2)  # text starts at column 1, after the selection bar
+        snap_changed = stale
         if stale:
             try:
                 panes = tmux.list_panes()
@@ -822,7 +843,11 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
             lines = help_lines(width, bool(os.environ.get("TMUX")), sidebar)
             selected = None
         else:
-            lines = render(snap, time.time(), width, pilot, state)
+            # Local figures follow every redraw (held for a second so a held key
+            # doesn't re-total the history); the network ones come from the feed's thread.
+            if time.time() - spend_at >= 1.0 or snap_changed:
+                spend, spend_at = watch_costs.local(db, repo_root, snap), time.time()
+            lines = render(snap, time.time(), width, pilot, state, costs=(spend, feed.get()))
             selected = selection(state, lines)
         if state.notice:
             notice, notice_until, state.notice = state.notice, time.time() + CLOSE_CONFIRM_SECONDS, ""
