@@ -1,7 +1,7 @@
 """Select-then-copy in a brindle chat pane (Apple Terminal, Cmd+C): Terminal's
 Cmd+C only copies its own native selection, never tmux's, so brindle puts a
-drag on the clipboard itself, the moment the mouse is released, and keeps the
-highlight until the next key, which is passed on to the chat. Driven through a
+drag on the clipboard itself, the moment the mouse is released, says so on screen and leaves copy mode, so
+the next key goes straight to the chat. Driven through a
 real attached client (SGR mouse bytes on a pty) with a mouse-tracking program
 in the pane and a stub clip command."""
 
