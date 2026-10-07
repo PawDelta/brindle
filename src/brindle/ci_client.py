@@ -100,6 +100,10 @@ TOKEN_FILE = "run_token"
 SETUP_KINDS = ("issue", "validate", "fix")
 SETUP_DIR = ".github/workflows"
 SETUP_BRANCH = "brindle/ci-setup"
+# Labelling an issue with this hands it to the issue workflow.
+TRIGGER_LABEL = "brindle"
+TRIGGER_LABEL_COLOR = "2E7D32"
+TRIGGER_LABEL_DESCRIPTION = "brindle CI picks this up"
 ENV_TOKEN = "BRINDLE_PRO_TOKEN"
 # How init sets Claude up: the ANTHROPIC_API_KEY secret, or workload identity
 # federation (the IDs as Actions variables; the workflow exchanges GitHub's
@@ -1222,6 +1226,162 @@ def _gh(args: list[str], *, run=subprocess.run, input: str | None = None, intera
     return out
 
 
+def _gh_api(path: str, *, run=subprocess.run, method: str | None = None, body: dict | None = None,
+            jq: str | None = None) -> str | None:
+    """``gh api path``: its output, or None when GitHub answers 404."""
+    args = ["api", path]
+    if method:
+        args += ["-X", method]
+    if jq:
+        args += ["--jq", jq]
+    if body is not None:
+        args += ["--input", "-"]
+    try:
+        return _gh(args, run=run, input=json.dumps(body) if body is not None else None)
+    except CIError as e:
+        if "HTTP 404" in str(e):
+            return None
+        raise
+
+
+def create_label(repo: str, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
+    """The label that hands an issue to brindle CI (``--force``: running init
+    again updates it rather than failing)."""
+    _gh(["label", "create", TRIGGER_LABEL, "--repo", repo, "--color", TRIGGER_LABEL_COLOR,
+         "--description", TRIGGER_LABEL_DESCRIPTION, "--force"], run=run)
+    say(f"   label '{TRIGGER_LABEL}' ready: label an issue with it and brindle CI picks the issue up")
+
+
+def _yaml_scalar(text: str) -> str:
+    text = re.split(r"\s+#", text, maxsplit=1)[0].strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1]
+    return text
+
+
+def workflow_jobs(text: str) -> list[str]:
+    """The check names a workflow's jobs report as: each job's ``name``, or
+    its id. A line scan of the top-level ``jobs:`` mapping (brindle has no
+    YAML parser); a name computed by an expression is left out, since its
+    check name is only known when it runs."""
+    names: list[str] = []
+    in_jobs = False
+    job_indent = body_indent = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent == 0:
+            in_jobs = re.match(r"jobs\s*:\s*(#.*)?$", line) is not None
+            continue
+        if not in_jobs:
+            continue
+        if job_indent is None:
+            job_indent = indent
+        if indent == job_indent:
+            m = re.match(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(#.*)?$", line)
+            names.append(m.group(1) if m else "")
+            body_indent = None
+        elif indent > job_indent and names:
+            if body_indent is None:
+                body_indent = indent
+            m = re.match(r"name\s*:\s*(.+)$", line)
+            if indent == body_indent and m:
+                names[-1] = _yaml_scalar(m.group(1))
+    return [n for n in names if n and "${{" not in n]
+
+
+def repo_jobs(cwd: str) -> list[str]:
+    """The check names of the jobs in the checkout's workflows, brindle's own left out."""
+    found: list[str] = []
+    folder = Path(cwd) / SETUP_DIR
+    files = sorted([*folder.glob("*.yml"), *folder.glob("*.yaml")]) if folder.is_dir() else []
+    for path in files:
+        if path.name.startswith("brindle-ci-"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        found += [j for j in workflow_jobs(text) if j not in found]
+    return found
+
+
+def required_checks(repo: str, branch: str, *, run=subprocess.run) -> list[str]:
+    """The status checks ``branch`` requires (none when it isn't protected or
+    requires none)."""
+    out = _gh_api(f"repos/{repo}/branches/{branch}/protection/required_status_checks", run=run)
+    if out is None:
+        return []
+    try:
+        got = json.loads(out)
+    except ValueError:
+        return []
+    if not isinstance(got, dict):
+        return []
+    names = [n for n in got.get("contexts") or [] if isinstance(n, str)]
+    names += [c["context"] for c in got.get("checks") or []
+              if isinstance(c, dict) and isinstance(c.get("context"), str) and c["context"] not in names]
+    return [n for n in names if n]
+
+
+def _require_checks(repo: str, branch: str, names: list[str], *, run=subprocess.run) -> None:
+    """Make ``names`` required on ``branch``: on top of its protection when it
+    has some (only the status checks change), else a protection of just them."""
+    if _gh_api(f"repos/{repo}/branches/{branch}/protection", run=run) is None:
+        body = {"required_status_checks": {"strict": False, "contexts": names}, "enforce_admins": False,
+                "required_pull_request_reviews": None, "restrictions": None}
+        _gh_api(f"repos/{repo}/branches/{branch}/protection", run=run, method="PUT", body=body)
+    elif _gh_api(f"repos/{repo}/branches/{branch}/protection/required_status_checks", run=run,
+                 method="PATCH", body={"contexts": names}) is None:
+        raise CIError("the branch's protection doesn't require status checks yet")
+
+
+def setup_required_checks(repo: str, *, cwd: str, run=subprocess.run,
+                          ask: Callable[[str, str], str] | None = None, required_check: str | None = None,
+                          no_required_check: bool = False, say: Callable[[str], None] = print) -> None:
+    """Fix builds only fix the default branch's required checks, and a new
+    repository has none: offer to make its workflow jobs required.
+    ``required_check`` (--required-check) names the one to require without
+    asking; ``no_required_check`` (--no-required-check) only warns."""
+    branch = _gh(["api", f"repos/{repo}", "--jq", ".default_branch"], run=run).strip() or "main"
+    have = required_checks(repo, branch, run=run)
+    if have:
+        say(f"   {branch} requires {', '.join(have)}: brindle fixes builds where one of them fails")
+        return
+    settings = (f"   to do it yourself: Settings > Branches on github.com/{repo}, add a rule for {branch}, "
+                f"turn on 'Require status checks to pass' and pick the check")
+    say(f"   warning: {branch} requires no status checks, and brindle only fixes builds where a required "
+        "check fails, so fix builds won't run")
+    if no_required_check:
+        say(settings)
+        return
+    if required_check:
+        names = [required_check]
+    else:
+        jobs = repo_jobs(cwd)
+        if not jobs:
+            say(f"   no workflow jobs in {SETUP_DIR} to require; once you have CI, mark its job as required")
+            say(settings)
+            return
+        asker = ask or (lambda q, d: d)
+        names = [job for job in jobs
+                 if not asker(f"Mark '{job}' as required so brindle can fix it when it fails? [Y/n]", "y")
+                 .strip().lower().startswith("n")]
+        if not names:
+            say(settings)
+            return
+    try:
+        _require_checks(repo, branch, names, run=run)
+    except CIError as e:
+        say(f"   GitHub didn't let brindle require {', '.join(names)}: {e}")
+        say("   (a private repository needs a paid GitHub plan for branch protection)")
+        say(settings)
+        return
+    say(f"   {branch} now requires {', '.join(names)}")
+
+
 def origin_url(cwd: str) -> str | None:
     """``cwd``'s ``origin`` remote URL, or None when there is none (or git
     can't tell: not installed, timed out)."""
@@ -1252,6 +1412,46 @@ def check_checkout(repo: str, cwd: str) -> None:
         raise CIError(f"run this inside a checkout of {repo} (origin here ({shown}) isn't a GitHub owner/name)")
     if origin.lower() != repo.lower():
         raise CIError(f"run this inside a checkout of {repo} (origin here is {origin})")
+
+
+def check_clean(cwd: str) -> None:
+    """init commits the workflows on a branch of its own and comes back:
+    with uncommitted changes it stops before doing anything, so they're
+    never carried along or lost."""
+    try:
+        dirty = git.dirty_files(cwd, tracked_only=True)
+    except git.GitError as e:
+        raise CIError(f"not a git checkout: {e}") from e
+    if dirty:
+        raise CIError(f"commit or stash your changes first ({len(dirty)} uncommitted, e.g. "
+                      f"{auth._sanitize(dirty[0], 100)}): init commits the workflows on a branch of its own")
+    if git.current_branch(cwd) == SETUP_BRANCH:
+        raise CIError(f"switch off {SETUP_BRANCH} first: init recreates that branch")
+
+
+def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
+    """Commit ``files`` on :data:`SETUP_BRANCH` and push it, then put the
+    checkout back where it was (also when a step fails) and delete the local
+    setup branch, so the next ``git pull`` after the setup pull request is
+    squash-merged doesn't diverge."""
+    start = git.current_branch(cwd)
+    back = ["checkout", "--quiet", start] if start else ["checkout", "--quiet", "--detach", head_sha(cwd)]
+    git.run(["checkout", "-B", SETUP_BRANCH], cwd)
+    committed = False
+    try:
+        for rel, text in files.items():
+            path = Path(cwd) / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            git.run(["add", rel], cwd)
+        git.run(["commit", "-q", "-m", "Add brindle CI workflows"], cwd)
+        committed = True
+        git.run(["push", "-u", "origin", SETUP_BRANCH], cwd)
+    finally:
+        if not committed:   # the tree was clean, so this only drops what was written here
+            git.run(["reset", "-q", "--hard"], cwd, check=False)
+        git.run(back, cwd)
+        git.run(["branch", "-D", SETUP_BRANCH], cwd, check=False)
 
 
 def _claude_credential(given: str | None, ask: Callable[[str, str], str] | None) -> str:
@@ -1318,14 +1518,16 @@ def federation_condition(repo: str) -> str:
 def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd: str, env: Mapping[str, str],
          base: str | None = None, run=subprocess.run, open_url: Callable[[str], None] | None = None,
          ask: Callable[[str, str], str] | None = None, account=None, client: Client | None = None,
-         credential: str | None = None, workspace_id: str | None = None,
-         say: Callable[[str], None] = print) -> None:
+         credential: str | None = None, workspace_id: str | None = None, required_check: str | None = None,
+         no_required_check: bool = False, say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
     :class:`brindle.pro.account.ProAccount` (the person's brindle Pro
     login; built with ``make`` when not given), ``ask(question, default)`` asks the person, ``open_url`` opens
     the browser. ``credential`` is how Claude signs in (``key`` or
     ``federation``; asked when not given). ``workspace_id`` is the workspace
-    of an organization-level API key (asked after the key when not given)."""
+    of an organization-level API key (asked after the key when not given).
+    ``required_check`` / ``no_required_check`` answer the required-check
+    question (see :func:`setup_required_checks`)."""
     import webbrowser
 
     from brindle.pro import account as account_mod
@@ -1339,7 +1541,8 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         if not REPO_RE.match(repo):
             raise CIError("repository must be owner/name (pass --repo)")
         check_checkout(repo, cwd)
-    say("1/6 checking the GitHub CLI and your rights on the repository")
+    check_clean(cwd)
+    say("1/8 checking the GitHub CLI and your rights on the repository")
     _gh(["auth", "status"], run=run)
     if not repo:
         repo = _gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], run=run).strip()
@@ -1354,16 +1557,16 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     api = client or Client(base)
     org_id = plugin._team_org(org)
     install_url = api.base + "/github/install?" + urllib.parse.urlencode({"org_id": org_id})
-    say(f"2/6 install the brindle GitHub App for {repo}: {install_url}")
+    say(f"2/8 install the brindle GitHub App for {repo}: {install_url}")
     (open_url or webbrowser.open)(install_url)
 
-    say("3/6 creating the org CI token and storing it as the BRINDLE_PRO_TOKEN secret")
+    say("3/8 creating the org CI token and storing it as the BRINDLE_PRO_TOKEN secret")
     got = auth.create_ci_token(plugin._client(base), plugin.store, org_id, f"ci:{repo}")
     cpc = got["token"]
     _gh(["secret", "set", ENV_TOKEN, "--repo", repo], run=run, input=cpc)
     say(f"   token {got['token_id']} created for org {got['org_id']} (the value is only in the secret)")
 
-    say("4/6 model keys: each one goes into gh's own prompt; brindle never sees it")
+    say("4/8 model keys: each one goes into gh's own prompt; brindle never sees it")
     if providers is None:
         installed = [n for n, a in ci_adapters.default_adapters(cwd).items() if a.cli and a.installed()]
         answer = (ask or (lambda q, d: d))("which providers? (claude, codex)", ",".join(installed) or "claude")
@@ -1382,7 +1585,14 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         if p == "claude":
             _set_key_workspace(repo, env, ask, workspace_id, run=run, say=say)
 
-    say("5/6 fetching the workflows and opening a pull request with them")
+    say(f"5/8 creating the '{TRIGGER_LABEL}' issue label")
+    create_label(repo, run=run, say=say)
+
+    say("6/8 checking the default branch's required status checks")
+    setup_required_checks(repo, cwd=cwd, run=run, ask=ask, required_check=required_check,
+                          no_required_check=no_required_check, say=say)
+
+    say("7/8 fetching the workflows and opening a pull request with them")
     files = {}
     for kind in SETUP_KINDS:
         try:
@@ -1393,19 +1603,14 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
             raise
     if not files:
         raise CIError("the server offered no workflow for this org")
-    git.run(["checkout", "-B", SETUP_BRANCH], cwd)
-    for rel, text in files.items():
-        path = Path(cwd) / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-        git.run(["add", rel], cwd)
-    git.run(["commit", "-q", "-m", "Add brindle CI workflows"], cwd)
-    git.run(["push", "-u", "origin", SETUP_BRANCH], cwd)
+    push_setup_branch(cwd, files)
     url = _gh(["pr", "create", "--repo", repo, "--head", SETUP_BRANCH, "--title", "Add brindle CI",
                "--body", "Workflows from `brindle ci init`."], run=run).strip()
     say(f"   pull request: {auth._sanitize(url, 200)}")
+    say(f"   you're back on {git.current_branch(cwd) or 'the commit you started on'}; "
+        f"merge the pull request, then pull")
 
-    say("6/6 doctor")
+    say("8/8 doctor")
     say(doctor(env, repo, cwd, org=ci_adapters.repo_is_org(env, repo, run=run)))
 
 

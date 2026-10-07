@@ -790,7 +790,12 @@ workflows call these commands:
   checkout of the repository. For Claude it asks whether to use an API key
   (the `ANTHROPIC_API_KEY` secret) or Anthropic
   [workload identity federation](https://platform.claude.com/docs/en/manage-claude/wif-reference)
-  (`--credential key|federation` answers without asking).
+  (`--credential key|federation` answers without asking). It also creates the
+  `brindle` issue label (label an issue with it to hand it to brindle CI), and
+  commits the workflows on a `brindle/ci-setup` branch, then puts you back on
+  the branch you started on and deletes the local setup branch, so `git pull`
+  after merging the setup pull request is clean (commit or stash your changes
+  first: it refuses to start with uncommitted work).
 - `brindle ci doctor`: which provider CLIs and credential names a runner has, and
   which providers CI may use on this repository.
 - `brindle ci start`: start a run for an issue, a goal text or a dispatched run,
@@ -801,6 +806,15 @@ workflows call these commands:
 
 Credential names are reported, never values. On a repository owned by a GitHub
 organization, a provider signed in only with a personal subscription is not used.
+
+Fix builds only fix the default branch's *required* status checks, and a new
+repository has none. When the default branch requires none, `brindle ci init`
+warns and, for each job in your workflows, asks whether to make it required
+(`--required-check NAME` picks one without asking, `--no-required-check` only
+warns). It adds the check to the branch's existing protection, or protects the
+branch with just that check. GitHub only allows branch protection on a private
+repository with a paid plan; when it refuses, init says how to require the
+check yourself (Settings > Branches, "Require status checks to pass").
 
 An Anthropic API key is either a workspace key (scoped to one workspace) or an
 organization-level key (not scoped to a workspace). An organization-level key
