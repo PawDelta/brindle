@@ -626,6 +626,15 @@ def requeue(task_id: str, depends_on: list[str] | None = None) -> str:
     it starts at once. Only a cancelled task can be requeued."""
     db = DB()
     caller, here = _caller(db)
+    old = db.get_task(task_id)
+    if old is not None:
+        if old.repo_root not in {root for _, root in _session_repos(db, caller, here)}:
+            return f"Error: No task {task_id}. list_tasks shows what's queued."
+        old_ws = db.get_workspace(old.caller_ws_id) or here
+        refused = _policy_refusal(db, caller, old_ws, old.profile, old.task_text, old.mode,
+                                  tasks._loads(old.files) or None, old.weight, old.branch)
+        if refused:
+            return refused
     try:
         return tasks.requeue(db, caller, here, task_id, depends_on)
     except ValueError as e:

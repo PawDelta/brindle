@@ -105,6 +105,20 @@ def test_requeue_refuses_a_task_that_is_not_cancelled(db, repo, boss):
     assert len(db.list_tasks(str(repo), state="pending")) == 1
 
 
+def test_requeue_refused_by_policy_and_scoped_to_session_repos(db, repo, boss, monkeypatch):
+    from brindle import policy
+
+    b = queued_task(db, repo, started_a(db))
+    mcp_server.cancel_task(b.id)
+    db.update_task(b.id, repo_root="/elsewhere")
+    assert mcp_server.requeue(b.id).startswith("Error: No task")
+    db.update_task(b.id, repo_root=str(repo))
+    monkeypatch.setattr(policy, "check_assign", lambda *a, **k: policy.Decision(False, "no"))
+    out = mcp_server.requeue(b.id)
+    assert "policy refused" in out
+    assert len(db.list_tasks(str(repo), state="pending")) == 0
+
+
 def test_requeue_unknown_task(db, repo, boss):
     assert mcp_server.requeue("nope").startswith("Error")
 
