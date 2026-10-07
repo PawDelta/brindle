@@ -601,18 +601,59 @@ def tail(text: str, lines: int = OUTPUT_TAIL_LINES) -> str:
     return "\n".join(out[-lines:])
 
 
-def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int) -> tuple[bool, str]:
-    """Run one check command. Returns (passed, the tail of its output)."""
-    try:
-        proc = subprocess.run(
-            cmd, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True,
-            text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+class CheckCancelled(Exception):
+    """``cancel()`` turned true while a check command was running."""
+
+
+CANCEL_POLL = 1.0   # seconds between looks at ``cancel`` while a check runs
+
+
+def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
+              cancel=None) -> tuple[bool, str]:
+    """Run one check command. Returns (passed, the tail of its output).
+    ``cancel``, if given, is polled while the command runs; when it turns
+    true the command is killed and ``CheckCancelled`` is raised."""
+    if cancel is None:
+        try:
+            proc = subprocess.run(
+                cmd, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True,
+                text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"$ {cmd}\n(timed out after {timeout}s)"
+        stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+    else:
+        proc = subprocess.Popen(
+            cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return False, f"$ {cmd}\n(timed out after {timeout}s)"
-    output = tail((proc.stdout or "") + (proc.stderr or ""))
-    status = "" if proc.returncode == 0 else f"(exit {proc.returncode})"
-    return proc.returncode == 0, "\n".join(p for p in (f"$ {cmd}", output, status) if p)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                stdout, stderr = proc.communicate(timeout=CANCEL_POLL)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            timed_out = time.monotonic() >= deadline
+            if timed_out or cancel():
+                _kill_group(proc)
+                proc.communicate()
+                if timed_out:
+                    return False, f"$ {cmd}\n(timed out after {timeout}s)"
+                raise CheckCancelled(cmd)
+        returncode = proc.returncode
+    output = tail((stdout or "") + (stderr or ""))
+    status = "" if returncode == 0 else f"(exit {returncode})"
+    return returncode == 0, "\n".join(p for p in (f"$ {cmd}", output, status) if p)
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    import signal
+
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
 
 
 def checking(ap: Autopilot, timeout: float = 900.0) -> bool:
