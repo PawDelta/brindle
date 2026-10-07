@@ -92,6 +92,7 @@ def _after_detach(ws: Workspace) -> None:
     if tmux.has_session(ws.tmux_session):
         typer.echo("Detached; everything is still running. Run `brindle` here to reopen.")
         return
+    agents._stop_local_models(DB())  # the Ollama brindle started, if nothing else uses it
     typer.echo("brindle session paused: nothing is running, and all work is saved.")
     typer.echo("  `brindle continue` picks it up where you left off; `brindle` starts fresh.")
     if scratch.is_scratch(ws.path) and not scratch.transferred_to(ws.path):

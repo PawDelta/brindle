@@ -102,10 +102,11 @@ class RepoConfig:
     services: list[dict] = field(default_factory=list)
     # Start Ollama in the background when a native profile points at it on
     # this machine and it isn't running, and preload the models (see
-    # brindle.native.serve). Off by default: a 30B model holds ~20 GB of GPU
-    # memory, so brindle uses a server that's already running and leaves
-    # starting one to the person.
-    local_models: bool = False
+    # brindle.native.serve). On by default, and only ever does anything for a
+    # native profile pointing at Ollama on a loopback address; the server
+    # brindle started is stopped again when the last session closes. Set
+    # false to never start or preload one.
+    local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
