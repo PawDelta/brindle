@@ -1614,6 +1614,7 @@ def delegate(
         start = base if git.branch_exists(caller_ws.repo_root, base) else "HEAD"
         created = workspaces.create(
             db, caller_ws.path, branch, base, fetch=False, start=start,
+            reuse_registered=True,
         )
         if created.setup and not created.setup.ok:
             raise AgentError(f"workspace setup failed:\n{created.setup.log}")

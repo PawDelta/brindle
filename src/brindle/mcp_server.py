@@ -817,6 +817,13 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
         ws = _ws(db, workspace, repo)
     except repos.RepoError as e:
         return str(e)
+    if not force:
+        # Refuse before any notification or task cancellation goes out.
+        for other in db.workspaces_sharing(ws.repo_root, path=ws.path, exclude_id=ws.id):
+            if ws.kind == "worktree" and workspaces.live_workers(db, other):
+                return (f"Not removed: {ws.id} shares its worktree {ws.path} with {other.id}, "
+                        "which has a live worker; removing it would delete that worker's "
+                        "checkout. Pass force=true to remove it anyway.")
     unmerged = False
     if ws.kind == "worktree" and ws.base_branch and os.path.isdir(ws.path):
         try:
@@ -829,7 +836,10 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
         pipeline.note_removed_unmerged(db, ws, actor=caller)
     else:
         pipeline.note_removed_merged(db, ws, actor=caller)
-    removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
+    try:
+        removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
+    except workspaces.WorkspaceError as e:
+        return f"Not removed: {e}"
     return f"Removed {ws.id}. {removed.branch_note or 'branch deleted'}"
 
 
