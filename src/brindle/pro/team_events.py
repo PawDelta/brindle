@@ -49,8 +49,10 @@ log = logging.getLogger(__name__)
 FEATURE = "team"
 KINDS = ("assign", "handoff", "review", "escalated", "merge", "remove")
 PAYLOAD_KEYS = ("kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref",
-                "at", "approved", "merged", "cost_usd")
+                "at", "approved", "merged", "cost_usd", "by_model")
 MAX_EVENT_COST_USD = 100_000     # the backend refuses more
+MAX_BY_MODEL = 32
+MAX_MODEL_NAME = 128
 BATCH = 100
 BATCH_BYTES = 48 * 1024          # backend caps the body at 64 KiB
 QUEUE_SIZE = 64
@@ -91,6 +93,29 @@ def _usd(v) -> float | None:
     return round(float(v), 4) if 0 <= v <= MAX_EVENT_COST_USD else None
 
 
+def _by_model(v) -> dict | None:
+    """``{name: {"tokens", "usd"}}`` the backend accepts: at most ``MAX_BY_MODEL``
+    entries, names cut to ``MAX_MODEL_NAME`` characters (names that collide are
+    summed), else None."""
+    if not isinstance(v, dict):
+        return None
+    out: dict[str, dict] = {}
+    for name, b in v.items():
+        if not isinstance(name, str) or not name or not isinstance(b, dict):
+            continue
+        tokens = b.get("tokens")
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens < 0:
+            continue
+        usd = _usd(b.get("usd")) or 0.0
+        slot = out.setdefault(name[:MAX_MODEL_NAME], {"tokens": 0, "usd": 0.0})
+        slot["tokens"] += tokens
+        slot["usd"] = round(slot["usd"] + usd, 4)
+    if len(out) > MAX_BY_MODEL:
+        top = sorted(out.items(), key=lambda kv: -kv[1]["tokens"])[:MAX_BY_MODEL]
+        out = dict(top)
+    return out or None
+
+
 def event_payload(key: OrgKey, identity: str | None, ev: Event, repo: str | None = None) -> dict | None:
     """The exact wire form of ``ev`` (always all of ``PAYLOAD_KEYS``, plus
     ``repo`` when given), or None for an unknown kind. ``identity`` is the repo
@@ -117,6 +142,7 @@ def event_payload(key: OrgKey, identity: str | None, ev: Event, repo: str | None
         "approved": _flag(ev.approved),
         "merged": _flag(ev.merged),
         "cost_usd": _usd(ev.cost_usd),
+        "by_model": _by_model(ev.by_model),
     }
     if repo:
         body["repo"] = repo

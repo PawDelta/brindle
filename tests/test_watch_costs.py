@@ -24,11 +24,27 @@ def section(local, remote=None, now=1000.0, width=60, collapsed=False):
     return watch_costs.render(local, remote, now, width, collapsed)
 
 
-def test_local_spend_today_and_month():
-    lines = section(Local(today=1.5, month=12.25))
+MODELS = [("opus", 620), ("sonnet", 310), ("haiku", 40), ("gpt", 20), ("local", 10)]
+
+
+def test_usage_share_by_model_top_three_and_other():
+    lines = section(Local(month=12.25, models=MODELS))
     assert texts(lines)[0].startswith("▾ Costs")
-    assert "today $1.50 · month $12.25" in lines[1].text
-    assert len(lines) == 2
+    body = [t.strip() for t in texts(lines)[1:]]
+    assert [t.split()[0] for t in body] == ["opus", "sonnet", "haiku", "other"]
+    assert [t.split()[-1] for t in body] == ["62%", "31%", "4%", "3%"]
+    assert "$" not in "".join(body)
+    assert len(lines) == 5
+
+
+def test_shares_add_up_to_100():
+    pct = [p for _, p in watch_costs.shares([("a", 1), ("b", 1), ("c", 1)])]
+    assert sum(pct) == 100
+    assert watch_costs.shares([]) == []
+
+
+def test_no_usage_says_so():
+    assert "no usage this month" in section(Local())[1].text
 
 
 def test_worker_dollars_sit_next_to_tokens():
@@ -55,44 +71,33 @@ def test_seat_spend_counted_by_the_org_wins_when_larger():
     assert "$9.00 of $10.00" in lines[2].text and lines[2].style == "alert"
 
 
-def test_admin_sees_org_total_and_cost_centers():
+def test_org_totals_and_cost_centers_are_not_in_the_sidebar():
     org = Org(True, 400.0, 1000.0, [("ops", 100.0, None), ("eng", 300.0, 500.0)], seats_over=2,
               unattributed=5.0)
-    lines = section(Local(month=1.0), Remote(org=org, at=970.0), now=1000.0, width=100)
-    assert "org $400.00 of $1,000.00" in lines[2].text and "updated 30s ago" in lines[2].text
-    assert "2 seats over" in lines[2].text and lines[2].style == "alert"
-    assert lines[3].text.strip() == "eng $300.00 of $500.00 · ops $100.00 · unattributed $5.00"
-    assert len(lines) == 4
+    lines = section(Local(models=MODELS), Remote(org=org, at=970.0), now=1000.0, width=100)
+    text = "".join(texts(lines))
+    assert "org " not in text and "eng" not in text and "unattributed" not in text
+    assert "$" not in text and len(lines) == 5
 
 
-def test_zero_unattributed_is_not_shown():
-    lines = section(Local(), Remote(org=Org(True, 4.0, 10.0, [], 0, 0.0), at=1000.0))
-    assert len(lines) == 3 and "unattributed" not in "".join(texts(lines))
-
-
-def test_admin_org_alerts_at_80_percent():
-    lines = section(Local(), Remote(org=Org(True, 850.0, 1000.0), at=1000.0))
-    assert lines[2].style == "alert"
-
-
-def test_member_sees_own_seat_not_the_org():
+def test_member_sees_the_budget_line_only():
     remote = Remote(limits=budget.Limits(month_usd=50.0, seat_spent_usd=20.0),
                     org=Org(False, 20.0, 50.0), at=1000.0)
     text = "\n".join(texts(section(Local(month=5.0), remote)))
     assert "$20.00 of $50.00" in text
-    assert "org " not in text
+    assert "org " not in text and "seat " not in text
 
 
-def test_offline_hides_the_org_line():
-    lines = section(Local(today=1.0, month=2.0), Remote(at=1000.0))
-    assert len(lines) == 2 and "updated" not in "".join(texts(lines))
+def test_no_budget_means_no_dollars():
+    assert "$" not in "".join(texts(section(Local(month=2.0, models=MODELS), Remote(at=1000.0))))
     assert len(section(Local(), None)) == 2        # nothing fetched yet
 
 
-def test_collapsed_is_one_selectable_line():
-    lines = section(Local(month=3.0), collapsed=True)
+def test_collapsed_is_one_selectable_line_with_the_top_share():
+    lines = section(Local(month=3.0, models=MODELS), collapsed=True)
     assert len(lines) == 1 and lines[0].group == watch_costs.GROUP
-    assert lines[0].text.startswith("▸ Costs")
+    assert lines[0].text.startswith("▸ Costs") and lines[0].text.endswith("(opus 62%)")
+    assert section(Local(), collapsed=True)[0].text == "▸ Costs"
 
 
 def test_costs_header_folds_with_space():
@@ -111,8 +116,9 @@ def test_costs_header_folds_with_space():
 
 def test_lines_fit_a_narrow_sidebar():
     org = Org(True, 400.0, 1000.0, [("engineering", 300.0, 500.0), ("operations", 100.0, None)], 1, 3.0)
-    for ln in section(Local(today=1.0, month=2.0), Remote(limits=budget.Limits(month_usd=10.0),
-                                                        org=org, at=1000.0), width=30):
+    models = [("claude-opus-4-1-20250805", 5), ("claude-sonnet-4", 3), ("x", 1), ("y", 1)]
+    for ln in section(Local(month=2.0, models=models), Remote(limits=budget.Limits(month_usd=10.0),
+                                                            org=org, at=1000.0), width=30):
         assert len(ln.text) <= 30
 
 

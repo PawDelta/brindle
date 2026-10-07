@@ -129,13 +129,16 @@ class Summary:
     by_model: dict[str, Bucket] = field(default_factory=dict)
 
 
+def model_label(p: Priced) -> str:
+    return p.model or (f"profile {p.row.profile}" if p.row.profile else "unknown model")
+
+
 def summary(db: DB, repo_root: str | None, now: float | None = None, days: int = DAYS) -> Summary:
     now = time.time() if now is None else now
     s = Summary(days)
     for p in priced_rows(db, repo_root, now - days * 86400):
         s.total.add(p.dollars, p.tokens)
-        label = p.model or (f"profile {p.row.profile}" if p.row.profile else "unknown model")
-        s.by_model.setdefault(label, Bucket()).add(p.dollars, p.tokens)
+        s.by_model.setdefault(model_label(p), Bucket()).add(p.dollars, p.tokens)
     return s
 
 

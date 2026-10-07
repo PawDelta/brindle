@@ -276,7 +276,7 @@ def test_event_payload_has_exactly_the_contract_keys(team):
     assert p.flush()
     review, remove = team.events
     keys = {"kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref", "at",
-            "approved", "merged", "cost_usd"}
+            "approved", "merged", "cost_usd", "by_model"}
     assert set(review) == set(remove) == keys
     assert review["cost_usd"] is None
     key = OrgKey(ORG, *team.org_key(ORG))

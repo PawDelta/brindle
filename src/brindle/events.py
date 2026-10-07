@@ -56,6 +56,7 @@ class Event:
     workspace_id: str | None = None
     reason: str | None = None
     cost_usd: float | None = None   # what the worker's task cost (a ``remove`` of a Team org member)
+    by_model: dict | None = None    # that cost split by model: {model: {"tokens", "usd"}}
 
 
 class EventsPlugin(ABC):
@@ -117,6 +118,36 @@ def _cost(kind: str, worker: Agent | None, repo_root: str) -> float | None:
         return None
 
 
+def _by_model(kind: str, worker: Agent | None, repo_root: str) -> dict | None:
+    """``{model: {"tokens", "usd"}}`` for the spend ``_cost`` covers, under the
+    same conditions. Unpriced tokens count with ``usd`` 0."""
+    if kind != "remove" or worker is None:
+        return None
+    try:
+        from brindle import cost
+        from brindle.db import DB
+        from brindle.pro import license
+
+        if not license.has("org_budgets"):
+            return None
+        db = DB()
+        pricer = cost.Pricer(repo_root)
+        out: dict[str, dict] = {}
+        for r in cost.rows_since(db, repo_root, 0.0):
+            if r.agent_id != worker.id:
+                continue
+            p = pricer.row(r)
+            if p is None:
+                continue
+            slot = out.setdefault(cost.model_label(p), {"tokens": 0, "usd": 0.0})
+            slot["tokens"] += p.tokens
+            slot["usd"] += p.dollars or 0.0
+        return out or None
+    except Exception:
+        log.debug("brindle: couldn't split %s by model for the event", worker.id, exc_info=True)
+        return None
+
+
 def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None, *,
          actor: Agent | str | None = None, approved: bool | None = None,
          merged: bool | None = None) -> None:
@@ -131,6 +162,7 @@ def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None,
             model=_model(worker.profile if worker else None, ws.repo_root),
             actor=who, approved=approved, merged=merged, workspace_id=ws.id,
             cost_usd=_cost(kind, worker, ws.repo_root),
+            by_model=_by_model(kind, worker, ws.repo_root),
         ))
     except Exception:
         log.exception("brindle: the events plugin failed on a %s event", kind)
