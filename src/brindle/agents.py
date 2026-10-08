@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 
-from brindle import git, keystore, providers, secrets, tmux, workspaces
+from brindle import git, keystore, pane_auth, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import load_profile, missing_add_dirs
@@ -427,16 +427,28 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     # Keys stored with `brindle keys` reach this window's env only (never the
     # tmux server's), unless the environment already has the name or an org's
     # deny_personal_keys keeps it out. deny/allow strip it as they do an exported key.
-    denied = set(m.denied_keys) if m is not None and m.denied_keys else set()
-    if agent.provider == "claude" and providers.claude_org_managed():
-        # Claude Code's managed settings supply the credential: no stored Claude key.
-        denied |= set(providers._ENV_AUTH["claude"])
-    env = {**keystore.pane_keys(credentials - denied, env), **env}
-    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
-                             tag=(AGENT_TAG, agent.id),
-                             keep=credentials,
-                             **({"allow": allow} if allow is not None else {}),
-                             **({"deny": m.denied_keys} if m is not None and m.denied_keys else {}))
+    # The profile's `auth` (subscription strips the provider's keys) and Claude
+    # Code's managed settings (a personal key mustn't bypass them) add to the
+    # org's denied keys; the org's own key (key_env / key_helper) is set last and
+    # passes the deny (secrets.org_key), a personal key under its name doesn't.
+    from brindle.pro import managed_models
+
+    org_managed = agent.provider == "claude" and bool(providers.claude_org_managed())
+    deny = pane_auth.deny_names(agent.provider, guarded.auth if guarded is not None else "auto",
+                                m, org_managed)
+    try:
+        org_env = managed_models.org_key_env(m, agent.provider)
+    except managed_models.ManagedUnavailable as e:
+        raise AgentError(f"managed models: {e}") from None
+    # Claude Code's managed settings supply the credential: no stored Claude key.
+    no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
+    env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}
+    with secrets.org_key(org_env):
+        target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
+                                 tag=(AGENT_TAG, agent.id),
+                                 keep=credentials,
+                                 **({"allow": allow} if allow is not None else {}),
+                                 **({"deny": deny} if deny else {}))
     # The pane id only means anything on the server that issued it (a
     # resumed agent may come back on a different one), so record both.
     server = tmux.current_server()
@@ -604,9 +616,16 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     # no personal keys (blank, so the launcher's own copy doesn't count).
     from brindle.pro import managed_models
 
-    why = signed_out(provider.name, {**profile.env, **managed_models.agent_env(m, provider.name),
-                                     **{k: "" for k in secrets.pane_deny(m.denied_keys if m else (),
-                                                                         {**profile.env, **managed_models.agent_env(m, provider.name)})}})
+    launch_env = {**profile.env, **managed_models.agent_env(m, provider.name)}
+    deny = pane_auth.deny_names(provider.name, profile.auth, m,
+                                provider.name == "claude" and bool(providers.claude_org_managed()))
+    org_key = managed_models.has_org_key(m, provider.name)
+    why = pane_auth.key_problem(profile, provider.name, deny, org_key)
+    if why:
+        raise AgentError(why)
+    # The org's own key signs the agent in: there is no login to check.
+    why = None if org_key else signed_out(
+        provider.name, {**launch_env, **{k: "" for k in secrets.pane_deny(deny, launch_env)}})
     if why:
         raise AgentError(why)
     # Here rather than in spawn, so a resume checks too: a directory can be

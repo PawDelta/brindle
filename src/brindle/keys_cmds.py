@@ -47,7 +47,16 @@ def keys_set(name: str = typer.Argument(..., help="The variable, e.g. ANTHROPIC_
         _fail(str(e))
     typer.echo(f"stored {name}")
     if name == "ANTHROPIC_API_KEY":
+        _warn_login()
         _offer_approval(value)
+
+
+def _warn_login() -> None:
+    from brindle import providers
+
+    if providers.subscription_login("claude"):
+        typer.secho("Claude Code will bill this key instead of your subscription in brindle panes; "
+                    "set auth: subscription on a profile to keep the login", fg="yellow")
 
 
 def _offer_approval(value: str) -> None:

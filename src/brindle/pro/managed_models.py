@@ -49,7 +49,13 @@ ROUTING_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VE
                "AWS_REGION", "AWS_DEFAULT_REGION", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID")
 
 NAMES = {"bedrock": "AWS Bedrock", "vertex": "Google Vertex AI", "azure": "Azure",
-         "openai-compatible": "an OpenAI-compatible endpoint"}
+         "openai-compatible": "an OpenAI-compatible endpoint", "anthropic": "the Anthropic API"}
+
+# The variable the org's key (``key_env`` / ``key_helper``) is set as in a pane,
+# by the agent's provider, for the managed provider that carries a key.
+ORG_KEY_VARS = {("claude", "anthropic"): "ANTHROPIC_API_KEY",
+                ("codex", "openai-compatible"): "OPENAI_API_KEY"}
+KEY_HELPER_TIMEOUT = 15.0
 
 
 class ManagedUnavailable(Exception):
@@ -77,6 +83,8 @@ class Managed:
                 bits.append(c.endpoint)
             if c.model_ids:
                 bits.append("models " + ", ".join(c.model_ids))
+            if c.key_env or c.key_helper:
+                bits.append("org-owned key")
             parts.append(bits[0] + (f" ({', '.join(bits[1:])})" if bits[1:] else ""))
         if self.deny_personal_keys:
             parts.append("personal API keys denied")
@@ -126,7 +134,7 @@ def provider_env(cfg: ProviderConfig, provider: str) -> dict[str, str]:
             env["CLAUDE_CODE_USE_FOUNDRY"] = "1"
             if cfg.endpoint:
                 env["ANTHROPIC_FOUNDRY_BASE_URL"] = cfg.endpoint
-        if cfg.model_ids and cfg.provider in ("bedrock", "vertex", "azure"):
+        if cfg.model_ids and cfg.provider in ("bedrock", "vertex", "azure", "anthropic"):
             env["ANTHROPIC_MODEL"] = cfg.model_ids[0]
             if len(cfg.model_ids) > 1:
                 env["ANTHROPIC_SMALL_FAST_MODEL"] = cfg.model_ids[-1]
@@ -207,6 +215,48 @@ def agent_env(m: Managed | None, provider: str) -> dict[str, str]:
     if m is None or m.config is None:
         return {}
     return provider_env(m.config, provider)
+
+
+def has_org_key(m: Managed | None, provider: str) -> bool:
+    """Whether the org supplies a key (``key_env`` / ``key_helper``) for
+    ``provider``'s agents. Reads nothing and runs nothing."""
+    c = getattr(m, "config", None)
+    return bool(c and (c.key_env or c.key_helper) and (provider, c.provider) in ORG_KEY_VARS)
+
+
+def org_key_env(m: Managed | None, provider: str) -> dict[str, str]:
+    """The org-owned key for a pane of ``provider``: ``{variable: key}``, or {}
+    when the org sets none for it. ``key_env`` is read from this process's
+    environment, ``key_helper`` run now (no shell, with a timeout). The key goes
+    only into that pane's environment: never logged, cached or sent anywhere,
+    and no failure message contains the helper's output. Raises
+    :class:`ManagedUnavailable` when the key can't be had (fail closed)."""
+    import os
+    import subprocess
+
+    if not has_org_key(m, provider):
+        return {}
+    c = m.config
+    var = ORG_KEY_VARS[(provider, c.provider)]
+    if c.key_env:
+        value = os.environ.get(c.key_env, "").strip()
+        if not value:
+            raise ManagedUnavailable(f"org {m.org_id}'s key variable {c.key_env} isn't set")
+        return {var: value}
+    name = c.key_helper[0]
+    try:
+        out = subprocess.run(list(c.key_helper), shell=False, capture_output=True, text=True,
+                             timeout=KEY_HELPER_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
+    except FileNotFoundError:
+        raise ManagedUnavailable(f"org {m.org_id}'s key helper {name!r} wasn't found") from None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        why = "timed out" if isinstance(e, subprocess.TimeoutExpired) else "couldn't be run"
+        raise ManagedUnavailable(f"org {m.org_id}'s key helper {name!r} {why}") from None
+    value = out.stdout.strip()
+    if out.returncode != 0 or not value:
+        raise ManagedUnavailable(f"org {m.org_id}'s key helper {name!r} "
+                                 + (f"failed (exit {out.returncode})" if out.returncode else "printed no key"))
+    return {var: value}
 
 
 def doctor_line(repo_root: str | None) -> tuple[bool, str] | None:
