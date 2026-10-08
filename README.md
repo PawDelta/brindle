@@ -967,8 +967,11 @@ workflows call these commands:
   or the pull request's checks and reviews and the evidence upload.
 - `brindle ci report`: tell the service how the workflow's jobs ended.
 
-Credential names are reported, never values. On a repository owned by a GitHub
-organization, a provider signed in only with a personal subscription is not used.
+Credential names are reported, never values. CI uses API keys, cloud sign-ins
+(Bedrock, Vertex, Foundry) or identity federation only: a provider signed in
+only with a subscription (`CLAUDE_CODE_OAUTH_TOKEN`, a Codex ChatGPT login) is
+not used, on personal and organization repositories alike. Add an API key
+secret instead.
 
 Fix builds only fix the default branch's *required* status checks, and a new
 repository has none. When the default branch requires none, `brindle ci init`
