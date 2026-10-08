@@ -50,7 +50,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable, Mapping, MutableMapping
 
-from brindle import airgap, ci_adapters, ci_federation, git
+from brindle import airgap, ci_adapters, ci_federation, git, model_access
 from brindle.pro import auth, license
 from brindle.secrets import SECRET_ENV, SECRET_PREFIXES, is_job_secret, scrub_secrets  # noqa: F401
 
@@ -947,7 +947,15 @@ def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | 
         state, note = "failed", stuck
     else:
         state, note = "working", f"supervisor {root.status}; autopilot {ap.state if ap else 'off'}"
-    event = {"state": state, "milestones": milestone_rows(db, root_id, milestone_ids),
+    extra = model_access.notes()
+    if root is not None:
+        try:
+            extra += adapter.notices(db, root)
+        except Exception:  # noqa: BLE001 - a notice never fails a session report
+            pass
+    if extra:
+        note = "; ".join([n for n in (note, *extra) if n])
+    event ={"state": state, "milestones": milestone_rows(db, root_id, milestone_ids),
              "usage": adapter.usage(db, root_id),
              "commits": count_commits(cwd, base_sha, branch) if cwd and base_sha and branch else 0,
              "provider_error": adapter.provider_error(db, root_id)}
@@ -1376,12 +1384,18 @@ def run_validation(plan: dict, run_token: str, *, cwd: str, env: MutableMapping[
 
 
 def doctor(env: Mapping[str, str], repo: str | None, cwd: str,
-           adapters: Mapping[str, ci_adapters.Adapter] | None = None, org: bool | None = None) -> str:
+           adapters: Mapping[str, ci_adapters.Adapter] | None = None, org: bool | None = None,
+           models: bool = False, run=subprocess.run) -> str:
+    """The doctor report. With ``models``, also one tiny call per pinned
+    model, each refusal named with its cause and fix."""
     adapters = adapters or ci_adapters.default_adapters(cwd)
     if org is None:
         org = ci_adapters.repo_is_org(env, repo)
     rows = ci_adapters.doctor(adapters, env, org)
-    return ci_adapters.format_doctor(rows, repo, org)
+    text = ci_adapters.format_doctor(rows, repo, org)
+    if models:
+        text += "\n" + "\n".join(ci_adapters.check_models(adapters, env, cwd, org, run=run))
+    return text
 
 
 # -- init -------------------------------------------------------------------------------------------------
