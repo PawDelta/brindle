@@ -192,15 +192,13 @@ def test_native_client_refuses_cross_origin_redirects():
 # -- the credential rule --------------------------------------------------------------------------
 
 
-def test_subscription_only_is_unusable_on_org_repos(bins):
+def test_subscription_only_is_unusable_on_every_repo(bins):
     a = ClaudeAdapter()
     sub = {"CLAUDE_CODE_OAUTH_TOKEN": "o", "PATH": str(bins)}
     key = {"ANTHROPIC_API_KEY": "k", "PATH": str(bins)}
-    assert usable(a, sub, org=False) == (True, "")
-    ok, why = usable(a, sub, org=True)
-    assert not ok and "personal subscription" in why and "an organization" in why
-    ok, why = usable(a, sub, org=None)
-    assert not ok and "unknown" in why, "unknown owner: the stricter answer"
+    for org in (False, True, None):
+        ok, why = usable(a, sub, org=org)
+        assert not ok and "personal subscription" in why and "API key" in why
     assert usable(a, key, org=True) == (True, "")
     assert usable(a, {"PATH": str(bins)}, org=False) == (False, "no credential found")
     assert usable(a, {**key, "PATH": "/nonexistent"}, org=False) == (False, "claude isn't installed")
@@ -220,7 +218,7 @@ def test_providers_available(bins):
     env = {"CLAUDE_CODE_OAUTH_TOKEN": "o", "OPENAI_API_KEY": "k", "PATH": str(bins)}
     adapters = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
     assert providers_available(adapters, env, org=True) == ["codex"]
-    assert providers_available(adapters, env, org=False) == ["claude", "codex"]
+    assert providers_available(adapters, env, org=False) == ["codex"]
 
 
 def test_repo_is_org_from_event_payload_then_api(tmp_path):

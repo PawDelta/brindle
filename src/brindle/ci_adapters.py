@@ -19,11 +19,12 @@ An adapter answers four questions and does three things:
   its raw reply.
 * ``usage``: token usage of a session, by model.
 
-The credential rule (:func:`usable`): on a repository owned by a GitHub
-organization, a provider whose only credential is a personal subscription is
-unavailable for CI. Personal repositories may use it. Whether the owner is
-an organization comes from the workflow's event payload or the GitHub API
-(:func:`repo_is_org`); when neither says, the stricter answer is used.
+The credential rule (:func:`usable`): CI uses API keys, cloud sign-ins or
+identity federation only. A provider whose only credential is a personal
+subscription (``CLAUDE_CODE_OAUTH_TOKEN``, a Codex ChatGPT login) is
+unavailable for CI on every repository, personal or organization-owned.
+The repository owner (:func:`repo_is_org`) is still reported but no longer
+changes the rule.
 
 Nothing here decides anything about the run itself: no verdicts, no stall
 detection, no rendering. The server does that.
@@ -610,10 +611,10 @@ def usable(adapter: Adapter, env: Mapping[str, str], org: bool | None) -> tuple[
     ok, why = adapter.available(env)
     if not ok:
         return False, why
-    if adapter.credential(env).kind == SUBSCRIPTION and org is not False:
-        who = "an organization" if org else "unknown (treated as an organization)"
-        return False, (f"its only credential is a personal subscription and the repository owner is "
-                       f"{who}: use an API key or a cloud sign-in")
+    if adapter.credential(env).kind == SUBSCRIPTION:
+        return False, ("its only credential is a personal subscription, which CI may not use "
+                       "(Anthropic's terms bar third parties from routing subscription credentials): "
+                       "use an API key or a cloud sign-in")
     return True, ""
 
 

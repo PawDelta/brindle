@@ -317,6 +317,34 @@ def _frontmatter_name(text: str) -> str | None:
     return None
 
 
+def literal_credential(text: str) -> str | None:
+    """The name of a model credential an ``env.NAME: value`` line of this
+    profile text sets to a literal value (the org library would store and
+    serve the key), or None. ``api_key_env: NAME`` is not such a line, and
+    neither is an empty value or a ``$VAR`` reference."""
+    from brindle import secrets
+
+    known = set(secrets.PERSONAL_KEYS)
+    for names in secrets._CREDENTIALS.values():
+        known.update(names)
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition(":")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if sep and key.startswith("env.") and key[4:] in known and value and not value.startswith("$"):
+            return key[4:]
+    return None
+
+
+def _refuse_literal_credential(text: str, what: str) -> None:
+    from brindle.pro import auth
+
+    name = literal_credential(text)
+    if name:
+        raise auth.AuthError(f"{what} sets {name} to a literal value; the org library must not hold "
+                             f"credentials. Name the variable with api_key_env instead",
+                             code="bad_request")
+
+
 def read_item(path: str | Path, kind: str, *, name: str | None = None, pinned: bool = False) -> dict:
     """The item to publish from a profile or rule-pack file: named ``name``,
     else by the file's frontmatter ``name``, else by its file name."""
@@ -334,6 +362,8 @@ def read_item(path: str | Path, kind: str, *, name: str | None = None, pinned: b
                              "(use --name)", code="bad_request")
     if not text.strip() or len(text) > MAX_TEXT:
         raise auth.AuthError(f"{p} must be 1 to {MAX_TEXT} characters", code="bad_request")
+    if kind == "profile":
+        _refuse_literal_credential(text, str(p))
     return {"kind": kind, "name": name, "text": text, "pinned": bool(pinned)}
 
 
@@ -342,6 +372,9 @@ def push(client, store, org_id: str, *, publish: list[dict] = (), delete: list[d
     admin+); the answer is the library's new version and its items."""
     from brindle.pro import auth
 
+    for it in publish:
+        if it.get("kind") == "profile":
+            _refuse_literal_credential(str(it.get("text", "")), f"profile {it.get('name')!r}")
     status, body = auth.authed(client, store, "POST", _path(org_id),
                                auth.JSONBody({"publish": list(publish), "delete": list(delete)}))
     if status != 200:
