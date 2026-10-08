@@ -332,7 +332,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle cost estimate [--tasks N] [--weight W] [--profile P] [--reviewer R]` | what the current goal (or N tasks) is likely to cost, as a range from this repo's history (median to p80 of past worker and review runs), plus a cheaper alternative with a different reviewer; says "low confidence" when there's too little history. Also added to `set_goal` and `assign` replies (brindle Pro) |
 | `brindle learning` | whether brindle Pro's hosted learning is on for this repo, and if not, why (nothing is learned on your machine) |
 | `brindle learning seed` | Pro: sends this repo's finished routing history to the hosted learner once, so it starts with what this machine has seen. Only the usual coarse record fields leave (kind/size one-hots, counters, HMAC keys), never task text or paths. A second run sends nothing new; decisions already sent live are skipped |
-| `brindle account [login\|logout\|status\|upgrade\|portal\|org]` | paid features: bare `brindle account` shows what your plan has and how to get the rest (see "brindle Pro and Team" below) |
+| `brindle account [login\|logout\|status\|upgrade\|portal\|seats\|org]` | paid features: bare `brindle account` shows what your plan has and how to get the rest (see "brindle Pro and Team" below) |
 | `brindle audit verify\|export\|pubkey\|ship\|prune` | the local tamper-evident audit log, and shipping it to your SIEM (brindle Enterprise; see "Audit log" below) |
 | `brindle watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks, `x` closes |
 | `brindle sidebar` | bring this session's sidebar into the tmux session you're in (also `Ctrl-b S` in a window without one); restarts it if it was closed |
@@ -737,7 +737,8 @@ brindle account status     # your plan, features, hosted learning on or off, whe
 brindle account savings    # what hosted learning's picks gained in this repo, this month and last: estimates, from this machine's records only
 brindle account upgrade    # opens the checkout for brindle Pro (and prints its URL)
 brindle account upgrade --enterprise [--trial] --seats N --org ORG   # brindle Enterprise for a team org; --trial: free trial, at most 10 seats
-brindle account portal     # opens the billing portal (invoices, seats, cancellation); --org ORG for a team org
+brindle account portal     # opens the billing portal (invoices, payment method, cancellation); --org ORG for a team org
+brindle account seats N    # set a Team or Enterprise org's seat count (billing admin); --org ORG; Stripe prorates the change
 brindle account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
 brindle account org policy # the org's policy, its per-role overrides, and the policy that applies to you
 brindle account org profiles                                  # the org's shared profiles and rule packs, and which are pinned

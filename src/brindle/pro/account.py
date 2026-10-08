@@ -62,7 +62,9 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   upgrade --enterprise [--trial] --seats N [--org ORG]
             the same for brindle Enterprise; --trial starts the free trial
             (at most 10 seats)
-  portal [--org ORG]  open the billing portal (invoices, seats, cancellation)
+  portal [--org ORG]  open the billing portal (invoices, payment method, cancellation)
+  seats N [--org ORG]  set a Team or Enterprise org's seat count (billing admin); Stripe
+            prorates the change on your next invoice
   sync      sync your user-wide settings (~/.brindle/config.json) with your account now
   org list          list the orgs you belong to
   org create <name> create a team org you own (then `upgrade --team`)
@@ -482,7 +484,7 @@ class ProAccount(_OrgCommands):
             and (seats is None or seats >= 1)
             and (opts["org"] is None or bool(opts["team"] or opts["enterprise"]))
             and (not opts["trial"] or bool(opts["enterprise"])),
-            "portal": not rest, "sync": not rest, "savings": not rest,
+            "portal": not rest, "sync": not rest, "savings": not rest, "seats": len(rest) == 1,
             "org": (sub in ("list", "policy") and len(rest) <= 1)
             or (sub in ("use", "invite", "join") and len(rest) == 2)
             or (sub == "learning-share" and len(rest) <= 2 and rest[1:] in ([], ["on"], ["off"]))
@@ -498,7 +500,7 @@ class ProAccount(_OrgCommands):
             "license": (sub in ("status", "remove") and len(rest) <= 1)
             or (sub == "install" and len(rest) == 2),
         }.get(cmd, False)
-        flags_ok = {"upgrade": ("team", "enterprise", "trial", "seats", "org"), "portal": ("org",), "login": ("device",),
+        flags_ok = {"upgrade": ("team", "enterprise", "trial", "seats", "org"), "portal": ("org",), "seats": ("org",), "login": ("device",),
                     "org": ("org", "admin") if sub == "invite"
                     else ("org",) if sub in ("ci-token", "learning-share", "company", "member")
                     else ("org", "pack", "pinned", "name") if sub == "profiles" and rest[1:2] == ["push"]
@@ -530,6 +532,8 @@ class ProAccount(_OrgCommands):
                                         enterprise=bool(opts["enterprise"]), trial=bool(opts["trial"]))
             if cmd == "portal":
                 return self.cmd_portal(base, org=opts["org"])
+            if cmd == "seats":
+                return self.cmd_seats(base, rest[0], org=opts["org"])
             if cmd == "login":
                 return self.cmd_login(base, device=bool(opts["device"]))
             return getattr(self, "cmd_" + cmd)(base)
@@ -794,6 +798,43 @@ class ProAccount(_OrgCommands):
         org = org or (self.store.load() or {}).get("org_id")
         self._open(auth.portal_url(self._client(base), self.store, org))
         return 0
+
+    def cmd_seats(self, base: str | None, n: str, org: str | None = None) -> int:
+        if not (n.isascii() and n.isdigit() and int(n) >= 1):
+            raise auth.AuthError("seats must be a whole number, at least 1", code="bad_request")
+        seats = int(n)
+        org_id = self._team_org(org)
+        status, body = auth.set_seats(self._client(base), self.store, org_id, seats)
+        if status != 200:
+            raise _seats_error(status, body, seats)
+        now = body.get("seats") if isinstance(body.get("seats"), int) else seats
+        used = body.get("used")
+        if isinstance(used, int):
+            self._say(f"Seats: {now} ({used} used). Stripe prorates the change on your next invoice.")
+        else:
+            self._say(f"Seats: {now}. Stripe prorates the change on your next invoice.")
+        return 0
+
+
+def _seats_error(status: int, body: dict, seats: int) -> auth.AuthError:
+    """The message for a refused ``POST /orgs/{org_id}/seats``."""
+    code = body.get("error") if isinstance(body.get("error"), str) else ""
+    desc = auth._sanitize(body.get("error_description")) \
+        if isinstance(body.get("error_description"), str) else ""
+    if status == 403:
+        return auth.AuthError("you need billing rights in this org to change its seats "
+                              "(an owner or billing admin)", code="forbidden")
+    if status == 409 and code == "below_used":
+        return auth.AuthError(f"{seats} is below the members using seats in this org; "
+                              "deactivate someone first, then retry", code="below_used")
+    if status == 409 and code == "over_max":
+        return auth.AuthError(desc or "the seat cap for this plan was reached", code="over_max")
+    if status == 409 and code == "no_subscription":
+        return auth.AuthError("this org has no Team or Enterprise subscription; see "
+                              "`brindle account upgrade`", code="no_subscription")
+    if status == 400:
+        return auth.AuthError("seats must be a whole number, at least 1", code="bad_request")
+    return auth._error(status, body)
 
 
 def make(repo_root: str | None = None) -> ProAccount:

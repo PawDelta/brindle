@@ -710,6 +710,13 @@ def create_invite(client: Client, store, org_id: str, email: str, role: str = "m
     return {k: _sanitize(body.get(k, ""), 320) for k in ("invite_code", "org_id", "email", "role")}
 
 
+def set_seats(client: Client, store, org_id: str, seats: int) -> tuple[int, dict]:
+    """Set a team org's seat count (``POST /orgs/{org_id}/seats``, billing admin).
+    Returns the raw answer; the caller maps the errors."""
+    return authed(client, store, "POST", f"/orgs/{urllib.parse.quote(org_id, safe='')}/seats",
+                  JSONBody({"seats": seats}))
+
+
 def accept_invite(client: Client, store, code: str) -> dict:
     """Join the org an invite code is for (``POST /invites/accept``)."""
     status, body = authed(client, store, "POST", "/invites/accept", JSONBody({"invite_code": code}))
