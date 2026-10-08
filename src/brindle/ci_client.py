@@ -118,7 +118,43 @@ ENV_TOKEN = "BRINDLE_PRO_TOKEN"
 # run job keeps its own token fresh from then on: brindle.ci_federation).
 KEY = "key"
 FEDERATION = "federation"
-CREDENTIALS = (KEY, FEDERATION)
+BEDROCK, VERTEX, FOUNDRY = "bedrock", "vertex", "foundry"
+CLOUDS = (BEDROCK, VERTEX, FOUNDRY)
+CREDENTIALS = (KEY, FEDERATION, *CLOUDS)
+# Keyless cloud sign-in: GitHub's OIDC token (subject
+# repo:OWNER/REPO:environment:brindle-ci) is trusted by the cloud, so nothing
+# secret is stored. Each cloud's IDs are Actions variables, like federation's.
+CLOUD_ENVIRONMENT = "brindle-ci"
+MODEL_PIN_VARS = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+_REGION = r"(?:global|us|eu|[a-z]+(?:-[a-z]+)*-?\d+)"
+_GCP_ID = r"[a-z][a-z0-9-]{4,28}[a-z0-9]"
+_UUID = r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"
+CLOUD_VARS = {   # cloud: ((variable, question, required, pattern, what it looks like), ...)
+    BEDROCK: (
+        ("AWS_ROLE_ARN", "AWS role ARN to assume", True,
+         r"arn:aws[a-z-]*:iam::\d{12}:role/[\w+=,.@/-]+", "arn:aws:iam::123456789012:role/..."),
+        ("AWS_REGION", "AWS region", True, r"[a-z]{2}(?:-[a-z]+)+-\d", "a region such as us-east-1"),
+    ),
+    VERTEX: (
+        ("GCP_WORKLOAD_IDENTITY_PROVIDER", "GCP workload identity provider", True,
+         r"projects/\d+/locations/global/workloadIdentityPools/[\w-]+/providers/[\w-]+",
+         "projects/N/locations/global/workloadIdentityPools/POOL/providers/PROVIDER"),
+        ("GCP_SERVICE_ACCOUNT", "GCP service account email", True,
+         rf"{_GCP_ID}@{_GCP_ID}\.iam\.gserviceaccount\.com", "NAME@PROJECT.iam.gserviceaccount.com"),
+        ("ANTHROPIC_VERTEX_PROJECT_ID", "GCP project id for Vertex AI", True, _GCP_ID, "a GCP project id"),
+        ("CLOUD_ML_REGION", "Vertex AI region", True, _REGION, "a region such as us-east5 or global"),
+    ),
+    FOUNDRY: (
+        ("AZURE_CLIENT_ID", "Azure app (client) id", True, _UUID, "a UUID"),
+        ("AZURE_TENANT_ID", "Azure tenant id", True, _UUID, "a UUID"),
+        ("ANTHROPIC_FOUNDRY_RESOURCE", "Foundry resource name (not a URL)", True,
+         r"[A-Za-z0-9][A-Za-z0-9-]{1,62}", "a resource name, not a URL"),
+    ),
+}
+CLOUD_PIN_FORMAT = (re.compile(r"^[\w.:/@-]+$"), "a model or deployment name")
+CLOUD_OPTION = "--cloud-var NAME=VALUE"
+# The org policy's provider_config names the cloud this way.
+POLICY_CLOUDS = {"bedrock": BEDROCK, "vertex": VERTEX, "azure": FOUNDRY}
 FEDERATION_VARS = (   # (variable, question, required)
     ("ANTHROPIC_FEDERATION_RULE_ID", "federation rule id (fdrl_...)", True),
     ("ANTHROPIC_ORGANIZATION_ID", "Anthropic organization id (uuid)", True),
@@ -1381,7 +1417,7 @@ def doctor(env: Mapping[str, str], repo: str | None, cwd: str,
     if org is None:
         org = ci_adapters.repo_is_org(env, repo)
     rows = ci_adapters.doctor(adapters, env, org)
-    return ci_adapters.format_doctor(rows, repo, org)
+    return "\n".join([ci_adapters.format_doctor(rows, repo, org), *cloud_status(env)])
 
 
 # -- init -------------------------------------------------------------------------------------------------
@@ -1667,8 +1703,11 @@ def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
         git.run(["branch", "-D", SETUP_BRANCH], cwd, check=False)
 
 
-def _claude_credential(given: str | None, ask: Callable[[str, str], str] | None) -> str:
-    choice = given or (ask or (lambda q, d: d))("Claude: API key or identity federation? (key, federation)", KEY)
+CREDENTIAL_QUESTION = f"Claude: API key or identity federation? ({', '.join(CREDENTIALS)})"
+
+
+def _claude_credential(given: str | None, ask: Callable[[str, str], str] | None, default: str = KEY) -> str:
+    choice = given or (ask or (lambda q, d: d))(CREDENTIAL_QUESTION, default)
     choice = choice.strip().lower()
     if choice not in CREDENTIALS:
         raise CIError(f"credential must be {' or '.join(CREDENTIALS)}, not {auth._sanitize(choice, 40)!r}")
@@ -1748,6 +1787,117 @@ def _set_federation(repo: str, values: Mapping[str, str], *, run=subprocess.run,
         "workflow runs, so only give write access to people you trust (forks never get a token)")
 
 
+def _cloud_value(name: str, value: str) -> str:
+    """``value`` stripped, or :class:`CIError` when it isn't blank and doesn't
+    look like what the cloud variable ``name`` holds."""
+    value = value.strip()
+    if name in MODEL_PIN_VARS:
+        pattern, looks = CLOUD_PIN_FORMAT
+    else:
+        pattern, looks = next((re.compile(f"^{p}$"), l) for specs in CLOUD_VARS.values()
+                              for n, _, _, p, l in specs if n == name)
+    if value and not pattern.match(value):
+        raise CIError(f"{name} looks like {looks}, not {auth._sanitize(value, 40)!r}")
+    return value
+
+
+def cloud_of(name: str) -> str | None:
+    """The cloud whose variable ``name`` is, None for any other name."""
+    return next((c for c, specs in CLOUD_VARS.items() if any(n == name for n, *_ in specs)), None)
+
+
+def cloud_ids(cloud: str, env: Mapping[str, str], ask: Callable[[str, str], str] | None,
+              given: Mapping[str, str], prefill: Mapping[str, str] | None = None) -> dict[str, str]:
+    """``cloud``'s variables by name, checked: from ``given`` (--cloud-var),
+    else asked with the variable in ``env`` (then ``prefill``, the org
+    policy's region or project) as the default, so an unattended init takes
+    them from the environment. The model pins are required for Foundry (they
+    are deployment names there) and optional elsewhere."""
+    asker = ask or (lambda q, d: d)
+    prefill = prefill or {}
+    wanted = [(n, q, req) for n, q, req, *_ in CLOUD_VARS[cloud]]
+    wanted += [(n, f"{n} (model pin{'' if cloud == FOUNDRY else ', optional'})", cloud == FOUNDRY)
+               for n in MODEL_PIN_VARS]
+    values = {}
+    for name, question, required in wanted:
+        value = given.get(name)
+        if value is None:
+            value = asker(question, env.get(name) or prefill.get(name) or "")
+        value = _cloud_value(name, value)
+        if not value:
+            if required:
+                raise CIError(f"{name} is required for --credential {cloud} "
+                              f"(pass {CLOUD_OPTION} or set ${name})")
+            continue
+        values[name] = value
+    return values
+
+
+def create_environment(repo: str, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
+    """The GitHub environment the cloud trust is pinned to: the workflows'
+    cloud job runs in it, so its OIDC subject is
+    ``repo:OWNER/REPO:environment:brindle-ci`` (``PUT`` is idempotent)."""
+    _gh_api(f"repos/{repo}/environments/{CLOUD_ENVIRONMENT}", run=run, method="PUT")
+    say(f"   environment '{CLOUD_ENVIRONMENT}' ready")
+
+
+def _set_cloud(repo: str, cloud: str, values: Mapping[str, str], *, run=subprocess.run,
+               say: Callable[[str], None] = print) -> None:
+    """Create the environment and store the :func:`cloud_ids` as Actions
+    variables (no cloud secret is stored: the sign-in is GitHub's OIDC)."""
+    say(f"   claude: {cloud} with keyless GitHub OIDC sign-in; the IDs are stored as Actions variables")
+    create_environment(repo, run=run, say=say)
+    for name, value in values.items():
+        _gh(["variable", "set", name, "--repo", repo, "--body", value], run=run)
+        say(f"   {name} set")
+    say(f"   trust the OIDC subject repo:{repo}:environment:{CLOUD_ENVIRONMENT} in your {cloud} "
+        f"identity provider (no secret is stored; forks never get a token)")
+
+
+def managed_cloud(cwd: str) -> tuple[str, dict[str, str]] | None:
+    """On Enterprise, the cloud the org policy's ``provider_config`` names
+    (bedrock, vertex or azure) and the region/project to prefill; else None."""
+    from brindle.pro import managed_models
+
+    try:
+        m = managed_models.current(cwd)
+    except Exception:  # noqa: BLE001 - not managed, or unreadable: no default
+        return None
+    cfg = m.config if m else None
+    cloud = POLICY_CLOUDS.get(cfg.provider) if cfg else None
+    if not cloud:
+        return None
+    prefill = {}
+    if cloud == BEDROCK and cfg.region:
+        prefill["AWS_REGION"] = cfg.region
+    if cloud == VERTEX:
+        if cfg.region:
+            prefill["CLOUD_ML_REGION"] = cfg.region
+        if cfg.project:
+            prefill["ANTHROPIC_VERTEX_PROJECT_ID"] = cfg.project
+    return cloud, prefill
+
+
+def cloud_status(env: Mapping[str, str]) -> list[str]:
+    """Doctor lines for a configured cloud: which one, and which of its
+    variables are set or missing. Names only, never values."""
+    use = {BEDROCK: "CLAUDE_CODE_USE_BEDROCK", VERTEX: "CLAUDE_CODE_USE_VERTEX", FOUNDRY: "CLAUDE_CODE_USE_FOUNDRY"}
+    lines = []
+    for cloud, specs in CLOUD_VARS.items():
+        names = [n for n, *_ in specs] + list(MODEL_PIN_VARS)
+        if not (env.get(use[cloud]) or any(env.get(n) for n, *_ in specs)):
+            continue
+        have = [n for n in names if env.get(n)]
+        missing = [n for n, _, req, *_ in specs if req and not env.get(n)]
+        if cloud == FOUNDRY:
+            missing += [n for n in MODEL_PIN_VARS if not env.get(n)]
+        line = f"cloud: {cloud} (keyless OIDC); variables set: {', '.join(have) or 'none'}"
+        if missing:
+            line += f"; missing: {', '.join(missing)}"
+        lines.append(line)
+    return lines
+
+
 def federation_condition(repo: str) -> str:
     """The CEL condition init recommends for the federation rule: the
     repository's own brindle CI workflows, not any workflow in it."""
@@ -1761,6 +1911,8 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
          credential: str | None = None, workspace_id: str | None = None, rule_id: str | None = None,
          organization_id: str | None = None, service_account_id: str | None = None,
          required_check: str | None = None, no_required_check: bool = False,
+         cloud_vars: Mapping[str, str] | None = None,
+         managed: Callable[[str], tuple[str, dict[str, str]] | None] = managed_cloud,
          say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
     :class:`brindle.pro.account.ProAccount` (the person's brindle Pro
@@ -1772,7 +1924,10 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     asked when not given). Every credential input is settled before step 3
     creates the CI token, so a missing or bad one never leaves a token behind.
     ``required_check`` / ``no_required_check`` answer the required-check
-    question (see :func:`setup_required_checks`)."""
+    question (see :func:`setup_required_checks`). ``cloud_vars`` gives the
+    variables of ``bedrock``, ``vertex`` or ``foundry`` (keyless OIDC; see
+    :func:`cloud_ids`); on Enterprise ``managed(cwd)`` names the org policy's
+    cloud, which becomes the default credential."""
     import webbrowser
 
     from brindle.pro import account as account_mod
@@ -1790,6 +1945,23 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     for name, value in given_ids.items():
         if value is not None:
             given_ids[name] = _federation_id(name, value)
+    given_cloud = {}
+    for name, value in (cloud_vars or {}).items():
+        if name not in MODEL_PIN_VARS and cloud_of(name) is None:
+            raise CIError(f"{auth._sanitize(name, 40)} isn't a cloud variable")
+        given_cloud[name] = _cloud_value(name, value)
+    if given_cloud:
+        owners = {cloud_of(n) for n in given_cloud if cloud_of(n)}
+        if credential is None and len(owners) == 1:
+            credential = owners.pop()   # a cloud variable answers the question
+        elif credential not in CLOUDS:
+            raise CIError(f"{CLOUD_OPTION} configures {' or '.join(CLOUDS)}, "
+                          f"not --credential {credential or 'unset'}")
+        wrong = [n for n in given_cloud if cloud_of(n) not in (None, credential)]
+        if wrong:
+            raise CIError(f"{', '.join(wrong)} don't belong to --credential {credential}")
+    if credential in CLOUDS and fed_options:
+        raise CIError(f"{', '.join(fed_options)} configure identity federation, not --credential {credential}")
     if repo:
         if not REPO_RE.match(repo):
             raise CIError("repository must be owner/name (pass --repo)")
@@ -1818,12 +1990,20 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         installed = [n for n, a in ci_adapters.default_adapters(cwd).items() if a.cli and a.installed()]
         answer = (ask or (lambda q, d: d))("which providers? (claude, codex)", ",".join(installed) or "claude")
         providers = [p.strip() for p in answer.split(",") if p.strip()]
-    federation = workspace = None
+    federation = workspace = cloud = cloud_values = None
     if "claude" in providers:
         if credential is None and fed_options:
             credential = FEDERATION   # a federation ID option answers the question
-        if _claude_credential(credential, ask) == FEDERATION:
+        default, prefill = KEY, {}
+        if credential is None and (found := managed(cwd)):
+            default, prefill = found   # Enterprise: the org policy's cloud
+        chosen = _claude_credential(credential, ask, default)
+        if chosen == FEDERATION:
             federation = federation_ids(env, ask, given_ids)
+        elif chosen in CLOUDS:
+            if chosen != default:
+                prefill = {}
+            cloud, cloud_values = chosen, cloud_ids(chosen, env, ask, given_cloud, prefill)
         else:
             workspace = key_workspace(env, ask, workspace_id)
 
@@ -1838,6 +2018,9 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
     for p in providers:
         if p == "claude" and federation is not None:
             _set_federation(repo, federation, run=run, say=say)
+            continue
+        if p == "claude" and cloud is not None:
+            _set_cloud(repo, cloud, cloud_values, run=run, say=say)
             continue
         name = secret_names.get(p)
         if not name:
