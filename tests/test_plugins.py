@@ -323,7 +323,7 @@ def test_policy_deny_blocks_assign_and_handoff_with_the_reason(db, repo, boss, m
     assert spawned == [] and db.list_tasks(str(repo)) == []
     info = gate.seen[0]
     assert info.mode == "assign" and info.weight == "heavy" and info.files == ("a.py",)
-    assert info.profile == "developer-heavy" and info.provider == "claude" and info.actor == "boss"
+    assert info.profile == "developer" and info.provider == "claude" and info.actor == "boss"
     assert info.branch == "feat-a" and info.repo_root == str(repo)
     assert gate.seen[1].mode == "handoff"
 
