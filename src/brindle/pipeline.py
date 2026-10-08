@@ -361,6 +361,10 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         except agents.AgentError:
             pass
+    if _retry_on_heavy(db, worker, ws, cfg,
+                       f"the review still asked for changes after {rounds - 1} fix round(s): "
+                       f"{summary}", report):
+        return True, False
     db.update_agent(worker.id, pipeline=None)
     _escalate(db, ws, worker)
     _tell(db, parent_id,
@@ -477,6 +481,8 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         latest = db.get_agent(worker.id)
         if latest is not None and latest.pipeline not in (None, "ready"):
             return text   # the worker moved on meanwhile (a new report): its new state stands
+        if text.startswith("Not merged. ") and _retry_on_heavy(db, worker, ws, cfg, text, report):
+            return text   # the checks failed: a stronger model gets one go at it
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent_id,
@@ -512,6 +518,61 @@ def _light_profile(db: DB, parent: Agent | None, ws: Workspace, cfg: RepoConfig,
         return name
     except autopilot.AutopilotError:
         return cfg.default_agent
+
+
+ESCALATION_PROFILE = "developer-heavy"
+CLOUD_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
+
+
+def fable_enabled(cfg: RepoConfig, worker: Agent, ws: Workspace) -> bool:
+    """Whether a failed heavy task may be retried on Fable: the repo's
+    ``fable_escalation`` when set, else on unless the worker runs on a cloud
+    account (its profile's env, or brindle's own, selects Bedrock, Vertex or
+    Foundry), where Fable may not be enabled."""
+    if cfg.fable_escalation is not None:
+        return bool(cfg.fable_escalation)
+    env = dict(os.environ)
+    try:
+        from brindle.profiles import load_profile
+
+        env.update(load_profile(worker.profile, ws.repo_root).env or {})
+    except Exception:  # noqa: BLE001 - an unreadable profile adds nothing
+        pass
+    return not any(env.get(k) not in (None, "", "0", "false") for k in CLOUD_ENV)
+
+
+def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: str,
+                    report: str) -> bool:
+    """A heavy task's worker failed (the review still asks for changes after
+    its rounds, or the checks fail): start ``developer-heavy`` on the same
+    branch, once, instead of handing the branch to a person. False when the
+    task isn't heavy, Fable isn't enabled, this was already the retry, or no
+    worker could start; the caller then escalates as before."""
+    if worker.profile == ESCALATION_PROFILE or not fable_enabled(cfg, worker, ws):
+        return False
+    if ESCALATION_PROFILE not in cfg.routing.get("heavy", []):
+        return False
+    weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
+    if weight != "heavy":
+        return False
+    parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+    task = (f"{worker.task or ''}\n\nA first attempt by {worker.profile} did not get through: "
+            f"{why}\n\nThe branch `{ws.branch}` holds its work in this worktree. Continue from it: "
+            "fix what is wrong, run the tests that cover your change, commit, and call "
+            "report_result. brindle reviews and checks the branch again before it merges.").strip()
+    try:
+        retry, _ws = agents.delegate(db, parent, ws, ESCALATION_PROFILE, task, "assign",
+                                     isolate=False, done_when=worker.done_when, plan_first=False)
+    except agents.AgentError:
+        return False
+    db.update_agent(worker.id, pipeline=None)
+    db.update_agent(retry.id, pipeline="fixing", pipeline_rounds=0)
+    _tell(db, worker.parent_id,
+          f"[brindle pipeline] `{ws.branch}` (heavy) failed on {worker.profile}: {why} Retrying "
+          f"once on {ESCALATION_PROFILE} ({retry.id}) in the same worktree; it is reviewed and "
+          "checked again before it merges. Nothing to do unless that fails too.\n\n"
+          f"Worker's last report:\n{report}", worker.id)
+    return True
 
 
 def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
