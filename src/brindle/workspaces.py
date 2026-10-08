@@ -110,9 +110,24 @@ def _repo_slug(repo_root: str) -> str:
     return git.slug(Path(repo_root).name) or "repo"
 
 
-def _session_name(repo_root: str, name: str) -> str:
+def _db_slug(db: DB, repo_root: str) -> str:
+    """The id prefix for ``repo_root``'s workspaces. It is the folder slug,
+    unless another repo already uses it (two repos in same-named folders);
+    then a numeric suffix keeps ids distinct. A repo keeps the prefix its
+    existing workspaces have."""
+    base = _repo_slug(repo_root)
+    owners: dict[str, str] = {}
+    for w in db.find_workspaces():
+        owners.setdefault(w.id.rsplit("/", 1)[0], w.repo_root)
+    slug, n = base, 2
+    while owners.get(slug, repo_root) != repo_root:
+        slug, n = f"{base}-{n}", n + 1
+    return slug
+
+
+def _session_name(repo_root: str, name: str, slug: str | None = None) -> str:
     # tmux forbids '.' and ':' in session names.
-    return f"brindle_{_repo_slug(repo_root)}_{name}".replace(".", "_").replace(":", "_")
+    return f"brindle_{slug or _repo_slug(repo_root)}_{name}".replace(".", "_").replace(":", "_")
 
 
 def _unique_name(db: DB, repo_root: str, branch: str) -> str:
@@ -301,8 +316,9 @@ def create(
         how = git.add_worktree(repo_root, path, branch, start_point)
     git.set_base(repo_root, branch, base)
 
+    slug = _db_slug(db, repo_root)
     ws = Workspace(
-        id=f"{_repo_slug(repo_root)}/{name}",
+        id=f"{slug}/{name}",
         repo_root=repo_root,
         name=name,
         kind="worktree",
@@ -313,7 +329,7 @@ def create(
             claimed.port_base if claimed is not None and claimed.port_base is not None
             else _next_port_base(db)
         ),
-        tmux_session=_session_name(repo_root, name),
+        tmux_session=_session_name(repo_root, name, slug),
         created_at=time.time(),
     )
     db.add_workspace(ws)
@@ -434,8 +450,9 @@ def adopt_root(db: DB, repo_path: str) -> Workspace:
     base = git.get_base(repo_root, branch) if branch != "HEAD" else None
     if base is None and not is_main:
         base = cfg.base_branch or git.default_branch(repo_root)
+    slug = _db_slug(db, repo_root)
     ws = Workspace(
-        id=f"{_repo_slug(repo_root)}/{name}",
+        id=f"{slug}/{name}",
         repo_root=repo_root,
         name=name,
         kind="main",
@@ -443,7 +460,7 @@ def adopt_root(db: DB, repo_path: str) -> Workspace:
         base_branch=base,
         path=top,
         port_base=None,
-        tmux_session=_session_name(repo_root, name),
+        tmux_session=_session_name(repo_root, name, slug),
         created_at=time.time(),
     )
     db.add_workspace(ws)

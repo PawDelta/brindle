@@ -126,6 +126,24 @@ def test_attach_refuses_bad_paths_duplicates_and_the_own_repo(db, repo, web, bos
         repos.resolve(db, "boss", str(repo), "nope")
 
 
+def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    twin = git_repo(elsewhere, repo.name, {"pipeline": False})
+    assert twin != repo and twin.name == repo.name
+    attached = repos.attach(db, "boss", str(twin))
+    ows = workspaces.adopt_root(db, str(twin))
+    assert attached.repo_root == str(twin)
+    assert boss.id == f"{repo.name}/root"          # existing ids are unchanged
+    assert ows.id != boss.id and ows.tmux_session != boss.tmux_session
+    assert workspaces.resolve(db, boss.id).repo_root == str(repo)
+    assert workspaces.resolve(db, ows.id).repo_root == str(twin)
+    # A worktree in the twin gets an id under the twin's prefix, not the other repo's.
+    wt = workspaces.create(db, str(twin), "feat/x", fetch=False).workspace
+    assert wt.id.startswith(ows.id.rsplit("/", 1)[0] + "/")
+    assert workspaces.resolve(db, wt.id).repo_root == str(twin)
+
+
 def test_attach_refuses_a_repo_attached_to_another_live_session(db, repo, web, boss, tmp_path, monkeypatch):
     other_repo = git_repo(tmp_path, "other", {})
     ows = workspaces.adopt_root(db, str(other_repo))
