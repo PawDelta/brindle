@@ -77,7 +77,10 @@ jobs:
           terraform validate
       - name: bicep builds
         if: steps.touched.outputs.run == 'true'
-        run: az bicep build --file deploy/azure/main.bicep --outfile "$RUNNER_TEMP/azuredeploy.json"
+        run: |
+          az bicep build --file deploy/azure/main.bicep --outfile "$RUNNER_TEMP/azuredeploy.json"
+          # the committed azuredeploy.json (the Deploy to Azure button's template) must match the Bicep
+          diff <(jq -S 'del(.metadata)' "$RUNNER_TEMP/azuredeploy.json") <(jq -S 'del(.metadata)' deploy/azure/azuredeploy.json)
 
   test:
     needs: changes
