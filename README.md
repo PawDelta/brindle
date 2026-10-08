@@ -59,7 +59,7 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.2.1`). A session started before an upgrade keeps
+session shows it too (`brindle 0.2.2`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -735,6 +735,7 @@ brindle account login      # opens your browser to sign in (--device: enter a co
 brindle account status     # your plan, features, hosted learning on or off, when the entitlement expires
 brindle account savings    # what hosted learning's picks gained in this repo, this month and last: estimates, from this machine's records only
 brindle account upgrade    # opens the checkout for brindle Pro (and prints its URL)
+brindle account upgrade --enterprise [--trial] --seats N --org ORG   # brindle Enterprise for a team org; --trial: free trial, at most 10 seats
 brindle account portal     # opens the billing portal (invoices, seats, cancellation); --org ORG for a team org
 brindle account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
 brindle account org policy # the org's policy, its per-role overrides, and the policy that applies to you

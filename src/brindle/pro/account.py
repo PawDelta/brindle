@@ -42,6 +42,8 @@ FEATURES = (
      "`min_version`, `required_profiles`, `required_rule_packs`, `kill_switch` in your org policy (`brindle account org policy`)"),
 )
 
+TRIAL_MAX_SEATS = 10   # an Enterprise trial is capped here (the backend enforces it too)
+
 USAGE = """usage: brindle account [<command>] [--base-url URL]
 
   (none)    what brindle Pro/Team add, which you have, and how to get the rest
@@ -57,6 +59,9 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   upgrade --team --seats N [--org ORG]
             print the checkout URL for brindle Team on a team org you administer
             (default: the current org)
+  upgrade --enterprise [--trial] --seats N [--org ORG]
+            the same for brindle Enterprise; --trial starts the free trial
+            (at most 10 seats)
   portal [--org ORG]  open the billing portal (invoices, seats, cancellation)
   sync      sync your user-wide settings (~/.brindle/config.json) with your account now
   org list          list the orgs you belong to
@@ -453,7 +458,9 @@ class ProAccount(_OrgCommands):
             print(USAGE, file=self.out)
             return 0
         try:
-            opts = {"team": _take(args, "--team", value=False), "seats": _take(args, "--seats"),
+            opts = {"team": _take(args, "--team", value=False),
+                    "enterprise": _take(args, "--enterprise", value=False),
+                    "trial": _take(args, "--trial", value=False), "seats": _take(args, "--seats"),
                     "org": _take(args, "--org"), "admin": _take(args, "--admin", value=False),
                     "device": _take(args, "--device", value=False),
                     "pack": _take(args, "--pack", value=False),
@@ -470,8 +477,11 @@ class ProAccount(_OrgCommands):
             sub = rest[0] if rest else "status"
         ok = {
             "features": not rest, "login": not rest, "logout": not rest, "status": not rest,
-            "upgrade": not rest and (bool(opts["team"]) == (seats is not None)) and (seats or 1) >= 1
-            and (opts["org"] is None or bool(opts["team"])),
+            "upgrade": not rest and not (opts["team"] and opts["enterprise"])
+            and (bool(opts["team"] or opts["enterprise"]) == (seats is not None))
+            and (seats is None or seats >= 1)
+            and (opts["org"] is None or bool(opts["team"] or opts["enterprise"]))
+            and (not opts["trial"] or bool(opts["enterprise"])),
             "portal": not rest, "sync": not rest, "savings": not rest,
             "org": (sub in ("list", "policy") and len(rest) <= 1)
             or (sub in ("use", "invite", "join") and len(rest) == 2)
@@ -488,7 +498,7 @@ class ProAccount(_OrgCommands):
             "license": (sub in ("status", "remove") and len(rest) <= 1)
             or (sub == "install" and len(rest) == 2),
         }.get(cmd, False)
-        flags_ok = {"upgrade": ("team", "seats", "org"), "portal": ("org",), "login": ("device",),
+        flags_ok = {"upgrade": ("team", "enterprise", "trial", "seats", "org"), "portal": ("org",), "login": ("device",),
                     "org": ("org", "admin") if sub == "invite"
                     else ("org",) if sub in ("ci-token", "learning-share", "company", "member")
                     else ("org", "pack", "pinned", "name") if sub == "profiles" and rest[1:2] == ["push"]
@@ -516,7 +526,8 @@ class ProAccount(_OrgCommands):
                     return getattr(self, "cmd_org_" + sub)(base, *rest[1:], org=opts["org"])
                 return getattr(self, "cmd_org_" + sub)(base, *rest[1:])
             if cmd == "upgrade":
-                return self.cmd_upgrade(base, team=bool(opts["team"]), seats=seats, org=opts["org"])
+                return self.cmd_upgrade(base, team=bool(opts["team"]), seats=seats, org=opts["org"],
+                                        enterprise=bool(opts["enterprise"]), trial=bool(opts["trial"]))
             if cmd == "portal":
                 return self.cmd_portal(base, org=opts["org"])
             if cmd == "login":
@@ -761,7 +772,15 @@ class ProAccount(_OrgCommands):
         return 0
 
     def cmd_upgrade(self, base: str | None, team: bool = False, seats: int | None = None,
-                    org: str | None = None) -> int:
+                    org: str | None = None, enterprise: bool = False, trial: bool = False) -> int:
+        if enterprise:
+            if trial and seats is not None and seats > TRIAL_MAX_SEATS:
+                raise auth.AuthError(f"an Enterprise trial is limited to {TRIAL_MAX_SEATS} seats "
+                                     f"(you asked for {seats}): lower --seats, or drop --trial",
+                                     code="bad_request")
+            self._open(auth.checkout_url(self._client(base), self.store, plan="enterprise",
+                                        seats=seats, org_id=self._team_org(org), trial=trial))
+            return 0
         if not team:
             self._open(auth.checkout_url(self._client(base), self.store))
             return 0

@@ -135,6 +135,15 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 @pytest.fixture(autouse=True)
+def no_signed_in_providers(monkeypatch):
+    """No sign-in probes in tests, and no `providers` param on /entitlement
+    (tests/test_entitlement_providers.py sets its own)."""
+    from brindle import doctor
+
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
+
+
+@pytest.fixture(autouse=True)
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
