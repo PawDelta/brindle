@@ -13,8 +13,9 @@ from brindle.db import Agent
 
 
 class Picker(learning.LearningPlugin):
-    def __init__(self, prefer=None, reason="its record is better"):
+    def __init__(self, prefer=None, reason="its record is better", note=None):
         self.prefer, self.reason, self.asked, self.defaults = prefer, reason, [], []
+        self.note = note
 
     def record(self, task, outcome):
         pass
@@ -25,6 +26,7 @@ class Picker(learning.LearningPlugin):
         if self.prefer not in candidates:
             return None
         self.last_reason = self.reason if self.prefer != default else None
+        self.last_note = self.note if self.prefer == default else None
         return self.prefer
 
 
@@ -163,7 +165,16 @@ def test_learning_keeping_the_default_is_not_credited(db, repo, boss, monkeypatc
     config(repo, learning="cloud")
     why = []
     assert choose(db, repo, weight="medium", why=why) == ("developer", False)
-    assert "learning picked it" not in why[0]
+    assert "learning picked it" not in why[0] and "learning kept it" not in why[0]
+
+
+def test_the_learners_note_on_a_kept_default_is_shown(db, repo, boss, monkeypatch):
+    plugin = Picker(prefer="developer", note="not enough similar tasks yet")
+    install(monkeypatch, plugin)
+    config(repo, learning="cloud")
+    why = []
+    assert choose(db, repo, weight="medium", why=why) == ("developer", False)
+    assert "learning kept it: not enough similar tasks yet" in why[0]
 
 
 def test_one_candidate_never_asks_the_learner(db, repo, boss, monkeypatch):
