@@ -1,6 +1,5 @@
 """Check runs share the machine (a queue with a few slots), a run far past
-its last duration is reported, and a check summary that arrives after the
-review is never silently dropped."""
+its last duration is reported, and stale or redundant runs give up."""
 import json
 import threading
 import time
@@ -118,7 +117,7 @@ def test_a_slot_is_given_back_when_the_run_raises(brindle_home, monkeypatch):
 
 
 def test_check_runs_of_different_branches_queue(db, repo, monkeypatch):
-    """The merge gate, _deliver-checks and _warm-checks all go through
+    """The merge gate, _review-after-checks and _warm-checks all go through
     run_checked: with one slot, two branches' suites never overlap."""
     configure(repo, check_concurrency=1)
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
@@ -145,7 +144,7 @@ def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch)
 
     def run(i):
         if i == 0:
-            gates.check_summary(DB(), spaces[0], cfg)                      # _deliver/_warm-checks
+            gates.check_summary(DB(), spaces[0], cfg)                      # _review-after/_warm-checks
         else:
             assert gates.run(DB(), spaces[1], cfg, review_required=False).ok   # the merge gate
 
@@ -319,144 +318,3 @@ def test_a_failure_from_before_the_wait_is_not_reused(db, repo, monkeypatch):
     assert len(calls) == 2
 
 
-def test_deliver_checks_exits_once_the_reviewer_has_reviewed_this_commit(db, session, monkeypatch):
-    root, ws = session
-    configure(Path(ws.repo_root), check_concurrency=1)
-    monkeypatch.setattr(autopilot, "CANCEL_POLL", 0.05)
-    add(db, ws, "rev", "review", "reviewer", parent="boss", status="processing")
-    sha = gates.head(ws)
-    threading.Timer(0.3, lambda: DB().add_review(ws.id, sha, "rev", True, "ok")).start()
-    t0 = time.monotonic()
-    agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=["sleep 30"], check_timeout=60))
-    assert time.monotonic() - t0 < 10
-    assert inbox(db, "rev") == [] and inbox(db, "boss") == []
-    with gates._check_slot(1):   # the slot was freed
-        pass
-
-
-def test_deliver_checks_exits_while_waiting_for_a_slot(db, session, monkeypatch):
-    root, ws = session
-    configure(Path(ws.repo_root), check_concurrency=1)
-    monkeypatch.setattr(gates, "SLOT_POLL", 0.02)
-    add(db, ws, "rev", "review", "reviewer", parent="boss", status="processing")
-    db.add_review(ws.id, gates.head(ws), "rev", True, "ok")
-    monkeypatch.setattr(autopilot, "run_check", lambda *a, **kw: pytest.fail("must not run"))
-    with gates._check_slot(1):    # the slot is taken, so the run has to wait
-        agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=["suite"]))
-    assert inbox(db, "rev") == []
-
-
-# -- a summary that arrives after the review -------------------------------------------
-
-
-def late(db, ws, checks, approved=None):
-    """The reviewer submitted (approved or not; None: no verdict) before the
-    checks finished."""
-    add(db, ws, "rev", "review", "reviewer", parent="boss", status="done", result="verdict")
-    if approved is not None:
-        db.add_review(ws.id, gates.head(ws), "rev", approved, "looked at the diff")
-    agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=checks))
-
-
-def test_a_failure_that_arrives_after_an_approval_reaches_the_supervisor(db, session):
-    root, ws = session
-    late(db, ws, ["true", "false"], approved=True)
-    [msg] = inbox(db, "boss")
-    assert "FAILED" in msg and "after reviewer rev had approved" in msg
-    assert "FAIL `false`" in msg and "PASS `true`" in msg and ws.id in msg
-    assert inbox(db, "rev") == []
-
-
-def test_a_late_pass_changes_nothing(db, session):
-    root, ws = session
-    late(db, ws, ["true"], approved=True)
-    assert inbox(db, "boss") == [] and inbox(db, "rev") == []
-
-
-def test_a_late_failure_after_changes_requested_goes_to_the_worker(db, session, monkeypatch):
-    root, ws = session
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    db.set_status("w1", "processing")
-    late(db, ws, ["false"], approved=False)
-    [msg] = inbox(db, "w1")
-    assert "FAIL `false`" in msg
-    assert inbox(db, "boss") == []
-
-
-def test_a_late_failure_goes_to_the_supervisor_when_the_worker_is_gone(db, session):
-    root, ws = session
-    late(db, ws, ["false"], approved=False)
-    [msg] = inbox(db, "boss")
-    assert "FAIL `false`" in msg and "approved" not in msg
-
-
-def test_a_late_failure_with_no_verdict_still_reaches_the_supervisor(db, session):
-    root, ws = session
-    late(db, ws, ["false"])
-    [msg] = inbox(db, "boss")
-    assert "FAIL `false`" in msg
-
-
-def test_a_late_crash_reaches_the_supervisor(db, session, monkeypatch):
-    root, ws = session
-    monkeypatch.setattr(gates, "check_summary",
-                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    late(db, ws, ["true"], approved=True)
-    [msg] = inbox(db, "boss")
-    assert "crashed" in msg and "boom" in msg
-
-
-def test_a_late_failure_for_a_reviewer_removed_mid_run_reaches_the_supervisor(db, session, monkeypatch):
-    root, ws = session
-    add(db, ws, "rev", "review", "reviewer", parent="boss", status="processing")
-
-    def vanish(*a, **kw):
-        db.delete_agent("rev")
-        return "FAIL `suite`\nboom"
-
-    monkeypatch.setattr(gates, "check_summary", vanish)
-    agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=["suite"]))
-    [msg] = inbox(db, "boss")
-    assert "FAIL `suite`" in msg
-
-
-def test_a_late_failure_for_a_commit_the_branch_has_left_is_dropped(db, session, monkeypatch):
-    root, ws = session
-    add(db, ws, "rev", "review", "reviewer", parent="boss", status="done", result="verdict")
-    db.add_review(ws.id, gates.head(ws), "rev", True, "ok")
-
-    def moves_on(*a, **kw):
-        (Path(ws.path) / "fix.py").write_text("y = 2\n")
-        sh("git add -A && git commit -qm fix", Path(ws.path))
-        return "FAIL `suite`\nboom"
-
-    monkeypatch.setattr(gates, "check_summary", moves_on)
-    agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=["suite"]))
-    assert inbox(db, "boss") == []
-
-
-def test_a_reviewer_still_at_work_gets_the_summary_itself(db, session):
-    root, ws = session
-    add(db, ws, "rev", "review", "reviewer", parent="boss", status="processing")
-    agents.deliver_check_summary(db, "rev", ws, RepoConfig(checks=["false"]))
-    assert any("FAIL `false`" in body for body in inbox(db, "rev"))
-    assert inbox(db, "boss") == []
-
-
-def test_the_reviewer_prompt_says_plainly_that_checks_are_still_running(db, session, monkeypatch):
-    root, ws = session
-    captured = {}
-
-    def fake_spawn(db_, ws_, profile, *, prompt=None, parent_id=None, mode="review", **kw):
-        captured["prompt"] = prompt
-        return Agent("rev", ws_.id, profile, "claude", parent_id, mode, "starting", "@0", None,
-                     time.time())
-
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    agents.request_review(db, db.get_agent("boss"), ws, cfg=RepoConfig(checks=["true"]))
-    prompt = captured["prompt"]
-    assert "checks are still running" in prompt and "don't have their results yet" in prompt
-    assert "still running when you submitted" in prompt
-
-    agents.request_review(db, db.get_agent("boss"), ws, cfg=RepoConfig())
-    assert "still running" not in captured["prompt"]

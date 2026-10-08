@@ -6,16 +6,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
 import time
 
 from mcp.server.mcpserver import MCPServer
 
 from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, workspaces
-from brindle.config import RepoConfig, load_repo_config
+from brindle.pro import brief_learning
+from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import list_profiles
-from brindle.providers import brindle_invocation
 
 MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
@@ -335,7 +334,8 @@ async def handoff(
         result = _await_worker(db, worker.id, wait_seconds)
         for w in why:
             result += f"\n\nProfile: {w}"
-        for w in (warning, missing, unhooked):
+        brief = brief_learning.warning(db, ws.repo_root, task, done_when, files, weight)
+        for w in (warning, missing, unhooked, brief):
             if w:
                 result += f"\n\nWarning: {w}"
         return result
@@ -463,7 +463,8 @@ async def assign(
         if learned and not why:
             text += f"\nprofile chosen by learning: {profile}"
         for w in (warning, agents.add_dirs_warning(worker, wws),
-                  codex_hook.launch_warning(worker.provider, wws.path)):
+                  codex_hook.launch_warning(worker.provider, wws.path),
+                  brief_learning.warning(db, wws.repo_root, task, done_when, files, weight)):
             if w:
                 text += f"\nWarning: {w}"
         for n in quota.notes(wws.repo_root):
@@ -747,17 +748,18 @@ async def request_review(workspace: str, focus: str | None = None, profile: str 
     """Start a reviewer agent on a worker's branch. It doesn't edit code; its
     verdict arrives as a message and is recorded for merge_workspace, which
     only accepts an approval of the branch's current commit. The repo's
-    checks run in a detached process and are delivered to the reviewer as a
-    message once they finish (so this returns right away instead of blocking
-    on the full suite, and the delivery survives even if this MCP server
-    exits first). focus: anything the reviewer should look at especially.
+    checks run first, in a detached process, and the reviewer starts once
+    they finish with their results in its prompt (so this returns right away
+    instead of blocking on the full suite, and the review survives even if
+    this MCP server exits first). focus: anything the reviewer should look
+    at especially.
     profile: the reviewer profile to use; defaults to the repo's
     `review_profile` config, else the built-in `reviewer-codex` profile (a
     different model from a Claude worker) when Codex is installed, else
     `reviewer`. repo: look the workspace up in that attached repo (alias or
     path); the reviewer and checks are that repo's own.
     """
-    def start() -> tuple[Agent, Workspace, RepoConfig] | str:
+    def start() -> str:
         db = DB()
         caller, _ = _caller(db)
         try:
@@ -768,25 +770,20 @@ async def request_review(workspace: str, focus: str | None = None, profile: str 
             return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
         cfg = load_repo_config(ws.repo_root)
         try:
-            reviewer = agents.request_review(db, caller, ws, profile, focus, cfg)
+            # With checks, a detached process runs them and then starts the reviewer.
+            reviewer = agents.start_review(db, caller, ws, profile, focus, cfg)
         except agents.AgentError as e:
             return str(e)
-        return reviewer, ws, cfg
+        if reviewer is None:
+            took = agents.expected_check_wait(db, ws, cfg)
+            wait = f" (usually about {max(1, round(took / 60))} min)" if took else ""
+            return (f"The repo's checks are running on {ws.branch}{wait}; the reviewer starts "
+                    "when they finish, with their results in its prompt. Its verdict will "
+                    "arrive as a message.")
+        return (f"Reviewer {reviewer.id} ({reviewer.profile}/{reviewer.provider}) is reviewing "
+                f"{ws.branch}. Its verdict will arrive as a message.")
 
-    result = await asyncio.to_thread(start)
-    if isinstance(result, str):
-        return result
-    reviewer, ws, cfg = result
-    if cfg.checks:
-        # Detached (like the existing _flush/_after-launch/_close calls): it
-        # must outlive this call and this MCP server process, since the
-        # reviewer was told a summary is coming.
-        subprocess.Popen(
-            [*brindle_invocation(), "_deliver-checks", reviewer.id, ws.id],
-            start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    return (f"Reviewer {reviewer.id} ({reviewer.profile}/{reviewer.provider}) is reviewing "
-            f"{ws.branch}. Its verdict will arrive as a message.")
+    return await asyncio.to_thread(start)
 
 
 @mcp.tool()
@@ -996,8 +993,30 @@ def get_progress() -> str:
 
     text = autopilot.progress(db, found[0])
     repo_root = found[1].repo_root
-    return "\n".join([text, *(f"Note: {n}." for n in
-                              [*quota.notes(repo_root), *learned_rules.notes(db, repo_root)])])
+    notes = [*quota.notes(repo_root), *learned_rules.notes(db, repo_root), *_learning_notes(db, repo_root)]
+    return "\n".join([text, *(f"Note: {n}." for n in notes)])
+
+
+def _learning_notes(db: DB, repo_root: str) -> list[str]:
+    """Pro's learners, made visible to the supervisor: approvals waiting to
+    become permission rules, and the one-line savings summary. Nothing
+    without the entitlement; never raises."""
+    try:
+        from brindle import permissions
+        from brindle.pro import brief_learning
+
+        if not brief_learning.entitled():
+            return []
+        notes = []
+        pending = permissions.suggestions()
+        if pending:
+            notes.append(f"{len(pending)} permission rule{'s' if len(pending) != 1 else ''} suggested from "
+                         "approvals you repeated; ask the user to review them with "
+                         "`brindle permissions suggestions`")
+        notes.append(savings.summary_line(savings.report(db, repo_root)).rstrip("."))
+        return notes
+    except Exception:  # noqa: BLE001 -- a side note must never fail get_progress
+        return []
 
 
 @mcp.tool()

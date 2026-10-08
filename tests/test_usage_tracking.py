@@ -118,6 +118,69 @@ def test_agent_usage_none_for_non_claude_providers(db):
     assert usage.agent_usage(db, a) is None
 
 
+def _codex_rollout(home: Path, cwd: Path, session_id: str, started: float) -> Path:
+    """A rollout in Codex's current layout: ordinals and timestamps on every
+    line, ``event_msg`` wrapping ``token_count``, and a long ``session_meta``."""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(started))
+    d = home / "sessions" / time.strftime("%Y/%m/%d", time.localtime(started))
+    path = d / f"rollout-{time.strftime('%Y-%m-%dT%H-%M-%S', time.localtime(started))}-{session_id}.jsonl"
+    meta = {"timestamp": f"{stamp}.380Z", "ordinal": 0, "type": "session_meta", "payload": {
+        "session_id": session_id, "id": session_id, "timestamp": f"{stamp}.231Z", "cwd": str(cwd),
+        "runtime_workspace_roots": [str(cwd)], "originator": "codex-tui", "source": "cli",
+        "base_instructions": {"text": "You are Codex. " * 2000}}}
+    ctx = {"timestamp": f"{stamp}.400Z", "ordinal": 1, "type": "turn_context",
+           "payload": {"turn_id": "t1", "cwd": str(cwd), "model": "gpt-6-luna"}}
+
+    def count(ordinal, inp, cached, out):
+        total = {"input_tokens": inp, "cached_input_tokens": cached, "cache_write_input_tokens": 0,
+                 "output_tokens": out, "reasoning_output_tokens": 0, "total_tokens": inp + out}
+        return {"timestamp": f"{stamp}.500Z", "ordinal": ordinal, "type": "event_msg", "payload": {
+            "type": "token_count", "info": {"total_token_usage": total, "last_token_usage": total,
+                                            "model_context_window": 258400}, "rate_limits": {}}}
+
+    write(path, [json.dumps(e) + "\n" for e in (meta, ctx, count(2, 1000, 800, 50), count(3, 3000, 2500, 90))])
+    return path
+
+
+def test_agent_usage_reads_a_codex_rollout_in_the_current_layout(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    now = time.time()
+    db.add_workspace(Workspace("ws1", str(tmp_path), "wt", "worktree", "feat/x", "main", str(wt),
+                               None, "s", now))
+    _codex_rollout(home, wt, "01a11457-4d77-7a11-bfed-bdfcf413e415", now + 1)
+    # found by its cwd, and by the session id Codex's notify reports
+    for ref in (None, "01a11457-4d77-7a11-bfed-bdfcf413e415"):
+        a = Agent("a1", "ws1", "developer-codex", "codex", None, "interactive", "idle", "", None, now,
+                  session_ref=ref)
+        u = usage.agent_usage(db, a)
+        assert u is not None and u.total
+        assert (u.input_tokens, u.cache_read_tokens, u.output_tokens) == (500, 2500, 90)
+        assert u.model == "gpt-6-luna"
+
+
+def test_codex_rollout_starting_just_before_the_agent_row_is_still_found(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    now = time.time()
+    db.add_workspace(Workspace("ws1", str(tmp_path), "wt", "worktree", "feat/x", "main", str(wt),
+                               None, "s", now))
+    _codex_rollout(home, wt, "01a11457-4d77-7a11-bfed-bdfcf413e415", now - usage.CODEX_START_SLACK + 1)
+    a = Agent("a1", "ws1", "developer-codex", "codex", None, "interactive", "idle", "", None, now)
+    assert usage.agent_usage(db, a) is not None
+    late = Agent("a2", "ws1", "developer-codex", "codex", None, "interactive", "idle", "", None,
+                 now + 600)   # a later agent in the same worktree isn't given the earlier rollout
+    assert usage.agent_usage(db, late) is None
+
+
 def test_includes_subagent_transcripts(db, tmp_path):
     t = tmp_path / "sess.jsonl"
     write(t, [_line("m1", input_tokens=10, output_tokens=20)])

@@ -433,3 +433,92 @@ def test_account_status_shows_cloud_learning(parts, remote):
     out = io.StringIO()
     account.ProAccount(REPO, store=parts[0], transport=remote, out=out).run(["status"])
     assert "off (no hosted learning)" in out.getvalue()
+
+
+# -- brindle learning seed ------------------------------------------------------------------------------
+
+
+def seed_history(db, root, n=3):
+    """``n`` finished decisions (with task rows holding text and files), plus one still running."""
+    from brindle.db import Task
+
+    for i in range(n):
+        tid, aid = f"t{i}", f"worker-zebra-{i}"
+        db.add_task(Task(id=tid, repo_root=root, agent_id=aid, caller_id=None, caller_ws_id="ws",
+                         profile="developer", task_text=TEXT, mode="x", isolate=1, branch="feat/zebra-hotfix",
+                         done_when=None, files=json.dumps(list(FILES)), depends_on=None,
+                         state="merged", created_at=time.time(), weight="heavy"))
+        db.add_routing_decision(root, task_id=tid, agent_id=aid, weight=None, baseline_profile="reviewer",
+                                profile="developer", learned=bool(i % 2))
+        db.note_routing_outcome(aid, review=True, outcome="merged" if i != 1 else "removed_unmerged")
+    db.add_routing_decision(root, task_id="running", agent_id="worker-running", weight="light",
+                            baseline_profile="developer", profile="developer", learned=False)
+
+
+@pytest.fixture
+def seed_cli(parts, remote, repo, db, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle import git
+    from brindle.cli import app
+
+    monkeypatch.setattr(cloud, "CloudLearner", lambda root, **kw: make(parts, remote))
+    monkeypatch.chdir(repo)
+    root = git.main_repo_root(str(repo))
+    seed_history(db, root)
+    return lambda: CliRunner().invoke(app, ["learning", "seed"]), root
+
+
+def test_seed_sends_one_record_per_finished_decision_and_only_record_payload_fields(seed_cli, remote):
+    run, _ = seed_cli
+    res = run()
+    assert res.exit_code == 0, res.output
+    assert "sent 3" in res.output
+    assert [r["event"] for r in remote.records] == ["merged", "removed_unmerged", "merged"]
+    allowed = set(cloud.record_payload(OrgKey("o", "k", b"s" * 32), "id", task(), Outcome("merged")))
+    allowed |= {"baseline_profile", "learned", "cost_rank", "baseline_cost_rank"}
+    for body in remote.records:
+        assert set(body) <= allowed
+        assert body["weight"] == "heavy" and body["review_rounds"] == 1
+        assert body["features"] == cloud.one_hot(task())
+        no_forbidden(body)
+
+
+def test_a_second_seed_sends_nothing(seed_cli, remote):
+    run, _ = seed_cli
+    assert run().exit_code == 0
+    remote.records.clear()
+    res = run()
+    assert res.exit_code == 0, res.output
+    assert "sent 0" in res.output and remote.records == []
+
+
+def test_seed_skips_decisions_the_live_path_already_sent(seed_cli, parts, remote, db):
+    run, root = seed_cli
+    db.add_routing_decision(root, task_id="live", agent_id="worker-live", weight="light",
+                            baseline_profile="developer", profile="developer", learned=False)
+    db.note_routing_outcome("worker-live", outcome="merged")
+    make(parts, remote).record(task(agent_id="worker-live"), Outcome("merged"))
+    res = run()
+    assert res.exit_code == 0, res.output
+    assert "sent 3" in res.output
+
+
+def test_seed_marks_merged_as_checks_passed_and_carries_the_live_agent_ref(seed_cli, parts, remote):
+    run, _ = seed_cli
+    assert run().exit_code == 0
+    by_event = {r["event"]: r for r in remote.records}
+    assert by_event["merged"]["checks_passed"] is True
+    assert by_event["removed_unmerged"]["checks_passed"] is False
+    live = make(parts, remote)
+    expect = {live.key(live.org()).agent_ref(f"worker-zebra-{i}") for i in range(3)}
+    assert {r["agent_ref"] for r in remote.records} == expect
+
+
+def test_seed_without_the_learning_entitlement_exits_nonzero(seed_cli, parts, remote):
+    run, _ = seed_cli
+    login_as(remote, parts[0], features=())
+    res = run()
+    assert res.exit_code != 0
+    assert "learning entitlement" in res.output
+    assert remote.records == []

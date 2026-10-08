@@ -47,6 +47,12 @@ WORKER_FOOTER = """
 ---
 You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
 {guidance}
+Before you finish, check your work against the task and its finish line, item
+by item: each behaviour it asks for needs a test that would fail without your
+change, and a requirement with no such test isn't done yet. If the task turns
+out too big for one branch, finish a coherent part and say exactly what's left
+(and how you'd split it) rather than leaving every part half done.
+
 When you have finished:
 1. Commit your work to this branch with a clear message (do not push or merge).
 2. Call the `report_result` tool from the `brindle` MCP server with a concise
@@ -72,6 +78,12 @@ Your shell may start in another directory, so begin every Bash command with
 `cd {path} && ` (or use `git -C {path}`), and give file tools absolute paths
 under that directory. Don't change files anywhere else, and don't switch branches.
 {guidance}
+Before you finish, check your work against the task and its finish line, item
+by item: each behaviour it asks for needs a test that would fail without your
+change, and a requirement with no such test isn't done yet. If the task turns
+out too big for one branch, finish a coherent part and say exactly what's left
+(and how you'd split it) rather than leaving every part half done.
+
 When you have finished:
 1. Commit your work there on `{branch}` with a clear message (do not push or merge).
 2. Don't call any brindle tools. End with a concise summary: what you changed,
@@ -1697,38 +1709,19 @@ def _local_reviewer_available() -> bool:
     return bool(ok) and "is available" in detail
 
 
-def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
-                   focus: str | None = None, cfg: RepoConfig | None = None) -> Agent:
-    """Start a reviewer in a worker's workspace right away. Its verdict is
-    recorded for the merge gate and forwarded to ``caller`` as a message.
-    ``profile`` picks the reviewer profile; None uses
-    ``default_review_profile``.
-
-    Raises ``AgentError`` if the chosen profile (explicit or picked) doesn't
-    exist, or if it uses the codex provider but codex isn't on PATH -- rather
-    than spawning a reviewer doomed to fail in a dead pane.
-
-    ``cfg.checks`` are NOT run here (that would block the caller on the full
-    suite): the caller runs them in the background and delivers a pass/fail
-    summary to the reviewer as a message once they finish, via
-    ``deliver_check_summary``. If the workspace already has a review at an
-    earlier commit, the reviewer is pointed at just what changed since then,
-    when that's a plain diff (see ``is_linear_since``)."""
-    from brindle import gates
-    from brindle.config import load_repo_config
+def _review_kill_switch(ws: Workspace) -> None:
     from brindle.pro import rollout
 
     why_not = rollout.kill_switch_reason(ws.repo_root)   # Enterprise managed rollout
     if why_not:
         raise AgentError(f"No reviewer started: {why_not}")
-    cfg = cfg or load_repo_config(ws.repo_root)
-    sha = gates.head(ws)
-    for old in db.list_agents(ws.id):
-        if old.mode != "review" or old.result is not None or not is_alive(old):
-            continue
-        if old.review_sha == sha:
-            return old   # one reviewer per workspace and commit
-        close(db, old.id)   # a new commit replaces the reviewer of the old one
+
+
+def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
+    """The reviewer profile to use, checked to be one that can run: raises
+    ``AgentError`` if it (explicit or picked) doesn't exist, or uses the codex
+    provider but codex isn't on PATH -- rather than spawning a reviewer doomed
+    to fail in a dead pane."""
     worker = workspace_worker(db, ws)
     profile = profile or default_review_profile(cfg, worker, db, ws.repo_root,
                                                 worker.task if worker else None)
@@ -1743,6 +1736,125 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
             f"reviewer profile {profile!r} can't run: {why}. "
             "Fix that, or set review_profile (or pass profile) to a different reviewer"
         )
+    return profile
+
+
+def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) -> Agent | None:
+    """The reviewer still at work on ``ws`` at ``sha``, if any. With
+    ``profile``, only one running that profile (a second review by another
+    profile is not a duplicate)."""
+    for a in db.list_agents(ws.id):
+        if a.mode == "review" and a.result is None and is_alive(a) and a.review_sha == sha \
+                and (profile is None or a.profile == profile):
+            return a
+    return None
+
+
+def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
+                 focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
+    """Have ``ws`` reviewed. Without checks configured the reviewer starts
+    right away and is returned. With checks, nothing starts yet: a detached
+    ``_review-after-checks`` process runs them and starts the reviewer with
+    their results in its prompt (see ``review_after_checks``), so this returns
+    at once with None, however long the suite takes. Raises ``AgentError``
+    for a reviewer that couldn't start whatever the checks say (the kill
+    switch, an unusable profile); a failure after that reaches ``caller``
+    as a message."""
+    from brindle import gates
+    from brindle.config import load_repo_config
+    from brindle.providers import brindle_invocation
+
+    cfg = cfg or load_repo_config(ws.repo_root)
+    if not cfg.checks:
+        return request_review(db, caller, ws, profile, focus, cfg)
+    _review_kill_switch(ws)
+    _review_profile(db, ws, profile, cfg)
+    existing = _live_reviewer(db, ws, gates.head(ws), profile)
+    if existing:
+        return existing   # one reviewer per workspace and commit
+    argv = [*brindle_invocation(), "_review-after-checks", ws.id]
+    if caller:
+        argv += ["--caller", caller.id]
+    if profile:
+        argv += ["--profile", profile]
+    if focus:
+        argv += ["--focus", focus]
+    _detach(argv)
+    return None
+
+
+def expected_check_wait(db: DB, ws: Workspace, cfg: RepoConfig) -> float | None:
+    """Seconds the repo's checks usually take (the sum of each one's last
+    passing duration), or None when any of them has never passed."""
+    total = 0.0
+    for cmd in cfg.checks:
+        took = db.check_duration(ws.repo_root, cmd)
+        if took is None:
+            return None
+        total += took
+    return total if cfg.checks else None
+
+
+def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
+                        focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
+    """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
+    lock and the by-sha cache, so a result a worker's report already warmed
+    is instant), then start the reviewer with the results in its prompt.
+    Meant to run from a detached process, which outlives the call that
+    started it. Gives up quietly when the branch moves on (the new commit
+    gets its own review), the workspace is gone, or a reviewer is already at
+    work on this commit. Raises ``AgentError`` when the reviewer can't
+    start."""
+    from brindle import gates
+    from brindle.config import load_repo_config
+
+    cfg = cfg or load_repo_config(ws.repo_root)
+    sha = gates.head(ws)
+    if _live_reviewer(db, ws, sha, profile):
+        return None
+    try:
+        summary = gates.check_summary(db, ws, cfg, cancel=lambda: gates.head(ws) != sha)
+    except gates.Abandoned:
+        return None
+    except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
+        summary = f"(running the checks crashed: {e})"
+    if db.get_workspace(ws.id) is None or gates.head(ws) != sha:
+        return None
+    caller = db.get_agent(caller_id) if caller_id else None
+    text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
+    return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
+
+
+def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
+                   focus: str | None = None, cfg: RepoConfig | None = None,
+                   check_summary: str | None = None) -> Agent:
+    """Start a reviewer in a worker's workspace right away. Its verdict is
+    recorded for the merge gate and forwarded to ``caller`` as a message.
+    ``profile`` picks the reviewer profile; None uses
+    ``default_review_profile`` (``AgentError`` if it can't run).
+
+    ``cfg.checks`` are NOT run here (that would block the caller on the full
+    suite): ``start_review`` runs them first, in the background, and passes
+    their results as ``check_summary`` for the reviewer's prompt. If the
+    workspace already has a review at an earlier commit, the reviewer is
+    pointed at just what changed since then, when that's a plain diff (see
+    ``is_linear_since``)."""
+    from brindle import gates
+    from brindle.config import load_repo_config
+
+    _review_kill_switch(ws)
+    cfg = cfg or load_repo_config(ws.repo_root)
+    sha = gates.head(ws)
+    for old in db.list_agents(ws.id):
+        if old.mode != "review" or old.result is not None or not is_alive(old):
+            continue
+        if old.review_sha == sha:
+            if profile and old.profile != profile:
+                continue   # another profile's review of this commit (a second review): keep both
+            return old   # one reviewer per workspace and commit
+        close(db, old.id)   # a new commit replaces the reviewer of the old one
+    worker = workspace_worker(db, ws)
+    profile = _review_profile(db, ws, profile, cfg)
 
     base = ws.base_branch or "the base branch"
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
@@ -1755,16 +1867,9 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     if worker and worker.done_when:
         task += f"\n\nIts finish line: {worker.done_when.strip()}"
 
-    if cfg and cfg.checks:
-        task += ("\n\nThe repo's checks are still running (or queued behind other branches' "
-                 "runs): you don't have their results yet. A pass/fail summary will arrive as a "
-                 "message. Review the diff meanwhile, and don't call submit_review until you've "
-                 "received it. If about 10 minutes pass after you've finished reviewing with no "
-                 "such message, submit anyway and say plainly in your summary that the checks "
-                 "were still running when you submitted, so your verdict rests on the diff "
-                 "alone: the merge gate runs them before anything merges, and a failure that "
-                 "arrives after your verdict goes to the supervisor. Don't run the whole suite "
-                 "yourself to compensate.")
+    if check_summary:
+        task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
+                 "Take these results into account; don't run the whole suite yourself.")
 
     prev = db.last_review(ws.id)
     if prev and prev.sha != sha:
@@ -1782,96 +1887,6 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
         task += f"\n\nFocus: {focus}"
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
                  mode="review", background_setup=True, review_sha=sha)
-
-
-def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConfig) -> None:
-    """Run ``cfg.checks`` for ``ws`` and deliver a pass/fail summary to the
-    reviewer's inbox: delivered right away if it's idle, or handed over at its
-    next Stop, exactly like any other queued message (see ``send_message``).
-    Meant to run from a detached process started by request_review, so it
-    outlives the MCP server call that kicked it off. Always delivers
-    something, even if a check crashes, since the reviewer was told to wait
-    for this before approving. If the reviewer is no longer there to receive
-    it by the time the checks finish, a failing summary isn't dropped: see
-    ``_late_check_summary``."""
-    from brindle import gates
-
-    reviewer = db.get_agent(reviewer_id)
-    if reviewer is None:
-        return
-    supervisor_id = reviewer.parent_id
-    sha = gates.head(ws)  # label with the commit the checks ran on
-
-    def settled() -> bool:
-        # The reviewer already gave its verdict on this commit, or the branch
-        # moved on: nobody is waiting for this run, so don't hold a slot.
-        review = db.latest_review(ws.id, sha)
-        return (review is not None and review.reviewer_id == reviewer_id) or gates.head(ws) != sha
-
-    try:
-        summary = gates.check_summary(db, ws, cfg, cancel=settled)
-        failed = gates.summary_failed(summary)
-    except gates.Abandoned:
-        return
-    except Exception as e:
-        summary, failed = f"(running the checks crashed: {e})", True
-
-    reviewer = db.get_agent(reviewer_id)
-    if reviewer is None or reviewer.result is not None or reviewer.status == "done":
-        # It submitted its review, was closed, or was removed while the checks ran.
-        if failed:
-            _late_check_summary(db, ws, sha, summary, reviewer_id, supervisor_id)
-        return
-
-    text = (f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary
-            else "No checks are configured for this repo.")
-    db.enqueue(reviewer_id, text, None)
-    flush(db, reviewer_id)
-
-
-def _late_check_summary(db: DB, ws: Workspace, sha: str, summary: str, reviewer_id: str,
-                        supervisor_id: str | None) -> None:
-    """The checks for ``ws`` at ``sha`` finished after its reviewer was done,
-    and failed (or crashed), so the verdict was given without them (a late
-    pass changes nothing). The failure must reach someone who can act on it:
-    the supervisor when the branch was approved (or has no verdict at this
-    commit), the worker when changes were requested anyway (the supervisor
-    if it's gone). Dropped
-    only when there's nothing left to act on: the workspace was removed, the
-    branch merged at this commit (its worktree may be going away under the
-    run), or the branch has new commits, which get their own run."""
-    from brindle import gates
-
-    try:
-        if db.get_workspace(ws.id) is None or db.merged_sha(ws.id) == sha or gates.head(ws) != sha:
-            return
-    except git.GitError:
-        return
-    worker = workspace_worker(db, ws)
-    supervisor_id = supervisor_id or (worker.parent_id if worker else None)
-    review = db.latest_review(ws.id, sha)
-    checks = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}"
-    if review is not None and not review.approved and worker and is_alive(worker):
-        try:
-            send_message(db, worker.id,
-                         "The repo's checks finished after the review of your branch, and "
-                         f"failed. Fix this along with the review's findings.\n\n{checks}")
-            return
-        except (AgentError, tmux.TmuxError):
-            pass   # the supervisor hears instead
-    if supervisor_id is None or db.get_agent(supervisor_id) is None:
-        return
-    if review is not None and review.approved:
-        lead = (f"[brindle] The checks on `{ws.branch}` (workspace {ws.id}) FAILED, and the result "
-                f"arrived after reviewer {reviewer_id} had approved it: the approval rests on "
-                "the diff alone. The merge gate runs the checks again, so the branch won't "
-                "merge while they fail. Send this to the worker to fix, then have it reviewed "
-                "again.")
-    else:
-        lead = (f"[brindle] The checks on `{ws.branch}` (workspace {ws.id}) FAILED, and the result "
-                f"arrived after reviewer {reviewer_id} had finished, so the review didn't "
-                "take it into account. Send this to the worker to fix.")
-    gates.tell(db, supervisor_id, f"{lead}\n\n{checks}")
 
 
 # -- hook entry point --------------------------------------------------------

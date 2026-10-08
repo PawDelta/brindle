@@ -134,7 +134,7 @@ def _check_slot(limit: int, cancel=None):
     """Hold one of ``limit`` machine-wide slots for a check run, waiting for
     one to come free: several branches' full suites at once swap the machine,
     and every run then takes hours. The slots are lock files under the brindle
-    home, so every brindle process (the merge gate, ``_deliver-checks``,
+    home, so every brindle process (the merge gate, ``_review-after-checks``,
     ``_warm-checks``, milestone checks) shares them, and a process that dies
     gives its slot back. ``limit`` 0 or less means no cap."""
     if limit <= 0:

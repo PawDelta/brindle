@@ -167,7 +167,7 @@ def test_detached_helpers_stop_when_their_brindle_home_is_gone(tmp_path, monkeyp
     gone = tmp_path / "gone-home"
     monkeypatch.setenv("BRINDLE_HOME", str(gone))
     runner = CliRunner()
-    for args in (["_after-launch", "abc"], ["_cull"], ["_deliver-checks", "abc", "p/w"],
+    for args in (["_after-launch", "abc"], ["_cull"], ["_review-after-checks", "p/w"],
                  ["_pool-fill", str(tmp_path)], ["_flush", "abc"], ["_close", "abc"]):
         result = runner.invoke(app, args)
         assert result.exit_code == 0, (args, result.output)

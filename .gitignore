@@ -9,3 +9,4 @@ graphify-out/
 # private, kept local for now
 docs/
 .brindle/config.local.json
+.brindle/bench.json

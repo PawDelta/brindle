@@ -172,11 +172,13 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
                weight: str | None = None,
                default: str | None = None) -> tuple[str | None, str | None]:
     """(override, reason): the learner's pick among ``candidates`` (default:
-    the repo's ``learning_candidates``) when it overrides ``default`` (what
-    brindle would use: the first candidate unless given), else (None, None).
-    The learner is not asked with fewer than two candidates."""
-    names = [c for c in (candidates if candidates is not None else cfg.learning_candidates)
-             if isinstance(c, str)]
+    the repo's ``learning_candidates``, else the medium tier's routing list)
+    when it overrides ``default`` (what brindle would use: the first
+    candidate unless given), else (None, None). The learner is not asked with
+    fewer than two candidates."""
+    if candidates is None:
+        candidates = cfg.learning_candidates or cfg.routing.get("medium") or []
+    names = [c for c in candidates if isinstance(c, str)]
     if not names:
         return None, None
     default = default or names[0]

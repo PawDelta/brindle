@@ -210,12 +210,78 @@ class Report:
     merged_spend: Bucket = field(default_factory=Bucket)
     reviews: dict[str, list[int]] = field(default_factory=dict)   # worker profile -> [approved, total]
     savings: "Savings | None" = None
+    stats: dict[tuple[str, str], "ProfileStats"] = field(default_factory=dict)   # (profile, weight)
+    depth: list[str] = field(default_factory=list)   # review-depth suggestions (see escapes)
 
     @property
     def per_merged_branch(self) -> float | None:
         if not self.merged or not self.merged_spend.tokens:
             return None
         return self.merged_spend.dollars / self.merged
+
+
+@dataclass
+class ProfileStats:
+    """How one worker profile did at one weight: tasks that finished in the window."""
+    finished: int = 0
+    merged: int = 0
+    unmerged: int = 0                                          # removed without merging
+    rounds: int = 0                                            # review rounds over the finished tasks
+    merged_spend: Bucket = field(default_factory=Bucket)       # the merged workers' own rows
+    merged_counted: int = 0                                    # merged branches with spend rows
+
+    @property
+    def merge_rate(self) -> float | None:
+        done = self.merged + self.unmerged
+        return self.merged / done if done else None
+
+    @property
+    def avg_rounds(self) -> float | None:
+        return self.rounds / self.finished if self.finished else None
+
+    @property
+    def tokens_per_merged(self) -> int | None:
+        # Over the merged branches that have spend rows: one with none would
+        # pull the average down without costing nothing.
+        return self.merged_spend.all_tokens // self.merged_counted if self.merged_counted else None
+
+    @property
+    def dollars_per_merged(self) -> float | None:
+        """None when nothing was priced; 0.0 when every token was free."""
+        b = self.merged_spend
+        if not self.merged_counted or not (b.tokens or (b.free and not b.unknown)):
+            return None
+        return b.dollars / self.merged_counted
+
+
+def profile_stats(db: DB, repo_root: str | None, since: float) -> dict[tuple[str, str], ProfileStats]:
+    """Per (worker profile, weight) results from ``routing_decisions`` made since ``since``."""
+    decisions = [d for d in db.list_routing_decisions(repo_root)
+                 if d.ts >= since and d.outcome in ("merged", "removed_unmerged")]
+    agents = {(d.repo_root, d.agent_id) for d in decisions if d.outcome == "merged" and d.agent_id}
+    spend: dict[tuple[str, str | None], Bucket] = {}
+    if agents:
+        for p in priced_rows(db, repo_root, 0):
+            key = (p.row.repo_root, p.row.agent_id)
+            if key in agents:
+                spend.setdefault(key, Bucket()).add(p.dollars, p.tokens, p.free)
+    out: dict[tuple[str, str], ProfileStats] = {}
+    for d in decisions:
+        s = out.setdefault((d.profile, d.weight or "-"), ProfileStats())
+        s.finished += 1
+        s.rounds += d.review_rounds
+        if d.outcome == "merged":
+            s.merged += 1
+            b = spend.get((d.repo_root, d.agent_id))
+            if b is not None:
+                s.merged_counted += 1
+                s.merged_spend.dollars += b.dollars
+                s.merged_spend.tokens += b.tokens
+                s.merged_spend.free += b.free
+                s.merged_spend.unknown += b.unknown
+        else:
+            s.unmerged += 1
+    return out
 
 
 def _goal_of(db: DB, agent_id: str | None, cache: dict) -> str:
@@ -284,8 +350,36 @@ def report(db: DB, repo_root: str | None, now: float | None = None, days: int = 
         counts = rep.reviews.setdefault(worker_profile.get((r.repo_root, r.branch), "?"), [0, 0])
         counts[0] += int(verdict)
         counts[1] += 1
+    rep.stats = profile_stats(db, repo_root, since)
     rep.savings = savings(db, repo_root, now, days)
+    rep.depth = _depth(db, repo_root, now)
     return rep
+
+
+def _depth(db: DB, repo_root: str | None, now: float) -> list[str]:
+    """Review-depth suggestions for one repo (none for ``--all``); never raises."""
+    if not repo_root:
+        return []
+    try:
+        from brindle import escapes
+        from brindle.config import load_repo_config
+
+        return escapes.review_depth_suggestions(db, repo_root, load_repo_config(repo_root).second_review, now)
+    except Exception:  # noqa: BLE001 -- a side section never breaks the report
+        return []
+
+
+def describe_depth(lines: list[str]) -> list[str]:
+    if not lines:
+        return []
+    return (["", f"Review depth suggestions, last {escapes_days()} days (copy into .brindle/config.json; "
+                 "brindle never changes it)"] + [f"  {line}" for line in lines])
+
+
+def escapes_days() -> int:
+    from brindle import escapes
+
+    return escapes.DEPTH_DAYS
 
 
 @dataclass
@@ -385,6 +479,27 @@ def _table(title: str, buckets: dict[str, Bucket], width: int = 28, limit: int |
     return lines
 
 
+def describe_stats(stats: dict[tuple[str, str], ProfileStats]) -> list[str]:
+    lines = ["", "Worker profiles by weight (finished tasks)"]
+    if not stats:
+        lines.append("  no finished tasks in this period")
+    for (profile, weight), s in sorted(stats.items(), key=lambda kv: (-kv[1].finished, kv[0])):
+        rate = s.merge_rate
+        rounds = s.avg_rounds
+        per = s.dollars_per_merged
+        tok = s.tokens_per_merged
+        cost_text = "-"
+        if tok is not None:
+            free = per == 0 and not s.merged_spend.tokens
+            cost_text = f"{format_tokens(tok)} tokens, " + (
+                "free" if free else pricing.money(per) if per is not None else "unpriced")
+            cost_text += " per merged branch"
+        lines.append(f"  {profile + ' / ' + weight:<28} {s.finished} finished, "
+                     + (f"{round(100 * rate)}% merged" if rate is not None else "no merge rate")
+                     + f", {rounds:.1f} review rounds avg, {cost_text}")
+    return lines
+
+
 def describe_report(rep: Report, repo_root: str | None) -> str:
     lines = [f"Cost report for {_where(repo_root)}, last {rep.days} days: {rep.total.show()}"]
     lines += _table("By day", dict(sorted(rep.by_day.items())), width=12)
@@ -412,6 +527,8 @@ def describe_report(rep: Report, repo_root: str | None) -> str:
         lines.append("  no reviews in this period")
     for profile, (ok, total) in sorted(rep.reviews.items(), key=lambda kv: (-kv[1][1], kv[0])):
         lines.append(f"  {profile:<28} {ok}/{total} approved ({round(100 * ok / total)}%)")
+    lines += describe_stats(rep.stats)
+    lines += describe_depth(rep.depth)
     if rep.savings is not None:
         lines += describe_savings(rep.savings)
     lines += _footer()
