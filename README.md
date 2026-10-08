@@ -320,6 +320,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `brindle ls [--all]` | workspaces and agents |
 | `brindle repo add PATH [--name ALIAS] / rm ALIAS / ls` | attach other local repos to the current session so workers can go there (brindle Pro; see "Several repos in one session") |
+| `brindle keys set/unset/list [NAME]` | store model API keys (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) once in the OS keychain (or a 0600 file); every agent pane gets the ones its provider reads, unless you already export it. `set` reads the value from a hidden prompt or stdin, `list` shows names and the last 4 characters. `CLAUDE_CODE_OAUTH_TOKEN` (a Claude subscription token) is never stored |
 | `brindle history [--limit N] [--kind K] [--all]` | durable log of worker results, reviews, merges and milestone checks |
 | `brindle cost [--days N] [--all]` | dollar spend at list prices over the last 30 days, by model |
 | `brindle cost report [--days N] [--all]` | Pro: spend by day, profile and goal, cost per merged branch, review pass rate per worker profile |
@@ -798,6 +799,16 @@ entitlement.
 * `deny_personal_keys`: the personal model keys (`ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, ...) are taken out of every agent pane, and a profile that
   sets one is refused.
+* An org-owned key: with `provider` `anthropic` (or `openai-compatible`), set
+  `key_env` to the name of a variable that holds the org's key (not a personal
+  one like `ANTHROPIC_API_KEY`), or `key_helper` to a command, as a list of
+  arguments, that prints the key (for example `["vault", "kv", "get",
+  "-field=key", "secret/anthropic"]`). brindle runs the helper on the person's
+  machine, without a shell and with a timeout, each time a worker starts, and
+  gives the key to that worker as `ANTHROPIC_API_KEY` (`OPENAI_API_KEY` for
+  Codex). It passes `deny_personal_keys`; a personal key doesn't. The key never
+  goes through brindle's servers. When the variable is missing or the helper
+  fails, the worker doesn't start.
 
 Two things to know when you turn on `deny_personal_keys`:
 
@@ -967,8 +978,11 @@ workflows call these commands:
   or the pull request's checks and reviews and the evidence upload.
 - `brindle ci report`: tell the service how the workflow's jobs ended.
 
-Credential names are reported, never values. On a repository owned by a GitHub
-organization, a provider signed in only with a personal subscription is not used.
+Credential names are reported, never values. CI uses API keys, cloud sign-ins
+(Bedrock, Vertex, Foundry) or identity federation only: a provider signed in
+only with a subscription (`CLAUDE_CODE_OAUTH_TOKEN`, a Codex ChatGPT login) is
+not used, on personal and organization repositories alike. Add an API key
+secret instead.
 
 Fix builds only fix the default branch's *required* status checks, and a new
 repository has none. When the default branch requires none, `brindle ci init`
@@ -1212,6 +1226,16 @@ needs no browser step. Put the key in your environment, or in a profile's
 `env.NAME: value` lines in `~/.brindle/agents` (never in the repo), and
 `brindle doctor` names the variable each CLI gets, from your shell or from
 which profiles.
+
+A profile chooses between the two with `auth`:
+
+| `auth:` | What the worker signs in with |
+|---|---|
+| `auto` (default) | A key from your environment or `brindle keys` if there is one, else the CLI's own login. |
+| `subscription` | Always the CLI's own login: brindle strips that provider's API keys from the pane. |
+| `api_key` | Only a key: the worker refuses to start without one. |
+
+Your org's `deny_personal_keys` (Enterprise) still applies on top of `auth`.
 
 ### Cheap workers
 

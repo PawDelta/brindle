@@ -27,7 +27,7 @@ from brindle.native.client import Client, ClientError, Endpoint
 from brindle.native.loop import LoopConfig, NativeAgent
 from brindle.native.permissions import Permissions
 from brindle.native.tools import Tool, Toolbox, ToolResult, core_tools
-from brindle.profiles import Profile
+from brindle.profiles import Profile, subscription_token_problem
 from brindle.providers import DELIVERY_NOTE
 
 DEFAULT_CONTEXT_TOKENS = 32_000
@@ -55,6 +55,9 @@ def endpoint_for(profile: Profile) -> Endpoint:
         raise ValueError(f"profile {profile.name!r} uses the native provider but gives no base_url")
     if not profile.model:
         raise ValueError(f"profile {profile.name!r} uses the native provider but gives no model")
+    problem = subscription_token_problem(profile)
+    if problem:
+        raise ValueError(problem)
     api = (profile.api or "openai").lower()
     if api not in ("openai", "anthropic"):
         raise ValueError(f"profile {profile.name!r}: api must be openai or anthropic, not {api!r}")

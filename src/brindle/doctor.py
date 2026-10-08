@@ -160,6 +160,70 @@ def signin_checks(repo_root: str | None = None) -> list[Check]:
     return out
 
 
+def credential_checks() -> list[Check]:
+    """One line per installed provider naming the credential its panes will
+    use (names only, never a value). For Claude, a key and a subscription login
+    together is a warning: Claude Code bills the key once it's approved."""
+    from brindle import keystore, providers
+
+    out = []
+    for provider in signin_providers():
+        if provider == "claude":
+            cred = providers.claude_credential()
+            if cred.kind == "org-managed":
+                out.append(Check(OK, "claude", f"org-managed ({cred.name})"))
+            elif cred.keyed or cred.kind == "cloud":
+                what = "API key" if cred.kind == "api key" else "auth token" if cred.kind == "token" else "cloud provider"
+                detail = f"{what} ({cred.name}, from {cred.source})"
+                level = OK
+                if cred.keyed and providers.subscription_login("claude"):
+                    level = WARN
+                    detail += ("; a subscription login exists too, but Claude Code bills the key once "
+                               "it is approved (`brindle keys set ANTHROPIC_API_KEY` or `brindle doctor "
+                               "--fix`), not the subscription")
+                out.append(Check(level, "claude", detail))
+            else:
+                out.append(Check(OK, "claude", "subscription login"))
+            continue
+        found = None
+        for name in providers._ENV_AUTH.get(provider, ()):
+            if os.environ.get(name):
+                found = (name, "environment")
+            else:
+                try:
+                    if keystore.get_key(name):
+                        found = (name, "key store")
+                except keystore.CredentialError:
+                    pass
+            if found:
+                break
+        out.append(Check(OK, provider, f"API key ({found[0]}, from {found[1]})" if found else "its own login"))
+    return out
+
+
+def fix(confirm) -> list[str]:
+    """`brindle doctor --fix`: offer to let Claude Code use an exported
+    ANTHROPIC_API_KEY without its approval question. ``confirm(prompt)``
+    answers; declining (or nothing to do) leaves Claude Code's config alone.
+    Returns the lines to print."""
+    from brindle import providers
+
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return ["nothing to fix"]
+    if providers.claude_org_managed():
+        return ["claude: org-managed; brindle does not approve keys there"]
+    if providers.api_key_approved(key):
+        return ["ANTHROPIC_API_KEY: already approved in Claude Code"]
+    if not confirm("Let Claude Code use the exported ANTHROPIC_API_KEY in brindle panes without asking?"):
+        return ["ANTHROPIC_API_KEY: left as is"]
+    try:
+        providers.approve_api_key(key)
+    except (OSError, ValueError) as e:
+        return [f"ANTHROPIC_API_KEY: couldn't update Claude Code's config: {e}"]
+    return ["ANTHROPIC_API_KEY: approved for Claude Code"]
+
+
 def checks(repo_root: str | None) -> list[Check]:
     from brindle import config, detect, procs, tmux
     from brindle.db import DB
@@ -176,6 +240,7 @@ def checks(repo_root: str | None) -> list[Check]:
                      install=CLI_INSTALL["codex"][1]))
     out.append(_tool("agy", False, "only needed for Google Antigravity agents"))
     out.extend(signin_checks(repo_root))
+    out.extend(credential_checks())
     out.append(_tool("gh", False, "only needed for `brindle pr` and `brindle new --pr`"))
     out.append(_tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"))
     out.append(_tool("graphify", False, "only needed for the code map agents can query"))

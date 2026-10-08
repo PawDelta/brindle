@@ -42,7 +42,23 @@ log = logging.getLogger(__name__)
 
 
 class ProfileError(ValueError):
-    """A profile file that can't be used as written: an ``extends`` cycle."""
+    """A profile file that can't be used as written: an ``extends`` cycle, or
+    a native profile naming a Claude subscription token."""
+
+
+SUBSCRIPTION_TOKEN = "CLAUDE_CODE_OAUTH_TOKEN"
+
+
+def subscription_token_problem(profile: "Profile") -> str | None:
+    """Why a native profile may not use ``CLAUDE_CODE_OAUTH_TOKEN`` (Anthropic's
+    terms bar third parties from routing Claude subscription credentials), or
+    None. Names the variable only, never a value."""
+    if profile.api_key_env == SUBSCRIPTION_TOKEN or (
+            profile.provider == "native" and SUBSCRIPTION_TOKEN in (profile.env or {})):
+        return (f"profile {profile.name!r} uses {SUBSCRIPTION_TOKEN}, a Claude subscription token, "
+                "which brindle's native provider may not send: use an API key "
+                "(set api_key_env to its variable)")
+    return None
 
 
 MAX_EXTENDS_DEPTH = 10
@@ -93,6 +109,13 @@ class Profile:
     write_scope: list[str] | None = None
     read_scope: list[str] | None = None
     env_allow: list[str] | None = None
+    # How the agent signs in: ``auto`` (a key from the environment or `brindle keys`
+    # wins, else the CLI's own login), ``subscription`` (no key reaches the pane,
+    # so the login is used) or ``api_key`` (refuse to start without a key).
+    auth: str = "auto"
+
+
+AUTH_CHOICES = ("auto", "subscription", "api_key")
 
 
 @dataclass
@@ -222,7 +245,7 @@ def _parse(text: str, fallback_name: str) -> Profile:
 
 def _build(meta: dict[str, str], body: str, fallback_name: str) -> Profile:
     permission_denies, permission_denies_errors = _json_list(meta.get("permission_denies"))
-    return Profile(
+    profile = Profile(
         name=meta.get("name", fallback_name),
         extends=meta.get("extends") or None,
         rules=_list(meta.get("rules")) or [],
@@ -249,7 +272,15 @@ def _build(meta: dict[str, str], body: str, fallback_name: str) -> Profile:
         write_scope=_list(meta.get("write_scope")),
         read_scope=_list(meta.get("read_scope")),
         env_allow=_list(meta.get("env_allow")),
+        auth=(meta.get("auth") or "auto").strip().lower(),
     )
+    if profile.auth not in AUTH_CHOICES:
+        raise ProfileError(f"profile {profile.name!r} has auth: {profile.auth!r}; "
+                           f"choose from {', '.join(AUTH_CHOICES)}")
+    problem = subscription_token_problem(profile)
+    if problem:
+        raise ProfileError(problem)
+    return profile
 
 
 def _search_dirs(repo_root: str | None) -> list[Path]:

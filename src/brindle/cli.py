@@ -15,7 +15,7 @@ import typer
 
 from brindle import agents, git, tmux, view, workspaces
 from brindle import history as history_mod
-from brindle import repo_cmds
+from brindle import keys_cmds, repo_cmds
 from brindle.usage import format_tokens
 from brindle.config import write_template
 from brindle.db import DB, Workspace
@@ -45,6 +45,7 @@ Paid features (hosted learning, per-worktree services, team policies, CI):
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 app.add_typer(repo_cmds.app, name="repo")
+app.add_typer(keys_cmds.app, name="keys")
 
 
 def _fail(msg: str) -> None:
@@ -790,12 +791,24 @@ def autopilot_cmd(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    fix: bool = typer.Option(False, "--fix", help="Offer to let Claude Code use an exported ANTHROPIC_API_KEY without asking."),
+) -> None:
     """Check that brindle has what it needs, and say what to do about anything missing.
 
     tmux, the agent CLIs, a writable home, leftover processes; in a repo, its
     config, checks and code map."""
     from brindle import doctor as doctor_mod
+
+    if fix:
+        def ask(prompt: str) -> bool:
+            try:
+                return typer.confirm(prompt, default=False)
+            except typer.Abort:
+                return False
+
+        for line in doctor_mod.fix(ask):
+            typer.echo(line)
 
     root = None
     try:

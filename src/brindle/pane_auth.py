@@ -1,0 +1,56 @@
+"""A profile's ``auth`` choice, and the variables a pane must start without.
+
+``auto`` (the default): a key from the environment or `brindle keys` wins, else
+the CLI's own login. ``subscription``: no stored key goes into the pane and the
+provider's exported keys are taken out, so the CLI's login is used. ``api_key``:
+the agent doesn't start without a key. An org's ``deny_personal_keys`` wins
+over all three (see :mod:`brindle.pro.managed_models`).
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Iterable
+
+from brindle import keystore
+
+# The API keys each provider's CLI reads from the environment. A subscription
+# token (CLAUDE_CODE_OAUTH_TOKEN) is a login, not a key: ``subscription`` keeps it.
+API_KEYS = {"claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+            "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"),
+            "antigravity": ("GEMINI_API_KEY",)}
+# What Claude Code's managed settings (apiKeyHelper, a gateway) replace: a
+# personally exported credential must not bypass them.
+CLAUDE_CREDENTIALS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def deny_names(provider: str, auth: str, m, org_managed: bool = False) -> tuple[str, ...]:
+    """The variables a ``provider`` pane starts without whatever else says:
+    the org's denied personal keys, Claude's credentials under Claude Code
+    managed settings, and the provider's API keys for ``auth: subscription``."""
+    deny = list(m.denied_keys) if m is not None else []
+    extra = (CLAUDE_CREDENTIALS if provider == "claude" and org_managed else ()) + (
+        API_KEYS.get(provider, ()) if auth == "subscription" else ())
+    return tuple(deny + [n for n in dict.fromkeys(extra) if n not in deny])
+
+
+def key_problem(profile, provider: str, deny: Iterable[str], org_key: bool) -> str | None:
+    """Why ``profile`` (``auth: api_key``) can't start for lack of a key, or
+    None. A key counts when the org supplies one, or one of the provider's key
+    variables isn't denied and is set (the profile's env, the environment) or
+    stored with `brindle keys`."""
+    if profile.auth != "api_key" or org_key:
+        return None
+    names = ((profile.api_key_env,) if profile.api_key_env else ()) if provider == "native" \
+        else API_KEYS.get(provider, ())
+    if not names:
+        return None
+    denied = set(deny)
+    usable = [n for n in names if n not in denied]
+    if any(profile.env.get(n) or os.environ.get(n) for n in usable) or keystore.pane_keys(usable):
+        return None
+    if not usable:
+        return (f"profile {profile.name!r} has auth: api_key, but your org doesn't allow personal API "
+                f"keys ({', '.join(names)}); use a profile with auth: auto or subscription")
+    return (f"profile {profile.name!r} has auth: api_key, but no API key is available: export "
+            f"{usable[0]} or run `brindle keys set {usable[0]}`")

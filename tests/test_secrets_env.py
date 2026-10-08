@@ -301,6 +301,64 @@ def test_agent_launches_scrub_and_keep_the_profiles_credentials(db, repo, monkey
     assert "GITHUB_TOKEN" not in keep
 
 
+def _launch(db, repo, monkeypatch, *profiles, **kw):
+    """Open a window per (agent_id, profile, provider); returns {name: (env, keep, kwargs)}."""
+    ws = workspaces.create(db, str(repo), "keys").workspace
+    seen = {}
+
+    def fake_new_window(session, name, cwd, command, env, tag=None, keep=(), **kwargs):
+        seen[name] = (dict(env), set(keep), kwargs, command)
+        return "%1"
+    monkeypatch.setattr(tmux, "new_window", fake_new_window)
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a, **k: None)
+    monkeypatch.setattr(tmux, "apply_theme", lambda *a, **k: None)
+    for agent_id, profile, provider in profiles:
+        a = Agent(agent_id, ws.id, profile, provider, None, "assign", "starting", "", None, time.time())
+        db.add_agent(a)
+        agents._open_window(db, a, ws, agent_id, ["sleep", "1"], watch_pane=False, **kw)
+    return seen
+
+
+def test_a_stored_key_reaches_only_its_own_providers_pane_env(db, repo, monkeypatch):
+    from brindle import keystore
+
+    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    keystore.set_key("ANTHROPIC_API_KEY", "sk-ant-test-claude-1111")
+    keystore.set_key("OPENAI_API_KEY", "sk-test-codex-2222")
+    seen = _launch(db, repo, monkeypatch, ("c1", "developer", "claude"), ("x1", "developer", "codex"))
+    env, _, _, command = seen["x1"]
+    assert env["OPENAI_API_KEY"] == "sk-test-codex-2222" and "ANTHROPIC_API_KEY" not in env
+    assert "GEMINI_API_KEY" not in env
+    assert not any("sk-" in a for a in command)
+    env, _, _, command = seen["c1"]
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-test-claude-1111" and "OPENAI_API_KEY" not in env
+    assert not any("sk-" in a for a in command)
+
+
+def test_the_exported_key_beats_the_stored_one(db, repo, monkeypatch):
+    from brindle import keystore
+
+    keystore.set_key("ANTHROPIC_API_KEY", "sk-ant-test-stored-3333")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-exported-4444")
+    env, _, _, _ = _launch(db, repo, monkeypatch, ("c1", "developer", "claude"))["c1"]
+    assert "ANTHROPIC_API_KEY" not in env   # the pane inherits the exported one untouched
+
+
+def test_a_stored_key_is_stripped_by_deny_like_an_exported_one(db, repo, monkeypatch):
+    from types import SimpleNamespace
+
+    from brindle import keystore
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    keystore.set_key("ANTHROPIC_API_KEY", "sk-ant-test-stored-5555")
+    m = SimpleNamespace(denied_keys=("ANTHROPIC_API_KEY",))
+    monkeypatch.setattr(agents, "agent_env", lambda *a, **k: {"BRINDLE_AGENT_ID": "c1"})
+    env, _, kwargs, _ = _launch(db, repo, monkeypatch, ("c1", "developer", "claude"), m=m)["c1"]
+    assert "ANTHROPIC_API_KEY" not in env          # never even fetched for the pane
+    assert kwargs["deny"] == ("ANTHROPIC_API_KEY",)   # and new_window strips it as for an exported key
+
+
 def test_inherited_names_include_this_process(monkeypatch, session):
     monkeypatch.setenv("GH_FROM_LAUNCHER", "x")
     assert "GH_FROM_LAUNCHER" in tmux.inherited_names(session)

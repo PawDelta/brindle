@@ -164,6 +164,10 @@ def brindle_home(tmp_path, monkeypatch):
     # keychain and network (a file store under the temporary home, no login).
     monkeypatch.setenv("BRINDLE_PRO_CREDENTIAL_STORE", "file")
     monkeypatch.delenv("BRINDLE_PRO_DEV", raising=False)
+    # No machine-wide Claude Code managed settings, and no ambient Claude credential.
+    monkeypatch.setenv("BRINDLE_CLAUDE_MANAGED_SETTINGS", "")
+    for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
     from brindle.pro import license
 
     license.clear_cache()

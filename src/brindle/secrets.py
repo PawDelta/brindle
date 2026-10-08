@@ -9,7 +9,9 @@ scrubbed, see :func:`provider_credentials`.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import threading
 from typing import Iterable, Mapping, MutableMapping
 
 # Secrets a brindle process holds that no agent may see: the Pro token and
@@ -154,10 +156,41 @@ def proxy_exempt(env: Mapping[str, str] = {}) -> dict[str, str]:
     return {}
 
 
+# The org-owned key (Enterprise managed models: ``key_env`` / ``key_helper``)
+# mapped into a pane being started, as (variable, value) pairs. In memory only,
+# for the length of that one launch (see org_key): never stored, logged or kept.
+_org_keys: list[tuple[str, str]] = []
+_org_keys_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def org_key(env: Mapping[str, str]):
+    """Register the org key variables in ``env`` for the duration of one pane
+    launch, so :func:`org_key_exempt` lets them past ``deny_personal_keys``."""
+    pairs = [(k, v) for k, v in env.items() if v]
+    with _org_keys_lock:
+        _org_keys.extend(pairs)
+    try:
+        yield
+    finally:
+        with _org_keys_lock:
+            for p in pairs:
+                _org_keys.remove(p)
+
+
+def org_key_exempt(env: Mapping[str, str] = {}) -> dict[str, str]:
+    """The org key variables an agent pane may keep under ``deny``, or {}. Only
+    a variable the launch sets to exactly the registered org key: a personal
+    key under the same name (a different value) is not exempt."""
+    with _org_keys_lock:
+        registered = list(_org_keys)
+    return {k: env[k] for k, v in registered if env.get(k) == v}
+
+
 def pane_deny(deny: Iterable[str], env: Mapping[str, str] = {}) -> list[str]:
-    """``deny`` less the federation proxy's token when the pane gets it
-    (proxy_exempt)."""
-    exempt = proxy_exempt(env)
+    """``deny`` less the federation proxy's token and the org's key when the
+    pane gets them (proxy_exempt, org_key_exempt)."""
+    exempt = {**proxy_exempt(env), **org_key_exempt(env)}
     return [n for n in deny if n not in exempt]
 
 
@@ -188,4 +221,5 @@ def pane_unset(names: Iterable[str], keep: Iterable[str] = (),
 
 __all__ = ["SECRET_ENV", "SECRET_PREFIXES", "is_job_secret", "scrub_secrets",
            "provider_credentials", "agent_credentials", "pane_unset", "BASE_ENV", "env_allowed",
-           "PERSONAL_KEYS", "register_proxy", "clear_proxy", "proxy_exempt", "pane_deny"]
+           "PERSONAL_KEYS", "register_proxy", "clear_proxy", "proxy_exempt", "pane_deny",
+           "org_key", "org_key_exempt"]

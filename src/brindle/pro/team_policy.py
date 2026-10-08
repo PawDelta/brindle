@@ -46,7 +46,9 @@ ROLE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 BUDGETS_FEATURE = "org_budgets"
 MANAGED_FEATURE = "managed_models"
 MAX_PROTECTED_PATHS = 64
-PROVIDERS = ("bedrock", "vertex", "azure", "openai-compatible")
+PROVIDERS = ("bedrock", "vertex", "azure", "openai-compatible", "anthropic")
+KEY_PROVIDERS = ("anthropic", "openai-compatible")    # the providers an org-owned key can be set for
+KEY_ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 
 class PolicyUnavailable(Exception):
@@ -67,11 +69,17 @@ class ProviderConfig:
     model_ids: tuple[str, ...] = ()
     endpoint: str | None = None
     project: str | None = None     # vertex: the GCP project id
+    # anthropic / openai-compatible: where the org's own key comes from. Never
+    # the key itself: ``key_env`` names an org variable on the person's machine,
+    # ``key_helper`` is a command (argv, no shell) run there at pane start.
+    key_env: str | None = None
+    key_helper: tuple[str, ...] | None = None
 
     def to_json(self) -> dict:
         return {"provider": self.provider, "region": self.region,
                 "model_ids": list(self.model_ids), "endpoint": self.endpoint,
-                "project": self.project}
+                "project": self.project, "key_env": self.key_env,
+                "key_helper": list(self.key_helper) if self.key_helper else None}
 
 
 @dataclass(frozen=True)
@@ -274,11 +282,39 @@ def _managed(p: dict) -> dict:
     if (not isinstance(ids, list) or len(ids) > 32
             or not all(isinstance(i, str) and i.strip() and i.isprintable() for i in ids)):
         raise PolicyUnavailable("malformed provider_config model_ids")
+    key_env, key_helper = _org_key(pc)
     return {"provider_config": ProviderConfig(
         provider=pc["provider"], region=_text(pc.get("region"), "provider_config region"),
         model_ids=tuple(ids), endpoint=_text(pc.get("endpoint"), "provider_config endpoint"),
-        project=_text(pc.get("project"), "provider_config project")),
+        project=_text(pc.get("project"), "provider_config project"),
+        key_env=key_env, key_helper=key_helper),
         "deny_personal_keys": deny}
+
+
+def _org_key(pc: dict) -> tuple[str | None, tuple[str, ...] | None]:
+    """``key_env`` and ``key_helper`` of a ``provider_config``. A ``key_env``
+    naming one of the person's own keys (secrets.PERSONAL_KEYS) or a brindle
+    secret is rejected: the org's key must come from a variable of its own."""
+    from brindle import secrets
+
+    env, helper = pc.get("key_env"), pc.get("key_helper")
+    if env is None and helper is None:
+        return None, None
+    if pc["provider"] not in KEY_PROVIDERS:
+        raise PolicyUnavailable(f"provider_config key_env/key_helper isn't supported for {pc['provider']}")
+    if env is not None and helper is not None:
+        raise PolicyUnavailable("provider_config sets both key_env and key_helper")
+    if env is not None:
+        if not isinstance(env, str) or not KEY_ENV_RE.match(env):
+            raise PolicyUnavailable("malformed provider_config key_env")
+        if env in secrets.PERSONAL_KEYS or secrets.is_job_secret(env):
+            raise PolicyUnavailable(f"provider_config key_env {env} is a personal or brindle key variable; "
+                                    "name an org variable instead")
+        return env, None
+    if (not isinstance(helper, list) or not 1 <= len(helper) <= 32
+            or not all(isinstance(a, str) and a and len(a) <= 1024 and "\0" not in a for a in helper)):
+        raise PolicyUnavailable("malformed provider_config key_helper")
+    return None, tuple(helper)
 
 
 def _spend(v) -> dict:
