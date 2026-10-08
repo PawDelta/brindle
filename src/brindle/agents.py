@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 
-from brindle import git, secrets, tmux, workspaces
+from brindle import git, keystore, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import load_profile, missing_add_dirs
@@ -419,9 +419,16 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     # reach the pane, kept or not.
     if m is _UNREAD:
         m = managed(ws.repo_root)
-    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id, agent, m),
+    env = agent_env(ws, agent.id, agent, m)
+    credentials = secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
+    # Keys stored with `brindle keys` reach this window's env only (never the
+    # tmux server's), unless the environment already has the name or an org's
+    # deny_personal_keys keeps it out. deny/allow strip it as they do an exported key.
+    denied = set(m.denied_keys) if m is not None and m.denied_keys else set()
+    env = {**keystore.pane_keys(credentials - denied, env), **env}
+    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
                              tag=(AGENT_TAG, agent.id),
-                             keep=secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root),
+                             keep=credentials,
                              **({"allow": allow} if allow is not None else {}),
                              **({"deny": m.denied_keys} if m is not None and m.denied_keys else {}))
     # The pane id only means anything on the server that issued it (a
