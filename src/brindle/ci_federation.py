@@ -249,6 +249,12 @@ AWS_SESSION_NAME = "brindle-ci"
 CLOUD_REFRESH_FRACTION = 0.5
 MIN_CLOUD_REFRESH_S = 5.0
 DEFAULT_CLOUD_LIFETIME_S = 300.0   # for a token without a readable exp
+# GitLab hands the job one ID token per `id_tokens:` entry and can't mint another
+# mid-job: the template names each cloud's variable, brindle writes it once.
+GITLAB_TOKEN_VARS = {BEDROCK: "BRINDLE_AWS_ID_TOKEN", VERTEX: "BRINDLE_GCP_ID_TOKEN",
+                     FOUNDRY: "BRINDLE_AZURE_ID_TOKEN"}
+GITLAB_LIFETIME_WARNING = ("GitLab can't refresh an ID token mid-job: its lifetime must cover the job timeout "
+                           "(set the identity provider's maximum token lifetime, and the job's timeout, to match)")
 
 
 def cloud_audience(cloud: str, ids: Mapping[str, str]) -> str:
@@ -259,24 +265,36 @@ def cloud_audience(cloud: str, ids: Mapping[str, str]) -> str:
     return AZURE_AUDIENCE
 
 
+def _cloud_selected(cloud: str, env: Mapping[str, str]) -> bool:
+    """``CLAUDE_CODE_USE_*`` selects ``cloud``, its IDs are set, and no
+    static credential is that would win anyway."""
+    if env.get(CLOUD_USE_VARS[cloud], "").strip().lower() in ("", "0", "false", "no"):
+        return False
+    if not all(env.get(k) for k in CLOUD_IDS[cloud]):
+        return False
+    if cloud == BEDROCK and (env.get("AWS_ACCESS_KEY_ID") or env.get("AWS_BEARER_TOKEN_BEDROCK")):
+        return False
+    if cloud == FOUNDRY and (env.get("ANTHROPIC_FOUNDRY_API_KEY") or env.get("ANTHROPIC_FOUNDRY_AUTH_TOKEN")):
+        return False
+    return True
+
+
 def cloud_token_clouds(env: Mapping[str, str]) -> list[str]:
     """The clouds this job signs in to keylessly: selected by
     ``CLAUDE_CODE_USE_*``, with their IDs and the Actions token endpoint set,
     and no static credential that would win anyway."""
     if env.get(DISABLE_VAR, "").strip() == "0" or not (env.get(ACTIONS_URL) and env.get(ACTIONS_TOKEN)):
         return []
-    clouds = []
-    for cloud, var in CLOUD_USE_VARS.items():
-        if env.get(var, "").strip().lower() in ("", "0", "false", "no"):
-            continue
-        if not all(env.get(k) for k in CLOUD_IDS[cloud]):
-            continue
-        if cloud == BEDROCK and (env.get("AWS_ACCESS_KEY_ID") or env.get("AWS_BEARER_TOKEN_BEDROCK")):
-            continue
-        if cloud == FOUNDRY and (env.get("ANTHROPIC_FOUNDRY_API_KEY") or env.get("ANTHROPIC_FOUNDRY_AUTH_TOKEN")):
-            continue
-        clouds.append(cloud)
-    return clouds
+    return [c for c in CLOUD_USE_VARS if _cloud_selected(c, env)]
+
+
+def gitlab_token_clouds(env: Mapping[str, str]) -> list[str]:
+    """The clouds a GitLab job signs in to: as :func:`cloud_token_clouds`,
+    but with the cloud's ``id_tokens:`` variable (:data:`GITLAB_TOKEN_VARS`)
+    in place of the Actions endpoint."""
+    if env.get(DISABLE_VAR, "").strip() == "0" or env.get("GITLAB_CI") != "true":
+        return []
+    return [c for c in CLOUD_USE_VARS if env.get(GITLAB_TOKEN_VARS[c]) and _cloud_selected(c, env)]
 
 
 def jwt_expiry(token: str) -> float | None:
@@ -400,6 +418,22 @@ class CloudTokenRefresher:
             shutil.rmtree(self.directory, ignore_errors=True)
 
 
+class StaticCloudToken(CloudTokenRefresher):
+    """A GitLab job's ID token for one cloud, written once to the same kind of
+    0600 file and never refreshed (GitLab can't mint another mid-job). The
+    token is dropped from memory once written."""
+
+    def __init__(self, cloud: str, ids: Mapping[str, str], token: str, *, directory: str | None = None) -> None:
+        super().__init__(cloud, ids, "", "", directory=directory)
+        self._pending: str | None = token
+
+    def start(self) -> None:
+        token, self._pending = self._pending, None
+        if not token:
+            raise FederationError("no ID token")
+        _write_private(self.token_file, token)
+
+
 class CloudTokens:
     """The running per-cloud refreshers and what the agents are told."""
 
@@ -428,8 +462,12 @@ def start_cloud_tokens(env: Mapping[str, str], *, fetch: Callable[..., str] | No
     A cloud whose first fetch fails is left out (its workflow credentials, if
     any, stay); None when no cloud is left."""
     started: list[CloudTokenRefresher] = []
-    for cloud in cloud_token_clouds(env):
-        r = CloudTokenRefresher(cloud, env, env[ACTIONS_URL], env[ACTIONS_TOKEN], fetch=fetch, clock=clock)
+    jobs: list[CloudTokenRefresher] = [
+        CloudTokenRefresher(c, env, env[ACTIONS_URL], env[ACTIONS_TOKEN], fetch=fetch, clock=clock)
+        for c in cloud_token_clouds(env)]
+    jobs += [StaticCloudToken(c, env, env[GITLAB_TOKEN_VARS[c]]) for c in gitlab_token_clouds(env)]
+    for r in jobs:
+        cloud = r.cloud
         try:
             r.start()
         except Exception as e:   # noqa: BLE001
