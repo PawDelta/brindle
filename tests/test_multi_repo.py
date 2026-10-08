@@ -126,6 +126,32 @@ def test_attach_refuses_bad_paths_duplicates_and_the_own_repo(db, repo, web, bos
         repos.resolve(db, "boss", str(repo), "nope")
 
 
+def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    twin = git_repo(elsewhere, repo.name, {"pipeline": False})
+    assert twin != repo and twin.name == repo.name
+    attached = repos.attach(db, "boss", str(twin))
+    ows = workspaces.adopt_root(db, str(twin))
+    assert attached.repo_root == str(twin)
+    assert boss.id == f"{repo.name}/root"          # existing ids are unchanged
+    assert ows.id != boss.id and ows.tmux_session != boss.tmux_session
+    assert workspaces.resolve(db, boss.id).repo_root == str(repo)
+    assert workspaces.resolve(db, ows.id).repo_root == str(twin)
+    # The same branch in both repos: separate ids, sessions and directories.
+    wt1 = workspaces.create(db, str(repo), "feat/x", fetch=False).workspace
+    wt2 = workspaces.create(db, str(twin), "feat/x", fetch=False).workspace
+    assert wt2.id.startswith(ows.id.rsplit("/", 1)[0] + "/")
+    assert wt1.id != wt2.id and wt1.path != wt2.path and wt1.tmux_session != wt2.tmux_session
+    assert workspaces.resolve(db, wt1.id).repo_root == str(repo)
+    assert workspaces.resolve(db, wt2.id).repo_root == str(twin)
+    # Pool entries of the twin don't share the first repo's pool directory either.
+    from brindle import pool
+    e1, e2 = pool.fill_one(db, str(repo)), pool.fill_one(db, str(twin))
+    assert e1 and e2 and Path(e1.path).parent != Path(e2.path).parent
+    assert pool.pool_dir(str(twin), db) == Path(e2.path).parent
+
+
 def test_attach_refuses_a_repo_attached_to_another_live_session(db, repo, web, boss, tmp_path, monkeypatch):
     other_repo = git_repo(tmp_path, "other", {})
     ows = workspaces.adopt_root(db, str(other_repo))

@@ -38,8 +38,9 @@ LOCKFILES = ("uv.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
              "Cargo.lock", "poetry.lock", "go.sum")
 
 
-def pool_dir(repo_root: str) -> Path:
-    return worktrees_dir() / workspaces._repo_slug(repo_root) / POOL_SUBDIR
+def pool_dir(repo_root: str, db: DB | None = None) -> Path:
+    slug = workspaces._db_slug(db, repo_root) if db else workspaces._repo_slug(repo_root)
+    return worktrees_dir() / slug / POOL_SUBDIR
 
 
 def fingerprint(repo_root: str, sha: str, cfg: RepoConfig) -> str:
@@ -72,7 +73,9 @@ def fill_one(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> PoolEntry
 
     token = uuid.uuid4().hex[:8]
     branch = f"brindle-pool/{token}"
-    path = str(pool_dir(repo_root) / token)
+    pdir = pool_dir(repo_root, db)
+    slug = pdir.parent.name
+    path = str(pdir / token)
     name = f"pool-{token}"
     port_base = workspaces._next_port_base(db)
 
@@ -95,9 +98,9 @@ def fill_one(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> PoolEntry
 
     workspaces._copy_local_files(repo_root, path, cfg.copy)
     placeholder = Workspace(
-        id=f"{workspaces._repo_slug(repo_root)}/{name}", repo_root=repo_root, name=name,
+        id=f"{slug}/{name}", repo_root=repo_root, name=name,
         kind="worktree", branch=branch, base_branch=base, path=path, port_base=port_base,
-        tmux_session=workspaces._session_name(repo_root, name), created_at=entry.created_at,
+        tmux_session=workspaces._session_name(repo_root, name, slug), created_at=entry.created_at,
     )
     setup = (
         workspaces.run_commands(cfg.setup, path, workspaces.workspace_env(placeholder))
@@ -134,15 +137,15 @@ def fill(db: DB, repo_root: str) -> int:
     return added
 
 
-def _lock_path(repo_root: str) -> Path:
-    return pool_dir(repo_root).parent / ".pool.lock"
+def _lock_path(repo_root: str, db: DB | None = None) -> Path:
+    return pool_dir(repo_root, db).parent / ".pool.lock"
 
 
 def fill_locked(db: DB, repo_root: str) -> int:
     """Sweep, trim, then ``fill``, skipping entirely if another fill for this
     repo is already running. Uses an flock rather than a stale-time heuristic,
     so a lock is only ever released by the process (or OS) that holds it."""
-    lock = _lock_path(repo_root)
+    lock = _lock_path(repo_root, db)
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "a+") as f:
         try:
@@ -201,11 +204,12 @@ def discard(repo_root: str, entry: PoolEntry, cfg: RepoConfig | None = None) -> 
     cfg = cfg or load_repo_config(repo_root)
     if os.path.exists(entry.path) and cfg.teardown:
         name = f"pool-{entry.branch.removeprefix('brindle-pool/')}"
+        slug = Path(entry.path).parent.parent.name   # the slug fill_one built the path from
         placeholder = Workspace(
-            id=f"{workspaces._repo_slug(repo_root)}/{name}", repo_root=repo_root, name=name,
+            id=f"{slug}/{name}", repo_root=repo_root, name=name,
             kind="worktree", branch=entry.branch, base_branch=entry.base_branch,
             path=entry.path, port_base=entry.port_base,
-            tmux_session=workspaces._session_name(repo_root, name), created_at=entry.created_at,
+            tmux_session=workspaces._session_name(repo_root, name, slug), created_at=entry.created_at,
         )
         workspaces.run_commands(cfg.teardown, entry.path, workspaces.workspace_env(placeholder))
     if os.path.exists(entry.path):
@@ -246,7 +250,7 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
         wt["worktree"]: wt["branch"].removeprefix("refs/heads/")
         for wt in git.list_worktrees(repo_root) if "branch" in wt
     }
-    base_dir = pool_dir(repo_root)
+    base_dir = pool_dir(repo_root, db)
     if base_dir.is_dir():
         for child in base_dir.iterdir():
             path = str(child)

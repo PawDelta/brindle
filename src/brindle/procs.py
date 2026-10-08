@@ -137,6 +137,29 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
     return out
 
 
+_SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh"}
+_PLUMBING = re.compile(r"claude|brindle|\bmcp\b|tmux|node_modules|\bnpm exec\b|caffeinate")
+
+
+def running_commands(agent_id: str, pane_pids: list[int] | None = None,
+                     procs: dict[int, Proc] | None = None) -> list[Proc]:
+    """Processes of this agent that look like a command it started (a test
+    run, a build, a sleep), not its CLI, its MCP servers, hooks or a bare shell."""
+    procs = table() if procs is None else procs
+    pids = agent_pids([agent_id], {agent_id: pane_pids or []}, procs).get(agent_id, set())
+    out = []
+    for pid in pids:
+        p = procs.get(pid)
+        if p is None:
+            continue
+        cmd = p.text.split(" BRINDLE_", 1)[0].strip()
+        first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
+        if first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd):
+            continue
+        out.append(p)
+    return out
+
+
 def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
     """Every agent id some process names in its command line or brindle MCP server."""
     procs = table() if procs is None else procs

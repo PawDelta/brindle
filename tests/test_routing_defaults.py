@@ -37,7 +37,11 @@ def test_light_starts_on_developer_light():
     assert DEFAULT_ROUTING["light"][0] == "developer-light"
     assert DEFAULT_ROUTING["light"][1:] == ["developer", "developer-codex", "developer-local"]
     p = load_profile("developer-light")
-    assert p.model == "sonnet" and p.effort == "low"
+    assert p.model == "haiku" and p.effort == "low"
+
+
+def test_heavy_starts_on_developer_with_developer_heavy_next():
+    assert DEFAULT_ROUTING["heavy"][:2] == ["developer", "developer-heavy"]
 
 
 def test_an_unweighted_task_offers_the_learner_the_medium_candidates(db, repo, monkeypatch):
