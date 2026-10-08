@@ -293,6 +293,10 @@ def render(local_: Local, remote: Remote | None, now: float, width: int,
     if lim is not None and lim.month_usd:
         # What the org counts for this seat can be more than what this repo shows.
         spent = max(local_.month, lim.seat_spent_usd or 0.0)
-        body.append(_vs(spent, lim.month_usd, width - 2))
+        if lim.hide_dollars:      # the org hides this person's dollars: only a status
+            word = budget.status_word(spent, lim.month_usd)
+            body.append((f"budget: {word}", "ok" if word == budget.WITHIN else "alert"))
+        else:
+            body.append(_vs(spent, lim.month_usd, width - 2))
     lines += [Line(fit("  " + t, width), s) for t, s in body]
     return lines

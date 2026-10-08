@@ -53,6 +53,7 @@ class PolicyUnavailable(Exception):
     pass
 
 
+DEFAULT_VISIBILITY = {"own_dollars": True, "team_spend": True, "org_spend": True}
 LISTS = ("allowed_providers", "allowed_models", "allowed_profiles")
 RULES = LISTS + ("require_human_review", "max_parallel_workers")
 
@@ -106,6 +107,9 @@ class OrgPolicy:
     member_overrides: dict = field(default_factory=dict)
     spend_seat_usd: float | None = None
     spend_month: str | None = None
+    # Who may see dollar amounts, resolved for the caller (owners/admins: all true). Only
+    # ``own_dollars`` is honored here; a missing field (older servers) means all true.
+    visibility: dict = field(default_factory=lambda: dict(DEFAULT_VISIBILITY))
     # Enterprise "managed_rollout" (see brindle.pro.rollout): org-wide, so the
     # base policy's values are used for the member's effective policy too.
     min_version: str | None = None
@@ -154,6 +158,7 @@ class OrgPolicy:
         if self.effective is not None:
             out["effective"] = {**self.effective.rules(), **self.effective.budgets(),
                                 **self.effective.rollout(), **self.effective.managed()}
+        out["visibility"] = dict(self.visibility)
         if self.cached_for is not None:
             out["cached_for"] = list(self.cached_for)
         if self.spend_seat_usd is not None:
@@ -285,6 +290,16 @@ def _spend(v) -> dict:
     return {"spend_seat_usd": float(usd), "spend_month": month if isinstance(month, str) else None}
 
 
+def _visibility(v) -> dict:
+    """The caller's ``visibility`` flags. A missing field or key is true (older
+    servers); anything present but not exactly ``true`` hides (fail closed)."""
+    if v is None:
+        return dict(DEFAULT_VISIBILITY)
+    if not isinstance(v, dict):
+        return {k: False for k in DEFAULT_VISIBILITY}
+    return {k: v.get(k, True) is True for k in DEFAULT_VISIBILITY}
+
+
 def _roles(v) -> dict:
     if v is None:
         return {}
@@ -323,7 +338,8 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
     key = body.get("cached_for")
     ok_key = isinstance(key, list) and len(key) == 2 and all(k is None or isinstance(k, str)
                                                              for k in key)
-    spend = _spend(body.get("spend"))
+    spend = {**_spend(body.get("spend")),
+             "visibility": _visibility(body.get("visibility", p.get("visibility")))}
     roll = _rollout(p)
     managed = _managed(p)
     return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p), **_budgets(p),
@@ -397,7 +413,8 @@ def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None)
                                           provider_config=p.provider_config,
                                           deny_personal_keys=p.deny_personal_keys,
                                           spend_seat_usd=p.spend_seat_usd,
-                                          spend_month=p.spend_month))
+                                          spend_month=p.spend_month,
+                                          visibility=p.visibility))
 
 
 def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:

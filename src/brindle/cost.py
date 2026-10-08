@@ -500,8 +500,28 @@ def describe_stats(stats: dict[tuple[str, str], ProfileStats]) -> list[str]:
     return lines
 
 
+def org_budget_line(repo_root: str | None) -> str | None:
+    """This month's org seat budget: dollars, or only a status word when the
+    org hides this person's dollars. None without an org budget."""
+    from brindle import budget
+
+    try:
+        lim = budget.org_limits(repo_root)
+    except Exception:  # noqa: BLE001 - the report outlives an unreadable policy
+        return None
+    if lim is None or lim.month_usd is None:
+        return None
+    spent = lim.seat_spent_usd or 0.0
+    if lim.hide_dollars:
+        return f"Org budget this month: {budget.status_word(spent, lim.month_usd)}"
+    return f"Org budget this month: {pricing.money(spent)} of {pricing.money(lim.month_usd)}"
+
+
 def describe_report(rep: Report, repo_root: str | None) -> str:
     lines = [f"Cost report for {_where(repo_root)}, last {rep.days} days: {rep.total.show()}"]
+    org_line = org_budget_line(repo_root)
+    if org_line:
+        lines.append(org_line)
     lines += _table("By day", dict(sorted(rep.by_day.items())), width=12)
     lines += _table("By profile", rep.by_profile)
     lines += _table("By goal", rep.by_goal, width=48, limit=10)
