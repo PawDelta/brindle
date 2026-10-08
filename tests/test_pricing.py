@@ -38,7 +38,6 @@ def test_list_prices_match_the_providers_pages():
     assert pricing.PRICES["claude-sonnet-5-5"] == Price(2, 10, 2.5, pytest.approx(0.2))
     assert pricing.PRICES["claude-opus-5-5"] == Price(4, 20, 5, 0.2)
     assert pricing.PRICES["claude-fable-5-1"] == Price(10, 50, 12.5, 0.25)
-    assert pricing.PRICES["claude-haiku-5-5"] == Price(0.10, 0.50, pytest.approx(0.125), pytest.approx(0.01))
     assert pricing.PRICES["claude-haiku-4-5"] == Price(1, 5, 1.25, pytest.approx(0.1))
     # OpenAI lists cache writes (1.25x input) for gpt-6 and gpt-5.6; for older models, none
     assert pricing.PRICES["gpt-6-luna"] == Price(0.10, 0.50, 0.125, 0.01)

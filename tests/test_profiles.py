@@ -53,7 +53,7 @@ def test_builtin_profiles_keep_their_defaults():
             if p.name == "developer-heavy":
                 assert p.model == "claude-fable-5-1" and p.effort == "high"
             elif p.name == "developer-light":
-                assert p.model == "claude-haiku-5-5"
+                assert p.model == "sonnet" and p.effort == "low"
             else:
                 assert p.effort is None
     assert load_profile("developer").permission_mode == "auto"
