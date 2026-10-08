@@ -169,12 +169,12 @@ def test_learning_keeping_the_default_is_not_credited(db, repo, boss, monkeypatc
 
 
 def test_the_learners_note_on_a_kept_default_is_shown(db, repo, boss, monkeypatch):
-    plugin = Picker(prefer="developer", note="not enough similar tasks yet: developer-codex has 2 of the 5 needed")
+    plugin = Picker(prefer="developer", note="not enough similar tasks yet")
     install(monkeypatch, plugin)
     config(repo, learning="cloud")
     why = []
     assert choose(db, repo, weight="medium", why=why) == ("developer", False)
-    assert "learning kept it: not enough similar tasks yet: developer-codex has 2 of the 5 needed" in why[0]
+    assert "learning kept it: not enough similar tasks yet" in why[0]
 
 
 def test_one_candidate_never_asks_the_learner(db, repo, boss, monkeypatch):

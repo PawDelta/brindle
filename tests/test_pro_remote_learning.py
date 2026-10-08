@@ -145,9 +145,9 @@ def test_an_override_carries_the_servers_reason(parts, remote):
 
 def test_a_kept_default_carries_the_servers_note(parts, remote):
     lr = make(parts, remote)
-    remote.suggest_note = "not enough similar tasks yet: reviewer has 3 of the 5 needed"
+    remote.suggest_note = "not enough similar tasks yet"
     assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
-    assert lr.last_note == "not enough similar tasks yet: reviewer has 3 of the 5 needed"
+    assert lr.last_note == "not enough similar tasks yet"
     remote.suggest_note, remote.suggest_pick = None, "reviewer"
     assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "reviewer"
     assert lr.last_note is None      # an override has a reason, not a note
