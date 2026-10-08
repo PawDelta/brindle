@@ -163,6 +163,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # 3. Workers stuck on a prompt nobody is answering, or gone silent.
     done.extend(note_stuck(db, now, panes))
     done.extend(note_silent(db, now, panes))
+    done.extend(note_model_refused(db, now, panes))
 
     # 4. Sidebar locks of sessions that are over.
     removed = clean_locks(db, now)
@@ -266,6 +267,65 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         db.update_agent(a.id, stuck_noted=last)
         done.append(f"told {a.parent_id} that worker {a.id} has gone silent")
+    return done
+
+
+def _task_weight(db: DB, a, ws) -> str | None:
+    if ws is None:
+        return None
+    return next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == a.id), None)
+
+
+def note_model_refused(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once, about a worker whose model the cloud
+    account refused (cause and one-line fix), where its tier's next profile
+    takes over (routing skips the refused one for an hour, so the other tasks
+    aren't lost the same way), and about Claude Code's own fallback to an
+    older model."""
+    from brindle import model_access
+    from brindle.config import load_repo_config
+    from brindle.providers import ClaudeCode
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.provider != "claude"
+                or a.status not in ("starting", "idle", "processing", "waiting")
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        where = f" on branch `{ws.branch}`" if ws else ""
+        error = ClaudeCode.api_error(screen)
+        swapped = None
+        try:
+            routing = load_repo_config(ws.repo_root).routing if ws else {}
+        except ValueError:
+            routing = {}
+        if model_access.classify(error) and model_access.first_time(f"refused:{a.id}"):
+            swapped = model_access.swap(routing, _task_weight(db, a, ws), a.profile, error)
+        if swapped is not None:
+            cause, to = swapped
+            move = (f"Other tasks of its weight tier go to {to} for the next hour; re-assign this "
+                    f"one with agent_profile={to}." if to
+                    else "No other profile in its weight tier is left to take over.")
+            body = (f"Worker {a.id} ({a.profile}){where} can't call its model: {cause.line()}. "
+                    f"{move}")
+        else:
+            warning = model_access.alias_fallback(screen)
+            if not warning or not model_access.first_time(f"alias:{a.id}"):
+                continue
+            body = f"Worker {a.id} ({a.profile}){where}: {warning}"
+        try:
+            agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        except agents.AgentError:
+            continue
+        done.append(f"told {a.parent_id} about worker {a.id}'s model")
     return done
 
 

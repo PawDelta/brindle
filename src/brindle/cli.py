@@ -2309,6 +2309,7 @@ def ci_report(
 @ci_app.command("doctor")
 def ci_doctor(
     repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: GITHUB_REPOSITORY)."),
+    models: bool = typer.Option(False, "--models", help="Also make one tiny call per pinned model and say why any is refused."),
 ) -> None:
     """Which provider CLIs and credential names are here, and which providers CI may use on this repository."""
     from brindle import ci_client, ci_hosts
@@ -2320,7 +2321,7 @@ def ci_doctor(
             full, org = env.get("CI_PROJECT_PATH") or repo, ci_hosts.GitLabHost.org_hint
         else:
             full, org = env.get("GITHUB_REPOSITORY") or repo, None
-        typer.echo(ci_client.doctor(env, full, os.getcwd(), org=org))
+        typer.echo(ci_client.doctor(env, full, os.getcwd(), org=org, models=models))
 
     _ci_call(go)
 

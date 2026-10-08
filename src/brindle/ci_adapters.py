@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Mapping, MutableMapping
 
 
-from brindle import providers
+from brindle import model_access, providers
 from brindle.secrets import is_job_secret
 
 log = logging.getLogger(__name__)
@@ -182,6 +182,11 @@ class Adapter:
         """Why the supervisor can't make progress on its own (a screen only a
         person answers), or None. Default: never."""
         return None
+
+    def notices(self, db, root) -> list[str]:
+        """Warnings the CLI printed that a run's notes should carry (Claude
+        Code's alias fallback to an older model). Default: none."""
+        return []
 
     def review(self, instructions: str, cwd: str, env: Mapping[str, str], *,
                timeout: float = REVIEW_TIMEOUT, profile: str | None = None) -> Review:
@@ -342,11 +347,27 @@ class ClaudeAdapter(Adapter):
                 since = now
             self._api_errors[agent.id] = (error, since)
             line = api_error_line(error)
+            cause = model_access.classify(error)
+            if cause is not None:
+                # The account can't call the model: no retry will help.
+                model_access.refuse(agent.profile, cause)
+                return f"{who} can't call its model: {cause.line()} ({line})"
             if providers.ClaudeCode.FATAL_API_ERROR.match(error):
                 return f"{who} stopped on an error it won't retry: {line}"
             if now - since >= TRANSIENT_API_ERROR_S:
                 return f"{who} has been stopped on an API error for {int(now - since)}s: {line}"
         return None
+
+    def notices(self, db, root) -> list[str]:
+        from brindle import agents
+
+        found = []
+        for agent in [root, *(a for a in (agents.tree(db, root.id) if root else [])
+                              if a.id != root.id and a.provider == self.name)]:
+            warning = model_access.alias_fallback(self._screen(agent) or "")
+            if warning and warning not in found:
+                found.append(warning)
+        return found
 
     @staticmethod
     def _screen(root) -> str | None:
@@ -642,6 +663,53 @@ def doctor(adapters: Mapping[str, Adapter], env: Mapping[str, str], org: bool | 
             "reason": why,
         })
     return rows
+
+
+def pinned_models(cwd: str) -> list[tuple[str, str]]:
+    """(profile, model) for each distinct model a Claude profile in the routing
+    tiers pins, in routing order."""
+    from brindle.config import DEFAULT_ROUTING, load_repo_config
+    from brindle.profiles import load_profile
+
+    try:
+        routing = load_repo_config(cwd).routing
+    except ValueError:
+        routing = DEFAULT_ROUTING
+    seen: dict[str, str] = {}
+    for tier in routing.values():
+        for name in tier:
+            try:
+                p = load_profile(name, cwd)
+            except KeyError:
+                continue
+            if p.provider == "claude" and p.model and p.model not in seen:
+                seen[p.model] = name
+    return [(profile, model) for model, profile in seen.items()]
+
+
+def check_models(adapters: Mapping[str, Adapter], env: Mapping[str, str], cwd: str,
+                 org: bool | None, *, run=subprocess.run) -> list[str]:
+    """One tiny call per pinned model through the claude CLI: a line each,
+    with the cause and fix of a model-access refusal. A refused profile is
+    remembered, so routing moves its tasks to the next profile of the tier."""
+    claude = adapters.get("claude")
+    if claude is None or not usable(claude, env, org)[0]:
+        return ["models: skipped (claude isn't usable here)"]
+    pinned = pinned_models(cwd)
+    if not pinned:
+        return ["models: none pinned"]
+    binary = claude.cli_path(env) or "claude"
+    lines = []
+    for profile, model in pinned:
+        ok, cause, text = model_access.probe(binary, model, cwd, claude_env(env), run=run)
+        if ok:
+            lines.append(f"model {model} ({profile}): ok")
+        elif cause is not None:
+            model_access.refuse(profile, cause)
+            lines.append(f"model {model} ({profile}): refused: {cause.line()}")
+        else:
+            lines.append(f"model {model} ({profile}): failed: {api_error_line(text)}")
+    return lines
 
 
 def format_doctor(rows: list[dict], repo: str | None, org: bool | None) -> str:

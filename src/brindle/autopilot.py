@@ -451,6 +451,11 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     over = gate.why_not(name, weight) if gate is not None and gate.active else None
     if over:
         return f"over budget, skipped {name} ({over})"
+    from brindle import model_access
+
+    denied = model_access.refused(name)
+    if denied:
+        return f"model refused for this account ({denied.cause}; {denied.fix}), skipped {name}"
     cli = CLI_FOR_PROVIDER.get(p.provider)
     if cli and unusable(p.provider, p.env):
         return (f"{cli} isn't signed in, skipped {name}" if signed_out(p.provider, p.env)
