@@ -559,9 +559,9 @@ keep theirs):
 ```json
 {
   "routing": {
-    "light":  ["developer", "developer-codex", "developer-local"],
+    "light":  ["developer-light", "developer", "developer-codex", "developer-local"],
     "medium": ["developer", "developer-codex", "developer-heavy"],
-    "heavy":  ["developer-heavy", "developer", "developer-codex"]
+    "heavy":  ["developer", "developer-heavy", "developer-codex"]
   }
 }
 ```
@@ -569,7 +569,9 @@ keep theirs):
 No tier prefers another provider for its own sake: all-Claude or all-Codex may
 be what works best for you, and that's for the learner to find out.
 
-`developer-codex` runs on Codex; `developer-heavy` on Claude Fable at high effort.
+`developer-light` runs on Claude Haiku at low effort; `developer` on your Claude
+Code default model; `developer-codex` on Codex; `developer-heavy` on Claude Fable
+at high effort.
 A profile is skipped when its CLI isn't installed (`claude`, `codex`, `agy`), the
 local model server isn't answering, or its provider is at your `usage_limit`. If
 hosted learning is on it chooses among the profiles left; otherwise the first

@@ -51,7 +51,7 @@ WEIGHTS = ("light", "medium", "heavy")
 DEFAULT_ROUTING = {
     "light": ["developer-light", "developer", "developer-codex", "developer-local"],
     "medium": ["developer", "developer-codex", "developer-heavy"],
-    "heavy": ["developer-heavy", "developer", "developer-codex"],
+    "heavy": ["developer", "developer-heavy", "developer-codex"],
 }
 
 
