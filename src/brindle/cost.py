@@ -32,6 +32,17 @@ ALL_ROWS = 10_000_000
 NO_GOAL = "(no goal)"
 LIST_NOTE = ("At list prices: a subscription (Claude Max, ChatGPT), batch or negotiated "
              "discount makes the real bill lower.")
+# Claude on an API key is billed at list price: no subscription to caveat.
+KEY_LIST_NOTE = "At list prices: a batch or negotiated discount makes the real bill lower."
+
+
+def _list_note() -> str:
+    from brindle import providers
+
+    try:
+        return KEY_LIST_NOTE if providers.claude_credential().keyed else LIST_NOTE
+    except Exception:  # noqa: BLE001 - the footer must not fail on a broken key store
+        return LIST_NOTE
 
 
 class NotEntitled(Exception):
@@ -163,7 +174,7 @@ def _where(repo_root: str | None) -> str:
 
 def _footer() -> list[str]:
     lines = ["", f"Prices as of {pricing.AS_OF.isoformat()} (set your own under \"pricing\" in "
-             ".brindle/config.json). " + LIST_NOTE]
+             ".brindle/config.json). " + _list_note()]
     warning = pricing.stale_warning()
     if warning:
         lines.append(warning)

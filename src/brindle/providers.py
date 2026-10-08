@@ -187,16 +187,89 @@ def seed_ci_config(trusted: list[str], api_key: str | None = None) -> str:
         for path in trusted:
             projects.setdefault(os.path.realpath(path), {})["hasTrustDialogAccepted"] = True
         if api_key:
-            responses = data.setdefault("customApiKeyResponses", {})
-            approved = responses.setdefault("approved", [])
-            suffix = api_key[-API_KEY_SUFFIX:]
-            if suffix not in approved:
-                approved.append(suffix)
-            responses.setdefault("rejected", [])
-            if suffix in responses["rejected"]:
-                responses["rejected"].remove(suffix)
+            _record_approval(data, api_key)
         _replace_json(config, data, 0o600)
     return config
+
+
+def _record_approval(data: dict, api_key: str) -> None:
+    """Mark ``api_key`` approved in Claude Code's config ``data``, as Claude
+    Code does: by its last 20 characters, and no longer rejected."""
+    responses = data.setdefault("customApiKeyResponses", {})
+    approved = responses.setdefault("approved", [])
+    suffix = api_key[-API_KEY_SUFFIX:]
+    if suffix not in approved:
+        approved.append(suffix)
+    responses.setdefault("rejected", [])
+    if suffix in responses["rejected"]:
+        responses["rejected"].remove(suffix)
+
+
+def approve_api_key(api_key: str) -> str:
+    """Let Claude Code use ``api_key`` without its "use this API key?" screen:
+    record the key's last 20 characters (never the key) under
+    ``customApiKeyResponses.approved`` in Claude Code's global config, and take
+    it out of ``rejected``. Only that; the config is created (mode 0600) when
+    missing and its mode kept otherwise. Returns the file's path; raises
+    OSError or ValueError (a file that isn't a JSON object) when it can't
+    write."""
+    if not api_key or not api_key.strip():
+        raise ValueError("empty key")
+    config = os.path.realpath(claude_global_config())
+    os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+    with _config_lock():
+        try:
+            data = _read_json(config)
+            import stat
+
+            mode = stat.S_IMODE(os.stat(config).st_mode)
+        except FileNotFoundError:
+            data, mode = {}, 0o600
+        if not isinstance(data, dict):
+            raise ValueError(f"{config} doesn't hold a JSON object")
+        _record_approval(data, api_key.strip())
+        _replace_json(config, data, mode)
+    return config
+
+
+# Where Claude Code reads its org-managed settings (its documented system
+# paths); BRINDLE_CLAUDE_MANAGED_SETTINGS (os.pathsep-separated) replaces them.
+MANAGED_SETTINGS_PATHS = (
+    "/Library/Application Support/ClaudeCode/managed-settings.json",   # macOS
+    "/etc/claude-code/managed-settings.json",                          # Linux, WSL
+    "C:\\Program Files\\ClaudeCode\\managed-settings.json",            # Windows
+)
+# Variables in a managed `env` that mean the org picks Claude's backend or credential.
+MANAGED_ENV_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                    "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
+                    "ANTHROPIC_FOUNDRY_BASE_URL")
+
+
+def managed_settings_paths() -> list[str]:
+    override = os.environ.get("BRINDLE_CLAUDE_MANAGED_SETTINGS")
+    return [p for p in override.split(os.pathsep) if p] if override is not None else list(MANAGED_SETTINGS_PATHS)
+
+
+def claude_org_managed() -> str | None:
+    """What Claude Code's managed settings take over, or None: ``apiKeyHelper``,
+    or the name of the first credential/backend variable in a managed ``env``.
+    An unreadable or malformed file counts as absent."""
+    for path in managed_settings_paths():
+        try:
+            data = _read_json(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("apiKeyHelper"):
+            return "apiKeyHelper"
+        env = data.get("env")
+        if isinstance(env, dict):
+            for key in MANAGED_ENV_KEYS:
+                if env.get(key):
+                    return key
+    return None
 
 
 def _config_lock():
@@ -294,7 +367,8 @@ class ClaudeCode(Provider):
         (re.compile(r"Choose the text style", re.I), "its first-run theme picker"),
         (re.compile(r"Security notes:[\s\S]*Press Enter to continue", re.I), "its first-run security notes"),
         (re.compile(r"Select login method", re.I), "its sign-in choice"),
-        (re.compile(r"Do you want to use this API key\?", re.I), 'its "use this API key?" question'),
+        (re.compile(r"Do you want to use this API key\?", re.I),
+         'its "use this API key?" question (`brindle keys set ANTHROPIC_API_KEY` can approve the key once)'),
     )
     # The footer under the input box, which no first-run screen has: with it
     # on screen, a first-run question is only quoted in the transcript.
@@ -672,6 +746,85 @@ def seen_signed_in(provider: str) -> bool:
     with any profile env (brindle doctor's "its own login")."""
     now = time.time()
     return any(k[0] == provider and now - t < SIGNED_IN_TTL for k, t in _SIGNED_IN.items())
+
+
+def subscription_login(provider: str = "claude") -> bool:
+    """Whether ``provider``'s own login answers "signed in", probed with the
+    provider's environment credentials left out so a key can't stand in for it."""
+    if provider != "claude":
+        return False
+    env = {k: v for k, v in os.environ.items() if k not in _ENV_AUTH["claude"]}
+    res = _auth_probe([claude_binary(), "auth", "status"], env)
+    if not res:
+        return False
+    try:
+        data = json.loads(res[1])
+    except ValueError:
+        return False
+    return isinstance(data, dict) and data.get("loggedIn") is True
+
+
+def _stored_key(name: str) -> bool:
+    from brindle import keystore
+
+    try:
+        return bool(keystore.get_key(name))
+    except keystore.CredentialError:
+        return False
+
+
+@dataclass
+class Credential:
+    kind: str            # "org-managed", "cloud", "token", "api key", "subscription"
+    name: str = ""       # the variable or setting that supplies it
+    source: str = ""     # "environment" or the key store's backend
+
+    @property
+    def keyed(self) -> bool:
+        """Billed per token through a key or token."""
+        return self.kind in ("api key", "token")
+
+
+def backend_label(backend: str) -> str:
+    """How a key store backend (keystore.backend_name) reads in doctor."""
+    return {"keychain": "keychain", "secret-service": "secret service"}.get(backend, "key file")
+
+
+def claude_credential() -> Credential:
+    """Which credential Claude Code uses in a brindle pane, in its own order of
+    precedence: an org's managed settings, a cloud provider, ANTHROPIC_AUTH_TOKEN,
+    ANTHROPIC_API_KEY (exported, else stored with `brindle keys`), else the
+    subscription login. Names only; no value is read out."""
+    from brindle import keystore
+
+    org = claude_org_managed()
+    if org:
+        return Credential("org-managed", org)
+    for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
+        if os.environ.get(name):
+            return Credential("cloud", name, "environment")
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return Credential("subscription", "CLAUDE_CODE_OAUTH_TOKEN", "environment")
+    for name, kind in (("ANTHROPIC_AUTH_TOKEN", "token"), ("ANTHROPIC_API_KEY", "api key")):
+        if os.environ.get(name):
+            return Credential(kind, name, "environment")
+        if _stored_key(name):
+            try:
+                backend = keystore.backend_name()
+            except keystore.CredentialError:
+                backend = "file"
+            return Credential(kind, name, backend_label(backend))
+    return Credential("subscription")
+
+
+def api_key_approved(api_key: str) -> bool:
+    """Whether Claude Code's config already approves ``api_key``."""
+    try:
+        data = _read_json(os.path.realpath(claude_global_config()))
+        return api_key[-API_KEY_SUFFIX:] in data["customApiKeyResponses"]["approved"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
 
 # Credentials a CLI takes from the environment instead of its own login.
 # agy (1.1.13 and later) reads GEMINI_API_KEY only when its settings.json

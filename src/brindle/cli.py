@@ -791,12 +791,24 @@ def autopilot_cmd(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    fix: bool = typer.Option(False, "--fix", help="Offer to let Claude Code use an exported ANTHROPIC_API_KEY without asking."),
+) -> None:
     """Check that brindle has what it needs, and say what to do about anything missing.
 
     tmux, the agent CLIs, a writable home, leftover processes; in a repo, its
     config, checks and code map."""
     from brindle import doctor as doctor_mod
+
+    if fix:
+        def ask(prompt: str) -> bool:
+            try:
+                return typer.confirm(prompt, default=False)
+            except typer.Abort:
+                return False
+
+        for line in doctor_mod.fix(ask):
+            typer.echo(line)
 
     root = None
     try:

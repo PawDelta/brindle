@@ -128,3 +128,53 @@ def test_doctor_keeps_quota_line_for_cli_not_installed(installed, monkeypatch):
     monkeypatch.setattr(providers, "codex_binary", lambda: "/nonexistent/codex")
     quota.record("codex", [quota.Window(42, time.time() + 3600, 10080)])
     assert any(q.name == "codex quota" for q in doctor.quota_checks(None))
+
+
+# -- which credential wins -----------------------------------------------------------------------
+
+FAKE_KEY = "sk-ant-api03-FAKEFAKEFAKEFAKE-0123456789abcdefXYZ"
+
+
+def credentials():
+    return {c.name: c for c in doctor.credential_checks()}
+
+
+def test_doctor_names_the_subscription_login(installed, monkeypatch):
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
+    c = credentials()["claude"]
+    assert (c.level, c.detail) == (doctor.OK, "subscription login")
+    assert credentials()["codex"].detail == "its own login"
+
+
+def test_doctor_names_an_exported_key_and_warns_next_to_a_subscription_login(installed, monkeypatch):
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    c = credentials()["claude"]
+    assert c.level == doctor.WARN
+    assert c.detail.startswith("API key (ANTHROPIC_API_KEY, from environment)")
+    assert "bills the key" in c.detail
+    assert FAKE_KEY not in doctor.render(doctor.credential_checks())
+
+
+def test_doctor_key_without_a_subscription_login_is_just_ok(installed, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)   # conftest's probe answers nothing
+    c = credentials()["claude"]
+    assert (c.level, c.detail) == (doctor.OK, "API key (ANTHROPIC_API_KEY, from environment)")
+
+
+def test_doctor_names_a_stored_key_by_where_it_is_kept(installed, monkeypatch):
+    from brindle import keystore
+
+    keystore.set_key("ANTHROPIC_API_KEY", FAKE_KEY)
+    assert credentials()["claude"].detail == "API key (ANTHROPIC_API_KEY, from key file)"
+    assert providers.backend_label("keychain") == "keychain"
+    assert providers.backend_label("secret-service") == "secret service"
+
+
+def test_doctor_says_org_managed(installed, tmp_path, monkeypatch):
+    path = tmp_path / "managed-settings.json"
+    path.write_text(json.dumps({"apiKeyHelper": "/opt/bin/get-key"}))
+    monkeypatch.setenv("BRINDLE_CLAUDE_MANAGED_SETTINGS", str(path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)   # the org's settings win over it
+    c = credentials()["claude"]
+    assert (c.level, c.detail) == (doctor.OK, "org-managed (apiKeyHelper)")

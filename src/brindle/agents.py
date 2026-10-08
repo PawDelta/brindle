@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 
-from brindle import git, keystore, secrets, tmux, workspaces
+from brindle import git, keystore, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import load_profile, missing_add_dirs
@@ -180,7 +180,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             profile_env = {}
         if m is _UNREAD:
             m = managed(ws.repo_root)
-        env = {**profile_env, **managed_models.agent_env(m, agent.provider), **env}
+        # Claude Code's own managed settings (apiKeyHelper, a managed env) pick
+        # the credential and backend: brindle adds no provider_config env there.
+        org = agent.provider == "claude" and providers.claude_org_managed()
+        env = {**profile_env, **({} if org else managed_models.agent_env(m, agent.provider)), **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -425,6 +428,9 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     # tmux server's), unless the environment already has the name or an org's
     # deny_personal_keys keeps it out. deny/allow strip it as they do an exported key.
     denied = set(m.denied_keys) if m is not None and m.denied_keys else set()
+    if agent.provider == "claude" and providers.claude_org_managed():
+        # Claude Code's managed settings supply the credential: no stored Claude key.
+        denied |= set(providers._ENV_AUTH["claude"])
     env = {**keystore.pane_keys(credentials - denied, env), **env}
     target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
                              tag=(AGENT_TAG, agent.id),
