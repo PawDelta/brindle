@@ -959,6 +959,19 @@ def count_commits(cwd: str, base_sha: str, branch: str) -> int:
         raise CIError(f"can't count the commits: {e}") from e
 
 
+def _session_profiles(db, root_id: str) -> set[str]:
+    """The profiles of the session's supervisor and every agent below it."""
+    found: set[str] = set()
+    todo = [root_id]
+    while todo:
+        agent = db.get_agent(todo.pop())
+        if agent is None:
+            continue
+        found.add(agent.profile)
+        todo.extend(c.id for c in db.children(agent.id))
+    return found
+
+
 def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | None = None,
                   base_sha: str | None = None, branch: str | None = None,
                   milestone_ids: list[int] | None = None) -> dict:
@@ -983,7 +996,7 @@ def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | 
         state, note = "failed", stuck
     else:
         state, note = "working", f"supervisor {root.status}; autopilot {ap.state if ap else 'off'}"
-    extra = model_access.notes()
+    extra = model_access.notes(_session_profiles(db, root_id), cwd)
     if root is not None:
         try:
             extra += adapter.notices(db, root)
@@ -991,7 +1004,7 @@ def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | 
             pass
     if extra:
         note = "; ".join([n for n in (note, *extra) if n])
-    event ={"state": state, "milestones": milestone_rows(db, root_id, milestone_ids),
+    event = {"state": state, "milestones": milestone_rows(db, root_id, milestone_ids),
              "usage": adapter.usage(db, root_id),
              "commits": count_commits(cwd, base_sha, branch) if cwd and base_sha and branch else 0,
              "provider_error": adapter.provider_error(db, root_id)}

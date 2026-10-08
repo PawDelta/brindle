@@ -560,6 +560,15 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
             f"{why}\n\nThe branch `{ws.branch}` holds its work in this worktree. Continue from it: "
             "fix what is wrong, run the tests that cover your change, commit, and call "
             "report_result. brindle reviews and checks the branch again before it merges.").strip()
+    # The retry works in the failed worker's worktree: two agents must never
+    # write to one, so the original goes first, and the retry waits on that.
+    if agents.is_alive(worker):
+        try:
+            agents.close(db, worker.id)
+        except agents.AgentError:
+            return False
+        if agents.is_alive(db.get_agent(worker.id) or worker):
+            return False
     try:
         retry, _ws = agents.delegate(db, parent, ws, ESCALATION_PROFILE, task, "assign",
                                      isolate=False, done_when=worker.done_when, plan_first=False)

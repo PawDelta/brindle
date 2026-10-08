@@ -6,6 +6,15 @@ cloud with no stored secret. Each one trusts only GitHub's OIDC token
 environment `brindle-ci` of one repository, i.e. the subject
 `repo:OWNER/REPO:environment:brindle-ci`.
 
+## Tightening trust
+
+The run job in the `brindle-ci` environment can mint cloud credentials for
+code from branches of the same repository (forks never get OIDC tokens). Keep
+the cloud role narrow: the templates grant only Claude model calls, so leave
+it that way. If you need more control, add protection rules to the
+`brindle-ci` environment (required reviewers, or limit it to selected
+branches).
+
 ## AWS (Amazon Bedrock)
 
 [`aws/brindle-ci-bedrock.yaml`](aws/brindle-ci-bedrock.yaml) is a

@@ -88,6 +88,47 @@ def test_the_refusal_lapses_after_an_hour(monkeypatch):
     assert model_access.refused("developer") is None and model_access.notes() == []
 
 
+@pytest.mark.parametrize("text", [
+    "API Error: 404 Not Found: the model config file does not exist",
+    "API Error: 404 The model 'gpt-5' does not exist",
+])
+def test_an_unrelated_404_is_not_classified_as_mantle(text):
+    assert model_access.classify(text) is None
+
+
+def test_a_bedrock_marker_classifies_a_mantle_404():
+    text = "API Error: 404 bedrock-mantle: model does not exist"
+    assert model_access.classify(text).key == "bedrock_endpoint"
+
+
+def test_a_refusal_under_one_fingerprint_does_not_affect_another():
+    model_access.refuse("developer", model_access.BEDROCK_QUOTA, "developer-heavy", fp="aws|us-east-1")
+    assert model_access.refused("developer", fp="aws|us-east-1").key == "bedrock_quota"
+    assert model_access.refused("developer", fp="aws|eu-west-1") is None
+    model_access.refuse("developer", model_access.VERTEX_QUOTA, fp="vertex|proj-a")
+    assert model_access.refused("developer", fp="aws|us-east-1").key == "bedrock_quota"   # both kept
+
+
+def test_the_fingerprint_names_the_account_never_a_key(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s3cret")
+    fp = model_access.fingerprint("developer")
+    assert "AWS_REGION=us-east-1" in fp and "s3cret" not in fp
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    assert model_access.fingerprint("developer") != fp
+
+
+def test_refusal_from_another_account_is_not_in_this_sessions_notes(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    model_access.refuse("developer", model_access.BEDROCK_QUOTA)
+    assert model_access.notes(["developer"])
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    assert model_access.notes(["developer"]) == []       # same profile, another account
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    assert model_access.notes(["reviewer"]) == []        # not this session's profile
+
+
 def test_no_next_profile_when_the_tier_is_used_up():
     model_access.refuse("developer-heavy", model_access.VERTEX_DATA_SHARING)
     cause, to = model_access.swap({"heavy": ["developer", "developer-heavy"]}, "heavy", "developer",
@@ -98,6 +139,7 @@ def test_no_next_profile_when_the_tier_is_used_up():
 def test_the_session_report_carries_the_swap_and_the_alias_warning(db, repo, monkeypatch):
     warning = "Opus 5.5 not available — using Opus 4.6 for this session"
     _, root, _ = _launch_showing(monkeypatch, db, repo, [PROMPT + "\n" + warning])
+    root.profile = "developer"
     db.add_agent(root)
     monkeypatch.setattr(ClaudeAdapter, "alive", lambda self, db_, r: True)
     monkeypatch.setattr(ClaudeAdapter, "provider_error", lambda self, db_, rid: None)

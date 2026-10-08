@@ -453,7 +453,7 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
         return f"over budget, skipped {name} ({over})"
     from brindle import model_access
 
-    denied = model_access.refused(name)
+    denied = model_access.refused(name, repo_root)
     if denied:
         return f"model refused for this account ({denied.cause}; {denied.fix}), skipped {name}"
     cli = CLI_FOR_PROVIDER.get(p.provider)
