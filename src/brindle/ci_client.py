@@ -1098,19 +1098,32 @@ def run(plan_token: str, token_path: str | Path, *, cwd: str, env: MutableMappin
     # Before the scrub: the refresher needs the Actions token endpoint,
     # which no agent may see.
     federation = start_federation(env, say=say)
+    cloud = start_cloud_tokens(env, say=say)
     try:
         if plan["plan_kind"] == "validation":
             check_validation_checkout(plan, cwd, say=say)
-            scrub_job(env, federation)
+            scrub_job(env, federation, cloud)
             return run_validation(plan, run_token, cwd=cwd, env=env, client=client, adapters=adapters,
                                   org=org, clock=clock, say=say)
         prepare_branch(plan, cwd, say=say)
-        scrub_job(env, federation)
+        scrub_job(env, federation, cloud)
         return _run_session(plan, run_token, repo=repo, cwd=cwd, env=env, client=client, db=db,
                             adapters=adapters, clock=clock, sleep=sleep, say=say)
     finally:
         if federation is not None:
             federation.stop()
+        if cloud is not None:
+            cloud.stop()
+
+
+def start_cloud_tokens(env: Mapping[str, str], say: Callable[[str], None] = print) -> ci_federation.CloudTokens | None:
+    """The run's keyless cloud sign-in (:mod:`brindle.ci_federation`): a
+    refreshed OIDC token file per cloud the job uses, or None."""
+    cloud = ci_federation.start_cloud_tokens(env)
+    if cloud is not None:
+        say("keyless cloud sign-in: the run refreshes its " +
+            ", ".join(r.cloud for r in cloud.refreshers) + " token itself")
+    return cloud
 
 
 def start_federation(env: Mapping[str, str], say: Callable[[str], None] = print) -> ci_federation.Federation | None:
@@ -1130,14 +1143,18 @@ def start_federation(env: Mapping[str, str], say: Callable[[str], None] = print)
     return fed
 
 
-def scrub_job(env: MutableMapping[str, str], federation: ci_federation.Federation | None) -> None:
+def scrub_job(env: MutableMapping[str, str], federation: ci_federation.Federation | None,
+              cloud: ci_federation.CloudTokens | None = None) -> None:
     """Scrub the job's secrets from ``env`` and this process (what every
-    agent inherits), then point both at the credential proxy if there is one."""
+    agent inherits), then point both at the credential proxy and the cloud
+    token files if there are any."""
     gone = scrub_secrets(env)
     for k in gone:
         os.environ.pop(k, None)
     if federation is not None:
         federation.apply(env, os.environ)
+    if cloud is not None:
+        cloud.apply(env, os.environ)
 
 
 def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: MutableMapping[str, str],

@@ -36,6 +36,7 @@ goes on with whatever credential the workflow gave it.
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import http.client
 import http.server
@@ -227,6 +228,217 @@ class TokenRefresher:
             self._thread.join(timeout=5)
         with self._lock:
             self._token = None
+
+
+# -- keyless cloud tokens ------------------------------------------------------------------------
+
+BEDROCK, VERTEX, FOUNDRY = "bedrock", "vertex", "foundry"
+CLOUD_USE_VARS = {BEDROCK: "CLAUDE_CODE_USE_BEDROCK", VERTEX: "CLAUDE_CODE_USE_VERTEX",
+                  FOUNDRY: "CLAUDE_CODE_USE_FOUNDRY"}
+# The IDs `ci init` stores that the token and its agent env need.
+CLOUD_IDS = {BEDROCK: ("AWS_ROLE_ARN",),
+             VERTEX: ("GCP_WORKLOAD_IDENTITY_PROVIDER", "GCP_SERVICE_ACCOUNT"),
+             FOUNDRY: ("AZURE_CLIENT_ID", "AZURE_TENANT_ID")}
+AWS_AUDIENCE = "sts.amazonaws.com"
+AZURE_AUDIENCE = "api://AzureADTokenExchange"
+GCP_AUDIENCE_PREFIX = "//iam.googleapis.com/"
+GCP_TOKEN_URL = "https://sts.googleapis.com/v1/token"
+GCP_IMPERSONATION_URL = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{}:generateAccessToken"
+GCP_SUBJECT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt"
+AWS_SESSION_NAME = "brindle-ci"
+CLOUD_REFRESH_FRACTION = 0.5
+MIN_CLOUD_REFRESH_S = 5.0
+DEFAULT_CLOUD_LIFETIME_S = 300.0   # for a token without a readable exp
+
+
+def cloud_audience(cloud: str, ids: Mapping[str, str]) -> str:
+    if cloud == BEDROCK:
+        return AWS_AUDIENCE
+    if cloud == VERTEX:
+        return GCP_AUDIENCE_PREFIX + ids["GCP_WORKLOAD_IDENTITY_PROVIDER"]
+    return AZURE_AUDIENCE
+
+
+def cloud_token_clouds(env: Mapping[str, str]) -> list[str]:
+    """The clouds this job signs in to keylessly: selected by
+    ``CLAUDE_CODE_USE_*``, with their IDs and the Actions token endpoint set,
+    and no static credential that would win anyway."""
+    if env.get(DISABLE_VAR, "").strip() == "0" or not (env.get(ACTIONS_URL) and env.get(ACTIONS_TOKEN)):
+        return []
+    clouds = []
+    for cloud, var in CLOUD_USE_VARS.items():
+        if env.get(var, "").strip().lower() in ("", "0", "false", "no"):
+            continue
+        if not all(env.get(k) for k in CLOUD_IDS[cloud]):
+            continue
+        if cloud == BEDROCK and (env.get("AWS_ACCESS_KEY_ID") or env.get("AWS_BEARER_TOKEN_BEDROCK")):
+            continue
+        if cloud == FOUNDRY and (env.get("ANTHROPIC_FOUNDRY_API_KEY") or env.get("ANTHROPIC_FOUNDRY_AUTH_TOKEN")):
+            continue
+        clouds.append(cloud)
+    return clouds
+
+
+def jwt_expiry(token: str) -> float | None:
+    """The ``exp`` claim of a JWT (not verified: only to time the refresh)."""
+    import base64
+
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        exp = claims.get("exp")
+    except (IndexError, ValueError, AttributeError):
+        return None
+    return float(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+
+
+def _write_private(path: str, text: str) -> None:
+    """Replace ``path`` with ``text``, mode 0600 from the moment it exists."""
+    import os
+
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+class CloudTokenRefresher:
+    """One cloud's GitHub OIDC token, kept in a 0600 file outside the
+    checkout and rewritten at half its lifetime (from its ``exp``). The cloud's
+    SDK reads the file on each use. A failed refresh is retried while the old
+    token is valid (and after). The token is never held in memory longer than
+    a write, nor logged."""
+
+    def __init__(self, cloud: str, ids: Mapping[str, str], oidc_url: str, request_token: str, *,
+                 directory: str | None = None,
+                 fetch: Callable[..., str] | None = None, clock: Callable[[], float] = time.time) -> None:
+        import tempfile
+
+        self.cloud = cloud
+        self._ids = {k: ids[k] for k in CLOUD_IDS[cloud]}
+        self._url, self._request_token = oidc_url, request_token
+        self._fetch = fetch or self._default_fetch
+        self._clock = clock
+        self._own_dir = directory is None
+        self.directory = directory or tempfile.mkdtemp(prefix="brindle-ci-cloud-")
+        self.token_file = f"{self.directory}/{cloud}-token"
+        self.audience = cloud_audience(cloud, ids)
+        self._failures = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _default_fetch(url: str, request_token: str, audience: str) -> str:
+        from brindle import ci_client
+
+        try:
+            return ci_client._fetch_oidc(url, request_token, audience=audience)
+        except ci_client.CIError as e:
+            raise FederationError(str(e)) from None
+
+    def refresh_now(self) -> float:
+        """Write a fresh token; the seconds to wait before the next refresh."""
+        token = self._fetch(self._url, self._request_token, self.audience)
+        exp = jwt_expiry(token)
+        lifetime = exp - self._clock() if exp is not None else DEFAULT_CLOUD_LIFETIME_S
+        _write_private(self.token_file, token)
+        return max(MIN_CLOUD_REFRESH_S, lifetime * CLOUD_REFRESH_FRACTION)
+
+    def tick(self) -> float:
+        try:
+            delay = self.refresh_now()
+        except Exception as e:   # noqa: BLE001 - the thread must not die
+            self._failures += 1
+            why = str(e) if isinstance(e, FederationError) else f"unexpected {type(e).__name__}"
+            log.warning("brindle ci: refreshing the %s token failed (%s); retrying", self.cloud, why)
+            n = self._failures
+            return RETRY_DELAYS[n - 1] if n <= len(RETRY_DELAYS) else RETRY_EVERY_S
+        self._failures = 0
+        return delay
+
+    def agent_env(self) -> dict[str, str]:
+        """The path and IDs the cloud's SDK needs; never the token."""
+        ids = self._ids
+        if self.cloud == BEDROCK:
+            return {"AWS_ROLE_ARN": ids["AWS_ROLE_ARN"], "AWS_WEB_IDENTITY_TOKEN_FILE": self.token_file,
+                    "AWS_ROLE_SESSION_NAME": AWS_SESSION_NAME}
+        if self.cloud == VERTEX:
+            config = f"{self.directory}/vertex-credentials.json"
+            _write_private(config, json.dumps(self.google_config()))
+            return {"GOOGLE_APPLICATION_CREDENTIALS": config}
+        return {"AZURE_CLIENT_ID": ids["AZURE_CLIENT_ID"], "AZURE_TENANT_ID": ids["AZURE_TENANT_ID"],
+                "AZURE_FEDERATED_TOKEN_FILE": self.token_file}
+
+    def google_config(self) -> dict:
+        return {"type": "external_account", "audience": self.audience,
+                "subject_token_type": GCP_SUBJECT_TOKEN_TYPE, "token_url": GCP_TOKEN_URL,
+                "service_account_impersonation_url": GCP_IMPERSONATION_URL.format(self._ids["GCP_SERVICE_ACCOUNT"]),
+                "credential_source": {"file": self.token_file, "format": {"type": "text"}}}
+
+    def start(self) -> None:
+        delay = self.refresh_now()
+        self._thread = threading.Thread(target=self._loop, args=(delay,), name=f"brindle-ci-{self.cloud}", daemon=True)
+        self._thread.start()
+
+    def _loop(self, delay: float) -> None:
+        while not self._stop.wait(delay):
+            delay = self.tick()
+
+    def stop(self) -> None:
+        import shutil
+
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        if self._own_dir:
+            shutil.rmtree(self.directory, ignore_errors=True)
+
+
+class CloudTokens:
+    """The running per-cloud refreshers and what the agents are told."""
+
+    def __init__(self, refreshers: list[CloudTokenRefresher]) -> None:
+        self.refreshers = refreshers
+
+    def agent_env(self) -> dict[str, str]:
+        env: dict[str, str] = {}
+        for r in self.refreshers:
+            env.update(r.agent_env())
+        return env
+
+    def apply(self, *envs: MutableMapping[str, str]) -> None:
+        for env in envs:
+            env.update(self.agent_env())
+
+    def stop(self) -> None:
+        for r in self.refreshers:
+            r.stop()
+
+
+def start_cloud_tokens(env: Mapping[str, str], *, fetch: Callable[..., str] | None = None,
+                       clock: Callable[[], float] = time.time) -> CloudTokens | None:
+    """Write the first token for each cloud the job uses and start
+    refreshing. Read ``env`` before the scrub (it needs the Actions endpoint).
+    A cloud whose first fetch fails is left out (its workflow credentials, if
+    any, stay); None when no cloud is left."""
+    started: list[CloudTokenRefresher] = []
+    for cloud in cloud_token_clouds(env):
+        r = CloudTokenRefresher(cloud, env, env[ACTIONS_URL], env[ACTIONS_TOKEN], fetch=fetch, clock=clock)
+        try:
+            r.start()
+        except Exception as e:   # noqa: BLE001
+            why = str(e) if isinstance(e, FederationError) else type(e).__name__
+            log.warning("brindle ci: the %s token: %s", cloud, why)
+            r.stop()
+            continue
+        started.append(r)
+    return CloudTokens(started) if started else None
 
 
 # -- the proxy -----------------------------------------------------------------------------------
