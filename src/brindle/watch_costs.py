@@ -160,7 +160,8 @@ def _org(repo_root: str | None, lim: budget.Limits | None) -> Org | None:
         return fetch_spend(ent.org_id)
     # A plain member sees only their own seat, from the policy fetch ``budget.limits``
     # already made (``lim.org``: an org budget is part of it).
-    if lim is None or not lim.org or lim.seat_spent_usd is None:
+    # Not at all when the org hides this person's dollars: the Org line carries only dollars.
+    if lim is None or not lim.org or lim.seat_spent_usd is None or lim.hide_dollars:
         return None
     return Org(False, lim.seat_spent_usd, lim.month_usd)
 

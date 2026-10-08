@@ -191,3 +191,57 @@ def test_the_task_budget_still_stops_workers_and_the_notes_have_no_dollars(db, r
     monkeypatch.setattr(budget, "worker_spend", lambda db, agent, root: 10.5)
     assert len(budget.sweep(db)) == 1 and "at limit" in sent[-1]
     assert all("$" not in s for s in sent)
+
+
+# -- the org line and personal limits -------------------------------------------------------------
+
+
+def member(monkeypatch, role="member"):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(license, "current", lambda refresh=False: SimpleNamespace(
+        features={team_policy.BUDGETS_FEATURE}, role=role, org_id=ORG))
+
+
+def test_a_member_whose_org_hides_dollars_gets_no_org_line(org, monkeypatch):
+    member(monkeypatch)
+    org(policy(spent=40, visibility=hidden()))
+    assert watch_costs._org("/r", budget.limits(Cfg(), "/r")) is None
+
+
+def test_a_member_whose_org_shows_dollars_still_gets_the_org_line(org, monkeypatch):
+    member(monkeypatch)
+    org(policy(spent=40))
+    got = watch_costs._org("/r", budget.limits(Cfg(), "/r"))
+    assert got == watch_costs.Org(False, 40.0, LIMIT)
+
+
+class Personal:
+    def __init__(self, **kw):
+        self.budget = kw
+
+
+def test_a_stricter_personal_limit_stays_in_dollars(db, repo, gate_env, org):
+    # the org's $100 month budget is hidden, but the person's own $2 task budget is theirs
+    org(policy(visibility=hidden()))
+    why = budget.Gate(db, Personal(task_usd=2), str(repo), "boss").why_not("big", "medium")
+    assert why and "$2.00 task budget" in why
+
+
+def test_the_orgs_limit_is_still_hidden_when_a_looser_personal_one_is_set(db, repo, gate_env, org):
+    org(policy(spent=100, visibility=hidden()))
+    why = budget.Gate(db, Personal(month_usd=500), str(repo), "boss").why_not("big", "medium")
+    assert why and "$" not in why and "at limit" in why
+
+
+def test_a_personal_limit_hides_nothing_without_an_org_budget(org):
+    lim = budget.Limits(task_usd=2.0, hide_dollars=True)
+    assert not lim.hides("task_usd")
+
+
+def test_which_limit_is_the_orgs_is_per_key(org):
+    org(policy(visibility=hidden(), task_usd=10))
+    lim = budget.limits(Personal(task_usd=5, goal_usd=50), "/r")
+    assert lim.task_usd == 5 and not lim.hides("task_usd")      # personal is stricter
+    assert lim.hides("month_usd")                               # the org's alone
+    assert lim.goal_usd == 50 and not lim.hides("goal_usd")     # the org sets no goal limit

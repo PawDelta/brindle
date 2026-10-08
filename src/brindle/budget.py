@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from brindle import pricing
 from brindle.db import DB
@@ -49,8 +49,18 @@ class Limits:
     org: bool = False       # an org budget is part of these limits: it can't be skipped for want of a price
     hide_dollars: bool = False   # the org hides this person's org spend and limits: words, not dollars
 
+    org_caps: dict = field(default_factory=dict)   # the org's own value per limit key, before a repo tightened it
+
     def any(self) -> bool:
         return any(getattr(self, k) is not None for k in KEYS)
+
+    def hides(self, key: str) -> bool:
+        """Whether ``key``'s dollars are the org's to hide. A stricter personal
+        (repo) limit is the person's own: it stays in dollars."""
+        if not self.hide_dollars:
+            return False
+        cap, mine = self.org_caps.get(key), getattr(self, key)
+        return cap is not None and (mine is None or mine >= cap)
 
 
 AT_LIMIT, CLOSE, WITHIN = "at limit", "getting close", "within limit"
@@ -146,8 +156,12 @@ def limits(cfg, repo_root: str | None = None) -> Limits | None:
         lim.month_usd = _tighter(lim.month_usd, org.month_usd)
         lim.seat_spent_usd = org.seat_spent_usd
         lim.hide_dollars = org.hide_dollars
+        lim.org_caps = {k: getattr(org, k) for k in KEYS}
     if lim.month_usd is not None:
-        lim.month_usd += _approved_month()      # an admin's cost-center approval (Enterprise)
+        approved = _approved_month()      # an admin's cost-center approval (Enterprise)
+        lim.month_usd += approved
+        if lim.org_caps.get("month_usd") is not None:
+            lim.org_caps["month_usd"] += approved
     return lim if lim.any() else None
 
 
@@ -282,9 +296,9 @@ class Gate:
                 return f"{profile} has no known price, so it can't be shown to fit the org's budget"
             return None
         m = pricing.money
-        hide = lim.hide_dollars      # the org hides its dollars from this person: say it in words
+        # the org hides its dollars from this person: say it in words (a personal limit stays in dollars)
         if lim.task_usd is not None and est > lim.task_usd:
-            if hide:
+            if lim.hides("task_usd"):
                 return f"a {profile} task would go over the task budget (at limit)"
             return f"a {profile} task costs about {m(est)}, over the {m(lim.task_usd)} task budget"
         if lim.goal_usd is not None:
@@ -292,14 +306,14 @@ class Gate:
             if spent is None:
                 return f"the goal's spend can't be totalled, so {profile} can't be shown to fit its budget"
             if spent + est > cap:
-                if hide:
+                if lim.hides("goal_usd"):
                     return f"{profile} would take the goal over its budget (at limit)"
                 return (f"{profile} at about {m(est)} would take the goal to {m(spent + est)}, "
                         f"over its {m(cap)} budget")
         if lim.month_usd is not None:
             spent = self.month_spend()
             if spent + est > lim.month_usd:
-                if hide:
+                if lim.hides("month_usd"):
                     return f"{profile} would take this month over the budget (at limit)"
                 return (f"{profile} at about {m(est)} would take this month to {m(spent + est)}, "
                         f"over the {m(lim.month_usd)} budget")
@@ -350,7 +364,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         try:
             if spent >= lim.task_usd:
                 note = (f"[brindle budget] worker {agent.id} is at limit on its task budget."
-                        if lim.hide_dollars else
+                        if lim.hides("task_usd") else
                         f"[brindle budget] worker {agent.id} has spent about {m(spent)}, "
                         f"its {m(lim.task_usd)} task budget.")
                 if lim.stop:
@@ -370,7 +384,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             elif spent >= lim.task_usd * WARN_AT and not r.budget_state:
                 db.set_budget_state(agent.id, "warned")
                 note = (f"[brindle budget] worker {agent.id} is getting close to its task budget."
-                        if lim.hide_dollars else
+                        if lim.hides("task_usd") else
                         f"[brindle budget] worker {agent.id} has spent about {m(spent)}, over "
                         f"{round(WARN_AT * 100)}% of its {m(lim.task_usd)} task budget.")
                 _tell(db, agent, note)
