@@ -24,7 +24,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from brindle.config import brindle_home
 
@@ -78,6 +78,9 @@ _DATA_SHARING = re.compile(r"requires data sharing to be enabled for publisher\s
                            re.IGNORECASE)
 
 
+MANTLE_WORDING = "the model 'claude-"   # Mantle's "The model 'claude-…' does not exist"
+
+
 def classify(text: str | None) -> Cause | None:
     """The cause of a model-access error in ``text`` (an API error line, a
     CLI's stderr), or None when it is some other error."""
@@ -88,7 +91,8 @@ def classify(text: str | None) -> Cause | None:
         return BEDROCK_QUOTA
     if "model use case details have not been submitted" in low:
         return BEDROCK_USE_CASE
-    if "404" in low and "does not exist" in low and "model" in low:
+    if "404" in low and "does not exist" in low and "model" in low and (
+            "mantle" in low or "bedrock" in low or MANTLE_WORDING in low):
         return BEDROCK_ENDPOINT
     if "online_prediction_requests_per_base_model" in low:
         return VERTEX_QUOTA
@@ -145,17 +149,56 @@ def _save(data: dict) -> None:
     os.replace(tmp, _path())
 
 
-def refuse(profile: str, cause: Cause, swapped_to: str | None = None) -> None:
+# Names and non-secret IDs that say which cloud account a profile calls; never keys.
+FINGERPRINT_ENV = (
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE",
+    "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION",
+    "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL",
+)
+
+
+def fingerprint(profile: str, repo_root: str | None = None) -> str:
+    """Where ``profile`` would call a model: its provider, whether a cloud flag
+    is on, and the region, project or resource it names. A refusal applies only
+    under the fingerprint it was recorded with."""
+    env = dict(os.environ)
+    provider = ""
+    try:
+        from brindle.profiles import load_profile
+
+        p = load_profile(profile, repo_root)
+        provider = p.provider or ""
+        env.update(p.env or {})
+    except Exception:  # noqa: BLE001 - an unreadable profile adds nothing
+        pass
+    parts = [f"provider={provider}"]
+    for k in FINGERPRINT_ENV:
+        v = env.get(k)
+        if v not in (None, ""):
+            parts.append(f"{k}={v}")
+    return "|".join(parts)
+
+
+def _key(profile: str, fp: str) -> str:
+    return f"{profile}@{fp}"
+
+
+def refuse(profile: str, cause: Cause, swapped_to: str | None = None, *,
+           repo_root: str | None = None, fp: str | None = None) -> None:
     """Record that ``profile``'s model was refused, and where its tasks go."""
     now = time.time()
+    fp = fingerprint(profile, repo_root) if fp is None else fp
     data = _load(now)
-    data["refused"][profile] = {"cause": cause.key, "at": now, "swapped_to": swapped_to}
+    data["refused"][_key(profile, fp)] = {"profile": profile, "fp": fp, "cause": cause.key,
+                                          "at": now, "swapped_to": swapped_to}
     _save(data)
 
 
-def refused(profile: str) -> Cause | None:
-    """The cause ``profile``'s model was refused for within the last hour."""
-    entry = _load(time.time())["refused"].get(profile)
+def refused(profile: str, repo_root: str | None = None, fp: str | None = None) -> Cause | None:
+    """The cause ``profile``'s model was refused for, here, within the last hour."""
+    fp = fingerprint(profile, repo_root) if fp is None else fp
+    entry = _load(time.time())["refused"].get(_key(profile, fp))
     return next((c for c in CAUSES if entry and c.key == entry.get("cause")), None)
 
 
@@ -170,11 +213,19 @@ def first_time(key: str) -> bool:
     return True
 
 
-def notes() -> list[str]:
+def notes(profiles: Iterable[str] | None = None, repo_root: str | None = None) -> list[str]:
     """One line per profile refused within the last hour, with the cause, the
-    fix and the profile its tasks moved to: for a run's notes."""
+    fix and the profile its tasks moved to: for a run's notes. With
+    ``profiles`` (a session's), only those, and only refusals recorded under
+    the fingerprint they have here."""
+    wanted = None if profiles is None else set(profiles)
     out = []
-    for profile, entry in sorted(_load(time.time())["refused"].items()):
+    for entry in sorted(_load(time.time())["refused"].values(),
+                        key=lambda e: (e.get("profile", ""), e.get("fp", ""))):
+        profile = entry.get("profile", "")
+        if wanted is not None and (profile not in wanted
+                                   or entry.get("fp") != fingerprint(profile, repo_root)):
+            continue
         cause = next((c for c in CAUSES if c.key == entry.get("cause")), None)
         if cause is None:
             continue
@@ -189,7 +240,8 @@ CAUSES = (BEDROCK_QUOTA, BEDROCK_USE_CASE, BEDROCK_ENDPOINT, VERTEX_QUOTA, VERTE
 
 
 def next_profile(routing: Mapping[str, list[str]], weight: str | None, profile: str,
-                 usable: Callable[[str], bool] = lambda _name: True) -> str | None:
+                 usable: Callable[[str], bool] = lambda _name: True,
+                 repo_root: str | None = None) -> str | None:
     """The profile after ``profile`` in its weight tier that is not refused and
     ``usable``. Without a ``weight``, the first tier that lists ``profile``."""
     tiers = [weight] if weight in routing else list(routing)
@@ -198,21 +250,22 @@ def next_profile(routing: Mapping[str, list[str]], weight: str | None, profile: 
         if profile not in order:
             continue
         for name in order[order.index(profile) + 1:]:
-            if refused(name) is None and usable(name):
+            if refused(name, repo_root) is None and usable(name):
                 return name
     return None
 
 
 def swap(routing: Mapping[str, list[str]], weight: str | None, profile: str, error: str,
-         usable: Callable[[str], bool] = lambda _name: True) -> tuple[Cause, str | None] | None:
+         usable: Callable[[str], bool] = lambda _name: True,
+         repo_root: str | None = None) -> tuple[Cause, str | None] | None:
     """``profile``'s model was refused with ``error``: if that is a model-access
     error, record the refusal and the swap and return (cause, the profile that
     takes over, or None when the tier has none left). None for other errors."""
     cause = classify(error)
     if cause is None:
         return None
-    to = next_profile(routing, weight, profile, usable)
-    refuse(profile, cause, to)
+    to = next_profile(routing, weight, profile, usable, repo_root)
+    refuse(profile, cause, to, repo_root=repo_root)
     return cause, to
 
 

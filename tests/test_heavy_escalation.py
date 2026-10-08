@@ -29,6 +29,9 @@ def heavy(db, piped, repo, monkeypatch):
         return db_.get_agent("retry1"), ws_
 
     monkeypatch.setattr(agents, "delegate", fake_delegate)
+    is_alive = agents.is_alive
+    monkeypatch.setattr(agents, "is_alive",
+                        lambda agent, panes=None: False if agent.id == "w1" else is_alive(agent, panes))
 
     def configure(**kw):
         (repo / ".brindle" / "config.json").write_text(json.dumps(
@@ -53,6 +56,45 @@ def test_a_rejected_heavy_task_is_retried_once_on_developer_heavy(db, heavy):
     assert db.get_agent("retry1").pipeline == "fixing"
     msg = db.pop_pending("boss")
     assert msg and "Retrying once on developer-heavy" in msg.body and "needs you" not in msg.body
+
+
+def test_the_retry_never_starts_while_the_original_worker_is_alive(db, heavy, monkeypatch):
+    ws, retries, configure = heavy
+    configure(fable_escalation=True)
+    state = {"alive": True}
+    seen = []
+    delegate = agents.delegate
+
+    def closing(db_, agent_id, panes=None):
+        seen.append("close")
+        state["alive"] = False
+        return db_.get_agent(agent_id)
+
+    def checked(*a, **kw):
+        seen.append(f"delegate(alive={state['alive']})")
+        return delegate(*a, **kw)
+
+    other = agents.is_alive
+    monkeypatch.setattr(agents, "is_alive",
+                        lambda agent, panes=None: state["alive"] if agent.id == "w1" else other(agent, panes))
+    monkeypatch.setattr(agents, "close", closing)
+    monkeypatch.setattr(agents, "delegate", checked)
+    assert reject(db, ws) is True
+    assert seen == ["close", "delegate(alive=False)"]
+    assert [r[0] for r in retries] == ["developer-heavy"]
+
+
+def test_no_retry_when_the_original_worker_cannot_be_stopped(db, heavy, monkeypatch):
+    ws, retries, configure = heavy
+    configure(fable_escalation=True)
+    other = agents.is_alive
+    monkeypatch.setattr(agents, "is_alive",
+                        lambda agent, panes=None: True if agent.id == "w1" else other(agent, panes))
+    monkeypatch.setattr(agents, "close", lambda db_, agent_id, panes=None: db_.get_agent(agent_id))
+    reject(db, ws)
+    assert retries == []                       # two agents never share the worktree
+    msg = db.pop_pending("boss")
+    assert msg and "needs you" in msg.body
 
 
 def test_the_retry_failing_too_goes_to_the_supervisor(db, heavy):

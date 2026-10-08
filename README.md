@@ -497,6 +497,7 @@ Autopilot, merge gates and cleanup:
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
 | `check_concurrency` | `2` | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
+| `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` (Fable) before handing it to you; `true` turns it on for a cloud account, `false` off |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
@@ -971,7 +972,8 @@ workflows call these commands:
   after merging the setup pull request is clean (commit or stash your changes
   first: it refuses to start with uncommitted work).
 - `brindle ci doctor`: which provider CLIs and credential names a runner has, and
-  which providers CI may use on this repository.
+  which providers CI may use on this repository. `--models` also makes one tiny
+  call per pinned model and says why any is refused (a quota, a form not filled in).
 - `brindle ci start`: start a run for an issue, a goal text or a dispatched run,
   or a validation of a pull request.
 - `brindle ci run`: run what was started: the supervisor and the result upload,
