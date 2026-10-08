@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Lets brindle CI in one GitHub repository call Amazon Bedrock with no stored
+  secret: GitHub's OIDC token, from the brindle-ci environment, is exchanged
+  for this role's short-lived credentials.
+
+Parameters:
+  GitHubRepo:
+    Type: String
+    Description: The GitHub repository brindle CI runs in, as owner/repo.
+    AllowedPattern: "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$"
+    ConstraintDescription: Use the form owner/repo.
+  CreateOidcProvider:
+    Type: String
+    Description: >-
+      true to create the GitHub OIDC provider in this account; false when the
+      account already has one for token.actions.githubusercontent.com.
+    AllowedValues: ["true", "false"]
+    Default: "true"
+
+Conditions:
+  MakeProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+
+  BrindleCiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: brindle-ci-bedrock
+      MaxSessionDuration: 7200
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepo}:environment:brindle-ci
+      Policies:
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:ListInferenceProfiles
+                  - bedrock:GetInferenceProfile
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*
+                  - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:application-inference-profile/*
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/*
+
+Outputs:
+  RoleArn:
+    Description: Role for brindle CI to assume (the role ARN in `brindle ci init`).
+    Value: !GetAtt BrindleCiRole.Arn

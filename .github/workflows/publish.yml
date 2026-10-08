@@ -34,6 +34,38 @@ jobs:
           name: dist
           path: dist/
 
+  # CloudFormation quick-create only accepts S3 URLs, so each release copies the
+  # AWS template to the bucket named by the repository variable
+  # DEPLOY_TEMPLATES_BUCKET (credentials: the repository variable
+  # DEPLOY_TEMPLATES_ROLE_ARN, via OIDC). Does nothing when the bucket is unset.
+  deploy-templates:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      BUCKET: ${{ vars.DEPLOY_TEMPLATES_BUCKET }}
+      ROLE_ARN: ${{ vars.DEPLOY_TEMPLATES_ROLE_ARN }}
+      AWS_REGION: ${{ vars.DEPLOY_TEMPLATES_REGION || 'us-east-1' }}
+    steps:
+      - name: No bucket configured
+        if: env.BUCKET == ''
+        run: echo "DEPLOY_TEMPLATES_BUCKET is unset; skipping the template upload."
+      - uses: actions/checkout@v7
+        if: env.BUCKET != ''
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.BUCKET != ''
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Upload the AWS template
+        if: env.BUCKET != ''
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          aws s3 cp deploy/aws/brindle-ci-bedrock.yaml \
+            "s3://$BUCKET/templates/$version/brindle-ci-bedrock.yaml"
+
   publish:
     needs: build
     runs-on: ubuntu-latest
