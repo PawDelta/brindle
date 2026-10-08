@@ -798,6 +798,16 @@ entitlement.
 * `deny_personal_keys`: the personal model keys (`ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, ...) are taken out of every agent pane, and a profile that
   sets one is refused.
+* An org-owned key: with `provider` `anthropic` (or `openai-compatible`), set
+  `key_env` to the name of a variable that holds the org's key (not a personal
+  one like `ANTHROPIC_API_KEY`), or `key_helper` to a command, as a list of
+  arguments, that prints the key (for example `["vault", "kv", "get",
+  "-field=key", "secret/anthropic"]`). brindle runs the helper on the person's
+  machine, without a shell and with a timeout, each time a worker starts, and
+  gives the key to that worker as `ANTHROPIC_API_KEY` (`OPENAI_API_KEY` for
+  Codex). It passes `deny_personal_keys`; a personal key doesn't. The key never
+  goes through brindle's servers. When the variable is missing or the helper
+  fails, the worker doesn't start.
 
 Two things to know when you turn on `deny_personal_keys`:
 
@@ -1215,6 +1225,16 @@ needs no browser step. Put the key in your environment, or in a profile's
 `env.NAME: value` lines in `~/.brindle/agents` (never in the repo), and
 `brindle doctor` names the variable each CLI gets, from your shell or from
 which profiles.
+
+A profile chooses between the two with `auth`:
+
+| `auth:` | What the worker signs in with |
+|---|---|
+| `auto` (default) | A key from your environment or `brindle keys` if there is one, else the CLI's own login. |
+| `subscription` | Always the CLI's own login: brindle strips that provider's API keys from the pane. |
+| `api_key` | Only a key: the worker refuses to start without one. |
+
+Your org's `deny_personal_keys` (Enterprise) still applies on top of `auth`.
 
 ### Cheap workers
 
