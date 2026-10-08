@@ -46,6 +46,29 @@ def keys_set(name: str = typer.Argument(..., help="The variable, e.g. ANTHROPIC_
     except keystore.CredentialError as e:
         _fail(str(e))
     typer.echo(f"stored {name}")
+    if name == "ANTHROPIC_API_KEY":
+        _offer_approval(value)
+
+
+def _offer_approval(value: str) -> None:
+    """Ask once whether Claude Code may use this key in brindle panes without
+    its own "use this API key?" question. Declining (or no answer) changes nothing."""
+    from brindle import providers
+
+    if providers.claude_org_managed() or providers.api_key_approved(value.strip()):
+        return
+    try:
+        yes = typer.confirm("Let Claude Code use this key in brindle panes without asking?", default=False)
+    except typer.Abort:
+        yes = False
+    if not yes:
+        typer.echo("not approved; Claude Code will ask the first time it sees the key")
+        return
+    try:
+        providers.approve_api_key(value)
+    except (OSError, ValueError) as e:
+        _fail(f"couldn't update Claude Code's config: {e}")
+    typer.echo("approved for Claude Code")
 
 
 @app.command("list")

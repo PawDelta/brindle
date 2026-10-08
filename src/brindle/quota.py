@@ -138,11 +138,23 @@ def _native_down(repo_root: str | None) -> bool:
     return any(not serve.reachable(s) for s in serve.local_servers(repo_root))
 
 
+def _key_billed(provider: str) -> bool:
+    """Claude runs on an API key (per token), so a subscription window the
+    status line once recorded doesn't apply."""
+    if provider != "claude":
+        return False
+    from brindle import providers
+
+    return providers.claude_credential().keyed
+
+
 def headroom(provider: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> float:
     """Percent of the provider's allowance left: 100 minus its fullest window,
     0 while it's limited. 100 when nothing is known."""
     if provider == "native":
         return 0.0 if _native_down(repo_root) else 100.0
+    if _key_billed(provider):
+        return 100.0
     q = get(provider)
     if q is None:
         return 100.0
@@ -173,6 +185,8 @@ def note(provider: str, repo_root: str | None = None) -> str | None:
     name = NAMES.get(provider, provider)
     if provider == "native":
         return "local model server not answering" if _native_down(repo_root) else None
+    if _key_billed(provider):
+        return f"{name} is pay per token (API key), no subscription window"
     q = get(provider)
     if q is None:
         return None
