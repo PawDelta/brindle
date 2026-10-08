@@ -15,7 +15,7 @@ import typer
 
 from brindle import agents, git, tmux, view, workspaces
 from brindle import history as history_mod
-from brindle import repo_cmds
+from brindle import keys_cmds, repo_cmds
 from brindle.usage import format_tokens
 from brindle.config import write_template
 from brindle.db import DB, Workspace
@@ -45,6 +45,7 @@ Paid features (hosted learning, per-worktree services, team policies, CI):
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 app.add_typer(repo_cmds.app, name="repo")
+app.add_typer(keys_cmds.app, name="keys")
 
 
 def _fail(msg: str) -> None:
