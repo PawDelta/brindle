@@ -1142,8 +1142,12 @@ def start_cloud_tokens(env: Mapping[str, str], say: Callable[[str], None] = prin
     refreshed OIDC token file per cloud the job uses, or None."""
     cloud = ci_federation.start_cloud_tokens(env)
     if cloud is not None:
-        say("keyless cloud sign-in: the run refreshes its " +
-            ", ".join(r.cloud for r in cloud.refreshers) + " token itself")
+        fixed = [r.cloud for r in cloud.refreshers if isinstance(r, ci_federation.StaticCloudToken)]
+        live = [r.cloud for r in cloud.refreshers if r.cloud not in fixed]
+        if live:
+            say("keyless cloud sign-in: the run refreshes its " + ", ".join(live) + " token itself")
+        if fixed:
+            say("keyless cloud sign-in: the job's " + ", ".join(fixed) + " ID token is used as is (not refreshed)")
     return cloud
 
 
@@ -2026,7 +2030,24 @@ def cloud_status(env: Mapping[str, str]) -> list[str]:
         if missing:
             line += f"; missing: {', '.join(missing)}"
         lines.append(line)
+        if env.get("GITLAB_CI") == "true" and env.get(ci_federation.GITLAB_TOKEN_VARS[cloud]):
+            lines.append("warning: " + ci_federation.GITLAB_LIFETIME_WARNING + lifetime_note(env))
     return lines
+
+
+def lifetime_note(env: Mapping[str, str], clock: Callable[[], float] | None = None) -> str:
+    """For the GitLab lifetime warning: how the job's ID token compares to
+    the job timeout (``CI_JOB_TIMEOUT``), when both are known."""
+    try:
+        timeout = float(env.get("CI_JOB_TIMEOUT") or "")
+    except ValueError:
+        return ""
+    exps = [ci_federation.jwt_expiry(env[v]) for v in ci_federation.GITLAB_TOKEN_VARS.values() if env.get(v)]
+    now = (clock or time.time)()
+    left = min((e - now for e in exps if e is not None), default=None)
+    if left is None or left >= timeout:
+        return ""
+    return f"; this token has {int(max(left, 0))}s left, the job timeout is {int(timeout)}s"
 
 
 def federation_condition(repo: str) -> str:
