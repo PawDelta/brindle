@@ -89,6 +89,21 @@ def signin_providers() -> list[str]:
     return out
 
 
+def signed_in_providers() -> list[str]:
+    """Names of the installed provider CLIs this machine is signed in to, by
+    the same test as signin_checks (an environment key, or a status check that
+    answered "signed in"). Names only: never a key or token."""
+    from brindle import providers
+
+    out = []
+    for provider in signin_providers():
+        if any(os.environ.get(k) for k in providers._ENV_AUTH.get(provider, ())):
+            out.append(provider)
+        elif providers.signed_out(provider) is None and providers.seen_signed_in(provider):
+            out.append(provider)
+    return out
+
+
 def _profile_keys(provider: str, repo_root: str | None) -> dict[str, list[str]]:
     """The environment keys (from providers._ENV_AUTH) that profiles on
     ``provider`` set in their ``env.NAME: value`` lines, with the profiles

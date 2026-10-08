@@ -351,14 +351,29 @@ def poll_device_token(client: Client, auth: DeviceAuthorization, *,
 ORG_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+def _signed_in_providers() -> list[str]:
+    """The agent providers this machine is signed in to, as `brindle doctor`
+    sees them: names only, never keys or tokens. A failed probe sends nothing."""
+    from brindle import doctor
+
+    try:
+        return [n for n in doctor.signed_in_providers() if re.fullmatch(r"[a-z]{1,32}", n)]
+    except Exception:  # noqa: BLE001 - reporting providers must never break a refresh
+        return []
+
+
 def _fetch_entitlement(client: Client, access: str, now: float, org_id: str | None = None):
     """(token, verified entitlement), or 401 when the access token was refused.
     ``org_id`` selects a team org (default: the personal org)."""
-    path = "/entitlement"
+    params = {}
     if org_id is not None:
         if not ORG_ID_RE.match(org_id):
             raise AuthError("invalid org id", code="bad_request")
-        path += "?" + urllib.parse.urlencode({"org_id": org_id})
+        params["org_id"] = org_id
+    names = _signed_in_providers()
+    if names:
+        params["providers"] = ",".join(names)
+    path = "/entitlement" + ("?" + urllib.parse.urlencode(params, safe=",") if params else "")
     status, body = client.get(path, token=access)
     if status == 401:
         return 401
@@ -663,11 +678,12 @@ def _billing_url(client: Client, store, path: str, body: dict | None = None) -> 
 
 
 def checkout_url(client: Client, store, *, plan: str = "pro", seats: int | None = None,
-                 org_id: str | None = None) -> str:
+                 org_id: str | None = None, trial: bool | None = None) -> str:
     """A Stripe checkout URL for upgrading (``POST /billing/checkout``): Pro
-    for your personal org by default, or Team with ``seats`` for a team org
-    you administer."""
-    body = {"plan": plan, "seats": seats, "org_id": org_id} if plan != "pro" or org_id else {}
+    for your personal org by default, or Team or Enterprise with ``seats`` for
+    a team org you administer (``trial``: Enterprise's free trial)."""
+    body = {"plan": plan, "seats": seats, "org_id": org_id, "trial": trial} \
+        if plan != "pro" or org_id else {}
     return _billing_url(client, store, "/billing/checkout", {k: v for k, v in body.items() if v is not None})
 
 
