@@ -1881,6 +1881,93 @@ def cloud_ids(cloud: str, env: Mapping[str, str], ask: Callable[[str, str], str]
     return values
 
 
+def _template_json(argv: list[str], *, run, what: str, instead: str):
+    """The JSON a deployment CLI prints. A missing CLI, a failed command or
+    unreadable output is a CIError naming what to pass instead; the command's
+    output is never echoed (only its first stderr line)."""
+    try:
+        proc = run(argv, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise CIError(f"{argv[0]} isn't installed, so {what} can't be read; pass {instead} instead") from None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise CIError(f"{what} couldn't be read ({type(e).__name__}); pass {instead} instead") from None
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip().splitlines()
+        raise CIError(f"{' '.join(argv[:3])} failed" + (f": {err[0][:200]}" if err else "")
+                      + f"; pass {instead} instead")
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        raise CIError(f"{what}: {argv[0]} printed no JSON; pass {instead} instead") from None
+
+
+def _pick(outputs: Mapping[str, str], names: tuple[str, ...], what: str, instead: str) -> str:
+    for name in names:
+        if outputs.get(name):
+            return str(outputs[name])
+    raise CIError(f"{what} has no {names[0]} output; pass {instead} instead")
+
+
+def template_vars(*, stack: str | None = None, region: str | None = None, terraform_dir: str | None = None,
+                  deployment: str | None = None, resource_group: str | None = None,
+                  run=None) -> dict[str, str]:
+    """Cloud variables read from a deployment template's outputs, for
+    ``brindle ci init --from-stack`` (AWS), ``--from-terraform`` (Google) or
+    ``--from-deployment`` (Azure). They are defaults: the caller lets
+    --cloud-var override, and init still format-checks every one."""
+    run = run or subprocess.run
+    if sum(x is not None for x in (stack, terraform_dir, deployment)) != 1:
+        raise CIError("pass exactly one of --from-stack (bedrock), --from-terraform (vertex), "
+                      "--from-deployment (foundry)")
+    if stack is not None:
+        instead = "--cloud-var AWS_ROLE_ARN=... (and AWS_REGION=...)"
+        argv = ["aws", "cloudformation", "describe-stacks", "--stack-name", stack, "--output", "json"]
+        if region:
+            argv += ["--region", region]
+        what = f"CloudFormation stack {stack}"
+        data = _template_json(argv, run=run, what=what, instead=instead)
+        try:
+            found = data["Stacks"][0]
+            outputs = {o["OutputKey"]: o["OutputValue"] for o in found.get("Outputs") or []}
+        except (KeyError, IndexError, TypeError):
+            raise CIError(f"{what} wasn't found in the describe-stacks output; pass {instead} instead") from None
+        values = {"AWS_ROLE_ARN": _pick(outputs, ("RoleArn",), what, instead)}
+        # the stack id is arn:aws:cloudformation:REGION:ACCOUNT:stack/...
+        arn_region = str(found.get("StackId", "")).split(":")[3:4]
+        stack_region = region or (arn_region[0] if arn_region else "")
+        if stack_region:
+            values["AWS_REGION"] = stack_region
+        return values
+    if terraform_dir is not None:
+        instead = "--cloud-var GCP_WORKLOAD_IDENTITY_PROVIDER=... --cloud-var GCP_SERVICE_ACCOUNT=..."
+        what = f"terraform outputs in {terraform_dir}"
+        data = _template_json(["terraform", f"-chdir={terraform_dir}", "output", "-json"], run=run,
+                              what=what, instead=instead)
+        if not isinstance(data, dict):
+            raise CIError(f"{what} aren't a JSON object; pass {instead} instead")
+        outputs = {k: v.get("value") for k, v in data.items() if isinstance(v, dict)}
+        account = _pick(outputs, ("service_account_email", "service_account"), what, instead)
+        values = {"GCP_WORKLOAD_IDENTITY_PROVIDER": _pick(outputs, ("workload_identity_provider",), what, instead),
+                  "GCP_SERVICE_ACCOUNT": account}
+        project = account.partition("@")[2].removesuffix(".iam.gserviceaccount.com")
+        if project and "." not in project:
+            values["ANTHROPIC_VERTEX_PROJECT_ID"] = project
+        return values
+    if not resource_group:
+        raise CIError("--from-deployment needs -g/--resource-group RG")
+    instead = "--cloud-var AZURE_CLIENT_ID=... --cloud-var AZURE_TENANT_ID=..."
+    what = f"deployment {deployment}"
+    data = _template_json(["az", "deployment", "group", "show", "--name", deployment,
+                           "--resource-group", resource_group, "--output", "json"],
+                          run=run, what=what, instead=instead)
+    try:
+        outputs = {k: v.get("value") for k, v in data["properties"]["outputs"].items()}
+    except (KeyError, TypeError, AttributeError):
+        raise CIError(f"{what} has no outputs; pass {instead} instead") from None
+    return {"AZURE_CLIENT_ID": _pick(outputs, ("clientId",), what, instead),
+            "AZURE_TENANT_ID": _pick(outputs, ("tenantId",), what, instead)}
+
+
 def create_environment(repo: str, *, run=subprocess.run, say: Callable[[str], None] = print) -> None:
     """The GitHub environment the cloud trust is pinned to: the workflows'
     cloud job runs in it, so its OIDC subject is

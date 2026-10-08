@@ -96,6 +96,31 @@ def test_an_unrelated_404_is_not_classified_as_mantle(text):
     assert model_access.classify(text) is None
 
 
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"])
+def test_the_exact_mantle_wording_is_classified(model):
+    cause = model_access.classify(f"API Error: 404 The model '{model}' does not exist")
+    assert cause is not None and cause.key == "bedrock_endpoint"
+
+
+def test_a_refusal_recorded_in_the_run_path_shows_in_session_notes(db, repo, monkeypatch):
+    """The run path and the doctor check fingerprint under the repo root, like session_event reads."""
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "agents").mkdir(exist_ok=True)
+    (repo / ".brindle" / "agents" / "developer.md").write_text(
+        "---\nname: developer\nprovider: claude\nenv.AWS_REGION: repo-only-region\n---\nDo the work.\n")
+    assert "repo-only-region" in model_access.fingerprint("developer", str(repo))
+    assert model_access.fingerprint("developer") != model_access.fingerprint("developer", str(repo))
+    _, root, _ = _launch_showing(monkeypatch, db, repo, [screen(ERRORS[2][0])])
+    root.profile = "developer"
+    db.add_agent(root)
+    monkeypatch.setattr(ClaudeAdapter, "alive", lambda self, db_, r: True)
+    monkeypatch.setattr(ClaudeAdapter, "provider_error", lambda self, db_, rid: None)
+    ci_client.session_event(db, root.id, ClaudeAdapter(), cwd=str(repo))
+    assert model_access.refused("developer", str(repo)).key == "bedrock_endpoint"
+    event = ci_client.session_event(db, root.id, ClaudeAdapter(), cwd=str(repo))
+    assert "model refused for developer" in event["note"]
+
+
 def test_a_bedrock_marker_classifies_a_mantle_404():
     text = "API Error: 404 bedrock-mantle: model does not exist"
     assert model_access.classify(text).key == "bedrock_endpoint"
@@ -204,4 +229,4 @@ def test_the_ci_doctor_model_check_names_each_refusal(repo, monkeypatch):
     assert len(calls) == 2, "one tiny call per pinned model"
     assert lines[0] == "model claude-opus-5-5 (developer): ok"
     assert "refused" in lines[1] and "publisher 'anthropic'" in lines[1] and "Fix:" in lines[1]
-    assert model_access.refused("developer-heavy").key == "vertex_data_sharing"
+    assert model_access.refused("developer-heavy", str(repo)).key == "vertex_data_sharing"

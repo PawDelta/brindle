@@ -350,7 +350,9 @@ class ClaudeAdapter(Adapter):
             cause = model_access.classify(error)
             if cause is not None:
                 # The account can't call the model: no retry will help.
-                model_access.refuse(agent.profile, cause)
+                # under the repo's fingerprint, which session_event reads the notes with
+                ws = db.get_workspace(agent.workspace_id)
+                model_access.refuse(agent.profile, cause, repo_root=ws.repo_root if ws else None)
                 return f"{who} can't call its model: {cause.line()} ({line})"
             if providers.ClaudeCode.FATAL_API_ERROR.match(error):
                 return f"{who} stopped on an error it won't retry: {line}"
@@ -705,7 +707,7 @@ def check_models(adapters: Mapping[str, Adapter], env: Mapping[str, str], cwd: s
         if ok:
             lines.append(f"model {model} ({profile}): ok")
         elif cause is not None:
-            model_access.refuse(profile, cause)
+            model_access.refuse(profile, cause, repo_root=cwd)
             lines.append(f"model {model} ({profile}): refused: {cause.line()}")
         else:
             lines.append(f"model {model} ({profile}): failed: {api_error_line(text)}")
