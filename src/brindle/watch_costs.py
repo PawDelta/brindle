@@ -160,7 +160,8 @@ def _org(repo_root: str | None, lim: budget.Limits | None) -> Org | None:
         return fetch_spend(ent.org_id)
     # A plain member sees only their own seat, from the policy fetch ``budget.limits``
     # already made (``lim.org``: an org budget is part of it).
-    if lim is None or not lim.org or lim.seat_spent_usd is None:
+    # Not at all when the org hides this person's dollars: the Org line carries only dollars.
+    if lim is None or not lim.org or lim.seat_spent_usd is None or lim.hide_dollars:
         return None
     return Org(False, lim.seat_spent_usd, lim.month_usd)
 
@@ -293,6 +294,10 @@ def render(local_: Local, remote: Remote | None, now: float, width: int,
     if lim is not None and lim.month_usd:
         # What the org counts for this seat can be more than what this repo shows.
         spent = max(local_.month, lim.seat_spent_usd or 0.0)
-        body.append(_vs(spent, lim.month_usd, width - 2))
+        if lim.hide_dollars:      # the org hides this person's dollars: only a status
+            word = budget.status_word(spent, lim.month_usd)
+            body.append((f"budget: {word}", "ok" if word == budget.WITHIN else "alert"))
+        else:
+            body.append(_vs(spent, lim.month_usd, width - 2))
     lines += [Line(fit("  " + t, width), s) for t, s in body]
     return lines
