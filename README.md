@@ -970,7 +970,14 @@ workflows call these commands:
   commits the workflows on a `brindle/ci-setup` branch, then puts you back on
   the branch you started on and deletes the local setup branch, so `git pull`
   after merging the setup pull request is clean (commit or stash your changes
-  first: it refuses to start with uncommitted work).
+  first: it refuses to start with uncommitted work). With your own cloud
+  (`--credential bedrock|vertex|foundry`, keyless GitHub OIDC) it can read the
+  IDs from the deployment template's outputs instead of asking:
+  `--from-stack NAME [--region R]` (AWS CloudFormation), `--from-terraform DIR`
+  (Google) or `--from-deployment NAME -g RG` (Azure). They are defaults for
+  `--cloud-var`, which still overrides them, and every ID is format-checked. A
+  missing `aws`, `terraform` or `az` CLI or output is an error that names the
+  `--cloud-var` to pass instead.
 - `brindle ci doctor`: which provider CLIs and credential names a runner has, and
   which providers CI may use on this repository. `--models` also makes one tiny
   call per pinned model and says why any is refused (a quota, a form not filled in).

@@ -33,9 +33,15 @@ aws cloudformation deploy --template-file deploy/aws/brindle-ci-bedrock.yaml \
 Set `CreateOidcProvider=false` if the account already has the GitHub OIDC
 provider.
 
+Then let `brindle ci init` read the outputs itself:
+
+```sh
+brindle ci init --from-stack brindle-ci [--region us-east-1]
+```
+
 | Output | `brindle ci init` |
 | --- | --- |
-| `RoleArn` | the AWS role to assume |
+| `RoleArn` | the AWS role to assume (`AWS_ROLE_ARN`; the region comes from the stack) |
 
 ## Google Cloud (Vertex AI)
 
@@ -48,10 +54,16 @@ terraform init
 terraform apply -var project_id=PROJECT -var github_repo=OWNER/REPO
 ```
 
+Then let `brindle ci init` read the outputs itself:
+
+```sh
+brindle ci init --from-terraform deploy/gcp
+```
+
 | Output | `brindle ci init` |
 | --- | --- |
 | `workload_identity_provider` | the workload identity provider |
-| `service_account_email` | the service account |
+| `service_account_email` | the service account (the project id comes from it) |
 
 ## Azure (Foundry)
 
@@ -70,8 +82,15 @@ az deployment group create --resource-group RG \
 Or use the Deploy to Azure button: open
 `https://portal.azure.com/#create/Microsoft.Template/uri/<URL-encoded raw URL of azuredeploy.json>`.
 
+Then let `brindle ci init` read the outputs itself (the deployment is named
+after the template file, `main`, unless you passed `--name`):
+
+```sh
+brindle ci init --from-deployment main -g RG
+```
+
 | Output | `brindle ci init` |
 | --- | --- |
 | `clientId` | the Azure client id |
 | `tenantId` | the Azure tenant id |
-| `subscriptionId` | the Azure subscription id |
+| `subscriptionId` | not used |

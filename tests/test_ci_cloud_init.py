@@ -197,6 +197,117 @@ def test_doctor_has_no_cloud_line_without_a_cloud(ci_repo):
     assert "cloud:" not in ci_client.doctor(PATH, REPO, str(ci_repo), org=True)
 
 
+STACK_ID = "arn:aws:cloudformation:eu-west-1:123456789012:stack/brindle-ci/abc"
+CLI_JSON = {
+    "aws": {"Stacks": [{"StackId": STACK_ID, "Outputs": [{"OutputKey": "RoleArn", "OutputValue": ROLE}]}]},
+    "terraform": {"workload_identity_provider": {"value": WIP, "sensitive": False},
+                  "service_account_email": {"value": SA, "sensitive": False}},
+    "az": {"properties": {"outputs": {"clientId": {"value": AZ_UUID}, "tenantId": {"value": AZ_UUID},
+                                      "subscriptionId": {"value": AZ_UUID}}}},
+}
+
+
+def fake_clis(monkeypatch, payloads=None, missing=()):
+    """Fake aws, terraform and az: their JSON, or not installed."""
+    import json
+    import subprocess
+
+    seen = []
+
+    def run(argv, **kw):
+        seen.append(argv)
+        if argv[0] in missing:
+            raise FileNotFoundError(argv[0])
+        return subprocess.CompletedProcess(argv, 0, json.dumps((payloads or CLI_JSON)[argv[0]]), "")
+    monkeypatch.setattr(subprocess, "run", run)
+    return seen
+
+
+def cli_init(monkeypatch, *args):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    got = {}
+    monkeypatch.setattr(ci_client, "init", lambda **kw: got.update(kw))
+    return CliRunner().invoke(app, ["ci", "init", *args], input=""), got
+
+
+def test_from_stack_reads_the_role_and_the_stacks_region(monkeypatch):
+    seen = fake_clis(monkeypatch)
+    result, got = cli_init(monkeypatch, "--from-stack", "brindle-ci")
+    assert result.exit_code == 0, result.output
+    assert seen == [["aws", "cloudformation", "describe-stacks", "--stack-name", "brindle-ci", "--output", "json"]]
+    assert got["credential"] == "bedrock"
+    assert got["cloud_vars"] == {"AWS_ROLE_ARN": ROLE, "AWS_REGION": "eu-west-1"}
+    assert ROLE not in result.output, "the IDs are not echoed"
+
+
+def test_from_stack_region_option_is_passed_on(monkeypatch):
+    seen = fake_clis(monkeypatch)
+    _, got = cli_init(monkeypatch, "--from-stack", "s", "--region", "us-east-1")
+    assert seen[0][-2:] == ["--region", "us-east-1"] and got["cloud_vars"]["AWS_REGION"] == "us-east-1"
+
+
+def test_from_terraform_reads_the_provider_and_service_account(monkeypatch):
+    seen = fake_clis(monkeypatch)
+    result, got = cli_init(monkeypatch, "--from-terraform", "deploy/gcp")
+    assert result.exit_code == 0, result.output
+    assert seen == [["terraform", "-chdir=deploy/gcp", "output", "-json"]]
+    assert got["credential"] == "vertex"
+    assert got["cloud_vars"] == {"GCP_WORKLOAD_IDENTITY_PROVIDER": WIP, "GCP_SERVICE_ACCOUNT": SA,
+                                 "ANTHROPIC_VERTEX_PROJECT_ID": "acme-proj-123"}
+
+
+def test_from_deployment_reads_client_and_tenant_not_subscription(monkeypatch):
+    seen = fake_clis(monkeypatch)
+    result, got = cli_init(monkeypatch, "--from-deployment", "main", "-g", "rg1")
+    assert result.exit_code == 0, result.output
+    assert seen == [["az", "deployment", "group", "show", "--name", "main", "--resource-group", "rg1",
+                     "--output", "json"]]
+    assert got["credential"] == "foundry"
+    assert got["cloud_vars"] == {"AZURE_CLIENT_ID": AZ_UUID, "AZURE_TENANT_ID": AZ_UUID}
+
+
+def test_an_explicit_cloud_var_beats_the_template(monkeypatch):
+    fake_clis(monkeypatch)
+    _, got = cli_init(monkeypatch, "--from-stack", "s", "--cloud-var", "AWS_REGION=ap-south-1")
+    assert got["cloud_vars"] == {"AWS_ROLE_ARN": ROLE, "AWS_REGION": "ap-south-1"}
+
+
+@pytest.mark.parametrize("args, cli, instead", [
+    (["--from-stack", "s"], "aws", "--cloud-var AWS_ROLE_ARN"),
+    (["--from-terraform", "d"], "terraform", "--cloud-var GCP_WORKLOAD_IDENTITY_PROVIDER"),
+    (["--from-deployment", "n", "-g", "rg"], "az", "--cloud-var AZURE_CLIENT_ID"),
+])
+def test_a_missing_cli_names_what_to_pass_instead(monkeypatch, args, cli, instead):
+    fake_clis(monkeypatch, missing=(cli,))
+    result, got = cli_init(monkeypatch, *args)
+    assert result.exit_code != 0 and not got
+    assert f"{cli} isn't installed" in result.output and instead in result.output
+
+
+def test_a_missing_output_names_what_to_pass_instead(monkeypatch):
+    fake_clis(monkeypatch, {"az": {"properties": {"outputs": {"clientId": {"value": AZ_UUID}}}}})
+    result, got = cli_init(monkeypatch, "--from-deployment", "n", "-g", "rg")
+    assert result.exit_code != 0 and not got
+    assert "no tenantId output" in result.output and "--cloud-var AZURE_CLIENT_ID" in result.output
+
+
+def test_a_template_value_is_still_format_checked(init_run):
+    values = {"AWS_ROLE_ARN": "brindle-ci", "AWS_REGION": "us-east-1"}
+    with pytest.raises(CIError, match="AWS_ROLE_ARN looks like "):
+        init_run(credential="bedrock", cloud_vars=values)
+
+
+def test_from_options_need_their_own_cloud(monkeypatch):
+    fake_clis(monkeypatch)
+    result, got = cli_init(monkeypatch, "--from-stack", "s", "--credential", "vertex")
+    assert result.exit_code != 0 and "configures bedrock" in result.output and not got
+    result, _ = cli_init(monkeypatch, "--from-deployment", "n")
+    assert result.exit_code != 0 and "--resource-group" in result.output
+
+
 def test_cli_cloud_var_options_reach_init(ci_repo, monkeypatch):
     from typer.testing import CliRunner
 
