@@ -2319,6 +2319,22 @@ def agent_for_session(db: DB, session_id: object) -> str | None:
     return matches[-1].id if matches else None
 
 
+def command_running(db: DB, agent: Agent) -> bool:
+    """Whether a command the agent started (possibly in the background) is
+    still running under it. Never raises: when unsure, it says no."""
+    if agent.provider != "claude":
+        return False
+    try:
+        from brindle import procs
+
+        window = agent.tmux_window if same_server(agent) and owns_pane(db, agent) else ""
+        pane_pids = tmux.window_pids(window) if window else []
+        return bool(procs.running_commands(agent.id, pane_pids))
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't look for %s's running commands", agent.id)
+        return False
+
+
 def tell_parent_unreported(db: DB, agent: Agent) -> None:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
@@ -2336,6 +2352,11 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
             return  # its verdict for the current commit is already recorded
     if agent.unreported_noted:
         return  # the supervisor was told once; no repeats
+    if command_running(db, agent):
+        # Its turn ended while a long or background command (a test run) is
+        # still going: it isn't stopped, and the command finishing wakes it.
+        # Not marked noted, so a real stop later still gets its one alert.
+        return
     db.update_agent(agent.id, unreported_noted=1)
     where = f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
     tool = "submit_review" if agent.mode == "review" else "report_result"

@@ -39,6 +39,52 @@ def test_stop_hook_nudges_worker_to_report_once(db, ws):
     assert agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True}) is None
 
 
+def _unreported_setup(db, ws, monkeypatch):
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0",
+                       None, time.time()))
+    fake_agent(db, ws, mode="assign", parent="boss")
+    sent = []
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: sent.append(a))
+    return sent
+
+
+def test_no_unreported_alert_while_a_long_command_runs(db, ws, monkeypatch):
+    sent = _unreported_setup(db, ws, monkeypatch)
+    running = {"on": True}
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: running["on"])
+    agents.handle_hook(db, "a1", "stop", {})                              # reminded
+    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})      # turn ends, command going
+    assert sent == [] and not db.get_agent("a1").unreported_noted
+    db.update_agent("a1", result="done")                                  # it later reports
+    agents.handle_hook(db, "a1", "stop", {})
+    assert sent == []
+
+
+def test_unreported_alert_still_fires_once_when_nothing_is_running(db, ws, monkeypatch):
+    sent = _unreported_setup(db, ws, monkeypatch)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    agents.handle_hook(db, "a1", "stop", {})
+    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    assert len(sent) == 1 and sent[0][1] == "boss"
+
+
+def test_running_commands_ignores_the_cli_and_shells_but_sees_a_test_run():
+    from brindle import procs
+
+    P = procs.Proc
+    table = {
+        1: P(1, 0, "tmux: server"),
+        10: P(10, 1, "-zsh BRINDLE_AGENT_ID=a1"),
+        11: P(11, 10, "claude --model x BRINDLE_AGENT_ID=a1"),
+        12: P(12, 11, "/bin/zsh -c uv run pytest"),
+        13: P(13, 12, "python -m pytest -q"),
+    }
+    assert procs.running_commands("a1", [10], table) == [table[13]]
+    del table[13]
+    assert procs.running_commands("a1", [10], table) == []
+
+
 def test_prompt_and_notification_hooks(db, ws):
     fake_agent(db, ws, status="idle")
     agents.handle_hook(db, "a1", "prompt-submit", {})
