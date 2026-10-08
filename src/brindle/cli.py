@@ -2330,13 +2330,14 @@ def ci_init(
     repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: the repository here)."),
     org: Optional[str] = typer.Option(None, "--org", help="The brindle Team org whose CI token to use."),
     providers: Optional[str] = typer.Option(None, "--providers", help="Comma-separated providers to set keys for (asked otherwise)."),
-    credential: Optional[str] = typer.Option(None, "--credential", help="How Claude signs in: key (the ANTHROPIC_API_KEY secret) or federation (workload identity federation; asked otherwise)."),
+    credential: Optional[str] = typer.Option(None, "--credential", help="How Claude signs in: key (the ANTHROPIC_API_KEY secret), federation (workload identity federation), or bedrock, vertex, foundry (keyless GitHub OIDC; no cloud secret stored). Asked otherwise; on Enterprise defaults to the org policy's cloud."),
     host: str = typer.Option("github", "--host", help="github (default) or gitlab (brindle Enterprise: writes .gitlab-ci.yml)."),
     force: bool = typer.Option(False, "--force", help="With --host gitlab: replace an existing .gitlab-ci.yml."),
     workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="With an organization-level API key or identity federation: the workspace (wrkspc_...), stored as the ANTHROPIC_WORKSPACE_ID variable (asked otherwise, defaulting to $ANTHROPIC_WORKSPACE_ID)."),
     rule_id: Optional[str] = typer.Option(None, "--rule-id", help="Identity federation: the rule ID (fdrl_...; asked otherwise, defaulting to $ANTHROPIC_FEDERATION_RULE_ID)."),
     organization_id: Optional[str] = typer.Option(None, "--organization-id", help="Identity federation: the Anthropic organization ID (asked otherwise, defaulting to $ANTHROPIC_ORGANIZATION_ID)."),
     service_account_id: Optional[str] = typer.Option(None, "--service-account-id", help="Identity federation: the service account ID (svac_...; asked otherwise, defaulting to $ANTHROPIC_SERVICE_ACCOUNT_ID)."),
+    cloud_var: Optional[list[str]] = typer.Option(None, "--cloud-var", metavar="NAME=VALUE", help="With --credential bedrock, vertex or foundry (keyless GitHub OIDC): a cloud variable such as AWS_ROLE_ARN, CLOUD_ML_REGION, ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_DEFAULT_SONNET_MODEL, stored as an Actions variable. Repeatable; asked otherwise, defaulting to the environment."),
     required_check: Optional[str] = typer.Option(None, "--required-check", metavar="NAME", help="When the default branch requires no status checks: make this check (a workflow job's name) required, without asking. brindle only fixes builds where a required check fails. Unattended (no terminal), this is the only way init makes a check required."),
     no_required_check: bool = typer.Option(False, "--no-required-check", help="When the default branch requires no status checks: only warn, don't offer to make a job required."),
 ) -> None:
@@ -2364,7 +2365,15 @@ def ci_init(
         # a [Y/n] question shows its own default
         return typer.prompt(question, default=default, show_default=not question.endswith("[Y/n]"))
 
+    cloud_vars = {}
+    for item in cloud_var or []:
+        name, sep, value = item.partition("=")
+        if not sep or not name.strip():
+            _fail(f"brindle ci: --cloud-var takes NAME=VALUE, not {item[:40]!r}")
+        cloud_vars[name.strip()] = value
+
     _ci_call(ci_client.init, repo=repo, org=org, providers=names, cwd=os.getcwd(), env=os.environ,
+             cloud_vars=cloud_vars or None,
              credential=credential, workspace_id=workspace_id, rule_id=rule_id, organization_id=organization_id,
              service_account_id=service_account_id, required_check=required_check,
              no_required_check=no_required_check, ask=ask, say=typer.echo)
