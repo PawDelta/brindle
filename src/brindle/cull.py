@@ -308,7 +308,8 @@ def note_model_refused(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         except ValueError:
             routing = {}
         if model_access.classify(error) and model_access.first_time(f"refused:{a.id}"):
-            swapped = model_access.swap(routing, _task_weight(db, a, ws), a.profile, error)
+            swapped = model_access.swap(routing, _task_weight(db, a, ws), a.profile, error,
+                                      repo_root=ws.repo_root if ws else None)
         if swapped is not None:
             cause, to = swapped
             move = (f"Other tasks of its weight tier go to {to} for the next hour; re-assign this "
