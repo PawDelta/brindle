@@ -87,6 +87,7 @@ PRICES: dict[str, Price] = {
     "claude-sonnet-4-5": _anthropic(3, 15),
     "claude-sonnet-4": _anthropic(3, 15),
     "claude-sonnet-4-0": _anthropic(3, 15),
+    "claude-haiku-5-5": _anthropic(0.10, 0.50),   # prompts up to 100K tokens
     "claude-haiku-4-5": _anthropic(1, 5),
     "claude-3-5-haiku": _anthropic(0.80, 4),
     # OpenAI (Standard tier)
@@ -116,7 +117,7 @@ ALIASES = {
     "fable": "claude-fable-5-1",
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
-    "haiku": "claude-haiku-4-5",
+    "haiku": "claude-haiku-5-5",
 }
 
 _PREFIXES = re.compile(r"^(?:(?:us|eu|apac|global)\.)?(?:anthropic|openai)[./]")

@@ -39,6 +39,8 @@ def test_list_prices_match_the_providers_pages():
     assert pricing.PRICES["claude-opus-5-5"] == Price(4, 20, 5, 0.2)
     assert pricing.PRICES["claude-fable-5-1"] == Price(10, 50, 12.5, 0.25)
     assert pricing.PRICES["claude-haiku-4-5"] == Price(1, 5, 1.25, pytest.approx(0.1))
+    assert pricing.PRICES["claude-haiku-5-5"] == Price(0.10, 0.50, pytest.approx(0.125), pytest.approx(0.01))
+    assert pricing.price_for("haiku") == pricing.PRICES["claude-haiku-5-5"]
     # OpenAI lists cache writes (1.25x input) for gpt-6 and gpt-5.6; for older models, none
     assert pricing.PRICES["gpt-6-luna"] == Price(0.10, 0.50, 0.125, 0.01)
     assert pricing.PRICES["gpt-6-astra"] == Price(10, 50, 12.50, 1)
@@ -127,7 +129,7 @@ def test_profile_prices(repo):
     profile(repo, "local", provider="native", model="qwen3-coder:30b",
             base_url="http://localhost:11434/v1")
     profile(repo, "default-model")
-    assert pricing.profile_price("cheap", str(repo)) == pricing.PRICES["claude-haiku-4-5"]
+    assert pricing.profile_price("cheap", str(repo)) == pricing.PRICES["claude-haiku-5-5"]
     assert pricing.profile_price("local", str(repo)) == pricing.FREE
     assert pricing.profile_price("default-model", str(repo)) is None
     assert pricing.profile_price("no-such-profile", str(repo)) is None
