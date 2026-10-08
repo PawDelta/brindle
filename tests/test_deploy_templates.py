@@ -82,6 +82,8 @@ def test_aws_oidc_provider_is_optional_and_trusts_sts_audience():
     provider = t["Resources"]["GitHubOidcProvider"]
     assert provider["Type"] == "AWS::IAM::OIDCProvider"
     assert provider["Condition"] in t["Conditions"]
+    # the role's trust policy names the provider by string, so it must wait for it
+    assert t["Resources"]["BrindleCiRole"]["DependsOn"] == "GitHubOidcProvider"
     assert provider["Properties"]["Url"] == ISSUER
     assert provider["Properties"]["ClientIdList"] == ["sts.amazonaws.com"]
 
@@ -110,9 +112,10 @@ def test_aws_outputs_role_arn():
 def test_gcp_enables_apis_and_pins_subject_in_provider():
     res = tf_resources()
     apis = res[("google_project_service", "apis")]
-    assert set(apis["for_each"].strip("${}").replace("toset(", "").rstrip(")").replace(" ", "").replace('"', "")
-               .strip("[]").split(",")) - {""} == {
-        "aiplatform.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com"}
+    for api in ("aiplatform.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com"):
+        assert api in apis["for_each"]
+    assert len(re.findall(r"\w+\.googleapis\.com", apis["for_each"])) == 3
+    assert "data" not in hcl("main.tf")   # no unused data sources needing extra permissions
     pool = res[("google_iam_workload_identity_pool", "brindle_ci")]
     assert pool["workload_identity_pool_id"] == "brindle-ci"
     provider = res[("google_iam_workload_identity_pool_provider", "github")]

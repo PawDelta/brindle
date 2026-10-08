@@ -32,6 +32,9 @@ Resources:
 
   BrindleCiRole:
     Type: AWS::IAM::Role
+    # The trust policy names the provider by a plain string, so order it
+    # explicitly; ignored when CreateOidcProvider is false.
+    DependsOn: GitHubOidcProvider
     Properties:
       RoleName: brindle-ci-bedrock
       MaxSessionDuration: 7200

@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - id: touched
+      - id: touched   # sets run=true when deploy/ changed; unset (not "false") otherwise
         env:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

@@ -14,10 +14,6 @@ provider "google" {
   project = var.project_id
 }
 
-data "google_project" "this" {
-  project_id = var.project_id
-}
-
 resource "google_project_service" "apis" {
   for_each = toset([
     "aiplatform.googleapis.com",
