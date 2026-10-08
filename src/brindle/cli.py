@@ -2349,7 +2349,10 @@ def ci_init(
 
     host = host.strip().lower()
     if host == ci_hosts.GITLAB:
-        _ci_call(ci_hosts.init_gitlab, cwd=os.getcwd(), force=force, say=typer.echo)
+        cloud = (credential or "").strip().lower() or None
+        if cloud and cloud not in ci_hosts.CLOUD_ID_TOKENS:
+            _fail("brindle ci: on GitLab --credential is bedrock, vertex or foundry (or leave it out)")
+        _ci_call(ci_hosts.init_gitlab, cwd=os.getcwd(), force=force, say=typer.echo, cloud=cloud)
         return
     if host != ci_hosts.GITHUB:
         _fail(f"brindle ci: host must be {' or '.join(ci_hosts.HOSTS)}")

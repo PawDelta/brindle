@@ -23,6 +23,8 @@ SECRET_ENV = ("BRINDLE_PRO_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN",
               # and the project token brindle opens merge requests with.
               "CI_JOB_TOKEN", "CI_JOB_JWT", "CI_JOB_JWT_V1", "CI_JOB_JWT_V2", "CI_REGISTRY_PASSWORD",
               "CI_DEPLOY_PASSWORD", "CI_DEPENDENCY_PROXY_PASSWORD", "CI_BUILD_TOKEN", "CI_REPOSITORY_URL", "BRINDLE_ID_TOKEN", "BRINDLE_GITLAB_TOKEN",
+              # the job's cloud ID tokens (brindle writes each to a token file for the cloud's SDK)
+              "BRINDLE_AWS_ID_TOKEN", "BRINDLE_GCP_ID_TOKEN", "BRINDLE_AZURE_ID_TOKEN",
               "GITLAB_TOKEN", "GITLAB_PRIVATE_TOKEN", "GITLAB_ACCESS_TOKEN",
               # gh also reads this alias of GH_ENTERPRISE_TOKEN
               "GITHUB_ENTERPRISE_TOKEN")
