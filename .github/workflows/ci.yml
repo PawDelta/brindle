@@ -44,6 +44,41 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code changed: $code"
 
+  # The deployment templates under deploy/, checked with their own linters
+  # (the pytest checks need none of these). Runs only when deploy/ changes.
+  deploy-templates:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: touched   # sets run=true when deploy/ changed; unset (not "false") otherwise
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || ! git diff --quiet "$BASE_SHA"...HEAD -- deploy; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: astral-sh/setup-uv@v10.2.0
+        if: steps.touched.outputs.run == 'true'
+      - name: cfn-lint
+        if: steps.touched.outputs.run == 'true'
+        run: uvx cfn-lint deploy/aws/brindle-ci-bedrock.yaml
+      - uses: hashicorp/setup-terraform@v3
+        if: steps.touched.outputs.run == 'true'
+      - name: terraform validate
+        if: steps.touched.outputs.run == 'true'
+        working-directory: deploy/gcp
+        run: |
+          terraform fmt -check
+          terraform init -backend=false
+          terraform validate
+      - name: bicep builds
+        if: steps.touched.outputs.run == 'true'
+        run: az bicep build --file deploy/azure/main.bicep --outfile "$RUNNER_TEMP/azuredeploy.json"
+
   test:
     needs: changes
     strategy:
