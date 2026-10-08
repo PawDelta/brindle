@@ -82,8 +82,8 @@ def test_config_overrides_one_tier_and_keeps_the_rest(repo):
 
 def test_weight_picks_the_first_candidate(db, repo, boss):
     why = []
-    assert choose(db, repo, weight="heavy", why=why) == ("developer-heavy", False)
-    assert why == ["weight heavy -> developer-heavy"]
+    assert choose(db, repo, weight="heavy", why=why) == ("developer", False)
+    assert why == ["weight heavy -> developer"]
     # No tier prefers another provider for its own sake: the baselines are
     # Claude profiles; Codex and the local model are learner candidates.
     assert choose(db, repo, weight="medium")[0] == "developer"
@@ -107,13 +107,13 @@ def test_precedence_explicit_then_milestone_then_weight(db, repo, boss):
     assert choose(db, repo, None, "heavy")[0] == "developer-local"
     milestone = db.milestones("boss")[0]
     db.record_check(milestone.id, True, "", "sha")
-    assert choose(db, repo, None, "heavy")[0] == "developer-heavy"
+    assert choose(db, repo, None, "heavy")[0] == "developer"
 
 
 def test_weight_routing_beats_learning_candidates(db, repo, boss, monkeypatch):
     install(monkeypatch, Picker(prefer="developer-local"))
     config(repo, learning="cloud", learning_candidates=["developer-local"])
-    assert choose(db, repo, weight="heavy")[0] == "developer-heavy"
+    assert choose(db, repo, weight="heavy")[0] == "developer"
 
 
 def test_missing_cli_is_skipped(db, repo, boss, monkeypatch):
