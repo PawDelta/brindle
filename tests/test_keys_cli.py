@@ -28,6 +28,16 @@ def test_set_refuses_the_oauth_token_and_job_secrets(brindle_home):
         assert keystore.default_store("brindle-keys", name).load() is None
 
 
+def test_unset_cannot_escape_the_key_directory(brindle_home):
+    victim = brindle_home / "victim.json"
+    brindle_home.mkdir(parents=True, exist_ok=True)
+    victim.write_text("{}")
+    for name in ("../victim", "../../victim", "a/b", 'A"B'):
+        r = runner.invoke(app, ["keys", "unset", name])
+        assert r.exit_code == 1, name
+    assert victim.exists()
+
+
 def test_an_empty_value_is_refused(brindle_home):
     r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input="\n")
     assert r.exit_code == 1 and keystore.get_key("OPENAI_API_KEY") is None

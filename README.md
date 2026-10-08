@@ -320,6 +320,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `brindle ls [--all]` | workspaces and agents |
 | `brindle repo add PATH [--name ALIAS] / rm ALIAS / ls` | attach other local repos to the current session so workers can go there (brindle Pro; see "Several repos in one session") |
+| `brindle keys set/unset/list [NAME]` | store model API keys (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) once in the OS keychain (or a 0600 file); every agent pane gets the ones its provider reads, unless you already export it. `set` reads the value from a hidden prompt or stdin, `list` shows names and the last 4 characters. `CLAUDE_CODE_OAUTH_TOKEN` (a Claude subscription token) is never stored |
 | `brindle history [--limit N] [--kind K] [--all]` | durable log of worker results, reviews, merges and milestone checks |
 | `brindle cost [--days N] [--all]` | dollar spend at list prices over the last 30 days, by model |
 | `brindle cost report [--days N] [--all]` | Pro: spend by day, profile and goal, cost per merged branch, review pass rate per worker profile |

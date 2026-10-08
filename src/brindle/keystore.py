@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -237,6 +238,9 @@ class KeyNameError(CredentialError):
 
 
 def _key_store(name: str):
+    # Local invariant: the name becomes a file name and a quoted keychain argument.
+    if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+        raise KeyNameError("not a valid variable name")
     return default_store(KEYS_SERVICE, name, label="brindle key")
 
 
