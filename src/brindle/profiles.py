@@ -109,6 +109,13 @@ class Profile:
     write_scope: list[str] | None = None
     read_scope: list[str] | None = None
     env_allow: list[str] | None = None
+    # How the agent signs in: ``auto`` (a key from the environment or `brindle keys`
+    # wins, else the CLI's own login), ``subscription`` (no key reaches the pane,
+    # so the login is used) or ``api_key`` (refuse to start without a key).
+    auth: str = "auto"
+
+
+AUTH_CHOICES = ("auto", "subscription", "api_key")
 
 
 @dataclass
@@ -265,7 +272,11 @@ def _build(meta: dict[str, str], body: str, fallback_name: str) -> Profile:
         write_scope=_list(meta.get("write_scope")),
         read_scope=_list(meta.get("read_scope")),
         env_allow=_list(meta.get("env_allow")),
+        auth=(meta.get("auth") or "auto").strip().lower(),
     )
+    if profile.auth not in AUTH_CHOICES:
+        raise ProfileError(f"profile {profile.name!r} has auth: {profile.auth!r}; "
+                           f"choose from {', '.join(AUTH_CHOICES)}")
     problem = subscription_token_problem(profile)
     if problem:
         raise ProfileError(problem)
