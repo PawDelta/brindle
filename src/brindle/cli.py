@@ -1557,9 +1557,17 @@ def learn_rules_cmd(repo_root: str) -> None:
             typer.echo(f"brindle: learned rules: {e}", err=True)
 
 
-@app.command()
-def learning() -> None:
+learning_app = typer.Typer(invoke_without_command=True,
+                           help="What brindle Pro's hosted learner has learned about which profiles fit "
+                                "which tasks (nothing is learned on this machine).")
+app.add_typer(learning_app, name="learning")
+
+
+@learning_app.callback()
+def learning(ctx: typer.Context) -> None:
     """What brindle Pro's hosted learner has learned about which profiles fit which tasks (nothing is learned on this machine)."""
+    if ctx.invoked_subcommand is not None:
+        return
     from brindle import learning as learning_mod
     from brindle.config import load_repo_config
 
@@ -1590,6 +1598,44 @@ def learning() -> None:
         typer.echo("hosted learning is unavailable")
         raise typer.Exit(1)
     typer.echo(p.report())
+
+
+@learning_app.command("seed")
+def learning_seed() -> None:
+    """Send this repo's finished routing history to the hosted learner once (brindle Pro), so it starts with what this machine has seen. Only the usual coarse record fields leave: never task text or paths."""
+    import json
+
+    from brindle import learning as learning_mod
+    from brindle.pro.learning import CloudLearner
+
+    try:
+        repo_root = git.main_repo_root(os.getcwd())
+    except git.GitError:
+        typer.echo("not in a git repo")
+        raise typer.Exit(1)
+    learner = CloudLearner(repo_root, start_thread=False)
+    reason = learner.inactive_reason()
+    if reason is not None:
+        typer.echo(f"hosted learning is not active: {reason}. Seeding needs brindle Pro "
+                   "with the learning entitlement.")
+        raise typer.Exit(1)
+    db = _helper_db()
+    items = []
+    for d, text, files_json in db.unseeded_finished_decisions(repo_root):
+        try:
+            files = tuple(str(f) for f in json.loads(files_json or "[]"))
+        except (TypeError, ValueError):
+            files = ()
+        info = learning_mod.TaskInfo(repo_root=repo_root, task=text, files=files, weight=d.weight,
+                                     agent_id=d.agent_id, profile=d.profile)
+        items.append((d.id, info, learning_mod.Outcome(d.outcome, checks_passed=d.outcome == "merged"), d))
+    sent = learner.seed(items)
+    if sent:
+        db.mark_routing_seeded(sent)
+    typer.echo(f"sent {len(sent)} finished decision(s) to the hosted learner"
+               + (f"; {len(items) - len(sent)} left for the next run" if len(sent) < len(items) else ""))
+    if len(sent) < len(items):
+        raise typer.Exit(1)
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True,
@@ -2512,18 +2558,32 @@ def flush_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
     agents.flush(_helper_db(), agent_id)
 
 
-@app.command("_deliver-checks", hidden=True)
-def deliver_checks_cmd(reviewer_id: str, workspace_id: str) -> None:
-    """Run a repo's checks for a reviewer and deliver the summary to its
-    inbox. Started detached from request_review, so the checks still finish
-    and get delivered even if the MCP server that started it has exited."""
+@app.command("_review-after-checks", hidden=True)
+def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Option(None, "--caller"),
+                            profile: Optional[str] = typer.Option(None, "--profile"),
+                            focus: Optional[str] = typer.Option(None, "--focus")) -> None:
+    """Run a repo's checks, then start the reviewer with their results in its
+    prompt. Started detached from start_review, so the review still starts
+    even if the MCP server that asked for it has exited."""
+    from brindle import gates
     from brindle.config import load_repo_config
 
     db = _helper_db()
     ws = db.get_workspace(workspace_id)
     if ws is None:
         return
-    agents.deliver_check_summary(db, reviewer_id, ws, load_repo_config(ws.repo_root))
+    try:
+        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root))
+    except (agents.AgentError, ValueError) as e:
+        from brindle import pipeline
+
+        worker = pipeline.piped_worker(db, ws)
+        if worker and worker.pipeline == "reviewing":
+            db.update_agent(worker.id, pipeline=None)   # nothing is reviewing it after all
+        if db.get_agent(caller) if caller else None:
+            gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` after its "
+                                   f"checks ({e}). Review it yourself with workspace_diff, then "
+                                   "merge_workspace.")
 
 
 @app.command("_check-milestones", hidden=True)

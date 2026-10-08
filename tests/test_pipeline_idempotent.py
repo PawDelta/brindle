@@ -206,16 +206,3 @@ def test_a_second_reviewer_submitting_after_the_removal_is_told_it_is_done(db, a
     out = agents.submit_review(db, "rev1", True, "lgtm")
     assert "Only a reviewer" in out or "already" in out
     assert drain(db) == [] and len(runs) == 1
-
-
-def test_a_late_failing_check_summary_for_a_merged_branch_is_dropped(db, approved, monkeypatch):
-    """_deliver-checks was still running the suite in the worktree when the
-    branch merged and the worktree started to go: its failure is not news."""
-    ws, runs = approved
-    keep_worktree(monkeypatch)
-    sha = gates.head(ws)
-    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
-    drain(db)
-    agents._late_check_summary(db, ws, sha, "FAIL `pytest`\n83 errors during collection",
-                               "rev0", "boss")
-    assert drain(db) == []

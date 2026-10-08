@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config
+from brindle import escapes
 from brindle.db import DB, Agent, Autopilot, Milestone, Workspace
 from brindle.profiles import load_profile
 
@@ -67,7 +68,9 @@ to be asked each step.
 - The goal: if none is set yet, ask the user what we're building. Turn the
   answer into a goal with 2-6 milestones, each with a `check` command brindle can
   run from the root of this checkout that exits 0 only when that milestone is
-  done (e.g. `uv run pytest tests/test_settings.py -q`). Record it with
+  done (e.g. `uv run pytest tests/test_settings.py -q`). A check must test what
+  the milestone promises, not just that the suite passes: name the tests that
+  cover its acceptance criteria. Record it with
   `set_goal`, tell the user the plan in a few lines, then start. If
   `.brindle/goals.md` exists, brindle has already loaded it: call `get_progress`.
 - Work on the first unverified milestone. Split it into independent tasks and
@@ -90,7 +93,8 @@ to be asked each step.
 - After merging, call `check_milestone`. Only brindle's check marks a milestone
   done: never claim one is done yourself. When every milestone passes, brindle
   audits the work against the goal; the goal is reached only when that audit
-  approves. Treat any gaps it finds as unfinished work.
+  approves. Treat any gaps it finds as unfinished work, and tighten (with
+  `set_goal`) the check that let each gap through.
 - Keep going until every milestone passes. If you stop early, brindle will ask
   you to continue. Stop only when you are blocked on something only the user
   can decide: call `need_user` with the question, then ask it.
@@ -754,6 +758,11 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             # Not if it already passed at this very commit: a flaky check
             # flipping back isn't progress.
             newly_passed |= ok and m.status != "passed" and (sha is None or m.passed_sha != sha)
+            if not ok and m.status == "passed" and sha and m.checked_sha:
+                # Passed at the commit before, fails now: whatever merged in
+                # between got past its reviewer.
+                escapes.milestone_regressed(db, checkout.repo_root, checkout.path, m.title,
+                                            m.checked_sha, sha)
             db.record_check(m.id, ok, out, sha)
 
     run(chosen)
@@ -929,6 +938,9 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
                 f"\n\n{summary}")
     db.update_autopilot(root_id, state="running", note=summary.strip()[:4000], audit_ok=0,
                         auditor_id=None)
+    audit_ws = db.get_workspace(root.workspace_id) if root else None
+    if audit_ws is not None:
+        escapes.audit_gaps(db, audit_ws.repo_root, summary)
     return (f"[brindle] Completion audit of {sha}: GAPS FOUND. The goal isn't reached yet, even "
             "though every milestone's check passes. Close each gap below (and where a check let "
             "a gap through, tighten it with set_goal), then call check_milestone to re-audit."

@@ -335,8 +335,46 @@ class CloudLearner(LearningPlugin):
                 self.queue.put_nowait(item)      # the payload is built by the sender
             except queue.Full:
                 self.dropped += 1
+                return
+            if outcome.event in TERMINAL and task.agent_id:
+                self._mark_seeded(task.agent_id)
         except Exception:  # noqa: BLE001
             log.info("hosted learning record skipped", exc_info=True)
+
+    def _mark_seeded(self, agent_id: str) -> None:
+        """A terminal record is on its way live, so `brindle learning seed` must not resend it."""
+        from brindle.db import DB
+
+        try:
+            db = DB()
+            try:
+                db.mark_agent_seeded(agent_id)
+            finally:
+                db.conn.close()
+        except Exception:  # noqa: BLE001 - at worst seed sends a duplicate the server can dedupe
+            log.info("could not mark decision as sent", exc_info=True)
+
+    def inactive_reason(self) -> str | None:
+        """Why hosted learning isn't active right now (None when it is)."""
+        from brindle import airgap
+
+        if airgap.enabled():
+            return "brindle is in air-gap mode, which sends nothing"
+        if time.time() < self._backoff_until:
+            return "the learning server asked brindle to back off; try again later"
+        if self.org() is not None:
+            return None
+        try:
+            from brindle.pro import license
+
+            ent = license.current(refresh=False, store=self._store)
+        except Exception:  # noqa: BLE001
+            return "you are not logged in to brindle Pro (`brindle account login`)"
+        if FEATURE not in ent.features:
+            return "your plan has no hosted learning (the `learning` entitlement; `brindle account upgrade`)"
+        if ent.in_grace:
+            return "your brindle Pro entitlement is in its grace period; log in again (`brindle account login`)"
+        return "hosted learning is unavailable"
 
     def _send_one(self, item) -> None:
         try:
@@ -357,6 +395,30 @@ class CloudLearner(LearningPlugin):
                 self._post(org, "/learning/record", body)
         except Exception as e:  # noqa: BLE001
             log.info("hosted learning record not sent (%s)", type(e).__name__)
+
+    def seed(self, items) -> list[int]:
+        """Send past finished decisions through the record path, inline and in order.
+        ``items`` are ``(ref, TaskInfo, Outcome, decision)``; returns the ``ref``s the
+        server took (a record that can't be built without leaking counts as taken: it
+        would never be sendable). Stops at the first failed send, so the rest wait for
+        the next run. Each body is exactly ``record_payload``'s."""
+        org = self.org()
+        identity = self.identity() if org else None
+        if org is None or identity is None:
+            return []
+        done = []
+        for ref, task, outcome, decision in items:
+            body = record_payload(self.key(org), identity, task, outcome,
+                                  decision.review_rounds, decision.escalations,
+                                  decision=decision, cost=self.cost)
+            if body is not None:
+                try:
+                    self._post(org, "/learning/record", body)
+                except Exception as e:  # noqa: BLE001
+                    log.info("hosted learning seed stopped (%s)", type(e).__name__)
+                    break
+            done.append(ref)
+        return done
 
     def _sender(self) -> None:
         while True:

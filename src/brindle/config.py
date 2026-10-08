@@ -49,7 +49,7 @@ WEIGHTS = ("light", "medium", "heavy")
 # Nothing here prefers another provider for its own sake: all-Claude or
 # all-Codex may well be best, and that's the learner's call.
 DEFAULT_ROUTING = {
-    "light": ["developer", "developer-codex", "developer-local"],
+    "light": ["developer-light", "developer", "developer-codex", "developer-local"],
     "medium": ["developer", "developer-codex", "developer-heavy"],
     "heavy": ["developer-heavy", "developer", "developer-codex"],
 }
@@ -70,6 +70,9 @@ class RepoConfig:
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
+    # Weight -> reviewer profile for a second, independent review of work of that weight;
+    # the pipeline merges only when both approve. Empty: one review (see brindle.pipeline).
+    second_review: dict[str, str] = field(default_factory=dict)
     pre_commit: bool = True            # run pre-commit (the framework) over a branch before merging
     max_agents: int = 4                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
@@ -85,7 +88,9 @@ class RepoConfig:
     auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
     plan_first: bool = False           # workers propose a plan and wait for approval before editing
-    permission_policy: str = "off"     # "on": brindle answers workers' permission requests by its rules (see brindle.permissions)
+    # "on": brindle answers workers' permission requests by its rules (see
+    # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
+    permission_policy: str = "off"
     overlap: str = "block"           # a task whose files overlap a running one: "block" or "warn"
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
@@ -173,6 +178,17 @@ def config_root(path: str | Path) -> Path:
     return main if common.name == ".git" and (main / CONFIG_DIR).is_dir() else path
 
 
+def _default_permission_policy() -> str:
+    """"on" for Pro and up (so approvals are recorded and learned), "off" on
+    Free. Fails closed: no license, or any error, means "off"."""
+    try:
+        from brindle.pro import license
+
+        return "on" if license.has("learned_rules") else "off"
+    except Exception:  # noqa: BLE001 -- an unreadable license is Free
+        return "off"
+
+
 def load_repo_config(repo_root: str | Path) -> RepoConfig:
     base = config_root(repo_root) / CONFIG_DIR
     shared = _read_json(base / CONFIG_FILE)
@@ -202,6 +218,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
             if isinstance(rule, str) and rule.strip() and rule.strip() not in rules:
                 rules.append(rule.strip())
     cfg.rules = rules
+    if not any("permission_policy" in source for source in (local, shared, user)):
+        cfg.permission_policy = _default_permission_policy()
     services = local["services"] if "services" in local else shared.get("services")
     if isinstance(services, list):
         cfg.services = [s for s in services if isinstance(s, dict)]
@@ -217,6 +235,12 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
             for tier, names in routing.items():
                 if tier in WEIGHTS and isinstance(names, list):
                     cfg.routing[tier] = [n for n in names if isinstance(n, str)]
+    for source in (shared, local):  # per weight, so a repo can override one and keep the rest
+        second = source.get("second_review")
+        if isinstance(second, dict):
+            for tier, name in second.items():
+                if tier in WEIGHTS and isinstance(name, str) and name:
+                    cfg.second_review[tier] = name
     for source in (user, shared, local):  # per model, so a repo can override one and keep the rest
         pricing = source.get("pricing")
         if isinstance(pricing, dict):

@@ -1,13 +1,10 @@
-import asyncio
-import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, gates, mcp_server, workspaces
+from brindle import agents, autopilot, gates, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.profiles import load_profile
@@ -157,96 +154,10 @@ def test_check_summary_truncation_keeps_the_tail_not_the_head(worker_ws, monkeyp
     assert summary.startswith("FAIL `a`\n... (truncated)\n") or "... (truncated)" in summary
 
 
-# -- delivering the check summary to a reviewer ---------------------------------
-
-
-def test_deliver_check_summary_queues_a_pass_fail_message(db, worker_ws):
-    add_worker(db, worker_ws, "rev1", task="Review", mode="review", status="processing", result=None)
-    cfg = RepoConfig(checks=["true", "false"])
-    agents.deliver_check_summary(db, "rev1", worker_ws, cfg)
-    msg = db.pop_pending("rev1")
-    assert msg is not None
-    assert "PASS `true`" in msg.body and "FAIL `false`" in msg.body
-
-
-def test_deliver_check_summary_delivers_even_if_checks_crash(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "rev2", task="Review", mode="review", status="processing", result=None)
-    monkeypatch.setattr(gates, "check_summary", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    agents.deliver_check_summary(db, "rev2", worker_ws, RepoConfig(checks=["true"]))
-    msg = db.pop_pending("rev2")
-    assert msg is not None and "crashed" in msg.body
-
-
-def test_deliver_check_summary_skips_a_reviewer_that_already_finished(db, worker_ws):
-    # add_worker's defaults (status="done", result set) simulate a reviewer
-    # that already submitted its review and was closed by the time the
-    # checks (which take a while) finish.
-    add_worker(db, worker_ws, "rev3", task="Review", mode="review")
-    agents.deliver_check_summary(db, "rev3", worker_ws, RepoConfig(checks=["true"]))
-    assert db.pending_count("rev3") == 0
-
-
-def test_deliver_check_summary_skips_a_reviewer_removed_mid_run(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "rev4", task="Review", mode="review", status="processing", result=None)
-
-    def vanish(*a, **kw):
-        db.delete_agent("rev4")  # e.g. its workspace was removed while checks ran
-        return "PASS `true`"
-
-    monkeypatch.setattr(gates, "check_summary", vanish)
-    agents.deliver_check_summary(db, "rev4", worker_ws, RepoConfig(checks=["true"]))
-    assert db.pending_count("rev4") == 0
-
-
-def test_request_review_launches_the_detached_deliver_checks_command(db, boss, worker_ws, monkeypatch):
-    """request_review must not run checks itself or wait on them in-process:
-    it hands off to a detached `brindle _deliver-checks` process (like the
-    existing _flush/_after-launch/_close calls) that survives even if this
-    MCP server exits."""
-    config_dir = Path(worker_ws.repo_root) / ".brindle"
-    config_dir.mkdir(exist_ok=True)
-    (config_dir / "config.json").write_text(json.dumps({"checks": ["true"]}))
-
-    import subprocess as subprocess_module
-
-    real_popen = subprocess_module.Popen
-    calls = []
-
-    def fake_popen(argv, **kw):
-        # subprocess.Popen is also how git.py shells out; only intercept our
-        # own detached call and let everything else run for real.
-        if isinstance(argv, list) and "_deliver-checks" in argv:
-            calls.append((argv, kw))
-            return SimpleNamespace(pid=1234)
-        return real_popen(argv, **kw)
-
-    monkeypatch.setattr(mcp_server.subprocess, "Popen", fake_popen)
-    out = asyncio.run(mcp_server.request_review(worker_ws.id))
-    assert "is reviewing" in out
-
-    [reviewer] = [a for a in db.list_agents(worker_ws.id) if a.mode == "review"]
-    assert len(calls) == 1
-    argv, kw = calls[0]
-    assert argv[-3:] == ["_deliver-checks", reviewer.id, worker_ws.id]
-    assert kw.get("start_new_session") is True
-
-
-def test_deliver_checks_cli_command_delivers_to_reviewer(db, worker_ws):
-    from typer.testing import CliRunner
-
-    from brindle.cli import app
-
-    add_worker(db, worker_ws, "rev5", task="Review", mode="review", status="processing", result=None)
-    res = CliRunner().invoke(app, ["_deliver-checks", "rev5", worker_ws.id])
-    assert res.exit_code == 0
-    msg = db.pop_pending("rev5")
-    assert msg is not None and "No checks are configured" in msg.body
-
-
 # -- review prompt ---------------------------------------------------------------
 
 
-def test_review_prompt_has_task_done_when_and_notes_checks_will_arrive_later(db, worker_ws, monkeypatch):
+def test_review_prompt_has_task_and_done_when_and_no_checks_without_a_summary(db, worker_ws, monkeypatch):
     add_worker(db, worker_ws, "w1", task="Add a login page with OAuth support.",
                done_when="tests/test_login.py passes")
     captured = capture_spawn(monkeypatch)
@@ -255,15 +166,8 @@ def test_review_prompt_has_task_done_when_and_notes_checks_will_arrive_later(db,
     prompt = captured["prompt"]
     assert "Add a login page with OAuth support." in prompt
     assert "tests/test_login.py passes" in prompt
-    assert "arrive as a message" in prompt
+    assert "checks" not in prompt.lower()
     assert "PASS" not in prompt and "FAIL" not in prompt
-    assert "Also run:" not in prompt
-
-
-def test_review_prompt_omits_checks_note_when_none_configured(db, worker_ws, monkeypatch):
-    captured = capture_spawn(monkeypatch)
-    agents.request_review(db, None, worker_ws, "reviewer", cfg=RepoConfig(checks=[]))
-    assert "arrive as a message" not in captured["prompt"]
 
 
 def test_incremental_review_focuses_on_diff_since_previous_sha(db, worker_ws, monkeypatch):

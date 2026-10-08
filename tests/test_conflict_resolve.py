@@ -88,7 +88,14 @@ def conflicted(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    monkeypatch.setattr(pipeline, "_detach", lambda argv: None)
+    def detach(argv):
+        # The repo has checks, so the review starts from a detached process
+        # once they finish: stand in for it.
+        if "_review-after-checks" in argv:
+            ws_ = db.get_workspace(argv[argv.index("_review-after-checks") + 1])
+            fake_review(db, db.get_agent("boss"), ws_)
+
+    monkeypatch.setattr(agents, "_detach", detach)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
     setup.reviews = started
     return setup

@@ -350,7 +350,8 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
     escalations INTEGER NOT NULL DEFAULT 0,
     outcome TEXT,                   -- merged | removed_unmerged, once it's over
     demoted_from TEXT,              -- the profile a budget moved this task off (brindle.budget)
-    budget_state TEXT               -- warned | over | stopped (brindle.budget.sweep)
+    budget_state TEXT,              -- warned | over | stopped (brindle.budget.sweep)
+    seeded_at REAL                  -- when `brindle learning seed` sent it to the hosted learner
 );
 CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
 CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
@@ -507,6 +508,7 @@ class RoutingDecision:
     outcome: str | None = None
     demoted_from: str | None = None
     budget_state: str | None = None
+    seeded_at: float | None = None
 
 
 @dataclass
@@ -664,9 +666,9 @@ class DB:
         routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
         if "prior" not in routing_cols:
             self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
-        for col in ("demoted_from", "budget_state"):
+        for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
             if col not in routing_cols:
-                self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} TEXT")
+                self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -1152,6 +1154,18 @@ class DB:
         ).fetchone()
         return _load(Review, row) if row else None
 
+    def reviews_at(self, workspace_id: str, sha: str) -> list[Review]:
+        """Each reviewer's latest review of ``sha``, oldest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM reviews WHERE workspace_id=? AND sha=? ORDER BY id", (workspace_id, sha),
+        ).fetchall()
+        latest: dict[str | None, Review] = {}
+        for row in rows:
+            r = _load(Review, row)
+            latest.pop(r.reviewer_id, None)
+            latest[r.reviewer_id] = r
+        return list(latest.values())
+
     def last_review(self, workspace_id: str) -> Review | None:
         """The most recent review of ``workspace_id`` at any sha, for incremental
         re-review: compare its sha against the current HEAD to see what's new."""
@@ -1518,6 +1532,34 @@ class DB:
         where, args = ("WHERE repo_root=?", (repo_root,)) if repo_root else ("", ())
         rows = self.conn.execute(f"SELECT * FROM routing_decisions {where} ORDER BY id", args)
         return [_load(RoutingDecision, r) for r in rows]
+
+    def unseeded_finished_decisions(self, repo_root: str) -> list[tuple[RoutingDecision, str, str | None]]:
+        """Finished (merged or removed_unmerged) decisions of ``repo_root`` not yet sent by
+        `brindle learning seed`, each with its task's text and files JSON ('' / None when the
+        decision has no task row)."""
+        rows = self.conn.execute(
+            "SELECT rd.*, t.task_text AS _text, t.files AS _files, t.weight AS _tweight "
+            "FROM routing_decisions rd LEFT JOIN tasks t ON t.id = rd.task_id "
+            "WHERE rd.repo_root=? AND rd.seeded_at IS NULL "
+            "AND rd.outcome IN ('merged', 'removed_unmerged') ORDER BY rd.id", (repo_root,))
+        out = []
+        for r in rows:
+            d = _load(RoutingDecision, r)
+            if d.weight is None:
+                d.weight = r["_tweight"]
+            out.append((d, r["_text"] or "", r["_files"]))
+        return out
+
+    def mark_routing_seeded(self, ids: list[int]) -> None:
+        now = time.time()
+        with self.tx() as c:
+            c.executemany("UPDATE routing_decisions SET seeded_at=? WHERE id=?", [(now, i) for i in ids])
+
+    def mark_agent_seeded(self, agent_id: str) -> None:
+        """The live learner path sent ``agent_id``'s terminal record: seeding skips it."""
+        with self.tx() as c:
+            c.execute("UPDATE routing_decisions SET seeded_at=? WHERE agent_id=? AND seeded_at IS NULL",
+                      (time.time(), agent_id))
 
     def list_routing_decisions_for_live_agents(self) -> list[RoutingDecision]:
         """Return routing decisions for agents that are currently running (not dismissed or done)."""

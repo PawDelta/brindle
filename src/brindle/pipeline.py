@@ -42,7 +42,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-import subprocess
 import threading
 from contextlib import contextmanager
 
@@ -127,11 +126,6 @@ def _settled(db: DB, ws: Workspace) -> str | None:
             "nothing more to merge.")
 
 
-def _detach(args: list[str]) -> None:
-    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
 def _tell(db: DB, parent_id: str | None, text: str, sender_id: str | None) -> None:
     if parent_id and db.get_agent(parent_id):
         try:
@@ -195,11 +189,36 @@ def _escalate(db: DB, ws: Workspace, worker: Agent | None) -> None:
 # -- stage 1: a worker reported ---------------------------------------------------
 
 
+def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str | None:
+    """The reviewer profile of the second review ``cfg.second_review`` asks
+    for on ``worker``'s branch, by the weight its task was sized at. None when
+    it's unset, the task has no weight there, or it names the profile that
+    does the first review anyway (one reviewer per profile and commit)."""
+    if not cfg.second_review:
+        return None
+    weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
+    profile = cfg.second_review.get(weight or "")
+    if not profile or profile == agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task):
+        return None
+    return profile
+
+
+def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> bool:
+    """Whether a second review is required for ``ws``'s current commit and
+    hasn't approved it yet (the first reviewer's approval must wait for it)."""
+    profile = second_profile(db, cfg, worker, ws)
+    if profile is None:
+        return False
+    reviews = db.reviews_at(ws.id, gates.head(ws))
+    if not reviews or not all(r.approved for r in reviews) or len(reviews) < 2:
+        return True   # one is missing, or one asked for changes (the worker is fixing it)
+    reviewers = [db.get_agent(r.reviewer_id) for r in reviews]
+    return not any(a is not None and a.profile == profile for a in reviewers)
+
+
 def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     """Start the review of a reported branch. Returns whether the pipeline
     took the report (so the caller doesn't forward it to the supervisor)."""
-    from brindle.providers import brindle_invocation
-
     try:
         cfg = load_repo_config(ws.repo_root)
     except ValueError:
@@ -217,7 +236,18 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
               f"changes, so it can't be reviewed or merged. Its report:\n\n{result}", worker.id)
         return True
     try:
-        reviewer = agents.request_review(db, parent, ws, None, None, cfg)
+        second = second_profile(db, cfg, worker, ws)
+        # With a second review both calls carry a concrete profile, so the
+        # reviewer dedupe compares profiles and neither can swallow the other.
+        first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
+        started = agents.start_review(db, parent, ws, first, None, cfg)   # with checks: after they finish
+        if second:
+            try:
+                agents.start_review(db, parent, ws, second, None, cfg)
+            except agents.AgentError:
+                if started is not None:
+                    agents.close(db, started.id)   # don't leave a lone first review running
+                raise
     except agents.AgentError as e:
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
@@ -227,8 +257,6 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
               f"Its report:\n\n{result}", worker.id)
         return True
     db.update_agent(worker.id, pipeline="reviewing")
-    if cfg.checks:
-        _detach([*brindle_invocation(), "_deliver-checks", reviewer.id, ws.id])
     return True
 
 
@@ -315,6 +343,8 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                   f"merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}\n\n"
                   f"Review ({reviewer.id}): approved.\n{summary}", worker.id)
             return True, False
+        if second_review_pending(db, cfg, worker, ws):
+            return True, False   # the other reviewer's verdict decides; both must approve
         db.update_agent(worker.id, pipeline="ready")
         return True, True
     rounds = (worker.pipeline_rounds or 0) + 1

@@ -41,7 +41,7 @@ def piped(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    monkeypatch.setattr(pipeline, "_detach", lambda argv: None)
+    monkeypatch.setattr(agents, "_detach", lambda argv: None)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
     return root, ws, started
 

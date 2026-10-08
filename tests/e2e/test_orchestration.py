@@ -41,7 +41,7 @@ def no_processes(monkeypatch):
     monkeypatch.setattr(agents, "warm_checks", lambda ws: None)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
-    monkeypatch.setattr(pipeline, "_detach", lambda argv: None)
+    monkeypatch.setattr(agents, "_detach", lambda argv: None)
 
 
 @pytest.fixture
@@ -60,15 +60,22 @@ def reviewers(db, monkeypatch):
     """Reviews start without a process; the list holds the reviewers started."""
     started: list[Agent] = []
 
-    def fake_review(db_, caller, ws, profile=None, focus=None, cfg=None):
+    def fake_review(db_, caller, ws, profile=None, focus=None, cfg=None, check_summary=None):
         a = Agent(f"rev{len(started)}", ws.id, "reviewer", "claude", caller.id, "review",
-                  "processing", "@r", None, time.time())
+                  "processing", "@r", None, time.time(), task=check_summary)   # task: what its prompt carried
         db_.add_agent(a)
         started.append(a)
         return a
 
     monkeypatch.setattr(agents, "request_review", fake_review)
     return started
+
+
+def review_after_checks(db, ws):
+    """What the detached `_review-after-checks` process does for a repo with checks."""
+    from brindle.config import load_repo_config
+
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, load_repo_config(ws.repo_root))
 
 
 def as_agent(monkeypatch, agent_id):
@@ -179,8 +186,11 @@ def test_pipeline_review_checks_merge_and_removal(db, repo, boss, reviewers, mon
 
     out = worker_reports(db, monkeypatch, wid, "added new.py")
     assert "having your branch reviewed" in out
-    assert db.get_agent(wid).pipeline == "reviewing" and len(reviewers) == 1
+    assert db.get_agent(wid).pipeline == "reviewing" and reviewers == []   # waits for the checks
     assert db.pending_count("boss") == 0                      # nothing to bother the supervisor with
+
+    review_after_checks(db, ws)                               # the detached step: checks, then the reviewer
+    assert len(reviewers) == 1 and "PASS `test -f new.py`" in reviewers[0].task
 
     out = reviewer_approves(monkeypatch, reviewers[0].id)
     assert "takes it from here" in out
@@ -199,6 +209,8 @@ def test_failed_checks_leave_the_branch_unmerged_and_need_the_supervisor(db, rep
     ws = ws_of(db, repo, "feat-f")
     commit(ws, "new.py")
     worker_reports(db, monkeypatch, wid, "added new.py")
+    review_after_checks(db, ws)
+    assert "FAIL `test -f never_there.py`" in reviewers[0].task   # the reviewer is told
 
     reviewer_approves(monkeypatch, reviewers[0].id)
 

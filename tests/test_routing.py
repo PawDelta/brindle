@@ -82,10 +82,10 @@ def test_weight_picks_the_first_candidate(db, repo, boss):
     why = []
     assert choose(db, repo, weight="heavy", why=why) == ("developer-heavy", False)
     assert why == ["weight heavy -> developer-heavy"]
-    # No tier prefers another provider for its own sake: the baseline is the
-    # default developer; Codex and the local model are learner candidates.
+    # No tier prefers another provider for its own sake: the baselines are
+    # Claude profiles; Codex and the local model are learner candidates.
     assert choose(db, repo, weight="medium")[0] == "developer"
-    assert choose(db, repo, weight="light")[0] == "developer"
+    assert choose(db, repo, weight="light")[0] == "developer-light"
 
 
 def test_no_weight_keeps_the_default_agent(db, repo, boss):
@@ -139,6 +139,7 @@ def test_provider_below_the_usage_limit_is_kept(db, repo, boss, monkeypatch):
 def test_native_down_is_skipped(db, repo, boss, monkeypatch):
     monkeypatch.setattr(quota, "headroom",
                         lambda provider, cfg=None, repo_root=None: 0.0 if provider == "native" else 100.0)
+    config(repo, routing={"light": ["developer-local", "developer"]})
     why = []
     assert choose(db, repo, weight="light", why=why)[0] == "developer"
     assert "local model server not answering" in why[0]
