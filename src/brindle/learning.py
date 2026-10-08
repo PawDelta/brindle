@@ -64,6 +64,8 @@ class LearningPlugin(ABC):
     last_reason: str | None = None
     # whether the last ``suggest``'s evidence included other orgs' shared results
     last_prior: bool = False
+    # why the last ``suggest`` kept ``default``, when the learner said
+    last_note: str | None = None
 
     @abstractmethod
     def record(self, task: TaskInfo, outcome: Outcome) -> None:
@@ -176,6 +178,7 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
     when it overrides ``default`` (what brindle would use: the first
     candidate unless given), else (None, None). The learner is not asked with
     fewer than two candidates."""
+    _forget_note(cfg, repo_root)
     if candidates is None:
         candidates = cfg.learning_candidates or cfg.routing.get("medium") or []
     names = [c for c in candidates if isinstance(c, str)]
@@ -211,6 +214,26 @@ def choose(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
     return choose_why(db, cfg, repo_root, task, files, candidates, weight, default)[0]
 
 
+def _forget_note(cfg: RepoConfig, repo_root: str) -> None:
+    try:
+        p = plugin(cfg, repo_root)
+        if p is not None:
+            p.last_note = None
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def kept_note(cfg: RepoConfig, repo_root: str) -> str | None:
+    """Why the learner kept the default in the last ``choose_why``, when it
+    said (e.g. "not enough similar tasks yet: ..."); None otherwise."""
+    try:
+        p = plugin(cfg, repo_root)
+        note = p.last_note if p is not None else None
+        return note if isinstance(note, str) and note else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def used_prior(cfg: RepoConfig, repo_root: str) -> bool:
     """Whether the learner's last override (see ``choose_why``) drew on other
     orgs' shared results. False without a learner or when it didn't say."""
@@ -221,5 +244,5 @@ def used_prior(cfg: RepoConfig, repo_root: str) -> bool:
         return False
 
 
-__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "note", "plugin", "reset",
+__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "kept_note", "note", "plugin", "reset",
            "used_prior"]

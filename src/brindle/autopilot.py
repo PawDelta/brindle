@@ -505,7 +505,8 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
         decision["baseline"] = remaining[0]
     why = f"weight {weight} -> {name}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
-    detail = [picked if pick else "", *skipped]
+    kept = learning.kept_note(cfg, repo_root)
+    detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
     detail = [d for d in detail if d]
     if detail:
         why += f" ({', '.join(detail)})"

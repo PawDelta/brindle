@@ -42,6 +42,7 @@ def remote(backend):
     """The fake backend plus the hosted-learning endpoints."""
     backend.records, backend.suggests = [], []
     backend.suggest_pick = None
+    backend.suggest_note = None
 
     def record(form, headers):
         if not backend._bearer(headers):
@@ -55,8 +56,11 @@ def remote(backend):
         backend.suggests.append(dict(form))
         pick = backend.suggest_pick or form["default"]
         over = pick != form["default"]
-        return 200, {"profile": pick, "overrode": over,
-                     "reason": "cheaper and as good" if over else None, "key_id": form["key_id"]}
+        reply = {"profile": pick, "overrode": over,
+                 "reason": "cheaper and as good" if over else None, "key_id": form["key_id"]}
+        if backend.suggest_note is not None:
+            reply["note"] = backend.suggest_note
+        return 200, reply
 
     backend.routes["POST /learning/record"] = record
     backend.routes["POST /learning/suggest"] = suggest
@@ -137,6 +141,19 @@ def test_an_override_carries_the_servers_reason(parts, remote):
     remote.suggest_pick = None
     assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
     assert lr.last_reason is None
+
+
+def test_a_kept_default_carries_the_servers_note(parts, remote):
+    lr = make(parts, remote)
+    remote.suggest_note = "not enough similar tasks yet: reviewer has 3 of the 5 needed"
+    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
+    assert lr.last_note == "not enough similar tasks yet: reviewer has 3 of the 5 needed"
+    remote.suggest_note, remote.suggest_pick = None, "reviewer"
+    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "reviewer"
+    assert lr.last_note is None      # an override has a reason, not a note
+    remote.suggest_pick = None
+    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
+    assert lr.last_note is None      # an older server says nothing
 
 
 def test_a_default_outside_the_candidates_sends_nothing(parts, remote):
