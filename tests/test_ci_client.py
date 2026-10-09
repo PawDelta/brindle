@@ -1696,7 +1696,9 @@ def init_run(ci_repo, monkeypatch, ci_entitled):
         t = FakeTransport({"GET /ci/workflow?kind=issue": [(200, {"text": "name: issue\n"})],
                            "GET /ci/workflow?kind=validate": [(404, {"error": "not_found"})],
                            "GET /ci/workflow?kind=fix": [(404, {"error": "not_found"})]})
-        kw.setdefault("env", {"PATH": os.environ["PATH"]})
+        # the preview clouds (vertex, foundry) are refused without the flag; the tests of
+        # those clouds that aren't about the flag run with it set
+        kw.setdefault("env", {"PATH": os.environ["PATH"], ci_client.PREVIEW_ENV: "1"})
         ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), run=run,
                        open_url=lambda url: None, account=Plugin(), client=ci_client.Client(BASE, t),
                        say=said.append, **kw)

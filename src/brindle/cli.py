@@ -2344,6 +2344,7 @@ def ci_init(
     from_terraform: Optional[str] = typer.Option(None, "--from-terraform", metavar="DIR", help="Vertex: read the workload identity provider and service account from this Terraform directory's outputs (terraform output -json) instead of asking."),
     from_deployment: Optional[str] = typer.Option(None, "--from-deployment", metavar="NAME", help="Foundry: read clientId and tenantId from this Azure resource group deployment's outputs (az deployment group show), with -g, instead of asking."),
     resource_group: Optional[str] = typer.Option(None, "--resource-group", "-g", metavar="RG", help="With --from-deployment: the resource group."),
+    preview: bool = typer.Option(False, "--preview", help="Set up Vertex AI or Microsoft Foundry, which are in preview (also BRINDLE_CI_PREVIEW_CLOUDS=1)."),
     required_check: Optional[str] = typer.Option(None, "--required-check", metavar="NAME", help="When the default branch requires no status checks: make this check (a workflow job's name) required, without asking. brindle only fixes builds where a required check fails. Unattended (no terminal), this is the only way init makes a check required."),
     no_required_check: bool = typer.Option(False, "--no-required-check", help="When the default branch requires no status checks: only warn, don't offer to make a job required."),
 ) -> None:
@@ -2357,7 +2358,7 @@ def ci_init(
         cloud = (credential or "").strip().lower() or None
         if cloud and cloud not in ci_hosts.CLOUD_ID_TOKENS:
             _fail("brindle ci: on GitLab --credential is bedrock, vertex or foundry (or leave it out)")
-        _ci_call(ci_hosts.init_gitlab, cwd=os.getcwd(), force=force, say=typer.echo, cloud=cloud)
+        _ci_call(ci_hosts.init_gitlab, cwd=os.getcwd(), force=force, say=typer.echo, cloud=cloud, preview=preview)
         return
     if host != ci_hosts.GITHUB:
         _fail(f"brindle ci: host must be {' or '.join(ci_hosts.HOSTS)}")
@@ -2398,7 +2399,7 @@ def ci_init(
         cloud_vars[name.strip()] = value
 
     _ci_call(ci_client.init, repo=repo, org=org, providers=names, cwd=os.getcwd(), env=os.environ,
-             cloud_vars=cloud_vars or None,
+             cloud_vars=cloud_vars or None, preview=preview,
              credential=credential, workspace_id=workspace_id, rule_id=rule_id, organization_id=organization_id,
              service_account_id=service_account_id, required_check=required_check,
              no_required_check=no_required_check, ask=ask, say=typer.echo)

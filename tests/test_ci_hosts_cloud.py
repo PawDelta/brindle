@@ -80,9 +80,17 @@ def test_the_cloud_is_selected_by_the_cicd_variables(cloud, ids, aud, var):
 @pytest.mark.parametrize("cloud,ids,aud,var", CLOUDS)
 def test_init_writes_the_cloud_template_and_warns(cloud, ids, aud, var, tmp_path):
     said = []
-    path = ci_hosts.init_gitlab(cwd=str(tmp_path), is_entitled=lambda: True, say=said.append, env=ids)
+    path = ci_hosts.init_gitlab(cwd=str(tmp_path), is_entitled=lambda: True, say=said.append, env=ids,
+                                preview=True)   # vertex and foundry are in preview (bedrock ignores it)
     assert path.read_text() == ci_hosts.render_template(cloud)
     assert any("lifetime must cover the job timeout" in s for s in said)
+
+
+@pytest.mark.parametrize("cloud,ids", [("vertex", CLOUDS[1][1]), ("foundry", CLOUDS[2][1])])
+def test_gitlab_refuses_a_preview_cloud_without_the_flag(tmp_path, cloud, ids):
+    with pytest.raises(CIError, match="in preview"):
+        ci_hosts.init_gitlab(cwd=str(tmp_path), is_entitled=lambda: True, say=lambda s: None, env=ids)
+    assert not (tmp_path / ci_hosts.GITLAB_CI_FILE).exists(), "nothing is written when refused"
 
 
 def test_init_with_no_cloud_writes_the_plain_template(tmp_path):
