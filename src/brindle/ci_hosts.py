@@ -21,7 +21,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Callable, Mapping
 
-from brindle import ci_client
+from brindle import ci_client, ci_federation
 from brindle.ci_client import CIError
 from brindle.pro import auth, license
 
@@ -288,25 +288,84 @@ brindle-ci:
 """
 
 
+# Keyless cloud sign-in: one id_tokens entry per cloud (the audience that cloud's
+# identity provider trusts), read by ci_federation.StaticCloudToken. The variables
+# are the CI/CD variables `ci init` documents for each cloud.
+CLOUD_ID_TOKENS = {   # cloud: (id_tokens variable, aud, CLAUDE_CODE_USE_* variable, CI/CD variables to set)
+    "bedrock": (ci_federation.GITLAB_TOKEN_VARS["bedrock"], ci_federation.AWS_AUDIENCE,
+                "CLAUDE_CODE_USE_BEDROCK", ("AWS_ROLE_ARN", "AWS_REGION")),
+    "vertex": (ci_federation.GITLAB_TOKEN_VARS["vertex"],
+               ci_federation.GCP_AUDIENCE_PREFIX + "$GCP_WORKLOAD_IDENTITY_PROVIDER",
+               "CLAUDE_CODE_USE_VERTEX", ("GCP_WORKLOAD_IDENTITY_PROVIDER", "GCP_SERVICE_ACCOUNT",
+                                          "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION")),
+    "foundry": (ci_federation.GITLAB_TOKEN_VARS["foundry"], ci_federation.AZURE_AUDIENCE,
+                "CLAUDE_CODE_USE_FOUNDRY", ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "ANTHROPIC_FOUNDRY_RESOURCE")),
+}
+
+
+def render_template(cloud: str | None = None) -> str:
+    """The brindle job template; with ``cloud`` (bedrock, vertex or foundry),
+    also the ``id_tokens`` entry and ``CLAUDE_CODE_USE_*`` variable that make
+    the job sign in to Claude on that cloud with no stored cloud secret."""
+    if cloud is None:
+        return GITLAB_TEMPLATE
+    if cloud not in CLOUD_ID_TOKENS:
+        raise CIError(f"cloud must be one of {', '.join(CLOUD_ID_TOKENS)}")
+    var, aud, use, ids = CLOUD_ID_TOKENS[cloud]
+    comment = (
+        f"# Keyless {cloud} sign-in: set {', '.join(ids)} (and your model pins, "
+        f"{', '.join(ci_client.MODEL_PIN_VARS)}) as CI/CD variables; no cloud secret is stored.\n"
+        f"# WARNING: GitLab can't mint a new ID token mid-job, so brindle writes this one once and\n"
+        f"# never refreshes it. Its lifetime must cover the job timeout: set the {cloud} identity\n"
+        f"# provider's maximum token lifetime, and this job's `timeout:`, to match.\n")
+    text = GITLAB_TEMPLATE.replace("\nstages:", "\n" + comment + "\nstages:", 1)
+    text = text.replace("      aud: https://pawdelta.com/brindle\n",
+                        f"      aud: https://pawdelta.com/brindle\n    {var}:\n      aud: {aud}\n", 1)
+    return text.replace('    GIT_DEPTH: "0"\n', f'    GIT_DEPTH: "0"\n    {use}: "1"\n', 1)
+
+
+def cloud_from_env(env: Mapping[str, str]) -> str | None:
+    """The cloud ``env`` (the CI/CD variables) selects: by ``CLAUDE_CODE_USE_*``,
+    else by which cloud's ID variable is set."""
+    for cloud, (_, _, use, ids) in CLOUD_ID_TOKENS.items():
+        if (env.get(use) or "").strip().lower() not in ("", "0", "false", "no"):
+            return cloud
+    for cloud, (_, _, _, ids) in CLOUD_ID_TOKENS.items():
+        if env.get(ids[0]):
+            return cloud
+    return None
+
+
 def init_gitlab(*, cwd: str, is_entitled: Callable[[], bool] | None = None,
                 say: Callable[[str], None] = print, force: bool = False,
-                env: Mapping[str, str] | None = None) -> Path:
+                env: Mapping[str, str] | None = None, cloud: str | None = None,
+                preview: bool = False) -> Path:
     """``brindle ci init --host gitlab``: write ``.gitlab-ci.yml`` (the
     brindle job template) in ``cwd``. Refuses without the ``ci_enterprise``
-    entitlement, and never overwrites an existing file unless ``force``."""
+    entitlement, and never overwrites an existing file unless ``force``.
+    ``cloud`` adds that cloud's keyless sign-in (see :func:`render_template`);
+    it defaults to the cloud ``env`` selects. A preview cloud needs ``preview``
+    (see :func:`ci_client.preview_check`)."""
     ci_client.refuse_airgap()
     get_host(GITLAB, {}, is_entitled=is_entitled)
     path = Path(cwd) / GITLAB_CI_FILE
     if path.exists() and not force:
         raise CIError(f"{GITLAB_CI_FILE} already exists; merge the brindle-ci job from the template "
                       "into it, or pass --force to replace it")
-    path.write_text(GITLAB_TEMPLATE, encoding="utf-8")
+    import os
+
+    env = os.environ if env is None else env
+    cloud = cloud or cloud_from_env(env)
+    if warning := ci_client.preview_check(cloud, preview=preview, env=env):
+        say(warning)
+    path.write_text(render_template(cloud), encoding="utf-8")
     say(f"wrote {GITLAB_CI_FILE}")
     say(f"set {ci_client.ENV_TOKEN} (the org CI token), {PROJECT_TOKEN_ENV} and your model keys as masked "
         "CI/CD variables, then commit the file")
-    import os
+    if cloud:
+        say(f"{cloud}: the job's ID token is not refreshed; " + ci_federation.GITLAB_LIFETIME_WARNING)
 
-    say(ci_client.doctor(os.environ if env is None else env, None, cwd, org=True))
+    say(ci_client.doctor(env, None, cwd, org=True))
     return path
 
 

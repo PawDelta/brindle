@@ -2309,6 +2309,7 @@ def ci_report(
 @ci_app.command("doctor")
 def ci_doctor(
     repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: GITHUB_REPOSITORY)."),
+    models: bool = typer.Option(False, "--models", help="Also make one tiny call per pinned model and say why any is refused."),
 ) -> None:
     """Which provider CLIs and credential names are here, and which providers CI may use on this repository."""
     from brindle import ci_client, ci_hosts
@@ -2320,7 +2321,7 @@ def ci_doctor(
             full, org = env.get("CI_PROJECT_PATH") or repo, ci_hosts.GitLabHost.org_hint
         else:
             full, org = env.get("GITHUB_REPOSITORY") or repo, None
-        typer.echo(ci_client.doctor(env, full, os.getcwd(), org=org))
+        typer.echo(ci_client.doctor(env, full, os.getcwd(), org=org, models=models))
 
     _ci_call(go)
 
@@ -2330,13 +2331,20 @@ def ci_init(
     repo: Optional[str] = typer.Option(None, "--repo", help="owner/name (default: the repository here)."),
     org: Optional[str] = typer.Option(None, "--org", help="The brindle Team org whose CI token to use."),
     providers: Optional[str] = typer.Option(None, "--providers", help="Comma-separated providers to set keys for (asked otherwise)."),
-    credential: Optional[str] = typer.Option(None, "--credential", help="How Claude signs in: key (the ANTHROPIC_API_KEY secret) or federation (workload identity federation; asked otherwise)."),
+    credential: Optional[str] = typer.Option(None, "--credential", help="How Claude signs in: key (the ANTHROPIC_API_KEY secret), federation (workload identity federation), or bedrock, vertex, foundry (keyless GitHub OIDC; no cloud secret stored). Asked otherwise; on Enterprise defaults to the org policy's cloud."),
     host: str = typer.Option("github", "--host", help="github (default) or gitlab (brindle Enterprise: writes .gitlab-ci.yml)."),
     force: bool = typer.Option(False, "--force", help="With --host gitlab: replace an existing .gitlab-ci.yml."),
     workspace_id: Optional[str] = typer.Option(None, "--workspace-id", help="With an organization-level API key or identity federation: the workspace (wrkspc_...), stored as the ANTHROPIC_WORKSPACE_ID variable (asked otherwise, defaulting to $ANTHROPIC_WORKSPACE_ID)."),
     rule_id: Optional[str] = typer.Option(None, "--rule-id", help="Identity federation: the rule ID (fdrl_...; asked otherwise, defaulting to $ANTHROPIC_FEDERATION_RULE_ID)."),
     organization_id: Optional[str] = typer.Option(None, "--organization-id", help="Identity federation: the Anthropic organization ID (asked otherwise, defaulting to $ANTHROPIC_ORGANIZATION_ID)."),
     service_account_id: Optional[str] = typer.Option(None, "--service-account-id", help="Identity federation: the service account ID (svac_...; asked otherwise, defaulting to $ANTHROPIC_SERVICE_ACCOUNT_ID)."),
+    cloud_var: Optional[list[str]] = typer.Option(None, "--cloud-var", metavar="NAME=VALUE", help="With --credential bedrock, vertex or foundry (keyless GitHub OIDC): a cloud variable such as AWS_ROLE_ARN, CLOUD_ML_REGION, ANTHROPIC_FOUNDRY_RESOURCE or ANTHROPIC_DEFAULT_SONNET_MODEL, stored as an Actions variable. Repeatable; asked otherwise, defaulting to the environment."),
+    from_stack: Optional[str] = typer.Option(None, "--from-stack", metavar="NAME", help="Bedrock: read RoleArn (and the region) from this CloudFormation stack's outputs (aws cloudformation describe-stacks) instead of asking."),
+    region: Optional[str] = typer.Option(None, "--region", help="With --from-stack: the stack's region (default: the AWS CLI's)."),
+    from_terraform: Optional[str] = typer.Option(None, "--from-terraform", metavar="DIR", help="Vertex: read the workload identity provider and service account from this Terraform directory's outputs (terraform output -json) instead of asking."),
+    from_deployment: Optional[str] = typer.Option(None, "--from-deployment", metavar="NAME", help="Foundry: read clientId and tenantId from this Azure resource group deployment's outputs (az deployment group show), with -g, instead of asking."),
+    resource_group: Optional[str] = typer.Option(None, "--resource-group", "-g", metavar="RG", help="With --from-deployment: the resource group."),
+    preview: bool = typer.Option(False, "--preview", help="Set up Vertex AI or Microsoft Foundry, which are in preview (also BRINDLE_CI_PREVIEW_CLOUDS=1)."),
     required_check: Optional[str] = typer.Option(None, "--required-check", metavar="NAME", help="When the default branch requires no status checks: make this check (a workflow job's name) required, without asking. brindle only fixes builds where a required check fails. Unattended (no terminal), this is the only way init makes a check required."),
     no_required_check: bool = typer.Option(False, "--no-required-check", help="When the default branch requires no status checks: only warn, don't offer to make a job required."),
 ) -> None:
@@ -2347,7 +2355,10 @@ def ci_init(
 
     host = host.strip().lower()
     if host == ci_hosts.GITLAB:
-        _ci_call(ci_hosts.init_gitlab, cwd=os.getcwd(), force=force, say=typer.echo)
+        cloud = (credential or "").strip().lower() or None
+        if cloud and cloud not in ci_hosts.CLOUD_ID_TOKENS:
+            _fail("brindle ci: on GitLab --credential is bedrock, vertex or foundry (or leave it out)")
+        _ci_call(ci_hosts.init_gitlab, cwd=os.getcwd(), force=force, say=typer.echo, cloud=cloud, preview=preview)
         return
     if host != ci_hosts.GITHUB:
         _fail(f"brindle ci: host must be {' or '.join(ci_hosts.HOSTS)}")
@@ -2364,7 +2375,31 @@ def ci_init(
         # a [Y/n] question shows its own default
         return typer.prompt(question, default=default, show_default=not question.endswith("[Y/n]"))
 
+    cloud_vars = {}
+    if region and not from_stack:
+        _fail("brindle ci: --region only applies with --from-stack")
+    if resource_group and not from_deployment:
+        _fail("brindle ci: --resource-group only applies with --from-deployment")
+    if from_stack or from_terraform or from_deployment:
+        implied = "bedrock" if from_stack else "vertex" if from_terraform else "foundry"
+        if credential and credential != implied:
+            _fail(f"brindle ci: --from-{'stack' if from_stack else 'terraform' if from_terraform else 'deployment'}"
+                  f" configures {implied}, not --credential {credential}")
+        credential = implied
+        try:
+            cloud_vars = ci_client.template_vars(stack=from_stack, region=region, terraform_dir=from_terraform,
+                                                 deployment=from_deployment, resource_group=resource_group)
+        except ci_client.CIError as e:
+            _fail(f"brindle ci: {e}")
+        typer.echo(f"read {', '.join(cloud_vars)} from the {implied} template's outputs")
+    for item in cloud_var or []:
+        name, sep, value = item.partition("=")
+        if not sep or not name.strip():
+            _fail(f"brindle ci: --cloud-var takes NAME=VALUE, not {item[:40]!r}")
+        cloud_vars[name.strip()] = value
+
     _ci_call(ci_client.init, repo=repo, org=org, providers=names, cwd=os.getcwd(), env=os.environ,
+             cloud_vars=cloud_vars or None, preview=preview,
              credential=credential, workspace_id=workspace_id, rule_id=rule_id, organization_id=organization_id,
              service_account_id=service_account_id, required_check=required_check,
              no_required_check=no_required_check, ask=ask, say=typer.echo)

@@ -134,7 +134,7 @@ def test_bedrock_env():
     assert managed_models.provider_env(cfg(BEDROCK), "claude") == {
         "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-east-1",
         "ANTHROPIC_MODEL": "anthropic.claude-sonnet-4",
-        "ANTHROPIC_SMALL_FAST_MODEL": "anthropic.claude-haiku-4"}
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "anthropic.claude-haiku-4"}
 
 
 def test_vertex_env():

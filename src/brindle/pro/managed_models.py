@@ -137,7 +137,7 @@ def provider_env(cfg: ProviderConfig, provider: str) -> dict[str, str]:
         if cfg.model_ids and cfg.provider in ("bedrock", "vertex", "azure", "anthropic"):
             env["ANTHROPIC_MODEL"] = cfg.model_ids[0]
             if len(cfg.model_ids) > 1:
-                env["ANTHROPIC_SMALL_FAST_MODEL"] = cfg.model_ids[-1]
+                env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = cfg.model_ids[-1]
     elif provider == "codex" and cfg.provider in ("azure", "openai-compatible") and cfg.endpoint:
         env["OPENAI_BASE_URL"] = cfg.endpoint
     return env

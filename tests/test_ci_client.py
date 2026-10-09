@@ -1696,7 +1696,9 @@ def init_run(ci_repo, monkeypatch, ci_entitled):
         t = FakeTransport({"GET /ci/workflow?kind=issue": [(200, {"text": "name: issue\n"})],
                            "GET /ci/workflow?kind=validate": [(404, {"error": "not_found"})],
                            "GET /ci/workflow?kind=fix": [(404, {"error": "not_found"})]})
-        kw.setdefault("env", {"PATH": os.environ["PATH"]})
+        # the preview clouds (vertex, foundry) are refused without the flag; the tests of
+        # those clouds that aren't about the flag run with it set
+        kw.setdefault("env", {"PATH": os.environ["PATH"], ci_client.PREVIEW_ENV: "1"})
         ci_client.init(repo=REPO, org=None, providers=["claude"], cwd=str(ci_repo), run=run,
                        open_url=lambda url: None, account=Plugin(), client=ci_client.Client(BASE, t),
                        say=said.append, **kw)
@@ -1706,7 +1708,7 @@ def init_run(ci_repo, monkeypatch, ci_entitled):
 
 
 def test_init_federation_sets_the_variables(init_run):
-    answers = {"Claude: API key or identity federation? (key, federation)": "federation",
+    answers = {ci_client.CREDENTIAL_QUESTION: "federation",
                "federation rule id (fdrl_...)": "fdrl_1", "Anthropic organization id (uuid)": ORG_UUID,
                "service account id (svac_...)": "svac_1", "workspace id (wrkspc_..., optional)": ""}
     asked = []
@@ -1715,7 +1717,7 @@ def test_init_federation_sets_the_variables(init_run):
         asked.append(q)
         return answers.get(q, default)
     calls, said = init_run(ask=ask)
-    assert asked[0] == "Claude: API key or identity federation? (key, federation)"
+    assert asked[0] == ci_client.CREDENTIAL_QUESTION
     variables = [c[3:] for c in calls if c[:3] == ["gh", "variable", "set"]]
     assert variables == [["ANTHROPIC_FEDERATION_RULE_ID", "--repo", REPO, "--body", "fdrl_1"],
                          ["ANTHROPIC_ORGANIZATION_ID", "--repo", REPO, "--body", ORG_UUID],

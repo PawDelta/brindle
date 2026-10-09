@@ -115,6 +115,21 @@ def test_ci_section_says_what_not_how():
     assert "on its way back" not in section and "exits 1" not in section
 
 
+def test_preview_clouds_are_marked_in_the_docs():
+    """Vertex and Foundry say they are in preview and name the flag; Bedrock is
+    not marked, and the docs name the same clouds as the code's PREVIEW_CLOUDS."""
+    from brindle import ci_client
+
+    deploy = (README.parent / "deploy" / "README.md").read_text()
+    text = README.read_text()
+    assert "--preview" in text and "BRINDLE_CI_PREVIEW_CLOUDS=1" in text
+    assert ci_client.PREVIEW_CLOUDS == {"vertex", "foundry"}
+    assert "## Google Cloud (Vertex AI, preview)" in deploy
+    assert "## Azure (Foundry, preview)" in deploy
+    aws = deploy.split("## Google Cloud")[0]   # the Bedrock (AWS) section is not marked
+    assert "preview" not in aws.lower()
+
+
 @pytest.mark.parametrize("page", _pages(), ids=lambda p: p.name)
 def test_every_sidebar_key_is_documented(page):
     from brindle.watch import KEYS

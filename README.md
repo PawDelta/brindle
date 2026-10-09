@@ -497,6 +497,7 @@ Autopilot, merge gates and cleanup:
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
 | `check_concurrency` | `2` | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
+| `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` (Fable) before handing it to you; `true` turns it on for a cloud account, `false` off |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
@@ -970,9 +971,20 @@ workflows call these commands:
   commits the workflows on a `brindle/ci-setup` branch, then puts you back on
   the branch you started on and deletes the local setup branch, so `git pull`
   after merging the setup pull request is clean (commit or stash your changes
-  first: it refuses to start with uncommitted work).
+  first: it refuses to start with uncommitted work). With your own cloud
+  (`--credential bedrock|vertex|foundry`, keyless GitHub OIDC) it can read the
+  IDs from the deployment template's outputs instead of asking:
+  `--from-stack NAME [--region R]` (AWS CloudFormation), `--from-terraform DIR`
+  (Google) or `--from-deployment NAME -g RG` (Azure). They are defaults for
+  `--cloud-var`, which still overrides them, and every ID is format-checked. A
+  missing `aws`, `terraform` or `az` CLI or output is an error that names the
+  `--cloud-var` to pass instead. Vertex AI and Microsoft Foundry are in
+  **preview** (not yet verified end to end): `init` refuses them unless you pass
+  `--preview` or set `BRINDLE_CI_PREVIEW_CLOUDS=1`, and `doctor` marks them
+  `(preview)`. Bedrock is generally available.
 - `brindle ci doctor`: which provider CLIs and credential names a runner has, and
-  which providers CI may use on this repository.
+  which providers CI may use on this repository. `--models` also makes one tiny
+  call per pinned model and says why any is refused (a quota, a form not filled in).
 - `brindle ci start`: start a run for an issue, a goal text or a dispatched run,
   or a validation of a pull request.
 - `brindle ci run`: run what was started: the supervisor and the result upload,

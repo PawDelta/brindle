@@ -84,6 +84,10 @@ class RepoConfig:
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
     review_rounds: int = 2             # fix-and-re-review rounds the pipeline runs before asking the supervisor
+    # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
+    # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
+    # which may not have Fable; true or false forces it (see brindle.pipeline.fable_enabled).
+    fable_escalation: bool | None = None
     merge_into: str | None = None      # branch worker branches are cut from and merge into (None: the supervisor's / default branch)
     auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
@@ -203,7 +207,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
-                "review_rounds", "goal_audit", "overlap", "local_models", "merge_into",
+                "review_rounds", "fable_escalation", "goal_audit", "overlap", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "learned_rules_repeats", "learned_rules_profile"):
