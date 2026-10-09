@@ -155,6 +155,12 @@ CLOUD_PIN_FORMAT = (re.compile(r"^[\w.:/@-]+$"), "a model or deployment name")
 CLOUD_OPTION = "--cloud-var NAME=VALUE"
 # The org policy's provider_config names the cloud this way.
 POLICY_CLOUDS = {"bedrock": BEDROCK, "vertex": VERTEX, "azure": FOUNDRY}
+# Clouds still in preview: init refuses them unless --preview or PREVIEW_ENV=1.
+# Removing one line here makes it generally available.
+PREVIEW_CLOUDS = {"vertex", "foundry"}
+PREVIEW_ENV = "BRINDLE_CI_PREVIEW_CLOUDS"
+PREVIEW_REFUSAL = ("Vertex AI and Microsoft Foundry for Brindle-CI are in preview: they haven't been verified "
+                   "end to end yet. Pass --preview to set them up anyway.")
 FEDERATION_VARS = (   # (variable, question, required)
     ("ANTHROPIC_FEDERATION_RULE_ID", "federation rule id (fdrl_...)", True),
     ("ANTHROPIC_ORGANIZATION_ID", "Anthropic organization id (uuid)", True),
@@ -2013,6 +2019,16 @@ def managed_cloud(cwd: str) -> tuple[str, dict[str, str]] | None:
     return cloud, prefill
 
 
+def preview_check(cloud: str | None, *, preview: bool, env: Mapping[str, str]) -> str | None:
+    """Refuse a preview cloud unless ``preview`` or ``PREVIEW_ENV=1``; else the
+    one-line warning to show (None for a generally available cloud)."""
+    if cloud not in PREVIEW_CLOUDS:
+        return None
+    if not (preview or env.get(PREVIEW_ENV) == "1"):
+        raise CIError(PREVIEW_REFUSAL)
+    return f"{cloud} is a preview for Brindle-CI: it isn't verified end to end yet"
+
+
 def cloud_status(env: Mapping[str, str]) -> list[str]:
     """Doctor lines for a configured cloud: which one, and which of its
     variables are set or missing. Names only, never values."""
@@ -2026,7 +2042,8 @@ def cloud_status(env: Mapping[str, str]) -> list[str]:
         missing = [n for n, _, req, *_ in specs if req and not env.get(n)]
         if cloud == FOUNDRY:
             missing += [n for n in MODEL_PIN_VARS if not env.get(n)]
-        line = f"cloud: {cloud} (keyless OIDC); variables set: {', '.join(have) or 'none'}"
+        mark = " (preview)" if cloud in PREVIEW_CLOUDS else ""
+        line = f"cloud: {cloud}{mark} (keyless OIDC); variables set: {', '.join(have) or 'none'}"
         if missing:
             line += f"; missing: {', '.join(missing)}"
         lines.append(line)
@@ -2063,7 +2080,7 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
          credential: str | None = None, workspace_id: str | None = None, rule_id: str | None = None,
          organization_id: str | None = None, service_account_id: str | None = None,
          required_check: str | None = None, no_required_check: bool = False,
-         cloud_vars: Mapping[str, str] | None = None,
+         cloud_vars: Mapping[str, str] | None = None, preview: bool = False,
          managed: Callable[[str], tuple[str, dict[str, str]] | None] = managed_cloud,
          say: Callable[[str], None] = print) -> None:
     """``brindle ci init``: the one-command setup. ``account`` is a
@@ -2114,6 +2131,7 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
             raise CIError(f"{', '.join(wrong)} don't belong to --credential {credential}")
     if credential in CLOUDS and fed_options:
         raise CIError(f"{', '.join(fed_options)} configure identity federation, not --credential {credential}")
+    preview_check(credential, preview=preview, env=env)   # refuse before anything is touched
     if repo:
         if not REPO_RE.match(repo):
             raise CIError("repository must be owner/name (pass --repo)")
@@ -2153,6 +2171,8 @@ def init(*, repo: str | None, org: str | None, providers: list[str] | None, cwd:
         if chosen == FEDERATION:
             federation = federation_ids(env, ask, given_ids)
         elif chosen in CLOUDS:
+            if warning := preview_check(chosen, preview=preview, env=env):
+                say(warning)
             if chosen != default:
                 prefill = {}
             cloud, cloud_values = chosen, cloud_ids(chosen, env, ask, given_cloud, prefill)

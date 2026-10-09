@@ -978,7 +978,10 @@ workflows call these commands:
   (Google) or `--from-deployment NAME -g RG` (Azure). They are defaults for
   `--cloud-var`, which still overrides them, and every ID is format-checked. A
   missing `aws`, `terraform` or `az` CLI or output is an error that names the
-  `--cloud-var` to pass instead.
+  `--cloud-var` to pass instead. Vertex AI and Microsoft Foundry are in
+  **preview** (not yet verified end to end): `init` refuses them unless you pass
+  `--preview` or set `BRINDLE_CI_PREVIEW_CLOUDS=1`, and `doctor` marks them
+  `(preview)`. Bedrock is generally available.
 - `brindle ci doctor`: which provider CLIs and credential names a runner has, and
   which providers CI may use on this repository. `--models` also makes one tiny
   call per pinned model and says why any is refused (a quota, a form not filled in).

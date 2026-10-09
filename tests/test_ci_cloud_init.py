@@ -88,7 +88,7 @@ def test_malformed_ids_stop_before_anything_runs(init_run, name, bad, looks):
 
 
 def test_a_url_as_the_foundry_resource_from_the_environment_stops_before_the_token(init_run):
-    env = {**PATH, **FOUNDRY, "ANTHROPIC_FOUNDRY_RESOURCE": "https://acme.openai.azure.com/"}
+    env = {**PATH, **PREVIEW, **FOUNDRY, "ANTHROPIC_FOUNDRY_RESOURCE": "https://acme.openai.azure.com/"}
     with pytest.raises(CIError, match="ANTHROPIC_FOUNDRY_RESOURCE looks like a resource name, not a URL"):
         init_run(credential="foundry", env=env)
     assert not secrets(init_run.calls) and not [s for s in init_run.said if s.startswith("3/8")]
@@ -109,7 +109,7 @@ def test_no_environment_for_key_or_federation(init_run):
 def test_unattended_takes_the_environment_and_asks_nothing(init_run):
     """No terminal: ask() returns each default, which is the variable in the environment."""
     unattended = lambda q, d: "n" if q.endswith("[Y/n]") else d  # noqa: E731
-    calls, _ = init_run(credential="vertex", env={**PATH, **VERTEX}, ask=unattended)
+    calls, _ = init_run(credential="vertex", env={**PATH, **PREVIEW, **VERTEX}, ask=unattended)
     assert variables(calls) == VERTEX
 
 
@@ -321,3 +321,80 @@ def test_cli_cloud_var_options_reach_init(ci_repo, monkeypatch):
     assert got["credential"] == "bedrock" and got["cloud_vars"] == BEDROCK
     bad = CliRunner().invoke(app, ["ci", "init", "--cloud-var", "AWS_REGION"], input="")
     assert bad.exit_code != 0 and "NAME=VALUE" in bad.output
+
+
+# -- preview clouds: vertex and foundry are refused without --preview or BRINDLE_CI_PREVIEW_CLOUDS=1 ----
+
+PREVIEW_MESSAGE = ("Vertex AI and Microsoft Foundry for Brindle-CI are in preview: they haven't been verified "
+                   "end to end yet. Pass --preview to set them up anyway.")
+PREVIEW = {ci_client.PREVIEW_ENV: "1"}
+PREVIEW_CLOUD_NAMES = ("vertex", "foundry")
+
+
+@pytest.mark.parametrize("cloud", PREVIEW_CLOUD_NAMES)
+def test_a_preview_cloud_is_refused_without_the_flag(init_run, cloud):
+    with pytest.raises(CIError) as refused:
+        init_run(credential=cloud, cloud_vars=BY_CLOUD[cloud], env={**PATH, **BY_CLOUD[cloud]}, ask=never)
+    assert str(refused.value) == PREVIEW_MESSAGE
+    assert not init_run.calls, "refused before anything is run, so no token is created"
+
+
+@pytest.mark.parametrize("cloud", PREVIEW_CLOUD_NAMES)
+def test_a_preview_cloud_is_set_up_with_the_flag(init_run, cloud):
+    calls, said = init_run(credential=cloud, cloud_vars=BY_CLOUD[cloud], preview=True, ask=never)
+    assert variables(calls) == BY_CLOUD[cloud]
+    assert secrets(calls) == ["BRINDLE_PRO_TOKEN"]
+    assert [s for s in said if "preview" in s] == [
+        f"{cloud} is a preview for Brindle-CI: it isn't verified end to end yet"]
+
+
+@pytest.mark.parametrize("cloud", PREVIEW_CLOUD_NAMES)
+def test_a_preview_cloud_is_set_up_with_the_env_var_unattended(init_run, cloud):
+    unattended = lambda q, d: "n" if q.endswith("[Y/n]") else d  # noqa: E731
+    calls, _ = init_run(credential=cloud, env={**PATH, **PREVIEW, **BY_CLOUD[cloud]}, ask=unattended)
+    assert variables(calls) == BY_CLOUD[cloud]
+
+
+def test_the_env_var_must_be_exactly_one(init_run):
+    with pytest.raises(CIError, match="in preview"):
+        init_run(credential="vertex", cloud_vars=VERTEX, env={**PATH, ci_client.PREVIEW_ENV: "0"}, ask=never)
+
+
+def test_bedrock_is_unaffected_without_the_flag(init_run):
+    calls, said = init_run(credential="bedrock", cloud_vars=BEDROCK, env={**PATH}, ask=never)
+    assert variables(calls) == BEDROCK
+    assert not any("preview" in s for s in said)
+
+
+def test_the_enterprise_default_of_a_preview_cloud_is_refused_without_the_flag(init_run):
+    managed = lambda cwd: ("vertex", {})  # noqa: E731 - the org policy names vertex
+    with pytest.raises(CIError, match="in preview"):
+        init_run(managed=managed, env={**PATH, **VERTEX}, ask=lambda q, d: d)
+    assert not secrets(init_run.calls), "refused before the CI token is created"
+
+
+def test_the_enterprise_default_of_a_preview_cloud_is_set_up_with_the_flag(init_run):
+    managed = lambda cwd: ("vertex", {})  # noqa: E731
+    calls, _ = init_run(managed=managed, preview=True, env={**PATH, **VERTEX}, ask=lambda q, d: d)
+    assert variables(calls) == VERTEX
+
+
+def test_cli_preview_flag_reaches_init(ci_repo, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    got = {}
+    monkeypatch.setattr(ci_client, "init", lambda **kw: got.update(kw))
+    result = CliRunner().invoke(app, ["ci", "init", "--credential", "vertex", "--preview"], input="")
+    assert result.exit_code == 0, result.output
+    assert got["preview"] is True and got["credential"] == "vertex"
+
+
+@pytest.mark.parametrize("cloud, expected", [("vertex", "cloud: vertex (preview) "), ("foundry", "cloud: foundry (preview) "),
+                                             ("bedrock", "cloud: bedrock (keyless OIDC)")])
+def test_doctor_marks_the_preview_clouds(ci_repo, cloud, expected):
+    env = {**PATH, f"CLAUDE_CODE_USE_{cloud.upper()}": "1", **BY_CLOUD[cloud]}
+    out = ci_client.doctor(env, REPO, str(ci_repo), org=True)
+    line = next(ln for ln in out.splitlines() if ln.startswith("cloud:"))
+    assert line.startswith(expected)

@@ -43,7 +43,11 @@ brindle ci init --from-stack brindle-ci [--region us-east-1]
 | --- | --- |
 | `RoleArn` | the AWS role to assume (`AWS_ROLE_ARN`; the region comes from the stack) |
 
-## Google Cloud (Vertex AI)
+## Google Cloud (Vertex AI, preview)
+
+> **Preview:** Vertex AI for Brindle-CI hasn't been verified end to end yet.
+> `brindle ci init` refuses it unless you pass `--preview` (or set
+> `BRINDLE_CI_PREVIEW_CLOUDS=1`). Bedrock is unchanged.
 
 [`gcp/main.tf`](gcp/main.tf) is Terraform. In Cloud Shell, with the repository
 open, follow [`gcp/tutorial.md`](gcp/tutorial.md), or:
@@ -65,7 +69,11 @@ brindle ci init --from-terraform deploy/gcp
 | `workload_identity_provider` | the workload identity provider |
 | `service_account_email` | the service account (the project id comes from it) |
 
-## Azure (Foundry)
+## Azure (Foundry, preview)
+
+> **Preview:** Microsoft Foundry for Brindle-CI hasn't been verified end to end
+> yet. `brindle ci init` refuses it unless you pass `--preview` (or set
+> `BRINDLE_CI_PREVIEW_CLOUDS=1`). Bedrock is unchanged.
 
 [`azure/main.bicep`](azure/main.bicep) is the source and
 [`azure/azuredeploy.json`](azure/azuredeploy.json) its compiled form (rebuild

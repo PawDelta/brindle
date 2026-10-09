@@ -338,12 +338,14 @@ def cloud_from_env(env: Mapping[str, str]) -> str | None:
 
 def init_gitlab(*, cwd: str, is_entitled: Callable[[], bool] | None = None,
                 say: Callable[[str], None] = print, force: bool = False,
-                env: Mapping[str, str] | None = None, cloud: str | None = None) -> Path:
+                env: Mapping[str, str] | None = None, cloud: str | None = None,
+                preview: bool = False) -> Path:
     """``brindle ci init --host gitlab``: write ``.gitlab-ci.yml`` (the
     brindle job template) in ``cwd``. Refuses without the ``ci_enterprise``
     entitlement, and never overwrites an existing file unless ``force``.
     ``cloud`` adds that cloud's keyless sign-in (see :func:`render_template`);
-    it defaults to the cloud ``env`` selects."""
+    it defaults to the cloud ``env`` selects. A preview cloud needs ``preview``
+    (see :func:`ci_client.preview_check`)."""
     ci_client.refuse_airgap()
     get_host(GITLAB, {}, is_entitled=is_entitled)
     path = Path(cwd) / GITLAB_CI_FILE
@@ -354,6 +356,8 @@ def init_gitlab(*, cwd: str, is_entitled: Callable[[], bool] | None = None,
 
     env = os.environ if env is None else env
     cloud = cloud or cloud_from_env(env)
+    if warning := ci_client.preview_check(cloud, preview=preview, env=env):
+        say(warning)
     path.write_text(render_template(cloud), encoding="utf-8")
     say(f"wrote {GITLAB_CI_FILE}")
     say(f"set {ci_client.ENV_TOKEN} (the org CI token), {PROJECT_TOKEN_ENV} and your model keys as masked "
