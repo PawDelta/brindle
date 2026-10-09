@@ -32,9 +32,6 @@ Resources:
 
   BrindleCiRole:
     Type: AWS::IAM::Role
-    # The trust policy names the provider by a plain string, so order it
-    # explicitly; ignored when CreateOidcProvider is false.
-    DependsOn: GitHubOidcProvider
     Properties:
       RoleName: brindle-ci-bedrock
       MaxSessionDuration: 7200
@@ -44,7 +41,12 @@ Resources:
           - Effect: Allow
             Action: sts:AssumeRoleWithWebIdentity
             Principal:
-              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+              # The new provider's ARN when this stack creates it (so the role waits for it),
+              # else the account's existing one.
+              Federated: !If
+                - MakeProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com

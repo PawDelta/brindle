@@ -65,7 +65,9 @@ def test_aws_trust_policy_pins_audience_and_subject():
     (stmt,) = role["AssumeRolePolicyDocument"]["Statement"]
     assert stmt["Effect"] == "Allow"
     assert stmt["Action"] == "sts:AssumeRoleWithWebIdentity"
-    assert "oidc-provider/token.actions.githubusercontent.com" in stmt["Principal"]["Federated"]["Fn::Sub"]
+    cond, created, existing = stmt["Principal"]["Federated"]["Fn::If"]
+    assert created == {"Ref": "GitHubOidcProvider"}
+    assert "oidc-provider/token.actions.githubusercontent.com" in existing["Fn::Sub"]
     assert stmt["Condition"] == {"StringEquals": {
         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
         "token.actions.githubusercontent.com:sub": {"Fn::Sub": SUBJECT},
@@ -82,8 +84,11 @@ def test_aws_oidc_provider_is_optional_and_trusts_sts_audience():
     provider = t["Resources"]["GitHubOidcProvider"]
     assert provider["Type"] == "AWS::IAM::OIDCProvider"
     assert provider["Condition"] in t["Conditions"]
-    # the role's trust policy names the provider by string, so it must wait for it
-    assert t["Resources"]["BrindleCiRole"]["DependsOn"] == "GitHubOidcProvider"
+    # the trust policy references the created provider through !If (an implicit dependency);
+    # an explicit DependsOn on a conditional resource fails cfn-lint (E3005)
+    assert "DependsOn" not in t["Resources"]["BrindleCiRole"]
+    cond = t["Resources"]["BrindleCiRole"]["Properties"]["AssumeRolePolicyDocument"]["Statement"][0]["Principal"]["Federated"]["Fn::If"][0]
+    assert cond == provider["Condition"]
     assert provider["Properties"]["Url"] == ISSUER
     assert provider["Properties"]["ClientIdList"] == ["sts.amazonaws.com"]
 
