@@ -56,10 +56,25 @@ def test_absence_requires_complete_authoritative_catalog(complete, authoritative
 
 
 def test_present_model_is_catalog_available_even_on_partial_page():
-    check, _ = checker(ma.Catalog(frozenset({"wanted"}), "codex", complete=False))
-    result = check.check(profile("codex"), effective_env={})
+    check, _ = checker(ma.Catalog(frozenset({"wanted"}), "openai", complete=False))
+    result = check.check(profile(), effective_env={})
     assert result.status == "available"
     assert "not verified" in result.explanation
+
+
+@pytest.mark.parametrize("complete", [True, False])
+@pytest.mark.parametrize("models,notices,explanation", [
+    (set(), set(), "not found"),
+    ({"wanted"}, set(), "bundled or cached"),
+    ({"wanted"}, {"wanted"}, "availability notice"),
+])
+def test_codex_membership_and_notices_do_not_prove_access(complete, models, notices, explanation):
+    catalog = ma.Catalog(frozenset(models), "codex", complete=complete,
+                         availability_notices=frozenset(notices))
+    check, _ = checker(catalog)
+    result = check.check(profile("codex"), effective_env={})
+    assert result.status == "unverified"
+    assert explanation in result.explanation
 
 
 @pytest.mark.parametrize("selected,listed,status", [
@@ -206,13 +221,20 @@ def rpc_process(monkeypatch, messages):
 def test_codex_handshake_hidden_models_notifications_and_pagination(monkeypatch):
     proc, popen = rpc_process(monkeypatch, [
         {"id": 1, "result": {}}, {"method": "notice", "params": {}},
-        {"id": 2, "result": {"data": [{"id": "display-id", "model": "one"}], "nextCursor": "next"}},
+        {"id": 2, "result": {"data": [{"id": "display-id", "model": "one",
+                                        "availabilityNux": {"message": "secret provider prose"}}],
+                              "nextCursor": "next"}},
         {"id": 3, "result": {"data": [{"model": "wanted", "hidden": True}], "nextCursor": None}},
     ])
     catalog = ma._codex_catalog()
     assert catalog.models == {"one", "wanted"}
+    assert catalog.availability_notices == {"one"}
     assert catalog.complete and not catalog.authoritative
     assert ma._selected("missing", catalog).status == "unverified"
+    assert ma._selected("wanted", catalog).status == "unverified"
+    assert "availability notice" in ma._selected("one", catalog).explanation
+    assert "secret" not in repr(catalog)
+    assert "secret" not in repr(ma._selected("one", catalog))
     sent = [json.loads(line) for line in proc.stdin.getvalue().splitlines()]
     assert [m["method"] for m in sent] == ["initialize", "initialized", "model/list", "model/list"]
     assert sent[0]["params"]["clientInfo"]["name"] == "brindle_model_discovery"
@@ -504,3 +526,30 @@ def test_worker_serializes_only_safe_errors(monkeypatch):
     monkeypatch.setattr(ma, "_native_catalog", Mock(side_effect=RuntimeError("secret")))
     ma._worker()
     assert json.loads(out.getvalue()) == {"error": "failed"}
+
+
+def test_worker_preserves_codex_notice_metadata_without_provider_prose(monkeypatch):
+    args = {"provider": "codex", "base_url": None, "api": None,
+            "api_key_env": None, "timeout": 1}
+    monkeypatch.setattr(ma.sys, "stdin", Mock(buffer=io.BytesIO(json.dumps(args).encode())))
+    out = io.StringIO()
+    monkeypatch.setattr(ma.sys, "stdout", out)
+    catalog = ma.Catalog(frozenset({"wanted"}), "codex", availability_notices=frozenset({"wanted"}))
+    monkeypatch.setattr(ma, "_codex_catalog", Mock(return_value=catalog))
+    ma._worker()
+    assert json.loads(out.getvalue())["availability_notices"] == ["wanted"]
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX process groups")
+def test_isolation_preserves_codex_notice_metadata(monkeypatch, tmp_path):
+    real_popen = subprocess.Popen
+
+    def fake_worker(argv, **kw):
+        payload = {"models": ["wanted"], "source": "codex", "complete": True,
+                   "authoritative": False, "availability_notices": ["wanted"]}
+        return real_popen([sys.executable, "-c", f"print({json.dumps(payload)!r})"], **kw)
+
+    monkeypatch.setattr(ma.subprocess, "Popen", fake_worker)
+    result = ma.ModelAvailabilityChecker().check(profile("codex"), effective_env={}, cwd=str(tmp_path))
+    assert result.status == "unverified"
+    assert "availability notice" in result.explanation

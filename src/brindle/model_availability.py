@@ -8,7 +8,9 @@ keystore. Only ``unavailable`` is suitable for rejecting a selected model.
 
 ``available`` means listed by the configured endpoint/CLI, not verified quota,
 billing, tool support or permission to generate. Codex may return a bundled
-catalog; missing Codex IDs and unknown aliases are therefore unverified.
+catalog, so membership alone is unverified, as are missing IDs and unknown
+aliases. Its availabilityNux metadata is a notice, not an entitlement flag;
+the result surfaces its presence without interpreting or echoing provider prose.
 No thread, turn, completion, model pull or server startup is performed.
 
 Built-in discovery runs in a disposable process group on macOS/Linux, with a
@@ -82,6 +84,8 @@ class Catalog:
     # custom deployments. Only authoritative catalogs justify a negative.
     complete: bool = True
     authoritative: bool = False
+    # Codex's message-only availabilityNux is not a boolean access decision.
+    availability_notices: frozenset[str] = frozenset()
 
 
 class _DiscoveryError(Exception):
@@ -169,6 +173,14 @@ def _selected(model: str, catalog: Catalog) -> Availability:
     names = {model}
     if catalog.source == "ollama" and ":" not in model.rsplit("/", 1)[-1]:
         names.add(model + ":latest")
+    if catalog.source == "codex" and names & catalog.models:
+        if names & catalog.availability_notices:
+            return Availability("unverified", "Codex lists the selected model with an availability notice; "
+                                "check its model picker and account guidance before provisioning. "
+                                "The notice does not verify generation access or quota.")
+        return Availability("unverified", "Codex lists the selected model, but may be using a bundled or cached "
+                            "catalog. Check its model picker and configured account before provisioning; "
+                            "generation access and quota are not verified.")
     if names & catalog.models:
         return Availability("available", "The selected model is listed by the configured provider. "
                             "Generation access, quota and tool support are not verified.")
@@ -229,7 +241,8 @@ def _isolated_discovery(request: Request, timeout: float) -> Catalog:
             if proc.returncode != 0:
                 raise _DiscoveryError("failed")
             return Catalog(frozenset(data["models"]), data["source"],
-                           data["complete"], data["authoritative"])
+                           data["complete"], data["authoritative"],
+                           frozenset(data.get("availability_notices", [])))
         finally:
             _kill_group(proc)
 
@@ -278,18 +291,26 @@ def _codex_catalog() -> Catalog:
                                                 "title": "brindle model discovery", "version": "1"}})
             send({"method": "initialized", "params": {}})
             models: set[str] = set()
+            notices: set[str] = set()
             cursor = None
             seen = set()
             for page in range(MAX_PAGES):
                 data = rpc(page + 2, "model/list", {"limit": 100, "includeHidden": True, "cursor": cursor})
                 models.update(_ids(data, "data", "model"))
+                # Current model/list exposes a message-only availabilityNux,
+                # not a per-model entitlement decision. hidden/isDefault and
+                # service tiers are picker/capability metadata, not access.
+                # Preserve notices but never classify their free-form prose.
+                notices.update(item["model"] for item in data["data"]
+                               if item.get("availabilityNux") is not None)
                 cursor = data.get("nextCursor")
                 if cursor is None:
-                    return Catalog(frozenset(models), "codex")
+                    return Catalog(frozenset(models), "codex", availability_notices=frozenset(notices))
                 if not isinstance(cursor, str) or not cursor or cursor in seen:
                     raise _DiscoveryError("failed")
                 seen.add(cursor)
-            return Catalog(frozenset(models), "codex", complete=False)
+            return Catalog(frozenset(models), "codex", complete=False,
+                           availability_notices=frozenset(notices))
         finally:
             proc.kill()
             proc.wait(timeout=1)
@@ -413,7 +434,8 @@ def _worker() -> None:
         else:
             raise _DiscoveryError("unsupported")
         output = {"models": sorted(catalog.models), "source": catalog.source,
-                  "complete": catalog.complete, "authoritative": catalog.authoritative}
+                  "complete": catalog.complete, "authoritative": catalog.authoritative,
+                  "availability_notices": sorted(catalog.availability_notices)}
     except _DiscoveryError as exc:
         output = {"error": str(exc) if str(exc) in _FAILURES else "failed"}
     except Exception:
