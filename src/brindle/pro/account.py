@@ -661,7 +661,12 @@ class ProAccount(_OrgCommands):
         client = auth.Client(base, transport=self.transport)
         browser = not device and loopback.can_open_browser(self.out)
         ent = auth.login(client, self.store, show=self._say, browser=browser)
-        self._say(f"Logged in as {ent.sub} ({ent.org_id}), plan {ent.plan}.")
+        try:
+            who = auth.me(client, self.store)
+        except auth.AuthError:
+            who = {}
+        display_name = who.get("name") or who.get("email") or ent.sub
+        self._say(f"Logged in as {display_name} ({ent.org_id}), plan {ent.plan}.")
         self._say("See what your plan includes: `brindle account`"
                   + ("" if ent.features else "; get brindle Pro: `brindle account upgrade`"))
         self._company_login(client)

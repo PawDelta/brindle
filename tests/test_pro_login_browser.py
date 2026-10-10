@@ -259,8 +259,37 @@ def test_account_login_opens_the_browser(store, backend, monkeypatch, local_term
     code, out, err = run(["login"], out=TTY(), store=store, transport=backend)
     assert code == 0, err
     assert "Opening your browser" in out and "visit: " + backend.opened[0] in out
-    assert "plan pro" in out and "BCDF-GHJK" not in out
+    assert "Logged in as dev@example.test (org_1), plan pro" in out
+    assert "BCDF-GHJK" not in out
     assert store.load()["refresh_token"] == "cpr_1"
+
+
+def test_login_display_name_uses_name_if_present(store, backend, monkeypatch, local_terminal):
+    cli_token(backend)
+    monkeypatch.setattr(webbrowser, "open", fake_browser(backend))
+    original_me = backend.routes["GET /me"]
+    def me_with_name(form, headers):
+        status, body = original_me(form, headers)
+        if status == 200:
+            body["name"] = "Alice Developer"
+        return status, body
+    backend.routes["GET /me"] = me_with_name
+    
+    code, out, err = run(["login"], out=TTY(), store=store, transport=backend)
+    assert code == 0, err
+    assert "Logged in as Alice Developer (org_1)" in out
+
+
+def test_login_display_name_falls_back_to_sub_if_me_fails(store, backend, monkeypatch, local_terminal):
+    cli_token(backend)
+    monkeypatch.setattr(webbrowser, "open", fake_browser(backend))
+    def me_fails(form, headers):
+        return 500, {"error": "server_error"}
+    backend.routes["GET /me"] = me_fails
+    
+    code, out, err = run(["login"], out=TTY(), store=store, transport=backend)
+    assert code == 0, err
+    assert "Logged in as user_1 (org_1)" in out
 
 
 def test_account_login_over_ssh_uses_the_device_flow(store, backend, monkeypatch, local_terminal):

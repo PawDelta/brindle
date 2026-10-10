@@ -663,7 +663,7 @@ def me(client: Client, store) -> dict:
     status, body = authed(client, store, "GET", "/me")
     if status != 200:
         raise _error(status, body)
-    return {k: _sanitize(body[k]) for k in ("sub", "email", "org_id", "plan", "status", "seats")
+    return {k: _sanitize(body[k]) for k in ("sub", "email", "name", "first_name", "last_name", "org_id", "plan", "status", "seats")
             if k in body}
 
 
