@@ -1180,6 +1180,25 @@ class Antigravity(Provider):
     TRUST_DIALOG = re.compile(r"Do you trust the contents of this project\?", re.I)
     TRUST_SELECTED = re.compile(r">\s*Yes, I trust this folder")
     READY = re.compile(r"\? for shortcuts|esc to cancel")
+    INPUT_LINE = re.compile(r"^\s*>\s*(.*)$", re.M)
+    ANSI_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+
+    @classmethod
+    def _strip_ansi(cls, text: str) -> str:
+        return cls.ANSI_SGR.sub("", text)
+
+    def paste_blocked(self, screen: str, interactive: bool) -> str | None:
+        if not interactive:
+            return None
+        styled_lines = screen.rstrip().splitlines()[-25:]
+        candidates = [ln for ln in styled_lines if self.INPUT_LINE.match(self._strip_ansi(ln))]
+        if not candidates:
+            return None
+        plain_line = self._strip_ansi(candidates[-1])
+        m = self.INPUT_LINE.match(plain_line)
+        if m and m.group(1).strip():
+            return "typing"
+        return None
 
     def after_launch(self, target: str) -> None:
         # A new worktree is a folder agy hasn't seen. brindle made it from the

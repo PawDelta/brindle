@@ -163,4 +163,23 @@ def test_screen_states():
     assert p.screen_state("> \n───\nesc to cancel      Gemini") == "busy"
     assert p.screen_state("> \n───\n? for shortcuts      Gemini") == "idle"
 
+def test_paste_blocked():
+    p = Antigravity()
+    # Not interactive -> None
+    assert p.paste_blocked("> hello", interactive=False) is None
+    
+    # Empty prompt -> None
+    assert p.paste_blocked("> \n───\n? for shortcuts      Gemini", interactive=True) is None
+    assert p.paste_blocked("   >    \n───\n? for shortcuts", interactive=True) is None
+    
+    # User has typed something -> typing
+    assert p.paste_blocked("> hello world\n───\n? for shortcuts", interactive=True) == "typing"
+    assert p.paste_blocked("  >  typing... \n───\n? for shortcuts", interactive=True) == "typing"
+    
+    # Text with ANSI escape codes
+    ansi_empty = "\x1b[38;5;232m>\x1b[0m "
+    ansi_typing = "\x1b[38;5;232m>\x1b[0m \x1b[1mhello\x1b[0m"
+    assert p.paste_blocked(ansi_empty, interactive=True) is None
+    assert p.paste_blocked(ansi_typing, interactive=True) == "typing"
+
 
