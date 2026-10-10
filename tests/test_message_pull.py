@@ -88,9 +88,10 @@ def test_read_messages_returns_and_marks_read(db, boss, pushed):
     agents.send_message(db, "boss", "the result", sender_id="w1")
     agents.send_message(db, "boss", "queued task started")
     text = mcp_server.read_messages()
-    assert "[Message from developer agent w1. Reply with the brindle send_message tool, to_agent_id=w1]" in text
+    assert "<details><summary>Message from developer agent w1</summary>" in text
+    assert "Reply with the brindle send_message tool, to_agent_id=w1" in text
     assert "the result" in text
-    assert "[Message from brindle]" in text and "queued task started" in text
+    assert "<details><summary>Message from brindle</summary>" in text and "queued task started" in text
     assert db.unread_count("boss") == 0
     assert mcp_server.read_messages() == "No unread messages."
 
