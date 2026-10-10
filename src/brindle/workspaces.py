@@ -247,14 +247,34 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
     how = "existing"
     if not os.path.isdir(ws.path) or _is_worktree_gutted(ws.path):
         if os.path.isdir(ws.path):
-            try:
-                dirty = git.dirty_files(ws.path)
-            except git.GitError:
-                dirty = []
-            if dirty:
-                shown = ", ".join(dirty[:5])
+            git_file = Path(ws.path) / ".git"
+            if git_file.exists():
+                try:
+                    proc = git.run(["status", "--porcelain", "--untracked-files=all"], ws.path)
+                    lines = [l for l in proc.stdout.splitlines() if l.strip()]
+                    dirty_work = []
+                    for line in lines:
+                        code = line[:2]
+                        path_str = line[3:]
+                        if code.strip() == "D":
+                            continue
+                        dirty_work.append(path_str)
+                    if dirty_work:
+                        shown = ", ".join(dirty_work[:5])
+                        raise WorkspaceError(
+                            f"workspace {ws.id} at {ws.path} appears damaged but has uncommitted or untracked work ({shown}). "
+                            f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
+                        )
+                    git.run(["checkout", "HEAD", "--", "."], ws.path)
+                    return Created(ws, "existing", branch, [], None)
+                except git.GitError:
+                    pass
+
+            surviving = [f.name for f in Path(ws.path).glob("[!.]*")]
+            if surviving:
+                shown = ", ".join(surviving[:5])
                 raise WorkspaceError(
-                    f"workspace {ws.id} at {ws.path} appears damaged but has uncommitted or untracked work ({shown}). "
+                    f"workspace {ws.id} at {ws.path} appears damaged but has surviving files ({shown}). "
                     f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
                 )
         try:

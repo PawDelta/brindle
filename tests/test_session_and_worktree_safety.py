@@ -21,8 +21,51 @@ def test_gutted_worktree_detected_and_recreated(db, repo, tmp_path):
     # Now call create with reuse_registered=True again
     reused = workspaces.create(db, str(repo), "feat/husk", reuse_registered=True)
     assert reused.workspace.id == ws.id
-    # The worktree should have been recreated with files intact
-    assert (Path(reused.workspace.path) / "README.md").exists() or (Path(reused.workspace.path) / ".git").exists()
+    # The worktree should have been restored with tracked files intact
+    assert (Path(reused.workspace.path) / "app.py").exists()
+
+
+def test_damaged_worktree_missing_git_with_surviving_files_raises(db, repo):
+    created = workspaces.create(db, str(repo), "feat/missing-git", reuse_registered=True)
+    ws = created.workspace
+    assert os.path.isdir(ws.path)
+    # Remove .git file but leave surviving user notes
+    git_file = Path(ws.path) / ".git"
+    if git_file.is_file():
+        git_file.unlink()
+    elif git_file.is_dir():
+        shutil.rmtree(git_file)
+    (Path(ws.path) / "surviving_notes.txt").write_text("critical notes that must not be deleted")
+
+    # Reusing registered workspace must fail closed and preserve surviving files
+    with pytest.raises(workspaces.WorkspaceError) as exc_info:
+        workspaces.create(db, str(repo), "feat/missing-git", reuse_registered=True)
+    assert "surviving files" in str(exc_info.value)
+    assert (Path(ws.path) / "surviving_notes.txt").exists()
+
+
+def test_damaged_worktree_missing_git_empty_recreated(db, repo):
+    created = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True)
+    ws = created.workspace
+    assert os.path.isdir(ws.path)
+    # Remove everything in ws.path so directory is empty
+    for f in list(Path(ws.path).glob("*")):
+        if f.is_file():
+            f.unlink()
+        elif f.is_dir():
+            shutil.rmtree(f)
+    git_file = Path(ws.path) / ".git"
+    if git_file.exists():
+        if git_file.is_file():
+            git_file.unlink()
+        else:
+            shutil.rmtree(git_file)
+
+    # Empty directory with broken/missing git should be safely pruned and recreated
+    reused = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True)
+    assert reused.workspace.id == ws.id
+    assert (Path(reused.workspace.path) / ".git").exists()
+    assert (Path(reused.workspace.path) / "app.py").exists()
 
 
 def test_damaged_worktree_with_uncommitted_work_raises(db, repo):

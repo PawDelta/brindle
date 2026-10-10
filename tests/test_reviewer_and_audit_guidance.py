@@ -116,3 +116,51 @@ def test_audit_prompt_includes_convergence_rules_and_prior_notes(db, repo):
     assert "Disclosed and awaiting owner decision" in prompt
     assert "Prior audit notes / accepted decisions" in prompt
     assert "Prior audit accepted omission of legacy export" in prompt
+
+
+def test_audit_history_persists_across_need_user_and_user_spoke(db, repo):
+    ws = Workspace("ws-hist", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-hist", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(supervisor.id)
+
+    # 1. Record an audit with gaps
+    autopilot.record_audit(db, supervisor.id, False, "Gap 1: Missing auth tests")
+    ap = db.get_autopilot(supervisor.id)
+    assert ap.audit_history is not None
+    assert "Gap 1: Missing auth tests" in ap.audit_history
+
+    # 2. need_user overwrites note
+    autopilot.need_user(db, supervisor.id, "Which model should we use?")
+    ap = db.get_autopilot(supervisor.id)
+    assert ap.note == "Which model should we use?"
+    assert "Gap 1: Missing auth tests" in ap.audit_history
+
+    # 3. user_spoke clears note
+    autopilot.user_spoke(db, supervisor)
+    ap = db.get_autopilot(supervisor.id)
+    assert ap.note is None
+    assert "Gap 1: Missing auth tests" in ap.audit_history
+
+    # 4. record_accepted_decision appends
+    autopilot.record_accepted_decision(db, supervisor.id, "Accepted omission of legacy export")
+    ap = db.get_autopilot(supervisor.id)
+    assert "Gap 1: Missing auth tests" in ap.audit_history
+    assert "Accepted omission of legacy export" in ap.audit_history
+
+    # 5. audit_prompt renders full audit_history
+    prompt = autopilot.audit_prompt(db, ap, "headsha")
+    assert "Gap 1: Missing auth tests" in prompt
+    assert "Accepted omission of legacy export" in prompt
+
+
+def test_all_builtin_reviewer_profiles_include_tiering_guidance():
+    from brindle.profiles import load_profile
+
+    for name in ("reviewer", "reviewer-codex", "reviewer-local"):
+        prof = load_profile(name)
+        prompt = prof.prompt
+        assert "`blocker`" in prompt, f"{name} missing blocker"
+        assert "`minor`" in prompt, f"{name} missing minor"
+        assert "`needs supervisor action" in prompt, f"{name} missing needs supervisor action"
+        assert "actionable by the worker" in prompt, f"{name} missing actionability"

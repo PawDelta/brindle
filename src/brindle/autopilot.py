@@ -931,7 +931,8 @@ def audit_prompt(db: DB, ap: Autopilot, head: str) -> str:
     ms = db.milestones(ap.root_id)
     lines = [f"{m.position}. {m.title} (check: `{m.check_cmd or 'none'}`)"
              + (f"\n   {m.detail}" if m.detail else "") for m in ms]
-    prior = f"\nPrior audit notes / accepted decisions:\n{ap.note.strip()}\n" if ap.note else ""
+    history_text = (getattr(ap, "audit_history", None) or ap.note or "").strip()
+    prior = f"\nPrior audit notes / accepted decisions:\n{history_text}\n" if history_text else ""
     return AUDIT.format(
         goal=ap.goal, detail=f"\n\n{ap.detail.strip()}" if ap.detail and ap.detail.strip() else "",
         milestones="\n".join(lines), work=(
@@ -967,28 +968,40 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     return auditor
 
 
+def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
+    """Record a supervisor/user-accepted scope exclusion or decision into persistent audit history."""
+    ap = db.get_autopilot(root_id)
+    entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
+    new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
+    db.update_autopilot(root_id, audit_history=new_history)
+
+
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
     """The auditor's verdict. Returns the message for the supervisor."""
     ap = db.get_autopilot(root_id)
     sha = (ap.audit_sha or "")[:8] if ap else ""
     root = db.get_agent(root_id)
     now = _commit(db.get_workspace(root.workspace_id) if root else None)
+    entry = f"Audit of {sha} ({'approved' if approved else 'gaps found'}):\n{summary.strip()}"
+    new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     if approved and (now is None or now != (ap.audit_sha if ap else None)):
         # Work landed (or is uncommitted) since the audit began: an approval of
         # the old commit says nothing about it, so the goal stays open.
-        db.update_autopilot(root_id, state="running", note=None, audit_ok=1, auditor_id=None)
+        db.update_autopilot(root_id, state="running", note=None, audit_ok=1, auditor_id=None,
+                            audit_history=new_history)
         return (f"[brindle] Completion audit of {sha}: approved, but your checkout has changed since "
                 "it started, so the goal isn't reached yet. Commit any changes and call "
                 f"check_milestone to audit the current commit.\n\n{summary}")
     if approved:
-        db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None)
+        db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None,
+                            audit_history=new_history)
         db.bump_progress(root_id)
         clear_finished_goal(db, root_id)
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
                 f"\n\n{summary}")
     db.update_autopilot(root_id, state="running", note=summary.strip()[:4000], audit_ok=0,
-                        auditor_id=None)
+                        auditor_id=None, audit_history=new_history)
     audit_ws = db.get_workspace(root.workspace_id) if root else None
     if audit_ws is not None:
         escapes.audit_gaps(db, audit_ws.repo_root, summary)

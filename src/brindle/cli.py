@@ -486,11 +486,24 @@ def continue_cmd(
             _fail("no scratch session started from this folder to continue; run `brindle` to start one")
     available = sessions.paused(db, ws.repo_root)
     if not available:
-        live = agents.find_running(db, ws, "supervisor")
-        if live and attach:
-            typer.echo(f"Session {live.id} is already running; reopening it.")
-            _attach(ws, live.tmux_window)
-            return
+        live = agents.find_running(db, ws, "supervisor") or next((a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and agents.is_alive(a)), None)
+        if live:
+            workers = agents.tree(db, live.id)
+            failed_workers = [a for a in workers if a.status == "failed"]
+            ap = db.get_autopilot(live.id)
+            is_blocked = ap and ap.state == "blocked"
+            if failed_workers or is_blocked:
+                resumed = _run(agents.resume, db, live.id)
+                if ap and is_blocked:
+                    db.update_autopilot(live.id, state="running", note=None)
+                typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
+                if attach:
+                    _attach(ws, live.tmux_window)
+                return
+            if attach:
+                typer.echo(f"Session {live.id} is already running; reopening it.")
+                _attach(ws, live.tmux_window)
+                return
         _fail("no paused sessions here. Run `brindle` to start a fresh one.")
     if session_id:
         matches = [s for s in available if s.root.id.startswith(session_id)]

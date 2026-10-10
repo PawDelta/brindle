@@ -75,12 +75,60 @@ def test_resume_restarts_failed_worker(db, repo, monkeypatch):
 
 
 def test_cross_process_invalidation_timestamp(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    import sys
+
     monkeypatch.setattr(providers, "brindle_home", lambda: tmp_path)
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path))
     providers._SIGNED_IN[("claude", ())] = 100.0
 
     providers.invalidate_signed_in("claude")
-    # seen_signed_in must return False because last_invalidated is newer than 100.0
+    # seen_signed_in in this process must return False
     assert not providers.seen_signed_in("claude")
+
+    # Now verify in a separate subprocess that the invalidation file is recognized across processes
+    code = (
+        "import sys, os, time\n"
+        "from brindle import providers\n"
+        "providers._SIGNED_IN[('claude', ())] = time.time() - 30\n"
+        "time.sleep(0.05)\n"
+        "providers.invalidate_signed_in('claude')\n"
+        "assert not providers.seen_signed_in('claude'), 'failed in parent'\n"
+        "sys.exit(0)\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], env={**os.environ, "BRINDLE_HOME": str(tmp_path)}, capture_output=True, text=True)
+    assert res.returncode == 0, f"Subprocess failed:\n{res.stderr}"
+
+
+def test_continue_cmd_recovers_live_session_with_failed_workers(db, repo, monkeypatch):
+    from brindle import cli, workspaces
+
+    ws = Workspace("ws-live", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-live", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    db.set_status(worker.id, "failed")
+    db.add_autopilot(supervisor.id)
+    db.update_autopilot(supervisor.id, state="blocked", note="Credentials need attention")
+
+    resumed_ids = []
+    def fake_resume(db_arg, root_id, **kwargs):
+        resumed_ids.append(root_id)
+        return [worker]
+
+    monkeypatch.setattr(agents, "resume", fake_resume)
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+    monkeypatch.setattr(cli, "_run", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    monkeypatch.setattr(workspaces, "adopt_root", lambda db, cwd: ws)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.chdir(repo)
+
+    cli.continue_cmd(session_id=None, attach=False)
+    assert supervisor.id in resumed_ids
+    ap = db.get_autopilot(supervisor.id)
+    assert ap.state == "running"
+    assert ap.note is None
 
 
 def test_antigravity_stop_classifies_auth_failure(db, repo, monkeypatch):

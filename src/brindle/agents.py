@@ -943,6 +943,11 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         identity_lock.ensure(a)
     resumed = []
     for a in candidates:
+        if a.status == "failed" and a.tmux_window:
+            try:
+                tmux.kill_window(a.tmux_window)
+            except Exception:
+                pass
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path):
             continue
@@ -1985,6 +1990,15 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
 
     if focus:
         task += f"\n\nFocus: {focus}"
+
+    task += (
+        "\n\nClassify each finding into one of:\n"
+        "- `blocker`: must be fixed before the branch can merge.\n"
+        "- `minor`: style nits, minor comments or suggestions that do not block merging.\n"
+        "- `needs supervisor action: <details>`: an issue the worker cannot fix within its allowed tools or permissions (e.g. network access, elevated migrations, scope decisions).\n\n"
+        "Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing). If you judged checks without running Bash, state clearly which checks you ran and which you read from history.\n\n"
+        "Approve (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
+    )
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
                  mode="review", background_setup=True, review_sha=sha)
 
@@ -2380,7 +2394,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 "error", "error_type", "message", "reason", "details", "status", "status_code", "code"
             )
         ).lower()
-        is_rate_limit = bool(re.search(r"\b(429|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
+        is_rate_limit = bool(re.search(r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b|rate_limit", err_fields))
         is_auth = not is_rate_limit and (
             payload.get("error_type") == "auth"
             or bool(re.search(r"\b(401|403)\b", err_fields))
