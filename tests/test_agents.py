@@ -632,7 +632,26 @@ def test_flush_types_a_lead_naming_the_sender(db, ws, monkeypatch):
     assert agents.flush(db, "a1") is True
     (body, lead), = calls
     assert "fix the test" in body
+    assert "<details><summary>Message from developer agent sup1</summary>" in body
     assert lead == "brindle delivered this message from developer agent sup1:"
+
+def test_format_message_uses_details_block(db, ws):
+    fake_agent(db, ws, status="idle", agent_id="sup1")
+    formatted = agents.format_message(db, "hello", "sup1")
+    assert "<details><summary>Message from developer agent sup1</summary>" in formatted
+    assert "hello" in formatted
+
+def test_render_unread_uses_details_block_for_brindle(db, ws):
+    class Msg:
+        def __init__(self, body, sender_id):
+            self.body = body
+            self.sender_id = sender_id
+    messages = [Msg("first brindle message", None), Msg("second brindle message", None)]
+    rendered = agents.render_unread(db, messages)
+    assert "<details><summary>Message from brindle</summary>" in rendered
+    assert "first brindle message" in rendered
+    assert "second brindle message" in rendered
+    assert "\n\n" in rendered
 
 
 def test_no_lead_is_typed_into_a_plain_shell(db, ws):

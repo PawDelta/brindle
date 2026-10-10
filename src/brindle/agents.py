@@ -1114,7 +1114,7 @@ def format_message(db: DB, body: str, sender_id: str | None) -> str:
         return body
     sender = db.get_agent(sender_id)
     who = f"{sender.profile} agent {sender_id}" if sender else f"agent {sender_id}"
-    return f"[Message from {who}. Reply with the brindle send_message tool, to_agent_id={sender_id}]\n\n{body}"
+    return f"<details><summary>Message from {who}</summary>\n\nReply with the brindle send_message tool, to_agent_id={sender_id}\n\n{body}\n</details>"
 
 
 def message_lead(db: DB, agent: Agent, sender_id: str | None) -> str | None:
@@ -1161,8 +1161,8 @@ def render_unread(db: DB, messages: list) -> str:
         if m.sender_id:
             parts.append(m.body)  # stored through format_message: sender and reply hint
         else:
-            parts.append(f"[Message from brindle]\n\n{m.body}")
-    return "\n\n---\n\n".join(parts)
+            parts.append(f"<details><summary>Message from brindle</summary>\n\n{m.body}\n</details>")
+    return "\n\n".join(parts)
 
 
 def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
