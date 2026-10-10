@@ -556,6 +556,11 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
     os.symlink(os.path.join(ws.path, "sub"), os.path.join(ws.path, "alias"))
     assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "alias", "deep", "x.txt")}) == "deny"
     assert decision("write_to_file", {"TargetFile": os.path.join(nested, "x.txt")}) == "allow"
+    # Reaching the worktree through a symlink outside it doesn't skip that.
+    outside_link = os.path.join(os.path.dirname(ws.path), "link-to-ws")
+    os.symlink(ws.path, outside_link)
+    assert decision("write_to_file", {"TargetFile": os.path.join(outside_link, "alias", "deep", "x.txt")}) == "deny"
+    assert decision("write_to_file", {"TargetFile": os.path.join(outside_link, "notes.md")}) == "deny"
     # A .. is resolved after the symlink before it, so it's never trusted.
     assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "alias", "..", "x.txt")}) == "deny"
     assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "sub", "..", "x.txt")}) == "deny"

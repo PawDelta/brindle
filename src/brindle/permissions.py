@@ -431,6 +431,16 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "`brindle permissions allow`.")
 
 
+def _lexically_within(literal: str, root: str) -> bool:
+    """``literal`` is ``root`` or under it as spelled, taking ``root`` as
+    given or resolved (macOS's /tmp is /private/tmp), with nothing resolved
+    in ``literal`` itself."""
+    for r in {os.path.normpath(root), os.path.realpath(root)}:
+        if literal == r or literal.startswith(r.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 def _through_symlink(literal: str, roots: list[str]) -> bool:
     """Whether ``literal`` (absolute, normalized) passes through a symlink
     below one of ``roots``, the file itself included. A root's own symlinks
@@ -525,10 +535,14 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
         # Protected wherever the workspaces list says the workspace is: the
         # anchors are brindle's own worktree and repo root.
+        literal = os.path.normpath(req.path) if path else None
         protected = (path and req.kind != "read"
-                     and _agy_protected(os.path.normpath(req.path), path, protected_roots or []))
+                     and _agy_protected(literal, path, protected_roots or []))
+        # In the workspace as written, not only once resolved: a path that
+        # gets there through a symlink outside it would skip the symlink walk.
         if path and not protected and any(
-                w and (path == os.path.realpath(w) or _inside(path, w)) for w in workspaces or []):
+                w and _lexically_within(literal, w) and (path == os.path.realpath(w) or _inside(path, w))
+                for w in workspaces or []):
             return {"decision": "allow", "reason": "brindle: a file in the workspace"}
         if req.kind == "mcp" and req.tool in _brindle_tools():
             return {"decision": "allow", "reason": "brindle: brindle's own tool"}
