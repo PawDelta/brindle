@@ -473,6 +473,31 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert len(rows) == 7 and all(r.result.startswith("deny:") for r in rows)
 
 
+def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
+    a = worker(db, ws, provider="antigravity", id_="g1")
+    turn_on(ws)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+
+    def decision(tool, args):
+        return strict_answer(db, ws, tool, args)["decision"]
+
+    # Writing what defines the hook, what git runs, or brindle's repo config
+    # would undo the gate (or make a command one of the allowed checks).
+    for rel in (".agents/hooks.json", ".git/hooks/pre-commit", ".brindle/config.local.json"):
+        assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, rel)}) == "deny", rel
+        assert decision("replace_file_content", {"TargetFile": os.path.join(ws.path, rel)}) == "deny", rel
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".agents", "hooks.json")}) == "allow"
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "src", ".agents.md")}) == "allow"
+    # Only brindle's own tools by their exact names, never another server's.
+    assert decision("mcp_brindle_x_run", {}) == "deny"
+    assert decision("mcp_brindle_evil_report_result", {}) == "deny"
+    assert decision("call_mcp_tool", {"ServerName": "brindle_x", "ToolName": "report_result"}) == "deny"
+    assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "not_a_tool"}) == "deny"
+    # agy tools not checked to stay inside the conversation are denied.
+    for tool in ("define_subagent", "manage_subagents", "schedule", "read_resource", "list_resources"):
+        assert decision(tool, {}) == "deny", tool
+
+
 @pytest.mark.parametrize("stdin", ["", "{broken", "[]", "null", '{"toolCall": 5}'])
 def test_agy_strict_fails_closed(db, ws, monkeypatch, stdin):
     a = worker(db, ws, provider="antigravity", id_="g1")

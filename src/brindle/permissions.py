@@ -417,16 +417,28 @@ def agy_output(decision: Decision | None, req: Request | None = None,
 
 # agy's own tools that act only on the conversation (tasks, messages to its
 # subagents, questions to the person); a subagent's tool calls reach the hook
-# themselves. Anything not listed here or mapped in AGY_KINDS is denied under
-# agy_approvals "brindle", so a tool agy adds later starts out blocked.
-AGY_CONVERSATION_TOOLS = frozenset({
-    "manage_task", "send_message", "schedule", "ask_question", "invoke_subagent",
-    "define_subagent", "manage_subagents", "list_resources", "read_resource",
-})
+# themselves (checked on agy 1.3.2). Anything not listed here or mapped in
+# AGY_KINDS is denied under agy_approvals "brindle", so a tool agy adds later
+# starts out blocked.
+AGY_CONVERSATION_TOOLS = frozenset({"manage_task", "send_message", "ask_question", "invoke_subagent"})
+# Inside a workspace, but not files the agent may write without a rule: what
+# brindle's hook and agy's settings are read from (.agents), what git runs
+# (.git/hooks, config), and brindle's repo config (checks, rules).
+AGY_PROTECTED_DIRS = (".agents", ".git", ".brindle")
 NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule allows this "
                   "({why}). Don't try another way to do the same thing: tell your supervisor "
                   "with send_message what you need and why, so the person can allow it with "
                   "`brindle permissions allow`.")
+
+
+def _brindle_tools() -> set[str]:
+    """brindle's MCP tools by both names agy gives them: mcp_brindle_<tool>
+    and, through call_mcp_tool, mcp__brindle__<tool>. Exact names, so another
+    server's tools (say a server named brindle_x) never count."""
+    from brindle.antigravity import tool_names
+
+    names = tool_names()
+    return {f"mcp_brindle_{n}" for n in names} | {f"mcp__brindle__{n}" for n in names}
 
 
 def agy_strict_output(decision: Decision | None, req: Request | None = None,
@@ -444,10 +456,14 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         return {"decision": "allow", "reason": f"brindle: {decision.reason}"}
     if req is not None:
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
-        if path and any(w and (path == os.path.realpath(w) or _inside(path, w)) for w in workspaces or []):
+        for w in (workspaces or []) if path else []:
+            rel = "." if w and path == os.path.realpath(w) else _inside(path, w)
+            if rel is None:
+                continue
+            if req.kind != "read" and rel.split(os.sep)[0] in AGY_PROTECTED_DIRS:
+                break  # no free pass: a rule must allow it
             return {"decision": "allow", "reason": "brindle: a file in the workspace"}
-        if req.kind == "mcp" and (req.tool.startswith("mcp_brindle_")
-                                  or req.tool.startswith("mcp__brindle__")):
+        if req.kind == "mcp" and req.tool in _brindle_tools():
             return {"decision": "allow", "reason": "brindle: brindle's own tool"}
         if req.kind == "other" and req.tool in AGY_CONVERSATION_TOOLS:
             return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
