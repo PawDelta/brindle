@@ -428,8 +428,9 @@ def test_followup_is_detached_once_and_five_seconds_after_delivery(db, health):
     now[0] += 2
     assert lh.inspect(db, a.id) == "pending"
     assert sleeps == [3.0] and now[0] == 135
-    assert "pending" in reports[0][1] and "not been verified" in reports[0][1]
-    assert lh.inspect(db, a.id) is None and len(reports) == 1
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "pending"
+    assert reports == [] and db.pending_count("boss") == 0
+    assert lh.inspect(db, a.id) is None and reports == []
 
 
 @pytest.mark.parametrize("screen,cause", [
@@ -446,11 +447,14 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     monkeypatch.setattr(lh, "capture", lambda a: screen)
     lh.delivered(db, a)
     assert lh.inspect(db, a.id) == "failed"
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "failed"
+    assert len(reports) == 1
     body = reports[0][1]
     assert "Fix:" in body and "secret-token" not in body and "https://private" not in body
     denied = model_access.refused(a.profile, fp="effective-account")
     assert denied.key == cause
     assert model_access.refused(a.profile, fp="another-account") is None
+    assert lh.inspect(db, a.id) is None and len(reports) == 1
 
 
 @pytest.mark.parametrize("delivered", [False, True])
@@ -460,7 +464,7 @@ def test_early_exit_reports_without_claiming_access(db, health, monkeypatch, del
     if delivered:
         lh.delivered(db, a)
     assert lh.inspect(db, a.id) == "exited"
-    assert "exited" in reports[0][1] and "retry" in reports[0][1]
+    assert len(reports) == 1 and "exited" in reports[0][1] and "retry" in reports[0][1]
 
 
 def test_readiness_failure_is_reported_without_sending_a_probe(db, health, monkeypatch):
@@ -597,7 +601,17 @@ def test_headless_startup_helper_leaves_delivered_task_to_its_followup(db, healt
     lh.delivered(db, a)
     cli.launch_health_cmd(a.id, startup=True, token=a._launch_health_token)
     assert sleeps == [5.0] and reports == []
-    assert lh.inspect(db, a.id) == "pending" and len(reports) == 1
+    assert lh.inspect(db, a.id) == "pending" and reports == []
+
+
+def test_pending_health_never_notifies_or_enqueues_supervisor(db, health, monkeypatch):
+    lh, a, _, sleeps, _, _ = health
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: pytest.fail("pending notification"))
+    monkeypatch.setattr(db, "enqueue", lambda *a, **k: pytest.fail("pending supervisor inbox message"))
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "pending"
+    assert sleeps == [5.0]
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "pending"
 
 
 def test_delegate_prepares_an_empty_pane_before_binding_and_delivers_once(db, root, detached, monkeypatch):

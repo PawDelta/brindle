@@ -177,12 +177,13 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
                            "AND pane=? AND token=? AND delivered_at IS ?",
                            (outcome, agent_id, row["pane"], row["token"], row["delivered_at"])).rowcount:
         return None
+    if outcome == "pending":
+        return outcome  # diagnostics only; do not spend a supervisor turn on a live process
     ws = db.get_workspace(agent.workspace_id)
     if cause and ws:
         model_access.refuse(agent.profile, cause, repo_root=ws.repo_root, fp=row["fingerprint"])
     detail = (cause.line() if cause else
-              "the worker exited before launch health could be established. Check its pane and CLI installation/login, then retry." if not alive else
-              "the process is live; model access is still pending and has not been verified. Watch the worker for its result or later errors.")
+              "the worker exited before launch health could be established. Check its pane and CLI installation/login, then retry.")
     # Never forward provider output, which can contain URLs, keys or prompt text.
     body = f"Worker {agent.id} launch health: {detail}"
     try:

@@ -612,7 +612,8 @@ The real first worker task is sent once. A detached helper inspects its current
 pane five seconds after delivery, so readiness delays do not use up that window.
 Explicit fresh authentication, access, model and capacity errors, or an early
 exit, produce a safe supervisor message with a next step. A live process with
-no clear result is reported as pending, not verified model access. Refusals use
+no clear result is recorded as pending for diagnostics, not verified model
+access; it does not send a supervisor notification. Refusals use
 the existing one-hour cooldown, scoped to the effective model/environment and
 local login revision. Changing the account, model or credentials invalidates
 that refusal; CLI/keychain account changes without an observable local revision
