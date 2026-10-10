@@ -505,7 +505,46 @@ class CloudLearner(LearningPlugin):
     # -- reporting ------------------------------------------------------------------------------
 
     def report(self) -> str:
-        state = ("active" if self.active() else
+        from collections import Counter
+
+        from brindle.config import load_repo_config
+        from brindle.db import DB
+
+        org = self.org()
+        state = ("active" if org else
                  "inactive (not logged in, offline, or your plan lacks hosted learning)")
-        return (f"cloud learning: {state}\n"
-                "The learner runs on the server; nothing is learned on this machine.")
+        lines = [f"cloud learning: {state}",
+                 "The learner runs on the server; nothing is learned on this machine."]
+        if org:
+            try:
+                status = self._post(org, "/learning/status", {"org_id": org})
+                remote = [f"This month ({status['month']}): {status['tasks']} finished tasks; "
+                          f"{status['learned']} picked by learning, {status['baseline']} used the default.",
+                          f"Exploration: {status['exploration']}"]
+                for p in status["profiles"]:
+                    note = (f" (below {status['min_tasks']:g} results)"
+                            if p['tasks'] < status['min_tasks'] else "")
+                    remote.append(f"  {p['profile']}: {p['tasks']:g} results{note}; "
+                                  f"mean outcome {p['mean']:.3f}")
+                lines.extend(remote)
+            except Exception:  # noqa: BLE001 - status is optional, including on older servers
+                lines.append("The server doesn't report status yet.")
+        db = DB()
+        try:
+            rows = [r for r in db.list_routing_decisions(self.repo_root)
+                    if r.weight_routed or (r.weight_routed is None and r.weight in WEIGHTS)][-20:]
+        finally:
+            db.conn.close()
+        picked = sum(bool(r.learned) for r in rows)
+        lines.append(f"Local picks in this repo (last {len(rows)} weight-routed assignments): "
+                     f"{picked} picked by learning, {len(rows) - picked} kept the default.")
+        if any(r.weight_routed is None for r in rows):
+            lines.append("  Older records count assignments with a weight; keep reasons weren't saved.")
+        for note, count in Counter(r.kept_note for r in rows if not r.learned and r.kept_note).most_common(3):
+            lines.append(f"  Kept the default: {note} ({count})")
+        cfg = load_repo_config(self.repo_root)
+        lines.append("Candidates by weight:")
+        for weight in WEIGHTS:
+            lines.append(f"  {weight}: {', '.join(cfg.routing.get(weight, [])) or 'none'}")
+        lines.append(f"learning_candidates: {', '.join(cfg.learning_candidates) or 'none'}")
+        return "\n".join(lines)

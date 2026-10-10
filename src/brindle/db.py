@@ -509,6 +509,8 @@ class RoutingDecision:
     demoted_from: str | None = None
     budget_state: str | None = None
     seeded_at: float | None = None
+    kept_note: str | None = None
+    weight_routed: int | None = None
 
 
 @dataclass
@@ -666,7 +668,8 @@ class DB:
         routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
         if "prior" not in routing_cols:
             self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
-        for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
+        for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL"),
+                          ("kept_note", "TEXT"), ("weight_routed", "INTEGER")):
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
 
@@ -1496,13 +1499,16 @@ class DB:
     def add_routing_decision(self, repo_root: str, *, task_id: str | None, agent_id: str | None,
                              weight: str | None, baseline_profile: str, profile: str,
                              learned: bool, prior: bool = False,
-                             ts: float | None = None, demoted_from: str | None = None) -> None:
+                             ts: float | None = None, demoted_from: str | None = None,
+                             kept_note: str | None = None, weight_routed: bool | None = None) -> None:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO routing_decisions (repo_root, ts, task_id, agent_id, weight, "
-                "baseline_profile, profile, learned, prior, demoted_from) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "baseline_profile, profile, learned, prior, demoted_from, kept_note, weight_routed) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time() if ts is None else ts, task_id, agent_id, weight,
-                 baseline_profile, profile, int(learned), int(learned and prior), demoted_from),
+                 baseline_profile, profile, int(learned), int(learned and prior), demoted_from,
+                 kept_note, int(weight_routed) if weight_routed is not None else None),
             )
 
     def set_budget_state(self, agent_id: str, state: str | None) -> None:

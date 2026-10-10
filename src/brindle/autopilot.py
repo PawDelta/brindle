@@ -511,6 +511,8 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     why = f"weight {weight} -> {name}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
     kept = learning.kept_note(cfg, repo_root)
+    if decision is not None:
+        decision.update(weight_routed=True, kept_note=kept if not pick else None)
     detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
     detail = [d for d in detail if d]
     if detail:
@@ -571,6 +573,8 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     if decision is not None:
         decision.update(profile=name, learned=learned, weight=weight,
                         prior=bool(routed.get("prior")),
+                        weight_routed=bool(routed.get("weight_routed")),
+                        kept_note=routed.get("kept_note"),
                         baseline=routed.get("baseline", name) if learned else name,
                         demoted_from=routed.get("demoted_from"))
     try:

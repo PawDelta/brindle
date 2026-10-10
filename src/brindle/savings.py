@@ -67,6 +67,7 @@ def record(db: DB, repo_root: str, decision: dict | None, *, task_id: str | None
             baseline_profile=decision.get("baseline") or decision["profile"],
             profile=decision["profile"], learned=bool(decision.get("learned")),
             prior=decision.get("prior") is True, demoted_from=decision.get("demoted_from"),
+            kept_note=decision.get("kept_note"), weight_routed=bool(decision.get("weight_routed")),
         )
     except Exception:
         log.exception("brindle: couldn't record the routing decision")
