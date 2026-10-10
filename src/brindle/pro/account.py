@@ -664,7 +664,14 @@ class ProAccount(_OrgCommands):
         self._say(f"Logged in as {ent.sub} ({ent.org_id}), plan {ent.plan}.")
         self._say("See what your plan includes: `brindle account`"
                   + ("" if ent.features else "; get brindle Pro: `brindle account upgrade`"))
+        self._company_login(client)
         return 0
+
+    def _company_login(self, client) -> None:
+        """Apply the org's ``agent_setup``, if it has one (nothing otherwise)."""
+        from brindle import company_login
+
+        company_login.apply_current(self._say, self.repo_root, store=self.store, client=client)
 
     def cmd_logout(self, base: str | None) -> int:
         try:
@@ -672,6 +679,9 @@ class ProAccount(_OrgCommands):
         except auth.AuthError:
             client = None
         auth.logout(client, self.store)
+        from brindle import company_login
+
+        company_login.clear_env()
         self._say("Logged out of brindle Pro.")
         return 0
 

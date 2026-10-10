@@ -841,6 +841,122 @@ _ENV_AUTH = {
 AGY_SETTINGS = "~/.gemini/antigravity-cli/settings.json"
 
 
+def codex_auth_path() -> str:
+    """Codex's auth file, ``$CODEX_HOME/auth.json`` (default ~/.codex);
+    BRINDLE_CODEX_AUTH overrides it (for tests)."""
+    override = os.environ.get("BRINDLE_CODEX_AUTH")
+    if override:
+        return os.path.expanduser(override)
+    return os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "auth.json")
+
+
+def codex_chatgpt_login() -> bool:
+    """Whether Codex is signed in with ChatGPT (``auth_mode: "chatgpt"`` in its
+    auth.json). Only that one field is kept; the tokens beside it are never
+    read out or printed."""
+    try:
+        with open(codex_auth_path()) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    mode = data.get("auth_mode") if isinstance(data, dict) else None
+    del data
+    return mode == "chatgpt"
+
+
+# Checked on Codex CLI 0.162.0 signed in with ChatGPT: the interactive TUI (what
+# brindle runs in agent panes) ignores OPENAI_API_KEY and CODEX_API_KEY and uses
+# the ChatGPT plan; only `codex login --with-api-key` switches it to a key.
+# Headless `codex exec` (Brindle-CI) takes CODEX_API_KEY over the login and
+# ignores OPENAI_API_KEY.
+CODEX_INTERACTIVE_USES_PLAN = (
+    "interactive Codex agents use your ChatGPT plan whatever key is set; "
+    "to put them on a key, run `codex login --with-api-key`")
+CODEX_EXEC_BILLS_KEY = (
+    "headless `codex exec` runs (and Brindle-CI) bill CODEX_API_KEY instead")
+CODEX_INTERACTIVE_IGNORES_KEYS = (
+    "interactive Codex ignores OPENAI_API_KEY and CODEX_API_KEY while signed in with ChatGPT and "
+    "uses your ChatGPT plan; run `codex login --with-api-key`, or use auth: subscription")
+CODEX_EXEC_IGNORES_OPENAI_KEY = (
+    "`codex exec` ignores OPENAI_API_KEY while signed in with ChatGPT; "
+    "store the key as CODEX_API_KEY (`brindle keys set CODEX_API_KEY`)")
+
+
+def agy_settings_path() -> str:
+    """agy's settings file; BRINDLE_AGY_SETTINGS overrides it (for tests)."""
+    return os.path.expanduser(os.environ.get("BRINDLE_AGY_SETTINGS") or AGY_SETTINGS)
+
+
+def agy_uses_gemini_key() -> bool:
+    """Whether agy's settings select the Gemini API (``"modelProvider": "gemini"``),
+    the only case in which it reads GEMINI_API_KEY."""
+    try:
+        data = _read_json(agy_settings_path())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("modelProvider") == "gemini"
+
+
+def agy_ignores_key_message() -> str:
+    return ("GEMINI_API_KEY is set but agy ignores it: set \"modelProvider\": \"gemini\" in "
+            f"{agy_settings_path()} (`brindle doctor --fix` or `brindle keys set GEMINI_API_KEY`)")
+
+
+def offer_agy_gemini(confirm, say) -> None:
+    """If agy's settings don't select the Gemini API it ignores GEMINI_API_KEY:
+    say so and offer to set ``"modelProvider": "gemini"``. Declining leaves the
+    file alone; nothing is asked when it's already set. ``confirm(prompt)``
+    answers, ``say(line)`` reports."""
+    if agy_uses_gemini_key():
+        return
+    path = agy_settings_path()
+    say(f"agy ignores GEMINI_API_KEY unless {path} has \"modelProvider\": \"gemini\"")
+    if not confirm(f"Set \"modelProvider\": \"gemini\" in {path}?"):
+        say("left as is; agy will keep using its own sign-in")
+        return
+    try:
+        set_agy_gemini()
+    except (OSError, ValueError) as e:
+        say(f"couldn't update {path}: {e}")
+        return
+    say(f"set \"modelProvider\": \"gemini\" in {path}")
+
+
+def set_agy_gemini() -> None:
+    """Set ``"modelProvider": "gemini"`` in agy's settings, keeping every other
+    key; the file is created (0600, in a 0700 directory) when absent. Raises
+    OSError/ValueError when the file can't be read or written."""
+    path = agy_settings_path()
+    try:
+        data = _read_json(path)
+    except FileNotFoundError:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} isn't a JSON object")
+    data["modelProvider"] = "gemini"
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    tmp = f"{path}.tmp{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _auth_probe(argv: list[str], env: dict[str, str] | None = None) -> tuple[int, str] | None:
     import subprocess
 

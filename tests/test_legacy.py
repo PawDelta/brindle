@@ -34,9 +34,19 @@ def test_old_home_with_agy_settings_points_at_mirrored_rules(home):
     (home / ".copse").mkdir()
     settings = home / ".gemini" / "antigravity-cli" / "settings.json"
     settings.parent.mkdir(parents=True)
-    settings.write_text("{}")
+    settings.write_text(json.dumps({"permissions": {"allow": ["command(git status)"]}}))
     lines = legacy.findings(None)
     assert any(str(settings) in line and "allow" in line for line in lines)
+
+
+@pytest.mark.parametrize("content", ["{}", '{"colorScheme": "dark", "trustedWorkspaces": ["/x"]}',
+                                     '{"permissions": {"allow": []}}', "not json"])
+def test_agy_settings_without_rules_is_not_reported(home, content):
+    (home / ".copse").mkdir()
+    settings = home / ".gemini" / "antigravity-cli" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(content)
+    assert not any(str(settings) in line for line in legacy.findings(None))
 
 
 def test_old_repo_dir_and_agent_entries(home, tmp_path):

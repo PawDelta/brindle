@@ -7,7 +7,7 @@ import logging
 import os
 import time
 
-from brindle import agents, git, status_cache, tmux
+from brindle import agents, git, identity_lock, status_cache, tmux
 from brindle import usage as usage_mod
 from brindle.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 
@@ -88,6 +88,17 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 now: float | None = None,
                 panes: dict[str, bool] | None = None,
                 alive: bool | None = None) -> dict:
+    who = identity_lock.locked_by(a.id)
+    if who:
+        # Another identity's session: structure only, nothing read from its
+        # conversation (usage, last activity, unread messages, subagents).
+        entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
+                 "status": f"locked: {who}", "mode": a.mode, "locked": who}
+        if detail:
+            entry.update(parent_id=a.parent_id, status_since=a.status_since, pending=0,
+                         reported=a.result is not None, window=None, tmux_server=None,
+                         headless=bool(a.headless), subagents=[])
+        return entry
     # Usage is a display extra: a bad transcript must never break the sidebar.
     try:
         u = usage_mod.agent_usage(db, a)

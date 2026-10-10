@@ -131,3 +131,19 @@ def test_overlap_keeps_running_workers_claims(db, repo):
     warning = tasks.overlap_warning(db, ws, ["src/shared.py"])
 
     assert warning and "running-claim" in warning
+
+
+def test_prune_closes_a_stale_agent_whose_whole_repo_is_gone(db, repo, monkeypatch):
+    """A repo deleted outright (an old demo, say) must not stop prune: git can't
+    even start there, so its agents count as on a gone workspace."""
+    import shutil
+
+    ws = workspaces.create(db, str(repo), "feat-repo-gone", run_setup=False).workspace
+    agent = _agent(db, ws, "old-paused")
+    monkeypatch.setattr("brindle.cull.tmux.list_panes", lambda: {})
+    shutil.rmtree(repo)
+
+    lines = cull.prune_stale_agents(db, now=time.time())
+
+    assert any(agent.id in line and "gone" in line for line in lines)
+    assert cull.workspaces_merged(ws) is False

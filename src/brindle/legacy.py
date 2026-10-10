@@ -21,6 +21,17 @@ def _agy_settings() -> Path:
     return Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
 
 
+def _agy_has_rules() -> bool:
+    """Whether agy's settings hold any ``permissions`` allow/deny/ask entries:
+    where copse mirrored its rules. A settings file without them has nothing to review."""
+    try:
+        data = json.loads(_agy_settings().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    perms = data.get("permissions") if isinstance(data, dict) else None
+    return isinstance(perms, dict) and any(perms.get(k) for k in ("allow", "deny", "ask"))
+
+
 def _old_keys(path: Path) -> list[str]:
     """Top-level keys, and keys under ``mcpServers``, named copse in a JSON file."""
     try:
@@ -45,7 +56,7 @@ def findings(repo_root: str | None) -> list[str]:
     if old_home.exists():
         found.append(f"{old_home} is not read: its saved permission rules, profiles and settings "
                      f"don't apply. Move what you want to keep to {brindle_home()}.")
-        if _agy_settings().exists():
+        if _agy_has_rules():
             found.append(f"{_agy_settings()} may still hold allow rules that {OLD} mirrored there; "
                          "brindle doesn't manage them, so review its allow list and remove any you don't want.")
     if repo_root:
