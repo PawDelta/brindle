@@ -696,6 +696,34 @@ Codex patches are checked file by file: allowed only if every file is. Codex
 doesn't say which tool run followed which prompt, so brindle doesn't learn from
 Codex approvals. To undo, delete that entry (or untrust it in Codex's `/hooks`).
 
+Codex also uses the profile's `allowed_tools` shell entries: `Bash(just lint)`
+allows that exact command, and `Bash(task test:*)` allows it with arguments.
+The same simple-command restriction applies, and default, user, repo and
+profile denies still win. Other `allowed_tools` entries aren't translated.
+An unrecognized patch header prevents automatic approval without discarding
+denies for files brindle can identify. Session/status bookkeeping failures
+don't discard the hook's decision; failures to evaluate the policy leave
+Codex's normal approval flow in place.
+
+Scope and platform limits: this is an **approval-request hook**, not a gate
+on every tool call. Codex commands already permitted by its sandbox or own
+rules never reach it, so brindle cannot enforce denies on those calls. It
+doesn't change Codex's sandbox or approval mode, and cannot make a `never`
+approval mode interactive. Disabled hooks, managed-only hook policies, older
+Codex versions without `PermissionRequest`, and nonlocal execution can prevent
+the hook from running. Keep Codex's own restrictions for tools that must always
+be blocked. See the [OpenAI hook protocol](https://learn.chatgpt.com/docs/hooks).
+
+The integration targets local macOS/Linux Codex CLI processes (POSIX shell
+quoting); native Windows hook commands aren't supported. The local app-server
+protocol was checked on macOS with Codex CLI **0.162.1**: newline-delimited
+`initialize`, `initialized`, and `hooks/list` returned the session-flags key
+above, `eventName: "permissionRequest"`, `source: "sessionFlags"`,
+`currentHash`, `enabled: true`, and `trustStatus: "trusted"` for the installed
+brindle hook. This read-only probe made no model calls or trust edits; hook
+dispatch/allow/deny behavior is covered by the permission tests. Linux runtime
+and native Windows behavior were not exercised by that probe.
+
 **Antigravity.** agy's hook can deny but its "allow" is ignored (an agy bug),
 and it has no "no opinion" answer. So the hook denies what the policy denies,
 answers "allow" for a file inside the workspace (which agy reads and writes

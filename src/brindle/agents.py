@@ -2106,6 +2106,12 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            from brindle.profiles import load_profile
+
+            try:
+                rules += permissions.profile_bash_allows(load_profile(agent.profile, ws.repo_root))
+            except KeyError:
+                pass  # deleted profile: no extra allowances
             decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
@@ -2219,6 +2225,20 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     agent = db.get_agent(agent_id)
     if agent is None:
         return None
+    if event == "codex-permission-request":
+        # Session/status writes are bookkeeping, never prerequisites for
+        # returning a policy decision (especially a deny).
+        answer = permission_request_decision(db, agent, payload, provider="codex")
+        try:
+            sid = payload.get("session_id")
+            if isinstance(sid, str) and sid and sid != agent.session_ref:
+                db.update_agent(agent_id, session_ref=sid)
+            if answer is None:
+                # Codex has no approval notification event.
+                db.set_status(agent_id, "waiting")
+        except Exception:  # noqa: BLE001
+            log.exception("brindle: couldn't record Codex permission status")
+        return answer
     sid = payload.get("session_id")
     if sid and sid != agent.session_ref:
         db.update_agent(agent_id, session_ref=str(sid))
@@ -2274,13 +2294,6 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         return pre_tool_decision(db, agent, payload)
     elif event == "permission-request":
         return permission_request_decision(db, agent, payload)
-    elif event == "codex-permission-request":
-        answer = permission_request_decision(db, agent, payload, provider="codex")
-        if answer is None:
-            # Left to the person: Codex shows its approval prompt now. Codex
-            # has no notification event for that, so this is the signal.
-            db.set_status(agent_id, "waiting")
-        return answer
     elif event == "tool-done":
         db.set_status(agent_id, "processing", only_if="waiting")
         db.set_status(agent_id, "processing", only_if="idle")  # see "pre-tool"
@@ -2462,18 +2475,20 @@ def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool 
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
     except json.JSONDecodeError:
         payload = {}
-    if not trusted:
-        agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
     if event in PERMISSION_EVENTS:
         # Never let a failure turn into a decision: anything wrong means no
         # output, so the CLI prompts the person as usual.
         if not isinstance(payload, dict):
             return ""
         try:
+            if not trusted:
+                agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
             out = handle_hook(db, agent_id, event, payload)
         except Exception:  # noqa: BLE001
             log.exception("brindle: permission-request hook failed")
             return ""
         return json.dumps(out) if out else ""
+    if not trusted:
+        agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
     out = handle_hook(db, agent_id, event, payload)
     return json.dumps(out) if out else ""
