@@ -138,6 +138,7 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
     if footer == len(lines) or (submitted and any(re.match(r"^\s*[•●■]", line) for line in lines[composer_start + 1:footer])):
         composer_start = len(lines)
     in_code = False
+    claude_banner = False
     candidate = None
     for index, line in enumerate(lines):
         stripped = line.strip()
@@ -148,6 +149,32 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
             continue
         if in_code or not stripped:
             continue
+        # Startup chrome is not assistant prose. Recognize the compact logo
+        # and boxed welcome banners across Claude versions, but never let a
+        # copied banner escape an assistant/tool response or a code fence.
+        if provider in (None, "claude") and context in ("startup", "ui"):
+            if re.search(r"\bClaude Code\b", stripped):
+                claude_banner = stripped.startswith("╭")
+                context = "ui"
+                continue
+            if claude_banner:
+                if stripped.startswith("╰"):
+                    claude_banner = False
+                if stripped.startswith(("│", "├", "╰")):
+                    continue
+            if re.match(r"^(?:[▐▛▜▝▘▗▖]|[─╭╰]|\? for shortcuts|⏵⏵)", stripped):
+                context = "ui"
+                continue
+        if provider in (None, "native") and context in ("startup", "ui", "submitted", "provider"):
+            if re.match(r"^brindle: (?:native worker \S+ on .+ at .+|resumed the conversation \(\d+ messages\))$", stripped):
+                context = "ui"
+                continue
+            if re.match(r"^── brindle: turn \d+ ──$", stripped):
+                context, candidate = "submitted", None
+                continue
+            if stripped in ("── brindle: turn finished ──", "── brindle: waiting for messages ──"):
+                context, candidate = "assistant", None
+                continue
         if re.match(r"^[❯>›]\s+\S", stripped):
             if context in ("assistant", "prose"):
                 continue  # quoted prompts cannot authenticate a new turn
@@ -156,17 +183,19 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
             continue
         if " ".join(stripped.split()) in prompt_text:
             continue  # wrapped profile/task text is not provider output
+        if provider == "native" and context == "submitted" and stripped in old:
+            continue  # runner captures the printed task preview before delivery
         if codex_ui and re.match(r"^(?:•\s|(?:Tool output|Ran |Explored |Example output))", stripped):
             context, candidate = "assistant", None
             continue
         if re.search(r"(?i)esc to (?:interrupt|cancel)|^thinking|^working\s*…", stripped):
             context, candidate = (context if context in ("assistant", "prose") else "ui"), None
             continue
-        if stripped.startswith("●") and len(line) - len(line.lstrip()) <= 1:
+        if stripped.startswith(("●", "⏺")) and len(line) - len(line.lstrip()) <= 1:
             # A tool result or assistant explanation is not a provider error.
             if context in ("assistant", "prose", "prompt"):
                 continue  # copied provider markers remain part of that block
-            context = "provider" if provider in (None, "claude") and re.match(r"^●\s*API Error:", stripped) else "assistant"
+            context = "provider" if provider in (None, "claude") and re.match(r"^[●⏺]\s*API Error:", stripped) else "assistant"
             candidate = _cause(stripped) if context == "provider" and stripped not in old else None
         elif (len(line) - len(line.lstrip()) <= 1
               and re.match(r"^■\s*(?:unexpected status|(?:API )?Error\b)", stripped)):

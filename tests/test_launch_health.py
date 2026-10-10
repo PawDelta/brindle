@@ -460,6 +460,67 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     assert lh.inspect(db, a.id) is None and len(reports) == 1
 
 
+@pytest.mark.parametrize("provider,banner,marker", [
+    ("claude", "Claude Code v2.1.0", "● API Error: 401 invalid API key"),
+    ("claude", " ▐▛███▜▌   Claude Code v2.1.0\n▝▜█████▛▘  Sonnet · Claude Pro\n  ▘▘ ▝▝    /workspace", "⏺ API Error: 401 invalid API key"),
+    ("claude", "╭─── Claude Code v2.1.0 ───╮\n│ Welcome back!             │\n│ Sonnet · Claude Pro       │\n│ /workspace                │\n╰──────────────────────────╯", "● API Error: 401 invalid API key"),
+    ("native", "", "── brindle: the model endpoint failed: 401; this worker has stopped ──"),
+    ("native", "brindle: native worker w1 on chosen at https://private", "── brindle: the model endpoint failed: 401 secret-token; this worker has stopped ──"),
+    ("native", "brindle: resumed the conversation (4 messages)\nbrindle: native worker w1 on chosen at https://private", "── brindle: the model endpoint failed: 401; this worker has stopped ──"),
+])
+@pytest.mark.parametrize("alive", [False, True])
+def test_startup_chrome_and_native_turn_accept_current_auth_failure(
+        db, health, monkeypatch, provider, banner, marker, alive):
+    from brindle import model_access
+    lh, a, _, sleeps, _, reports = health
+    db.update_agent(a.id, provider=provider)
+    turn = f"❯ {a.task}" if provider == "claude" else f"── brindle: turn 1 ──\n{a.task}"
+    baseline = f"{banner}\n{turn}\n"
+    monkeypatch.setattr(lh, "capture", lambda a: baseline + marker)
+    monkeypatch.setattr(agents, "is_alive", lambda a: alive)
+    lh.delivered(db, a, baseline)
+    assert lh.inspect(db, a.id) == "failed"
+    assert sleeps == [5.0]
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "failed"
+    assert len(reports) == 1 and "Fix:" in reports[0][1]
+    assert "secret-token" not in reports[0][1] and "https://private" not in reports[0][1]
+    assert model_access.refused(a.profile, fp="effective-account").key == "launch_auth"
+
+
+@pytest.mark.parametrize("provider,screen", [
+    ("claude", "● Example output:\nClaude Code v2.1.0\n❯ implement a feature\n● API Error: 401 invalid API key"),
+    ("claude", "⏺ Bash(cat errors.txt)\nClaude Code v2.1.0\n❯ implement a feature\n⏺ API Error: 401 invalid API key"),
+    ("claude", "Claude Code v2.1.0\n● Example:\n```\nClaude Code v2.1.0\n❯ implement a feature\n● API Error: 401 invalid API key\n```"),
+    ("native", "Here is an example:\n── brindle: turn 1 ──\n── brindle: the model endpoint failed: 401; this worker has stopped ──"),
+    ("native", "brindle: native worker w1 on chosen at https://private\n── brindle: turn 1 ──\nimplement a feature\nHere is an example:\n── brindle: turn 2 ──\n── brindle: the model endpoint failed: 401; this worker has stopped ──"),
+])
+def test_quoted_startup_and_turn_chrome_remain_silent_pending(db, health, monkeypatch, provider, screen):
+    from brindle import model_access
+    lh, a, _, _, _, reports = health
+    db.update_agent(a.id, provider=provider)
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "pending"
+    assert reports == [] and db.pending_count("boss") == 0
+    assert model_access.refused(a.profile, fp="effective-account") is None
+
+
+def test_actual_native_task_preview_does_not_hide_current_failure(db, health, monkeypatch):
+    from brindle import model_access
+    from brindle.native.runner import _preview
+    lh, a, _, _, _, reports = health
+    task = "\n".join(f"instruction {i}" for i in range(8))
+    db.update_agent(a.id, provider="native", task=task)
+    # runner prints this preview, captures it, then calls loop.run on the task.
+    baseline = f"brindle: native worker {a.id} on chosen at https://private\n\n── brindle: turn 1 ──\n{_preview(task)}\n"
+    assert baseline.endswith("...\n")
+    monkeypatch.setattr(lh, "capture", lambda a: baseline + "── brindle: the model endpoint failed: 401; this worker has stopped ──")
+    lh.delivered(db, a, baseline)
+    assert lh.inspect(db, a.id) == "failed"
+    assert len(reports) == 1 and "Fix:" in reports[0][1]
+    assert model_access.refused(a.profile, fp="effective-account").key == "launch_auth"
+
+
 def test_current_codex_error_retains_provider_ui_and_real_task_context():
     from brindle import launch_health as lh
     screen = "OpenAI Codex\nmodel: chosen\n› implement a feature\n■ unexpected status 403 Forbidden\n100% context left"
