@@ -42,25 +42,41 @@ LAUNCH_CACHE_FILE = "identity-launch-cache.json"
 PROBE_TIMEOUT = 20.0
 PERSONAL_PLANS = ("free", "pro", "max")
 
-# Under an enforced company identity (Enterprise), what picks the account a
+# Under an enforced company identity (Enterprise), what can pick the account a
 # Claude pane runs as. The pane gets exactly the route brindle checked
-# (``enforced_route_env``): these never come from a profile's env lines, and
-# the ROUTE_VARS ones the route doesn't set are taken out of the pane even when
-# inherited or stored, so the identity checked is the identity used.
-ROUTE_VARS = frozenset({
-    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_BEDROCK_BASE_URL", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
-    "AWS_ROLE_ARN", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_VERTEX_BASE_URL",
-    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT",
-    "CLOUDSDK_ACTIVE_CONFIG_NAME", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_API_KEY",
-    "ANTHROPIC_FOUNDRY_BASE_URL", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID",
-    "AZURE_FEDERATED_TOKEN_FILE"})
-# Where the CLIs keep their sign-in: inherited, brindle's own probe sees the
-# same files, so only a profile's env line could point a pane elsewhere.
-CONFIG_VARS = frozenset({"CLAUDE_CONFIG_DIR", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
-                         "CLOUDSDK_CONFIG", "AZURE_CONFIG_DIR"})
+# (``enforced_route_env``): no profile env line in these families reaches it,
+# and the inherited ones the route doesn't set are taken out of the pane, so the
+# identity checked is the identity used. Matched by family, not a list of
+# names, so a variable this list doesn't know (a new SDK setting) is covered.
+PICK_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_USE_", "CLAUDE_CODE_SKIP_", "AWS_", "CLOUDSDK_",
+                 "GOOGLE_", "GCLOUD_", "CLOUD_ML_", "AZURE_")
+ROUTE_VARS = frozenset({"CLAUDE_CODE_OAUTH_TOKEN"})   # a picker outside those families
+# Where the CLIs keep their sign-in, and how requests leave the machine:
+# inherited, brindle's own probe sees the same, so only a profile's env line
+# could point a pane elsewhere.
+PROFILE_ONLY = frozenset({"CLAUDE_CONFIG_DIR", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                          "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS"})
+
+
+def picks_account(name: str) -> bool:
+    """Whether ``name`` can choose the backend, account or key of a Claude pane."""
+    return name in ROUTE_VARS or name.upper().startswith(PICK_PREFIXES)
+
+
+def profile_may_set(name: str) -> bool:
+    """Whether a profile's env line ``name`` reaches a Claude pane under an
+    enforced company identity."""
+    return not picks_account(name) and name.upper() not in PROFILE_ONLY
+
+
+def enforced_deny(route: dict[str, str], inherited) -> list[str]:
+    """The names a Claude pane starts without under an enforced company
+    identity: every account picker it would inherit (``inherited``) or be
+    handed (a stored key, ROUTE_VARS) that the checked ``route`` doesn't set."""
+    names = set(ROUTE_VARS) | {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                                "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
+    names |= {n for n in inherited if picks_account(n)}
+    return sorted(names - set(route))
 
 _cache: dict[tuple[str, ...], tuple[float, tuple[int, str]]] = {}
 

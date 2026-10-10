@@ -194,8 +194,7 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         else:
             # An enforced company identity (Enterprise): the pane runs on the route
             # launch_problem checked, whatever a profile's env lines say.
-            pick = company_identity.ROUTE_VARS | company_identity.CONFIG_VARS
-            profile_env = {k: v for k, v in profile_env.items() if k not in pick}
+            profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
             env = {**profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a

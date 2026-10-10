@@ -38,7 +38,7 @@ def deny_names(provider: str, auth: str, m, org_managed: bool = False) -> tuple[
 
         route = company_identity.enforced_route_env()
         if route is not None:
-            extra += tuple(sorted(company_identity.ROUTE_VARS - set(route)))
+            extra += tuple(company_identity.enforced_deny(route, os.environ))
     return tuple(deny + [n for n in dict.fromkeys(extra) if n not in deny])
 
 

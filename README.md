@@ -759,8 +759,12 @@ your session are told; a timeout or missing CLI never pauses, it warns once.
 A wrong company identity pauses them only when the org policy enforces it
 (Enterprise); otherwise it warns once. While it enforces, Claude agents run
 on exactly the route brindle checked: a profile's env lines can't change the
-backend, account or key, and other cloud credentials and Claude keys in your
-environment or `brindle keys` are left out of their panes. After `brindle login`,
+backend, account, key or proxy, and other cloud and Claude credential variables
+(`ANTHROPIC_*`, `AWS_*`, `GOOGLE_*`, `CLOUDSDK_*`, `AZURE_*`, ...) in your
+environment or `brindle keys` are left out of their panes, so those agents
+can't use your own AWS, Google Cloud or Azure access in their shell either.
+Claude Code's own settings files can still set variables inside it; to rule
+that out too, use Claude Code's managed settings. After `brindle login`,
 `brindle doctor --fix` or the CLI's own login, the agents brindle paused resume
 into their conversations, but only as the account they started under: if
 someone else is signed in (a personal login, say) they stay paused until the

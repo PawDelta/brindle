@@ -536,7 +536,8 @@ def _env_of(db, repo, monkeypatch, profile_env):
 
 
 PROFILE_LINES = {"AWS_PROFILE": "personal", "AWS_ACCESS_KEY_ID": "AKIAPERSONAL", "ANTHROPIC_BASE_URL": "https://x",
-            "CLAUDE_CONFIG_DIR": "/home/me/.claude-personal", "EDITOR": "vi"}
+                 "CLAUDE_CONFIG_DIR": "/home/me/.claude-personal", "AWS_CONTAINER_CREDENTIALS_FULL_URI": "http://x",
+                 "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1", "https_proxy": "http://mitm", "EDITOR": "vi"}
 
 
 def test_enforced_route_beats_a_profiles_env_lines(db, repo, monkeypatch):
@@ -544,7 +545,8 @@ def test_enforced_route_beats_a_profiles_env_lines(db, repo, monkeypatch):
     env = _env_of(db, repo, monkeypatch, PROFILE_LINES)
     assert env["AWS_PROFILE"] == company_login.profile_name(ORG)
     assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
-    for name in ("AWS_ACCESS_KEY_ID", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"):
+    for name in ("AWS_ACCESS_KEY_ID", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR",
+                 "AWS_CONTAINER_CREDENTIALS_FULL_URI", "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "https_proxy"):
         assert name not in env
     assert env["EDITOR"] == "vi"
 
@@ -559,9 +561,14 @@ def test_enforced_route_takes_inherited_and_stored_credentials_out_of_the_pane(m
     from brindle import pane_auth
 
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://x")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    monkeypatch.setenv("EDITOR", "vi")
     deny = pane_auth.deny_names("claude", "auto", None)
-    for name in ("AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_VERTEX"):
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+                 "AWS_CONTAINER_CREDENTIALS_FULL_URI", "CLAUDE_CODE_USE_VERTEX"):
         assert name in deny
+    assert "EDITOR" not in deny
     assert "AWS_PROFILE" not in deny and "CLAUDE_CODE_USE_BEDROCK" not in deny   # the route's own
     assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("codex", "auto", None)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
