@@ -431,6 +431,27 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "`brindle permissions allow`.")
 
 
+def _agy_protected(literal: str, real: str, roots: list[str]) -> bool:
+    """Whether a write lands in a .agents/.git/.brindle folder under one of
+    ``roots``, at any depth, ignoring case (macOS and Windows file systems
+    do). Checked on the path as written and as resolved, and against each
+    top-level protected folder resolved, so a symlink either way (a
+    ``.agents`` that points elsewhere, or a path that points into one) is
+    still caught."""
+    names = {d.casefold() for d in AGY_PROTECTED_DIRS}
+    for root in (r for r in roots if r):
+        for p, r in ((literal, os.path.normpath(root)), (real, os.path.realpath(root))):
+            rel = os.path.relpath(p, r)
+            if rel != ".." and not rel.startswith(".." + os.sep):
+                if names & {part.casefold() for part in rel.split(os.sep)}:
+                    return True
+        for d in AGY_PROTECTED_DIRS:
+            target = os.path.realpath(os.path.join(root, d))
+            if real == target or real.startswith(target + os.sep):
+                return True
+    return False
+
+
 def _brindle_tools() -> set[str]:
     """brindle's MCP tools by both names agy gives them: mcp_brindle_<tool>
     and, through call_mcp_tool, mcp__brindle__<tool>. Exact names, so another
@@ -484,10 +505,8 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
         # Protected wherever the workspaces list says the workspace is: the
         # anchors are brindle's own worktree and repo root.
-        # Any .agents/.git/.brindle under them, not only the top-level ones.
-        protected = path and req.kind != "read" and any(
-            set((_inside(path, root) or "").split(os.sep)) & set(AGY_PROTECTED_DIRS)
-            for root in protected_roots or [] if root)
+        protected = (path and req.kind != "read"
+                     and _agy_protected(os.path.normpath(req.path), path, protected_roots or []))
         if path and not protected and any(
                 w and (path == os.path.realpath(w) or _inside(path, w)) for w in workspaces or []):
             return {"decision": "allow", "reason": "brindle: a file in the workspace"}

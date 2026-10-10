@@ -535,6 +535,20 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
     # .agents/.git/.brindle are protected at any depth, not only at the top.
     assert decision("write_to_file", {"TargetFile": os.path.join(src, ".agents", "hooks.json")}) == "deny"
+    # ... in any case (macOS file systems ignore it) ...
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, ".AGENTS", "hooks.json")}) == "deny"
+    # ... and through a symlink either way: a .agents that points elsewhere in
+    # the worktree, and a harmless-looking path that points into one.
+    agents = os.path.join(ws.path, ".agents")
+    real_agents = os.path.join(ws.path, "agents_real")
+    if os.path.isdir(agents):
+        os.rename(agents, real_agents)
+    else:
+        os.makedirs(real_agents)
+    os.symlink(real_agents, agents)
+    assert decision("write_to_file", {"TargetFile": os.path.join(agents, "hooks.json")}) == "deny"
+    os.symlink(agents, os.path.join(ws.path, "docs"))
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "docs", "hooks.json")}) == "deny"
     # agy tools not checked to stay inside the conversation are denied.
     for tool in ("define_subagent", "manage_subagents", "schedule", "read_resource", "list_resources"):
         assert decision(tool, {}) == "deny", tool
