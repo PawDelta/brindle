@@ -441,8 +441,20 @@ def _brindle_tools() -> set[str]:
     return {f"mcp_brindle_{n}" for n in names} | {f"mcp__brindle__{n}" for n in names}
 
 
+def agy_path_args(payload: dict) -> set[str]:
+    """Every distinct path a call to an agy file tool names, made absolute
+    against its Cwd. More than one means brindle can't tell which one agy
+    will act on."""
+    call = payload.get("toolCall") if isinstance(payload, dict) else None
+    args = call.get("args") if isinstance(call, dict) and isinstance(call.get("args"), dict) else {}
+    cwd = _agy_arg(args, "Cwd") or ""
+    raws = {_agy_arg(args, a) for a in AGY_PATH_ARGS} - {None}
+    return {_abs_path(r, cwd) if cwd else r for r in raws}
+
+
 def agy_strict_output(decision: Decision | None, req: Request | None = None,
-                      workspaces: list[str] | None = None) -> dict:
+                      workspaces: list[str] | None = None,
+                      protected_roots: list[str] | None = None) -> dict:
     """agy's PreToolUse answer under ``agy_approvals: "brindle"``, where agy
     runs with --dangerously-skip-permissions: a hook's "ask" then runs the
     call without a prompt, so brindle answers allow or deny, never ask.
@@ -456,12 +468,13 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         return {"decision": "allow", "reason": f"brindle: {decision.reason}"}
     if req is not None:
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
-        for w in (workspaces or []) if path else []:
-            rel = "." if w and path == os.path.realpath(w) else _inside(path, w)
-            if rel is None:
-                continue
-            if req.kind != "read" and rel.split(os.sep)[0] in AGY_PROTECTED_DIRS:
-                break  # no free pass: a rule must allow it
+        # Protected wherever the workspaces list says the workspace is: the
+        # anchors are brindle's own worktree and repo root.
+        protected = path and req.kind != "read" and any(
+            path == os.path.realpath(os.path.join(root, d)) or _inside(path, os.path.join(root, d))
+            for root in protected_roots or [] if root for d in AGY_PROTECTED_DIRS)
+        if path and not protected and any(
+                w and (path == os.path.realpath(w) or _inside(path, w)) for w in workspaces or []):
             return {"decision": "allow", "reason": "brindle: a file in the workspace"}
         if req.kind == "mcp" and req.tool in _brindle_tools():
             return {"decision": "allow", "reason": "brindle: brindle's own tool"}

@@ -444,6 +444,7 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     turn_on(ws)
     set_local(ws.repo_root, "checks", ["uv run pytest -q"])
     monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     outside = tmp_path / "elsewhere.txt"
     outside.write_text("x")
 
@@ -455,8 +456,15 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, "app.py")}) == "allow"
     assert decision("list_dir", {"DirectoryPath": ws.path}) == "allow"  # the workspace itself
     assert decision("write_to_file", {"TargetFile": "notes.md"}) == "allow"
+    brain = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli", "brain", "c1")
+    os.makedirs(brain, exist_ok=True)
+    assert decision("write_to_file", {"TargetFile": os.path.join(brain, "plan.md")},
+                    artifactDirectoryPath=brain) == "allow"
+    # Any other folder the payload calls its artifact folder is not.
     assert decision("write_to_file", {"TargetFile": str(tmp_path / "plan.md")},
-                    artifactDirectoryPath=str(tmp_path)) == "allow"
+                    artifactDirectoryPath=str(tmp_path)) == "deny"
+    assert decision("write_to_file", {"TargetFile": str(tmp_path / "plan.md")},
+                    artifactDirectoryPath=os.path.join(brain, "..", "..", "..", "..", "..")) == "deny"
     assert decision("mcp_brindle_report_result", {}) == "allow"
     assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "send_message"}) == "allow"
     assert decision("invoke_subagent", {}) == "allow"  # its own calls reach this hook
@@ -470,7 +478,7 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert decision("call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue"}) == "deny"
     assert decision("browser_click", {}) == "deny"  # a tool brindle doesn't know
     rows = db.list_history(ws.repo_root, "permission")
-    assert len(rows) == 7 and all(r.result.startswith("deny:") for r in rows)
+    assert len(rows) == 9 and all(r.result.startswith("deny:") for r in rows)
 
 
 def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
@@ -493,6 +501,17 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
     assert decision("mcp_brindle_evil_report_result", {}) == "deny"
     assert decision("call_mcp_tool", {"ServerName": "brindle_x", "ToolName": "report_result"}) == "deny"
     assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "not_a_tool"}) == "deny"
+    # A call naming two paths: agy may act on either, so neither is trusted.
+    hooks = os.path.join(ws.path, ".agents", "hooks.json")
+    assert decision("write_to_file", {"AbsolutePath": os.path.join(ws.path, "ok.txt"),
+                                      "TargetFile": hooks}) == "deny"
+    # The protected folders are anchored to brindle's worktree and repo, not
+    # to what the payload says the workspace is.
+    wide = strict_answer(db, ws, "write_to_file", {"TargetFile": hooks}, workspacePaths=["/"])
+    assert wide["decision"] == "deny"
+    root_hooks = os.path.join(ws.repo_root, ".git", "hooks", "pre-commit")
+    assert strict_answer(db, ws, "write_to_file", {"TargetFile": root_hooks},
+                         workspacePaths=[ws.repo_root])["decision"] == "deny"
     # agy tools not checked to stay inside the conversation are denied.
     for tool in ("define_subagent", "manage_subagents", "schedule", "read_resource", "list_resources"):
         assert decision(tool, {}) == "deny", tool

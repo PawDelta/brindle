@@ -329,10 +329,20 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     decision = permissions.decide(req, checks=cfg.checks, rules=rules)
     spaces = payload.get("workspacePaths")
     spaces = [s for s in spaces if isinstance(s, str) and s] if isinstance(spaces, list) else []
-    if strict and isinstance(payload.get("artifactDirectoryPath"), str):
-        # agy keeps the conversation's plans and task lists here.
-        spaces.append(payload["artifactDirectoryPath"])
-    out = output(decision, req, spaces)
+    if strict:
+        # Only what brindle knows, not the payload's word: the worktree, and
+        # agy's folder for this conversation's plans and task lists.
+        spaces = [ws.path]
+        artifacts = payload.get("artifactDirectoryPath")
+        brain = os.path.realpath(Path.home() / ".gemini" / "antigravity-cli" / "brain")
+        if isinstance(artifacts, str) and os.path.realpath(artifacts).startswith(brain + os.sep):
+            spaces.append(os.path.realpath(artifacts))
+        if req is not None and len(permissions.agy_path_args(payload)) > 1:
+            out = {"decision": "deny", "reason": "brindle: the call names more than one path"}
+        else:
+            out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root])
+    else:
+        out = output(decision, req, spaces)
     if req is not None and out["decision"] == "deny":
         # Only denies are worth a history row here: agy runs this for every
         # tool call.
