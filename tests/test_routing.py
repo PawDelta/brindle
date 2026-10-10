@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from brindle import agents, autopilot, learning, mcp_server, plugins, quota, workspaces
-from brindle.config import DEFAULT_ROUTING, load_repo_config
+from brindle import agents, autopilot, doctor, learning, mcp_server, plugins, quota, workspaces
+from brindle.config import DEFAULT_ROUTING, load_repo_config, user_config_path
 from brindle.db import Agent
 
 
@@ -78,6 +78,82 @@ def test_config_overrides_one_tier_and_keeps_the_rest(repo):
     r = load_repo_config(repo).routing
     assert r["heavy"] == ["developer"]
     assert r["light"] == DEFAULT_ROUTING["light"] and "bogus" not in r
+
+
+def test_routing_merges_user_repo_and_local_per_tier(repo, tmp_path):
+    user = user_config_path()
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_text(json.dumps({"routing": {"light": ["developer-codex"]}}))
+    cfg = load_repo_config(repo)
+    assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer-codex"]}
+    assert cfg.routing_sources["light"] == str(user)
+
+    config(repo, routing={"light": ["developer"], "medium": ["developer-heavy"]})
+    cfg = load_repo_config(repo)
+    assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer"], "medium": ["developer-heavy"]}
+    assert cfg.routing_sources["light"] == str(repo / ".brindle" / "config.json")
+
+    local = repo / ".brindle" / "config.local.json"
+    local.write_text(json.dumps({"routing": {"light": ["developer-local"]}}))
+    cfg = load_repo_config(repo)
+    assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer-local"], "medium": ["developer-heavy"]}
+    assert cfg.routing_sources == {
+        "light": str(local), "medium": str(repo / ".brindle" / "config.json"), "heavy": "DEFAULT_ROUTING",
+    }
+    other_repo = tmp_path / "other-repo"
+    other_repo.mkdir()
+    assert load_repo_config(other_repo).routing == {**DEFAULT_ROUTING, "light": ["developer-codex"]}
+
+
+def test_repo_and_local_keep_untouched_user_tiers(repo):
+    user_config_path().parent.mkdir(parents=True, exist_ok=True)
+    user_config_path().write_text(json.dumps({"routing": {"light": ["developer-codex"]}}))
+    config(repo, routing={"medium": ["developer-heavy"]})
+    (repo / ".brindle" / "config.local.json").write_text(
+        json.dumps({"routing": {"heavy": ["developer-local"]}}))
+    assert load_repo_config(repo).routing == {
+        "light": ["developer-codex"], "medium": ["developer-heavy"], "heavy": ["developer-local"],
+    }
+
+
+@pytest.mark.parametrize("layer", ["user", "repo", "local"])
+@pytest.mark.parametrize("names", [["missing-worker", "developer"], ["missing-worker"]])
+def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, layer, names):
+    path = {"user": user_config_path(), "repo": repo / ".brindle" / "config.json",
+            "local": repo / ".brindle" / "config.local.json"}[layer]
+    path.write_text(json.dumps({"routing": {"light": names}}))
+    why = []
+    assert choose(db, repo, weight="light", why=why) == ("developer", False)
+    assert f"no profile missing-worker in {path}, skipped missing-worker" in why[0]
+    if len(names) == 1:
+        assert "every light candidate was out" in why[0] and "using developer" in why[0]
+    [check] = [c for c in doctor.routing_checks(load_repo_config(repo), str(repo))
+               if c.name == "routing light"]
+    assert check.level == doctor.WARN
+    assert f"no profile missing-worker in {path}, skipped" in check.detail
+    assert check.detail.startswith("developer (" if len(names) > 1 else "none configured (")
+
+
+@pytest.mark.parametrize("layer", ["default", "user", "repo", "local"])
+def test_doctor_prints_effective_routing_and_each_tiers_source(repo, monkeypatch, layer):
+    config(repo)
+    path = {"user": user_config_path(), "repo": repo / ".brindle" / "config.json",
+            "local": repo / ".brindle" / "config.local.json"}.get(layer)
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"routing": {"light": ["developer-codex"]}}))
+    monkeypatch.setattr(doctor, "_tool", lambda *a, **k: doctor.Check(doctor.OK, a[0], "stub"))
+    monkeypatch.setattr(doctor, "native_checks", lambda root: [])
+    # Exercise the section in the full report, not just its helper.
+    checks = [c for c in doctor.checks(str(repo)) if c.name.startswith("routing ")]
+    assert len(checks) == 3
+    assert all(c.level == doctor.OK for c in checks)
+    rendered = doctor.render(checks)
+    for tier in DEFAULT_ROUTING:
+        names = ["developer-codex"] if tier == "light" and path else DEFAULT_ROUTING[tier]
+        source = str(path) if tier == "light" and path else "DEFAULT_ROUTING"
+        assert f"{' -> '.join(names)} (from {source})" in rendered
+        assert f"routing {tier}" in rendered
 
 
 def test_weight_picks_the_first_candidate(db, repo, boss):

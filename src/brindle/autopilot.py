@@ -450,7 +450,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     try:
         p = load_profile(name, repo_root)
     except KeyError:
-        return f"no profile {name}"
+        source = cfg.routing_sources.get(weight or "", "DEFAULT_ROUTING")
+        return f"no profile {name} in {source}, skipped {name}"
     over = gate.why_not(name, weight) if gate is not None and gate.active else None
     if over:
         return f"over budget, skipped {name} ({over})"

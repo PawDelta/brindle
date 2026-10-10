@@ -141,6 +141,8 @@ class RepoConfig:
     airgap: bool = False
     # Weight routing: task weight -> profiles to try, in order (see autopilot.choose_profile).
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
+    # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
+    routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
     # Model prices in $/MTok that add to or override brindle's built-in ones (see brindle.pricing):
     # {"model": {"input", "output", "cache_write"?, "cache_read"?}}, merged per model: user, then repo, then config.local.json.
     pricing: dict[str, dict] = field(default_factory=dict)
@@ -237,12 +239,14 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
             for group, name in plugins.items():
                 if isinstance(group, str) and isinstance(name, str):
                     cfg.plugins[group] = name
-    for source in (shared, local):  # per tier, so a repo can override one and keep the rest
+    for source, path in ((user, user_config_path()), (shared, base / CONFIG_FILE),
+                         (local, base / LOCAL_CONFIG_FILE)):  # per tier, keeping the other tiers
         routing = source.get("routing")
         if isinstance(routing, dict):
             for tier, names in routing.items():
                 if tier in WEIGHTS and isinstance(names, list):
                     cfg.routing[tier] = [n for n in names if isinstance(n, str)]
+                    cfg.routing_sources[tier] = str(path)
     for source in (shared, local):  # per weight, so a repo can override one and keep the rest
         second = source.get("second_review")
         if isinstance(second, dict):
