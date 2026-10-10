@@ -1,4 +1,4 @@
-"""Issue #49: an Antigravity worker's warm-up, task and messages must reach
+"""Issue #49: an Antigravity worker's instructions, task and messages must reach
 its own pane, never the Claude Code inbox of the session that launched it;
 and assign/handoff say why a worker couldn't be started."""
 
@@ -54,13 +54,13 @@ def fake_tmux(monkeypatch):
 
 @pytest.fixture
 def helpers(monkeypatch):
-    """brindle's detached helpers (_flush, _after-launch) aren't started; git
+    """brindle's detached helpers (_flush, _after-launch, _launch-health) aren't started; git
     and everything else runs as usual. Returns their command lines."""
     started = []
     real = subprocess.Popen
 
     def popen(argv, *a, **k):
-        if isinstance(argv, list) and any(x in argv for x in ("_flush", "_after-launch")):
+        if isinstance(argv, list) and any(x in argv for x in ("_flush", "_after-launch", "_launch-health")):
             started.append(argv)
             return None
         return real(argv, *a, **k)
@@ -83,13 +83,18 @@ def test_launch_does_not_take_the_launchers_inbox(db, ws, launcher_inbox, fake_t
     # agy has no start hook, so brindle marks it ready from the launcher's own process.
     assert a.status == "idle" and not a.inbox_socket and not a.inbox_token
     assert any("_flush" in argv and a.id in argv for argv in helpers)
-    # The warm-up (its profile) and then the task are typed into its pane.
+    # Its instructions and actual task reach its own pane in a single turn.
+    assert db.pending_count(a.id) == 1
     assert agents.flush(db, a.id)
+    assert [t for t, _ in fake_tmux] == ["@9"]
+    delivered = fake_tmux[0][1]
+    assert "You are a developer agent" in delivered
+    assert "When you run under brindle" in delivered and "call_mcp_tool" in delivered
+    assert delivered.count("fix it") == 1 and antigravity.WARMUP_END not in delivered
+    assert db.pending_count(a.id) == 0
     db.set_status(a.id, "idle")
-    assert agents.flush(db, a.id)
-    assert [t for t, _ in fake_tmux] == ["@9", "@9"]
-    assert fake_tmux[0][1].endswith(antigravity.WARMUP_END) and "You are a developer agent" in fake_tmux[0][1]
-    assert fake_tmux[1][1].startswith("fix it")
+    assert not agents.flush(db, a.id)
+    assert len(fake_tmux) == 1
     assert launcher_inbox == []
 
 
@@ -185,9 +190,17 @@ def test_assign_starts_an_antigravity_worker(db, boss, launcher_inbox, fake_tmux
     # What the detached _after-launch helper does once agy shows its prompt.
     agents.ready(db, worker.id)
     assert not db.get_agent(worker.id).inbox_socket
+    assert db.pending_count(worker.id) == 1
     assert agents.flush(db, worker.id)
-    assert fake_tmux[0][0] == "@9" and fake_tmux[0][1].endswith(antigravity.WARMUP_END)
-    assert db.pending_count(worker.id) == 1   # the task, typed in as the next turn
+    assert len(fake_tmux) == 1 and fake_tmux[0][0] == "@9"
+    delivered = fake_tmux[0][1]
+    assert "You are a developer agent" in delivered
+    assert "When you run under brindle" in delivered and "call_mcp_tool" in delivered
+    assert delivered.count("write the readme") == 1 and antigravity.WARMUP_END not in delivered
+    assert db.pending_count(worker.id) == 0
+    db.set_status(worker.id, "idle")
+    assert not agents.flush(db, worker.id)
+    assert len(fake_tmux) == 1
     assert launcher_inbox == []
 
 
