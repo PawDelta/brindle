@@ -98,6 +98,41 @@ def test_launch_does_not_take_the_launchers_inbox(db, ws, launcher_inbox, fake_t
     assert launcher_inbox == []
 
 
+@pytest.mark.parametrize("autopilot_on", [False, True])
+def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
+        db, ws, repo, launcher_inbox, fake_tmux, helpers, monkeypatch, autopilot_on):
+    from brindle import autopilot, cli, model_access
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
+    monkeypatch.setattr(Antigravity, "after_launch", lambda *a: True)
+    monkeypatch.setattr(Antigravity, "warmup", lambda *a: pytest.fail("synthetic warmup"))
+    monkeypatch.setattr(model_access, "probe", lambda *a, **k: pytest.fail("availability generation probe"))
+    monkeypatch.setattr(autopilot, "guide", lambda *a: "\nAutopilot context must survive initialization.")
+    monkeypatch.setattr(cli, "_preflight", lambda *a: None)
+    monkeypatch.setattr(cli, "_trust_codex_hook", lambda *a: None)
+    monkeypatch.setattr(cli, "_cull_detached", lambda *a: None)
+    monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)
+    monkeypatch.setattr(cli, "_settings_sync_detached", lambda *a: None)
+    cli.start(agent="supervisor", prompt=None, provider="antigravity", attach=False,
+              watch=False, autopilot=autopilot_on, branch=None, worktree=None)
+    a, = db.list_agents(ws.id)
+    assert a.mode == "interactive" and a.task is None
+    expected = agents._profile_for(db, a, ws).prompt
+    assert expected and db.pending_count(a.id) == 1
+    agents.ready(db, a.id)
+    assert agents.flush(db, a.id)
+    delivered = fake_tmux[0][1]
+    assert expected in delivered and antigravity.TOOLS_NOTE in delivered
+    assert "Delegation rule:" in delivered
+    assert ("Autopilot context must survive initialization." in delivered) == autopilot_on
+    assert antigravity.WARMUP_END not in delivered
+    assert db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone() is None
+    assert not any("_launch-health" in argv for argv in helpers)
+    assert db.pending_count(a.id) == 0
+    db.set_status(a.id, "idle")
+    assert not agents.flush(db, a.id) and len(fake_tmux) == 1 and launcher_inbox == []
+
+
 def test_a_claude_agent_still_records_its_own_inbox(db, ws, launcher_inbox):
     db.add_agent(Agent("c1", ws.id, "developer", "claude", None, "assign", "starting", "@1", None, time.time()))
     agents.handle_hook(db, "c1", "session-start", {})

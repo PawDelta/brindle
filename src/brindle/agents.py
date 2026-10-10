@@ -733,12 +733,13 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
-        # Deliver the real task once; no synthetic warm-up/model request.
+        # Workers receive their instructions and real task in one delivery.
+        # A fresh interactive chat without a task still needs its profile.
+        if provider.name == "antigravity" and not resume and (prompt or agent.mode == "interactive"):
+            from brindle import antigravity
+            instructions = "\n\n".join(filter(None, (antigravity.TOOLS_NOTE, profile.prompt)))
+            prompt = "\n\n".join(filter(None, (antigravity.format_delivered_message(instructions), prompt)))
         if prompt:
-            if provider.name == "antigravity" and not resume:
-                from brindle import antigravity
-                instructions = "\n\n".join(filter(None, (antigravity.TOOLS_NOTE, profile.prompt)))
-                prompt = f"{antigravity.format_delivered_message(instructions)}\n\n{prompt}"
             db.enqueue(agent.id, prompt, None)
         prompt = None
     # Recorded before launching: the agent's hooks may fire within milliseconds.

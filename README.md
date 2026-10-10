@@ -619,6 +619,9 @@ probe here; no Claude CLI or synthetic generation request is used for these chec
 
 The real first worker task is sent once. A detached helper inspects its current
 pane five seconds after delivery, so readiness delays do not use up that window.
+Fresh interactive Antigravity chats without a task still receive their profile,
+tool instructions and any autopilot context once after readiness; worker
+instructions accompany the actual task in the same delivery.
 For argv tasks, the timer starts at prompt submission or observed CLI readiness,
 after trust/startup handling; readiness timeout does not establish delivery.
 Explicit fresh authentication, access, model and capacity errors, or an early
