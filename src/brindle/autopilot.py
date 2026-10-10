@@ -512,7 +512,21 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     name = pick or remaining[0]
     if decision is not None:
         decision["baseline"] = remaining[0]
-    why = f"weight {weight} -> {name}"
+
+    try:
+        from brindle.profiles import load_profile
+        p = load_profile(name, repo_root)
+        model_info = []
+        if p.model:
+            model_info.append(p.model)
+        if p.effort:
+            model_info.append(f"{p.effort} effort")
+        cost_tag = "; most expensive tier" if weight == "heavy" else ("; lowest cost tier" if weight == "light" else "")
+        info_str = f" ({', '.join(model_info)}{cost_tag})" if model_info or cost_tag else ""
+    except Exception:
+        info_str = ""
+
+    why = f"weight {weight} -> {name}{info_str}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
     kept = learning.kept_note(cfg, repo_root)
     detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
@@ -548,6 +562,22 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         if weight:
             if weight not in WEIGHTS:
                 raise AutopilotError(f"weight must be one of {', '.join(WEIGHTS)}, not {weight!r}")
+            weight_order = {"light": 0, "medium": 1, "heavy": 2}
+            if cfg.max_weight and cfg.max_weight in WEIGHTS:
+                if weight_order[weight] > weight_order[cfg.max_weight]:
+                    orig_weight = weight
+                    weight = cfg.max_weight
+                    if why is not None:
+                        why.append(f"weight {orig_weight} capped to {weight} by max_weight")
+            if files and all(f.startswith("docs/") or f.endswith(".md") for f in files):
+                if weight == "heavy":
+                    weight = "medium"
+                    if why is not None:
+                        why.append("weight demoted from heavy to medium (docs only)")
+                elif weight == "medium":
+                    weight = "light"
+                    if why is not None:
+                        why.append("weight demoted from medium to light (docs only)")
             from brindle import budget
 
             gate = budget.Gate(db, cfg, repo_root, caller_id)

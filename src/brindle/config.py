@@ -91,6 +91,7 @@ class RepoConfig:
     merge_into: str | None = None      # branch worker branches are cut from and merge into (None: the supervisor's / default branch)
     auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
+    max_weight: str | None = None      # ceiling for weight routing: "light", "medium", or None (unlimited)
     plan_first: bool = False           # workers propose a plan and wait for approval before editing
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
@@ -214,7 +215,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
                 "review_rounds", "fable_escalation", "goal_audit", "overlap", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "sidebar", "pr_footer", "plan_first", "learning",
+                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile"):
         for source in (local, shared, user):
