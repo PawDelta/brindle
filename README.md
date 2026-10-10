@@ -605,11 +605,18 @@ before creating a worker worktree or process. Partial catalogs, aliases,
 discovery errors and Codex's bundled catalogs remain unverified; being listed
 does not prove generation access, billing or quota. Catalog discovery is bounded
 to five seconds and cached briefly by environment and local account/config
-revision where available. Claude, Bedrock, Vertex and Foundry have no catalog
+revision where available. Routing and provisioning reuse equivalent catalog
+context across worktrees, excluding launch bookkeeping while retaining project
+settings, credentials and account selectors. CLI catalogs remain advisory;
+unobservable external/keychain login changes may remain cached for 30 seconds.
+Custom CLI binaries retain separate cache entries per working directory.
+Claude, Bedrock, Vertex and Foundry have no catalog
 probe here; no Claude CLI or synthetic generation request is used for these checks.
 
 The real first worker task is sent once. A detached helper inspects its current
 pane five seconds after delivery, so readiness delays do not use up that window.
+For argv tasks, the timer starts at prompt submission or observed CLI readiness,
+after trust/startup handling; readiness timeout does not establish delivery.
 Explicit fresh authentication, access, model and capacity errors, or an early
 exit, produce a safe supervisor message with a next step. A live process with
 no clear result is recorded as pending for diagnostics, not verified model
@@ -621,7 +628,8 @@ may require waiting for the cooldown or clearing `model_refusals.json`.
 This is a single observation, not an entitlement test: unfamiliar or wrapped
 errors, later failures and slow requests can remain pending. It does not scan
 historical transcripts, and excludes task text, previous pane lines and older
-marked replies. A separate detached check covers headless exits before task
+marked replies, fenced examples and ordinary assistant/tool explanations. A
+separate detached check covers headless and argv startup exits before task
 delivery. Existing readiness and watch/cull handling continues afterward.
 
 **Hosted learning (brindle Pro).** With a plan that includes it, brindle learns

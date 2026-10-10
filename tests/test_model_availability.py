@@ -687,3 +687,68 @@ def test_pane_key_helper_resolved_once_for_catalog_health_and_launch(db, repo, m
     agents._effective_window_env(a, ws, None)
     assert agents._window_environment(a, ws, None) is first
     key.assert_called_once()
+
+
+def test_existing_tmux_environment_excludes_launcher_only_credentials_and_account(db, repo, monkeypatch):
+    from brindle import agents, tmux, workspaces
+    monkeypatch.setenv("OPENAI_API_KEY", "launcher-key")
+    monkeypatch.setenv("CODEX_HOME", "/launcher-account")
+    snapshots = {("-g",): "HOME=/server-home\nCODEX_HOME=/server-account\n",
+                 ("-t", "=brindle_proj_root"): "CUSTOM=session\n"}
+    monkeypatch.setattr(tmux, "_tmux", lambda command, *scope, **k:
+                        subprocess.CompletedProcess([], 0, snapshots.get(scope, ""), ""))
+    env = tmux.inherited_env("brindle_proj_root")
+    assert "OPENAI_API_KEY" not in env and env["CODEX_HOME"] == "/server-account"
+    p = profile("codex", env={"CUSTOM": "explicit"})
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "codex"))
+    monkeypatch.setattr(agents, "_model_checker", check)
+    assert agents.model_problem("test", workspaces.adopt_root(db, str(repo))) is None
+    request = discover.call_args.args[0]
+    assert "OPENAI_API_KEY" not in request.env and request.env["CODEX_HOME"] == "/server-account"
+    assert request.env["CUSTOM"] == "explicit"
+    from brindle import launch_health, model_access
+    model_access.refuse("test", model_access.LAUNCH_AUTH, repo_root=str(repo),
+                        fp=launch_health.fingerprint(p, request.env))
+    monkeypatch.setenv("OPENAI_API_KEY", "different-launcher-key")
+    monkeypatch.setenv("CODEX_HOME", "/different-launcher-account")
+    assert "authentication" in agents.model_problem("test", workspaces.adopt_root(db, str(repo))).lower()
+
+
+def test_new_tmux_server_environment_uses_launcher_snapshot(monkeypatch):
+    from brindle import tmux
+    monkeypatch.setenv("OPENAI_API_KEY", "new-server-key")
+    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: subprocess.CompletedProcess([], 1, "", "no server"))
+    assert tmux.inherited_env("new-session")["OPENAI_API_KEY"] == "new-server-key"
+
+
+@pytest.mark.parametrize("change", ["credential", "account", "project", "selector", "explicit_bookkeeping_key"])
+def test_provisioning_cache_preserves_catalog_identity(tmp_path, change):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    env = {"HOME": str(tmp_path), "OPENAI_API_KEY": "first", "CUSTOM_ACCOUNT": "one", "BRINDLE_AGENT_ID": "preview"}
+    p = profile("codex", api_key_env="BRINDLE_AGENT_ID" if change == "explicit_bookkeeping_key" else "OPENAI_API_KEY")
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "codex"))
+    check.check(p, effective_env=env, cwd=str(first), account_identity="revision-one",
+                catalog_context=ma.provisioning_context(p.provider, str(first), env))
+    other = {**env, "BRINDLE_AGENT_ID": "worker"}
+    revision = "revision-one"
+    if change == "credential":
+        other["OPENAI_API_KEY"] = "second"
+    elif change == "selector":
+        other["CUSTOM_ACCOUNT"] = "two"
+    elif change == "account":
+        revision = "revision-two"
+    elif change == "project":
+        (second / ".codex").mkdir()
+        (second / ".codex" / "config.toml").write_text('model_provider = "other"')
+    check.check(p, effective_env=other, cwd=str(second), account_identity=revision,
+                catalog_context=ma.provisioning_context(p.provider, str(second), other))
+    assert discover.call_count == 2
+    assert discover.call_args.args[0].env == other  # normalized cache identity never alters discovery env
+
+
+def test_custom_cli_catalog_retains_cwd_identity(tmp_path):
+    env = {"BRINDLE_CODEX_BIN": "/custom/codex"}
+    assert ma.provisioning_context("codex", str(tmp_path / "a"), env) != ma.provisioning_context("codex", str(tmp_path / "b"), env)

@@ -457,6 +457,12 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     assert lh.inspect(db, a.id) is None and len(reports) == 1
 
 
+def test_current_codex_error_retains_provider_ui_and_real_task_context():
+    from brindle import launch_health as lh
+    screen = "OpenAI Codex\nmodel: chosen\n› implement a feature\n■ unexpected status 403 Forbidden\n100% context left"
+    assert lh.failure(screen, task="implement a feature") == lh.AUTH
+
+
 @pytest.mark.parametrize("delivered", [False, True])
 def test_early_exit_reports_without_claiming_access(db, health, monkeypatch, delivered):
     lh, a, _, _, _, reports = health
@@ -492,10 +498,28 @@ def test_after_launch_does_not_move_followup_ahead_of_five_seconds(db, health):
     ("● API Error: 403 Forbidden\n❯ retry\n● fixed it", "", ""),
     ("● API Error: 403 Forbidden\nesc to interrupt", "", ""),
     ("```\nError: invalid API key\n```", "", ""),
+    ("● Example:\n```\n■ unexpected status 403 Forbidden\n```", "", ""),
+    ("● Explanation:\n  Error: invalid API key", "", ""),
+    ("● Explanation:\nError: invalid API key", "", ""),
+    ("● Bash(cat errors.txt)\n  Error: invalid API key", "", ""),
+    ("● Example:\n~~~\n● API Error: 403 Forbidden\n~~~", "", ""),
+    ("Assistant explanation\nError: invalid API key", "", ""),
+    ("Tool output:\n■ unexpected status 403 Forbidden", "", ""),
+    ("● Bash(cat errors.txt)\n  ● API Error: 403 Forbidden", "", ""),
+    ("❯ reproduce these errors\n■ unexpected status 403 Forbidden", "", ""),
 ])
 def test_prompt_history_and_prose_are_not_launch_evidence(screen, baseline, task):
     from brindle import launch_health
     assert launch_health.failure(screen, baseline=baseline, task=task) is None
+
+
+def test_quoted_error_never_creates_refusal_or_notification(db, health, monkeypatch):
+    from brindle import model_access
+    lh, a, _, _, _, reports = health
+    monkeypatch.setattr(lh, "capture", lambda a: "● Example:\n```\n■ unexpected status 403 Forbidden\n```")
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "pending" and reports == []
+    assert model_access.refused(a.profile, fp="effective-account") is None
 
 
 def test_paused_finished_and_replaced_launches_are_not_reported(db, health):
@@ -537,6 +561,8 @@ def test_initial_command_task_delivered_once_and_no_generation_probe(db, root, l
     assert db.pending_count(a.id) == 0
     assert ["_launch-health", a.id] in [argv[3:5] for argv in detached]
     assert ["_after-launch", a.id] in [argv[3:5] for argv in detached]
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+    assert [argv for argv in detached if argv[3] == "_launch-health"][0][-1] == "--startup"
 
 
 def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatch):
@@ -545,10 +571,89 @@ def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatc
     steps = []
     monkeypatch.setattr(tmux, "paste", lambda *a, **k: steps.append("task"))
     monkeypatch.setattr(agents, "_detach", lambda *a: steps.append("followup"))
-    monkeypatch.setattr(agents.get_provider("shell"), "after_launch", lambda *a: None)
+    monkeypatch.setattr(type(agents.get_provider("shell")), "after_launch", lambda *a: None)
     agents.spawn(db, ws, "developer", provider_name="shell", prompt="real task",
                  parent_id=boss.id, mode="assign")
     assert steps == ["task", "followup"]
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
+        db, root, launches, detached, monkeypatch, provider):
+    from brindle import launch_health as lh
+    boss, ws = root
+    now, sleeps, reports = [100.0], [], []
+    monkeypatch.setattr(lh.time, "time", lambda: now[0])
+    monkeypatch.setattr(lh.time, "sleep", lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay)))
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    shown = ["Trust this folder?"]
+    monkeypatch.setattr(lh, "capture", lambda a: shown[0])
+    monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
+    a = agents.spawn(db, ws, "developer", provider_name=provider, prompt="real task", parent_id=boss.id,
+                     mode="assign", background_setup=True)
+    token = a._launch_health_token
+    assert sum("real task" in arg for arg in launches[-1]) == 1
+    assert sleeps == [] and db.pending_count(a.id) == 0
+    cli.launch_health_cmd(a.id, startup=True, token=token)
+    assert now[0] == 105 and reports == []
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+    def delayed_ready(self, target):
+        assert target == a.tmux_window
+        now[0] = 112.0  # trust/readiness takes longer than the initial five seconds
+        shown[0] = "■ unexpected status 403 Forbidden" if provider == "codex" else "● API Error: 401 invalid API key"
+        return True
+
+    monkeypatch.setattr(type(agents.get_provider(provider)), "after_launch", delayed_ready)
+    cli.after_launch_cmd(a.id, token=token)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert row["delivered_at"] == 112 and row["outcome"] is None and reports == []
+    followups = [cmd for cmd in detached if cmd[3] == "_launch-health" and "--startup" not in cmd]
+    assert len(followups) == 1
+    now[0] = 114.0
+    cli.launch_health_cmd(a.id, startup=False, token=token)
+    assert sleeps == [5.0, 3.0] and now[0] == 117
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "failed"
+    assert len(reports) == 1 and "Fix:" in reports[0]
+    assert db.pending_count(a.id) == 0 and sum("real task" in arg for arg in launches[-1]) == 1
+
+
+def test_prompt_submit_arms_argv_health_once_before_readiness_helper(db, root, launches, detached, monkeypatch):
+    from brindle import launch_health as lh
+    boss, ws = root
+    monkeypatch.setattr(lh.time, "time", lambda: 120.0)
+    a = agents.spawn(db, ws, "developer", prompt="real task", parent_id=boss.id, mode="assign", background_setup=True)
+    agents.handle_hook(db, a.id, "prompt-submit", {"prompt": "real task"})
+    agents.handle_hook(db, a.id, "prompt-submit", {"prompt": "real task"})
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == 120
+    assert len([cmd for cmd in detached if cmd[3] == "_launch-health" and "--startup" not in cmd]) == 1
+
+
+@pytest.mark.parametrize("provider,ready_screen", [("claude", "❯"), ("codex", "› 100% context left"),
+                                                   ("antigravity", "? for shortcuts")])
+def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeypatch, provider, ready_screen):
+    now = [100.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "loading" if now[0] < 106 else ready_screen)
+    assert agents.get_provider(provider).after_launch("%test") is True
+    assert now[0] == 106
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "loading")
+    assert agents.get_provider(provider).after_launch("%test") is False
+    assert now[0] == 136
+
+
+def test_codex_trust_confirmation_is_not_yet_task_acceptance(monkeypatch):
+    now, keys = [100.0], []
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    screens = iter(["Trust this folder?\n› 1. Trust and continue", "loading", "› 100% context left"])
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
+    monkeypatch.setattr(tmux, "send_keys", lambda *a: keys.append(a))
+    assert agents.get_provider("codex").after_launch("%test") is True
+    assert now[0] == 101.5 and keys == [("%test", "Enter")]
 
 
 def test_headless_real_turn_schedules_followup_once(db, root, launches, monkeypatch):
@@ -633,9 +738,15 @@ def test_delegate_prepares_an_empty_pane_before_binding_and_delivers_once(db, ro
     monkeypatch.setattr(agents, "_open_window", open_window)
     a, _ = agents.delegate(db, boss, ws, "developer", "real initial task", "assign")
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
-    assert launched == [a.id] and row["pane"] == "%bound" and row["delivered_at"] is not None
+    assert launched == [a.id] and row["delivered_at"] is None
     followups = [argv for argv in detached if argv[3] == "_launch-health"]
-    assert len(followups) == 1 and followups[0][-2:] == ["--token", row["token"]]
+    assert len(followups) == 1 and followups[0][-3:] == ["--token", row["token"], "--startup"]
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(type(agents.get_provider(a.provider)), "after_launch", lambda *a: True)
+    cli.after_launch_cmd(a.id, token=row["token"])
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert row["pane"] == "%bound" and row["delivered_at"] is not None
+    assert len([argv for argv in detached if argv[3] == "_launch-health" and "--startup" not in argv]) == 1
     assert db.pending_count(a.id) == 0
 
 
@@ -707,6 +818,30 @@ def test_old_prepared_agent_cannot_deliver_into_replacement_launch(db, health):
     assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
 
 
+@pytest.mark.parametrize("replacement_point", ["readiness", "ready"])
+def test_readiness_helper_cannot_arm_concurrently_replaced_argv_launch(db, health, monkeypatch, replacement_point):
+    lh, a, _, _, started, reports = health
+    lh.prepare(db, a, "old-account", argv_task=True)
+    old_token = a._launch_health_token
+
+    def replace():
+        resumed = db.get_agent(a.id)
+        lh.prepare(db, resumed, "new-account", argv_task=True)
+
+    def readiness(self, target):
+        if replacement_point == "readiness":
+            replace()
+        return True
+
+    monkeypatch.setattr(type(agents.get_provider(a.provider)), "after_launch", readiness)
+    monkeypatch.setattr(agents, "ready", lambda *args: replace() if replacement_point == "ready" else None)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    cli.after_launch_cmd(a.id, token=old_token)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert row["token"] != old_token and row["delivered_at"] is None and row["outcome"] is None
+    assert started == [] and reports == []
+
+
 def test_launch_health_schema_migrates_existing_rows(db, health):
     from brindle.db import DB
     _, a, _, _, _, _ = health
@@ -719,5 +854,6 @@ def test_launch_health_schema_migrates_existing_rows(db, health):
     try:
         row = migrated.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
         assert row["fingerprint"] == "legacy" and row["token"] == ""
+        assert row["argv_task"] == 0
     finally:
         migrated.conn.close()

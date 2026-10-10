@@ -23,7 +23,7 @@ import uuid
 from brindle import company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
-from brindle.model_availability import ModelAvailabilityChecker
+from brindle.model_availability import ModelAvailabilityChecker, provisioning_context
 from brindle.profiles import load_profile, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, signed_out, unusable
 from brindle.sidebar_follow import (
@@ -538,7 +538,8 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
     if denied:
         return denied.line()
     result = _model_checker.check(profile, effective_env=effective, cwd=ws.path,
-                                  account_identity=account_revision(profile.provider, effective))
+                                  account_identity=account_revision(profile.provider, effective),
+                                  catalog_context=provisioning_context(profile.provider, ws.path, effective))
     return result.explanation if result.status == "unavailable" else None
 
 
@@ -753,7 +754,7 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first)))
     if prompt or db.pending_count(agent.id):
-        _prepare_launch_health(db, agent, ws, profile, m)
+        _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"))
     else:
         # Resuming a conversation without delivering a new task must not
         # classify the previous turn's error as a current launch failure.
@@ -762,7 +763,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                           **({"m": m} if m is not None else {}))
     if prompt and provider.name != "shell":
         from brindle import launch_health
-        launch_health.delivered(db, agent)
+        from brindle.providers import brindle_invocation
+        # Observe early startup exits independently; a live startup must not
+        # consume the follow-up before the CLI accepts its argv task.
+        if launch_health.helper_token(agent):
+            _detach([*brindle_invocation(), "_launch-health", agent.id,
+                     *launch_health.helper_token(agent), "--startup"])
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)
@@ -783,16 +789,20 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             env={**base, **agent_env(ws, agent.id)},
         )
     else:
-        provider.after_launch(target)
+        accepted = provider.after_launch(target)
         ready(db, agent.id)
+        if accepted:
+            from brindle import launch_health
+            launch_health.accepted(db, agent)
 
 
-def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD) -> None:
+def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
+                           *, argv_task: bool = False) -> None:
     if not agent.parent_id or not agent.task:
         return
     from brindle import launch_health
     effective = _effective_window_env(agent, ws, m)
-    launch_health.prepare(db, agent, launch_health.fingerprint(profile, effective))
+    launch_health.prepare(db, agent, launch_health.fingerprint(profile, effective), argv_task=argv_task)
 
 
 # -- headless workers (claude -p) ------------------------------------------------
@@ -2376,6 +2386,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             )
     elif event == "prompt-submit":
         db.set_status(agent_id, "processing")
+        from brindle import launch_health
+        launch_health.accepted(db, agent)
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))

@@ -127,3 +127,33 @@ def test_catalog_available_and_unverified_do_not_reject_provisioning(db, repo, m
     monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(a))
     a = agents.spawn(db, ws, "developer", prompt="real task")
     assert launched == [a] and db.get_agent(a.id) is not None
+
+
+@pytest.mark.parametrize("provider", ["native", "codex", "antigravity"])
+def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, repo, monkeypatch, provider):
+    from brindle import autopilot, model_availability as ma, tmux
+    from brindle.config import RepoConfig
+    from brindle.profiles import Profile
+    ws = workspaces.adopt_root(db, str(repo))
+    p = Profile("test", "", provider, "", model="wanted", base_url="https://api.openai.com/v1")
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(autopilot, "load_profile", lambda *a: p)
+    monkeypatch.setattr(tmux, "inherited_env", lambda *a: {"HOME": str(repo), "PATH": "/usr/bin"})
+    from brindle import providers
+    monkeypatch.setattr(providers, "signed_out", lambda *a, **k: None)
+    monkeypatch.setattr(providers, "unusable", lambda *a: None)
+    now, requests = [0.0], []
+
+    def slow_discovery(request, timeout):
+        requests.append(request)
+        now[0] += timeout  # a whole catalog timeout, without sleeping
+        return ma.Catalog(frozenset({"wanted"}), "openai" if provider == "native" else provider)
+
+    monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(discover=slow_discovery, clock=lambda: now[0]))
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append((a, ws)))
+    assert autopilot._unavailable("test", RepoConfig(), str(repo)) is None
+    worker, worker_ws = agents.delegate(db, None, ws, "test", "real task", "assign")
+    assert worker_ws.path != ws.path and launched == [(worker, worker_ws)]
+    assert len(requests) == 1 and now[0] == ma.TIMEOUT
+    assert requests[0].env["BRINDLE_AGENT_ID"] == "preflight"  # discovery still gets exact worker env

@@ -60,11 +60,18 @@ def account_revision(provider: str, env) -> str | None:
     return hashlib.sha256(json.dumps(revisions).encode()).hexdigest() if revisions else None
 
 
-def prepare(db, agent, fp: str) -> None:
+def prepare(db, agent, fp: str, *, argv_task: bool = False) -> None:
     if agent.parent_id and agent.task:
         agent._launch_health_token = uuid.uuid4().hex
-        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint) VALUES (?,?,?,?)",
-                        (agent.id, agent._launch_health_token, agent.tmux_window or "", fp))
+        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint,argv_task) VALUES (?,?,?,?,?)",
+                        (agent.id, agent._launch_health_token, agent.tmux_window or "", fp, argv_task))
+
+
+def accepted(db, agent) -> None:
+    """An argv task reaches the CLI only after startup/trust or prompt-submit."""
+    row = db.conn.execute("SELECT argv_task FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+    if row and row["argv_task"]:
+        delivered(db, agent)
 
 
 def helper_token(agent) -> list[str]:
@@ -108,42 +115,59 @@ def before_delivery(db, agent) -> str:
 
 
 def failure(screen: str, *, baseline: str = "", task: str = ""):
-    """Require an error marker, then classify only its line (never user prose)."""
+    """Read complete response context before accepting a provider error block."""
     old = {line.strip() for line in baseline.splitlines()}
     text = re.sub(r"\x1b\[[0-9;]*m", "", screen)
-    # Resumed TUIs can render old replies. Only the latest marked response
-    # can be current; a newer successful/busy reply supersedes an old error.
-    replies = list(re.finditer(r"(?m)^\s*[●■]", text))
-    if replies:
-        text = text[replies[-1].start():]
-    if re.search(r"(?i)esc to (?:interrupt|cancel)|thinking|working\s*…", text):
-        return None
-    # A Claude user turn or Codex/agy input block isn't a provider response.
-    in_prompt = False
+    context = "ui" if re.search(r"OpenAI Codex|\b\d+% context left", text) else "startup"
     in_code = False
+    candidate = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("```"):
+        if stripped.startswith(("```", "~~~")):
             in_code = not in_code
             continue
-        if re.match(r"^[❯>]\s", stripped):
-            in_prompt = True
-        elif stripped.startswith(("●", "■")):
-            in_prompt = False
-        if in_prompt or in_code or stripped in old or (stripped and stripped in task):
+        if in_code or not stripped or (stripped and stripped in task):
             continue
-        if not re.match(r"^(?:●\s*API Error:|■\s*|(?:API )?Error:|ERROR\b|── brindle: the model endpoint failed:)", stripped):
+        if re.match(r"^[❯>›]\s+\S", stripped):
+            prompt = re.sub(r"^[❯>›]\s+", "", stripped)
+            context, candidate = ("ui" if prompt in task else "prompt"), None
             continue
-        cause = model_access.classify(stripped)
-        if cause:
-            return cause
-        low = stripped.lower()
-        if re.search(r"\b(401|403)\b|unauthorized|authentication failed|invalid.api.key|not authenticated|access denied|permission denied", low):
-            return AUTH
-        if re.search(r"\b429\b|rate.limit|quota|capacity|overloaded|resource.exhausted|usage.limit", low):
-            return CAPACITY
-        if re.search(r"model.*(?:not found|does not exist|not available|not supported|unavailable)|unsupported model", low):
-            return MODEL
+        if re.search(r"(?i)esc to (?:interrupt|cancel)|^thinking|^working\s*…", stripped):
+            context, candidate = "ui", None
+            continue
+        if stripped.startswith("●") and len(line) - len(line.lstrip()) <= 1:
+            # A tool result or assistant explanation is not a provider error.
+            context = "provider" if re.match(r"^●\s*API Error:", stripped) else "assistant"
+            candidate = _cause(stripped) if context == "provider" and stripped not in old else None
+        elif (len(line) - len(line.lstrip()) <= 1
+              and re.match(r"^■\s*(?:unexpected status|(?:API )?Error\b)", stripped)):
+            if context in ("startup", "provider", "ui"):
+                context = "provider"
+                candidate = _cause(stripped) if stripped not in old else None
+        elif (not line[:1].isspace() and context in ("startup", "provider")
+              and re.match(r"^(?:(?:API )?Error:|ERROR\b)", stripped)):
+            context = "provider"
+            candidate = _cause(stripped) if stripped not in old else None
+        elif (not line[:1].isspace() and context not in ("assistant", "prompt")
+              and stripped.startswith("── brindle: the model endpoint failed:")):
+            context = "provider"
+            candidate = _cause(stripped) if stripped not in old else None
+        elif context == "startup":
+            context = "prose"
+    return candidate
+
+
+def _cause(line: str):
+    cause = model_access.classify(line)
+    if cause:
+        return cause
+    low = line.lower()
+    if re.search(r"\b(401|403)\b|unauthorized|authentication failed|invalid.api.key|not authenticated|access denied|permission denied", low):
+        return AUTH
+    if re.search(r"\b429\b|rate.limit|quota|capacity|overloaded|resource.exhausted|usage.limit", low):
+        return CAPACITY
+    if re.search(r"model.*(?:not found|does not exist|not available|not supported|unavailable)|unsupported model", low):
+        return MODEL
     return None
 
 

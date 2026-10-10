@@ -153,13 +153,16 @@ def inherited_names(session: str) -> set[str]:
 
 def inherited_env(session: str) -> dict[str, str]:
     """Snapshot the environment a new pane inherits, without logging values."""
-    env = dict(os.environ)
+    env = {}
     for scope in (("-g",), ("-t", f"={session}")):
         try:
             proc = _tmux("show-environment", *scope, check=False)
         except TmuxError:
-            break  # routing before tmux is installed/started
+            return dict(os.environ) if scope == ("-g",) else env
         if proc.returncode != 0:
+            if scope == ("-g",):
+                # A new server will inherit the process that creates it.
+                return dict(os.environ)
             continue
         for line in proc.stdout.splitlines():
             if line.startswith("-"):
