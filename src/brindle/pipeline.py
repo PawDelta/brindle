@@ -42,6 +42,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import re
 import threading
 from contextlib import contextmanager
 
@@ -347,8 +348,9 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False   # the other reviewer's verdict decides; both must approve
         db.update_agent(worker.id, pipeline="ready")
         return True, True
+    needs_sup = bool(re.search(r"needs[-_ ]?supervisor(?:[-_ ]?action)?", summary, re.I))
     rounds = (worker.pipeline_rounds or 0) + 1
-    if rounds <= cfg.review_rounds and agents.is_alive(worker):
+    if not needs_sup and rounds <= cfg.review_rounds and agents.is_alive(worker):
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
         try:
             agents.send_message(
@@ -361,15 +363,15 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         except agents.AgentError:
             pass
-    if _retry_on_heavy(db, worker, ws, cfg,
+    if not needs_sup and _retry_on_heavy(db, worker, ws, cfg,
                        f"the review still asked for changes after {rounds - 1} fix round(s): "
                        f"{summary}", report):
         return True, False
     db.update_agent(worker.id, pipeline=None)
     _escalate(db, ws, worker)
+    reason = "needs supervisor action" if needs_sup else f"still has review findings after {rounds - 1} fix round(s)"
     _tell(db, parent_id,
-          f"[brindle pipeline] `{ws.branch}` still has review findings after {rounds - 1} fix "
-          f"round(s). This needs you: decide what to do.\n\nLatest review ({reviewer.id}):\n"
+          f"[brindle pipeline] `{ws.branch}` {reason}. This needs you: decide what to do.\n\nLatest review ({reviewer.id}):\n"
           f"{summary}\n\nWorker's last report:\n{report}", worker.id)
     return True, False
 

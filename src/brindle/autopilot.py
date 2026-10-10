@@ -888,6 +888,13 @@ check that only greps, or skipped tests are gaps); look for TODOs, stubs, placeh
 returns, disabled or deleted tests and half-finished pieces. You may run a narrow test to
 probe a suspicion; don't re-run the whole suite.
 
+Audit convergence rules:
+- Conduct one comprehensive pass listing all gaps at once.
+- Separate findings into:
+  1. "Work not done" (missing implementation or test coverage).
+  2. "Disclosed and awaiting owner decision" (deliberate scope choices, proposals or options awaiting user decision).
+- Do not re-raise any gap or choice that earlier audits mentioned and the supervisor or owner has accepted.
+{prior_decisions}
 Call submit_review once. approved=true only if every part of the goal is really done.
 Otherwise approved=false, listing each gap most severe first: the milestone or part of the
 goal it concerns, file:line where it applies, what's missing, and what would close it."""
@@ -924,6 +931,7 @@ def audit_prompt(db: DB, ap: Autopilot, head: str) -> str:
     ms = db.milestones(ap.root_id)
     lines = [f"{m.position}. {m.title} (check: `{m.check_cmd or 'none'}`)"
              + (f"\n   {m.detail}" if m.detail else "") for m in ms]
+    prior = f"\nPrior audit notes / accepted decisions:\n{ap.note.strip()}\n" if ap.note else ""
     return AUDIT.format(
         goal=ap.goal, detail=f"\n\n{ap.detail.strip()}" if ap.detail and ap.detail.strip() else "",
         milestones="\n".join(lines), work=(
@@ -931,6 +939,7 @@ def audit_prompt(db: DB, ap: Autopilot, head: str) -> str:
             f"`git diff {ap.goal_sha}..{head}` in this checkout." if ap.goal_sha else
             f"The goal's starting commit wasn't recorded: use `git log` to find where this "
             f"work began, and audit up to {head}."),
+        prior_decisions=prior,
     )
 
 

@@ -1360,6 +1360,14 @@ A profile chooses between the two with `auth`:
 
 Your org's `deny_personal_keys` (Enterprise) still applies on top of `auth`.
 
+#### Running unattended on API keys
+
+When running long, unattended autopilot sessions with API keys:
+
+- **Quota and usage pause**: Autopilot's automatic usage pause (`usage_limit: 90`) relies on the percentage numbers emitted by Claude Code's status line under subscription plans. Under API-key billing (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), the CLIs report no subscription percentage, so usage pause thresholds do not trigger; manage spend via provider account budget limits or brindle budget policies.
+- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts unless permissions are pre-populated in `settings.json` (see Permissions) or run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
+- **Auth failures and rotation**: When an API key expires or is rotated externally, brindle detects the 401/403 authentication error, marks the worker as failed, alerts the supervisor, invalidates its cached sign-in probes, and pauses autopilot with a `Credentials need attention` notice rather than cycling idle nudges. To rotate keys safely, export the new key (or update `brindle keys set`), then resume the session with `brindle continue`.
+
 ### Cheap workers
 
 By default a Claude Code worker loads everything your own `claude` does: your

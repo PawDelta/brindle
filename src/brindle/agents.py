@@ -1942,6 +1942,8 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
 
     if worker and worker.task:
         task += f"\n\nThe worker's original task:\n{worker.task.strip()[:TASK_TRIM]}"
+    if worker and worker.files:
+        task += f"\n\nDeclared files: {', '.join(worker.files)}"
     if worker and worker.done_when:
         task += f"\n\nIts finish line: {worker.done_when.strip()}"
 
