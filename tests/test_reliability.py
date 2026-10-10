@@ -330,6 +330,7 @@ def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
     monkeypatch.setattr(time, "sleep", no_sleep)
     monkeypatch.setattr(tmux, "capture", lambda target, **k: captured.append(target) or CLAUDE_BUSY)
     monkeypatch.setattr(tmux, "window_alive", lambda w: True)
+    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot())
     db.set_status("boss", "idle")   # every agent idle: nothing to read at all
     entry = view.autopilot_entry(db, ws.repo_root)
     assert entry and entry["workers"] == 1   # w2; w1 is stalled

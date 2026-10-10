@@ -96,7 +96,8 @@ def test_warmup_then_the_task(db, ws, monkeypatch):
     monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)
     a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
     first, second = db.pop_pending(a.id), db.pop_pending(a.id)
-    assert first.body.startswith("When you run under brindle") and "call_mcp_tool" in first.body
+    assert first.body.startswith("<details><summary>brindle instructions</summary>")
+    assert "When you run under brindle" in first.body and "call_mcp_tool" in first.body
     assert "You are a developer agent" in first.body and first.body.endswith(antigravity.WARMUP_END)
     assert second.body.startswith("fix it")
 
@@ -161,5 +162,24 @@ def test_screen_states():
     assert p.screen_state("Requesting permission for:\n  echo hi\nRun this command?\nesc to cancel") == "waiting"
     assert p.screen_state("> \n───\nesc to cancel      Gemini") == "busy"
     assert p.screen_state("> \n───\n? for shortcuts      Gemini") == "idle"
+
+def test_paste_blocked():
+    p = Antigravity()
+    # Not interactive -> None
+    assert p.paste_blocked("> hello", interactive=False) is None
+    
+    # Empty prompt -> None
+    assert p.paste_blocked("> \n───\n? for shortcuts      Gemini", interactive=True) is None
+    assert p.paste_blocked("   >    \n───\n? for shortcuts", interactive=True) is None
+    
+    # User has typed something -> typing
+    assert p.paste_blocked("> hello world\n───\n? for shortcuts", interactive=True) == "typing"
+    assert p.paste_blocked("  >  typing... \n───\n? for shortcuts", interactive=True) == "typing"
+    
+    # Text with ANSI escape codes
+    ansi_empty = "\x1b[38;5;232m>\x1b[0m "
+    ansi_typing = "\x1b[38;5;232m>\x1b[0m \x1b[1mhello\x1b[0m"
+    assert p.paste_blocked(ansi_empty, interactive=True) is None
+    assert p.paste_blocked(ansi_typing, interactive=True) == "typing"
 
 

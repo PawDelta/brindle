@@ -145,7 +145,10 @@ Acting on what you find:
   verify each finding (a reviewer can be wrong), fix the real ones, and report
   what you fixed and which findings weren't real. Don't ask first. Ask only
   before outward-facing or hard-to-reverse actions (posting, merging into a
-  shared branch, deleting) and for decisions that are the user's to make."""
+  shared branch, deleting) and for decisions that are the user's to make.
+- Format your own verbose outputs or message transcripts in collapsible
+  `<details><summary>Title</summary>...</details>` blocks so they are not
+  sprawling in the chat UI."""
 
 
 def supervisor_rules(cfg: RepoConfig) -> str:

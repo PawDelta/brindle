@@ -74,7 +74,7 @@ class RepoConfig:
     # the pipeline merges only when both approve. Empty: one review (see brindle.pipeline).
     second_review: dict[str, str] = field(default_factory=dict)
     pre_commit: bool = True            # run pre-commit (the framework) over a branch before merging
-    max_agents: int = 4                # workers running at once per session; 0 means no cap
+    max_agents: int = 5                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
     check_concurrency: int = 2         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit

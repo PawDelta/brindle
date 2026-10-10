@@ -59,7 +59,7 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.3.1`). A session started before an upgrade keeps
+session shows it too (`brindle 0.3.2`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start

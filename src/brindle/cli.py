@@ -1164,11 +1164,14 @@ _KIND_HELP = "read, write, edit, bash, fetch, mcp or other."
 @permissions_app.command("allow")
 def permissions_allow(
     kind: str = typer.Argument(..., help=_KIND_HELP),
-    match: str = typer.Argument(..., help="The command, path, URL or tool name (exact unless --prefix/--glob)."),
+    match: Optional[str] = typer.Argument(None, help="The command, path, URL or tool name (exact unless --prefix/--glob)."),
     prefix: bool = typer.Option(False, "--prefix", help="Match anything starting with MATCH."),
     glob: bool = typer.Option(False, "--glob", help="MATCH is a shell-style glob (* also crosses /)."),
 ) -> None:
     """Allow requests that match. A bash allow never covers a command with shell metacharacters."""
+    if match is None:
+        match = kind
+        kind = "bash"
     _add_permission_rule("allow", kind, match, prefix, glob)
 
 
