@@ -169,6 +169,20 @@ def _default(id_: str, kind: str, match: str, match_type: str, decision: str) ->
     return Rule(kind, match, match_type, decision, "default", 0.0, id_)
 
 
+def _preset(kind: str, match: str, match_type: str, decision: str) -> Rule:
+    return Rule(kind, match, match_type, decision, "user", time.time(), "")
+
+
+PRESET_COMMANDS = ("aws", "uv", "pytest", "python", "npm", "pnpm", "yarn", "docker", "cargo", "go", "make", "gh")
+PRESET_RULES = tuple(
+    rule
+    for cmd in PRESET_COMMANDS
+    for rule in (
+        _preset("bash", cmd, "exact", "allow"),
+        _preset("bash", f"{cmd} ", "prefix", "allow"),
+    )
+)
+
 DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
     _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
@@ -833,8 +847,17 @@ class Store:
 
 
 def load_store() -> Store:
+    path = store_path()
+    if not path.exists():
+        store = Store(rules=list(PRESET_RULES))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(store.to_json(), encoding="utf-8")
+        except OSError:
+            pass
+        return store
     try:
-        data = json.loads(store_path().read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return Store()
     if not isinstance(data, dict):
