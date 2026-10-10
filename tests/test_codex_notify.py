@@ -9,6 +9,19 @@ from brindle.profiles import load_profile
 from brindle.providers import Codex, LaunchContext
 
 
+# Bottom of a real `tmux capture-pane -p -J -e -t %1234 -S -40` from
+# Codex, with trailing padding removed. The model/path is a separate footer
+# row ABOVE shortcuts, and is neither faint nor part of the input.
+CODEX_EMPTY_PANE = (
+    "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n"
+    "\n"
+    "  \x1b[38;2;246;226;183mGPT-6.1-Sol medium\x1b[39m · "
+    "\x1b[38;2;171;223;167m~/.brindle/worktrees/brindle/fix/codex-input-guard\x1b[39m\n"
+    "  \x1b[1m?\x1b[0m for shortcuts                  ⚠ "
+    "\x1b[38;2;196;167;103m1 warning\x1b[39m · \x1b[1mf2\x1b[0m to view\n"
+)
+
+
 @pytest.fixture
 def ws(db, repo):
     return workspaces.create(db, str(repo), "feature").workspace
@@ -43,6 +56,9 @@ def test_codex_trusts_hook_status():
     "\x1b[2mplaceholder\x1b[0m real input",
     "\x1b[2mplaceholder\x1b[22m real input",
     "\x1b[38;5;244mplaceholder\x1b[38;5;196m real input",
+    "\x1b[90mhalf a message\x1b[0m",
+    "\x1b[38;5;244mhalf a message\x1b[0m",
+    "\x1b[38;2;128;128;128mhalf a message\x1b[0m",
 ])
 def test_notify_keeps_typed_input_queued_until_cleared(db, ws, monkeypatch, input_text):
     codex_agent(db, ws)
@@ -71,9 +87,9 @@ def test_notify_keeps_typed_input_queued_until_cleared(db, ws, monkeypatch, inpu
 
 @pytest.mark.parametrize("placeholder", [
     "", "\x1b[2mFind and fix a bug\x1b[0m",
-    "\x1b[90mExplain this codebase\x1b[39m",
-    "\x1b[38;5;244mWrite tests\x1b[0m",
-    "\x1b[38;2;128;128;128mWrite tests\x1b[0m",
+    "\x1b[2;90mExplain this codebase\x1b[0m",
+    "\x1b[2;38;5;244mWrite tests\x1b[0m",
+    "\x1b[2;38;2;128;128;128mWrite tests\x1b[0m",
     "\x1b[2mFind and fix\n  a bug\x1b[0m",
 ])
 def test_notify_delivers_over_empty_placeholder(db, ws, monkeypatch, placeholder):
@@ -110,6 +126,32 @@ def test_codex_clipped_input_is_conservatively_blocked():
 def test_codex_placeholder_style_before_marker():
     screen = "\x1b[2m› Find and fix a bug\x1b[0m\n\n  ? for shortcuts"
     assert Codex().paste_blocked(screen, True) is None
+
+
+@pytest.mark.parametrize("input_text", [
+    "\x1b[38;2;205;214;244mhalf a request\x1b[39m",
+    "\x1b[38;2;202;202;202mhalf a request\x1b[39m",
+    "\x1b[90mhalf a request\x1b[39m",
+    "\n  \x1b[38;5;244mwrapped continuation\x1b[39m",
+])
+@pytest.mark.parametrize("clear_placeholder", [False, True])
+def test_real_codex_footer_allows_placeholder_but_protects_grey_input(
+    db, ws, monkeypatch, input_text, clear_placeholder,
+):
+    codex_agent(db, ws)
+    placeholder = "\x1b[2mAsk Codex to do anything\x1b[0m"
+    screen = CODEX_EMPTY_PANE.replace(placeholder, input_text)
+    pasted = []
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    db.enqueue("c1", "next step please", None)
+    agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
+    assert pasted == []
+    assert db.pending_count("c1") == 1
+    screen = CODEX_EMPTY_PANE.replace(placeholder, "") if clear_placeholder else CODEX_EMPTY_PANE
+    assert agents.flush(db, "c1") is True
+    assert pasted == ["next step please"]
+    assert db.pending_count("c1") == 0
 
 
 @pytest.mark.parametrize("mode", ["interactive", "assign"])
