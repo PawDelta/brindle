@@ -16,7 +16,13 @@ def test_preset_permissions(monkeypatch, tmp_path):
     # Mock brindle_home to point to tmp_path so store_path() returns a non-existent file path
     monkeypatch.setattr("brindle.permissions.brindle_home", lambda: tmp_path)
     
-    rules = load_store().rules
+    # Call load_store() which should create the file
+    store = load_store()
+    
+    # Verify the file was written
+    assert store_path().exists()
+    
+    rules = store.rules
     
     # Check that presets are in load_store().rules when file doesn't exist
     for cmd in PRESET_COMMANDS:

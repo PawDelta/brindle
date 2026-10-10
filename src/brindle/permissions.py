@@ -849,7 +849,13 @@ class Store:
 def load_store() -> Store:
     path = store_path()
     if not path.exists():
-        return Store(rules=list(PRESET_RULES))
+        store = Store(rules=list(PRESET_RULES))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(store.to_json(), encoding="utf-8")
+        except OSError:
+            pass
+        return store
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
