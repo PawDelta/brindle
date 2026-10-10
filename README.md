@@ -604,7 +604,11 @@ environment. A model absent from a complete authoritative catalog is rejected
 before creating a worker worktree or process. Partial catalogs, aliases,
 discovery errors and Codex's bundled catalogs remain unverified; being listed
 does not prove generation access, billing or quota. Catalog discovery is bounded
-to five seconds and cached briefly by environment and local account/config
+to five seconds for standalone checks; foreground routing/provisioning limits
+discovery to one second, leaving room in the three-second launch budget for
+provisioning and bounded helper cleanup. A timeout remains unverified and
+launch proceeds with the real-task health follow-up. Catalogs are cached
+briefly by environment and local account/config
 revision where available. Routing and provisioning reuse equivalent catalog
 context across worktrees, excluding launch bookkeeping while retaining project
 settings, credentials and account selectors. CLI catalogs remain advisory;

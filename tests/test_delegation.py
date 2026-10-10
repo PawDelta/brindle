@@ -130,7 +130,8 @@ def test_catalog_available_and_unverified_do_not_reject_provisioning(db, repo, m
 
 
 @pytest.mark.parametrize("provider", ["native", "codex", "antigravity"])
-def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, repo, monkeypatch, provider):
+@pytest.mark.parametrize("times_out", [False, True])
+def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, repo, monkeypatch, provider, times_out):
     from brindle import autopilot, model_availability as ma, tmux
     from brindle.config import RepoConfig
     from brindle.profiles import Profile
@@ -147,6 +148,8 @@ def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, r
     def slow_discovery(request, timeout):
         requests.append(request)
         now[0] += timeout  # a whole catalog timeout, without sleeping
+        if times_out:
+            raise TimeoutError
         return ma.Catalog(frozenset({"wanted"}), "openai" if provider == "native" else provider)
 
     monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(discover=slow_discovery, clock=lambda: now[0]))
@@ -155,5 +158,5 @@ def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, r
     assert autopilot._unavailable("test", RepoConfig(), str(repo)) is None
     worker, worker_ws = agents.delegate(db, None, ws, "test", "real task", "assign")
     assert worker_ws.path != ws.path and launched == [(worker, worker_ws)]
-    assert len(requests) == 1 and now[0] == ma.TIMEOUT
+    assert len(requests) == 1 and now[0] == ma.PROVISIONING_TIMEOUT and now[0] < 3.0
     assert requests[0].env["BRINDLE_AGENT_ID"] == "preflight"  # discovery still gets exact worker env

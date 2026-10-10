@@ -752,3 +752,14 @@ def test_provisioning_cache_preserves_catalog_identity(tmp_path, change):
 def test_custom_cli_catalog_retains_cwd_identity(tmp_path):
     env = {"BRINDLE_CODEX_BIN": "/custom/codex"}
     assert ma.provisioning_context("codex", str(tmp_path / "a"), env) != ma.provisioning_context("codex", str(tmp_path / "b"), env)
+
+
+def test_provisioning_timeout_override_only_shortens_standalone_discovery_budget():
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), ttl=0)
+    check.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)
+    assert discover.call_args.args[1] == ma.PROVISIONING_TIMEOUT
+    check.check(profile(), effective_env={})
+    assert discover.call_args.args[1] == ma.TIMEOUT
+    shorter, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), timeout=0.2)
+    shorter.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)
+    assert discover.call_args.args[1] == 0.2

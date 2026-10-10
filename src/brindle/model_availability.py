@@ -61,6 +61,9 @@ if TYPE_CHECKING:
 Status = Literal["available", "unavailable", "unverified"]
 Source = Literal["codex", "antigravity", "ollama", "openai", "anthropic", "compatible"]
 TIMEOUT = 5.0
+# Leave room in the foreground launch's three-second budget for provisioning
+# and the discovery helper's bounded process-group cleanup.
+PROVISIONING_TIMEOUT = 1.0
 CACHE_TTL = 30.0
 MAX_BYTES = 1024 * 1024
 MAX_PAGES = 10
@@ -128,13 +131,16 @@ class ModelAvailabilityChecker:
 
     def check(self, profile: Profile, *, effective_env: Mapping[str, str],
               cwd: str | None = None, account_identity: str | None = None,
-              catalog_context: str | None = None) -> Availability:
+              catalog_context: str | None = None, timeout: float | None = None) -> Availability:
         """Check an explicit model using exactly the environment of its worker.
 
         Profile.env is intentionally not re-applied; effective_env has already
         resolved its precedence and may have removed credentials from it.
         Account identities, model names, URLs and error bodies are never echoed.
         """
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("timeout must be positive and finite")
+        discovery_timeout = self._timeout if timeout is None else min(self._timeout, timeout)
         model = profile.model
         if not model or not model.strip() or model == "default":
             return Availability("unverified", "No explicit model to check; keep the provider's default selection.")
@@ -167,7 +173,7 @@ class ModelAvailabilityChecker:
             if cacheable and key in self._cache:
                 return self._cache[key][1]
         try:
-            catalog = self._discover(request, self._timeout)
+            catalog = self._discover(request, discovery_timeout)
             result = _selected(model, catalog)
         except (TimeoutError, subprocess.TimeoutExpired):
             result = Availability("unverified", _FAILURES["timeout"])

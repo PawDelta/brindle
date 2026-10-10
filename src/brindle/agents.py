@@ -23,7 +23,7 @@ import uuid
 from brindle import company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
-from brindle.model_availability import ModelAvailabilityChecker, provisioning_context
+from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.profiles import load_profile, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, signed_out, unusable
 from brindle.sidebar_follow import (
@@ -539,7 +539,8 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         return denied.line()
     result = _model_checker.check(profile, effective_env=effective, cwd=ws.path,
                                   account_identity=account_revision(profile.provider, effective),
-                                  catalog_context=provisioning_context(profile.provider, ws.path, effective))
+                                  catalog_context=provisioning_context(profile.provider, ws.path, effective),
+                                  timeout=PROVISIONING_TIMEOUT)
     return result.explanation if result.status == "unavailable" else None
 
 

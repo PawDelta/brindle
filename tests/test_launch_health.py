@@ -565,6 +565,44 @@ def test_initial_command_task_delivered_once_and_no_generation_probe(db, root, l
     assert [argv for argv in detached if argv[3] == "_launch-health"][0][-1] == "--startup"
 
 
+def test_cold_catalog_timeout_preserves_launch_budget_and_real_task_followup(
+        db, root, launches, detached, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from brindle import launch_health as lh, model_access, model_availability as ma
+    boss, ws = root
+    now, calls, sleeps = [100.0], [], []
+    monkeypatch.setattr(lh, "time", SimpleNamespace(
+        time=lambda: now[0],
+        sleep=lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay))))
+    original = agents.load_profile
+    monkeypatch.setattr(agents, "load_profile", lambda *a: replace(original(*a), provider="codex", model="wanted"))
+
+    def timeout(request, budget):
+        calls.append(budget)
+        now[0] += budget
+        raise TimeoutError
+
+    # Default discovery permits five seconds, but provisioning must override it.
+    monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(discover=timeout, clock=lambda: now[0]))
+    monkeypatch.setattr(model_access, "probe", lambda *a, **k: pytest.fail("synthetic generation"))
+    a = agents.spawn(db, ws, "developer", prompt="real task", parent_id=boss.id, mode="assign", background_setup=True)
+    assert sleeps == []
+    assert calls == [ma.PROVISIONING_TIMEOUT] and now[0] - 100 < BUDGET
+    assert sum("real task" in arg for arg in launches[-1]) == 1
+    assert db.pending_count(a.id) == 0
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(type(agents.get_provider(a.provider)), "after_launch", lambda *a: True)
+    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(lh, "capture", lambda a: "working")
+    cli.after_launch_cmd(a.id, token=a._launch_health_token)
+    assert lh.inspect(db, a.id, token=a._launch_health_token) == "pending"
+    assert sleeps == [5.0] and now[0] == 100 + ma.PROVISIONING_TIMEOUT + 5
+    assert len([cmd for cmd in detached if cmd[3] == "_launch-health" and "--startup" not in cmd]) == 1
+    assert len(calls) == 1 and sum("real task" in arg for arg in launches[-1]) == 1
+
+
 def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatch):
     from brindle import launch_health
     boss, ws = root
