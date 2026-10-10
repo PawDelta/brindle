@@ -363,6 +363,12 @@ def test_milestone_check_runs_in_the_attached_repo(db, repo, web, boss):
 def test_without_the_feature_everything_cross_repo_is_refused(db, repo, web, boss, monkeypatch):
     repos.attach(db, "boss", str(web), "web")     # attached while entitled
     monkeypatch.setattr(license, "has", lambda feature: False)
+    
+    assert "restricted feature of brindle Pro" in repos.PRO_MESSAGE
+    assert "limited to a single repository" in repos.PRO_MESSAGE
+    assert "`brindle account upgrade`" in repos.PRO_MESSAGE
+    assert "https://pawdelta.com/brindle" in repos.PRO_MESSAGE
+
     with pytest.raises(repos.RepoError, match=re.escape(repos.PRO_MESSAGE)):
         repos.attach(db, "boss", str(web), "web2")
     out = asyncio.run(mcp_server.assign("developer", "do web", branch="feat-web", repo="web"))
