@@ -20,7 +20,8 @@ from conftest import sh
 
 
 @pytest.fixture
-def ws(db, repo):
+def ws(db, repo, monkeypatch):
+    monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
     return workspaces.create(db, str(repo), "feature").workspace
 
 

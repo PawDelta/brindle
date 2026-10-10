@@ -17,7 +17,8 @@ from brindle.permissions import Decision, Rule, decide_all, from_agy, from_codex
 
 
 @pytest.fixture
-def ws(db, repo):
+def ws(db, repo, monkeypatch):
+    monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
     return workspaces.create(db, str(repo), "feature").workspace
 
 
