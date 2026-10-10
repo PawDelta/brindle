@@ -496,3 +496,73 @@ def test_fix_runs_company_login(monkeypatch):
     monkeypatch.setattr(company_login, "apply_current", lambda say, *a, **k: called.append(say))
     doctor.fix(lambda prompt: False)
     assert called
+
+
+# -- what is checked is what runs ----------------------------------------------------------
+
+@pytest.mark.parametrize("current", [
+    "claude org Me (org-1) (org-9)",    # a personal org named after the company's id
+    "claude org x org-1 (org-9)",
+    "claude org none",
+    "claude org org-9",
+])
+def test_an_org_name_never_stands_in_for_the_org_id(current):
+    assert not company_identity.matches("org:org-1", current)
+
+
+def test_the_org_id_matches_with_or_without_a_name():
+    assert company_identity.matches("org:ORG-1", "claude org Acme (org-1)")
+    assert company_identity.matches("org:org-1", "claude org org-1")
+
+
+def test_a_login_without_an_org_id_has_no_org(monkeypatch):
+    Fake(monkeypatch, {("claude", "auth", "status"): (0, json.dumps(
+        {"loggedIn": True, "orgName": f"Me ({CLAUDE_ORG})", "subscriptionType": "pro"}))})
+    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG))
+    ident = company_identity.claude_identity(ORG, claude_setup("subscription", org_id=CLAUDE_ORG))
+    assert ident.ident == "claude org none"
+    assert not company_identity.matches(f"org:{CLAUDE_ORG}", ident.ident)
+
+
+def _env_of(db, repo, monkeypatch, profile_env):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(agents, "load_profile",
+                        lambda name, root=None: SimpleNamespace(env=profile_env, tool_search=None))
+    ws = workspaces.create(db, str(repo), "enf").workspace
+    a = Agent("e1", ws.id, "developer", "claude", None, "assign", "starting", "", None, 0.0)
+    db.add_agent(a)
+    return agents.agent_env(ws, "e1", a, SimpleNamespace(config=None, denied_keys=()))
+
+
+PROFILE_LINES = {"AWS_PROFILE": "personal", "AWS_ACCESS_KEY_ID": "AKIAPERSONAL", "ANTHROPIC_BASE_URL": "https://x",
+            "CLAUDE_CONFIG_DIR": "/home/me/.claude-personal", "EDITOR": "vi"}
+
+
+def test_enforced_route_beats_a_profiles_env_lines(db, repo, monkeypatch):
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
+    env = _env_of(db, repo, monkeypatch, PROFILE_LINES)
+    assert env["AWS_PROFILE"] == company_login.profile_name(ORG)
+    assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+    for name in ("AWS_ACCESS_KEY_ID", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"):
+        assert name not in env
+    assert env["EDITOR"] == "vi"
+
+
+def test_without_enforce_a_profiles_env_lines_still_apply(db, repo, monkeypatch):
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
+    env = _env_of(db, repo, monkeypatch, PROFILE_LINES)
+    assert env["AWS_PROFILE"] == "personal" and env["AWS_ACCESS_KEY_ID"] == "AKIAPERSONAL"
+
+
+def test_enforced_route_takes_inherited_and_stored_credentials_out_of_the_pane(monkeypatch):
+    from brindle import pane_auth
+
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
+    deny = pane_auth.deny_names("claude", "auto", None)
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_USE_VERTEX"):
+        assert name in deny
+    assert "AWS_PROFILE" not in deny and "CLAUDE_CODE_USE_BEDROCK" not in deny   # the route's own
+    assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("codex", "auto", None)
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
+    assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("claude", "auto", None)

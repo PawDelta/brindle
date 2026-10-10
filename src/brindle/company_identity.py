@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,26 @@ LAUNCH_CACHE_SECONDS = 300.0
 LAUNCH_CACHE_FILE = "identity-launch-cache.json"
 PROBE_TIMEOUT = 20.0
 PERSONAL_PLANS = ("free", "pro", "max")
+
+# Under an enforced company identity (Enterprise), what picks the account a
+# Claude pane runs as. The pane gets exactly the route brindle checked
+# (``enforced_route_env``): these never come from a profile's env lines, and
+# the ROUTE_VARS ones the route doesn't set are taken out of the pane even when
+# inherited or stored, so the identity checked is the identity used.
+ROUTE_VARS = frozenset({
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_VERTEX_BASE_URL",
+    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT",
+    "CLOUDSDK_ACTIVE_CONFIG_NAME", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_API_KEY",
+    "ANTHROPIC_FOUNDRY_BASE_URL", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID",
+    "AZURE_FEDERATED_TOKEN_FILE"})
+# Where the CLIs keep their sign-in: inherited, brindle's own probe sees the
+# same files, so only a profile's env line could point a pane elsewhere.
+CONFIG_VARS = frozenset({"CLAUDE_CONFIG_DIR", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+                         "CLOUDSDK_CONFIG", "AZURE_CONFIG_DIR"})
 
 _cache: dict[tuple[str, ...], tuple[float, tuple[int, str]]] = {}
 
@@ -256,7 +277,9 @@ def _claude_login(claude, route, cache) -> Identity:
         owner = f"{name}'s" if name else f"organization {org}'s"
         billed = f"Claude: {owner} {plan + ' ' if plan else ''}plan"
     return Identity("claude", line, problem, billed=billed,
-                    ident=f"claude org {name or org or 'none'}" + (f" ({org})" if org and name else ""))
+                    # without an org id the name alone never identifies an org (see _org_of)
+                    ident=(f"claude org {name} ({org})" if name else f"claude org {org}") if org
+                    else "claude org none")
 
 
 def _claude_login_cmd(route) -> str:
@@ -367,9 +390,29 @@ def matches(expected: str | None, current: str | None) -> bool:
     if not expected or not current:
         return False
     if expected.startswith("org:"):
-        org, cur = expected[4:].casefold(), current.casefold()
-        return f"({org})" in cur or cur.endswith(f" {org}")   # "claude org Name (org)" or "claude org org"
+        return (_org_of(current) or "").casefold() == expected[4:].casefold()
     return expected.casefold() == current.casefold()
+
+
+def _org_of(ident: str) -> str | None:
+    """The org id in a ``claude_identity`` ident: the last parenthesised group
+    of "claude org Name (org)", or the whole of "claude org org". Never a
+    match inside the org's name, which its members can set to anything."""
+    m = re.fullmatch(r"claude org .* \(([^()\s]+)\)|claude org ([^()\s]+)", ident)
+    return (m.group(1) or m.group(2)) if m else None
+
+
+def enforced_route_env() -> dict[str, str] | None:
+    """The Claude Code variables of the org's route when its policy enforces
+    the company identity (Enterprise), the ones ``launch_problem`` checks;
+    None when it doesn't enforce or can't be read (as the launch check)."""
+    try:
+        got = _setup()
+        if got is None or not got[1].enforce or got[1].claude is None:
+            return None
+        return company_login.claude_env(got[0], got[1].claude)
+    except Exception:  # noqa: BLE001 - as launch_problem: unreadable never blocks
+        return None
 
 
 def _local_setup():

@@ -187,7 +187,16 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # profile's env lines and the org's managed provider both beat it; none
         # at all under Claude Code's managed settings (stored_env).
         company = {} if agent.provider != "claude" else company_login.stored_env()
-        env = {**company, **profile_env, **({} if org else managed_models.agent_env(m, agent.provider)), **env}
+        managed_env = {} if org else managed_models.agent_env(m, agent.provider)
+        enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
+        if enforced is None:
+            env = {**company, **profile_env, **managed_env, **env}
+        else:
+            # An enforced company identity (Enterprise): the pane runs on the route
+            # launch_problem checked, whatever a profile's env lines say.
+            pick = company_identity.ROUTE_VARS | company_identity.CONFIG_VARS
+            profile_env = {k: v for k, v in profile_env.items() if k not in pick}
+            env = {**profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and

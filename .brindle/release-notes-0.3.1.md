@@ -13,7 +13,7 @@
 
 **Enterprise**
 
-- **Enforce the company identity.** With enforcement on, agents pause when they would run under an identity other than the company's.
+- **Enforce the company identity.** With enforcement on, Claude agents start only under the company's identity and run on exactly the route brindle checked: a profile's env lines can't change it, and other cloud credentials and Claude keys are left out of their panes. They pause when the signed-in identity changes.
 
 **Changes to note**
 

@@ -27,10 +27,18 @@ CLAUDE_CREDENTIALS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_
 def deny_names(provider: str, auth: str, m, org_managed: bool = False) -> tuple[str, ...]:
     """The variables a ``provider`` pane starts without whatever else says:
     the org's denied personal keys, Claude's credentials under Claude Code
-    managed settings, and the provider's API keys for ``auth: subscription``."""
+    managed settings, the provider's API keys for ``auth: subscription``, and
+    for Claude under an enforced company identity whatever else picks an account."""
     deny = list(m.denied_keys) if m is not None else []
     extra = (CLAUDE_CREDENTIALS if provider == "claude" and org_managed else ()) + (
         API_KEYS.get(provider, ()) if auth == "subscription" else ())
+    if provider == "claude" and not org_managed:
+        # An enforced company identity: nothing but the checked route picks the account.
+        from brindle import company_identity
+
+        route = company_identity.enforced_route_env()
+        if route is not None:
+            extra += tuple(sorted(company_identity.ROUTE_VARS - set(route)))
     return tuple(deny + [n for n in dict.fromkeys(extra) if n not in deny])
 
 
