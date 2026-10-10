@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from brindle import agents, workspaces
+from brindle import agents, tmux, workspaces
 from brindle.db import Agent
 
 REAL_PULLS = agents.pulls_messages  # conftest patches it off for the other tests
@@ -112,6 +112,41 @@ def test_person_message_is_pushed(db, boss, pushed):
 def test_messages_to_workers_are_pushed(db, boss, pushed):
     agents.send_message(db, "w1", "do this", sender_id="boss")
     assert len(pushed) == 1 and "do this" in pushed[0]
+    assert db.unread_count("w1") == 0
+
+
+@pytest.mark.parametrize("person", [False, True])
+def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch, person):
+    with db.tx() as c:
+        c.execute("UPDATE agents SET provider='codex', status='idle' WHERE id='boss'")
+    screen = "Done.\n\n› half a request\n  still typing\n\n  ? for shortcuts"
+    pasted = []
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    monkeypatch.setattr(agents.time, "sleep", lambda *_: None)
+    assert agents.send_message(db, "boss", "the result", sender_id="w1", person=person) == "queued"
+    assert pasted == []
+    assert db.pending_count("boss") == 1
+    assert db.unread_count("boss") == (0 if person else 1)
+    assert agents.flush(db, "boss") is False
+    screen = "Done.\n\n› \x1b[2mFind and fix a bug\x1b[0m\n\n  ? for shortcuts"
+    assert agents.flush(db, "boss") is True
+    assert len(pasted) == 1
+    assert ("the result" if person else "Call read_messages.") in pasted[0]
+    assert db.pending_count("boss") == 0
+    assert db.unread_count("boss") == (0 if person else 1)
+
+
+def test_codex_worker_delivery_ignores_input_text(db, boss, monkeypatch):
+    with db.tx() as c:
+        c.execute("UPDATE agents SET provider='codex', status='idle' WHERE id='w1'")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "› worker input\n  ? for shortcuts")
+    monkeypatch.setattr(agents.time, "sleep", lambda *_: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.send_message(db, "w1", "do this", sender_id="boss") == "delivered"
+    assert len(pasted) == 1 and "do this" in pasted[0]
+    assert db.pending_count("w1") == 0
     assert db.unread_count("w1") == 0
 
 

@@ -1060,6 +1060,62 @@ class Codex(Provider):
     # send input to a terminal. Nothing else on its screen asks this way.
     APPROVAL = re.compile(r"Would you like to (?:run the following command|make the following edits"
                           r"|grant these permissions|send input to (?:the existing )?terminal)")
+    ANSI_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+    INPUT_LINE = re.compile(r"^[ \t]*›(.*)$")
+    FOOTER = re.compile(r"^[ \t]*(?:\? for shortcuts|\d+% context left)")
+
+    def paste_blocked(self, screen: str, interactive: bool) -> str | None:
+        # Approval choices also use ›. Never paste into those menus, even
+        # for a worker whose ordinary input is not hand-typed.
+        plain = self.ANSI_SGR.sub("", screen)
+        dialog = " ".join(plain.split())
+        if self.APPROVAL.search(dialog) or self.TRUST_DIALOG.search(dialog):
+            return "approval"
+        if not interactive:
+            return None
+        lines = screen.splitlines()
+        prompts = [i for i, line in enumerate(lines)
+                   if self.INPUT_LINE.match(self.ANSI_SGR.sub("", line))]
+        if not prompts:
+            return "input" if plain.strip() else None
+        start = prompts[-1]
+        end = next((i for i in range(start + 1, len(lines))
+                    if self.FOOTER.match(self.ANSI_SGR.sub("", lines[i]))), len(lines))
+        # Keep continuation rows, including rows after an empty first line.
+        # Keep styling before › too: dim may already be active at the marker.
+        styled = "\n".join(lines[start:end]).replace("›", "", 1)
+        dim = grey = False
+        pos = 0
+        for match in self.ANSI_SGR.finditer(styled):
+            if styled[pos:match.start()].strip() and not (dim or grey):
+                return "typing"
+            codes = match.group(1).split(";")
+            i = 0
+            while i < len(codes):
+                code = codes[i]
+                if code in ("", "0"):
+                    dim = grey = False
+                elif code == "2":
+                    dim = True
+                elif code == "22":
+                    dim = False
+                elif code == "90":
+                    grey = True
+                elif code == "39" or (code.isdigit() and
+                                      (30 <= int(code) <= 37 or 91 <= int(code) <= 97)):
+                    grey = False
+                elif code == "38" and i + 2 < len(codes) and codes[i + 1] == "5":
+                    grey = codes[i + 2].isdigit() and 232 <= int(codes[i + 2]) <= 253
+                    i += 2
+                elif code == "38" and i + 4 < len(codes) and codes[i + 1] == "2":
+                    rgb = codes[i + 2:i + 5]
+                    grey = all(c.isdigit() for c in rgb) and len(set(rgb)) == 1
+                    i += 4
+                i += 1
+            pos = match.end()
+        if styled[pos:].strip() and not (dim or grey):
+            return "typing"
+        return None
 
     def command(self, ctx: LaunchContext) -> list[str]:
         spec = mcp_server_spec(ctx.agent_id)
