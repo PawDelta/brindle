@@ -956,7 +956,9 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     running = db.get_agent(ap.auditor_id) if ap.auditor_id else None
     if running and running.result is None and running.status not in ("paused", "done") \
             and agents.is_alive(running):
-        return None
+        if ap.audit_sha == head:
+            return None
+        agents.close(db, running.id)
     cfg = cfg or load_repo_config(ws.repo_root)
     profile = agents.default_review_profile(cfg, db.get_agent(root_id), db, ws.repo_root, ap.goal)
     auditor = agents.spawn(db, ws, profile, prompt=audit_prompt(db, ap, head), parent_id=root_id,
