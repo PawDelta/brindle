@@ -764,7 +764,7 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.conn.execute("DELETE FROM launch_health WHERE agent_id=?", (agent.id,))
     target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
                           **({"m": m} if m is not None else {}))
-    if prompt and provider.name != "shell":
+    if provider.name != "shell":
         from brindle import launch_health
         from brindle.providers import brindle_invocation
         # Observe early startup exits independently; a live startup must not
@@ -793,8 +793,8 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         )
     else:
         accepted = provider.after_launch(target)
-        ready(db, agent.id)
         if accepted:
+            ready(db, agent.id)
             from brindle import launch_health
             launch_health.accepted(db, agent)
 
@@ -803,8 +803,11 @@ def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNRE
                            *, argv_task: bool = False, submitted_prompt: str = "") -> None:
     if not agent.parent_id or not agent.task:
         return
+    from dataclasses import replace
+
     from brindle import launch_health
     effective = _effective_window_env(agent, ws, m)
+    profile = replace(profile, provider=agent.provider)
     launch_health.prepare(db, agent, launch_health.fingerprint(profile, effective), argv_task=argv_task,
                           submitted_prompt=submitted_prompt)
 

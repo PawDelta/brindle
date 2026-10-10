@@ -2498,12 +2498,12 @@ def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -
     if not launch_health.current(db, agent_id, token):
         return
     a = db.get_agent(agent_id)
-    if a and a.tmux_window:
+    if a and a.tmux_window and a.status not in ("paused", "done") and a.result is None:
         accepted = get_provider(a.provider).after_launch(a.tmux_window)
         if not launch_health.current(db, agent_id, token):
             return
-        agents.ready(db, agent_id)
         if accepted:
+            agents.ready(db, agent_id)
             # Carry the observed launch token into the delivery CAS.
             a._launch_health_token = token
             launch_health.accepted(db, a)

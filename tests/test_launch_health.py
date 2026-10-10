@@ -407,7 +407,8 @@ def health(db, root, monkeypatch):
 
     monkeypatch.setattr(lh.time, "sleep", sleep)
     monkeypatch.setattr(agents, "_detach", started.append)
-    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     monkeypatch.setattr(lh, "capture", lambda a: "working")
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append((to, body)))
@@ -605,7 +606,7 @@ def test_real_codex_profile_prefixed_argv_prompt_permits_current_provider_failur
     now, sleeps, reports = [100.0], [], []
     monkeypatch.setattr(lh, "time", SimpleNamespace(
         time=lambda: now[0], sleep=lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay))))
-    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task", parent_id=boss.id,
@@ -760,7 +761,7 @@ def test_cold_catalog_timeout_preserves_launch_budget_and_real_task_followup(
     assert db.pending_count(a.id) == 0
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(type(agents.get_provider(a.provider)), "after_launch", lambda *a: True)
-    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     monkeypatch.setattr(lh, "capture", lambda a: "working")
     cli.after_launch_cmd(a.id, token=a._launch_health_token)
@@ -791,7 +792,7 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     monkeypatch.setattr(lh.time, "time", lambda: now[0])
     monkeypatch.setattr(lh.time, "sleep", lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay)))
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
-    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     shown = ["Trust this folder?"]
     monkeypatch.setattr(lh, "capture", lambda a: shown[0])
@@ -1063,3 +1064,196 @@ def test_launch_health_schema_migrates_existing_rows(db, health):
         assert row["submitted_prompt"] == ""
     finally:
         migrated.conn.close()
+
+
+@pytest.mark.parametrize("reply,cause", [
+    ("API Error: 401 invalid x-api-key", "launch_auth"),
+    ("API Error: 529 Overloaded", "launch_capacity"),
+    ("Here is the fixture:\nAPI Error: 401 invalid x-api-key", None),
+    ("```text\nAPI Error: 401 invalid x-api-key\n```", None),
+])
+def test_headless_runner_context_preserves_errors_and_quoted_output(db, health, monkeypatch, reply, cause):
+    from brindle import model_access
+    lh, a, _, _, _, reports = health
+    db.update_agent(a.id, provider="claude", headless=1)
+    baseline = f"── brindle: turn 1 ──\n{a.task}\n"
+    monkeypatch.setattr(lh, "capture", lambda a: baseline + reply)
+    lh.delivered(db, a, baseline)
+    assert lh.inspect(db, a.id) == ("failed" if cause else "pending")
+    refusal = model_access.refused(a.profile, fp="effective-account")
+    assert (refusal.key if refusal else None) == cause
+    assert len(reports) == bool(cause)
+
+
+@pytest.mark.parametrize("reply,cause", [
+    ("• Working (2s • esc to interrupt)\n■ unexpected status 403 Forbidden", "launch_auth"),
+    ("• Example (esc to interrupt):\n■ unexpected status 403 Forbidden", None),
+    ("• Working (example: esc to interrupt)\n■ unexpected status 403 Forbidden", None),
+    ("```text\nfixture\n```\n■ unexpected status 403 Forbidden", None),
+    ("■ unexpected status 403 Forbidden\nThe retry succeeded.", None),
+])
+def test_codex_progress_and_response_context(db, health, monkeypatch, reply, cause):
+    from brindle import model_access
+    lh, a, _, _, _, reports = health
+    screen = f"OpenAI Codex\n› {a.task}\n{reply}\n› \n100% context left"
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == ("failed" if cause else "pending")
+    refusal = model_access.refused(a.profile, fp="effective-account")
+    assert (refusal.key if refusal else None) == cause
+    assert len(reports) == bool(cause)
+
+
+@pytest.mark.parametrize("mutation", ["pause", "result", "pane", "owner"])
+def test_health_capture_cannot_report_after_agent_changes(db, health, monkeypatch, mutation):
+    from brindle import model_access
+    lh, a, _, _, _, reports = health
+    owns = [True]
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: owns[0])
+
+    def capture(agent):
+        if mutation == "pause":
+            db.set_status(a.id, "paused")
+        elif mutation == "result":
+            db.update_agent(a.id, result="done")
+        elif mutation == "pane":
+            db.update_agent(a.id, tmux_window="%replacement")
+        else:
+            owns[0] = False
+        return "■ unexpected status 403 Forbidden"
+
+    monkeypatch.setattr(lh, "capture", capture)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) is None
+    assert reports == []
+    assert model_access.refused(a.profile, fp="effective-account") is None
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+def test_health_never_captures_a_reassigned_pane(db, health, monkeypatch):
+    lh, a, _, _, _, reports = health
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: False)
+    monkeypatch.setattr(lh, "capture", lambda *a: pytest.fail("read someone else's pane"))
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) is None and reports == []
+
+
+def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monkeypatch):
+    lh, a, _, _, started, _ = health
+    fresh = db.get_agent(a.id)  # flush/runner loads an Agent without an in-memory token
+
+    def capture(agent):
+        lh.prepare(db, db.get_agent(a.id), "replacement")
+        return "old screen"
+
+    monkeypatch.setattr(lh, "capture", capture)
+    lh.delivered(db, fresh, lh.before_delivery(db, fresh))
+    assert started == []
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+def test_dead_delivered_worker_waits_for_its_five_second_followup(db, health, monkeypatch):
+    lh, a, _, sleeps, _, reports = health
+    monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id, wait=False) is None
+    assert reports == [] and sleeps == []
+    assert lh.inspect(db, a.id) == "exited" and sleeps == [5.0]
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_readiness_timeout_keeps_real_task_queued(db, root, launches, detached, monkeypatch, background):
+    from brindle import launch_health as lh
+    from brindle import antigravity
+    monkeypatch.setattr(antigravity, "install", lambda *a, **k: None)
+    boss, ws = root
+    monkeypatch.setattr(type(agents.get_provider("antigravity")), "after_launch", lambda *a: False)
+    monkeypatch.setattr(agents, "ready", lambda *a: pytest.fail("timeout is not readiness"))
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(lh, "inspect", lambda *a, **k: None)
+    a = agents.spawn(db, ws, "developer", provider_name="antigravity", prompt="real task",
+                     parent_id=boss.id, mode="assign", background_setup=background)
+    if background:
+        cli.after_launch_cmd(a.id, token=a._launch_health_token)
+    assert db.pending_count(a.id) == 1
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+    assert len([cmd for cmd in detached if "_launch-health" in cmd and "--startup" in cmd]) == 1
+
+
+@pytest.mark.parametrize("provider,screen,cause", [
+    ("claude", "Claude Code v2.1.0\n● API Error: 400 The selected model\n  is not available for this account", "bedrock_quota"),
+    ("codex", "OpenAI Codex\n■ unexpected status 403 Forbidden\n  Check your account permissions.\n› \n100% context left", "launch_auth"),
+    ("claude", "Claude Code v2.1.0\n● Example:\n  API Error: 400 The selected model\n  is not available for this account", None),
+    ("codex", "OpenAI Codex\n• Ran cat fixture.txt\n  ■ unexpected status 403 Forbidden\n  Check your account permissions.\n› \n100% context left", None),
+])
+def test_wrapped_provider_blocks_require_provider_context(provider, screen, cause):
+    from brindle import launch_health
+    found = launch_health.failure(screen, provider=provider)
+    assert (found.key if found else None) == cause
+
+
+def test_concurrent_refusals_and_notices_preserve_every_update(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from brindle import model_access
+    save = model_access._save
+    barrier = threading.Barrier(8)
+
+    def slow_save(data):
+        time.sleep(0.01)  # force overlapping writers without the process lock
+        save(data)
+
+    monkeypatch.setattr(model_access, "_save", slow_save)
+
+    def record(i):
+        barrier.wait(timeout=5)
+        model_access.refuse(f"worker-{i}", model_access.LAUNCH_AUTH, fp=f"identity-{i}")
+        return model_access.first_time("same-notice")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        assert sum(executor.map(record, range(8))) == 1
+    assert all(model_access.refused(f"worker-{i}", fp=f"identity-{i}") == model_access.LAUNCH_AUTH
+               for i in range(8))
+
+
+@pytest.mark.parametrize("provider", ["native", "claude", "codex"])
+def test_submitted_task_fences_do_not_hide_real_provider_failure(provider):
+    from brindle import launch_health as lh
+    task = "Fix this fixture:\n```\nError: invalid API key\n```"
+    marker = {"native": "── brindle: the model endpoint failed: 401; this worker has stopped ──",
+              "claude": "API Error: 401 invalid x-api-key",
+              "codex": "■ unexpected status 403 Forbidden"}[provider]
+    if provider == "codex":
+        baseline = ""
+        screen = f"OpenAI Codex\n› {task}\n{marker}\n› \n100% context left"
+    else:
+        baseline = f"── brindle: turn 1 ──\n{task}\n"
+        screen = baseline + marker
+    assert lh.failure(screen, task=task, baseline=baseline, provider=provider) == lh.AUTH
+
+
+@pytest.mark.parametrize("state", ["paused", "done", "reported"])
+def test_inactive_worker_cannot_arm_delivery_or_run_readiness(db, health, monkeypatch, state):
+    lh, a, _, _, started, _ = health
+    if state == "reported":
+        db.update_agent(a.id, result="finished")
+    else:
+        db.set_status(a.id, state)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(type(agents.get_provider(a.provider)), "after_launch",
+                        lambda *a: pytest.fail("readiness touched inactive pane"))
+    cli.after_launch_cmd(a.id, token=a._launch_health_token)
+    lh.delivered(db, a)
+    assert started == []
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+@pytest.mark.parametrize("provider,screen", [
+    ("claude", "Here is a Claude Code example:\n● API Error: 401 invalid API key"),
+    ("codex", "OpenAI Codex examples:\n■ unexpected status 403 Forbidden"),
+    ("codex", "OpenAI Codex\nUse esc to interrupt while testing:\n■ unexpected status 403 Forbidden"),
+    ("codex", "OpenAI Codex\nThinking about this example:\n■ unexpected status 403 Forbidden"),
+    ("claude", "❯ Test these failure messages:\nesc to interrupt\n● API Error: 401 invalid API key"),
+])
+def test_provider_names_and_keyboard_help_in_prose_are_not_ui(provider, screen):
+    from brindle import launch_health
+    assert launch_health.failure(screen, provider=provider) is None

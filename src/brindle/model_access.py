@@ -19,11 +19,13 @@ prompt, so every task routed to that model fails the same way. This module
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import re
 import subprocess
 import time
 from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import Callable, Iterable, Mapping
 
 from brindle.config import brindle_home
@@ -155,6 +157,19 @@ def _save(data: dict) -> None:
     os.replace(tmp, _path())
 
 
+@contextmanager
+def _refusal_lock():
+    # Detached launch observers and routing run in different processes.
+    # Serialize the entire read/update/replace, including first_time's writes.
+    os.makedirs(os.path.dirname(_path()), exist_ok=True)
+    with open(_path() + ".lock", "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 # Names and non-secret IDs that say which cloud account a profile calls; never keys.
 FINGERPRINT_ENV = (
     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
@@ -195,10 +210,11 @@ def refuse(profile: str, cause: Cause, swapped_to: str | None = None, *,
     """Record that ``profile``'s model was refused, and where its tasks go."""
     now = time.time()
     fp = fingerprint(profile, repo_root) if fp is None else fp
-    data = _load(now)
-    data["refused"][_key(profile, fp)] = {"profile": profile, "fp": fp, "cause": cause.key,
-                                          "at": now, "swapped_to": swapped_to}
-    _save(data)
+    with _refusal_lock():
+        data = _load(now)
+        data["refused"][_key(profile, fp)] = {"profile": profile, "fp": fp, "cause": cause.key,
+                                              "at": now, "swapped_to": swapped_to}
+        _save(data)
 
 
 def refused(profile: str, repo_root: str | None = None, fp: str | None = None) -> Cause | None:
@@ -211,12 +227,13 @@ def refused(profile: str, repo_root: str | None = None, fp: str | None = None) -
 def first_time(key: str) -> bool:
     """True once per hour for ``key`` (so a supervisor hears of one thing once)."""
     now = time.time()
-    data = _load(now)
-    if key in data["told"]:
-        return False
-    data["told"][key] = now
-    _save(data)
-    return True
+    with _refusal_lock():
+        data = _load(now)
+        if key in data["told"]:
+            return False
+        data["told"][key] = now
+        _save(data)
+        return True
 
 
 def notes(profiles: Iterable[str] | None = None, repo_root: str | None = None) -> list[str]:

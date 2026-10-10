@@ -30,7 +30,7 @@ CAPACITY = model_access.LAUNCH_CAPACITY
 
 def fingerprint(profile, env) -> str:
     # No raw credentials in refusal storage. Omit per-worker launch bookkeeping.
-    identity = {k: v for k, v in env.items() if k not in _LAUNCH_ENV}
+    identity = {k: v for k, v in env.items() if k not in _LAUNCH_ENV or k == profile.api_key_env}
     return hashlib.sha256(json.dumps([profile.provider, profile.model, profile.base_url,
                                      profile.api, profile.api_key_env, sorted(identity.items()),
                                      account_revision(profile.provider, env)]).encode()).hexdigest()
@@ -95,8 +95,11 @@ def delivered(db, agent, baseline: str = "") -> None:
     if row is None or (expected is not None and expected != row["token"]):
         return
     changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=?, pane=? "
-                              "WHERE agent_id=? AND delivered_at IS NULL AND token=?",
-                              (time.time(), baseline, agent.tmux_window or os.environ.get("TMUX_PANE", ""), agent.id, row["token"])).rowcount
+                              "WHERE agent_id=? AND delivered_at IS NULL AND token=? AND outcome IS NULL "
+                              "AND EXISTS (SELECT 1 FROM agents WHERE id=? AND result IS NULL "
+                              "AND status NOT IN ('paused','done'))",
+                              (time.time(), baseline, agent.tmux_window or os.environ.get("TMUX_PANE", ""),
+                               agent.id, row["token"], agent.id)).rowcount
     if changed:
         agents._detach([*brindle_invocation(), "_launch-health", agent.id, "--token", row["token"]])
 
@@ -111,7 +114,10 @@ def capture(agent) -> str:
 
 
 def before_delivery(db, agent) -> str:
-    row = db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+    row = db.conn.execute("SELECT token, delivered_at FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+    # Bind this delivery before capture/paste/IPC can race with a resume,
+    # including the absence of a launch observation at this point.
+    agent._launch_health_token = row["token"] if row else ""
     return capture(agent) if row and row["delivered_at"] is None else ""
 
 
@@ -140,20 +146,26 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
     in_code = False
     claude_banner = False
     candidate = None
+    error_block = ""
     for index, line in enumerate(lines):
         stripped = line.strip()
         if composer_start <= index <= footer:
             continue
+        if context == "submitted" and stripped and (
+                " ".join(stripped.split()) in prompt_text
+                or (provider in ("native", "claude") and stripped in old)):
+            continue  # submitted task/runner preview may itself contain fences or error markers
         if stripped.startswith(("```", "~~~")):
             in_code = not in_code
+            context, candidate = "assistant", None
             continue
         if in_code or not stripped:
             continue
         # Startup chrome is not assistant prose. Recognize the compact logo
         # and boxed welcome banners across Claude versions, but never let a
         # copied banner escape an assistant/tool response or a code fence.
-        if provider in (None, "claude") and context in ("startup", "ui"):
-            if re.search(r"\bClaude Code\b", stripped):
+        if provider in (None, "claude") and context in ("startup", "ui") and not stripped.startswith("── brindle:"):
+            if re.match(r"^(?:(?:[▐▛▜▝▘▗▖]|╭).*?)?Claude Code v\d", stripped):
                 claude_banner = stripped.startswith("╭")
                 context = "ui"
                 continue
@@ -165,14 +177,15 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
             if re.match(r"^(?:[▐▛▜▝▘▗▖]|[─╭╰]|\? for shortcuts|⏵⏵)", stripped):
                 context = "ui"
                 continue
-        if provider in (None, "native") and context in ("startup", "ui", "submitted", "provider"):
+        if provider in (None, "native", "claude") and context in ("startup", "ui", "submitted", "provider"):
             if re.match(r"^brindle: (?:native worker \S+ on .+ at .+|resumed the conversation \(\d+ messages\))$", stripped):
                 context = "ui"
                 continue
-            if re.match(r"^── brindle: turn \d+ ──$", stripped):
+            if re.match(r"^── brindle: turn \d+ ──$", stripped) and stripped in old:
                 context, candidate = "submitted", None
                 continue
-            if stripped in ("── brindle: turn finished ──", "── brindle: waiting for messages ──"):
+            if stripped in ("── brindle: turn finished ──", "── brindle: waiting for messages ──",
+                            "── brindle: turn finished; waiting for messages ──"):
                 context, candidate = "assistant", None
                 continue
         if re.match(r"^[❯>›]\s+\S", stripped):
@@ -183,13 +196,15 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
             continue
         if " ".join(stripped.split()) in prompt_text:
             continue  # wrapped profile/task text is not provider output
-        if provider == "native" and context == "submitted" and stripped in old:
-            continue  # runner captures the printed task preview before delivery
+        if re.fullmatch(r"(?:[•·]\s+)?(?:Working|Thinking)\s*…?\s*"
+                        r"\((?:\d+[hms]\s*)+[•·]\s*esc to (?:interrupt|cancel)\)", stripped, re.I):
+            context, candidate = (context if context in ("assistant", "prose", "prompt") else "ui"), None
+            continue
         if codex_ui and re.match(r"^(?:•\s|(?:Tool output|Ran |Explored |Example output))", stripped):
             context, candidate = "assistant", None
             continue
-        if re.search(r"(?i)esc to (?:interrupt|cancel)|^thinking|^working\s*…", stripped):
-            context, candidate = (context if context in ("assistant", "prose") else "ui"), None
+        if re.fullmatch(r"(?i)esc to (?:interrupt|cancel)|thinking(?:…|\.{3})?|working\s*…", stripped):
+            context, candidate = (context if context in ("assistant", "prose", "prompt") else "ui"), None
             continue
         if stripped.startswith(("●", "⏺")) and len(line) - len(line.lstrip()) <= 1:
             # A tool result or assistant explanation is not a provider error.
@@ -197,23 +212,38 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
                 continue  # copied provider markers remain part of that block
             context = "provider" if provider in (None, "claude") and re.match(r"^[●⏺]\s*API Error:", stripped) else "assistant"
             candidate = _cause(stripped) if context == "provider" and stripped not in old else None
+            error_block = stripped if context == "provider" and stripped not in old else ""
         elif (len(line) - len(line.lstrip()) <= 1
               and re.match(r"^■\s*(?:unexpected status|(?:API )?Error\b)", stripped)):
             if provider in (None, "codex") and context in ("startup", "provider", "ui", "submitted"):
                 context = "provider"
                 candidate = _cause(stripped) if stripped not in old else None
-        elif (not line[:1].isspace() and context in ("startup", "provider")
+                error_block = stripped if stripped not in old else ""
+        elif (not line[:1].isspace() and (context in ("startup", "provider")
+              or (provider == "claude" and context == "submitted"))
               and re.match(r"^(?:(?:API )?Error:|ERROR\b)", stripped)):
             context = "provider"
             candidate = _cause(stripped) if stripped not in old else None
+            error_block = stripped if stripped not in old else ""
         elif (provider in (None, "native") and not line[:1].isspace() and context not in ("assistant", "prompt", "prose")
               and stripped.startswith("── brindle: the model endpoint failed:")):
             context = "provider"
             candidate = _cause(stripped) if stripped not in old else None
-        elif context in ("ui", "submitted") and not re.match(r"^(?:[╭╰│─]|OpenAI Codex|model:|directory:|\d+% context left|\? for shortcuts)", stripped):
+            error_block = stripped if stripped not in old else ""
+        elif context == "provider" and len(line) - len(line.lstrip()) >= 2:
+            # Provider-rendered hard wraps retain the authenticated error
+            # block; ordinary prose and assistant/tool markers end it below.
+            if error_block:
+                error_block += " " + stripped
+                candidate = _cause(error_block)
+        elif context in ("ui", "submitted") and not re.match(r"^(?:[╭╰│─]|OpenAI Codex(?:\s+\(v[^)]+\))?$|model:|directory:|\d+% context left|\? for shortcuts)", stripped):
             context = "assistant"
         elif context == "startup":
             context = "prose"
+        elif context == "provider" and not re.match(r"^(?:[╭╰│─]|\d+% context left|\? for shortcuts|[❯›]\s*$)", stripped):
+            # Unmarked prose after an error is ambiguous (a recovery, example,
+            # or tool output). Do not keep an earlier candidate authoritative.
+            context, candidate = "prose", None
     return candidate
 
 
@@ -248,19 +278,25 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
         return None
     agent = db.get_agent(agent_id)
     if (not agent or agent.result is not None or agent.status in ("paused", "done")
-            or (row["pane"] and agent.tmux_window != row["pane"]) or not agents.same_server(agent)):
+            or (row["pane"] and agent.tmux_window != row["pane"]) or not agents.same_server(agent)
+            or not agents.owns_pane(db, agent)):
+        return None
+    if row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:
         return None
     alive = agents.is_alive(agent)
     cause = failure(capture(agent), baseline=row["baseline"], task=agent.task or "",
                     submitted_prompt=row["submitted_prompt"], provider=agent.provider)
     if alive and row["delivered_at"] is None and not cause:
         return None
-    if alive and row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:
+    if not agents.owns_pane(db, agent):
         return None
     outcome = "failed" if cause else "exited" if not alive else "pending"
     if not db.conn.execute("UPDATE launch_health SET outcome=? WHERE agent_id=? AND outcome IS NULL "
-                           "AND pane=? AND token=? AND delivered_at IS ?",
-                           (outcome, agent_id, row["pane"], row["token"], row["delivered_at"])).rowcount:
+                           "AND pane=? AND token=? AND delivered_at IS ? "
+                           "AND EXISTS (SELECT 1 FROM agents WHERE id=? AND result IS NULL "
+                           "AND status NOT IN ('paused','done') AND tmux_window IS ?)",
+                           (outcome, agent_id, row["pane"], row["token"], row["delivered_at"],
+                            agent_id, agent.tmux_window)).rowcount:
         return None
     if outcome == "pending":
         return outcome  # diagnostics only; do not spend a supervisor turn on a live process

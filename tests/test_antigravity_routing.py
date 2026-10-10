@@ -77,7 +77,7 @@ def add_agy(db, ws, agent_id="g1", status="idle", window="@9"):
 
 def test_launch_does_not_take_the_launchers_inbox(db, ws, launcher_inbox, fake_tmux, helpers, monkeypatch):
     monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
-    monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)
+    monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: True)
     a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
     a = db.get_agent(a.id)
     # agy has no start hook, so brindle marks it ready from the launcher's own process.

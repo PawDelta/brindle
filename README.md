@@ -623,7 +623,9 @@ Fresh interactive Antigravity chats without a task still receive their profile,
 tool instructions and any autopilot context once after readiness; worker
 instructions accompany the actual task in the same delivery.
 For argv tasks, the timer starts at prompt submission or observed CLI readiness,
-after trust/startup handling; readiness timeout does not establish delivery.
+after trust/startup handling; readiness timeout does not establish delivery or
+release queued work. Paused workers, replaced launches and reassigned panes are
+excluded from the observation.
 Explicit fresh authentication, access, model and capacity errors, or an early
 exit, produce a safe supervisor message with a next step. A live process with
 no clear result is recorded as pending for diagnostics, not verified model
@@ -632,8 +634,8 @@ the existing one-hour cooldown, scoped to the effective model/environment and
 local login revision. Changing the account, model or credentials invalidates
 that refusal; CLI/keychain account changes without an observable local revision
 may require waiting for the cooldown or clearing `model_refusals.json`.
-This is a single observation, not an entitlement test: unfamiliar or wrapped
-errors, later failures and slow requests can remain pending. It does not scan
+This is a single observation, not an entitlement test: unfamiliar error layouts,
+later failures and slow requests can remain pending. It does not scan
 historical transcripts, and excludes task text, previous pane lines and older
 marked replies, fenced examples and ordinary assistant/tool explanations. A
 Codex follow-up retains the complete submitted argv prompt (including profile

@@ -754,6 +754,29 @@ def test_custom_cli_catalog_retains_cwd_identity(tmp_path):
     assert ma.provisioning_context("codex", str(tmp_path / "a"), env) != ma.provisioning_context("codex", str(tmp_path / "b"), env)
 
 
+def test_cooldown_keeps_explicit_credential_even_if_named_like_bookkeeping():
+    from brindle import launch_health
+    p = profile(api_key_env="BRINDLE_AGENT_ID")
+    assert launch_health.fingerprint(p, {"BRINDLE_AGENT_ID": "key-one"}) != \
+        launch_health.fingerprint(p, {"BRINDLE_AGENT_ID": "key-two"})
+
+
+def test_launch_provider_override_uses_same_cooldown_as_preflight(db, repo, monkeypatch):
+    from brindle import agents, workspaces, launch_health, model_access
+    from brindle.db import Agent
+    ws = workspaces.adopt_root(db, str(repo))
+    p = profile("claude")
+    a = Agent("worker", ws.id, "test", "codex", "boss", "assign", "processing", "%w", None, 100,
+              task="real task")
+    db.add_agent(a)
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: {"HOME": str(repo)})
+    agents._prepare_launch_health(db, a, ws, p)
+    fp = db.conn.execute("SELECT fingerprint FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0]
+    model_access.refuse("test", launch_health.AUTH, fp=fp)
+    assert "authentication" in agents.model_problem("test", ws, agent=a)
+
+
 def test_provisioning_timeout_override_only_shortens_standalone_discovery_budget():
     check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), ttl=0)
     check.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)
