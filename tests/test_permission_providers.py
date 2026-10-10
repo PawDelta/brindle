@@ -549,6 +549,16 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
     assert decision("write_to_file", {"TargetFile": os.path.join(agents, "hooks.json")}) == "deny"
     os.symlink(agents, os.path.join(ws.path, "docs"))
     assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "docs", "hooks.json")}) == "deny"
+    # Any symlink on the way needs a rule, wherever it leads: here into a
+    # nested .agents reached under another name.
+    nested = os.path.join(ws.path, "sub", "deep")
+    os.makedirs(nested)
+    os.symlink(os.path.join(ws.path, "sub"), os.path.join(ws.path, "alias"))
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "alias", "deep", "x.txt")}) == "deny"
+    assert decision("write_to_file", {"TargetFile": os.path.join(nested, "x.txt")}) == "allow"
+    # A .. is resolved after the symlink before it, so it's never trusted.
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "alias", "..", "x.txt")}) == "deny"
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "sub", "..", "x.txt")}) == "deny"
     # agy tools not checked to stay inside the conversation are denied.
     for tool in ("define_subagent", "manage_subagents", "schedule", "read_resource", "list_resources"):
         assert decision(tool, {}) == "deny", tool

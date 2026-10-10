@@ -431,6 +431,22 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "`brindle permissions allow`.")
 
 
+def _through_symlink(literal: str, roots: list[str]) -> bool:
+    """Whether ``literal`` (absolute, normalized) passes through a symlink
+    below one of ``roots``, the file itself included. A root's own symlinks
+    (macOS's /tmp -> /private/tmp) don't count."""
+    for root in {f(r) for r in roots if r for f in (os.path.normpath, os.path.realpath)}:
+        rel = os.path.relpath(literal, root)
+        if rel == ".." or rel.startswith(".." + os.sep) or rel == ".":
+            continue
+        prefix = root
+        for part in rel.split(os.sep):
+            prefix = os.path.join(prefix, part)
+            if os.path.islink(prefix):
+                return True
+    return False
+
+
 def _agy_protected(literal: str, real: str, roots: list[str]) -> bool:
     """Whether a write lands in a .agents/.git/.brindle folder under one of
     ``roots``, at any depth, ignoring case (macOS and Windows file systems
@@ -439,6 +455,8 @@ def _agy_protected(literal: str, real: str, roots: list[str]) -> bool:
     ``.agents`` that points elsewhere, or a path that points into one) is
     still caught."""
     names = {d.casefold() for d in AGY_PROTECTED_DIRS}
+    if _through_symlink(literal, roots):
+        return True  # where it really lands is not worth guessing at
     for root in (r for r in roots if r):
         for p, r in ((literal, os.path.normpath(root)), (real, os.path.realpath(root))):
             rel = os.path.relpath(p, r)
@@ -479,6 +497,8 @@ def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
         return "the call names more than one path"
     if any(not os.path.isabs(p) for p in paths):
         return "the call names a relative path"
+    if any(".." in p.split("/") or ".." in p.split(os.sep) for p in paths):
+        return "the path has a .. in it"  # resolved after a symlink, not as written
     cwd = args.get("Cwd")
     if call.get("name") == "run_command" and isinstance(cwd, str) and cwd:
         real, root = os.path.realpath(cwd), os.path.realpath(worktree)
