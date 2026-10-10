@@ -1060,6 +1060,71 @@ class Codex(Provider):
     # send input to a terminal. Nothing else on its screen asks this way.
     APPROVAL = re.compile(r"Would you like to (?:run the following command|make the following edits"
                           r"|grant these permissions|send input to (?:the existing )?terminal)")
+    ANSI_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+    INPUT_LINE = re.compile(r"^[ \t]*›(.*)$")
+    FOOTER = re.compile(r"^[ \t]*(?:\? for shortcuts|\d+% context left)")
+    MODEL_PATH = re.compile(r"^[ \t]*[^·\n]+ · (?:~/|/|[A-Za-z]:[\\/])")
+
+    def paste_blocked(self, screen: str, interactive: bool) -> str | None:
+        # Approval choices also use ›. Never paste into those menus, even
+        # for a worker whose ordinary input is not hand-typed.
+        plain = self.ANSI_SGR.sub("", screen)
+        lines = screen.splitlines()
+        plain_lines = plain.splitlines()
+        prompts = [i for i, line in enumerate(plain_lines) if self.INPUT_LINE.match(line)]
+        start = prompts[-1] if prompts else -1
+        end = next((i for i in range(start + 1, len(lines))
+                    if self.FOOTER.match(plain_lines[i])), len(lines))
+        # A returned chat composer and its footer supersede old approval
+        # dialogs in the transcript. A selected numbered menu choice is
+        # still an approval, even if a shortcuts footer is visible below it.
+        choice = start >= 0 and re.match(r"^[ \t]*›[ \t]*\d+[.)][ \t]", plain_lines[start])
+        dialog_start = start if start >= 0 and end < len(lines) and not choice else 0
+        dialog = " ".join("\n".join(plain_lines[dialog_start:]).split())
+        if self.APPROVAL.search(dialog) or self.TRUST_DIALOG.search(dialog):
+            return "approval"
+        if not interactive:
+            return None
+        if not prompts:
+            return "input" if plain.strip() else None
+        # The model/path status row precedes the shortcuts row in current
+        # Codex. Recognize it only in that footer block, after a blank row,
+        # so it does not become a continuation of the person's draft.
+        footer_start = end
+        while footer_start > start + 1 and self.ANSI_SGR.sub("", lines[footer_start - 1]).strip():
+            footer_start -= 1
+        if (end < len(lines) and footer_start < end
+                and self.MODEL_PATH.match(self.ANSI_SGR.sub("", lines[footer_start]))):
+            end = footer_start
+        # Keep continuation rows, including rows after an empty first line.
+        # Keep styling before › too: dim may already be active at the marker.
+        styled = "\n".join(lines[start:end]).replace("›", "", 1)
+        # Foreground grey is a normal theme colour too. Only SGR faint (2)
+        # identifies a placeholder; colour alone must never permit a paste.
+        dim = False
+        pos = 0
+        for match in self.ANSI_SGR.finditer(styled):
+            if styled[pos:match.start()].strip() and not dim:
+                return "typing"
+            codes = match.group(1).split(";")
+            i = 0
+            while i < len(codes):
+                code = codes[i]
+                if code in ("", "0"):
+                    dim = False
+                elif code == "2":
+                    dim = True
+                elif code == "22":
+                    dim = False
+                elif code in ("38", "48", "58") and i + 2 < len(codes) and codes[i + 1] == "5":
+                    i += 2
+                elif code in ("38", "48", "58") and i + 4 < len(codes) and codes[i + 1] == "2":
+                    i += 4
+                i += 1
+            pos = match.end()
+        if styled[pos:].strip() and not dim:
+            return "typing"
+        return None
 
     def command(self, ctx: LaunchContext) -> list[str]:
         spec = mcp_server_spec(ctx.agent_id)

@@ -437,6 +437,7 @@ def test_worker_stopping_unreported_tells_a_hookless_parent(db, root, monkeypatc
     db.update_agent("boss", provider="codex", status="idle")
     add_agent(db, ws, "w1", status="processing")
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "Done.\n\n› \n\n  ? for shortcuts")
     pasted = []
     monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True})
