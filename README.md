@@ -723,6 +723,10 @@ above, `eventName: "permissionRequest"`, `source: "sessionFlags"`,
 brindle hook. This read-only probe made no model calls or trust edits; hook
 dispatch/allow/deny behavior is covered by the permission tests. Linux runtime
 and native Windows behavior were not exercised by that probe.
+`codex features list` also reported `hooks stable true` without a user
+`features.hooks` setting, both on 0.162.1 and the bundled 0.158.0-alpha.2.1.
+A session override of `features.hooks=false` reported false. No feature-enable
+flag is needed on these versions, and brindle leaves explicit disablement alone.
 
 **Antigravity.** agy's hook can deny but its "allow" is ignored (an agy bug),
 and it has no "no opinion" answer. So the hook denies what the policy denies,

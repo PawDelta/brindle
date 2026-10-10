@@ -377,6 +377,20 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert codex_hook.status() == codex_hook.TRUSTED
 
 
+def test_codex_launch_does_not_override_explicit_hook_disablement(ws, monkeypatch):
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    config = codex_hook.codex_home() / "config.toml"
+    disabled = config.read_text() + "\n[features]\nhooks = false\n"
+    config.write_text(disabled)
+    argv = launch_argv(ws)
+    assert "--enable" not in argv
+    assert not any("features.hooks" in arg or "features.codex_hooks" in arg for arg in argv)
+    assert "--dangerously-bypass-hook-trust" not in argv
+    assert config.read_text() == disabled
+
+
 def test_a_removed_trust_stays_removed(ws, monkeypatch):
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
     turn_on(ws)
