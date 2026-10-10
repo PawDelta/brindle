@@ -410,6 +410,7 @@ def test_account_login_applies_company_login_after_the_pawdelta_login(monkeypatc
 
     seen = []
     monkeypatch.setattr(pro_account.auth, "login", lambda *a, **k: Ent())
+    monkeypatch.setattr(pro_account.auth, "me", lambda *a, **k: {})
     monkeypatch.setattr(pro_account.loopback, "can_open_browser", lambda out: False)
     monkeypatch.setattr(company_login, "apply_current", lambda say, *a, **k: seen.append(say))
     acct = pro_account.ProAccount(store=object())

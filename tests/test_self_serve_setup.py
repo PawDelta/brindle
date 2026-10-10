@@ -422,6 +422,7 @@ def test_login_and_doctor_fix_offer_it(entry, env, monkeypatch):
             sub, org_id, plan, features = "me", "acme", "pro", frozenset()
 
         monkeypatch.setattr(pro_account.auth, "login", lambda *a, **k: Ent())
+        monkeypatch.setattr(pro_account.auth, "me", lambda *a, **k: {})
         monkeypatch.setattr(pro_account.loopback, "can_open_browser", lambda out: False)
         monkeypatch.setattr(pro_account.ProAccount, "_client", lambda self, base=None: None, raising=False)
         assert pro_account.ProAccount(store=object()).run(["login"]) == 0
