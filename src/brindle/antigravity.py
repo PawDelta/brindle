@@ -254,6 +254,11 @@ def agent_from_parent(max_depth: int = 4) -> str | None:
 # -- hooks ---------------------------------------------------------------------------
 
 LIMIT_ERROR = re.compile(r"429|quota|rate.?limit|resource.?exhausted", re.I)
+AUTH_ERROR = re.compile(
+    r"401|403|unauthorized|authentication|auth[-_ ]?fail|invalid[-_ ]?(?:api[-_ ]?)?key|"
+    r"expired[-_ ]?(?:token|key)?|credit[-_ ]?balance|billing|permission denied",
+    re.I,
+)
 
 
 def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
@@ -283,14 +288,16 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
         error = str(payload.get("error") or "")
         if error:
             limited = bool(LIMIT_ERROR.search(error))
+            autherr = bool(AUTH_ERROR.search(error))
             if limited:
                 from brindle import quota
                 from brindle.config import RepoConfig, load_repo_config
 
                 ws = db.get_workspace(agent.workspace_id)
                 quota.record_limit("antigravity", load_repo_config(ws.repo_root) if ws else RepoConfig())
+            error_type = "rate_limit" if limited else ("auth" if autherr else "error")
             agents.handle_hook(db, agent_id, "stop-failure",
-                               {**base, "error_type": "rate_limit" if limited else "error"})
+                               {**base, "error_type": error_type, "error": error})
             return None
         if db.pending_count(agent_id):
             # A new turn, not a continuation: only then does agy give the

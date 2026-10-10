@@ -748,6 +748,15 @@ def seen_signed_in(provider: str) -> bool:
     return any(k[0] == provider and now - t < SIGNED_IN_TTL for k, t in _SIGNED_IN.items())
 
 
+def invalidate_signed_in(provider: str | None = None) -> None:
+    """Clear cached positive sign-in probes (e.g. after an auth failure or when rotating keys)."""
+    global _SIGNED_IN
+    if provider is None:
+        _SIGNED_IN.clear()
+    else:
+        _SIGNED_IN = {k: v for k, v in _SIGNED_IN.items() if k[0] != provider}
+
+
 def subscription_login(provider: str = "claude") -> bool:
     """Whether ``provider``'s own login answers "signed in", probed with the
     provider's environment credentials left out so a key can't stand in for it."""

@@ -934,8 +934,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task.
     With ``only``, just those agents (if paused) restart."""
-    from brindle import identity_lock
+    from brindle import identity_lock, providers
 
+    providers.invalidate_signed_in()
     candidates = [a for a in tree(db, root_id)
                   if a.status == "paused" and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
@@ -2352,12 +2353,36 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 flush(db, agent_id)
     elif event == "stop-failure":
         # The turn ended on an API error; no Stop hook follows.
-        db.set_status(agent_id, "idle")
-        db.clear_permission_requests(agent_id)
-        if "rate_limit" in json.dumps(payload):
-            from brindle import autopilot as pilot
+        payload_str = json.dumps(payload).lower()
+        is_auth = (
+            payload.get("error_type") == "auth"
+            or any(w in payload_str for w in ("401", "403", "unauthorized", "authentication", "auth_fail", "auth fail", "invalid api key", "invalid_api_key", "expired token", "credit balance"))
+        )
+        if is_auth:
+            db.set_status(agent_id, "failed")
+            db.clear_permission_requests(agent_id)
+            from brindle import providers, autopilot as pilot
+            providers.invalidate_signed_in(agent.provider)
+            msg = (
+                f"[brindle] Agent {agent_id} encountered an authentication failure "
+                f"(invalid or expired credentials): {payload.get('error') or payload.get('error_type') or '401/403'}. "
+                "Check API keys or login status."
+            )
+            if agent.parent_id:
+                try:
+                    send_message(db, agent.parent_id, msg, sender_id="brindle")
+                except Exception:
+                    pass
+            root_id = pilot.root_of(db, agent_id)
+            if db.get_autopilot(root_id):
+                pilot.need_user(db, root_id, f"Credentials need attention for agent {agent_id}: authentication failure.")
+        else:
+            db.set_status(agent_id, "idle")
+            db.clear_permission_requests(agent_id)
+            if "rate_limit" in payload_str:
+                from brindle import autopilot as pilot
 
-            pilot.limit_reached(db, agent)
+                pilot.limit_reached(db, agent)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:
         # the sidebar hides a subagent that's been "running" too long instead.
