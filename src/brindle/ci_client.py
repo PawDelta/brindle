@@ -1179,9 +1179,8 @@ def scrub_job(env: MutableMapping[str, str], federation: ci_federation.Federatio
     """Scrub the job's secrets from ``env`` and this process (what every
     agent inherits), then point both at the credential proxy and the cloud
     token files if there are any."""
-    gone = scrub_secrets(env)
-    for k in gone:
-        os.environ.pop(k, None)
+    scrub_secrets(env)
+    scrub_secrets(os.environ)
     if federation is not None:
         federation.apply(env, os.environ)
     if cloud is not None:
