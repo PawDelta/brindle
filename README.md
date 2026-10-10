@@ -573,6 +573,21 @@ keep theirs):
 No tier prefers another provider for its own sake: all-Claude or all-Codex may
 be what works best for you, and that's for the learner to find out.
 
+Routing merges per tier in this order: built-in defaults, `~/.brindle/config.json`
+(every repo), the repo's `.brindle/config.json` (shared with the team), then
+`.brindle/config.local.json` (your override for that repo). Each tier you set
+replaces that tier's list; tiers you leave out keep the list from the layer below.
+For example, put this in `~/.brindle/config.json` to use Codex for light tasks
+in every repo, or in a repo's `.brindle/config.local.json` to do so only there:
+
+```json
+{"routing": {"light": ["developer-codex", "developer"]}}
+```
+
+Run `brindle doctor` in the repo to see the effective list and source file for
+each tier. Unknown profile names are skipped; doctor and the routing reply
+report the missing name and the file that supplied it.
+
 `developer-light` runs on Claude Haiku at low effort; `developer` on your Claude
 Code default model; `developer-codex` on Codex; `developer-heavy` on Claude Fable
 at high effort.

@@ -365,6 +365,7 @@ def checks(repo_root: str | None) -> list[Check]:
     if repo_root:
         try:
             cfg = config.load_repo_config(repo_root)
+            out.extend(routing_checks(cfg, repo_root))
             path = Path(repo_root) / config.CONFIG_DIR / config.CONFIG_FILE
             if path.exists():
                 out.append(Check(OK, "repo config", f"{path}"))
@@ -411,6 +412,29 @@ def checks(repo_root: str | None) -> list[Check]:
                              "uncommitted changes: workers branch from committed work only"))
         else:
             out.append(Check(OK, "working tree", "clean"))
+    return out
+
+
+def routing_checks(cfg, repo_root: str) -> list[Check]:
+    """Effective routing per tier, with its config source and missing names."""
+    from brindle.config import WEIGHTS
+    from brindle.profiles import load_profile
+
+    out = []
+    for tier in WEIGHTS:
+        names, missing = [], []
+        for name in cfg.routing[tier]:
+            try:
+                load_profile(name, repo_root)
+            except KeyError:
+                missing.append(name)
+            else:
+                names.append(name)
+        source = cfg.routing_sources[tier]
+        detail = f"{' -> '.join(names) or 'none configured'} (from {source})"
+        if missing:
+            detail += f"; no profile {', '.join(missing)} in {source}, skipped"
+        out.append(Check(WARN if missing else OK, f"routing {tier}", detail))
     return out
 
 
