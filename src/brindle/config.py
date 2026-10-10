@@ -95,6 +95,10 @@ class RepoConfig:
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
     permission_policy: str = "off"
+    # "brindle": with the policy on, agy workers run with
+    # --dangerously-skip-permissions and brindle's hook allows or denies every
+    # call (see brindle.antigravity). "prompt" (default): agy asks as usual.
+    agy_approvals: str = "prompt"
     overlap: str = "block"           # a task whose files overlap a running one: "block" or "warn"
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
@@ -209,7 +213,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
                 "review_rounds", "fable_escalation", "goal_audit", "overlap", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "sidebar", "pr_footer", "plan_first", "learning",
-                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
+                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile"):
         for source in (local, shared, user):
             if key in source:

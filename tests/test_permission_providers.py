@@ -429,6 +429,224 @@ def test_agy_pre_tool_answers_what_agy_would_do_except_a_deny(db, ws, monkeypatc
     assert answer("run_command", {"CommandLine": "git status"}) == "ask"
 
 
+# -- agy: agy_approvals "brindle" (--dangerously-skip-permissions, the hook decides) -------------
+
+
+def strict_answer(db, ws, tool, args, **extra):
+    stdin = json.dumps({**agy_payload(tool, args, ws.path), **extra})
+    return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))
+
+
+def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, monkeypatch, tmp_path):
+    # With the skip flag agy runs a hook's "ask" unprompted, so the strict hook
+    # never answers ask: what brindle would have asked about is denied.
+    a = worker(db, ws, provider="antigravity", id_="g1")
+    turn_on(ws)
+    set_local(ws.repo_root, "checks", ["uv run pytest -q"])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("x")
+
+    def decision(tool, args, **extra):
+        return strict_answer(db, ws, tool, args, **extra)["decision"]
+
+    assert decision("run_command", {"CommandLine": "git status"}) == "allow"
+    assert decision("run_command", {"CommandLine": "uv run pytest -q"}) == "allow"  # the repo's check
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, "app.py")}) == "allow"
+    assert decision("list_dir", {"DirectoryPath": ws.path}) == "allow"  # the workspace itself
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "notes.md")}) == "allow"
+    assert decision("run_command", {"CommandLine": "git status", "Cwd": ws.path}) == "allow"
+    brain = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli", "brain", "c1")
+    os.makedirs(brain, exist_ok=True)
+    assert decision("write_to_file", {"TargetFile": os.path.join(brain, "plan.md")},
+                    artifactDirectoryPath=brain) == "allow"
+    # Any other folder the payload calls its artifact folder is not.
+    assert decision("write_to_file", {"TargetFile": str(tmp_path / "plan.md")},
+                    artifactDirectoryPath=str(tmp_path)) == "deny"
+    assert decision("write_to_file", {"TargetFile": str(tmp_path / "plan.md")},
+                    artifactDirectoryPath=os.path.join(brain, "..", "..", "..", "..", "..")) == "deny"
+    assert decision("mcp_brindle_report_result", {}) == "allow"
+    assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "send_message"}) == "allow"
+    assert decision("invoke_subagent", {}) == "allow"  # its own calls reach this hook
+
+    assert decision("run_command", {"CommandLine": "git push"}) == "deny"
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
+    out = strict_answer(db, ws, "run_command", {"CommandLine": "curl https://example.com"})
+    assert out["decision"] == "deny" and "send_message" in out["reason"]
+    assert decision("view_file", {"AbsolutePath": str(outside)}) == "deny"
+    assert decision("read_url_content", {"Url": "https://example.com"}) == "deny"
+    assert decision("call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue"}) == "deny"
+    assert decision("browser_click", {}) == "deny"  # a tool brindle doesn't know
+    rows = db.list_history(ws.repo_root, "permission")
+    assert len(rows) == 9 and all(r.result.startswith("deny:") for r in rows)
+
+
+def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
+    a = worker(db, ws, provider="antigravity", id_="g1")
+    turn_on(ws)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+
+    def decision(tool, args):
+        return strict_answer(db, ws, tool, args)["decision"]
+
+    # Writing what defines the hook, what git runs, or brindle's repo config
+    # would undo the gate (or make a command one of the allowed checks).
+    for rel in (".agents/hooks.json", ".git/hooks/pre-commit", ".brindle/config.local.json"):
+        assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, rel)}) == "deny", rel
+        assert decision("replace_file_content", {"TargetFile": os.path.join(ws.path, rel)}) == "deny", rel
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".agents", "hooks.json")}) == "allow"
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "src", ".agents.md")}) == "allow"
+    # Only brindle's own tools by their exact names, never another server's.
+    assert decision("mcp_brindle_x_run", {}) == "deny"
+    assert decision("mcp_brindle_evil_report_result", {}) == "deny"
+    assert decision("call_mcp_tool", {"ServerName": "brindle_x", "ToolName": "report_result"}) == "deny"
+    assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "not_a_tool"}) == "deny"
+    # A call naming two paths: agy may act on either, so neither is trusted.
+    hooks = os.path.join(ws.path, ".agents", "hooks.json")
+    assert decision("write_to_file", {"AbsolutePath": os.path.join(ws.path, "ok.txt"),
+                                      "TargetFile": hooks}) == "deny"
+    # The protected folders are anchored to brindle's worktree and repo, not
+    # to what the payload says the workspace is.
+    wide = strict_answer(db, ws, "write_to_file", {"TargetFile": hooks}, workspacePaths=["/"])
+    assert wide["decision"] == "deny"
+    root_hooks = os.path.join(ws.repo_root, ".git", "hooks", "pre-commit")
+    assert strict_answer(db, ws, "write_to_file", {"TargetFile": root_hooks},
+                         workspacePaths=[ws.repo_root])["decision"] == "deny"
+    # Whatever agy might read differently from brindle is denied, not guessed:
+    # a relative path (agy may not resolve it against Cwd), a JSON-encoded
+    # value, ~, or a command run outside the worktree.
+    src = os.path.join(ws.path, "src")
+    assert decision("write_to_file", {"TargetFile": ".agents/hooks.json", "Cwd": src}) == "deny"
+    assert decision("write_to_file", {"TargetFile": "notes.md"}) == "deny"
+    assert decision("write_to_file", {"TargetFile": json.dumps(os.path.join(ws.path, "n.md"))}) == "deny"
+    assert decision("write_to_file", {"TargetFile": "~/notes.md"}) == "deny"
+    assert decision("run_command", {"CommandLine": json.dumps("git status")}) == "deny"
+    assert decision("run_command", {"CommandLine": "git status", "Cwd": "/tmp"}) == "deny"
+    assert decision("run_command", {"CommandLine": "git status", "Cwd": json.dumps(ws.path)}) == "deny"
+    # The profile's allowed_tools (the developer's ls, uv run, ...) count, as
+    # for a Claude Code worker; a deny still wins, and nothing compound passes.
+    assert decision("run_command", {"CommandLine": "ls -la"}) == "allow"
+    assert decision("run_command", {"CommandLine": "ls"}) == "allow"
+    assert decision("run_command", {"CommandLine": "uv run pytest tests/test_x.py -q"}) == "allow"
+    assert decision("run_command", {"CommandLine": "lsof -i"}) == "deny"
+    assert decision("run_command", {"CommandLine": "ls; curl https://example.com"}) == "deny"
+    assert decision("run_command", {"CommandLine": "ls $(curl https://example.com)"}) == "deny"
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
+    # .agents/.git/.brindle are protected at any depth, not only at the top.
+    assert decision("write_to_file", {"TargetFile": os.path.join(src, ".agents", "hooks.json")}) == "deny"
+    # ... in any case (macOS file systems ignore it) ...
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, ".AGENTS", "hooks.json")}) == "deny"
+    # ... and through a symlink either way: a .agents that points elsewhere in
+    # the worktree, and a harmless-looking path that points into one.
+    agents = os.path.join(ws.path, ".agents")
+    real_agents = os.path.join(ws.path, "agents_real")
+    if os.path.isdir(agents):
+        os.rename(agents, real_agents)
+    else:
+        os.makedirs(real_agents)
+    os.symlink(real_agents, agents)
+    assert decision("write_to_file", {"TargetFile": os.path.join(agents, "hooks.json")}) == "deny"
+    os.symlink(agents, os.path.join(ws.path, "docs"))
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "docs", "hooks.json")}) == "deny"
+    # Any symlink on the way needs a rule, wherever it leads: here into a
+    # nested .agents reached under another name.
+    nested = os.path.join(ws.path, "sub", "deep")
+    os.makedirs(nested)
+    os.symlink(os.path.join(ws.path, "sub"), os.path.join(ws.path, "alias"))
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "alias", "deep", "x.txt")}) == "deny"
+    assert decision("write_to_file", {"TargetFile": os.path.join(nested, "x.txt")}) == "allow"
+    # Reaching the worktree through a symlink outside it doesn't skip that.
+    outside_link = os.path.join(os.path.dirname(ws.path), "link-to-ws")
+    os.symlink(ws.path, outside_link)
+    assert decision("write_to_file", {"TargetFile": os.path.join(outside_link, "alias", "deep", "x.txt")}) == "deny"
+    assert decision("write_to_file", {"TargetFile": os.path.join(outside_link, "notes.md")}) == "deny"
+    # A .. is resolved after the symlink before it, so it's never trusted.
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "alias", "..", "x.txt")}) == "deny"
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "sub", "..", "x.txt")}) == "deny"
+    # agy tools not checked to stay inside the conversation are denied.
+    for tool in ("define_subagent", "manage_subagents", "schedule", "read_resource", "list_resources"):
+        assert decision(tool, {}) == "deny", tool
+
+
+@pytest.mark.parametrize("stdin", ["", "{broken", "[]", "null", '{"toolCall": 5}'])
+def test_agy_strict_fails_closed(db, ws, monkeypatch, stdin):
+    a = worker(db, ws, provider="antigravity", id_="g1")
+    turn_on(ws)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    assert json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))["decision"] == "deny"
+
+
+def test_agy_strict_failures_are_deny_unless_agy_plainly_prompts(db, monkeypatch):
+    def broken_db():
+        raise RuntimeError("no db")
+
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "g1")
+    payload = json.dumps(agy_payload("run_command", {"CommandLine": "x"}))
+    assert json.loads(antigravity.pre_tool_main(payload, db_factory=broken_db, strict=True))["decision"] == "deny"
+    # An agent brindle doesn't know: deny.
+    assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=True))["decision"] == "deny"
+    monkeypatch.delenv("BRINDLE_AGENT_ID")
+    monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
+    # No agent: the person's own agy in this checkout. Started without the
+    # flag, it prompts, so ask; with the flag, or when that can't be told, deny.
+    for launched, expected in ((False, "ask"), (True, "deny"), (None, "deny")):
+        monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda launched=launched: launched)
+        assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=True))["decision"] == expected
+
+
+def test_agy_strict_cli_event(monkeypatch):
+    monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
+    for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "ls"}))):
+        res = CliRunner().invoke(app, ["_hook", "agy-pre-tool-strict"], input=stdin)
+        assert res.exit_code == 0
+        assert json.loads(res.stdout)["decision"] == "deny"
+
+
+def test_agy_strict_launch_skips_prompts_and_hooks_every_tool(db, ws, monkeypatch):
+    from brindle.profiles import load_profile
+    from brindle.providers import Antigravity, LaunchContext
+
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
+
+    def launch():
+        argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, cwd=ws.path))
+        hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
+        return argv, hooks.get("PreToolUse")
+
+    set_local(ws.repo_root, "agy_approvals", "brindle")
+    set_local(ws.repo_root, "permission_policy", "off")
+    argv, pre = launch()
+    assert antigravity.SKIP_FLAG not in argv and pre is None  # needs the policy on
+    turn_on(ws)
+    argv, [entry] = launch()
+    assert antigravity.SKIP_FLAG in argv
+    assert entry["matcher"] == "*" and "agy-pre-tool-strict" in entry["hooks"][0]["command"]
+    set_local(ws.repo_root, "agy_approvals", "prompt")
+    argv, [entry] = launch()
+    assert antigravity.SKIP_FLAG not in argv and "agy-pre-tool-strict" not in entry["hooks"][0]["command"]
+
+
+def test_launched_with_skip_flag_reads_the_agy_process(monkeypatch):
+    commands = {10: "/bin/sh -c brindle _hook", 20: "/Users/x/.local/bin/agy --dangerously-skip-permissions -i hi"}
+    parents = {10: 20, 20: 1}
+    monkeypatch.setattr(os, "getppid", lambda: 10)
+    monkeypatch.setattr(antigravity, "_parent", lambda pid: parents.get(pid))
+
+    class Done:
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(antigravity.subprocess, "run", lambda argv, **kw: Done(commands.get(int(argv[-1]), "")))
+    assert antigravity._launched_with_skip_flag() is True
+    commands[20] = "/Users/x/.local/bin/agy -i hi"
+    assert antigravity._launched_with_skip_flag() is False
+    commands[20] = "python something"
+    assert antigravity._launched_with_skip_flag() is None
+
+
 # -- agy: mirroring brindle's rules into its settings --------------------------------------------
 
 

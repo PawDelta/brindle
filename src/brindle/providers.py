@@ -1085,6 +1085,8 @@ class Codex(Provider):
         argv += codex_hook.launch_flags(ctx.cwd)
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
+        if ctx.profile.effort:
+            argv += ["-c", f"model_reasoning_effort={json.dumps(ctx.profile.effort)}"]
         # Codex has no system-prompt flag; lead the first message with the profile.
         first = "\n\n".join(p for p in (ctx.profile.prompt, ctx.initial_prompt) if p)
         if first:
@@ -1148,13 +1150,22 @@ class Antigravity(Provider):
     def command(self, ctx: LaunchContext) -> list[str]:
         from brindle import antigravity
 
+        strict = False
         if ctx.cwd:
             policy = antigravity.policy_on(ctx.cwd)
-            antigravity.install(ctx.cwd, permission_policy=bool(policy))
+            strict = policy is not None and antigravity.strict_on(ctx.cwd)
+            antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]
+        if strict:
+            # agy ignores a hook's "allow" (google-antigravity/antigravity-cli#1053)
+            # but honors its "deny" with this flag, so brindle's hook, installed
+            # above on every tool, is the gate: see antigravity.pre_tool_main.
+            argv.append(antigravity.SKIP_FLAG)
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
+        if ctx.profile.effort:
+            argv += ["--effort", ctx.profile.effort]
         if ctx.profile.permission_mode in ("acceptEdits", "accept-edits", "auto"):
             # agy has no classifier mode; accepting edits is the closest.
             argv += ["--mode", "accept-edits"]

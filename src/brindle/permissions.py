@@ -415,6 +415,144 @@ def agy_output(decision: Decision | None, req: Request | None = None,
     return {"decision": "ask", "reason": f"brindle: {why}"}
 
 
+# agy's own tools that act only on the conversation (tasks, messages to its
+# subagents, questions to the person); a subagent's tool calls reach the hook
+# themselves (checked on agy 1.3.2). Anything not listed here or mapped in
+# AGY_KINDS is denied under agy_approvals "brindle", so a tool agy adds later
+# starts out blocked.
+AGY_CONVERSATION_TOOLS = frozenset({"manage_task", "send_message", "ask_question", "invoke_subagent"})
+# Inside a workspace, but not files the agent may write without a rule: what
+# brindle's hook and agy's settings are read from (.agents), what git runs
+# (.git/hooks, config), and brindle's repo config (checks, rules).
+AGY_PROTECTED_DIRS = (".agents", ".git", ".brindle")
+NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule allows this "
+                  "({why}). Don't try another way to do the same thing: tell your supervisor "
+                  "with send_message what you need and why, so the person can allow it with "
+                  "`brindle permissions allow`.")
+
+
+def _lexically_within(literal: str, root: str) -> bool:
+    """``literal`` is ``root`` or under it as spelled, taking ``root`` as
+    given or resolved (macOS's /tmp is /private/tmp), with nothing resolved
+    in ``literal`` itself."""
+    for r in {os.path.normpath(root), os.path.realpath(root)}:
+        if literal == r or literal.startswith(r.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _through_symlink(literal: str, roots: list[str]) -> bool:
+    """Whether ``literal`` (absolute, normalized) passes through a symlink
+    below one of ``roots``, the file itself included. A root's own symlinks
+    (macOS's /tmp -> /private/tmp) don't count."""
+    for root in {f(r) for r in roots if r for f in (os.path.normpath, os.path.realpath)}:
+        rel = os.path.relpath(literal, root)
+        if rel == ".." or rel.startswith(".." + os.sep) or rel == ".":
+            continue
+        prefix = root
+        for part in rel.split(os.sep):
+            prefix = os.path.join(prefix, part)
+            if os.path.islink(prefix):
+                return True
+    return False
+
+
+def _agy_protected(literal: str, real: str, roots: list[str]) -> bool:
+    """Whether a write lands in a .agents/.git/.brindle folder under one of
+    ``roots``, at any depth, ignoring case (macOS and Windows file systems
+    do). Checked on the path as written and as resolved, and against each
+    top-level protected folder resolved, so a symlink either way (a
+    ``.agents`` that points elsewhere, or a path that points into one) is
+    still caught."""
+    names = {d.casefold() for d in AGY_PROTECTED_DIRS}
+    if _through_symlink(literal, roots):
+        return True  # where it really lands is not worth guessing at
+    for root in (r for r in roots if r):
+        for p, r in ((literal, os.path.normpath(root)), (real, os.path.realpath(root))):
+            rel = os.path.relpath(p, r)
+            if rel != ".." and not rel.startswith(".." + os.sep):
+                if names & {part.casefold() for part in rel.split(os.sep)}:
+                    return True
+        for d in AGY_PROTECTED_DIRS:
+            target = os.path.realpath(os.path.join(root, d))
+            if real == target or real.startswith(target + os.sep):
+                return True
+    return False
+
+
+def _brindle_tools() -> set[str]:
+    """brindle's MCP tools by both names agy gives them: mcp_brindle_<tool>
+    and, through call_mcp_tool, mcp__brindle__<tool>. Exact names, so another
+    server's tools (say a server named brindle_x) never count."""
+    from brindle.antigravity import tool_names
+
+    names = tool_names()
+    return {f"mcp_brindle_{n}" for n in names} | {f"mcp__brindle__{n}" for n in names}
+
+
+def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
+    """Why brindle can't be sure it reads an agy call the way agy will, or
+    None. Under agy_approvals "brindle" such a call is denied rather than
+    guessed at: a JSON-encoded value (brindle decodes it, agy may not), a
+    relative or ~ path (agy may resolve it against something other than
+    Cwd), more than one path, or a command run outside the worktree."""
+    call = payload.get("toolCall") if isinstance(payload, dict) else None
+    args = call.get("args") if isinstance(call, dict) and isinstance(call.get("args"), dict) else {}
+    for name in (*AGY_PATH_ARGS, "Cwd", "CommandLine"):
+        raw = args.get(name)
+        if isinstance(raw, str) and raw and _agy_arg(args, name) != raw:
+            return f"{name} is JSON-encoded"
+    paths = {args[a] for a in AGY_PATH_ARGS if isinstance(args.get(a), str) and args[a]}
+    if len(paths) > 1:
+        return "the call names more than one path"
+    if any(not os.path.isabs(p) for p in paths):
+        return "the call names a relative path"
+    if any(".." in p.split("/") or ".." in p.split(os.sep) for p in paths):
+        return "the path has a .. in it"  # resolved after a symlink, not as written
+    cwd = args.get("Cwd")
+    if call.get("name") == "run_command" and isinstance(cwd, str) and cwd:
+        real, root = os.path.realpath(cwd), os.path.realpath(worktree)
+        if not os.path.isabs(cwd) or (real != root and not _inside(real, worktree)):
+            return "the command runs outside the worktree"
+    return None
+
+
+def agy_strict_output(decision: Decision | None, req: Request | None = None,
+                      workspaces: list[str] | None = None,
+                      protected_roots: list[str] | None = None) -> dict:
+    """agy's PreToolUse answer under ``agy_approvals: "brindle"``, where agy
+    runs with --dangerously-skip-permissions: a hook's "ask" then runs the
+    call without a prompt, so brindle answers allow or deny, never ask.
+    Allowed: what a rule allows, a file inside a workspace (or the
+    conversation's artifact folder, passed in ``workspaces``), brindle's own
+    tools, and agy's conversation-only tools. Everything else is denied with
+    a reason that tells the agent to ask its supervisor."""
+    if decision is not None and decision.decision == "deny":
+        return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
+    if decision is not None and decision.decision == "allow":
+        return {"decision": "allow", "reason": f"brindle: {decision.reason}"}
+    if req is not None:
+        path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
+        # Protected wherever the workspaces list says the workspace is: the
+        # anchors are brindle's own worktree and repo root.
+        literal = os.path.normpath(req.path) if path else None
+        protected = (path and req.kind != "read"
+                     and _agy_protected(literal, path, protected_roots or []))
+        # In the workspace as written, not only once resolved: a path that
+        # gets there through a symlink outside it would skip the symlink walk.
+        if path and not protected and any(
+                w and _lexically_within(literal, w) and (path == os.path.realpath(w) or _inside(path, w))
+                for w in workspaces or []):
+            return {"decision": "allow", "reason": "brindle: a file in the workspace"}
+        if req.kind == "mcp" and req.tool in _brindle_tools():
+            return {"decision": "allow", "reason": "brindle: brindle's own tool"}
+        if req.kind == "other" and req.tool in AGY_CONVERSATION_TOOLS:
+            return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
+    why = decision.reason if decision is not None else "brindle couldn't read the request"
+    why = why.removesuffix("; asking the user")  # nobody is asked here
+    return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why)}
+
+
 # -- matching ---------------------------------------------------------------------------------
 
 
@@ -589,6 +727,27 @@ def profile_rules(profile) -> list[Rule]:
         kind, match_type, match = parts
         if kind in KINDS and match_type in MATCH_TYPES and match:
             out.append(Rule(kind, match, match_type, "deny", "profile"))
+    return out
+
+
+PROFILE_BASH = re.compile(r"Bash\(([^()*]+?)(:\*)?\)")
+
+
+def profile_bash_allows(profile) -> list[Rule]:
+    """The profile's ``allowed_tools`` shell entries as allow rules, for an
+    agy worker under agy_approvals "brindle", which Claude Code's
+    ``--allowedTools`` never reaches: ``Bash(git status)`` is that exact
+    command, ``Bash(uv run:*)`` it alone or followed by arguments. Like
+    every bash allow, a compound or quoted command never matches."""
+    out = []
+    for entry in getattr(profile, "allowed_tools", None) or []:
+        m = PROFILE_BASH.fullmatch(entry.strip())
+        if not m:
+            continue
+        command = m.group(1).strip()
+        out.append(Rule("bash", command, "exact", "allow", "profile"))
+        if m.group(2):
+            out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
     return out
 
 

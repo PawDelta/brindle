@@ -37,6 +37,14 @@ def test_command_sets_up_the_checkout(db, ws, repo, monkeypatch):
     assert sh("git status --porcelain", repo) == ""
 
 
+def test_command_passes_the_profiles_model_and_effort(db, ws, repo, monkeypatch):
+    import dataclasses
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    profile = dataclasses.replace(load_profile("developer"), model="gemini-3.1-pro-high", effort="high")
+    argv = Antigravity().command(LaunchContext("g1", profile, None, cwd=str(repo)))
+    assert argv[:5] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high"]
+
+
 def test_resume_uses_the_conversation(db, ws, repo):
     argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, resume="abc", cwd=str(repo)))
     assert argv[-2:] == ["--conversation", "abc"]

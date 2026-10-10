@@ -60,6 +60,10 @@ EVENTS = {
     "PostToolUse": "agy-post-tool",
     "PreToolUse": "agy-pre-tool",
 }
+# PreToolUse under agy_approvals "brindle" (agy started with
+# --dangerously-skip-permissions): allow or deny only, and deny on any failure.
+STRICT_EVENT = "agy-pre-tool-strict"
+SKIP_FLAG = "--dangerously-skip-permissions"
 # The tools brindle's policy has an opinion on (brindle.permissions.from_agy);
 # others never reach its hook. The hook must answer something (nothing is a
 # deny), and agy's "ask" prompts unless an Always Allow rule covers the call,
@@ -166,9 +170,10 @@ def _hook_command(event: str) -> str:
     return assigns + " ".join(shlex.quote(a) for a in [*brindle_invocation(), "_hook", event])
 
 
-def install(workspace: str, permission_policy: bool = False) -> None:
+def install(workspace: str, permission_policy: bool = False, strict: bool = False) -> None:
     """Give the checkout brindle's MCP server, hooks and rule for agy (and,
-    with ``permission_policy``, the PreToolUse hook that applies it)."""
+    with ``permission_policy``, the PreToolUse hook that applies it; with
+    ``strict``, the one for agy_approvals "brindle", on every tool)."""
     from brindle.providers import brindle_invocation
 
     cmd = brindle_invocation()
@@ -180,7 +185,11 @@ def install(workspace: str, permission_policy: bool = False) -> None:
     handler = lambda ev: [{"type": "command", "command": _hook_command(EVENTS[ev]), "timeout": 60}]  # noqa: E731
     hooks = {"PreInvocation": handler("PreInvocation"), "Stop": handler("Stop"),
              "PostToolUse": [{"matcher": "*", "hooks": handler("PostToolUse")}]}
-    if permission_policy:
+    if strict:
+        # agy runs every call this hook doesn't deny, so it sees every tool.
+        hooks["PreToolUse"] = [{"matcher": "*", "hooks": [
+            {"type": "command", "command": _hook_command(STRICT_EVENT), "timeout": 60}]}]
+    elif permission_policy:
         hooks["PreToolUse"] = [{"matcher": PRE_TOOL_MATCHER, "hooks": handler("PreToolUse")}]
     _merge_json(workspace, AGENTS_DIR / "hooks.json", "", "brindle", hooks)
     rule = Path(workspace) / AGENTS_DIR / "rules" / "brindle.md"
@@ -298,56 +307,116 @@ def _flush_soon(agent_id: str, delay: float = 1.5) -> None:
                      start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def pre_tool_decision(db, agent_id: str | None, payload: object) -> dict:
-    """agy's PreToolUse: brindle's permission policy as deny or ask."""
+def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = False) -> dict:
+    """agy's PreToolUse: brindle's permission policy as deny or ask (with
+    ``strict``, agy_approvals "brindle": allow or deny; see
+    permissions.agy_strict_output)."""
     from brindle import permissions
     from brindle.agents import _record_permission
     from brindle.config import load_repo_config
     from brindle.profiles import profile_rules_for
 
+    output = permissions.agy_strict_output if strict else permissions.agy_output
     agent = db.get_agent(agent_id) if agent_id else None
     ws = db.get_workspace(agent.workspace_id) if agent else None
     if ws is None or not isinstance(payload, dict):
-        return permissions.agy_output(None)
+        return output(None)
     cfg = load_repo_config(ws.repo_root)
-    if cfg.permission_policy != "on":
-        return permissions.agy_output(None)
+    if cfg.permission_policy != "on" and not strict:
+        return output(None)
     req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root)
     rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    if strict:
+        # What a Claude Code worker on this profile runs without asking
+        # (its allowed_tools); a deny still wins, since decide() checks those first.
+        from brindle.profiles import load_profile
+
+        try:
+            rules += permissions.profile_bash_allows(load_profile(agent.profile, ws.repo_root))
+        except KeyError:
+            pass
     decision = permissions.decide(req, checks=cfg.checks, rules=rules)
-    if req is not None and decision.decision == "deny":
-        # Only denies are worth a history row here: agy runs this for every
-        # tool call, and brindle's allow is only advisory (agy decides).
-        _record_permission(db, agent, ws, req.summary(), f"deny: {decision.reason}")
     spaces = payload.get("workspacePaths")
     spaces = [s for s in spaces if isinstance(s, str) and s] if isinstance(spaces, list) else []
-    return permissions.agy_output(decision, req, spaces)
+    if strict:
+        # Only what brindle knows, not the payload's word: the worktree, and
+        # agy's folder for this conversation's plans and task lists.
+        spaces = [ws.path]
+        artifacts = payload.get("artifactDirectoryPath")
+        brain = os.path.realpath(Path.home() / ".gemini" / "antigravity-cli" / "brain")
+        if isinstance(artifacts, str) and os.path.realpath(artifacts).startswith(brain + os.sep):
+            spaces.append(os.path.realpath(artifacts))
+        ambiguous = permissions.agy_strict_ambiguity(payload, ws.path) if req is not None else None
+        if ambiguous and decision.decision != "deny":
+            out = {"decision": "deny", "reason": f"brindle: {ambiguous}, so it can't be checked; "
+                                                 "use one absolute path inside your worktree"}
+        else:
+            out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root])
+    else:
+        out = output(decision, req, spaces)
+    if req is not None and out["decision"] == "deny":
+        # Only denies are worth a history row here: agy runs this for every
+        # tool call.
+        _record_permission(db, agent, ws, req.summary(), f"deny: {out['reason']}")
+    return out
 
 
 PRE_TOOL_FALLBACK = json.dumps({"decision": "ask", "reason": "brindle: no decision"})
+STRICT_FALLBACK = json.dumps({"decision": "deny", "reason": "brindle: couldn't check this call, so it's denied"})
 
 
-def pre_tool_main(stdin_text: str, db_factory=None) -> str:
+def _launched_with_skip_flag(max_depth: int = 4) -> bool | None:
+    """Whether the agy process that ran this hook was started with
+    --dangerously-skip-permissions: True, False, or None when that can't be
+    told (then the caller assumes it was)."""
+    pid: int | None = os.getppid()
+    try:
+        for _ in range(max_depth):
+            if not pid or pid <= 1:
+                return None
+            argv = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                                  capture_output=True, text=True).stdout.split()
+            if SKIP_FLAG in argv:
+                return True
+            if argv and os.path.basename(argv[0]) == "agy":
+                return False
+            pid = _parent(pid)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def pre_tool_main(stdin_text: str, db_factory=None, strict: bool = False) -> str:
     """``brindle _hook agy-pre-tool``: always a JSON answer (deny, ask, or allow
     for a file in the workspace); any failure (no agent, bad input, a broken
-    DB) is ask, since agy reads no answer as deny."""
+    DB) is ask, since agy reads no answer as deny.
+
+    ``strict`` (``agy-pre-tool-strict``, agy_approvals "brindle"): agy runs
+    whatever isn't denied, so a failure is a deny. The one exception is an agy
+    that plainly wasn't started with the skip flag and isn't a brindle agent
+    (the person's own session in a checkout brindle set up): that one prompts
+    as usual, so it gets ask."""
+    fallback = STRICT_FALLBACK if strict else PRE_TOOL_FALLBACK
     try:
         try:
             payload = json.loads(stdin_text) if stdin_text.strip() else {}
         except ValueError:
-            payload = None  # unreadable: ask
+            payload = None  # unreadable: the fallback
         agent_id = os.environ.get("BRINDLE_AGENT_ID") or agent_from_parent()
+        if strict and not agent_id:
+            return PRE_TOOL_FALLBACK if _launched_with_skip_flag() is False else STRICT_FALLBACK
         if db_factory is None:
             from brindle.db import DB as db_factory
-        out = pre_tool_decision(db_factory(), agent_id, payload)
-        if isinstance(out, dict) and out.get("decision") in ("deny", "ask", "allow"):
+        out = pre_tool_decision(db_factory(), agent_id, payload, strict=strict)
+        allowed = ("deny", "allow") if strict else ("deny", "ask", "allow")
+        if isinstance(out, dict) and out.get("decision") in allowed:
             return json.dumps(out)
     except Exception as e:  # noqa: BLE001
         try:
             print(f"brindle hook agy-pre-tool: {e}", file=sys.stderr)
         except Exception:  # noqa: BLE001
             pass
-    return PRE_TOOL_FALLBACK
+    return fallback
 
 
 def hook_main(db, event: str, stdin_text: str) -> str:
@@ -539,6 +608,18 @@ def policy_on(workspace: str) -> list[str] | None:
     except Exception:  # noqa: BLE001
         return None
     return list(cfg.checks or []) if cfg.permission_policy == "on" else None
+
+
+def strict_on(workspace: str) -> bool:
+    """agy_approvals "brindle" with the permission policy on: agy runs with
+    --dangerously-skip-permissions and brindle's hook decides every call."""
+    from brindle.config import load_repo_config
+
+    try:
+        cfg = load_repo_config(workspace)
+    except Exception:  # noqa: BLE001
+        return False
+    return cfg.permission_policy == "on" and cfg.agy_approvals == "brindle"
 
 
 def sync_for_launch(workspace: str, checks: list[str] | None) -> None:
