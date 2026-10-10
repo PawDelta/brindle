@@ -37,6 +37,7 @@ import queue
 import shlex
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -193,8 +194,12 @@ class _AppServer:
         self.lines: queue.Queue = queue.Queue()
         threading.Thread(target=self._read, daemon=True).start()
         self.next_id = 0
-        self.call("initialize", {"clientInfo": {"name": "brindle", "version": "0"}})
-        self._send({"method": "initialized"})
+        try:
+            self.call("initialize", {"clientInfo": {"name": "brindle", "version": "0"}})
+            self._send({"method": "initialized"})
+        except Exception:
+            self.close()
+            raise
 
     def _read(self) -> None:
         for line in self.proc.stdout:
@@ -208,9 +213,13 @@ class _AppServer:
     def call(self, method: str, params: dict) -> dict:
         self.next_id += 1
         self._send({"id": self.next_id, "method": method, "params": params})
+        deadline = time.monotonic() + self.timeout
         while True:
             try:
-                line = self.lines.get(timeout=self.timeout)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise queue.Empty
+                line = self.lines.get(timeout=remaining)
             except queue.Empty as e:
                 raise CodexHookError(f"codex app-server didn't answer {method}") from e
             if line is None:
@@ -219,15 +228,24 @@ class _AppServer:
                 msg = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(msg, dict):
+                continue
             if msg.get("id") == self.next_id:
                 if "error" in msg:
                     raise CodexHookError(f"codex {method}: {msg['error']}")
-                return msg.get("result") or {}
+                result = msg.get("result")
+                if not isinstance(result, dict):
+                    raise CodexHookError(f"codex {method}: invalid result")
+                return result
 
     def close(self) -> None:
         try:
             self.proc.kill()
         except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
             pass
 
 

@@ -1079,8 +1079,11 @@ def permissions_check(profile: str | None = typer.Option(None, "--profile", help
         typer.echo(f"\nProfile {selected.name}: effective policy")
         for provider in ("Claude Code", "Codex"):
             typer.echo(f"\n{provider} (brindle hook):")
-            for rule in rules:
+            provider_rules = rules + (perms.profile_bash_allows(selected) if provider == "Codex" else [])
+            for rule in provider_rules:
                 typer.echo(f"  {rule.decision:5} {rule.kind:5} {rule.describe()} ({rule.source})")
+            if provider == "Codex":
+                typer.echo("  Only approval requests reach this hook; requires an enabled, trusted hook.")
         typer.echo("\nAntigravity:")
         for rule in rules:
             if rule in profile_denies:

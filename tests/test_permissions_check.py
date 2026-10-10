@@ -71,6 +71,20 @@ def test_permissions_check_unknown_profile_and_default_all_profiles(monkeypatch)
     assert "Profile developer:" in all_profiles.output
 
 
+def test_permissions_check_shows_codex_profile_commands_and_approval_limit(monkeypatch):
+    from brindle.profiles import Profile
+
+    profile = Profile("custom", "", "codex", "", allowed_tools=["Bash(just lint)", "Bash(task test:*)"])
+    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
+    monkeypatch.setattr("brindle.cli.load_profile", lambda name, repo: profile)
+    out = CliRunner().invoke(app, ["permissions", "check", "--profile", "custom"]).output
+    codex = out.split("Codex (brindle hook):")[1].split("Antigravity:")[0]
+    assert "bash exact 'just lint' (profile)" in codex
+    assert "bash prefix 'task test ' (profile)" in codex
+    assert "Only approval requests" in codex
+    assert "enabled, trusted hook" in codex
+
+
 def test_permission_hooks_enforce_profile_deny(db, repo):
     ws = workspaces.create(db, str(repo), "feature").workspace
     set_local(ws.repo_root, "permission_policy", "on")
