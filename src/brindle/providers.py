@@ -1069,19 +1069,24 @@ class Codex(Provider):
         # Approval choices also use ›. Never paste into those menus, even
         # for a worker whose ordinary input is not hand-typed.
         plain = self.ANSI_SGR.sub("", screen)
-        dialog = " ".join(plain.split())
+        lines = screen.splitlines()
+        plain_lines = plain.splitlines()
+        prompts = [i for i, line in enumerate(plain_lines) if self.INPUT_LINE.match(line)]
+        start = prompts[-1] if prompts else -1
+        end = next((i for i in range(start + 1, len(lines))
+                    if self.FOOTER.match(plain_lines[i])), len(lines))
+        # A returned chat composer and its footer supersede old approval
+        # dialogs in the transcript. A selected numbered menu choice is
+        # still an approval, even if a shortcuts footer is visible below it.
+        choice = start >= 0 and re.match(r"^[ \t]*›[ \t]*\d+[.)][ \t]", plain_lines[start])
+        dialog_start = start if start >= 0 and end < len(lines) and not choice else 0
+        dialog = " ".join("\n".join(plain_lines[dialog_start:]).split())
         if self.APPROVAL.search(dialog) or self.TRUST_DIALOG.search(dialog):
             return "approval"
         if not interactive:
             return None
-        lines = screen.splitlines()
-        prompts = [i for i, line in enumerate(lines)
-                   if self.INPUT_LINE.match(self.ANSI_SGR.sub("", line))]
         if not prompts:
             return "input" if plain.strip() else None
-        start = prompts[-1]
-        end = next((i for i in range(start + 1, len(lines))
-                    if self.FOOTER.match(self.ANSI_SGR.sub("", lines[i]))), len(lines))
         # The model/path status row precedes the shortcuts row in current
         # Codex. Recognize it only in that footer block, after a blank row,
         # so it does not become a continuation of the person's draft.

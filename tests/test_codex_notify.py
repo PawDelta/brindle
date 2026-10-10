@@ -106,6 +106,7 @@ def test_notify_delivers_over_empty_placeholder(db, ws, monkeypatch, placeholder
 
 
 @pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize("footer", ["", "\n\n  ? for shortcuts"])
 @pytest.mark.parametrize("question", [
     "Would you like to run the following command?",
     "Would you like to run the following\n  command?",
@@ -114,8 +115,8 @@ def test_notify_delivers_over_empty_placeholder(db, ws, monkeypatch, placeholder
     "Would you like to send input to the existing terminal?",
     "Trust this folder?",
 ])
-def test_codex_approval_is_not_an_input_prompt(question, interactive):
-    screen = f"\x1b[1m{question}\x1b[0m\n› 1. Yes\n  2. No"
+def test_codex_approval_is_not_an_input_prompt(question, interactive, footer):
+    screen = f"\x1b[1m{question}\x1b[0m\n› 1. Yes\n  2. No{footer}"
     assert Codex().paste_blocked(screen, interactive) == "approval"
 
 
@@ -172,10 +173,35 @@ def test_notify_queues_over_approval_until_chat_returns(db, ws, monkeypatch, mod
     agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
     assert pasted == keys == []
     assert db.pending_count("c1") == 1
-    screen = "Done.\n\n› \n\n  ? for shortcuts"
+    screen += "\n\nApproved.\nCommand completed.\n\n" + CODEX_EMPTY_PANE
     assert agents.flush(db, "c1") is True
     assert pasted == ["next step please"]
     assert db.pending_count("c1") == 0
+
+
+@pytest.mark.parametrize("mode", ["interactive", "assign"])
+@pytest.mark.parametrize("question", [
+    "Would you like to run the following command?",
+    "Would you like to make the following edits?",
+    "Trust this folder?",
+])
+def test_historical_approval_does_not_block_clear_codex_input(db, ws, monkeypatch, mode, question):
+    agent = codex_agent(db, ws)
+    with db.tx() as c:
+        c.execute("UPDATE agents SET mode=? WHERE id=?", (mode, agent.id))
+    screen = f"{question}\n› 1. Yes\n  2. No\n\nCompleted.\n\n" + CODEX_EMPTY_PANE
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    db.enqueue("c1", "next step please", None)
+    agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
+    assert pasted == ["next step please"]
+    assert db.pending_count("c1") == 0
+
+
+def test_active_codex_approval_without_selected_marker_blocks():
+    screen = "Would you like to run the following command?\n  1. Yes\n  2. No"
+    assert Codex().paste_blocked(screen, False) == "approval"
 
 
 def test_notify_turn_complete_sets_idle_and_delivers_queued_message(db, ws, monkeypatch):
