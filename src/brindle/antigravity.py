@@ -95,6 +95,12 @@ def warmup(instructions: str | None) -> str:
     return f"{body}\n\n{WARMUP_END}" if body else WARMUP_END
 
 
+def format_delivered_message(body: str) -> str:
+    if not body:
+        return body
+    return f"<details><summary>brindle instructions</summary>\n\n{body}\n\n</details>"
+
+
 class AntigravityError(RuntimeError):
     pass
 
