@@ -1226,7 +1226,7 @@ def session(db, repo, monkeypatch):
 def test_repo_add_needs_pro_then_attaches_lists_and_detaches(run, acct, db, repo, session, tmp_path):
     web = second_repo(tmp_path)
     code, out = run("repo", "add", str(web), "--name", "web")
-    assert code == 1 and "part of brindle Pro" in out
+    assert code == 1 and "restricted feature of brindle Pro" in out
     assert db.session_repos(session) == []
     code, out = run("repo", "ls")
     assert code == 0 and "No repos attached" in out
@@ -1255,7 +1255,7 @@ def test_a_lapsed_plan_cannot_use_an_attached_repo(run, acct, db, repo, session,
     assert run("repo", "add", str(web), "--name", "web")[0] == 0
     assert repos.resolve(db, session, str(repo), "web") == str(web)
     acct.login("team", features=["team"])                        # the plan no longer has multi_repo
-    with pytest.raises(repos.RepoError, match="part of brindle Pro"):
+    with pytest.raises(repos.RepoError, match="restricted feature of brindle Pro"):
         repos.resolve(db, session, str(repo), "web")
     assert repos.resolve(db, session, str(repo), None) == str(repo)    # the own repo still works
 
