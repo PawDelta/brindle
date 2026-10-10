@@ -424,6 +424,7 @@ def test_unknown_pagination_does_not_imply_absence(pagination):
     (None, None, None), ("file:///secret", None, None), ("https://u:p@example.com", None, None),
     ("https://example.com?key=secret", None, None), ("https://example.com", "bedrock", None),
     ("https://example.com", None, "MISSING_KEY"),
+    ("http://example.com/v1", None, None),
 ])
 def test_unsupported_or_missing_native_configuration_never_sends(base, api, key_env):
     get = Mock()
