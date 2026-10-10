@@ -237,7 +237,7 @@ def new(
 
 @app.command()
 def start(
-    agent: str = typer.Option("supervisor", "--agent", "-a", help="Agent profile."),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile (default: supervisor in scratch, repo default_agent in checkouts)."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
@@ -246,7 +246,7 @@ def start(
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
 ) -> None:
-    """Start a fresh chat with an agent here (default: a supervisor), with the dashboard alongside.
+    """Start a fresh chat with an agent here (default: repo default_agent in checkouts, supervisor in scratch), with the dashboard alongside.
 
     If a session is still running here, you choose: open it, start the new
     one in its own worktree (both run at once), or pause it and start fresh.
@@ -254,6 +254,7 @@ def start(
     it back. With --branch or --worktree it runs in that worktree instead,
     which gets the repo's .brindle config."""
     from brindle.config import load_repo_config
+    from brindle import scratch
 
     db = DB()
     if branch or worktree:
@@ -269,6 +270,18 @@ def start(
             if choice == "n":
                 ws = _run(_session_worktree, db, ws)
                 typer.echo(f"✓ new session in its own worktree: {ws.path} ({ws.branch})")
+
+    if not branch and not worktree and not scratch.is_scratch(ws.path):
+        curr_b = git.current_branch(ws.path)
+        if curr_b and git.merged_into_default(ws.repo_root, curr_b):
+            typer.secho(f"! Branch '{curr_b}' is already merged into '{git.default_branch(ws.repo_root)}'.", fg="yellow")
+
+    if agent is None:
+        if scratch.is_scratch(ws.path):
+            agent = "supervisor"
+        else:
+            agent = _run(load_repo_config, ws.repo_root).default_agent
+
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
 
     if provider and agent == "supervisor" and provider in NOT_SUPERVISOR:
@@ -667,8 +680,23 @@ def default(
         if cont:
             continue_cmd(session_id=None, attach=True)
         else:
-            start(agent="supervisor", prompt=None, provider=provider, attach=True, watch=True,
+            start(agent=None, prompt=None, provider=provider, attach=True, watch=True,
                   autopilot=autopilot, branch=None, worktree=None)
+
+
+@app.command()
+def supervisor(
+    prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
+    provider: Optional[str] = typer.Option(None),
+    attach: bool = typer.Option(True, "--attach/--no-attach"),
+    watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
+    branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
+    worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
+) -> None:
+    """Start an explicit supervisor session to coordinate coding agents."""
+    start(agent="supervisor", prompt=prompt, provider=provider, attach=attach, watch=watch,
+          autopilot=autopilot, branch=branch, worktree=worktree)
 
 
 def _session_root(db: DB) -> str:

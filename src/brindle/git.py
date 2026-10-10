@@ -89,6 +89,27 @@ def remote_branch_exists(root: str | Path, branch: str, remote: str = "origin") 
     return ok(["show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"], root)
 
 
+def merged_into_default(root: str | Path, branch: str) -> bool:
+    """True if ``branch`` has already been merged into the default branch
+    (main/master) or has no unique changes remaining against it."""
+    base = default_branch(root)
+    if not branch or branch == base or branch == "HEAD":
+        return False
+    targets = [base]
+    if remote_branch_exists(root, base):
+        targets.append(f"origin/{base}")
+    for target in targets:
+        if ok(["merge-base", "--is-ancestor", branch, target], root):
+            return True
+        try:
+            cherry = out(["cherry", target, branch], root).splitlines()
+            if cherry and all(line.startswith("-") for line in cherry):
+                return True
+        except GitError:
+            pass
+    return False
+
+
 def list_branches(root: str | Path, pattern: str = "*") -> list[str]:
     proc = out(["for-each-ref", "--format=%(refname:short)", f"refs/heads/{pattern}"], root)
     return [b for b in proc.splitlines() if b]
