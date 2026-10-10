@@ -573,3 +573,14 @@ def test_enforced_route_takes_inherited_and_stored_credentials_out_of_the_pane(m
     assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("codex", "auto", None)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
     assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("claude", "auto", None)
+
+
+def test_enforced_deny_covers_known_pickers_tmux_and_stored_names():
+    route = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "brindle-acme", "AWS_REGION": "us-east-1"}
+    deny = company_identity.enforced_deny(route, set(), set())
+    for name in ("AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_APPLICATION_CREDENTIALS", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+                 "AWS_CONTAINER_CREDENTIALS_FULL_URI", "ANTHROPIC_API_KEY"):
+        assert name in deny   # never left to whether something says it's set
+    assert not set(route) & set(deny)
+    deny = company_identity.enforced_deny(route, {"AWS_NEW_SDK_TOKEN", "EDITOR"}, {"ANTHROPIC_OTHER_KEY"})
+    assert "AWS_NEW_SDK_TOKEN" in deny and "ANTHROPIC_OTHER_KEY" in deny and "EDITOR" not in deny

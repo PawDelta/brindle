@@ -454,6 +454,12 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
         org_env = managed_models.org_key_env(m, agent.provider)
     except managed_models.ManagedUnavailable as e:
         raise AgentError(f"managed models: {e}") from None
+    # An enforced company identity: also every account picker the tmux server
+    # would hand the pane or `brindle keys` holds for it (pane_auth covers this process's).
+    route = None if agent.provider != "claude" or org_managed else company_identity.enforced_route_env()
+    if route is not None:
+        extra = company_identity.enforced_deny(route, tmux.inherited_names(ws.tmux_session), credentials)
+        deny = (*deny, *(n for n in extra if n not in deny))
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
     env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}

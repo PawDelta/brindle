@@ -69,14 +69,32 @@ def profile_may_set(name: str) -> bool:
     return not picks_account(name) and name.upper() not in PROFILE_ONLY
 
 
-def enforced_deny(route: dict[str, str], inherited) -> list[str]:
+# Always taken out under enforcement, whether or not anything says they're set.
+KNOWN_PICKERS = frozenset({
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_BEDROCK_BASE_URL", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "ANTHROPIC_VERTEX_PROJECT_ID",
+    "ANTHROPIC_VERTEX_BASE_URL", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
+    "CLOUDSDK_CONFIG", "CLOUDSDK_CORE_PROJECT", "CLOUDSDK_ACTIVE_CONFIG_NAME",
+    "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_BASE_URL",
+    "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE",
+    "AZURE_CONFIG_DIR"})
+
+
+def enforced_deny(route: dict[str, str], *names) -> list[str]:
     """The names a Claude pane starts without under an enforced company
-    identity: every account picker it would inherit (``inherited``) or be
-    handed (a stored key, ROUTE_VARS) that the checked ``route`` doesn't set."""
-    names = set(ROUTE_VARS) | {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-                                "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
-    names |= {n for n in inherited if picks_account(n)}
-    return sorted(names - set(route))
+    identity: every known account picker, plus every picker among ``names``
+    (what the pane would inherit from this process and the tmux server, and
+    the keys stored for it), less what the checked ``route`` sets."""
+    out = set(KNOWN_PICKERS)
+    for group in names:
+        out |= {n for n in group if picks_account(n)}
+    return sorted(out - set(route))
 
 _cache: dict[tuple[str, ...], tuple[float, tuple[int, str]]] = {}
 
