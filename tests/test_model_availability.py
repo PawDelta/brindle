@@ -777,6 +777,47 @@ def test_launch_provider_override_uses_same_cooldown_as_preflight(db, repo, monk
     assert "authentication" in agents.model_problem("test", ws, agent=a)
 
 
+@pytest.mark.parametrize("initial", ["", 'model_provider = "company"\n'])
+def test_codex_folder_trust_preserves_cooldown_identity(db, repo, monkeypatch, initial):
+    from brindle import agents, workspaces, launch_health, model_access
+    root = repo / ".codex"
+    root.mkdir()
+    config = root / "config.toml"
+    if initial:
+        config.write_text(initial)
+    env = {"CODEX_HOME": str(root)}
+    p = profile("codex")
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: env)
+    fp = launch_health.fingerprint(p, env)
+    # Codex may atomically create/replace this file on trust acceptance.
+    updated = root / "new-config.toml"
+    updated.write_text(initial + '\n[projects."/new/worktree"]\ntrust_level = "trusted"\n'
+                       '\n[tui]\ntheme = "dark"\n[notice]\nhide_rate_limit_model_nudge = true\n')
+    updated.replace(config)
+    model_access.refuse(p.name, launch_health.AUTH, fp=fp)
+    assert launch_health.fingerprint(p, env) == fp
+    assert "authentication" in agents.model_problem(p.name, workspaces.adopt_root(db, str(repo)))
+
+
+@pytest.mark.parametrize("changed", [
+    'model_provider = "another"',
+    '[model_providers.company]\nbase_url = "https://other.example/v1"',
+    '[model_providers.company]\nenv_key = "DIFFERENT_KEY"',
+    '[projects."/worktree"]\nmodel_provider = "another"',
+    'forced_login_method = "api"',
+    'invalid TOML [',
+])
+def test_codex_config_identity_retains_provider_and_auth_changes(tmp_path, changed):
+    from brindle import launch_health
+    config = tmp_path / "config.toml"
+    config.write_text('model_provider = "company"\n')
+    env = {"CODEX_HOME": str(tmp_path)}
+    before = launch_health.fingerprint(profile("codex"), env)
+    config.write_text(changed)
+    assert launch_health.fingerprint(profile("codex"), env) != before
+
+
 def test_provisioning_timeout_override_only_shortens_standalone_discovery_budget():
     check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), ttl=0)
     check.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)

@@ -13,7 +13,9 @@ import json
 import os
 import re
 import time
+import tomllib
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 from brindle import model_access, tmux
@@ -37,12 +39,12 @@ def fingerprint(profile, env) -> str:
 
 
 def account_revision(provider: str, env) -> str | None:
-    """Opaque local login/config revision; stat files, never read auth contents."""
+    """Opaque login/config revision; auth files are statted, never read."""
     home = Path(env.get("HOME", str(Path.home())))
     paths = []
     if provider == "codex":
         root = Path(env.get("CODEX_HOME", str(home / ".codex")))
-        paths = [root / "auth.json", root / "config.toml"]
+        paths = [root / "auth.json"]
     elif provider == "claude":
         root = Path(env.get("CLAUDE_CONFIG_DIR", str(home / ".claude")))
         paths = [root / ".credentials.json", root / "settings.json",
@@ -51,6 +53,8 @@ def account_revision(provider: str, env) -> str | None:
     elif provider == "antigravity":
         paths = [Path(env.get("BRINDLE_AGY_SETTINGS", str(home / ".gemini" / "antigravity-cli" / "settings.json")))]
     revisions = []
+    if provider == "codex":
+        revisions.append((str(root / "config.toml"), _codex_config_revision(root / "config.toml")))
     for path in paths:
         try:
             st = path.stat()
@@ -60,12 +64,66 @@ def account_revision(provider: str, env) -> str | None:
     return hashlib.sha256(json.dumps(revisions).encode()).hexdigest() if revisions else None
 
 
+def _codex_config_revision(path: Path) -> str:
+    # Trust acceptance rewrites config.toml during startup. Hash its semantic
+    # configuration, removing only trust/UI fields, so provider/auth changes
+    # still invalidate refusals without reading the auth file itself.
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        raw = b""
+    except OSError:
+        try:
+            st = path.stat()
+            return hashlib.sha256(str((st.st_ino, st.st_size, st.st_mtime_ns)).encode()).hexdigest()
+        except OSError:
+            return "unreadable"
+    try:
+        config = tomllib.loads(raw.decode())
+    except (ValueError, UnicodeError):
+        return hashlib.sha256(raw).hexdigest()
+    for key in ("tui", "notice"):
+        config.pop(key, None)
+    projects = config.get("projects")
+    if isinstance(projects, dict):
+        for name, project in list(projects.items()):
+            if isinstance(project, dict):
+                project.pop("trust_level", None)
+                if not project:
+                    del projects[name]
+        if not projects:
+            del config["projects"]
+    return hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def prepare(db, agent, fp: str, *, argv_task: bool = False, submitted_prompt: str = "") -> None:
     if agent.parent_id and agent.task:
         agent._launch_health_token = uuid.uuid4().hex
         db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint,argv_task,submitted_prompt) "
                         "VALUES (?,?,?,?,?,?)",
-                        (agent.id, agent._launch_health_token, agent.tmux_window or "", fp, argv_task, submitted_prompt))
+                        (agent.id, agent._launch_health_token, "", fp, argv_task, submitted_prompt))
+
+
+def bind(db, agent, pane: str) -> None:
+    """Publish the newly created pane, never the pane retained on resume.
+
+    A hook/runner may deliver before new_window returns. Whichever update
+    completes pane binding plus delivery schedules the one follow-up.
+    """
+    token = getattr(agent, "_launch_health_token", None)
+    if not token:
+        return
+    row = db.conn.execute("UPDATE launch_health SET pane=? WHERE agent_id=? AND token=? AND pane='' "
+                          "RETURNING delivered_at, outcome", (pane, agent.id, token)).fetchone()
+    if row and row["delivered_at"] is not None and row["outcome"] is None:
+        _followup(agent.id, token)
+
+
+def _followup(agent_id: str, token: str) -> None:
+    from brindle import agents
+    from brindle.providers import brindle_invocation
+
+    agents._detach([*brindle_invocation(), "_launch-health", agent_id, "--token", token])
 
 
 def accepted(db, agent) -> None:
@@ -87,21 +145,17 @@ def current(db, agent_id: str, token: str | None) -> bool:
 
 def delivered(db, agent, baseline: str = "") -> None:
     """Called only after delivery of the real task, once per launch."""
-    from brindle import agents
-    from brindle.providers import brindle_invocation
-
     row = db.conn.execute("SELECT token FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     expected = getattr(agent, "_launch_health_token", None)
     if row is None or (expected is not None and expected != row["token"]):
         return
-    changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=?, pane=? "
+    changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=? "
                               "WHERE agent_id=? AND delivered_at IS NULL AND token=? AND outcome IS NULL "
                               "AND EXISTS (SELECT 1 FROM agents WHERE id=? AND result IS NULL "
-                              "AND status NOT IN ('paused','done'))",
-                              (time.time(), baseline, agent.tmux_window or os.environ.get("TMUX_PANE", ""),
-                               agent.id, row["token"], agent.id)).rowcount
-    if changed:
-        agents._detach([*brindle_invocation(), "_launch-health", agent.id, "--token", row["token"]])
+                              "AND status NOT IN ('paused','done')) RETURNING pane",
+                              (time.time(), baseline, agent.id, row["token"], agent.id)).fetchone()
+    if changed and changed["pane"]:
+        _followup(agent.id, row["token"])
 
 
 def capture(agent) -> str:
@@ -114,11 +168,22 @@ def capture(agent) -> str:
 
 
 def before_delivery(db, agent) -> str:
-    row = db.conn.execute("SELECT token, delivered_at FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+    row = db.conn.execute("SELECT token, delivered_at, pane FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     # Bind this delivery before capture/paste/IPC can race with a resume,
     # including the absence of a launch observation at this point.
     agent._launch_health_token = row["token"] if row else ""
-    return capture(agent) if row and row["delivered_at"] is None else ""
+    if not row or row["delivered_at"] is not None:
+        return ""
+    if row["pane"]:
+        # A runner may have loaded its Agent before publication, including
+        # the previous tmux server. Refresh that metadata along with the pane.
+        published = db.get_agent(agent.id)
+        return capture(replace(published, tmux_window=row["pane"])) if published else ""
+    if os.environ.get("BRINDLE_AGENT_ID") == agent.id and os.environ.get("TMUX_PANE"):
+        # The runner is already inside the new pane, but its launcher has not
+        # published that pane yet. Never capture the old resumed pane.
+        return capture(replace(agent, tmux_window=os.environ["TMUX_PANE"], tmux_server=tmux.current_server()))
+    return ""
 
 
 def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",
@@ -267,7 +332,7 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
 
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
     agent = db.get_agent(agent_id)
-    if (not row or not agent or (token is not None and token != row["token"])
+    if (not row or not row["pane"] or not agent or (token is not None and token != row["token"])
             or row["outcome"] or agent.result is not None or agent.status in ("paused", "done")):
         return None
     if row["delivered_at"] is not None and wait:

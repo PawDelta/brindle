@@ -1163,6 +1163,20 @@ class Codex(Provider):
     TRUST_DIALOG = re.compile(r"Trust this folder\?", re.I)
     TRUST_SELECTED = re.compile(r"›\s*1\.\s*Trust and continue")
 
+    def launch_ready(self, screen: str) -> bool:
+        plain = self.ANSI_SGR.sub("", screen)
+        lines = plain.splitlines()
+        prompts = [i for i, line in enumerate(lines) if self.INPUT_LINE.match(line)]
+        if not prompts or self.paste_blocked(screen, False):
+            return False
+        start = prompts[-1]
+        if re.match(r"^[ \t]*›[ \t]*\d+[.)][ \t]", lines[start]):
+            return False
+        footer = "\n".join(lines[start:])
+        return bool(re.search(r"\d+% context left|esc to interrupt", footer, re.I)
+                    or (any(self.MODEL_PATH.match(line) for line in lines[start + 1:])
+                        and any(self.FOOTER.match(line) for line in lines[start + 1:])))
+
     def after_launch(self, target: str) -> bool:
         # Same situation as Claude Code: a new worktree of the user's own repo.
         # Codex saves this trust for the repository root in ~/.codex/config.toml.
@@ -1173,13 +1187,14 @@ class Codex(Provider):
                 screen = tmux.capture(target, lines=60)
             except tmux.TmuxError:
                 return False
+            screen = self.ANSI_SGR.sub("", screen)
+            if self.launch_ready(screen):
+                return True
             if self.TRUST_DIALOG.search(screen):
                 if self.TRUST_SELECTED.search(screen):
                     tmux.send_keys(target, "Enter")
                 else:
                     tmux.send_keys(target, "Up")
-            elif "›" in screen and ("context left" in screen or "Esc to interrupt" in screen):
-                return True
         return False
 
     def screen_state(self, screen: str) -> str | None:

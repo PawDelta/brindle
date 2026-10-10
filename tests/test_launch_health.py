@@ -30,6 +30,7 @@ from brindle.providers import ClaudeCode, trust_folder
 
 from test_agents import CLAUDE_PROMPT
 from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
+from test_codex_notify import CODEX_EMPTY_PANE
 
 TRUST_SCREEN = (
     " Do you trust the files in this folder?\n\n"
@@ -413,6 +414,7 @@ def health(db, root, monkeypatch):
     monkeypatch.setattr(lh, "capture", lambda a: "working")
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append((to, body)))
     lh.prepare(db, a, "effective-account")
+    lh.bind(db, a, a.tmux_window)
     return lh, a, now, sleeps, started, reports
 
 
@@ -838,6 +840,7 @@ def test_prompt_submit_arms_argv_health_once_before_readiness_helper(db, root, l
 
 
 @pytest.mark.parametrize("provider,ready_screen", [("claude", "❯"), ("codex", "› 100% context left"),
+                                                   ("codex", CODEX_EMPTY_PANE),
                                                    ("antigravity", "? for shortcuts")])
 def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeypatch, provider, ready_screen):
     now = [100.0]
@@ -976,6 +979,7 @@ def test_concurrent_resume_cannot_report_or_mutate_replacement_launch(db, health
         resumed = other.get_agent(a.id)
         # Deliberately reuse the pane ID: a pane-only outcome CAS is insufficient.
         lh.prepare(other, resumed, "resumed-account")
+        lh.bind(other, resumed, resumed.tmux_window)
         lh.delivered(other, resumed)
         assert resumed._launch_health_token != original_token
 
@@ -1006,6 +1010,7 @@ def test_old_helper_started_after_resume_does_not_observe_new_launch(db, health,
     old_token = a._launch_health_token
     resumed = db.get_agent(a.id)
     lh.prepare(db, resumed, "resumed-account")
+    lh.bind(db, resumed, resumed.tmux_window)
     lh.delivered(db, resumed)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     assert lh.inspect(db, a.id, token=old_token) is None
@@ -1028,6 +1033,7 @@ def test_old_prepared_agent_cannot_deliver_into_replacement_launch(db, health):
 def test_readiness_helper_cannot_arm_concurrently_replaced_argv_launch(db, health, monkeypatch, replacement_point):
     lh, a, _, _, started, reports = health
     lh.prepare(db, a, "old-account", argv_task=True)
+    lh.bind(db, a, a.tmux_window)
     old_token = a._launch_health_token
 
     def replace():
@@ -1257,3 +1263,108 @@ def test_inactive_worker_cannot_arm_delivery_or_run_readiness(db, health, monkey
 def test_provider_names_and_keyboard_help_in_prose_are_not_ui(provider, screen):
     from brindle import launch_health
     assert launch_health.failure(screen, provider=provider) is None
+
+
+@pytest.mark.parametrize("menu", [
+    "Trust this folder?\n› 1. Trust and continue\n  2. Quit",
+    "Would you like to run the following command?\n› 1. Yes\n  2. No",
+    "Would you like to make the following\n  edits?\n  1. Yes\n  2. No",
+])
+def test_codex_launch_readiness_rejects_menus_with_shortcuts(menu):
+    from brindle.providers import Codex
+    footer = CODEX_EMPTY_PANE.split("\n", 1)[1]
+    assert not Codex().launch_ready(menu + footer)
+    assert Codex().launch_ready(menu + "\nCompleted.\n" + CODEX_EMPTY_PANE)
+
+
+def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launches, detached, monkeypatch):
+    from brindle import launch_health as lh, model_access
+    boss, ws = root
+    now, sleeps, reports = [100.0], [], []
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task",
+                     parent_id=boss.id, mode="assign", background_setup=True)
+    cli.after_launch_cmd(a.id, token=a._launch_health_token)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert row["delivered_at"] == 100.5 and row["outcome"] is None
+    assert len([cmd for cmd in detached if "_launch-health" in cmd and "--startup" not in cmd]) == 1
+    assert sum("real task" in arg for arg in launches[-1]) == 1
+    monkeypatch.setattr(lh, "capture", lambda a: "■ unexpected status 403 Forbidden\n" + CODEX_EMPTY_PANE)
+    assert lh.inspect(db, a.id, token=a._launch_health_token) == "failed"
+    assert sleeps == [0.5, 5.0] and now[0] == 105.5
+    assert len(reports) == 1 and model_access.refused(a.profile, fp=row["fingerprint"]) == lh.AUTH
+
+
+@pytest.mark.parametrize("headless", [False, True])
+def test_resumed_startup_failure_observes_new_pane_before_delivery(db, health, monkeypatch, headless):
+    lh, a, _, _, _, reports = health
+    ws = db.get_workspace(a.workspace_id)
+    db.update_agent(a.id, tmux_window="%old", headless=int(headless))
+    a = db.get_agent(a.id)
+    monkeypatch.setattr(type(agents.get_provider(a.provider)), "after_launch", lambda *a: False)
+    # A native runner uses the headless launch path without invoking a CLI.
+    if headless:
+        db.update_agent(a.id, provider="native")
+        a.provider = "native"
+    def open_window(db, agent, ws, name, argv, watch_pane):
+        row = db.conn.execute("SELECT pane FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+        assert row["pane"] == ""  # prepare did not inherit %old
+        db.update_agent(a.id, tmux_window="%new")
+        agent.tmux_window = "%new"
+        return "%new"
+    monkeypatch.setattr(agents, "_open_window", open_window)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+    seen = []
+    monkeypatch.setattr(lh, "capture", lambda a: seen.append(a.tmux_window) or "Error: authentication failed")
+    agents._launch(db, a, ws, prompt="real task", resume="saved", watch_pane=False)
+    assert lh.inspect(db, a.id, wait=False, token=a._launch_health_token) == "failed"
+    assert seen == ["%new"] and len(reports) == 1
+
+
+@pytest.mark.parametrize("early_delivery", [False, True])
+def test_new_pane_publication_and_early_delivery_schedule_once(db, health, monkeypatch, early_delivery):
+    lh, a, now, sleeps, started, reports = health
+    db.update_agent(a.id, tmux_window="%old")
+    a = db.get_agent(a.id)
+    stale = db.get_agent(a.id)
+    lh.prepare(db, a, "resumed-account", argv_task=True)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    monkeypatch.setenv("TMUX_PANE", "%new")
+    monkeypatch.setattr(tmux, "current_server", lambda: "new-server")
+    seen = []
+    monkeypatch.setattr(lh, "capture", lambda a: seen.append((a.tmux_window, a.tmux_server)) or "new baseline")
+    if early_delivery:
+        lh.delivered(db, db.get_agent(a.id), lh.before_delivery(db, a))
+        assert started == [] and lh.inspect(db, a.id, wait=False) is None
+    now[0] += 2
+    db.update_agent(a.id, tmux_window="%new", tmux_server="new-server")
+    a.tmux_window = "%new"
+    lh.bind(db, a, "%new")
+    if not early_delivery:
+        lh.delivered(db, stale, lh.before_delivery(db, stale))
+    lh.bind(db, a, "%wrong")
+    lh.delivered(db, a)
+    assert len(started) == 1 and seen == [("%new", "new-server")]
+    assert lh.inspect(db, a.id) == "pending"
+    assert sleeps == [3.0 if early_delivery else 5.0] and reports == []
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert row["pane"] == "%new" and row["baseline"] == "new baseline"
+
+
+def test_old_launch_cannot_bind_replacement_pane(db, health):
+    lh, old, _, _, started, _ = health
+    replacement = db.get_agent(old.id)
+    lh.prepare(db, replacement, "replacement")
+    lh.bind(db, old, "%old")
+    row = db.conn.execute("SELECT pane FROM launch_health WHERE agent_id=?", (old.id,)).fetchone()
+    assert row["pane"] == "" and started == []

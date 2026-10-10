@@ -764,6 +764,8 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.conn.execute("DELETE FROM launch_health WHERE agent_id=?", (agent.id,))
     target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
                           **({"m": m} if m is not None else {}))
+    from brindle import launch_health
+    launch_health.bind(db, agent, target)
     if provider.name != "shell":
         from brindle import launch_health
         from brindle.providers import brindle_invocation
@@ -853,8 +855,10 @@ def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     runner = get_provider(agent.provider).runner
     argv = [*brindle_invocation(), runner, agent.id, *(["--resume", resume] if resume else [])]
     _prepare_launch_health(db, agent, ws, _profile_for(db, agent, ws, m), m)
-    _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane,
-                 **({"m": m} if m is not None else {}))
+    target = _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane,
+                          **({"m": m} if m is not None else {}))
+    from brindle import launch_health
+    launch_health.bind(db, agent, target)
     if agent.parent_id and agent.task:
         # A runner can fail before it consumes the task (bad config/imports).
         # This helper observes only that startup; delivery arms its own timer.
