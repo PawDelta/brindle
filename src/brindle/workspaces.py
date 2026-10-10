@@ -210,7 +210,7 @@ def live_workers(db: DB, ws: Workspace) -> list:
 
 
 def _is_worktree_gutted(path: str | Path) -> bool:
-    """True if worktree directory exists but is a broken or gutted husk."""
+    """True if directory is missing, or is a worktree where files were wiped by an interrupted removal."""
     p = Path(path)
     if not p.is_dir():
         return True
@@ -219,7 +219,9 @@ def _is_worktree_gutted(path: str | Path) -> bool:
     try:
         deleted = git.out(["ls-files", "--deleted"], p).splitlines()
         tracked = git.out(["ls-files"], p).splitlines()
-        if tracked and len(deleted) > 0 and (len(deleted) >= len(tracked) / 2 or not any(p.glob("[!.]*"))):
+        if not any(p.glob("[!.]*")):
+            return True
+        if tracked and len(deleted) > 0 and len(deleted) >= len(tracked) / 2:
             return True
     except git.GitError:
         return True
@@ -244,6 +246,17 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
     ws = registered[0]
     how = "existing"
     if not os.path.isdir(ws.path) or _is_worktree_gutted(ws.path):
+        if os.path.isdir(ws.path):
+            try:
+                dirty = git.dirty_files(ws.path)
+            except git.GitError:
+                dirty = []
+            if dirty:
+                shown = ", ".join(dirty[:5])
+                raise WorkspaceError(
+                    f"workspace {ws.id} at {ws.path} appears damaged but has uncommitted or untracked work ({shown}). "
+                    f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
+                )
         try:
             git.remove_worktree(repo_root, ws.path, force=True)
         except Exception:

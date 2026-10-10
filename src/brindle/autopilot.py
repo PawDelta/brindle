@@ -828,7 +828,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     if done and audit is None:
         db.update_autopilot(root_id, state="done", note=None)
     elif done and audit == "start":
-        db.update_autopilot(root_id, state="auditing", note=None)
+        db.update_autopilot(root_id, state="auditing")
     elif done:
         db.update_autopilot(root_id, state="running")
     elif ap and ap.state in ("done", "auditing"):

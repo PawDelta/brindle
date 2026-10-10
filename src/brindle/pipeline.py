@@ -552,6 +552,8 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
     worker could start; the caller then escalates as before."""
     if worker.profile == ESCALATION_PROFILE or not fable_enabled(cfg, worker, ws):
         return False
+    if cfg.max_weight and cfg.max_weight in ("light", "medium"):
+        return False
     if ESCALATION_PROFILE not in cfg.routing.get("heavy", []):
         return False
     weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)

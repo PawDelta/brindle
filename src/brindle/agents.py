@@ -938,7 +938,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
 
     providers.invalidate_signed_in()
     candidates = [a for a in tree(db, root_id)
-                  if a.status == "paused" and (only is None or a.id in only)]
+                  if a.status in ("paused", "failed") and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
     resumed = []
@@ -1523,8 +1523,9 @@ def detach(db: DB, agent_id: str) -> str | None:
     """Stop waiting synchronously on a handoff worker: from now on its result
     is forwarded to its parent as a message. Returns the result instead if it
     arrived in the meantime (so it's never lost between the two paths)."""
-    db.update_agent(agent_id, mode="handoff_detached")
     agent = db.get_agent(agent_id)
+    if agent and agent.mode == "handoff":
+        db.update_agent(agent_id, mode="handoff_detached")
     return agent.result if agent else None
 
 
@@ -1543,11 +1544,12 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
 
     caller = db.get_agent(caller_id)
     ws = db.get_workspace(caller.workspace_id) if caller else None
-    if not caller or caller.mode != "review" or ws is None:
+    root_id = autopilot.root_of(db, caller.id) if caller else None
+    ap = db.get_autopilot(root_id) if root_id else None
+    is_auditor = bool(ap and ap.auditor_id == caller_id)
+    if not caller or (caller.mode != "review" and not is_auditor) or ws is None:
         return "Only a reviewer started with request_review can submit a review."
-    root_id = autopilot.root_of(db, caller.id)
-    ap = db.get_autopilot(root_id)
-    if ap and ap.auditor_id == caller.id:   # the completion audit, not a branch review
+    if is_auditor:   # the completion audit, not a branch review
         text = autopilot.record_audit(db, root_id, approved, summary)
         report_result(db, caller.id, text, forward=False)
         try:
@@ -1940,12 +1942,30 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
             "it isn't pre-approved). "
             "Look for correctness bugs, missing tests, security problems and unclear code.")
 
+    worker_files = []
+    worker_done_when = getattr(worker, "done_when", None) if worker else None
+    if worker:
+        if getattr(worker, "files", None):
+            worker_files = worker.files
+        else:
+            t = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
+            if t:
+                if t.files:
+                    import json
+                    try:
+                        worker_files = json.loads(t.files)
+                    except Exception:
+                        worker_files = [t.files]
+                if not worker_done_when and t.done_when:
+                    worker_done_when = t.done_when
     if worker and worker.task:
         task += f"\n\nThe worker's original task:\n{worker.task.strip()[:TASK_TRIM]}"
-    if worker and worker.files:
-        task += f"\n\nDeclared files: {', '.join(worker.files)}"
-    if worker and worker.done_when:
-        task += f"\n\nIts finish line: {worker.done_when.strip()}"
+    if worker:
+        task += f"\n\nWorker profile: {worker.profile} (provider: {worker.provider})"
+    if worker_files:
+        task += f"\n\nDeclared files: {', '.join(worker_files)}"
+    if worker_done_when:
+        task += f"\n\nIts finish line: {worker_done_when.strip()}"
 
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
@@ -2355,10 +2375,16 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 flush(db, agent_id)
     elif event == "stop-failure":
         # The turn ended on an API error; no Stop hook follows.
-        payload_str = json.dumps(payload).lower()
-        is_auth = (
+        err_fields = " ".join(
+            str(payload.get(k) or "") for k in (
+                "error", "error_type", "message", "reason", "details", "status", "status_code", "code"
+            )
+        ).lower()
+        is_rate_limit = bool(re.search(r"\b(429|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
+        is_auth = not is_rate_limit and (
             payload.get("error_type") == "auth"
-            or any(w in payload_str for w in ("401", "403", "unauthorized", "authentication", "auth_fail", "auth fail", "invalid api key", "invalid_api_key", "expired token", "credit balance"))
+            or bool(re.search(r"\b(401|403)\b", err_fields))
+            or any(w in err_fields for w in ("unauthorized", "authentication", "auth_fail", "auth fail", "invalid api key", "invalid_api_key", "expired token", "credit balance"))
         )
         if is_auth:
             db.set_status(agent_id, "failed")
@@ -2381,7 +2407,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
-            if "rate_limit" in payload_str:
+            if is_rate_limit:
                 from brindle import autopilot as pilot
 
                 pilot.limit_reached(db, agent)

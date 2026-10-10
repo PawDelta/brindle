@@ -1,17 +1,19 @@
 import pytest
 
 from brindle import agents, autopilot, pipeline
-from brindle.db import DB, Workspace
+from brindle.db import DB, Workspace, Task, Autopilot
 from brindle.config import RepoConfig
 
 
-def test_request_review_passes_files_and_done_when(db, repo, monkeypatch):
+def test_request_review_passes_files_from_db_task_and_done_when(db, repo, monkeypatch):
     ws = Workspace("ws-rev", str(repo), "feat/rev", "main", "main", "main", str(repo), 20000, "tmux-rev", 0)
     db.add_workspace(ws)
+    # Persisted worker in DB (no .files attribute on Agent)
     worker = agents.spawn(db, ws, "developer", mode="assign")
-    worker.task = "Implement auth flow"
-    worker.files = ["src/auth.py", "tests/test_auth.py"]
     worker.done_when = "pytest tests/test_auth.py passes"
+    # Store task in DB with files
+    t = Task("t-rev", str(repo), worker.id, None, ws.id, "developer", "Implement auth flow", "assign", 1, "feat/rev", worker.done_when, '["src/auth.py", "tests/test_auth.py"]', None, "started", 0.0)
+    db.add_task(t)
 
     spawned_prompts = []
     def fake_spawn(db_arg, ws_arg, profile_arg, **kwargs):
@@ -22,12 +24,55 @@ def test_request_review_passes_files_and_done_when(db, repo, monkeypatch):
         return m
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(agents, "workspace_worker", lambda db_arg, ws_arg: worker)
+    # worker loaded from DB has no worker.files
+    worker_from_db = db.get_agent(worker.id)
+    monkeypatch.setattr(agents, "workspace_worker", lambda db_arg, ws_arg: worker_from_db)
+
     agents.request_review(db, None, ws)
     assert len(spawned_prompts) == 1
     prompt = spawned_prompts[0]
     assert "Declared files: src/auth.py, tests/test_auth.py" in prompt
     assert "finish line: pytest tests/test_auth.py passes" in prompt.lower()
+    assert "Worker profile: developer" in prompt
+
+
+def test_submit_review_succeeds_for_completion_auditor(db, repo, monkeypatch):
+    ws = Workspace("ws-aud", str(repo), "feat/aud", "main", "main", "main", str(repo), 20000, "tmux-aud", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    # Auditor spawned
+    auditor = agents.spawn(db, ws, "reviewer", mode="review", parent_id=supervisor.id)
+    # Set autopilot in auditing state
+    db.add_autopilot(supervisor.id)
+    db.update_autopilot(supervisor.id, auditor_id=auditor.id, audit_sha="headsha", state="auditing")
+
+    # Even if detached:
+    agents.detach(db, auditor.id)
+
+    # Calling submit_review as auditor must NOT return 'Only a reviewer started with request_review...'
+    ret = agents.submit_review(db, auditor.id, False, "Audit findings: gaps")
+    assert "Only a reviewer started with request_review" not in ret
+    assert "Audit recorded" in ret
+
+
+def test_check_milestones_preserves_prior_audit_note_on_re_audit(db, repo, monkeypatch):
+    ws = Workspace("ws-check", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-check", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    # Set autopilot with a prior audit note
+    db.add_autopilot(supervisor.id)
+    db.set_milestones(supervisor.id, [("M1", "true", "")])
+    m = db.milestones(supervisor.id)[0]
+    db.record_check(m.id, True, "passed")
+    db.update_autopilot(supervisor.id, state="running", note="Prior audit accepted exclusion of X", audit_ok=0, audit_sha="oldsha")
+
+    monkeypatch.setattr(autopilot, "audit_due", lambda ap_arg, cfg_arg, head_arg: "start")
+    monkeypatch.setattr(autopilot, "_commit", lambda ws_arg: "newsha")
+    autopilot.check_milestones(db, supervisor.id, ws)
+
+    updated_ap = db.get_autopilot(supervisor.id)
+    assert updated_ap.state == "auditing"
+    assert updated_ap.note == "Prior audit accepted exclusion of X"
 
 
 def test_needs_supervisor_finding_skips_fix_rounds(db, repo, monkeypatch):
@@ -55,7 +100,6 @@ def test_needs_supervisor_finding_skips_fix_rounds(db, repo, monkeypatch):
 
 
 def test_audit_prompt_includes_convergence_rules_and_prior_notes(db, repo):
-    from brindle.db import Autopilot
     ap = Autopilot(
         root_id="boss",
         enabled=1,

@@ -306,11 +306,12 @@ async def handoff(
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
             return str(e)
+        effective_weight = decision.get("weight") or weight
         if unmet:
             t = tasks.enqueue(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=weight,
+                weight=effective_weight,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
@@ -329,7 +330,7 @@ async def handoff(
             return _start_failure(profile, e)
         started = tasks.record_started(
             db, ws, worker, profile, task,"handoff", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, weight=weight,
+            done_when=done_when, files=files, depends_on=depends_on, weight=effective_weight,
         )
         savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
@@ -432,11 +433,12 @@ async def assign(
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
             return str(e)
+        effective_weight = decision.get("weight") or weight
         if unmet:
             t = tasks.enqueue(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=weight,
+                weight=effective_weight,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
@@ -455,7 +457,7 @@ async def assign(
             return _start_failure(profile, e)
         started = tasks.record_started(
             db, ws, worker, profile, task,"assign", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, weight=weight,
+            done_when=done_when, files=files, depends_on=depends_on, weight=effective_weight,
         )
         savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
@@ -603,9 +605,16 @@ def list_agents(repo: str | None = None) -> str:
             for a in db.list_agents(ws.id):
                 me = " (you)" if caller and a.id == caller.id else ""
                 parent = f" parent={a.parent_id}" if a.parent_id else ""
+                usage_str = ""
+                try:
+                    from brindle import usage as usage_mod
+                    u = usage_mod.agent_usage(db, a)
+                    usage_str = f" tokens={usage_mod.short_summary(u)}" if u and u.total else ""
+                except Exception:
+                    pass
                 lines.append(
                     f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
-                    f"ws={ws.id} branch={ws.branch}{_last_activity(a)}"
+                    f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}"
                 )
         return "\n".join(lines) or "No agents."
 

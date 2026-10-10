@@ -25,6 +25,25 @@ def test_gutted_worktree_detected_and_recreated(db, repo, tmp_path):
     assert (Path(reused.workspace.path) / "README.md").exists() or (Path(reused.workspace.path) / ".git").exists()
 
 
+def test_damaged_worktree_with_uncommitted_work_raises(db, repo):
+    created = workspaces.create(db, str(repo), "feat/precious", reuse_registered=True)
+    ws = created.workspace
+    assert os.path.isdir(ws.path)
+    # Add an untracked file and an edit
+    (Path(ws.path) / "untracked_notes.txt").write_text("critical notes")
+    (Path(ws.path) / "README.md").write_text("edited readme")
+    # Simulate partial deletion of another tracked file to make it damaged
+    tracked_files = [f for f in Path(ws.path).glob("*.py")]
+    for tf in tracked_files:
+        tf.unlink()
+
+    # Reusing registered workspace must NOT silently wipe untracked_notes.txt or edited readme
+    with pytest.raises(workspaces.WorkspaceError) as exc_info:
+        workspaces.create(db, str(repo), "feat/precious", reuse_registered=True)
+    assert "uncommitted or untracked work" in str(exc_info.value)
+    assert (Path(ws.path) / "untracked_notes.txt").exists()
+
+
 def test_start_on_merged_branch_detects_merge(repo):
     # Create a feature branch and merge it into main
     sh("git checkout -b feat/merged", repo)
@@ -34,6 +53,19 @@ def test_start_on_merged_branch_detects_merge(repo):
     sh("git checkout feat/merged", repo)
     assert git.merged_into_default(str(repo), "feat/merged")
     assert not git.merged_into_default(str(repo), "main")
+
+
+def test_start_on_squash_merged_branch_detects_squash(repo):
+    # Create a feature branch with multiple commits and squash merge into main
+    sh("git checkout -b feat/multi-squash", repo)
+    (repo / "step1.txt").write_text("step 1")
+    sh("git add step1.txt && git commit -m 'step 1'", repo)
+    (repo / "step2.txt").write_text("step 2")
+    sh("git add step2.txt && git commit -m 'step 2'", repo)
+    sh("git checkout main", repo)
+    sh("git merge --squash feat/multi-squash && git commit -m 'squashed feat'", repo)
+    sh("git checkout feat/multi-squash", repo)
+    assert git.merged_into_default(str(repo), "feat/multi-squash")
 
 
 def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatch):

@@ -95,12 +95,35 @@ def merged_into_default(root: str | Path, branch: str) -> bool:
     base = default_branch(root)
     if not branch or branch == base or branch == "HEAD":
         return False
+    if has_remote(root, "origin"):
+        try:
+            run(["fetch", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], root, timeout=5, check=False)
+        except Exception:
+            pass
     targets = [base]
     if remote_branch_exists(root, base):
         targets.append(f"origin/{base}")
     for target in targets:
         if ok(["merge-base", "--is-ancestor", branch, target], root):
             return True
+        try:
+            b_tree = out(["rev-parse", f"{branch}^{{tree}}"], root).strip()
+            t_tree = out(["rev-parse", f"{target}^{{tree}}"], root).strip()
+            if b_tree == t_tree:
+                return True
+            mb = out(["merge-base", target, branch], root).strip()
+            if mb:
+                mb_tree = out(["rev-parse", f"{mb}^{{tree}}"], root).strip()
+                if b_tree == mb_tree:
+                    return True
+                try:
+                    res = out(["merge-tree", "--write-tree", target, branch], root).strip()
+                    if res == t_tree:
+                        return True
+                except GitError:
+                    pass
+        except GitError:
+            pass
         try:
             cherry = out(["cherry", target, branch], root).splitlines()
             if cherry and all(line.startswith("-") for line in cherry):
