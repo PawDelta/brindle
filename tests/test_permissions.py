@@ -6,21 +6,23 @@ import pytest
 from typer.testing import CliRunner
 
 from brindle.cli import app
-from brindle.permissions import DEFAULT_RULES, PRESET_COMMANDS, Request, decide
+from brindle.permissions import DEFAULT_RULES, PRESET_COMMANDS, Request, decide, load_store, store_path
 
 runner = CliRunner()
 
 
-def test_preset_permissions():
+def test_preset_permissions(monkeypatch, tmp_path):
     """Verify that preset permissions are in the defaults and allow their commands."""
-    rules = DEFAULT_RULES
+    # Mock brindle_home to point to tmp_path so store_path() returns a non-existent file path
+    monkeypatch.setattr("brindle.permissions.brindle_home", lambda: tmp_path)
     
-    # Check that presets are in DEFAULT_RULES
+    rules = load_store().rules
+    
+    # Check that presets are in load_store().rules when file doesn't exist
     for cmd in PRESET_COMMANDS:
-        exact_id = f"d-preset-{cmd}-exact"
-        prefix_id = f"d-preset-{cmd}-prefix"
-        assert any(r.id == exact_id for r in rules)
-        assert any(r.id == prefix_id for r in rules)
+        # We can just check that a bash allow exact and prefix rule exists for each cmd
+        assert any(r.kind == "bash" and r.match == cmd and r.match_type == "exact" and r.decision == "allow" for r in rules)
+        assert any(r.kind == "bash" and r.match == f"{cmd} " and r.match_type == "prefix" and r.decision == "allow" for r in rules)
         
         # Test exact match
         req_exact = Request("claude", "bash", "Bash", command=cmd)
