@@ -88,7 +88,17 @@ WARMUP_END = "Reply with just the word: ready. Your task, if any, comes in the n
 
 
 def warmup(instructions: str | None) -> str:
-    return "\n\n".join(p for p in (TOOLS_NOTE, instructions, WARMUP_END) if p)
+    parts = [p for p in (TOOLS_NOTE, instructions) if p]
+    body = "\n\n".join(parts)
+    if body:
+        body = f"<details><summary>brindle instructions</summary>\n\n{body}\n\n</details>"
+    return f"{body}\n\n{WARMUP_END}" if body else WARMUP_END
+
+
+def format_delivered_message(body: str) -> str:
+    if not body:
+        return body
+    return f"<details><summary>brindle instructions</summary>\n\n{body}\n\n</details>"
 
 
 class AntigravityError(RuntimeError):
