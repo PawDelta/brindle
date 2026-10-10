@@ -358,6 +358,37 @@ def test_native_api_catalogs_and_credentials_are_mocked(api, base, url, source):
         assert "x-api-key" not in headers
 
 
+@pytest.mark.parametrize("api", ["openai", "anthropic"])
+@pytest.mark.parametrize("port", [1234, 11434])
+@pytest.mark.parametrize("host", [
+    "api.openai.com", "api.anthropic.com", "gateway.example.com", "localhost.example.com",
+    "192.168.1.2", "0.0.0.0", "[2001:db8::1]", "[::]",
+])
+def test_external_plain_http_catalog_never_sends_credentials(api, port, host):
+    get = Mock(return_value={"data": []})
+    request = ma.Request("native", f"http://{host}:{port}/v1", api, "KEY", {"KEY": "secret"})
+    with pytest.raises(ma._DiscoveryError, match="^unsupported$"):
+        ma._native_catalog(request, 1, get=get)
+    get.assert_not_called()
+
+
+@pytest.mark.parametrize("api", ["openai", "anthropic"])
+@pytest.mark.parametrize("host", [
+    "localhost", "LOCALHOST", "127.0.0.1", "127.42.0.2", "[::1]", "[0:0:0:0:0:0:0:1]",
+])
+def test_loopback_plain_http_catalog_accepts_credentials(api, host):
+    get = Mock(return_value={"data": [{"id": "wanted"}]})
+    base = f"http://{host}:1234/v1"
+    request = ma.Request("native", base, api, "KEY", {"KEY": "secret"})
+    assert ma._native_catalog(request, 1, get=get).models == {"wanted"}
+    url, headers, timeout = get.call_args.args
+    assert url == base + "/models" and timeout == 1
+    if api == "anthropic":
+        assert headers["x-api-key"] == "secret"
+    else:
+        assert headers["Authorization"] == "Bearer secret"
+
+
 def test_mocked_anthropic_pagination_is_bounded_and_cursor_is_encoded(monkeypatch):
     get = Mock(side_effect=[
         {"data": [{"id": "one"}], "has_more": True, "last_id": "one&secret"},
@@ -401,7 +432,9 @@ def test_unsupported_or_missing_native_configuration_never_sends(base, api, key_
     get.assert_not_called()
 
 
-def test_http_is_get_only_and_refuses_redirects(monkeypatch):
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("target", ["https://elsewhere/models", "http://elsewhere/models"])
+def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
     opener = Mock()
     response = io.BytesIO(b'{"data": []}')
     opener.open.return_value = response
@@ -412,7 +445,7 @@ def test_http_is_get_only_and_refuses_redirects(monkeypatch):
     assert request.get_method() == "GET" and request.data is None
     assert opener.open.call_args.kwargs["timeout"] == 2
     redirects = build.call_args.args[0]
-    assert redirects.redirect_request(request, None, 302, "", {}, "https://elsewhere") is None
+    assert redirects.redirect_request(request, None, code, "", {}, target) is None
 
 
 @pytest.mark.parametrize("code,reason", [(401, "auth"), (403, "auth"), (404, "failed"), (429, "failed"), (500, "failed")])

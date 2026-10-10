@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -377,6 +378,15 @@ def _native_catalog(request: Request, timeout: float, *, get=_get_json) -> Catal
         raise _DiscoveryError("unsupported")
     if parsed.username or parsed.password:
         raise _DiscoveryError("unsupported")
+    if parsed.scheme == "http" and parsed.hostname != "localhost":
+        # Plain HTTP is only safe for local gateways. Check literal addresses
+        # without DNS resolution, before constructing or sending credentials.
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise _DiscoveryError("unsupported")
     api = (request.api or "openai").lower()
     if api not in ("openai", "anthropic"):
         raise _DiscoveryError("unsupported")
