@@ -441,15 +441,29 @@ def _brindle_tools() -> set[str]:
     return {f"mcp_brindle_{n}" for n in names} | {f"mcp__brindle__{n}" for n in names}
 
 
-def agy_path_args(payload: dict) -> set[str]:
-    """Every distinct path a call to an agy file tool names, made absolute
-    against its Cwd. More than one means brindle can't tell which one agy
-    will act on."""
+def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
+    """Why brindle can't be sure it reads an agy call the way agy will, or
+    None. Under agy_approvals "brindle" such a call is denied rather than
+    guessed at: a JSON-encoded value (brindle decodes it, agy may not), a
+    relative or ~ path (agy may resolve it against something other than
+    Cwd), more than one path, or a command run outside the worktree."""
     call = payload.get("toolCall") if isinstance(payload, dict) else None
     args = call.get("args") if isinstance(call, dict) and isinstance(call.get("args"), dict) else {}
-    cwd = _agy_arg(args, "Cwd") or ""
-    raws = {_agy_arg(args, a) for a in AGY_PATH_ARGS} - {None}
-    return {_abs_path(r, cwd) if cwd else r for r in raws}
+    for name in (*AGY_PATH_ARGS, "Cwd", "CommandLine"):
+        raw = args.get(name)
+        if isinstance(raw, str) and raw and _agy_arg(args, name) != raw:
+            return f"{name} is JSON-encoded"
+    paths = {args[a] for a in AGY_PATH_ARGS if isinstance(args.get(a), str) and args[a]}
+    if len(paths) > 1:
+        return "the call names more than one path"
+    if any(not os.path.isabs(p) for p in paths):
+        return "the call names a relative path"
+    cwd = args.get("Cwd")
+    if call.get("name") == "run_command" and isinstance(cwd, str) and cwd:
+        real, root = os.path.realpath(cwd), os.path.realpath(worktree)
+        if not os.path.isabs(cwd) or (real != root and not _inside(real, worktree)):
+            return "the command runs outside the worktree"
+    return None
 
 
 def agy_strict_output(decision: Decision | None, req: Request | None = None,
@@ -470,9 +484,10 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
         # Protected wherever the workspaces list says the workspace is: the
         # anchors are brindle's own worktree and repo root.
+        # Any .agents/.git/.brindle under them, not only the top-level ones.
         protected = path and req.kind != "read" and any(
-            path == os.path.realpath(os.path.join(root, d)) or _inside(path, os.path.join(root, d))
-            for root in protected_roots or [] if root for d in AGY_PROTECTED_DIRS)
+            set((_inside(path, root) or "").split(os.sep)) & set(AGY_PROTECTED_DIRS)
+            for root in protected_roots or [] if root)
         if path and not protected and any(
                 w and (path == os.path.realpath(w) or _inside(path, w)) for w in workspaces or []):
             return {"decision": "allow", "reason": "brindle: a file in the workspace"}
@@ -659,6 +674,27 @@ def profile_rules(profile) -> list[Rule]:
         kind, match_type, match = parts
         if kind in KINDS and match_type in MATCH_TYPES and match:
             out.append(Rule(kind, match, match_type, "deny", "profile"))
+    return out
+
+
+PROFILE_BASH = re.compile(r"Bash\(([^()*]+?)(:\*)?\)")
+
+
+def profile_bash_allows(profile) -> list[Rule]:
+    """The profile's ``allowed_tools`` shell entries as allow rules, for an
+    agy worker under agy_approvals "brindle", which Claude Code's
+    ``--allowedTools`` never reaches: ``Bash(git status)`` is that exact
+    command, ``Bash(uv run:*)`` it alone or followed by arguments. Like
+    every bash allow, a compound or quoted command never matches."""
+    out = []
+    for entry in getattr(profile, "allowed_tools", None) or []:
+        m = PROFILE_BASH.fullmatch(entry.strip())
+        if not m:
+            continue
+        command = m.group(1).strip()
+        out.append(Rule("bash", command, "exact", "allow", "profile"))
+        if m.group(2):
+            out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
     return out
 
 

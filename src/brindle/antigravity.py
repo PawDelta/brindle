@@ -326,6 +326,15 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         return output(None)
     req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root)
     rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    if strict:
+        # What a Claude Code worker on this profile runs without asking
+        # (its allowed_tools); a deny still wins, since decide() checks those first.
+        from brindle.profiles import load_profile
+
+        try:
+            rules += permissions.profile_bash_allows(load_profile(agent.profile, ws.repo_root))
+        except KeyError:
+            pass
     decision = permissions.decide(req, checks=cfg.checks, rules=rules)
     spaces = payload.get("workspacePaths")
     spaces = [s for s in spaces if isinstance(s, str) and s] if isinstance(spaces, list) else []
@@ -337,8 +346,10 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         brain = os.path.realpath(Path.home() / ".gemini" / "antigravity-cli" / "brain")
         if isinstance(artifacts, str) and os.path.realpath(artifacts).startswith(brain + os.sep):
             spaces.append(os.path.realpath(artifacts))
-        if req is not None and len(permissions.agy_path_args(payload)) > 1:
-            out = {"decision": "deny", "reason": "brindle: the call names more than one path"}
+        ambiguous = permissions.agy_strict_ambiguity(payload, ws.path) if req is not None else None
+        if ambiguous and decision.decision != "deny":
+            out = {"decision": "deny", "reason": f"brindle: {ambiguous}, so it can't be checked; "
+                                                 "use one absolute path inside your worktree"}
         else:
             out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root])
     else:

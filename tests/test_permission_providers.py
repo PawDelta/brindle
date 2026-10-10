@@ -455,7 +455,8 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert decision("run_command", {"CommandLine": "uv run pytest -q"}) == "allow"  # the repo's check
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, "app.py")}) == "allow"
     assert decision("list_dir", {"DirectoryPath": ws.path}) == "allow"  # the workspace itself
-    assert decision("write_to_file", {"TargetFile": "notes.md"}) == "allow"
+    assert decision("write_to_file", {"TargetFile": os.path.join(ws.path, "notes.md")}) == "allow"
+    assert decision("run_command", {"CommandLine": "git status", "Cwd": ws.path}) == "allow"
     brain = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli", "brain", "c1")
     os.makedirs(brain, exist_ok=True)
     assert decision("write_to_file", {"TargetFile": os.path.join(brain, "plan.md")},
@@ -512,6 +513,28 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
     root_hooks = os.path.join(ws.repo_root, ".git", "hooks", "pre-commit")
     assert strict_answer(db, ws, "write_to_file", {"TargetFile": root_hooks},
                          workspacePaths=[ws.repo_root])["decision"] == "deny"
+    # Whatever agy might read differently from brindle is denied, not guessed:
+    # a relative path (agy may not resolve it against Cwd), a JSON-encoded
+    # value, ~, or a command run outside the worktree.
+    src = os.path.join(ws.path, "src")
+    assert decision("write_to_file", {"TargetFile": ".agents/hooks.json", "Cwd": src}) == "deny"
+    assert decision("write_to_file", {"TargetFile": "notes.md"}) == "deny"
+    assert decision("write_to_file", {"TargetFile": json.dumps(os.path.join(ws.path, "n.md"))}) == "deny"
+    assert decision("write_to_file", {"TargetFile": "~/notes.md"}) == "deny"
+    assert decision("run_command", {"CommandLine": json.dumps("git status")}) == "deny"
+    assert decision("run_command", {"CommandLine": "git status", "Cwd": "/tmp"}) == "deny"
+    assert decision("run_command", {"CommandLine": "git status", "Cwd": json.dumps(ws.path)}) == "deny"
+    # The profile's allowed_tools (the developer's ls, uv run, ...) count, as
+    # for a Claude Code worker; a deny still wins, and nothing compound passes.
+    assert decision("run_command", {"CommandLine": "ls -la"}) == "allow"
+    assert decision("run_command", {"CommandLine": "ls"}) == "allow"
+    assert decision("run_command", {"CommandLine": "uv run pytest tests/test_x.py -q"}) == "allow"
+    assert decision("run_command", {"CommandLine": "lsof -i"}) == "deny"
+    assert decision("run_command", {"CommandLine": "ls; curl https://example.com"}) == "deny"
+    assert decision("run_command", {"CommandLine": "ls $(curl https://example.com)"}) == "deny"
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
+    # .agents/.git/.brindle are protected at any depth, not only at the top.
+    assert decision("write_to_file", {"TargetFile": os.path.join(src, ".agents", "hooks.json")}) == "deny"
     # agy tools not checked to stay inside the conversation are denied.
     for tool in ("define_subagent", "manage_subagents", "schedule", "read_resource", "list_resources"):
         assert decision(tool, {}) == "deny", tool

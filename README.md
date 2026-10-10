@@ -701,7 +701,9 @@ With `"agy_approvals": "brindle"` (and the policy on), brindle's hook is the
 only gate instead: agy workers start with `--dangerously-skip-permissions`,
 under which agy still honors a hook's deny, and the hook runs on every tool,
 subagents' calls included. It allows what a rule allows (a repo's checks
-included), files inside the workspace (writes under `.agents/`, `.git/` and
+included), the shell commands in the profile's `allowed_tools` (what a Claude
+Code worker on it runs without asking), files inside the workspace given as one
+absolute path (writes under `.agents/`, `.git/` and
 `.brindle/` only by a rule, since those hold the hook, git's hooks and the
 repo's checks), brindle's own tools and agy's tools that act only on the
 conversation, and denies everything else, telling the agent to
