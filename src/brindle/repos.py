@@ -23,7 +23,11 @@ from brindle import git, workspaces
 from brindle.db import DB, Workspace
 
 FEATURE = "multi_repo"
-PRO_MESSAGE = "Working across several repos in one session is part of brindle Pro."
+PRO_MESSAGE = (
+    "Working across multiple repositories is a restricted feature of brindle Pro. "
+    "The free tier is limited to a single repository per session. "
+    "To upgrade, run `brindle account upgrade` or visit https://pawdelta.com/brindle."
+)
 
 
 class RepoError(RuntimeError):
