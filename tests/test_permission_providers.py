@@ -429,6 +429,128 @@ def test_agy_pre_tool_answers_what_agy_would_do_except_a_deny(db, ws, monkeypatc
     assert answer("run_command", {"CommandLine": "git status"}) == "ask"
 
 
+# -- agy: agy_approvals "brindle" (--dangerously-skip-permissions, the hook decides) -------------
+
+
+def strict_answer(db, ws, tool, args, **extra):
+    stdin = json.dumps({**agy_payload(tool, args, ws.path), **extra})
+    return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))
+
+
+def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, monkeypatch, tmp_path):
+    # With the skip flag agy runs a hook's "ask" unprompted, so the strict hook
+    # never answers ask: what brindle would have asked about is denied.
+    a = worker(db, ws, provider="antigravity", id_="g1")
+    turn_on(ws)
+    set_local(ws.repo_root, "checks", ["uv run pytest -q"])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    outside = tmp_path / "elsewhere.txt"
+    outside.write_text("x")
+
+    def decision(tool, args, **extra):
+        return strict_answer(db, ws, tool, args, **extra)["decision"]
+
+    assert decision("run_command", {"CommandLine": "git status"}) == "allow"
+    assert decision("run_command", {"CommandLine": "uv run pytest -q"}) == "allow"  # the repo's check
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, "app.py")}) == "allow"
+    assert decision("list_dir", {"DirectoryPath": ws.path}) == "allow"  # the workspace itself
+    assert decision("write_to_file", {"TargetFile": "notes.md"}) == "allow"
+    assert decision("write_to_file", {"TargetFile": str(tmp_path / "plan.md")},
+                    artifactDirectoryPath=str(tmp_path)) == "allow"
+    assert decision("mcp_brindle_report_result", {}) == "allow"
+    assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "send_message"}) == "allow"
+    assert decision("invoke_subagent", {}) == "allow"  # its own calls reach this hook
+
+    assert decision("run_command", {"CommandLine": "git push"}) == "deny"
+    assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
+    out = strict_answer(db, ws, "run_command", {"CommandLine": "curl https://example.com"})
+    assert out["decision"] == "deny" and "send_message" in out["reason"]
+    assert decision("view_file", {"AbsolutePath": str(outside)}) == "deny"
+    assert decision("read_url_content", {"Url": "https://example.com"}) == "deny"
+    assert decision("call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue"}) == "deny"
+    assert decision("browser_click", {}) == "deny"  # a tool brindle doesn't know
+    rows = db.list_history(ws.repo_root, "permission")
+    assert len(rows) == 7 and all(r.result.startswith("deny:") for r in rows)
+
+
+@pytest.mark.parametrize("stdin", ["", "{broken", "[]", "null", '{"toolCall": 5}'])
+def test_agy_strict_fails_closed(db, ws, monkeypatch, stdin):
+    a = worker(db, ws, provider="antigravity", id_="g1")
+    turn_on(ws)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    assert json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))["decision"] == "deny"
+
+
+def test_agy_strict_failures_are_deny_unless_agy_plainly_prompts(db, monkeypatch):
+    def broken_db():
+        raise RuntimeError("no db")
+
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "g1")
+    payload = json.dumps(agy_payload("run_command", {"CommandLine": "x"}))
+    assert json.loads(antigravity.pre_tool_main(payload, db_factory=broken_db, strict=True))["decision"] == "deny"
+    # An agent brindle doesn't know: deny.
+    assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=True))["decision"] == "deny"
+    monkeypatch.delenv("BRINDLE_AGENT_ID")
+    monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
+    # No agent: the person's own agy in this checkout. Started without the
+    # flag, it prompts, so ask; with the flag, or when that can't be told, deny.
+    for launched, expected in ((False, "ask"), (True, "deny"), (None, "deny")):
+        monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda launched=launched: launched)
+        assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=True))["decision"] == expected
+
+
+def test_agy_strict_cli_event(monkeypatch):
+    monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
+    for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "ls"}))):
+        res = CliRunner().invoke(app, ["_hook", "agy-pre-tool-strict"], input=stdin)
+        assert res.exit_code == 0
+        assert json.loads(res.stdout)["decision"] == "deny"
+
+
+def test_agy_strict_launch_skips_prompts_and_hooks_every_tool(db, ws, monkeypatch):
+    from brindle.profiles import load_profile
+    from brindle.providers import Antigravity, LaunchContext
+
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
+
+    def launch():
+        argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, cwd=ws.path))
+        hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
+        return argv, hooks.get("PreToolUse")
+
+    set_local(ws.repo_root, "agy_approvals", "brindle")
+    set_local(ws.repo_root, "permission_policy", "off")
+    argv, pre = launch()
+    assert antigravity.SKIP_FLAG not in argv and pre is None  # needs the policy on
+    turn_on(ws)
+    argv, [entry] = launch()
+    assert antigravity.SKIP_FLAG in argv
+    assert entry["matcher"] == "*" and "agy-pre-tool-strict" in entry["hooks"][0]["command"]
+    set_local(ws.repo_root, "agy_approvals", "prompt")
+    argv, [entry] = launch()
+    assert antigravity.SKIP_FLAG not in argv and "agy-pre-tool-strict" not in entry["hooks"][0]["command"]
+
+
+def test_launched_with_skip_flag_reads_the_agy_process(monkeypatch):
+    commands = {10: "/bin/sh -c brindle _hook", 20: "/Users/x/.local/bin/agy --dangerously-skip-permissions -i hi"}
+    parents = {10: 20, 20: 1}
+    monkeypatch.setattr(os, "getppid", lambda: 10)
+    monkeypatch.setattr(antigravity, "_parent", lambda pid: parents.get(pid))
+
+    class Done:
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(antigravity.subprocess, "run", lambda argv, **kw: Done(commands.get(int(argv[-1]), "")))
+    assert antigravity._launched_with_skip_flag() is True
+    commands[20] = "/Users/x/.local/bin/agy -i hi"
+    assert antigravity._launched_with_skip_flag() is False
+    commands[20] = "python something"
+    assert antigravity._launched_with_skip_flag() is None
+
+
 # -- agy: mirroring brindle's rules into its settings --------------------------------------------
 
 

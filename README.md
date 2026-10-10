@@ -509,6 +509,7 @@ Autopilot, merge gates and cleanup:
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"off"` | `"on"`: brindle answers Claude Code workers' permission prompts from its rules (see "Permission policy" below); off, the prompts behave as they always did |
+| `agy_approvals` | `"prompt"` | `"brindle"`: with the policy on, Antigravity workers run without approval prompts and brindle's hook allows or denies every call (see "Antigravity" under "Permission policy") |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | `"block"` | a task whose `files` overlap a running task's is refused (`"warn"` starts it with a warning) |
@@ -695,6 +696,17 @@ touches anything else, and keeps your original file once as
 does it by hand. To undo, turn `permission_policy` off and run `sync-agy`: brindle
 removes exactly its own entries. brindle doesn't learn from agy approvals (its
 hook runs for every tool call, so a tool running doesn't mean you approved it).
+
+With `"agy_approvals": "brindle"` (and the policy on), brindle's hook is the
+only gate instead: agy workers start with `--dangerously-skip-permissions`,
+under which agy still honors a hook's deny, and the hook runs on every tool,
+subagents' calls included. It allows what a rule allows (a repo's checks
+included), files inside the workspace, brindle's own tools and agy's tools that
+act only on the conversation, and denies everything else, telling the agent to
+ask its supervisor; you allow it with `brindle permissions allow`. Any failure
+in the hook is a deny, and a tool brindle doesn't know is denied. Nobody can
+approve a prompt in the agent's pane in this mode. The default, `"prompt"`,
+leaves agy asking as described above.
 
 ## brindle Pro and Team
 

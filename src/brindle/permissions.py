@@ -415,6 +415,47 @@ def agy_output(decision: Decision | None, req: Request | None = None,
     return {"decision": "ask", "reason": f"brindle: {why}"}
 
 
+# agy's own tools that act only on the conversation (tasks, messages to its
+# subagents, questions to the person); a subagent's tool calls reach the hook
+# themselves. Anything not listed here or mapped in AGY_KINDS is denied under
+# agy_approvals "brindle", so a tool agy adds later starts out blocked.
+AGY_CONVERSATION_TOOLS = frozenset({
+    "manage_task", "send_message", "schedule", "ask_question", "invoke_subagent",
+    "define_subagent", "manage_subagents", "list_resources", "read_resource",
+})
+NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule allows this "
+                  "({why}). Don't try another way to do the same thing: tell your supervisor "
+                  "with send_message what you need and why, so the person can allow it with "
+                  "`brindle permissions allow`.")
+
+
+def agy_strict_output(decision: Decision | None, req: Request | None = None,
+                      workspaces: list[str] | None = None) -> dict:
+    """agy's PreToolUse answer under ``agy_approvals: "brindle"``, where agy
+    runs with --dangerously-skip-permissions: a hook's "ask" then runs the
+    call without a prompt, so brindle answers allow or deny, never ask.
+    Allowed: what a rule allows, a file inside a workspace (or the
+    conversation's artifact folder, passed in ``workspaces``), brindle's own
+    tools, and agy's conversation-only tools. Everything else is denied with
+    a reason that tells the agent to ask its supervisor."""
+    if decision is not None and decision.decision == "deny":
+        return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
+    if decision is not None and decision.decision == "allow":
+        return {"decision": "allow", "reason": f"brindle: {decision.reason}"}
+    if req is not None:
+        path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
+        if path and any(w and (path == os.path.realpath(w) or _inside(path, w)) for w in workspaces or []):
+            return {"decision": "allow", "reason": "brindle: a file in the workspace"}
+        if req.kind == "mcp" and (req.tool.startswith("mcp_brindle_")
+                                  or req.tool.startswith("mcp__brindle__")):
+            return {"decision": "allow", "reason": "brindle: brindle's own tool"}
+        if req.kind == "other" and req.tool in AGY_CONVERSATION_TOOLS:
+            return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
+    why = decision.reason if decision is not None else "brindle couldn't read the request"
+    why = why.removesuffix("; asking the user")  # nobody is asked here
+    return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why)}
+
+
 # -- matching ---------------------------------------------------------------------------------
 
 

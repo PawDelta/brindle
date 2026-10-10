@@ -2428,15 +2428,16 @@ def ci_init(
 @app.command("_hook", hidden=True)
 def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
          payload: Optional[str] = typer.Argument(None)) -> None:
-    if event == "agy-pre-tool":
-        # agy reads no answer as deny, so this always prints one (ask on any failure).
+    if event in ("agy-pre-tool", "agy-pre-tool-strict"):
+        # agy reads no answer as deny, so this always prints one (ask on any
+        # failure; deny under agy_approvals "brindle", where ask would run it).
         from brindle import antigravity
 
         try:
             text = sys.stdin.read()
         except Exception:  # noqa: BLE001
             text = ""
-        typer.echo(antigravity.pre_tool_main(text))
+        typer.echo(antigravity.pre_tool_main(text, strict=event == "agy-pre-tool-strict"))
         return
     if event.startswith("agy-"):
         from brindle import antigravity
