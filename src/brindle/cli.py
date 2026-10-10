@@ -13,7 +13,7 @@ from typing import Optional
 
 import typer
 
-from brindle import agents, git, tmux, view, workspaces
+from brindle import agents, git, identity_lock, tmux, view, workspaces
 from brindle import history as history_mod
 from brindle import keys_cmds, repo_cmds
 from brindle.usage import format_tokens
@@ -792,7 +792,7 @@ def autopilot_cmd(
 
 @app.command()
 def doctor(
-    fix: bool = typer.Option(False, "--fix", help="Offer to let Claude Code use an exported ANTHROPIC_API_KEY without asking."),
+    fix: bool = typer.Option(False, "--fix", help="Offer to let Claude Code use an exported ANTHROPIC_API_KEY without asking, and agy a GEMINI_API_KEY (modelProvider \"gemini\")."),
 ) -> None:
     """Check that brindle has what it needs, and say what to do about anything missing.
 
@@ -1655,6 +1655,17 @@ def learning_seed() -> None:
                                "help_option_names": []})   # --help is the plugin's: it lists every subcommand
 def account(ctx: typer.Context) -> None:
     """brindle Pro/Team: paid features, login, upgrade, billing, orgs. Bare `brindle account` shows what you have."""
+    _run_account(list(ctx.args))
+
+
+@app.command("login", context_settings={"allow_extra_args": True, "ignore_unknown_options": True,
+                                         "help_option_names": []})
+def login(ctx: typer.Context) -> None:
+    """Log in to brindle and set up your company's agents: the same as `brindle account login`."""
+    _run_account(["login", *ctx.args])
+
+
+def _run_account(args: list[str]) -> None:
     from brindle import account as account_mod
     from brindle.config import load_repo_config
 
@@ -1668,7 +1679,7 @@ def account(ctx: typer.Context) -> None:
         from brindle.config import RepoConfig
 
         cfg = RepoConfig()
-    raise typer.Exit(account_mod.run(cfg, repo_root, list(ctx.args), echo=typer.echo))
+    raise typer.Exit(account_mod.run(cfg, repo_root, args, echo=typer.echo))
 
 
 # -- brindle audit (brindle Enterprise: the local tamper-evident audit chain) ---------------------
@@ -2141,6 +2152,7 @@ def agent_peek(agent_id: str, lines: int = typer.Option(40, "--lines", "-n")) ->
     """Print the last lines of an agent's terminal."""
     db = DB()
     a = _run(agents.get, db, agent_id)
+    _run(identity_lock.ensure, a)
     if not a.tmux_window:
         typer.secho(f"{a.id} has no terminal (it runs as its supervisor's own subagent)"
                     if not agents.runs_process(a) else f"{a.id} has no terminal", fg="red", err=True)
@@ -2158,6 +2170,11 @@ def agent_turns(agent_id: str) -> None:
     ws = db.get_workspace(a.workspace_id)
     if ws is None:
         _fail(f"{a.id}'s workspace is gone")
+    from brindle import identity_lock
+
+    who = identity_lock.locked_by(a.id)
+    if who:
+        _fail(f"{a.id} is locked: {who}. {identity_lock.message(who)}.")
     typer.echo(rewind.format_turns(ws.repo_root, a.id))
 
 

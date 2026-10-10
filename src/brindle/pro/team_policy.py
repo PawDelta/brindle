@@ -29,7 +29,8 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+from urllib.parse import urlsplit
 
 from brindle.policy import AssignInfo, Decision, MergeInfo, PolicyPlugin, allow, deny
 
@@ -82,6 +83,73 @@ class ProviderConfig:
                 "key_helper": list(self.key_helper) if self.key_helper else None}
 
 
+AGENT_CLAUDE_ROUTES = ("subscription", "console", "bedrock", "vertex", "foundry", "gateway")
+AGENT_CODEX_ROUTES = ("chatgpt", "api_key", "azure")
+# The sub-block a Claude route needs; the others are pruned from the parsed block.
+CLAUDE_ROUTE_BLOCK = {"bedrock": "aws", "vertex": "gcp", "foundry": "azure", "gateway": "gateway"}
+CLAUDE_ORG_ROUTES = ("subscription", "console")     # the routes that sign in to a Claude org
+AGENT_ENFORCE_FEATURE = MANAGED_FEATURE             # ``enforce`` needs this Enterprise entitlement
+
+
+@dataclass(frozen=True)
+class AwsSetup:
+    sso_start_url: str
+    sso_region: str
+    account_id: str
+    role_name: str
+    region: str
+
+
+@dataclass(frozen=True)
+class GcpSetup:
+    project: str
+    region: str
+
+
+@dataclass(frozen=True)
+class AzureSetup:
+    subscription_id: str
+    resource: str
+
+
+@dataclass(frozen=True)
+class GatewaySetup:
+    base_url: str
+
+
+@dataclass(frozen=True)
+class ModelsSetup:
+    opus: str | None = None
+    sonnet: str | None = None
+    haiku: str | None = None
+
+
+@dataclass(frozen=True)
+class ClaudeSetup:
+    route: str
+    org_id: str | None = None
+    aws: AwsSetup | None = None
+    gcp: GcpSetup | None = None
+    azure: AzureSetup | None = None
+    gateway: GatewaySetup | None = None
+    models: ModelsSetup | None = None
+
+
+@dataclass(frozen=True)
+class CodexSetup:
+    route: str
+
+
+@dataclass(frozen=True)
+class AgentSetup:
+    """Org policy ``agent_setup``: how the org's workers sign in to Claude and
+    Codex. Names only, never a secret. ``enforce`` is False unless the org has
+    the Enterprise entitlement."""
+    claude: ClaudeSetup | None = None
+    codex: CodexSetup | None = None
+    enforce: bool = False
+
+
 @dataclass(frozen=True)
 class OrgPolicy:
     org_id: str
@@ -128,6 +196,8 @@ class OrgPolicy:
     # whether personal API keys are stripped from their panes.
     provider_config: ProviderConfig | None = None
     deny_personal_keys: bool = False
+    # The org's ``agent_setup`` block (None: absent, or malformed and ignored).
+    agent_setup: AgentSetup | None = None
 
     @property
     def enforced(self) -> OrgPolicy:
@@ -159,6 +229,7 @@ class OrgPolicy:
     def to_json(self) -> dict:
         out = {"org_id": self.org_id, "version": self.version, "fetched_at": self.fetched_at,
                "policy": {**self.rules(), **self.budgets(), **self.rollout(), **self.managed(),
+                          "agent_setup": asdict(self.agent_setup) if self.agent_setup else None,
                           "roles": {r: {k: _list(v) if k in LISTS else v
                                         for k, v in o.items()}
                                     for r, o in self.roles.items()}},
@@ -317,6 +388,175 @@ def _org_key(pc: dict) -> tuple[str | None, tuple[str, ...] | None]:
     return None, tuple(helper)
 
 
+AWS_KEYS = ("sso_start_url", "sso_region", "account_id", "role_name", "region")
+GCP_KEYS = ("project", "region")
+AZURE_KEYS = ("subscription_id", "resource")
+GATEWAY_KEYS = ("base_url",)
+MODEL_KEYS = ("opus", "sonnet", "haiku")
+CLAUDE_KEYS = ("route", "org_id", "aws", "gcp", "azure", "gateway", "models")
+CODEX_KEYS = ("route",)
+AGENT_KEYS = ("claude", "codex", "enforce")
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+AWS_ACCOUNT_RE = re.compile(r"\d{12}")
+IAM_ROLE_RE = re.compile(r"[A-Za-z0-9+=,.@_-]{1,64}")
+AWS_REGION_RE = re.compile(r"[a-z]{2}(?:-gov)?-[a-z]+-\d{1,2}")
+GCP_REGION_RE = re.compile(r"[a-z]+-[a-z]+\d{1,2}")
+GCP_PROJECT_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
+AZURE_RESOURCE_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?")   # a name: no dots, no URL
+MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+HTTPS_URL_RE = re.compile(r"https://[^\s/?#@]+(?:/[^\s?#]*)?")
+# Secret-shaped values: none belongs in a policy. Matched on any string field.
+SECRET_RE = re.compile(r"(?<![A-Za-z0-9])sk-|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_|"
+                       r"xox[abprs]-|AIza[0-9A-Za-z_-]{35}|-----BEGIN|"
+                       r"(?i:password|secret|token|api[_-]?key)\s*[=:]")
+
+
+class _Malformed(ValueError):
+    pass
+
+
+def _obj(v, keys: tuple[str, ...], what: str) -> dict:
+    """``v`` as an object with only ``keys`` in it (anything else is malformed)."""
+    if not isinstance(v, dict):
+        raise _Malformed(f"{what} isn't an object")
+    extra = sorted(set(v) - set(keys), key=str)
+    if extra:
+        # A newer server may send fields this client doesn't know: ignore them
+        # (but never a secret-shaped one), and say so once at debug level.
+        if any(_secret_shaped(k) or _secret_shaped(v[k]) for k in extra):
+            raise _Malformed(f"{what} has a secret-shaped unknown field")
+        log.debug("ignoring unknown %s field(s): %s", what, ", ".join(str(k) for k in extra))
+        v = {k: x for k, x in v.items() if k in keys}
+    return v
+
+
+def _secret_shaped(v) -> bool:
+    if isinstance(v, str):
+        return bool(SECRET_RE.search(v))
+    if isinstance(v, dict):
+        return any(_secret_shaped(k) or _secret_shaped(x) for k, x in v.items())
+    if isinstance(v, list):
+        return any(_secret_shaped(x) for x in v)
+    return False
+
+
+def _field(d: dict, key: str, pattern: re.Pattern, *, required: bool = True,
+           max_len: int = 128) -> str | None:
+    v = d.get(key)
+    if v is None:
+        if required:
+            raise _Malformed(f"missing {key}")
+        return None
+    if not isinstance(v, str) or len(v) > max_len or not pattern.fullmatch(v) or SECRET_RE.search(v):
+        raise _Malformed(f"invalid {key}")
+    return v
+
+
+def _https(d: dict, key: str) -> str:
+    v = _field(d, key, HTTPS_URL_RE, max_len=512)
+    u = urlsplit(v)
+    if u.scheme != "https" or not u.hostname or "@" in u.netloc:
+        raise _Malformed(f"invalid {key}")
+    return v
+
+
+def _aws(v) -> AwsSetup:
+    a = _obj(v, AWS_KEYS, "aws")
+    url = a.get("sso_start_url")
+    if isinstance(url, str) and url.endswith("#"):
+        # AWS shows its start URL as ".../start/#"; the trailing # isn't part of it.
+        a = {**a, "sso_start_url": url[:-1]}
+    return AwsSetup(sso_start_url=_https(a, "sso_start_url"),
+                    sso_region=_field(a, "sso_region", AWS_REGION_RE),
+                    account_id=_field(a, "account_id", AWS_ACCOUNT_RE),
+                    role_name=_field(a, "role_name", IAM_ROLE_RE, max_len=64),
+                    region=_field(a, "region", AWS_REGION_RE))
+
+
+def _gcp(v) -> GcpSetup:
+    g = _obj(v, GCP_KEYS, "gcp")
+    return GcpSetup(project=_field(g, "project", GCP_PROJECT_RE),
+                    region=_field(g, "region", GCP_REGION_RE))
+
+
+def _azure(v) -> AzureSetup:
+    z = _obj(v, AZURE_KEYS, "azure")
+    return AzureSetup(subscription_id=_field(z, "subscription_id", UUID_RE),
+                      resource=_field(z, "resource", AZURE_RESOURCE_RE, max_len=64))
+
+
+def _gateway(v) -> GatewaySetup:
+    g = _obj(v, GATEWAY_KEYS, "gateway")
+    return GatewaySetup(base_url=_https(g, "base_url"))
+
+
+def _models(v) -> ModelsSetup:
+    m = _obj(v, MODEL_KEYS, "models")
+    return ModelsSetup(**{k: _field(m, k, MODEL_ID_RE, required=False, max_len=128) for k in MODEL_KEYS})
+
+
+def _claude(v) -> ClaudeSetup:
+    c = _obj(v, CLAUDE_KEYS, "claude")
+    route = c.get("route")
+    if route not in AGENT_CLAUDE_ROUTES:
+        raise _Malformed("invalid claude route")
+    org = _field(c, "org_id", UUID_RE, required=route in CLAUDE_ORG_ROUTES)
+    # Every sub-block present is validated, then only the one the route needs is kept.
+    parsed = {"aws": _aws, "gcp": _gcp, "azure": _azure, "gateway": _gateway}
+    blocks = {k: fn(c[k]) if c.get(k) is not None else None for k, fn in parsed.items()}
+    need = CLAUDE_ROUTE_BLOCK.get(route)
+    if need and blocks[need] is None:
+        raise _Malformed(f"claude route {route} needs {need}")
+    models = _models(c["models"]) if c.get("models") is not None else None
+    return ClaudeSetup(route=route, org_id=org if route in CLAUDE_ORG_ROUTES else None,
+                       aws=blocks["aws"] if need == "aws" else None,
+                       gcp=blocks["gcp"] if need == "gcp" else None,
+                       azure=blocks["azure"] if need == "azure" else None,
+                       gateway=blocks["gateway"] if need == "gateway" else None,
+                       models=models)
+
+
+def _codex(v) -> CodexSetup:
+    c = _obj(v, CODEX_KEYS, "codex")
+    if c.get("route") not in AGENT_CODEX_ROUTES:
+        raise _Malformed("invalid codex route")
+    return CodexSetup(route=c["route"])
+
+
+def _enforce_entitled() -> bool:
+    from brindle.pro import license
+
+    try:
+        return license.has(AGENT_ENFORCE_FEATURE)
+    except Exception:  # noqa: BLE001 - no verified entitlement: not enforced
+        return False
+
+
+def _parse_agent_setup(raw) -> AgentSetup:
+    a = _obj(raw, AGENT_KEYS, "agent_setup")
+    enforce = a.get("enforce", False)
+    if enforce is None:
+        enforce = False
+    if not isinstance(enforce, bool):
+        raise _Malformed("invalid enforce")
+    claude = _claude(a["claude"]) if a.get("claude") is not None else None
+    codex = _codex(a["codex"]) if a.get("codex") is not None else None
+    return AgentSetup(claude=claude, codex=codex, enforce=enforce and _enforce_entitled())
+
+
+def _agent_setup(p: dict) -> AgentSetup | None:
+    """The policy's ``agent_setup`` block. A malformed one is ignored with one
+    warning, and never raises: the rest of the policy still applies."""
+    raw = p.get("agent_setup")
+    if raw is None:
+        return None
+    try:
+        return _parse_agent_setup(raw)
+    except Exception as e:  # noqa: BLE001 - a bad block must not break the policy
+        log.warning("ignoring the org policy's agent_setup block (%s)", e)
+        return None
+
+
 def _spend(v) -> dict:
     if not isinstance(v, dict):
         return {}
@@ -387,7 +627,8 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
                          **spend),
                      role=_role_name(body.get("role")),
                      policy_role=_role_name(body.get("policy_role")),
-                     cached_for=tuple(key) if ok_key else None, **spend)
+                     cached_for=tuple(key) if ok_key else None,
+                     agent_setup=_agent_setup(p), **spend)
 
 
 def cache_path(org_id: str):

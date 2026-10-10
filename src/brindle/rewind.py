@@ -394,9 +394,10 @@ def rewind(db: DB, agent_id: str, to: int, *, profile: str | None = None,
     """Reset ``agent_id``'s worktree to its snapshot ``to``, stop it, and
     start a fresh worker there (profile ``profile``, default the same) with
     a brief of the task, turns 1..``to`` and ``note``. Returns the new agent."""
-    from brindle import agents
+    from brindle import agents, identity_lock
 
     agent = agents.get(db, agent_id)
+    identity_lock.ensure(agent)
     ws = db.get_workspace(agent.workspace_id)
     if ws is None:
         raise RewindError(f"{agent_id}'s workspace is gone")

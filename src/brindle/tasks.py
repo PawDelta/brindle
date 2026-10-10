@@ -223,6 +223,14 @@ def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | Non
     never started falls back to ancestry."""
     if not depends_on:
         return []
+    from brindle import identity_lock
+
+    for dep in depends_on:   # a branch from another identity's session can't be pulled in
+        agent = db.get_agent(dep)
+        found = [db.get_workspace(agent.workspace_id)] if agent else [
+            w for w in db.find_workspaces(caller_ws.repo_root) if w.branch == dep]
+        for w in found:
+            identity_lock.ensure_workspace(db, w)   # a missing workspace (None) is never locked
     unmet = []
     for dep in depends_on:
         task = _dep_task(db, caller_ws.repo_root, dep)

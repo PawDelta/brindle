@@ -161,6 +161,11 @@ def _last_tool(transcript: str) -> str | None:
 def _last_activity(a: Agent) -> str:
     """`` last: WebFetch 40s ago`` from the agent's transcript (its mtime is
     the last activity), or empty when it has none."""
+    from brindle import identity_lock
+
+    who = identity_lock.locked_by(a.id) if getattr(a, "id", None) else None
+    if who:
+        return f" locked: {who}"
     if not a.transcript_path:
         return ""
     try:
@@ -737,6 +742,12 @@ async def merge_workspace(workspace: str, squash: bool = False, repo: str | None
             ws = _ws(db, workspace, repo)
         except repos.RepoError as e:
             return f"Not merged: {e}"
+        from brindle import identity_lock
+
+        try:
+            identity_lock.ensure_workspace(db, ws)
+        except agents.AgentError as e:
+            return f"Not merged: {e}"
         return pipeline.merge(db, caller, ws, squash=squash)
 
     return await asyncio.to_thread(run)
@@ -854,6 +865,11 @@ def agent_turns(agent_id: str) -> str:
     ws = db.get_workspace(a.workspace_id)
     if ws is None:
         return f"{agent_id}'s workspace is gone."
+    from brindle import identity_lock
+
+    who = identity_lock.locked_by(a.id)
+    if who:
+        return f"{a.id} is locked: {who}. {identity_lock.message(who)}."
     return rewind.format_turns(ws.repo_root, agent_id)
 
 

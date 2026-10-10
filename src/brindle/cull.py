@@ -137,6 +137,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     done.extend(cost_centers.poll(only_due=True, now=now))
 
+    # 1f. Agents whose provider's sign-in is gone (or wrong): pause them, and
+    # resume them once it's valid again.
+    from brindle import signin_pause
+
+    done.extend(signin_pause.sweep(db, now))
+
     # 2. Workers nobody needs any more.
     limits: dict[str, float] = {}
     for a in db.list_agents():
@@ -453,8 +459,9 @@ def prune_stale_agents(db: DB, now: float | None = None) -> list[str]:
         limit = _stale_after(db, a, limits)
         if limit <= 0 or now - since <= limit:
             continue
-        missing = not os.path.isdir(ws.path)
-        merged = ws.kind == "worktree" and workspaces_merged(ws)
+        # A repo deleted outright leaves records whose git commands can't even start.
+        missing = not os.path.isdir(ws.path) or not os.path.isdir(ws.repo_root)
+        merged = not missing and ws.kind == "worktree" and workspaces_merged(ws)
         if not missing and not merged:
             continue
         agents.close(db, a.id)
@@ -465,8 +472,9 @@ def prune_stale_agents(db: DB, now: float | None = None) -> list[str]:
 
 
 def workspaces_merged(ws: Workspace) -> bool:
-    """Whether a workspace branch is already contained in its configured base."""
-    return bool(ws.base_branch) and git.ok(
+    """Whether a workspace branch is already contained in its configured base
+    (False when the repo itself is gone)."""
+    return bool(ws.base_branch) and os.path.isdir(ws.repo_root) and git.ok(
         ["merge-base", "--is-ancestor", f"refs/heads/{ws.branch}",
          f"refs/heads/{ws.base_branch}"], ws.repo_root)
 

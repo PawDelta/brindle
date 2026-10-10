@@ -197,20 +197,70 @@ def credential_checks() -> list[Check]:
                     pass
             if found:
                 break
+        if found and provider == "antigravity" and not providers.agy_uses_gemini_key():
+            out.append(Check(WARN, provider, providers.agy_ignores_key_message()))
+            continue
+        if provider == "codex" and providers.codex_chatgpt_login():
+            codex_key = _codex_key_source("CODEX_API_KEY")
+            if codex_key:
+                out.append(Check(WARN, provider, f"API key (CODEX_API_KEY, from {codex_key}); "
+                                 f"{providers.CODEX_INTERACTIVE_USES_PLAN}; "
+                                 + providers.CODEX_EXEC_BILLS_KEY))
+                continue
+            if found and found[0] == "OPENAI_API_KEY":
+                out.append(Check(WARN, provider, f"OPENAI_API_KEY is set, but "
+                                 + providers.CODEX_INTERACTIVE_USES_PLAN))
+                continue
         out.append(Check(OK, provider, f"API key ({found[0]}, from {found[1]})" if found else "its own login"))
     return out
+
+
+def _codex_key_source(name: str) -> str | None:
+    from brindle import keystore
+
+    if os.environ.get(name):
+        return "environment"
+    try:
+        return "key store" if keystore.get_key(name) else None
+    except keystore.CredentialError:
+        return None
+
+
+def _gemini_key_present() -> bool:
+    from brindle import keystore
+
+    if os.environ.get("GEMINI_API_KEY"):
+        return True
+    try:
+        return bool(keystore.get_key("GEMINI_API_KEY"))
+    except keystore.CredentialError:
+        return False
 
 
 def fix(confirm) -> list[str]:
     """`brindle doctor --fix`: offer to let Claude Code use an exported
     ANTHROPIC_API_KEY without its approval question. ``confirm(prompt)``
     answers; declining (or nothing to do) leaves Claude Code's config alone.
-    Returns the lines to print."""
+    Also offers to set agy's ``"modelProvider": "gemini"`` when a Gemini key
+    exists that agy would ignore. Returns the lines to print."""
+    from brindle import company_login, providers
+
+    lines: list[str] = []
+    # Self-serve setup asks only on a terminal. What it found and its menu print
+    # at once (before the question, not at the end); only an applied setup adds
+    # result lines, so keeping the personal setup leaves "nothing to fix".
+    company_login.apply_current(lines.append, info=print)
+    if "antigravity" in signin_providers() and _gemini_key_present():
+        providers.offer_agy_gemini(confirm, lines.append)
+    return lines + _fix_claude(confirm, lines)
+
+
+def _fix_claude(confirm, done: list[str]) -> list[str]:
     from brindle import providers
 
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
-        return ["nothing to fix"]
+        return [] if done else ["nothing to fix"]
     if providers.claude_org_managed():
         return ["claude: org-managed; brindle does not approve keys there"]
     if providers.api_key_approved(key):
@@ -241,6 +291,13 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(_tool("agy", False, "only needed for Google Antigravity agents"))
     out.extend(signin_checks(repo_root))
     out.extend(credential_checks())
+    from brindle import company_identity
+
+    out.extend(company_identity.checks())
+
+    from brindle import signin_pause
+
+    out.extend(signin_pause.checks())
     out.append(_tool("gh", False, "only needed for `brindle pr` and `brindle new --pr`"))
     out.append(_tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"))
     out.append(_tool("graphify", False, "only needed for the code map agents can query"))

@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 
-from brindle import git, keystore, pane_auth, providers, secrets, tmux, workspaces
+from brindle import company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import load_profile, missing_add_dirs
@@ -183,7 +183,11 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # Claude Code's own managed settings (apiKeyHelper, a managed env) pick
         # the credential and backend: brindle adds no provider_config env there.
         org = agent.provider == "claude" and providers.claude_org_managed()
-        env = {**profile_env, **({} if org else managed_models.agent_env(m, agent.provider)), **env}
+        # The company's Claude Code env (`brindle login`): the lowest layer, so a
+        # profile's env lines and the org's managed provider both beat it; none
+        # at all under Claude Code's managed settings (stored_env).
+        company = {} if agent.provider != "claude" else company_login.stored_env()
+        env = {**company, **profile_env, **({} if org else managed_models.agent_env(m, agent.provider)), **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -262,7 +266,9 @@ def spawn(
     finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
     agent is a session root that drives toward a goal (see brindle.autopilot)."""
     from brindle import autopilot as pilot
+    from brindle import identity_lock
 
+    identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
     profile = load_profile(profile_name, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
@@ -612,6 +618,14 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.set_status(agent.id, status)
         agent.status = status
         return
+    # An org that enforces its company sign-in (Enterprise) refuses a
+    # different identity; one that can't be told never blocks.
+    why = company_identity.launch_problem(provider.name)
+    if why:
+        raise AgentError(why)
+    from brindle import signin_pause
+
+    signin_pause.record_launch(agent)   # who it runs as, so a resume never crosses accounts
     # What the agent will run with: the managed provider's variables, and
     # no personal keys (blank, so the launcher's own copy doesn't count).
     from brindle.pro import managed_models
@@ -906,10 +920,14 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task.
     With ``only``, just those agents (if paused) restart."""
+    from brindle import identity_lock
+
+    candidates = [a for a in tree(db, root_id)
+                  if a.status == "paused" and (only is None or a.id in only)]
+    for a in candidates:   # all or nothing: a session never half-resumes under another identity
+        identity_lock.ensure(a)
     resumed = []
-    for a in tree(db, root_id):
-        if a.status != "paused" or (only is not None and a.id not in only):
-            continue
+    for a in candidates:
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path):
             continue
@@ -1138,7 +1156,10 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
     """Deliver now if the agent is idle; otherwise queue until it is.
     Returns ``"delivered"`` or ``"queued"``. ``person`` marks a message from
     the person running brindle, which is always pushed."""
+    from brindle import identity_lock
+
     agent = get(db, to_id)
+    identity_lock.ensure(agent)
     if not person and runs_process(agent) and is_alive(agent) and pulls_messages(db, agent):
         # Keep the message unread and deliver only a notice, once for everything unread.
         db.enqueue_held(agent.id, format_message(db, body, sender_id), sender_id)
@@ -1648,6 +1669,13 @@ def delegate(
         raise AgentError(str(e)) from e
     if plan_first is None:
         plan_first = load_repo_config(caller_ws.repo_root).plan_first
+    from brindle import identity_lock
+
+    identity_lock.ensure_workspace(db, caller_ws)
+    if isolate and branch:   # naming a branch must not reuse another identity's worktree
+        for other in db.find_workspaces(caller_ws.repo_root):
+            if other.branch == branch:
+                identity_lock.ensure_workspace(db, other)
     if isolate:
         caller_ws = workspaces.refresh_branch(db, caller_ws)
         # merge_into applies to the supervisor's workers; a worker's own

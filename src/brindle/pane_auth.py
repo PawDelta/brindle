@@ -34,11 +34,13 @@ def deny_names(provider: str, auth: str, m, org_managed: bool = False) -> tuple[
     return tuple(deny + [n for n in dict.fromkeys(extra) if n not in deny])
 
 
-def key_problem(profile, provider: str, deny: Iterable[str], org_key: bool) -> str | None:
+def key_problem(profile, provider: str, deny: Iterable[str], org_key: bool,
+                exec_mode: bool = False) -> str | None:
     """Why ``profile`` (``auth: api_key``) can't start for lack of a key, or
     None. A key counts when the org supplies one, or one of the provider's key
     variables isn't denied and is set (the profile's env, the environment) or
-    stored with `brindle keys`."""
+    stored with `brindle keys`. ``exec_mode``: the profile runs headless
+    `codex exec` rather than the interactive Codex brindle uses in panes."""
     if profile.auth != "api_key" or org_key:
         return None
     names = ((profile.api_key_env,) if profile.api_key_env else ()) if provider == "native" \
@@ -47,7 +49,28 @@ def key_problem(profile, provider: str, deny: Iterable[str], org_key: bool) -> s
         return None
     denied = set(deny)
     usable = [n for n in names if n not in denied]
+    if provider == "codex" and usable:
+        from brindle import providers
+
+        if providers.codex_chatgpt_login():
+            if not exec_mode:
+                # Interactive Codex ignores both env keys under a ChatGPT login.
+                return f"profile {profile.name!r} has auth: api_key, but " + providers.CODEX_INTERACTIVE_IGNORES_KEYS
+            # `codex exec` takes CODEX_API_KEY and ignores OPENAI_API_KEY.
+            had_openai = bool(profile.env.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+                              or keystore.pane_keys(["OPENAI_API_KEY"]))
+            usable = [n for n in usable if n != "OPENAI_API_KEY"]
+            have_codex = "CODEX_API_KEY" in usable and (
+                profile.env.get("CODEX_API_KEY") or os.environ.get("CODEX_API_KEY")
+                or keystore.pane_keys(["CODEX_API_KEY"]))
+            if had_openai and not have_codex:
+                return f"profile {profile.name!r} has auth: api_key, but " + providers.CODEX_EXEC_IGNORES_OPENAI_KEY
     if any(profile.env.get(n) or os.environ.get(n) for n in usable) or keystore.pane_keys(usable):
+        if provider == "antigravity":
+            from brindle import providers
+
+            if not providers.agy_uses_gemini_key():
+                return f"profile {profile.name!r} has auth: api_key, but " + providers.agy_ignores_key_message()
         return None
     if not usable:
         return (f"profile {profile.name!r} has auth: api_key, but your org doesn't allow personal API "

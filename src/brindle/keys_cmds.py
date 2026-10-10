@@ -49,6 +49,24 @@ def keys_set(name: str = typer.Argument(..., help="The variable, e.g. ANTHROPIC_
     if name == "ANTHROPIC_API_KEY":
         _warn_login()
         _offer_approval(value)
+    elif name in ("OPENAI_API_KEY", "CODEX_API_KEY"):
+        from brindle import providers
+
+        if providers.codex_chatgpt_login():
+            msg = f"Codex is signed in with ChatGPT: {providers.CODEX_INTERACTIVE_USES_PLAN}"
+            if name == "CODEX_API_KEY":
+                msg += f"; {providers.CODEX_EXEC_BILLS_KEY}"
+            typer.secho(msg, fg="yellow")
+    elif name == "GEMINI_API_KEY":
+        from brindle import providers
+
+        def ask(prompt: str) -> bool:
+            try:
+                return typer.confirm(prompt, default=False)
+            except typer.Abort:
+                return False
+
+        providers.offer_agy_gemini(ask, typer.echo)
 
 
 def _warn_login() -> None:

@@ -59,7 +59,7 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.3.0`). A session started before an upgrade keeps
+session shows it too (`brindle 0.3.1`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -333,6 +333,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle learning` | whether brindle Pro's hosted learning is on for this repo, and if not, why (nothing is learned on your machine) |
 | `brindle learning seed` | Pro: sends this repo's finished routing history to the hosted learner once, so it starts with what this machine has seen. Only the usual coarse record fields leave (kind/size one-hots, counters, HMAC keys), never task text or paths. A second run sends nothing new; decisions already sent live are skipped |
 | `brindle account [login\|logout\|status\|upgrade\|portal\|seats\|org]` | paid features: bare `brindle account` shows what your plan has and how to get the rest (see "brindle Pro and Team" below) |
+| `brindle login` | the same as `brindle account login`; when your org's policy has an `agent_setup` block it also signs you in to the Claude and Codex route the company chose (AWS SSO profile, `gcloud`, `az`, `claude auth login`, `codex login`), stores the Claude Code environment for brindle's panes in `~/.brindle/config.json`, and checks the pinned models. `brindle doctor --fix` does the same |
 | `brindle audit verify\|export\|pubkey\|ship\|prune` | the local tamper-evident audit log, and shipping it to your SIEM (brindle Enterprise; see "Audit log" below) |
 | `brindle watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks, `x` closes |
 | `brindle sidebar` | bring this session's sidebar into the tmux session you're in (also `Ctrl-b S` in a window without one); restarts it if it was closed |
@@ -732,6 +733,7 @@ workflow.
 
 ```sh
 brindle account            # paid features: what you have, how to use them, how to get the rest
+brindle login              # the same as `brindle account login`; also applies your org's agent_setup (company agent sign-in)
 brindle account login      # opens your browser to sign in (--device: enter a code instead, e.g. over SSH); brindle checks the plan offline from then on
 brindle account status     # your plan, features, hosted learning on or off, when the entitlement expires
 brindle account savings    # what hosted learning's picks gained in this repo, this month and last: estimates, from this machine's records only
@@ -747,6 +749,44 @@ brindle account org profiles rm <name> [--pack]               # take one out of 
 brindle account org member policy-role <member> <role|none>   # give a member a policy role (admin; Enterprise)
 brindle account org company [link <org_id> | unlink]          # link orgs you own into one company; learning is pooled only within it
 ```
+
+**Sign-in loss pauses agents.** While agents run, brindle checks every 30 s that
+Claude and Codex are still signed in (`claude auth status` or the cloud route's
+identity, re-checked only when its credentials change; `codex login status`;
+Antigravity can't be checked). If one is signed out, its running agents pause
+with their worktrees, commits and conversations kept, and the supervisor and
+your session are told; a timeout or missing CLI never pauses, it warns once.
+A wrong company identity pauses them only when the org policy enforces it
+(Enterprise); otherwise it warns once. After `brindle login`,
+`brindle doctor --fix` or the CLI's own login, the agents brindle paused resume
+into their conversations, but only as the account they started under: if
+someone else is signed in (a personal login, say) they stay paused until the
+original account is back. Your own chat session is never paused, only the
+workers. A cloud sign-in is re-checked only when its credential files or
+variables change, so a token that expires silently isn't noticed until then.
+`brindle doctor` lists agents paused for sign-in.
+
+**Sessions stay with their identity.** Each Claude agent records the identity it
+launched under (Claude org, AWS account and role, GCP project, Azure
+subscription; ids only, never tokens). While a different identity is signed in,
+that agent is locked: brindle refuses to resume it (`brindle continue`), rewind
+it, message or hand off to it, start a new agent in its worktree (including
+naming its branch for a new worker), or `peek` at it, with "This session
+belongs to <org/account>; sign in as it to continue (`brindle login`)".
+`brindle ls`, `watch`, the sidebar, `list_agents` and `agent_turns` show it as
+`locked: <org/account>` without its conversation (usage, last activity, turn
+summaries), and `depends_on` and `merge_workspace` won't pull its branch into a
+session under another identity. Agents with no recorded identity (started before
+this, or without a company setup) are unaffected, and so is everything while the
+current identity can't be told (signed out, CLI missing).
+
+This is a guard inside brindle, not a sandbox: on one OS user account the
+worktrees, transcripts and credential files stay readable outside brindle (a
+shell, another tool). Real separation needs a separate OS user or your
+company's device management. Codex and Antigravity can't be told apart by
+account (brindle only sees "signed in"), so their sessions are paused on
+sign-out but can't be locked to one account; isolation applies to Claude routes
+(subscription, Bedrock, Vertex, Foundry).
 
 ### Several repos in one session (brindle Pro)
 
@@ -1228,7 +1268,7 @@ it's signed in without a plan that includes it, is reported to its supervisor.
 | Provider | Key login (environment variables) |
 |---|---|
 | `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
-| `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY` |
+| `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY`. With Codex signed in with ChatGPT (checked on Codex CLI 0.162.0): interactive `codex`, which brindle runs in agent panes, ignores both keys and uses the ChatGPT plan, and only `codex login --with-api-key` switches it to a key; headless `codex exec` (Brindle-CI) bills `CODEX_API_KEY` over the login and ignores `OPENAI_API_KEY`. `brindle doctor` and `brindle keys set` say so, and `auth: api_key` on an interactive Codex profile is refused under a ChatGPT login (run `codex login --with-api-key`, or use `auth: subscription`) |
 | `antigravity` | `GEMINI_API_KEY`, only with `"modelProvider": "gemini"` in `agy`'s `settings.json` (see [Google Antigravity](#google-antigravity)); otherwise `agy`'s own browser sign-in |
 
 Workers that run unattended should use key login where the CLI supports it.
@@ -1635,6 +1675,30 @@ Codex agents report status through Codex's `notify` hook (brindle passes
 marks the agent idle and delivers any queued message. Codex has no Stop hook, so for
 an autopilot supervisor on Codex that turn end is also where brindle tells it to keep
 going, with the same limit on reminders as Claude Code.
+
+### Using your company's access
+
+Two ways to run brindle's agents on your company's Claude (Bedrock, Vertex,
+Foundry, a Team or Enterprise plan) and Codex, without handling keys:
+
+- **Your org sets it up (brindle Team).** When your org's policy has an
+  `agent_setup` block, `brindle login` (and `brindle doctor --fix`) signs you
+  in to the route the company chose and `brindle doctor` shows which identity
+  each agent uses. It always wins over anything below.
+- **You set it up yourself (any plan).** When your org has no `agent_setup`,
+  `brindle login` looks, read-only, at what this machine is already signed in
+  to: Claude Code's managed settings (if your IT configures Claude Code,
+  brindle just uses it), `claude auth status`, AWS SSO profiles in
+  `~/.aws/config`, the active `gcloud` project, the active `az` subscription
+  and `codex login status`. It never reads tokens or credential files. It
+  proposes what it found ("Use Bedrock (AWS 1234…, role Dev, us-east-1)?");
+  the default is no, and with no terminal it is always no. A yes is saved as
+  `"agent_setup"` in `~/.brindle/config.json`, in the same format as the org
+  policy's (`enforce` is never applied to it), and `brindle doctor` labels it
+  as self-serve and says who is billed.
+
+You must be authorized to use any company credentials you connect: brindle only
+signs in with the access you already have, it doesn't grant any.
 
 ## Google Antigravity
 

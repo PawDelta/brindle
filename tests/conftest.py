@@ -144,12 +144,25 @@ def no_signed_in_providers(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_signin_pause(monkeypatch):
+    """The cull sweep and agent launches don't ask the real CLIs who is signed
+    in: every provider reads as unverifiable (tests/test_signin_pause.py
+    brings the real check back and fakes the probes under it)."""
+    from brindle import signin_pause
+
+    signin_pause.reset()
+    monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: None)
+
+
+@pytest.fixture(autouse=True)
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    # ... nor agy's real settings.
+    monkeypatch.setenv("BRINDLE_AGY_SETTINGS", str(tmp_path / "agy-home" / "settings.json"))
     # The shell provider runs $SHELL. The person's own shell reads their dotfiles,
     # so a slow or stuck one (a stale pyenv rehash lock waits 60s) would fail
     # tests that give the shell a few seconds.
@@ -173,6 +186,25 @@ def brindle_home(tmp_path, monkeypatch):
     license.clear_cache()
     yield home
     license.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def no_machine_cloud_state(tmp_path, monkeypatch):
+    """Self-serve detection (and company login) never reads this machine's real
+    AWS/gcloud/az config or runs its CLIs: they point at empty temporary
+    directories and count as not installed, unless a test fakes
+    company_login.which/run_cmd itself."""
+    import shutil
+
+    from brindle import company_login
+
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-aws" / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-aws" / "credentials"))
+    monkeypatch.setenv("CLOUDSDK_CONFIG", str(tmp_path / "no-gcloud"))
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path / "no-azure"))
+    cloud = {"aws", "gcloud", "az", "claude", "codex"}
+    monkeypatch.setattr(company_login, "which",
+                        lambda name: None if name in cloud else shutil.which(name))
 
 
 @pytest.fixture(autouse=True)
