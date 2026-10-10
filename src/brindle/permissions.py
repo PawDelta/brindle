@@ -169,6 +169,16 @@ def _default(id_: str, kind: str, match: str, match_type: str, decision: str) ->
     return Rule(kind, match, match_type, decision, "default", 0.0, id_)
 
 
+PRESET_COMMANDS = ("aws", "git", "uv", "pytest", "python", "npm", "pnpm", "yarn", "docker", "cargo", "go", "make", "gh")
+PRESET_RULES = tuple(
+    rule
+    for cmd in PRESET_COMMANDS
+    for rule in (
+        _default(f"d-preset-{cmd}-exact", "bash", cmd, "exact", "allow"),
+        _default(f"d-preset-{cmd}-prefix", "bash", f"{cmd} ", "prefix", "allow"),
+    )
+)
+
 DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
     _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
@@ -180,7 +190,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-gnupg", "read", "~/.gnupg*", "glob", "deny"),
     _default("d-env", "read", "*/.env*", "glob", "deny"),
     _default("d-env-rel", "read", ".env*", "glob", "deny"),
-)
+) + PRESET_RULES
 
 
 # -- providers: Claude Code ------------------------------------------------------------------
