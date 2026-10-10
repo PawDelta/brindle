@@ -361,6 +361,7 @@ CREATE TABLE IF NOT EXISTS launch_health (
     pane TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
     argv_task INTEGER NOT NULL DEFAULT 0,
+    submitted_prompt TEXT NOT NULL DEFAULT '',
     delivered_at REAL,
     baseline TEXT NOT NULL DEFAULT '',
     outcome TEXT
@@ -684,6 +685,8 @@ class DB:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN token TEXT NOT NULL DEFAULT ''")
         if "argv_task" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN argv_task INTEGER NOT NULL DEFAULT 0")
+        if "submitted_prompt" not in health_cols:
+            self.conn.execute("ALTER TABLE launch_health ADD COLUMN submitted_prompt TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:

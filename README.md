@@ -636,7 +636,9 @@ This is a single observation, not an entitlement test: unfamiliar or wrapped
 errors, later failures and slow requests can remain pending. It does not scan
 historical transcripts, and excludes task text, previous pane lines and older
 marked replies, fenced examples and ordinary assistant/tool explanations. A
-separate detached check covers headless and argv startup exits before task
+Codex follow-up retains the complete submitted argv prompt (including profile
+instructions) and distinguishes assistant/tool responses from the idle composer.
+A separate detached check covers headless and argv startup exits before task
 delivery. Existing readiness and watch/cull handling continues afterward.
 
 **Hosted learning (brindle Pro).** With a plan that includes it, brindle learns

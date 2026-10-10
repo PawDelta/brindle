@@ -463,6 +463,85 @@ def test_current_codex_error_retains_provider_ui_and_real_task_context():
     assert lh.failure(screen, task="implement a feature") == lh.AUTH
 
 
+@pytest.mark.parametrize("reply", [
+    "• Example output:\n■ unexpected status 403 Forbidden",
+    "• Ran cat errors.txt\n■ unexpected status 403 Forbidden",
+    "• Explored\n  └ Read errors.txt\n■ unexpected status 403 Forbidden",
+    "Here is an example output:\n■ unexpected status 403 Forbidden",
+    "Tool output:\n■ unexpected status 403 Forbidden",
+    "• Example output:\n```\n■ unexpected status 403 Forbidden\n```",
+    "• Example output:\nError: invalid API key",
+    "• Example output:\nesc to interrupt\n■ unexpected status 403 Forbidden",
+])
+@pytest.mark.parametrize("submitted_turn", [False, True])
+def test_full_codex_ui_assistant_and_tool_output_cannot_report_or_cool_down(db, health, monkeypatch, reply, submitted_turn):
+    from brindle import model_access
+    lh, a, _, sleeps, _, reports = health
+    prompt = f"› {a.task}\n" if submitted_turn else ""
+    screen = f"OpenAI Codex\n{prompt}{reply}\n\n› \n100% context left"
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "pending"
+    assert sleeps == [5.0] and reports == [] and db.pending_count("boss") == 0
+    assert model_access.refused(a.profile, fp="effective-account") is None
+
+
+@pytest.mark.parametrize("composer", ["› Find and fix a bug", "› \x1b[2mFind and fix a bug\x1b[0m", "› Write tests for @filename", "› "])
+def test_full_codex_ui_idle_composer_does_not_erase_current_error(db, health, monkeypatch, composer):
+    from brindle import model_access
+    lh, a, _, sleeps, _, reports = health
+    screen = f"OpenAI Codex\n■ unexpected status 403 Forbidden\n\n{composer}\n100% context left"
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "failed"
+    assert sleeps == [5.0] and len(reports) == 1 and "Fix:" in reports[0][1]
+    assert model_access.refused(a.profile, fp="effective-account").key == "launch_auth"
+
+
+def test_full_codex_ui_composer_draft_is_not_a_provider_error(db, health, monkeypatch):
+    from brindle import model_access
+    lh, a, _, _, _, reports = health
+    screen = "OpenAI Codex\n› Test these failure messages:\n● API Error: 403 Forbidden\n■ unexpected status 403 Forbidden\n100% context left"
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "pending" and reports == []
+    assert model_access.refused(a.profile, fp="effective-account") is None
+
+
+@pytest.mark.parametrize("idle_composer", [False, True])
+def test_real_codex_profile_prefixed_argv_prompt_permits_current_provider_failure(
+        db, root, launches, detached, monkeypatch, idle_composer):
+    from brindle import launch_health as lh, model_access
+    from types import SimpleNamespace
+    boss, ws = root
+    now, sleeps, reports = [100.0], [], []
+    monkeypatch.setattr(lh, "time", SimpleNamespace(
+        time=lambda: now[0], sleep=lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay))))
+    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
+    a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task", parent_id=boss.id,
+                     mode="assign", background_setup=True)
+    full_prompt = launches[-1][-1]
+    assert full_prompt.startswith("You are a developer agent") and full_prompt.count("real task") == 1
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert row["submitted_prompt"] == full_prompt and row["delivered_at"] is None
+    displayed = "\n  ".join(full_prompt.splitlines())
+    screen = f"OpenAI Codex\n› {displayed}\n■ unexpected status 403 Forbidden\n"
+    if idle_composer:
+        screen += "\n› Find and fix a bug\n"
+    screen += "100% context left"
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(type(agents.get_provider("codex")), "after_launch", lambda *a: True)
+    cli.after_launch_cmd(a.id, token=a._launch_health_token)
+    assert reports == [] and sleeps == []
+    assert lh.inspect(db, a.id, token=a._launch_health_token) == "failed"
+    assert sleeps == [5.0] and len(reports) == 1 and "Fix:" in reports[0]
+    assert model_access.refused(a.profile, fp=row["fingerprint"]).key == "launch_auth"
+    assert db.pending_count(a.id) == 0 and full_prompt.count("real task") == 1
+
+
 @pytest.mark.parametrize("delivered", [False, True])
 def test_early_exit_reports_without_claiming_access(db, health, monkeypatch, delivered):
     lh, a, _, _, _, reports = health
@@ -893,5 +972,6 @@ def test_launch_health_schema_migrates_existing_rows(db, health):
         row = migrated.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
         assert row["fingerprint"] == "legacy" and row["token"] == ""
         assert row["argv_task"] == 0
+        assert row["submitted_prompt"] == ""
     finally:
         migrated.conn.close()

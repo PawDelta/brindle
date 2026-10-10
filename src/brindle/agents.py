@@ -756,7 +756,8 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first)))
     if prompt or db.pending_count(agent.id):
-        _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"))
+        _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
+                              submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
     else:
         # Resuming a conversation without delivering a new task must not
         # classify the previous turn's error as a current launch failure.
@@ -799,12 +800,13 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 
 
 def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
-                           *, argv_task: bool = False) -> None:
+                           *, argv_task: bool = False, submitted_prompt: str = "") -> None:
     if not agent.parent_id or not agent.task:
         return
     from brindle import launch_health
     effective = _effective_window_env(agent, ws, m)
-    launch_health.prepare(db, agent, launch_health.fingerprint(profile, effective), argv_task=argv_task)
+    launch_health.prepare(db, agent, launch_health.fingerprint(profile, effective), argv_task=argv_task,
+                          submitted_prompt=submitted_prompt)
 
 
 # -- headless workers (claude -p) ------------------------------------------------

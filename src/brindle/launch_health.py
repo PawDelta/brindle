@@ -60,11 +60,12 @@ def account_revision(provider: str, env) -> str | None:
     return hashlib.sha256(json.dumps(revisions).encode()).hexdigest() if revisions else None
 
 
-def prepare(db, agent, fp: str, *, argv_task: bool = False) -> None:
+def prepare(db, agent, fp: str, *, argv_task: bool = False, submitted_prompt: str = "") -> None:
     if agent.parent_id and agent.task:
         agent._launch_health_token = uuid.uuid4().hex
-        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint,argv_task) VALUES (?,?,?,?,?)",
-                        (agent.id, agent._launch_health_token, agent.tmux_window or "", fp, argv_task))
+        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint,argv_task,submitted_prompt) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (agent.id, agent._launch_health_token, agent.tmux_window or "", fp, argv_task, submitted_prompt))
 
 
 def accepted(db, agent) -> None:
@@ -114,26 +115,47 @@ def before_delivery(db, agent) -> str:
     return capture(agent) if row and row["delivered_at"] is None else ""
 
 
-def failure(screen: str, *, baseline: str = "", task: str = ""):
+def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = ""):
     """Read complete response context before accepting a provider error block."""
     old = {line.strip() for line in baseline.splitlines()}
     text = re.sub(r"\x1b\[[0-9;]*m", "", screen)
-    context = "ui" if re.search(r"OpenAI Codex|\b\d+% context left", text) else "startup"
+    lines = text.splitlines()
+    codex_ui = bool(re.search(r"OpenAI Codex|\b\d+% context left", text))
+    context = "ui" if codex_ui else "startup"
+    prompt_text = " ".join((submitted_prompt or task).split())
+    # The last composer plus its footer is UI, including dim placeholders and
+    # multiline drafts. It is not a new submitted turn superseding an error.
+    composers = [i for i, line in enumerate(lines) if re.match(r"^\s*›", line)]
+    composer_start = composers[-1] if composers else len(lines)
+    footer = next((i for i in range(composer_start + 1, len(lines))
+                   if re.match(r"^\s*(?:\d+% context left|\? for shortcuts)", lines[i])), len(lines))
+    submitted = (composer_start < len(lines) and
+                 " ".join(re.sub(r"^\s*›\s*", "", lines[composer_start]).split()) in prompt_text
+                 and bool(re.sub(r"^\s*›\s*", "", lines[composer_start]).strip()))
+    if footer == len(lines) or (submitted and any(re.match(r"^\s*[•●■]", line) for line in lines[composer_start + 1:footer])):
+        composer_start = len(lines)
     in_code = False
     candidate = None
-    for line in text.splitlines():
+    for index, line in enumerate(lines):
         stripped = line.strip()
+        if composer_start <= index <= footer:
+            continue
         if stripped.startswith(("```", "~~~")):
             in_code = not in_code
             continue
-        if in_code or not stripped or (stripped and stripped in task):
+        if in_code or not stripped:
             continue
         if re.match(r"^[❯>›]\s+\S", stripped):
             prompt = re.sub(r"^[❯>›]\s+", "", stripped)
-            context, candidate = ("ui" if prompt in task else "prompt"), None
+            context, candidate = ("submitted" if " ".join(prompt.split()) in prompt_text else "prompt"), None
+            continue
+        if " ".join(stripped.split()) in prompt_text:
+            continue  # wrapped profile/task text is not provider output
+        if codex_ui and re.match(r"^(?:•\s|(?:Tool output|Ran |Explored |Example output))", stripped):
+            context, candidate = "assistant", None
             continue
         if re.search(r"(?i)esc to (?:interrupt|cancel)|^thinking|^working\s*…", stripped):
-            context, candidate = "ui", None
+            context, candidate = ("assistant" if context == "assistant" else "ui"), None
             continue
         if stripped.startswith("●") and len(line) - len(line.lstrip()) <= 1:
             # A tool result or assistant explanation is not a provider error.
@@ -141,7 +163,7 @@ def failure(screen: str, *, baseline: str = "", task: str = ""):
             candidate = _cause(stripped) if context == "provider" and stripped not in old else None
         elif (len(line) - len(line.lstrip()) <= 1
               and re.match(r"^■\s*(?:unexpected status|(?:API )?Error\b)", stripped)):
-            if context in ("startup", "provider", "ui"):
+            if context in ("startup", "provider", "ui", "submitted"):
                 context = "provider"
                 candidate = _cause(stripped) if stripped not in old else None
         elif (not line[:1].isspace() and context in ("startup", "provider")
@@ -152,6 +174,8 @@ def failure(screen: str, *, baseline: str = "", task: str = ""):
               and stripped.startswith("── brindle: the model endpoint failed:")):
             context = "provider"
             candidate = _cause(stripped) if stripped not in old else None
+        elif context in ("ui", "submitted") and not re.match(r"^(?:[╭╰│─]|OpenAI Codex|model:|directory:|\d+% context left|\? for shortcuts)", stripped):
+            context = "assistant"
         elif context == "startup":
             context = "prose"
     return candidate
@@ -191,7 +215,8 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
             or (row["pane"] and agent.tmux_window != row["pane"]) or not agents.same_server(agent)):
         return None
     alive = agents.is_alive(agent)
-    cause = failure(capture(agent), baseline=row["baseline"], task=agent.task or "")
+    cause = failure(capture(agent), baseline=row["baseline"], task=agent.task or "",
+                    submitted_prompt=row["submitted_prompt"])
     if alive and row["delivered_at"] is None and not cause:
         return None
     if alive and row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:
