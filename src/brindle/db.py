@@ -355,6 +355,17 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
 );
 CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
 CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
+CREATE TABLE IF NOT EXISTS launch_health (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    token TEXT NOT NULL DEFAULT '',
+    pane TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    argv_task INTEGER NOT NULL DEFAULT 0,
+    submitted_prompt TEXT NOT NULL DEFAULT '',
+    delivered_at REAL,
+    baseline TEXT NOT NULL DEFAULT '',
+    outcome TEXT
+);
 """
 
 
@@ -669,6 +680,13 @@ class DB:
         for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
+        health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
+        if "token" not in health_cols:
+            self.conn.execute("ALTER TABLE launch_health ADD COLUMN token TEXT NOT NULL DEFAULT ''")
+        if "argv_task" not in health_cols:
+            self.conn.execute("ALTER TABLE launch_health ADD COLUMN argv_task INTEGER NOT NULL DEFAULT 0")
+        if "submitted_prompt" not in health_cols:
+            self.conn.execute("ALTER TABLE launch_health ADD COLUMN submitted_prompt TEXT NOT NULL DEFAULT ''")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:

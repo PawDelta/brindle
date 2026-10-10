@@ -19,11 +19,13 @@ prompt, so every task routed to that model fails the same way. This module
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import re
 import subprocess
 import time
 from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import Callable, Iterable, Mapping
 
 from brindle.config import brindle_home
@@ -73,6 +75,12 @@ FOUNDRY_PROVIDER_DATA = Cause(
     "foundry_provider_data", "foundry",
     "the Foundry deployment lacks organization details (InvalidModelProviderData)",
     "give the deployment organization, industry and country (API version 2026-09-01 or later)")
+LAUNCH_AUTH = Cause("launch_auth", "", "the worker's authentication or model access was rejected",
+                    "check the effective profile's credentials and account, then retry or choose another profile")
+LAUNCH_MODEL = Cause("launch_model", "", "the selected model was rejected",
+                     "check the exact model ID and account access, or choose another profile")
+LAUNCH_CAPACITY = Cause("launch_capacity", "", "the provider refused work on capacity or quota",
+                        "wait for capacity or quota to recover, or choose another profile")
 
 _DATA_SHARING = re.compile(r"requires data sharing to be enabled for publisher\s*['\"‘’]?anthropic",
                            re.IGNORECASE)
@@ -149,6 +157,19 @@ def _save(data: dict) -> None:
     os.replace(tmp, _path())
 
 
+@contextmanager
+def _refusal_lock():
+    # Detached launch observers and routing run in different processes.
+    # Serialize the entire read/update/replace, including first_time's writes.
+    os.makedirs(os.path.dirname(_path()), exist_ok=True)
+    with open(_path() + ".lock", "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 # Names and non-secret IDs that say which cloud account a profile calls; never keys.
 FINGERPRINT_ENV = (
     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
@@ -189,10 +210,11 @@ def refuse(profile: str, cause: Cause, swapped_to: str | None = None, *,
     """Record that ``profile``'s model was refused, and where its tasks go."""
     now = time.time()
     fp = fingerprint(profile, repo_root) if fp is None else fp
-    data = _load(now)
-    data["refused"][_key(profile, fp)] = {"profile": profile, "fp": fp, "cause": cause.key,
-                                          "at": now, "swapped_to": swapped_to}
-    _save(data)
+    with _refusal_lock():
+        data = _load(now)
+        data["refused"][_key(profile, fp)] = {"profile": profile, "fp": fp, "cause": cause.key,
+                                              "at": now, "swapped_to": swapped_to}
+        _save(data)
 
 
 def refused(profile: str, repo_root: str | None = None, fp: str | None = None) -> Cause | None:
@@ -205,12 +227,13 @@ def refused(profile: str, repo_root: str | None = None, fp: str | None = None) -
 def first_time(key: str) -> bool:
     """True once per hour for ``key`` (so a supervisor hears of one thing once)."""
     now = time.time()
-    data = _load(now)
-    if key in data["told"]:
-        return False
-    data["told"][key] = now
-    _save(data)
-    return True
+    with _refusal_lock():
+        data = _load(now)
+        if key in data["told"]:
+            return False
+        data["told"][key] = now
+        _save(data)
+        return True
 
 
 def notes(profiles: Iterable[str] | None = None, repo_root: str | None = None) -> list[str]:
@@ -236,7 +259,7 @@ def notes(profiles: Iterable[str] | None = None, repo_root: str | None = None) -
 
 
 CAUSES = (BEDROCK_QUOTA, BEDROCK_USE_CASE, BEDROCK_ENDPOINT, VERTEX_QUOTA, VERTEX_DATA_SHARING,
-          FOUNDRY_QUOTA, FOUNDRY_PROVIDER_DATA)
+          FOUNDRY_QUOTA, FOUNDRY_PROVIDER_DATA, LAUNCH_AUTH, LAUNCH_MODEL, LAUNCH_CAPACITY)
 
 
 def next_profile(routing: Mapping[str, list[str]], weight: str | None, profile: str,

@@ -587,3 +587,243 @@ def test_isolation_preserves_codex_notice_metadata(monkeypatch, tmp_path):
     result = ma.ModelAvailabilityChecker().check(profile("codex"), effective_env={}, cwd=str(tmp_path))
     assert result.status == "unverified"
     assert "availability notice" in result.explanation
+
+
+def test_provisioning_checks_managed_model_and_exact_pane_environment(db, repo, monkeypatch):
+    from brindle import agents, guardrails, keystore, secrets, tmux, workspaces
+    from brindle.pro import managed_models
+
+    ws = workspaces.adopt_root(db, str(repo))
+    p = profile("codex", env={"OPENAI_API_KEY": "profile-key", "CUSTOM": "profile-value"},
+                auth="subscription", env_allow=["CUSTOM"])
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(guardrails, "effective", lambda p: p)
+    monkeypatch.setattr(secrets, "agent_credentials", lambda *a: frozenset({"OPENAI_API_KEY"}))
+    monkeypatch.setattr(keystore, "pane_keys", lambda *a: {"STORED_KEY": "stored"})
+    monkeypatch.setattr(tmux, "inherited_env", lambda *a: {
+        "HOME": "/effective-home", "CODEX_HOME": "/effective-account",
+        "OPENAI_API_KEY": "server-key", "CUSTOM": "server-value", "DENIED": "no"})
+    monkeypatch.setattr(managed_models, "refusal", lambda *a: None)
+    monkeypatch.setattr(managed_models, "apply_profile", lambda m, p: replace(p, model="managed-model"))
+    monkeypatch.setattr(managed_models, "agent_env", lambda *a: {"CUSTOM": "managed-value"})
+    monkeypatch.setattr(managed_models, "org_key_env", lambda *a: {"OPENAI_API_KEY": "org-key"})
+    m = managed_models.Managed("org", None, True)
+    seen = []
+
+    def discover(request, timeout):
+        seen.append(request)
+        return ma.Catalog(frozenset({"managed-model"}), "codex")
+
+    check = Mock(wraps=ma.ModelAvailabilityChecker(discover=discover))
+    monkeypatch.setattr(agents, "_model_checker", check)
+    assert agents.model_problem("test", ws, m=m) is None
+    request = seen[0]
+    assert check.check.call_args.args[0].model == "managed-model"
+    assert request.cwd == ws.path
+    assert request.env["CUSTOM"] == "managed-value"
+    assert request.env["OPENAI_API_KEY"] == "org-key"  # org exemptions survive subscription/deny
+    assert request.env["CODEX_HOME"] == "/effective-account"
+    assert "DENIED" not in request.env
+    assert request.env["STORED_KEY"] == "stored"
+
+
+def test_subscription_excludes_personal_keys_from_catalog(db, repo, monkeypatch):
+    from brindle import agents, keystore, tmux, workspaces
+    p = profile("codex", auth="subscription", env={"OPENAI_API_KEY": "profile-secret"})
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(keystore, "pane_keys", lambda *a: {})
+    monkeypatch.setattr(tmux, "inherited_env", lambda *a: {"OPENAI_API_KEY": "parent-secret"})
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "codex"))
+    monkeypatch.setattr(agents, "_model_checker", check)
+    assert agents.model_problem("test", workspaces.adopt_root(db, str(repo))) is None
+    assert "OPENAI_API_KEY" not in discover.call_args.args[0].env
+
+
+def test_effective_refusal_cooldown_changes_with_model_account_and_expires(db, repo, monkeypatch):
+    from brindle import agents, launch_health, model_access, tmux, workspaces
+    p = profile("codex")
+    ws = workspaces.adopt_root(db, str(repo))
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    env = {"CODEX_HOME": "/account-a"}
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: env)
+    check, discover = checker(ma.Catalog(frozenset({"wanted", "other"}), "codex"))
+    monkeypatch.setattr(agents, "_model_checker", check)
+    now = [100.0]
+    monkeypatch.setattr(model_access.time, "time", lambda: now[0])
+    model_access.refuse("test", model_access.LAUNCH_CAPACITY, fp=launch_health.fingerprint(p, env))
+    assert "capacity" in agents.model_problem("test", ws)
+    discover.assert_not_called()
+    env["CODEX_HOME"] = "/account-b"
+    assert agents.model_problem("test", ws) is None
+    env["CODEX_HOME"] = "/account-a"
+    p = replace(p, model="other")
+    assert agents.model_problem("test", ws) is None
+    p = replace(p, model="wanted")
+    now[0] += model_access.REFUSAL_TTL + 1
+    assert agents.model_problem("test", ws) is None
+
+
+def test_login_revision_invalidates_identity_without_reading_auth(tmp_path):
+    from brindle import launch_health
+    auth = tmp_path / "auth.json"
+    env = {"CODEX_HOME": str(tmp_path)}
+    before = launch_health.fingerprint(profile("codex"), env)
+    auth.write_text("secret")
+    assert launch_health.fingerprint(profile("codex"), env) != before
+    assert "secret" not in launch_health.account_revision("codex", env)
+    assert launch_health.fingerprint(profile("native"), {"BRINDLE_CUSTOM_KEY": "a"}) != \
+        launch_health.fingerprint(profile("native"), {"BRINDLE_CUSTOM_KEY": "b"})
+
+
+def test_pane_key_helper_resolved_once_for_catalog_health_and_launch(db, repo, monkeypatch):
+    from brindle import agents, workspaces
+    from brindle.db import Agent
+    from brindle.pro import managed_models
+    ws = workspaces.adopt_root(db, str(repo))
+    a = Agent("worker", ws.id, "developer", "claude", "boss", "assign", "starting", "", None, 0)
+    key = Mock(return_value={"ANTHROPIC_API_KEY": "org-key"})
+    monkeypatch.setattr(managed_models, "org_key_env", key)
+    first = agents._window_environment(a, ws, None)
+    agents._effective_window_env(a, ws, None)
+    assert agents._window_environment(a, ws, None) is first
+    key.assert_called_once()
+
+
+def test_existing_tmux_environment_excludes_launcher_only_credentials_and_account(db, repo, monkeypatch):
+    from brindle import agents, tmux, workspaces
+    monkeypatch.setenv("OPENAI_API_KEY", "launcher-key")
+    monkeypatch.setenv("CODEX_HOME", "/launcher-account")
+    snapshots = {("-g",): "HOME=/server-home\nCODEX_HOME=/server-account\n",
+                 ("-t", "=brindle_proj_root"): "CUSTOM=session\n"}
+    monkeypatch.setattr(tmux, "_tmux", lambda command, *scope, **k:
+                        subprocess.CompletedProcess([], 0, snapshots.get(scope, ""), ""))
+    env = tmux.inherited_env("brindle_proj_root")
+    assert "OPENAI_API_KEY" not in env and env["CODEX_HOME"] == "/server-account"
+    p = profile("codex", env={"CUSTOM": "explicit"})
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "codex"))
+    monkeypatch.setattr(agents, "_model_checker", check)
+    assert agents.model_problem("test", workspaces.adopt_root(db, str(repo))) is None
+    request = discover.call_args.args[0]
+    assert "OPENAI_API_KEY" not in request.env and request.env["CODEX_HOME"] == "/server-account"
+    assert request.env["CUSTOM"] == "explicit"
+    from brindle import launch_health, model_access
+    model_access.refuse("test", model_access.LAUNCH_AUTH, repo_root=str(repo),
+                        fp=launch_health.fingerprint(p, request.env))
+    monkeypatch.setenv("OPENAI_API_KEY", "different-launcher-key")
+    monkeypatch.setenv("CODEX_HOME", "/different-launcher-account")
+    assert "authentication" in agents.model_problem("test", workspaces.adopt_root(db, str(repo))).lower()
+
+
+def test_new_tmux_server_environment_uses_launcher_snapshot(monkeypatch):
+    from brindle import tmux
+    monkeypatch.setenv("OPENAI_API_KEY", "new-server-key")
+    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: subprocess.CompletedProcess([], 1, "", "no server"))
+    assert tmux.inherited_env("new-session")["OPENAI_API_KEY"] == "new-server-key"
+
+
+@pytest.mark.parametrize("change", ["credential", "account", "project", "selector", "explicit_bookkeeping_key"])
+def test_provisioning_cache_preserves_catalog_identity(tmp_path, change):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    env = {"HOME": str(tmp_path), "OPENAI_API_KEY": "first", "CUSTOM_ACCOUNT": "one", "BRINDLE_AGENT_ID": "preview"}
+    p = profile("codex", api_key_env="BRINDLE_AGENT_ID" if change == "explicit_bookkeeping_key" else "OPENAI_API_KEY")
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "codex"))
+    check.check(p, effective_env=env, cwd=str(first), account_identity="revision-one",
+                catalog_context=ma.provisioning_context(p.provider, str(first), env))
+    other = {**env, "BRINDLE_AGENT_ID": "worker"}
+    revision = "revision-one"
+    if change == "credential":
+        other["OPENAI_API_KEY"] = "second"
+    elif change == "selector":
+        other["CUSTOM_ACCOUNT"] = "two"
+    elif change == "account":
+        revision = "revision-two"
+    elif change == "project":
+        (second / ".codex").mkdir()
+        (second / ".codex" / "config.toml").write_text('model_provider = "other"')
+    check.check(p, effective_env=other, cwd=str(second), account_identity=revision,
+                catalog_context=ma.provisioning_context(p.provider, str(second), other))
+    assert discover.call_count == 2
+    assert discover.call_args.args[0].env == other  # normalized cache identity never alters discovery env
+
+
+def test_custom_cli_catalog_retains_cwd_identity(tmp_path):
+    env = {"BRINDLE_CODEX_BIN": "/custom/codex"}
+    assert ma.provisioning_context("codex", str(tmp_path / "a"), env) != ma.provisioning_context("codex", str(tmp_path / "b"), env)
+
+
+def test_cooldown_keeps_explicit_credential_even_if_named_like_bookkeeping():
+    from brindle import launch_health
+    p = profile(api_key_env="BRINDLE_AGENT_ID")
+    assert launch_health.fingerprint(p, {"BRINDLE_AGENT_ID": "key-one"}) != \
+        launch_health.fingerprint(p, {"BRINDLE_AGENT_ID": "key-two"})
+
+
+def test_launch_provider_override_uses_same_cooldown_as_preflight(db, repo, monkeypatch):
+    from brindle import agents, workspaces, launch_health, model_access
+    from brindle.db import Agent
+    ws = workspaces.adopt_root(db, str(repo))
+    p = profile("claude")
+    a = Agent("worker", ws.id, "test", "codex", "boss", "assign", "processing", "%w", None, 100,
+              task="real task")
+    db.add_agent(a)
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: {"HOME": str(repo)})
+    agents._prepare_launch_health(db, a, ws, p)
+    fp = db.conn.execute("SELECT fingerprint FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0]
+    model_access.refuse("test", launch_health.AUTH, fp=fp)
+    assert "authentication" in agents.model_problem("test", ws, agent=a)
+
+
+@pytest.mark.parametrize("initial", ["", 'model_provider = "company"\n'])
+def test_codex_folder_trust_preserves_cooldown_identity(db, repo, monkeypatch, initial):
+    from brindle import agents, workspaces, launch_health, model_access
+    root = repo / ".codex"
+    root.mkdir()
+    config = root / "config.toml"
+    if initial:
+        config.write_text(initial)
+    env = {"CODEX_HOME": str(root)}
+    p = profile("codex")
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: env)
+    fp = launch_health.fingerprint(p, env)
+    # Codex may atomically create/replace this file on trust acceptance.
+    updated = root / "new-config.toml"
+    updated.write_text(initial + '\n[projects."/new/worktree"]\ntrust_level = "trusted"\n'
+                       '\n[tui]\ntheme = "dark"\n[notice]\nhide_rate_limit_model_nudge = true\n')
+    updated.replace(config)
+    model_access.refuse(p.name, launch_health.AUTH, fp=fp)
+    assert launch_health.fingerprint(p, env) == fp
+    assert "authentication" in agents.model_problem(p.name, workspaces.adopt_root(db, str(repo)))
+
+
+@pytest.mark.parametrize("changed", [
+    'model_provider = "another"',
+    '[model_providers.company]\nbase_url = "https://other.example/v1"',
+    '[model_providers.company]\nenv_key = "DIFFERENT_KEY"',
+    '[projects."/worktree"]\nmodel_provider = "another"',
+    'forced_login_method = "api"',
+    'invalid TOML [',
+])
+def test_codex_config_identity_retains_provider_and_auth_changes(tmp_path, changed):
+    from brindle import launch_health
+    config = tmp_path / "config.toml"
+    config.write_text('model_provider = "company"\n')
+    env = {"CODEX_HOME": str(tmp_path)}
+    before = launch_health.fingerprint(profile("codex"), env)
+    config.write_text(changed)
+    assert launch_health.fingerprint(profile("codex"), env) != before
+
+
+def test_provisioning_timeout_override_only_shortens_standalone_discovery_budget():
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), ttl=0)
+    check.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)
+    assert discover.call_args.args[1] == ma.PROVISIONING_TIMEOUT
+    check.check(profile(), effective_env={})
+    assert discover.call_args.args[1] == ma.TIMEOUT
+    shorter, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), timeout=0.2)
+    shorter.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)
+    assert discover.call_args.args[1] == 0.2

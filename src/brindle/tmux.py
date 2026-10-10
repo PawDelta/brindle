@@ -151,6 +151,28 @@ def inherited_names(session: str) -> set[str]:
     return names
 
 
+def inherited_env(session: str) -> dict[str, str]:
+    """Snapshot the environment a new pane inherits, without logging values."""
+    env = {}
+    for scope in (("-g",), ("-t", f"={session}")):
+        try:
+            proc = _tmux("show-environment", *scope, check=False)
+        except TmuxError:
+            return dict(os.environ) if scope == ("-g",) else env
+        if proc.returncode != 0:
+            if scope == ("-g",):
+                # A new server will inherit the process that creates it.
+                return dict(os.environ)
+            continue
+        for line in proc.stdout.splitlines():
+            if line.startswith("-"):
+                env.pop(line[1:], None)
+            elif "=" in line:
+                name, _, value = line.partition("=")
+                env[name] = value
+    return env
+
+
 def scrubbed(command: list[str], unset: list[str]) -> list[str]:
     """``command`` started without the variables ``unset``: panes inherit the
     tmux server's whole environment, and tmux has no per-pane way to take a

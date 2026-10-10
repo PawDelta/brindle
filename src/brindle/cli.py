@@ -2490,14 +2490,40 @@ def _helper_db() -> DB:
 
 
 @app.command("_after-launch", hidden=True)
-def after_launch_cmd(agent_id: str) -> None:
+def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -> None:
     from brindle.providers import get_provider
+    from brindle import launch_health
 
     db = _helper_db()
+    if not launch_health.current(db, agent_id, token):
+        return
     a = db.get_agent(agent_id)
-    if a and a.tmux_window:
-        get_provider(a.provider).after_launch(a.tmux_window)
-        agents.ready(db, agent_id)
+    if a and a.tmux_window and a.status not in ("paused", "done") and a.result is None:
+        accepted = get_provider(a.provider).after_launch(a.tmux_window)
+        if not launch_health.current(db, agent_id, token):
+            return
+        if accepted:
+            agents.ready(db, agent_id)
+            # Carry the observed launch token into the delivery CAS.
+            a._launch_health_token = token
+            launch_health.accepted(db, a)
+        launch_health.inspect(db, agent_id, wait=False, token=token)
+
+
+@app.command("_launch-health", hidden=True)
+def launch_health_cmd(agent_id: str, startup: bool = typer.Option(False),
+                      token: Optional[str] = typer.Option(None)) -> None:
+    from brindle import launch_health
+
+    db = _helper_db()
+    if not launch_health.current(db, agent_id, token):
+        return
+    if startup:
+        time.sleep(launch_health.FOLLOWUP_SECONDS)
+        row = db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
+        if row is None or row["delivered_at"] is not None:
+            return  # the task-delivery helper owns the real five-second follow-up
+    launch_health.inspect(db, agent_id, wait=not startup, token=token)
 
 
 @app.command("_headless", hidden=True)

@@ -1,4 +1,4 @@
-"""Issue #49: an Antigravity worker's warm-up, task and messages must reach
+"""Issue #49: an Antigravity worker's instructions, task and messages must reach
 its own pane, never the Claude Code inbox of the session that launched it;
 and assign/handoff say why a worker couldn't be started."""
 
@@ -54,13 +54,13 @@ def fake_tmux(monkeypatch):
 
 @pytest.fixture
 def helpers(monkeypatch):
-    """brindle's detached helpers (_flush, _after-launch) aren't started; git
+    """brindle's detached helpers (_flush, _after-launch, _launch-health) aren't started; git
     and everything else runs as usual. Returns their command lines."""
     started = []
     real = subprocess.Popen
 
     def popen(argv, *a, **k):
-        if isinstance(argv, list) and any(x in argv for x in ("_flush", "_after-launch")):
+        if isinstance(argv, list) and any(x in argv for x in ("_flush", "_after-launch", "_launch-health")):
             started.append(argv)
             return None
         return real(argv, *a, **k)
@@ -77,20 +77,60 @@ def add_agy(db, ws, agent_id="g1", status="idle", window="@9"):
 
 def test_launch_does_not_take_the_launchers_inbox(db, ws, launcher_inbox, fake_tmux, helpers, monkeypatch):
     monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
-    monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)
+    monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: True)
     a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
     a = db.get_agent(a.id)
     # agy has no start hook, so brindle marks it ready from the launcher's own process.
     assert a.status == "idle" and not a.inbox_socket and not a.inbox_token
     assert any("_flush" in argv and a.id in argv for argv in helpers)
-    # The warm-up (its profile) and then the task are typed into its pane.
+    # Its instructions and actual task reach its own pane in a single turn.
+    assert db.pending_count(a.id) == 1
     assert agents.flush(db, a.id)
+    assert [t for t, _ in fake_tmux] == ["@9"]
+    delivered = fake_tmux[0][1]
+    assert "You are a developer agent" in delivered
+    assert "When you run under brindle" in delivered and "call_mcp_tool" in delivered
+    assert delivered.count("fix it") == 1 and antigravity.WARMUP_END not in delivered
+    assert db.pending_count(a.id) == 0
     db.set_status(a.id, "idle")
-    assert agents.flush(db, a.id)
-    assert [t for t, _ in fake_tmux] == ["@9", "@9"]
-    assert fake_tmux[0][1].endswith(antigravity.WARMUP_END) and "You are a developer agent" in fake_tmux[0][1]
-    assert fake_tmux[1][1].startswith("fix it")
+    assert not agents.flush(db, a.id)
+    assert len(fake_tmux) == 1
     assert launcher_inbox == []
+
+
+@pytest.mark.parametrize("autopilot_on", [False, True])
+def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
+        db, ws, repo, launcher_inbox, fake_tmux, helpers, monkeypatch, autopilot_on):
+    from brindle import autopilot, cli, model_access
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
+    monkeypatch.setattr(Antigravity, "after_launch", lambda *a: True)
+    monkeypatch.setattr(Antigravity, "warmup", lambda *a: pytest.fail("synthetic warmup"))
+    monkeypatch.setattr(model_access, "probe", lambda *a, **k: pytest.fail("availability generation probe"))
+    monkeypatch.setattr(autopilot, "guide", lambda *a: "\nAutopilot context must survive initialization.")
+    monkeypatch.setattr(cli, "_preflight", lambda *a: None)
+    monkeypatch.setattr(cli, "_trust_codex_hook", lambda *a: None)
+    monkeypatch.setattr(cli, "_cull_detached", lambda *a: None)
+    monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)
+    monkeypatch.setattr(cli, "_settings_sync_detached", lambda *a: None)
+    cli.start(agent="supervisor", prompt=None, provider="antigravity", attach=False,
+              watch=False, autopilot=autopilot_on, branch=None, worktree=None)
+    a, = db.list_agents(ws.id)
+    assert a.mode == "interactive" and a.task is None
+    expected = agents._profile_for(db, a, ws).prompt
+    assert expected and db.pending_count(a.id) == 1
+    agents.ready(db, a.id)
+    assert agents.flush(db, a.id)
+    delivered = fake_tmux[0][1]
+    assert expected in delivered and antigravity.TOOLS_NOTE in delivered
+    assert "Delegation rule:" in delivered
+    assert ("Autopilot context must survive initialization." in delivered) == autopilot_on
+    assert antigravity.WARMUP_END not in delivered
+    assert db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone() is None
+    assert not any("_launch-health" in argv for argv in helpers)
+    assert db.pending_count(a.id) == 0
+    db.set_status(a.id, "idle")
+    assert not agents.flush(db, a.id) and len(fake_tmux) == 1 and launcher_inbox == []
 
 
 def test_a_claude_agent_still_records_its_own_inbox(db, ws, launcher_inbox):
@@ -185,9 +225,17 @@ def test_assign_starts_an_antigravity_worker(db, boss, launcher_inbox, fake_tmux
     # What the detached _after-launch helper does once agy shows its prompt.
     agents.ready(db, worker.id)
     assert not db.get_agent(worker.id).inbox_socket
+    assert db.pending_count(worker.id) == 1
     assert agents.flush(db, worker.id)
-    assert fake_tmux[0][0] == "@9" and fake_tmux[0][1].endswith(antigravity.WARMUP_END)
-    assert db.pending_count(worker.id) == 1   # the task, typed in as the next turn
+    assert len(fake_tmux) == 1 and fake_tmux[0][0] == "@9"
+    delivered = fake_tmux[0][1]
+    assert "You are a developer agent" in delivered
+    assert "When you run under brindle" in delivered and "call_mcp_tool" in delivered
+    assert delivered.count("write the readme") == 1 and antigravity.WARMUP_END not in delivered
+    assert db.pending_count(worker.id) == 0
+    db.set_status(worker.id, "idle")
+    assert not agents.flush(db, worker.id)
+    assert len(fake_tmux) == 1
     assert launcher_inbox == []
 
 

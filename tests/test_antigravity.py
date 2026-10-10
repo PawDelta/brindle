@@ -88,18 +88,19 @@ def test_process_env_reads_another_process():
         child.kill()
 
 
-def test_warmup_then_the_task(db, ws, monkeypatch):
+def test_instructions_and_task_arrive_in_one_real_turn(db, ws, monkeypatch):
     monkeypatch.setattr(agents.tmux, "ensure_session", lambda *a: None)
     monkeypatch.setattr(agents.tmux, "new_window", lambda *a, **k: "@9")
     monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a: None)
     monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
     monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)
     a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
-    first, second = db.pop_pending(a.id), db.pop_pending(a.id)
+    first = db.pop_pending(a.id)
     assert first.body.startswith("<details><summary>brindle instructions</summary>")
     assert "When you run under brindle" in first.body and "call_mcp_tool" in first.body
-    assert "You are a developer agent" in first.body and first.body.endswith(antigravity.WARMUP_END)
-    assert second.body.startswith("fix it")
+    assert "You are a developer agent" in first.body and "fix it" in first.body
+    assert antigravity.WARMUP_END not in first.body
+    assert db.pop_pending(a.id) is None
 
 
 def test_queued_messages_arrive_as_a_new_turn(db, ws, monkeypatch):
