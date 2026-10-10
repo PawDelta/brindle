@@ -73,6 +73,12 @@ FOUNDRY_PROVIDER_DATA = Cause(
     "foundry_provider_data", "foundry",
     "the Foundry deployment lacks organization details (InvalidModelProviderData)",
     "give the deployment organization, industry and country (API version 2026-09-01 or later)")
+LAUNCH_AUTH = Cause("launch_auth", "", "the worker's authentication or model access was rejected",
+                    "check the effective profile's credentials and account, then retry or choose another profile")
+LAUNCH_MODEL = Cause("launch_model", "", "the selected model was rejected",
+                     "check the exact model ID and account access, or choose another profile")
+LAUNCH_CAPACITY = Cause("launch_capacity", "", "the provider refused work on capacity or quota",
+                        "wait for capacity or quota to recover, or choose another profile")
 
 _DATA_SHARING = re.compile(r"requires data sharing to be enabled for publisher\s*['\"‘’]?anthropic",
                            re.IGNORECASE)
@@ -236,7 +242,7 @@ def notes(profiles: Iterable[str] | None = None, repo_root: str | None = None) -
 
 
 CAUSES = (BEDROCK_QUOTA, BEDROCK_USE_CASE, BEDROCK_ENDPOINT, VERTEX_QUOTA, VERTEX_DATA_SHARING,
-          FOUNDRY_QUOTA, FOUNDRY_PROVIDER_DATA)
+          FOUNDRY_QUOTA, FOUNDRY_PROVIDER_DATA, LAUNCH_AUTH, LAUNCH_MODEL, LAUNCH_CAPACITY)
 
 
 def next_profile(routing: Mapping[str, list[str]], weight: str | None, profile: str,

@@ -388,3 +388,213 @@ def test_recently_active_worker_is_not_silent(db, root, screens, monkeypatch):
     worker_on(db, ws, "unknown", time.time() - 3600)
     monkeypatch.setattr(tmux, "window_activity", lambda target, **k: time.time() - 30)
     assert cull.note_silent(db, time.time(), {}) == []
+
+
+@pytest.fixture
+def health(db, root, monkeypatch):
+    from brindle import launch_health as lh
+    _, ws = root
+    a = worker_on(db, ws, "processing", 100)
+    db.update_agent(a.id, task="implement a feature", provider="codex")
+    a = db.get_agent(a.id)
+    now = [100.0]
+    sleeps, started, reports = [], [], []
+    monkeypatch.setattr(lh.time, "time", lambda: now[0])
+
+    def sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr(lh.time, "sleep", sleep)
+    monkeypatch.setattr(agents, "_detach", started.append)
+    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(lh, "capture", lambda a: "working")
+    monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append((to, body)))
+    lh.prepare(db, a, "effective-account")
+    return lh, a, now, sleeps, started, reports
+
+
+def test_followup_is_detached_once_and_five_seconds_after_delivery(db, health):
+    lh, a, now, sleeps, started, reports = health
+    # Readiness can take arbitrarily long. It is not task delivery.
+    now[0] += 30
+    assert lh.inspect(db, a.id) is None
+    assert sleeps == [] and reports == []
+    lh.delivered(db, a)
+    lh.delivered(db, a)
+    assert len(started) == 1 and started[0][-2:] == ["_launch-health", a.id]
+    assert sleeps == []  # foreground never sleeps
+    now[0] += 2
+    assert lh.inspect(db, a.id) == "pending"
+    assert sleeps == [3.0] and now[0] == 135
+    assert "pending" in reports[0][1] and "not been verified" in reports[0][1]
+    assert lh.inspect(db, a.id) is None and len(reports) == 1
+
+
+@pytest.mark.parametrize("screen,cause", [
+    ("■ unexpected status 403 Forbidden: secret-token https://private", "launch_auth"),
+    ("Error: invalid API key secret-token", "launch_auth"),
+    ("Error: model not found secret-token", "launch_model"),
+    ("ERROR: 429 capacity exhausted secret-token", "launch_capacity"),
+    ("● API Error: model use case details have not been submitted secret-token", "bedrock_use_case"),
+    ("── brindle: the model endpoint failed: 401 secret-token; this worker has stopped ──", "launch_auth"),
+])
+def test_current_failures_report_safe_actions_and_effective_cooldown(db, health, monkeypatch, screen, cause):
+    from brindle import model_access
+    lh, a, _, _, _, reports = health
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "failed"
+    body = reports[0][1]
+    assert "Fix:" in body and "secret-token" not in body and "https://private" not in body
+    denied = model_access.refused(a.profile, fp="effective-account")
+    assert denied.key == cause
+    assert model_access.refused(a.profile, fp="another-account") is None
+
+
+@pytest.mark.parametrize("delivered", [False, True])
+def test_early_exit_reports_without_claiming_access(db, health, monkeypatch, delivered):
+    lh, a, _, _, _, reports = health
+    monkeypatch.setattr(agents, "is_alive", lambda a: False)
+    if delivered:
+        lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "exited"
+    assert "exited" in reports[0][1] and "retry" in reports[0][1]
+
+
+def test_readiness_failure_is_reported_without_sending_a_probe(db, health, monkeypatch):
+    lh, a, _, sleeps, started, reports = health
+    monkeypatch.setattr(lh, "capture", lambda a: "Error: authentication failed")
+    assert lh.inspect(db, a.id, wait=False) == "failed"
+    assert sleeps == [] and started == [] and "credentials" in reports[0][1]
+
+
+def test_after_launch_does_not_move_followup_ahead_of_five_seconds(db, health):
+    lh, a, _, sleeps, _, reports = health
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id, wait=False) is None
+    assert reports == [] and sleeps == []
+
+
+@pytest.mark.parametrize("screen,baseline,task", [
+    ("Error: model not found", "Error: model not found", ""),
+    ("  Error: model not found", "Error: model not found", ""),
+    ("Error: model not found", "", "test Error: model not found handling"),
+    ("❯ test these failures\n  Error: invalid API key\n  Error: 429 capacity", "", ""),
+    ("The user asked us to handle 403 and model not found", "", ""),
+    ("tool output: Error: invalid API key", "", ""),
+    ("❯ test these failures\nError: invalid API key", "", ""),
+    ("● API Error: 403 Forbidden\n❯ retry\n● fixed it", "", ""),
+    ("● API Error: 403 Forbidden\nesc to interrupt", "", ""),
+    ("```\nError: invalid API key\n```", "", ""),
+])
+def test_prompt_history_and_prose_are_not_launch_evidence(screen, baseline, task):
+    from brindle import launch_health
+    assert launch_health.failure(screen, baseline=baseline, task=task) is None
+
+
+def test_paused_finished_and_replaced_launches_are_not_reported(db, health):
+    lh, a, _, _, _, reports = health
+    lh.delivered(db, a)
+    db.set_status(a.id, "paused")
+    assert lh.inspect(db, a.id) is None
+    db.set_status(a.id, "processing")
+    db.update_agent(a.id, tmux_window="%new-launch")
+    assert lh.inspect(db, a.id) is None
+    db.update_agent(a.id, tmux_window=a.tmux_window, result="finished")
+    assert lh.inspect(db, a.id) is None and reports == []
+
+
+def test_queued_actual_task_schedules_only_after_readiness_and_paste(db, health, monkeypatch):
+    lh, a, now, sleeps, started, _ = health
+    pastes = []
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pastes.append(body))
+    db.set_status(a.id, "starting")
+    db.enqueue(a.id, a.task, None)
+    now[0] = 140
+    assert not agents.flush(db, a.id) and started == []
+    db.set_status(a.id, "idle")
+    assert agents.flush(db, a.id)
+    assert not agents.flush(db, a.id)
+    assert pastes == [a.task] and len(started) == 1 and sleeps == []
+    assert lh.inspect(db, a.id) == "pending" and sleeps == [5.0]
+
+
+def test_initial_command_task_delivered_once_and_no_generation_probe(db, root, launches, detached, monkeypatch):
+    from brindle import model_access
+    monkeypatch.setattr(model_access, "probe", lambda *a, **k: pytest.fail("synthetic generation"))
+    monkeypatch.setattr(ClaudeCode, "warmup", lambda *a: pytest.fail("warm-up generation"))
+    boss, ws = root
+    a = agents.spawn(db, ws, "developer", prompt="real task", parent_id=boss.id, mode="assign",
+                     background_setup=True)
+    assert sum("real task" in arg for arg in launches[-1]) == 1
+    assert db.pending_count(a.id) == 0
+    assert ["_launch-health", a.id] in [argv[3:] for argv in detached]
+    assert ["_after-launch", a.id] in [argv[3:] for argv in detached]
+
+
+def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatch):
+    from brindle import launch_health
+    boss, ws = root
+    steps = []
+    monkeypatch.setattr(tmux, "paste", lambda *a, **k: steps.append("task"))
+    monkeypatch.setattr(agents, "_detach", lambda *a: steps.append("followup"))
+    monkeypatch.setattr(agents.get_provider("shell"), "after_launch", lambda *a: None)
+    agents.spawn(db, ws, "developer", provider_name="shell", prompt="real task",
+                 parent_id=boss.id, mode="assign")
+    assert steps == ["task", "followup"]
+
+
+def test_headless_real_turn_schedules_followup_once(db, root, launches, monkeypatch):
+    from brindle import launch_health
+    from dataclasses import replace
+    boss, ws = root
+    original = agents.load_profile
+    monkeypatch.setattr(agents, "load_profile", lambda *a: replace(original(*a), headless=True))
+    started, turns = [], []
+    monkeypatch.setattr(agents, "_detach", started.append)
+    monkeypatch.setattr(launch_health, "capture", lambda a: "")
+    monkeypatch.setattr(subprocess, "call", lambda argv, **k: turns.append(argv) or 0)
+    a = agents.spawn(db, ws, "developer", prompt="real task", parent_id=boss.id, mode="assign")
+    assert len(started) == 1 and started[0][-1] == "--startup"
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+    assert agents.run_headless(db, a.id, exit_when_idle=True) == 0
+    assert len(turns) == 1 and len(started) == 2
+    assert started[1][-2:] == ["_launch-health", a.id]
+    assert db.pending_count(a.id) == 0
+
+
+def test_native_real_task_schedules_followup_without_extra_model_turn(db, health, monkeypatch):
+    from unittest.mock import Mock
+    from brindle.native import runner
+    from brindle.profiles import Profile
+    lh, a, _, sleeps, started, _ = health
+    db.update_agent(a.id, provider="native", headless=1, mode="interactive")
+    p = Profile("developer", "", "native", "", model="wanted", base_url="http://localhost/v1")
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    loop = Mock()
+    loop.run.return_value = "done"
+    monkeypatch.setattr(runner, "NativeAgent", lambda *a, **k: loop)
+    db.enqueue(a.id, "real task", None)
+    assert runner.run_native(db, a.id, exit_when_idle=True) == 0
+    loop.run.assert_called_once_with("real task")
+    assert len(started) == 1 and sleeps == []
+
+
+def test_headless_startup_helper_reports_exit_before_delivery(db, health, monkeypatch):
+    lh, a, _, sleeps, _, reports = health
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(agents, "is_alive", lambda a: False)
+    cli.launch_health_cmd(a.id, startup=True)
+    assert sleeps == [5.0] and "exited" in reports[0][1]
+
+
+def test_headless_startup_helper_leaves_delivered_task_to_its_followup(db, health, monkeypatch):
+    lh, a, _, sleeps, _, reports = health
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    lh.delivered(db, a)
+    cli.launch_health_cmd(a.id, startup=True)
+    assert sleeps == [5.0] and reports == []
+    assert lh.inspect(db, a.id) == "pending" and len(reports) == 1

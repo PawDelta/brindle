@@ -355,6 +355,14 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
 );
 CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
 CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
+CREATE TABLE IF NOT EXISTS launch_health (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    pane TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    delivered_at REAL,
+    baseline TEXT NOT NULL DEFAULT '',
+    outcome TEXT
+);
 """
 
 

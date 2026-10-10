@@ -3,6 +3,7 @@ workers (conservative, balanced by default, or fast)."""
 
 import json
 import time
+import pytest
 
 from typer.testing import CliRunner
 
@@ -69,3 +70,60 @@ def test_user_setting_applies_everywhere_but_a_repo_can_override(db, repo, monke
     assert result.exit_code == 0, result.output
     assert "Delegation rule: conservative" in _prompt(db, ws, aid="s2")
     assert json.loads(user_config_path().read_text())["delegation"] == "fast"  # untouched
+
+
+def test_known_unavailable_model_rejected_before_workspace_or_agent_side_effects(db, repo, monkeypatch):
+    from brindle import model_availability as ma
+    from brindle.profiles import Profile
+    ws = workspaces.adopt_root(db, str(repo))
+    p = Profile("missing", "", "native", "", model="absent", base_url="https://api.openai.com/v1")
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(
+        discover=lambda *a: ma.Catalog(frozenset({"other"}), "openai", authoritative=True)))
+    monkeypatch.setattr(workspaces, "create", lambda *a, **k: pytest.fail("created worktree"))
+    monkeypatch.setattr(db, "add_agent", lambda *a: pytest.fail("created agent"))
+    monkeypatch.setattr(agents, "_open_window", lambda *a, **k: pytest.fail("launched process"))
+    with pytest.raises(agents.AgentError, match="absent from"):
+        agents.delegate(db, None, ws, "missing", "real task", "assign")
+    with pytest.raises(agents.AgentError, match="absent from"):
+        agents.spawn(db, ws, "missing", prompt="real task")
+
+
+def test_routing_skips_catalog_unavailable_with_same_preflight(db, repo, monkeypatch):
+    from brindle import autopilot, model_availability as ma
+    from brindle.config import RepoConfig
+    from brindle.profiles import Profile
+    p = Profile("missing", "", "native", "", model="absent", base_url="https://api.openai.com/v1")
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(autopilot, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(
+        discover=lambda *a: ma.Catalog(frozenset(), "openai", authoritative=True)))
+    assert "absent from" in autopilot._unavailable("missing", RepoConfig(), str(repo))
+
+
+def test_resume_rechecks_model_before_launch_side_effects(db, repo, monkeypatch):
+    from brindle import model_availability as ma, signin_pause
+    from brindle.profiles import Profile
+    ws = workspaces.adopt_root(db, str(repo))
+    a = Agent("worker", ws.id, "missing", "native", None, "assign", "paused", "", None, time.time())
+    db.add_agent(a)
+    p = Profile("missing", "", "native", "", model="absent", base_url="https://api.openai.com/v1")
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(
+        discover=lambda *a: ma.Catalog(frozenset(), "openai", authoritative=True)))
+    monkeypatch.setattr(signin_pause, "record_launch", lambda *a: pytest.fail("recorded launch"))
+    monkeypatch.setattr(agents, "_open_window", lambda *a, **k: pytest.fail("opened pane"))
+    with pytest.raises(agents.AgentError, match="absent from"):
+        agents._launch(db, a, ws, prompt="real task", resume=None, watch_pane=False)
+
+
+@pytest.mark.parametrize("status", ["available", "unverified"])
+def test_catalog_available_and_unverified_do_not_reject_provisioning(db, repo, monkeypatch, status):
+    from unittest.mock import Mock
+    from brindle.model_availability import Availability
+    ws = workspaces.adopt_root(db, str(repo))
+    monkeypatch.setattr(agents, "_model_checker", Mock(check=Mock(return_value=Availability(status, "advisory"))))
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(a))
+    a = agents.spawn(db, ws, "developer", prompt="real task")
+    assert launched == [a] and db.get_agent(a.id) is not None
