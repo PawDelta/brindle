@@ -1085,6 +1085,8 @@ class Codex(Provider):
         argv += codex_hook.launch_flags(ctx.cwd)
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
+        if ctx.profile.effort:
+            argv += ["-c", f"model_reasoning_effort={json.dumps(ctx.profile.effort)}"]
         # Codex has no system-prompt flag; lead the first message with the profile.
         first = "\n\n".join(p for p in (ctx.profile.prompt, ctx.initial_prompt) if p)
         if first:
@@ -1155,6 +1157,8 @@ class Antigravity(Provider):
         argv = [antigravity.binary()]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
+        if ctx.profile.effort:
+            argv += ["--effort", ctx.profile.effort]
         if ctx.profile.permission_mode in ("acceptEdits", "accept-edits", "auto"):
             # agy has no classifier mode; accepting edits is the closest.
             argv += ["--mode", "accept-edits"]

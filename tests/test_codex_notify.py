@@ -90,3 +90,13 @@ def test_supervisor_refuses_a_provider_that_cant_supervise(repo, monkeypatch):
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["--provider", "native"])
     assert res.exit_code != 0 and "can't run the supervisor" in res.output
+
+
+def test_command_passes_the_profiles_model_and_effort(monkeypatch):
+    import dataclasses
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", "/opt/codex")
+    profile = dataclasses.replace(load_profile("developer"), model="gpt-6.1-sol", effort="high")
+    argv = Codex().command(LaunchContext("abc", profile, "do it"))
+    assert argv[argv.index("--model") + 1] == "gpt-6.1-sol"
+    assert 'model_reasoning_effort="high"' in argv
+    assert argv[argv.index('model_reasoning_effort="high"') - 1] == "-c"
