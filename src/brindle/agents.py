@@ -771,14 +771,14 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     if background_setup:
         # Startup dialogs (folder trust) are handled by a detached helper so
         # the person gets their terminal immediately.
-        from brindle import inbox
+        from brindle import inbox, launch_health
         from brindle.providers import brindle_invocation
 
         # Without this process's own Claude Code inbox, if it has one: the
         # helper marks the agent ready, and must not take that inbox for it.
         base = {k: v for k, v in os.environ.items() if k not in (inbox.SOCKET_VAR, inbox.TOKEN_VAR)}
         subprocess.Popen(
-            [*brindle_invocation(), "_after-launch", agent.id],
+            [*brindle_invocation(), "_after-launch", agent.id, *launch_health.helper_token(agent)],
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env={**base, **agent_env(ws, agent.id)},
         )
@@ -841,7 +841,9 @@ def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     if agent.parent_id and agent.task:
         # A runner can fail before it consumes the task (bad config/imports).
         # This helper observes only that startup; delivery arms its own timer.
-        _detach([*brindle_invocation(), "_launch-health", agent.id, "--startup"])
+        from brindle import launch_health
+        _detach([*brindle_invocation(), "_launch-health", agent.id,
+                 *launch_health.helper_token(agent), "--startup"])
 
 
 def _preview(text: str, lines: int = 6) -> str:

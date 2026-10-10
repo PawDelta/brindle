@@ -264,7 +264,7 @@ def test_assign_returns_within_budget(db, root, launches, detached, slow_backgro
     worker, _ = agents.delegate(db, boss, ws, "developer", "add a flag", "assign")
     assert time.monotonic() - t0 < BUDGET
     # The startup dialog is handled by the detached helper, not waited on here.
-    assert ["_after-launch", worker.id] in [argv[3:] for argv in detached]
+    assert ["_after-launch", worker.id] in [argv[3:5] for argv in detached]
 
 
 # -- a prompt is visible: 'waiting', and its supervisor is told once -----------------
@@ -423,7 +423,7 @@ def test_followup_is_detached_once_and_five_seconds_after_delivery(db, health):
     assert sleeps == [] and reports == []
     lh.delivered(db, a)
     lh.delivered(db, a)
-    assert len(started) == 1 and started[0][-2:] == ["_launch-health", a.id]
+    assert len(started) == 1 and started[0][3:5] == ["_launch-health", a.id]
     assert sleeps == []  # foreground never sleeps
     now[0] += 2
     assert lh.inspect(db, a.id) == "pending"
@@ -531,8 +531,8 @@ def test_initial_command_task_delivered_once_and_no_generation_probe(db, root, l
                      background_setup=True)
     assert sum("real task" in arg for arg in launches[-1]) == 1
     assert db.pending_count(a.id) == 0
-    assert ["_launch-health", a.id] in [argv[3:] for argv in detached]
-    assert ["_after-launch", a.id] in [argv[3:] for argv in detached]
+    assert ["_launch-health", a.id] in [argv[3:5] for argv in detached]
+    assert ["_after-launch", a.id] in [argv[3:5] for argv in detached]
 
 
 def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatch):
@@ -562,7 +562,7 @@ def test_headless_real_turn_schedules_followup_once(db, root, launches, monkeypa
     assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
     assert agents.run_headless(db, a.id, exit_when_idle=True) == 0
     assert len(turns) == 1 and len(started) == 2
-    assert started[1][-2:] == ["_launch-health", a.id]
+    assert started[1][3:5] == ["_launch-health", a.id]
     assert db.pending_count(a.id) == 0
 
 
@@ -587,7 +587,7 @@ def test_headless_startup_helper_reports_exit_before_delivery(db, health, monkey
     lh, a, _, sleeps, _, reports = health
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(agents, "is_alive", lambda a: False)
-    cli.launch_health_cmd(a.id, startup=True)
+    cli.launch_health_cmd(a.id, startup=True, token=a._launch_health_token)
     assert sleeps == [5.0] and "exited" in reports[0][1]
 
 
@@ -595,6 +595,115 @@ def test_headless_startup_helper_leaves_delivered_task_to_its_followup(db, healt
     lh, a, _, sleeps, _, reports = health
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     lh.delivered(db, a)
-    cli.launch_health_cmd(a.id, startup=True)
+    cli.launch_health_cmd(a.id, startup=True, token=a._launch_health_token)
     assert sleeps == [5.0] and reports == []
     assert lh.inspect(db, a.id) == "pending" and len(reports) == 1
+
+
+def test_delegate_prepares_an_empty_pane_before_binding_and_delivers_once(db, root, detached, monkeypatch):
+    boss, ws = root
+    launched = []
+
+    def open_window(db, agent, ws, name, argv, watch_pane):
+        # Exercise delegate -> spawn -> _launch -> prepare on the real unbound
+        # Agent, rather than preparing an already-bound health fixture.
+        assert agent.tmux_window == ""
+        row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+        assert row["pane"] == "" and row["delivered_at"] is None and row["token"]
+        assert sum("real initial task" in arg for arg in argv) == 1
+        launched.append(agent.id)
+        agent.tmux_window = "%bound"
+        db.update_agent(agent.id, tmux_window=agent.tmux_window)
+        return agent.tmux_window
+
+    monkeypatch.setattr(agents, "_open_window", open_window)
+    a, _ = agents.delegate(db, boss, ws, "developer", "real initial task", "assign")
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert launched == [a.id] and row["pane"] == "%bound" and row["delivered_at"] is not None
+    followups = [argv for argv in detached if argv[3] == "_launch-health"]
+    assert len(followups) == 1 and followups[0][-2:] == ["--token", row["token"]]
+    assert db.pending_count(a.id) == 0
+
+
+def test_prepare_normalizes_none_pane(db, health):
+    lh, a, _, _, _, _ = health
+    a.tmux_window = None
+    lh.prepare(db, a, "new-account")
+    assert db.conn.execute("SELECT pane FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == ""
+
+
+@pytest.mark.parametrize("replacement_point", ["wait", "capture"])
+def test_concurrent_resume_cannot_report_or_mutate_replacement_launch(db, health, monkeypatch, replacement_point):
+    from brindle import model_access
+    from brindle.db import DB
+    lh, a, now, sleeps, _, reports = health
+    original_token = a._launch_health_token
+    lh.delivered(db, a)
+    other = DB(db.path)
+
+    def replace_launch():
+        resumed = other.get_agent(a.id)
+        # Deliberately reuse the pane ID: a pane-only outcome CAS is insufficient.
+        lh.prepare(other, resumed, "resumed-account")
+        lh.delivered(other, resumed)
+        assert resumed._launch_health_token != original_token
+
+    if replacement_point == "wait":
+        def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
+            replace_launch()
+        monkeypatch.setattr(lh.time, "sleep", sleep)
+    else:
+        def capture(agent):
+            replace_launch()
+            return "■ unexpected status 403 Forbidden"
+        monkeypatch.setattr(lh, "capture", capture)
+
+    try:
+        assert lh.inspect(db, a.id, token=original_token) is None
+        row = other.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+        assert row["fingerprint"] == "resumed-account" and row["outcome"] is None
+        assert sleeps == [5.0] and reports == []
+        assert model_access.refused(a.profile, fp="effective-account") is None
+    finally:
+        other.conn.close()
+
+
+def test_old_helper_started_after_resume_does_not_observe_new_launch(db, health, monkeypatch):
+    lh, a, _, sleeps, _, reports = health
+    old_token = a._launch_health_token
+    resumed = db.get_agent(a.id)
+    lh.prepare(db, resumed, "resumed-account")
+    lh.delivered(db, resumed)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    assert lh.inspect(db, a.id, token=old_token) is None
+    cli.launch_health_cmd(a.id, startup=True, token=old_token)
+    cli.after_launch_cmd(a.id, token=old_token)
+    assert sleeps == [] and reports == []
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+def test_old_prepared_agent_cannot_deliver_into_replacement_launch(db, health):
+    lh, a, _, _, started, _ = health
+    resumed = db.get_agent(a.id)
+    lh.prepare(db, resumed, "resumed-account")
+    lh.delivered(db, a)
+    assert started == []
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+def test_launch_health_schema_migrates_existing_rows(db, health):
+    from brindle.db import DB
+    _, a, _, _, _, _ = health
+    db.conn.execute("DROP TABLE launch_health")
+    db.conn.execute("CREATE TABLE launch_health (agent_id TEXT PRIMARY KEY, pane TEXT NOT NULL, "
+                    "fingerprint TEXT NOT NULL, delivered_at REAL, baseline TEXT NOT NULL DEFAULT '', outcome TEXT)")
+    db.conn.execute("INSERT INTO launch_health (agent_id,pane,fingerprint) VALUES (?,?,?)",
+                    (a.id, a.tmux_window, "legacy"))
+    migrated = DB(db.path)
+    try:
+        row = migrated.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+        assert row["fingerprint"] == "legacy" and row["token"] == ""
+    finally:
+        migrated.conn.close()

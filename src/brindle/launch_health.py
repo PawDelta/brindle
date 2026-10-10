@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 
 from brindle import model_access, tmux
@@ -61,8 +62,19 @@ def account_revision(provider: str, env) -> str | None:
 
 def prepare(db, agent, fp: str) -> None:
     if agent.parent_id and agent.task:
-        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,pane,fingerprint) VALUES (?,?,?)",
-                        (agent.id, agent.tmux_window, fp))
+        agent._launch_health_token = uuid.uuid4().hex
+        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint) VALUES (?,?,?,?)",
+                        (agent.id, agent._launch_health_token, agent.tmux_window or "", fp))
+
+
+def helper_token(agent) -> list[str]:
+    token = getattr(agent, "_launch_health_token", None)
+    return ["--token", token] if token else []
+
+
+def current(db, agent_id: str, token: str | None) -> bool:
+    row = db.conn.execute("SELECT token FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
+    return token is None or bool(row and row["token"] == token)
 
 
 def delivered(db, agent, baseline: str = "") -> None:
@@ -70,11 +82,15 @@ def delivered(db, agent, baseline: str = "") -> None:
     from brindle import agents
     from brindle.providers import brindle_invocation
 
+    row = db.conn.execute("SELECT token FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+    expected = getattr(agent, "_launch_health_token", None)
+    if row is None or (expected is not None and expected != row["token"]):
+        return
     changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=?, pane=? "
-                              "WHERE agent_id=? AND delivered_at IS NULL",
-                              (time.time(), baseline, agent.tmux_window or os.environ.get("TMUX_PANE", ""), agent.id)).rowcount
+                              "WHERE agent_id=? AND delivered_at IS NULL AND token=?",
+                              (time.time(), baseline, agent.tmux_window or os.environ.get("TMUX_PANE", ""), agent.id, row["token"])).rowcount
     if changed:
-        agents._detach([*brindle_invocation(), "_launch-health", agent.id])
+        agents._detach([*brindle_invocation(), "_launch-health", agent.id, "--token", row["token"]])
 
 
 def capture(agent) -> str:
@@ -131,16 +147,21 @@ def failure(screen: str, *, baseline: str = "", task: str = ""):
     return None
 
 
-def inspect(db, agent_id: str, *, wait: bool = True) -> str | None:
+def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -> str | None:
     """Run in a detached helper, five seconds after actual delivery."""
     from brindle import agents
 
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
     agent = db.get_agent(agent_id)
-    if not row or not agent or row["outcome"] or agent.result is not None or agent.status in ("paused", "done"):
+    if (not row or not agent or (token is not None and token != row["token"])
+            or row["outcome"] or agent.result is not None or agent.status in ("paused", "done")):
         return None
     if row["delivered_at"] is not None and wait:
         time.sleep(max(0.0, row["delivered_at"] + FOLLOWUP_SECONDS - time.time()))
+    latest = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
+    if (not latest or latest["token"] != row["token"]
+            or latest["delivered_at"] != row["delivered_at"] or latest["outcome"]):
+        return None
     agent = db.get_agent(agent_id)
     if (not agent or agent.result is not None or agent.status in ("paused", "done")
             or (row["pane"] and agent.tmux_window != row["pane"]) or not agents.same_server(agent)):
@@ -152,8 +173,9 @@ def inspect(db, agent_id: str, *, wait: bool = True) -> str | None:
     if alive and row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:
         return None
     outcome = "failed" if cause else "exited" if not alive else "pending"
-    if not db.conn.execute("UPDATE launch_health SET outcome=? WHERE agent_id=? AND outcome IS NULL AND pane=?",
-                           (outcome, agent_id, row["pane"])).rowcount:
+    if not db.conn.execute("UPDATE launch_health SET outcome=? WHERE agent_id=? AND outcome IS NULL "
+                           "AND pane=? AND token=? AND delivered_at IS ?",
+                           (outcome, agent_id, row["pane"], row["token"], row["delivered_at"])).rowcount:
         return None
     ws = db.get_workspace(agent.workspace_id)
     if cause and ws:
