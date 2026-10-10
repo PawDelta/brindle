@@ -79,6 +79,35 @@ def test_codex_patch_is_a_request_per_file(ws):
     assert r.kind == "edit" and r.path is None
 
 
+@pytest.mark.parametrize("patch,kind", [
+    ("*** Begin Patch\n*** Update File: secret.py\n*** Move to: public.py\n@@\n-old\n+new\n*** End Patch\n", "edit"),
+    ("*** Begin Patch\n*** Delete File: secret.py\n*** End Patch\n", "write"),
+])
+def test_codex_patch_rename_and_delete_preserve_source_deny(db, ws, patch, kind):
+    a = worker(db, ws)
+    turn_on(ws)
+    permissions.add_rule("edit", "*", "allow", "glob")
+    permissions.add_rule("write", "*", "allow", "glob")
+    permissions.add_rule(kind, "secret.py", "deny")
+    out = agents.hook_main(db, a.id, "codex-permission-request",
+                          json.dumps(codex_payload("apply_patch", {"command": patch}, ws.path)))
+    assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+
+@pytest.mark.parametrize("source,destination", [
+    ("a/secret.py", "b/public.py"),
+    ("a/secret.py", "/dev/null"),
+    ("/dev/null", "b/public.py"),
+])
+def test_codex_unsupported_unified_diff_never_auto_allows(ws, source, destination):
+    # Codex apply_patch uses *** headers. Don't interpret an unsupported
+    # diff's destination as enough evidence to allow the whole operation.
+    patch = f"--- {source}\n+++ {destination}\n@@ -1 +1 @@\n-old\n+new\n"
+    reqs = from_codex(codex_payload("apply_patch", {"command": patch}, ws.path), ws.path, ws.repo_root)
+    rules = [Rule("edit", "*", "glob", "allow"), Rule("write", "*", "glob", "allow")]
+    assert decide_all(reqs, rules=rules).decision == "ask"
+
+
 @pytest.mark.parametrize("patch", [
     "*** Begin Patch\n*** Update File: a.py\n  *** Update File: /etc/hosts\n*** End Patch\n",
     "*** Begin Patch\n*** Update File: a.py\n\t*** Add File: b.py\n*** End Patch\n",
@@ -304,6 +333,31 @@ def test_codex_app_server_notifications_do_not_reset_deadline(monkeypatch):
     with pytest.raises(codex_hook.CodexHookError, match="didn't answer initialize"):
         codex_hook._AppServer("codex", [], timeout=3)
     assert proc.killed and proc.waited
+
+
+def test_codex_app_server_silent_reader_cannot_block_rpc_deadline(monkeypatch):
+    import threading
+
+    released = threading.Event()
+
+    class SilentStdout:
+        def __iter__(self):
+            # Simulate a pipe that never produces a newline. Bound even the
+            # fake reader's wait so a regression cannot hang the test runner.
+            released.wait(2)
+            return iter(())
+
+    proc = _fake_codex_process(monkeypatch, SilentStdout())
+    kill = proc.kill
+
+    def release_reader():
+        kill()
+        released.set()
+
+    proc.kill = release_reader
+    with pytest.raises(codex_hook.CodexHookError, match="didn't answer initialize"):
+        codex_hook._AppServer("codex", [], timeout=0.05)
+    assert released.is_set() and proc.killed and proc.waited
 
 
 class FakeAppServer:
