@@ -1203,6 +1203,9 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None) -> str
         raise AgentError(f"agent {agent.id} is not running")
     provider = get_provider(agent.provider)
     text = format_message(db, body, sender_id)
+    if agent.provider == "antigravity":
+        from brindle.antigravity import format_delivered_message
+        text = format_delivered_message(text)
     if agent.headless:
         # Its runner starts the next turn with this, or the Stop hook hands it
         # over if a turn is still running.
