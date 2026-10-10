@@ -444,6 +444,9 @@ def test_followup_is_detached_once_and_five_seconds_after_delivery(db, health):
 def test_current_failures_report_safe_actions_and_effective_cooldown(db, health, monkeypatch, screen, cause):
     from brindle import model_access
     lh, a, _, _, _, reports = health
+    # Only the actual provider's response marker can attest a current failure.
+    provider = "claude" if screen.startswith("●") else "native" if screen.startswith("──") else "codex"
+    db.update_agent(a.id, provider=provider)
     monkeypatch.setattr(lh, "capture", lambda a: screen)
     lh.delivered(db, a)
     assert lh.inspect(db, a.id) == "failed"
@@ -505,6 +508,30 @@ def test_full_codex_ui_composer_draft_is_not_a_provider_error(db, health, monkey
     monkeypatch.setattr(lh, "capture", lambda a: screen)
     lh.delivered(db, a)
     assert lh.inspect(db, a.id) == "pending" and reports == []
+    assert model_access.refused(a.profile, fp="effective-account") is None
+
+
+@pytest.mark.parametrize("provider,screen", [
+    ("codex", "OpenAI Codex\n• Example output:\n● API Error: 403 Forbidden\n\n› \n100% context left"),
+    ("codex", "OpenAI Codex\n• Example output:\n› implement a feature\n■ unexpected status 403 Forbidden\n\n› \n100% context left"),
+    ("codex", "OpenAI Codex\n• Ran cat errors.txt\n› implement a feature\n■ unexpected status 403 Forbidden\n\n› \n100% context left"),
+    ("codex", "OpenAI Codex\n• Example output:\n❯ implement a feature\n● API Error: 403 Forbidden\n\n› \n100% context left"),
+    ("claude", "● Example output:\n❯ implement a feature\n● API Error: 403 Forbidden"),
+    ("claude", "● Bash(cat errors.txt)\n● API Error: 403 Forbidden"),
+    ("claude", "● Example output:\n■ unexpected status 403 Forbidden"),
+    ("codex", "● API Error: 403 Forbidden"),
+    ("claude", "■ unexpected status 403 Forbidden"),
+    ("codex", "── brindle: the model endpoint failed: 401; this worker has stopped ──"),
+])
+def test_quoted_prompt_and_foreign_error_markers_remain_silent_pending(db, health, monkeypatch, provider, screen):
+    from brindle import model_access
+    lh, a, _, sleeps, _, reports = health
+    db.update_agent(a.id, provider=provider)
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) == "pending"
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "pending"
+    assert sleeps == [5.0] and reports == [] and db.pending_count("boss") == 0
     assert model_access.refused(a.profile, fp="effective-account") is None
 
 

@@ -115,13 +115,16 @@ def before_delivery(db, agent) -> str:
     return capture(agent) if row and row["delivered_at"] is None else ""
 
 
-def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = ""):
+def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",
+            provider: str | None = None):
     """Read complete response context before accepting a provider error block."""
     old = {line.strip() for line in baseline.splitlines()}
     text = re.sub(r"\x1b\[[0-9;]*m", "", screen)
     lines = text.splitlines()
-    codex_ui = bool(re.search(r"OpenAI Codex|\b\d+% context left", text))
-    context = "ui" if codex_ui else "startup"
+    has_codex_ui = provider in (None, "codex") and bool(re.search(r"OpenAI Codex|\b\d+% context left", text))
+    codex_ui = provider == "codex" or has_codex_ui
+    provider = provider or ("codex" if codex_ui else None)
+    context = "ui" if has_codex_ui else "startup"
     prompt_text = " ".join((submitted_prompt or task).split())
     # The last composer plus its footer is UI, including dim placeholders and
     # multiline drafts. It is not a new submitted turn superseding an error.
@@ -146,6 +149,8 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
         if in_code or not stripped:
             continue
         if re.match(r"^[❯>›]\s+\S", stripped):
+            if context in ("assistant", "prose"):
+                continue  # quoted prompts cannot authenticate a new turn
             prompt = re.sub(r"^[❯>›]\s+", "", stripped)
             context, candidate = ("submitted" if " ".join(prompt.split()) in prompt_text else "prompt"), None
             continue
@@ -155,22 +160,24 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
             context, candidate = "assistant", None
             continue
         if re.search(r"(?i)esc to (?:interrupt|cancel)|^thinking|^working\s*…", stripped):
-            context, candidate = ("assistant" if context == "assistant" else "ui"), None
+            context, candidate = (context if context in ("assistant", "prose") else "ui"), None
             continue
         if stripped.startswith("●") and len(line) - len(line.lstrip()) <= 1:
             # A tool result or assistant explanation is not a provider error.
-            context = "provider" if re.match(r"^●\s*API Error:", stripped) else "assistant"
+            if context in ("assistant", "prose", "prompt"):
+                continue  # copied provider markers remain part of that block
+            context = "provider" if provider in (None, "claude") and re.match(r"^●\s*API Error:", stripped) else "assistant"
             candidate = _cause(stripped) if context == "provider" and stripped not in old else None
         elif (len(line) - len(line.lstrip()) <= 1
               and re.match(r"^■\s*(?:unexpected status|(?:API )?Error\b)", stripped)):
-            if context in ("startup", "provider", "ui", "submitted"):
+            if provider in (None, "codex") and context in ("startup", "provider", "ui", "submitted"):
                 context = "provider"
                 candidate = _cause(stripped) if stripped not in old else None
         elif (not line[:1].isspace() and context in ("startup", "provider")
               and re.match(r"^(?:(?:API )?Error:|ERROR\b)", stripped)):
             context = "provider"
             candidate = _cause(stripped) if stripped not in old else None
-        elif (not line[:1].isspace() and context not in ("assistant", "prompt")
+        elif (provider in (None, "native") and not line[:1].isspace() and context not in ("assistant", "prompt", "prose")
               and stripped.startswith("── brindle: the model endpoint failed:")):
             context = "provider"
             candidate = _cause(stripped) if stripped not in old else None
@@ -216,7 +223,7 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
         return None
     alive = agents.is_alive(agent)
     cause = failure(capture(agent), baseline=row["baseline"], task=agent.task or "",
-                    submitted_prompt=row["submitted_prompt"])
+                    submitted_prompt=row["submitted_prompt"], provider=agent.provider)
     if alive and row["delivered_at"] is None and not cause:
         return None
     if alive and row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:

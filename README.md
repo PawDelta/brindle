@@ -638,6 +638,8 @@ historical transcripts, and excludes task text, previous pane lines and older
 marked replies, fenced examples and ordinary assistant/tool explanations. A
 Codex follow-up retains the complete submitted argv prompt (including profile
 instructions) and distinguishes assistant/tool responses from the idle composer.
+Quoted prompts and error-looking markers inside assistant/tool output remain
+ambiguous and pending; markers from another provider do not establish failure.
 A separate detached check covers headless and argv startup exits before task
 delivery. Existing readiness and watch/cull handling continues afterward.
 
