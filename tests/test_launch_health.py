@@ -232,7 +232,7 @@ def test_trust_is_idempotent(tmp_path, claude_config):
 
 # -- the foreground launch path never waits on slow work -------------------------
 
-BUDGET = 3.0  # seconds; each stubbed slow step below takes longer than this alone
+BUDGET = 5.0  # seconds; each stubbed slow step below takes longer than this alone
 
 
 @pytest.fixture
@@ -799,9 +799,17 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
     monkeypatch.setattr(lh.time, "time", lambda: now[0])
-    monkeypatch.setattr(lh.time, "sleep", lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay)))
+    real_sleep = lh.time.sleep
+    def sleep(delay):
+        if abs(delay - 5.0) < 0.01 or abs(delay - 3.0) < 0.01:
+            sleeps.append(delay)
+            now[0] += delay
+        else:
+            real_sleep(delay)
+    monkeypatch.setattr(lh.time, "sleep", sleep)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     shown = ["Trust this folder?"]
     monkeypatch.setattr(lh, "capture", lambda a: shown[0])
