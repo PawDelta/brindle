@@ -1292,6 +1292,7 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task",
                      parent_id=boss.id, mode="assign", background_setup=True)
     cli.after_launch_cmd(a.id, token=a._launch_health_token)
