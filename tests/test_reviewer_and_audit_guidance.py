@@ -155,15 +155,113 @@ def test_audit_history_persists_across_need_user_and_user_spoke(db, repo):
 
 
 def test_all_builtin_reviewer_profiles_include_tiering_guidance():
+    import re
     from brindle.profiles import load_profile
 
-    for name in ("reviewer", "reviewer-gemini", "reviewer-codex", "reviewer-local"):
+    # Comprehensive structural parsing of tiering guidance across all reviewer profiles
+    profiles_to_check = ("reviewer", "reviewer-gemini", "reviewer-codex", "reviewer-local")
+    for name in profiles_to_check:
         prof = load_profile(name)
         prompt = prof.prompt
-        assert "`blocker`" in prompt, f"{name} missing blocker"
-        assert "`minor`" in prompt, f"{name} missing minor"
-        assert "`needs supervisor action" in prompt, f"{name} missing needs supervisor action"
-        assert "actionable by the worker" in prompt, f"{name} missing actionability"
+
+        # 1. Structural schema parsing: Classification tiers must be defined with clear semantics
+        # Must have blocker bullet with must be fixed semantics
+        blocker_match = re.search(r"-\s*`blocker`:\s*must be fixed before the branch can merge", prompt, re.I)
+        assert blocker_match, f"{name} missing structural blocker specification"
+
+        # Must have minor bullet with style nits / non-blocking semantics
+        minor_match = re.search(r"-\s*`minor`:\s*style nits, minor comments or suggestions that do not block merging", prompt, re.I)
+        assert minor_match, f"{name} missing structural minor specification"
+
+        # Must have needs supervisor action with details and explanation
+        supervisor_match = re.search(
+            r"-\s*`needs supervisor action:\s*<details>`:\s*an issue the worker cannot fix within its allowed tools or permissions",
+            prompt,
+            re.I,
+        )
+        assert supervisor_match, f"{name} missing structural supervisor action specification"
+
+        # 2. Actionability guidance: instruction to assess worker capabilities
+        actionable_match = re.search(
+            r"Check whether your findings are actionable by the worker:\s*if a fix requires capabilities outside the worker's brief,\s*flag it as `needs supervisor action`",
+            prompt,
+            re.I,
+        )
+        assert actionable_match, f"{name} missing actionable evaluation rule"
+
+        # 3. Substance verification for finish line
+        substance_match = re.search(
+            r"Check the finish line \(`done_when`\) for substance,\s*not just placeholder presence",
+            prompt,
+            re.I,
+        )
+        assert substance_match, f"{name} missing finish line substance requirement"
+
+        # 4. Strict approval condition
+        approval_match = re.search(
+            r"Approve \(`approved=true`\) only if there are no blockers and no supervisor-action items\.\s*If only minor findings remain,\s*approve and list them under minor findings",
+            prompt,
+            re.I,
+        )
+        assert approval_match, f"{name} missing approval criteria rule"
+
+
+def test_reviewer_tiered_guidance_application_and_routing_scenarios(db, repo, monkeypatch):
+    """Scenario tests verifying that the tiered guidance is effectively applied and routed:
+    - Minor findings only -> approved, no supervisor action, no fix loop
+    - Blocker findings -> not approved, worker fix round triggered
+    - Needs supervisor action -> not approved, worker fix loop bypassed, routed to supervisor
+    """
+    from brindle import agents, pipeline
+    from brindle.db import Workspace
+
+    ws = Workspace("ws-tier-scenarios", str(repo), "feat/tier", "main", "main", "worktree", str(repo), 20000, "tmux-tier", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+
+    sent_messages = []
+    def fake_send(db_arg, to_id, msg, **kwargs):
+        sent_messages.append((to_id, msg))
+
+    monkeypatch.setattr(agents, "send_message", fake_send)
+    monkeypatch.setattr(pipeline, "_retry_on_heavy", lambda *args: False)
+
+    # Scenario 1: Minor findings only - reviewer approves according to guidance
+    minor_summary = "All checks pass.\n- minor: consider renaming variable `x` to `timeout_seconds` for clarity.\nNeeds supervisor action: None."
+    assert not pipeline.has_supervisor_action(minor_summary)
+    worker1 = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    reviewer1 = agents.spawn(db, ws, "reviewer", mode="review")
+    db.update_agent(worker1.id, pipeline="reviewing")
+    handled, ready = pipeline._on_review(db, reviewer1, ws, approved=True, summary=minor_summary)
+    assert handled is True
+    # In accordance with guidance, minor findings do not trigger worker fix rounds
+    assert not any(to_id == worker1.id for to_id, _ in sent_messages)
+    # Supervisor receives the approved notification with minor findings
+    assert any(to_id == supervisor.id and "approved" in msg and "minor" in msg for to_id, msg in sent_messages)
+
+    # Scenario 2: Blocker actionable by worker - reviewer rejects, triggers worker fix round
+    sent_messages.clear()
+    blocker_summary = "Review failed.\n- blocker: missing check for None in process_data() leading to AttributeError.\nNeeds supervisor action: None."
+    assert not pipeline.has_supervisor_action(blocker_summary)
+    worker2 = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    reviewer2 = agents.spawn(db, ws, "reviewer", mode="review")
+    db.update_agent(worker2.id, pipeline="reviewing")
+    handled, ready = pipeline._on_review(db, reviewer2, ws, approved=False, summary=blocker_summary)
+    assert ready is False
+    assert any(to_id == worker2.id and "missing check for None" in msg for to_id, msg in sent_messages)
+    assert not any(to_id == supervisor.id for to_id, _ in sent_messages)
+
+    # Scenario 3: Needs supervisor action - reviewer flags capability gap, routes directly to supervisor
+    sent_messages.clear()
+    sup_action_summary = "Review finding:\n- needs supervisor action: requires production database credentials for migration."
+    assert pipeline.has_supervisor_action(sup_action_summary)
+    worker3 = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    reviewer3 = agents.spawn(db, ws, "reviewer", mode="review")
+    db.update_agent(worker3.id, pipeline="reviewing")
+    handled, ready = pipeline._on_review(db, reviewer3, ws, approved=False, summary=sup_action_summary)
+    assert ready is False
+    assert not any(to_id == worker3.id for to_id, _ in sent_messages)
+    assert any(to_id == supervisor.id and "needs supervisor action" in msg for to_id, msg in sent_messages)
 
 
 def test_record_audit_decision_mcp_records_for_subsequent_audit(db, repo, monkeypatch):
