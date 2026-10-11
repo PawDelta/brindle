@@ -228,3 +228,21 @@ def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch
     with pytest.raises(autopilot.AutopilotError) as exc_info2:
         autopilot.choose_profile(db, "caller-res-light", str(repo), requested="research-light")
     assert "exceeds configured max_weight 'medium'" in str(exc_info2.value)
+
+
+def test_milestone_selected_profile_includes_cost_feedback(db, repo, monkeypatch):
+    ws = Workspace("ws-cost", str(repo), "feat/cost", "main", "main", "main", str(repo), 20000, "tmux-c", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(sup.id)
+    autopilot.set_goal(db, sup.id, "Goal", [("Step 1", "true", "", "developer-heavy")])
+
+    cfg = RepoConfig()
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    why = []
+    profile, _ = autopilot.choose_profile(db, sup.id, str(repo), why=why)
+    assert profile == "developer-heavy"
+    joined = " ".join(why)
+    assert "developer-heavy" in joined
+    assert "most expensive tier" in joined

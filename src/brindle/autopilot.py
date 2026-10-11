@@ -523,6 +523,20 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if decision is not None:
         decision["baseline"] = remaining[0]
 
+    info_str = model_cost_info(name, cfg, repo_root)
+
+    why = f"weight {weight} -> {name}{info_str}"
+    picked = f"learning picked it: {reason}" if reason else "learning picked it"
+    kept = learning.kept_note(cfg, repo_root)
+    detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
+    detail = [d for d in detail if d]
+    if detail:
+        why += f" ({', '.join(detail)})"
+    return name, bool(pick), why
+
+
+def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+    """Format model name, effort, and cost tier as a cost signal string."""
     try:
         from brindle.profiles import load_profile
         p = load_profile(name, repo_root)
@@ -538,18 +552,10 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
         else:
             cost_tier = "medium cost tier"
         cost_tag = f"; {cost_tier}"
-        info_str = f" ({', '.join(model_info)}{cost_tag})"
+        return f" ({', '.join(model_info)}{cost_tag})"
     except Exception:
-        info_str = ""
+        return ""
 
-    why = f"weight {weight} -> {name}{info_str}"
-    picked = f"learning picked it: {reason}" if reason else "learning picked it"
-    kept = learning.kept_note(cfg, repo_root)
-    detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
-    detail = [d for d in detail if d]
-    if detail:
-        why += f" ({', '.join(detail)})"
-    return name, bool(pick), why
 
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
@@ -610,6 +616,8 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         if ceiling and weight_order[profile_weight(req, cfg, repo_root)] > weight_order[ceiling]:
             raise AutopilotError(f"profile {req!r} exceeds configured max_weight {ceiling!r}")
         name = req
+        if why is not None:
+            why.append(f"requested profile -> {name}{model_cost_info(name, cfg, repo_root)}")
     else:
         name = ""
 
@@ -623,9 +631,11 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 candidates = cfg.routing.get(ceiling, [cfg.default_agent])
                 name = candidates[0] if candidates else cfg.default_agent
                 if why is not None:
-                    why.append(f"milestone profile {m_profile} capped to {name} by max_weight {ceiling}")
+                    why.append(f"milestone profile {m_profile} capped to {name}{model_cost_info(name, cfg, repo_root)} by max_weight {ceiling}")
             else:
                 name = m_profile
+                if why is not None:
+                    why.append(f"milestone profile -> {name}{model_cost_info(name, cfg, repo_root)}")
     if not name:
         from brindle import learning
 

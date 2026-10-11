@@ -621,6 +621,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 raise
         if force and os.path.exists(ws.path):
             shutil.rmtree(ws.path, ignore_errors=True)
+        if os.path.exists(ws.path):
+            raise WorkspaceError(f"could not remove worktree directory at {ws.path}")
     else:
         git.run(["worktree", "prune"], ws.repo_root, check=False)
 

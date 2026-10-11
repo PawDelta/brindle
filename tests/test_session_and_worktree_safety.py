@@ -135,6 +135,24 @@ def test_damaged_worktree_with_staged_deletion_raises(db, repo):
     assert "D  extra.py" in status_out
 
 
+def test_remove_workspace_refuses_to_forget_when_directory_remains(db, repo, monkeypatch):
+    created = workspaces.create(db, str(repo), "feat/failed-rm", reuse_registered=True)
+    ws = created.workspace
+    assert os.path.isdir(ws.path)
+
+    # Simulate git worktree remove failing and directory remaining
+    monkeypatch.setattr(git, "remove_worktree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(shutil, "rmtree", lambda *args, **kwargs: None)
+
+    with pytest.raises(workspaces.WorkspaceError) as exc_info:
+        workspaces.remove(db, ws, force=True, delete_branch=False, keep_session=True)
+    assert "could not remove worktree directory" in str(exc_info.value)
+
+    # Workspace record must NOT be deleted/forgotten from DB while directory remains
+    assert db.get_workspace(ws.id) is not None
+
+
+
 def test_start_on_merged_branch_detects_merge(repo):
     # Create a feature branch and merge it into main
     sh("git checkout -b feat/merged", repo)
