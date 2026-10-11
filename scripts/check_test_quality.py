@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 4059
+TEST_BUDGET = 4061
 
 
 class Finding(NamedTuple):
@@ -90,6 +90,8 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
         if dotted(node.func).endswith(".setattr") and len(node.args) >= 2:
             if name(node.args[0]) == "time" and isinstance(node.args[1], ast.Constant) and node.args[1].value == "sleep":
                 return frozenset({"time.sleep"})
+            if isinstance(node.args[0], ast.Constant) and node.args[0].value == "time.sleep":
+                return frozenset({"time.sleep"})
         if isinstance(node.func, ast.Attribute) and node.func.attr == "start":
             return patch_target(node.func.value) or patchers.get(dotted(node.func.value), frozenset())
         return frozenset()
@@ -115,12 +117,11 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
         # Process statement lists in order: a patch after a sleep cannot excuse it.
         for _, value in ast.iter_fields(node):
             if isinstance(value, list):
-                active = mocked
-                # stopall stops started patchers, preserving decorator/context
-                # mocks and immediate monkeypatch mutations from other sources.
                 started_exemptions = started
                 patchers = {}
+                mp_exemptions = {}
                 for child in value:
+                    active = mocked | (frozenset().union(*mp_exemptions.values()) if mp_exemptions else frozenset())
                     if isinstance(child, ast.AST):
                         visit(child, active, scope, started_exemptions)
                         if isinstance(child, (ast.Expr, ast.Assign, ast.AnnAssign)):
@@ -129,11 +130,15 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
                             if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
                                 if call.func.attr == "start":
                                     started_exemptions = started_exemptions | exemptions
-                                else:
-                                    active = active | exemptions
+                                elif call.func.attr == "setattr":
+                                    mp_name = dotted(call.func.value)
+                                    mp_exemptions[mp_name] = mp_exemptions.get(mp_name, frozenset()) | exemptions
                                 if call.func.attr == "stop":
                                     started_exemptions = started_exemptions - patchers.get(
                                         dotted(call.func.value), frozenset())
+                                if call.func.attr == "undo":
+                                    mp_name = dotted(call.func.value)
+                                    mp_exemptions.pop(mp_name, None)
                                 if dotted(call.func).endswith(".stopall"):
                                     started_exemptions = frozenset()
                         if isinstance(child, (ast.Assign, ast.AnnAssign)):

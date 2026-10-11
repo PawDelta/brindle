@@ -332,3 +332,34 @@ def test_removed_model_availability_matrices_fail_guardrail():
         assert len(new) == 1
         assert new[0].key == key
 
+
+def test_monkeypatch_undo_restores_unmocked_sleep(tmp_path):
+    path = tmp_path / "test_undo.py"
+    path.write_text('''
+import time
+from unittest.mock import patch
+def test_undo(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    time.sleep(0)
+    monkeypatch.undo()
+    time.sleep(1)
+@patch("time.sleep")
+def test_undo_preserves_decorators(mock, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    monkeypatch.undo()
+    time.sleep(2)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(1)"]
+
+
+def test_monkeypatch_string_target_accepted(tmp_path):
+    path = tmp_path / "test_str_target.py"
+    path.write_text('''
+import time
+def test_string_target(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    time.sleep(0)
+''')
+    assert quality.sleep_issues(path) == []
+
