@@ -91,6 +91,55 @@ def test_immediate(monkeypatch):
         "time.sleep(1)", "time.sleep(2)", "time.sleep(4)"]
 
 
+def test_assigned_patcher_start_activates_mock(tmp_path):
+    path = tmp_path / "test_assigned.py"
+    path.write_text('''
+import time
+from unittest.mock import patch
+def test_assignment():
+    patcher = patch("time.sleep")
+    mock_sleep = patcher.start()
+    time.sleep(0)
+def test_annotation():
+    patcher: object = patch.object(time, "sleep")
+    mock_sleep: object = patcher.start()
+    time.sleep(0)
+''')
+    assert quality.sleep_issues(path) == []
+
+
+def test_stopall_clears_started_patcher_exemptions(tmp_path):
+    path = tmp_path / "test_stopall.py"
+    path.write_text('''
+import time
+from unittest.mock import patch
+def test_stopall():
+    patcher = patch("time.sleep")
+    patcher.start()
+    time.sleep(0)
+    patch.stopall()
+    time.sleep(1)
+def test_assigned_stopall():
+    mock_sleep = patch("time.sleep").start()
+    time.sleep(0)
+    patch.stopall()
+    time.sleep(2)
+@patch("time.sleep")
+def test_decorator_still_active(mock):
+    patcher = patch("time.sleep")
+    patcher.start()
+    patch.stopall()
+    time.sleep(3)
+def test_monkeypatch_still_active(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    patch("time.sleep").start()
+    patch.stopall()
+    time.sleep(4)
+''')
+    assert [issue.key.rsplit("::", 1)[-1] for issue in quality.sleep_issues(path)] == [
+        "time.sleep(1)", "time.sleep(2)"]
+
+
 def test_module_patch_does_not_replace_direct_sleep_imports(tmp_path):
     path = tmp_path / "test_bindings.py"
     path.write_text('''
@@ -188,7 +237,9 @@ def test_generated(a, b):
     assert "1 grandfathered" in passed.stdout
     # Enlarging the same legacy matrix must fail even with a generous budget.
     source = tests / "test_generated.py"
-    source.write_text(source.read_text().replace("range(4)", "range(5)"))
+    # Change the file size too: timestamp-based bytecode caches otherwise may
+    # reuse the old fixture for a same-size edit made within the same second.
+    source.write_text(source.read_text().replace("range(4)", "range(5 + 0)"))
     failed = subprocess.run([*command, "--budget", "20", "--baseline", str(baseline)],
                             capture_output=True, text=True)
     assert failed.returncode == 1

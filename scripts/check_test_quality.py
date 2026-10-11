@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 4148
+TEST_BUDGET = 4150
 
 
 class Finding(NamedTuple):
@@ -98,7 +98,7 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
 
     relative = path.relative_to(root).as_posix() if root else path.name
 
-    def visit(node, mocked=frozenset(), scope=()):
+    def visit(node, mocked=frozenset(), scope=(), started=frozenset()):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             scope = (*scope, node.name)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -106,7 +106,7 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
         if isinstance(node, (ast.With, ast.AsyncWith)):
             mocked = mocked.union(*(patch_target(i.context_expr) for i in node.items))
         binding = name(node.func) if isinstance(node, ast.Call) else ""
-        if (binding == "time.sleep" or binding.startswith("imported:")) and binding not in mocked:
+        if (binding == "time.sleep" or binding.startswith("imported:")) and binding not in (mocked | started):
             # Stable across unrelated line edits, but specific to the scope,
             # call expression and number of occurrences. A new sleep in another
             # test or another identical call cannot borrow a file-wide waiver.
@@ -116,22 +116,34 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
         for _, value in ast.iter_fields(node):
             if isinstance(value, list):
                 active = mocked
+                # stopall stops started patchers, preserving decorator/context
+                # mocks and immediate monkeypatch mutations from other sources.
+                started_exemptions = started
                 patchers = {}
                 for child in value:
                     if isinstance(child, ast.AST):
-                        visit(child, active, scope)
-                        if isinstance(child, ast.Assign):
+                        visit(child, active, scope, started_exemptions)
+                        if isinstance(child, (ast.Expr, ast.Assign, ast.AnnAssign)):
+                            call = child.value
+                            exemptions = immediate_target(call, patchers)
+                            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
+                                if call.func.attr == "start":
+                                    started_exemptions = started_exemptions | exemptions
+                                else:
+                                    active = active | exemptions
+                                if call.func.attr == "stop":
+                                    started_exemptions = started_exemptions - patchers.get(
+                                        dotted(call.func.value), frozenset())
+                                if dotted(call.func).endswith(".stopall"):
+                                    started_exemptions = frozenset()
+                        if isinstance(child, (ast.Assign, ast.AnnAssign)):
                             targets = patch_target(child.value)
-                            for target in child.targets:
+                            bindings = child.targets if isinstance(child, ast.Assign) else [child.target]
+                            for target in bindings:
                                 if isinstance(target, ast.Name):
                                     patchers[target.id] = targets
-                        if isinstance(child, ast.Expr):
-                            active = active | immediate_target(child.value, patchers)
-                            call = child.value
-                            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "stop":
-                                active = active - patchers.get(dotted(call.func.value), frozenset())
             elif isinstance(value, ast.AST):
-                visit(value, mocked, scope)
+                visit(value, mocked, scope, started)
 
     visit(tree)
     return issues
