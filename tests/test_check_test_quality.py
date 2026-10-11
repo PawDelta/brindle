@@ -205,10 +205,9 @@ def test_main_reports_sleep_and_parametrize(tmp_path, monkeypatch, capsys):
 def test_ci_checks_quality_before_tests_in_both_legs():
     script = (quality.ROOT / "scripts" / "ci_local.sh").read_text()
     host, linux = script.split('  else\n    # The export is copied inside', 1)
-    assert host.index("python scripts/check_test_quality.py") < host.index("$PARALLEL_PASS")
-    assert host.index("$PARALLEL_PASS") < host.index("$SERIAL_PASS")
-    assert linux.index("python scripts/check_test_quality.py") < linux.index("$PARALLEL_PASS")
-    assert linux.index("$PARALLEL_PASS") < linux.index("$SERIAL_PASS")
+    assert host.index("python scripts/check_test_quality.py") < host.index('"${PARALLEL_PASS[@]}"')
+    assert host.index('"${PARALLEL_PASS[@]}"') < host.index('"${SERIAL_PASS[@]}"')
+    assert linux.index("python scripts/check_test_quality.py") < linux.index("$test_cmds")
 
 
 
