@@ -800,7 +800,11 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
     monkeypatch.setattr(time, "time", lambda: now[0])
-    monkeypatch.setattr(time, "sleep", lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay)))
+    def sleep(delay):
+        if abs(delay - 5.0) < 0.01 or abs(delay - 3.0) < 0.01:
+            sleeps.append(delay)
+            now[0] += delay
+    monkeypatch.setattr(time, "sleep", sleep)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
