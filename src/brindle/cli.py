@@ -274,7 +274,15 @@ def start(
     if not branch and not worktree and not scratch.is_scratch(ws.path):
         curr_b = git.current_branch(ws.path)
         if curr_b and git.merged_into_default(ws.repo_root, curr_b):
-            typer.secho(f"! Branch '{curr_b}' is already merged into '{git.default_branch(ws.repo_root)}'.", fg="yellow")
+            default_b = git.default_branch(ws.repo_root)
+            typer.secho(f"! Branch '{curr_b}' is already merged into '{default_b}'.", fg="yellow")
+            try:
+                if not git.dirty_files(ws.path):
+                    git.run(["checkout", default_b], ws.path)
+                    ws = workspaces.refresh_branch(db, ws)
+                    typer.secho(f"✓ Switched to '{default_b}'.", fg="green")
+            except Exception:
+                pass
 
     if agent is None:
         agent = _run(load_repo_config, ws.repo_root).default_agent

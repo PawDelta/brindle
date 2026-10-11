@@ -166,6 +166,73 @@ def test_start_on_merged_branch_detects_merge(repo):
     assert not git.merged_into_default(str(repo), "main")
 
 
+def test_start_on_merged_branch_switches_to_default_when_clean(db, repo, monkeypatch):
+    from brindle import cli, agents
+    sh("git checkout -b feat/merged-clean", repo)
+    (repo / "feature_clean.txt").write_text("clean")
+    sh("git add feature_clean.txt && git commit -m 'feat clean'", repo)
+    sh("git checkout main && git merge feat/merged-clean", repo)
+    sh("git checkout feat/merged-clean", repo)
+
+    spawned_branches = []
+    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
+        spawned_branches.append(ws_arg.branch)
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.id = "agent-merged-clean"
+        m.profile = agent_arg
+        m.tmux_window = "w1"
+        return m
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
+    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
+    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
+    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
+    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
+    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
+    monkeypatch.chdir(repo)
+
+    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
+    assert git.current_branch(str(repo)) == "main"
+    assert spawned_branches == ["main"]
+
+
+def test_start_on_merged_branch_does_not_switch_when_dirty(db, repo, monkeypatch):
+    from brindle import cli, agents
+    sh("git checkout -b feat/merged-dirty", repo)
+    (repo / "feature_dirty.txt").write_text("dirty")
+    sh("git add feature_dirty.txt && git commit -m 'feat dirty'", repo)
+    sh("git checkout main && git merge feat/merged-dirty", repo)
+    sh("git checkout feat/merged-dirty", repo)
+    (repo / "uncommitted.txt").write_text("uncommitted work")
+
+    spawned_branches = []
+    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
+        spawned_branches.append(ws_arg.branch)
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.id = "agent-merged-dirty"
+        m.profile = agent_arg
+        m.tmux_window = "w1"
+        return m
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
+    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
+    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
+    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
+    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
+    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
+    monkeypatch.chdir(repo)
+
+    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
+    assert git.current_branch(str(repo)) == "feat/merged-dirty"
+    assert spawned_branches == ["feat/merged-dirty"]
+
+
 def test_start_on_squash_merged_branch_detects_squash(repo):
     # Create a feature branch with multiple commits and squash merge into main
     sh("git checkout -b feat/multi-squash", repo)
