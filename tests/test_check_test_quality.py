@@ -205,8 +205,11 @@ def test_main_reports_sleep_and_parametrize(tmp_path, monkeypatch, capsys):
 def test_ci_checks_quality_before_tests_in_both_legs():
     script = (quality.ROOT / "scripts" / "ci_local.sh").read_text()
     host, linux = script.split('  else\n    # The export is copied inside', 1)
-    assert host.index("python scripts/check_test_quality.py") < host.index("$PYTEST) >")
-    assert linux.index("python scripts/check_test_quality.py") < linux.index("$PYTEST")
+    assert host.index("python scripts/check_test_quality.py") < host.index("$PARALLEL_PASS")
+    assert host.index("$PARALLEL_PASS") < host.index("$SERIAL_PASS")
+    assert linux.index("python scripts/check_test_quality.py") < linux.index("$PARALLEL_PASS")
+    assert linux.index("$PARALLEL_PASS") < linux.index("$SERIAL_PASS")
+
 
 
 def test_cli_collects_generated_cases_without_running_tests(tmp_path):
@@ -494,6 +497,43 @@ def test_context_outer(monkeypatch):
     time.sleep(2)
 ''')
     assert quality.sleep_issues(path) == []
+
+
+def test_deferred_lambda_does_not_install_mock(tmp_path):
+    path = tmp_path / "test_lambda.py"
+    path.write_text('''
+import time
+def test_deferred(monkeypatch):
+    install_mock = lambda: monkeypatch.setattr(time, "sleep", lambda _: None)
+    time.sleep(10)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(10)"]
+
+
+def test_short_circuit_does_not_install_mock(tmp_path):
+    path = tmp_path / "test_short_circuit.py"
+    path.write_text('''
+import time
+def test_short_circuit(monkeypatch):
+    False and monkeypatch.setattr(time, "sleep", lambda _: None)
+    time.sleep(10)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(10)"]
+
+
+def test_conditional_expression_does_not_install_mock(tmp_path):
+    path = tmp_path / "test_ifexp.py"
+    path.write_text('''
+import time
+def test_ifexp(monkeypatch, cond):
+    monkeypatch.setattr(time, "sleep", lambda _: None) if cond else None
+    time.sleep(10)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(10)"]
+
 
 
 

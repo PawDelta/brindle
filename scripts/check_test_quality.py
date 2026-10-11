@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 4069
+TEST_BUDGET = 4072
 
 
 class Finding(NamedTuple):
@@ -147,53 +147,112 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
                 return frozenset({"time.sleep"})
         return frozenset()
 
+    def evaluate_expr_mutations(expr, state):
+        if expr is None:
+            return
+        if isinstance(expr, ast.Lambda):
+            # Lambdas are deferred expressions; their bodies are NOT evaluated at definition.
+            return
+        if isinstance(expr, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        if isinstance(expr, ast.IfExp):
+            evaluate_expr_mutations(expr.test, state)
+            s_body = state.clone()
+            evaluate_expr_mutations(expr.body, s_body)
+            s_else = state.clone()
+            evaluate_expr_mutations(expr.orelse, s_else)
+            state.apply(s_body.join(s_else))
+            return
+        if isinstance(expr, ast.BoolOp):
+            if not expr.values:
+                return
+            evaluate_expr_mutations(expr.values[0], state)
+            current_path = state.clone()
+            joined = state.clone()
+            for val in expr.values[1:]:
+                s_val = current_path.clone()
+                evaluate_expr_mutations(val, s_val)
+                joined = joined.join(s_val)
+                current_path = s_val
+            state.apply(joined)
+            return
+        if isinstance(expr, ast.Call):
+            for arg in expr.args:
+                evaluate_expr_mutations(arg, state)
+            for kw in expr.keywords:
+                evaluate_expr_mutations(kw.value, state)
+            call_name = dotted(expr.func)
+            if call_name.endswith(".stopall"):
+                state.started.clear()
+                state.unnamed_started.clear()
+            elif isinstance(expr.func, ast.Attribute):
+                attr = expr.func.attr
+                if attr == "start":
+                    receiver = dotted(expr.func.value)
+                    if receiver in state.patchers:
+                        state.started.add(receiver)
+                    else:
+                        tgt = patch_target(expr.func.value)
+                        if tgt:
+                            state.unnamed_started.update(tgt)
+                elif attr == "stop":
+                    receiver = dotted(expr.func.value)
+                    state.started.discard(receiver)
+                elif attr == "setattr" and len(expr.args) >= 2:
+                    tgt = setattr_target(expr)
+                    if tgt:
+                        mp_name = dotted(expr.func.value)
+                        state.mp_exemptions.setdefault(mp_name, set()).update(tgt)
+                elif attr == "undo":
+                    mp_name = dotted(expr.func.value)
+                    state.mp_exemptions.pop(mp_name, None)
+            return
+        for _, value in ast.iter_fields(expr):
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        evaluate_expr_mutations(item, state)
+            elif isinstance(value, ast.AST):
+                evaluate_expr_mutations(value, state)
+
     def update_mutations(stmt, state):
-        assigned_calls = set()
         if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             rhs = stmt.value
-            if rhs is not None:
-                targets = patch_target(rhs)
-                bindings = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            if rhs is None:
+                return
+            targets = patch_target(rhs)
+            bindings = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            assigned_start = False
+            if isinstance(rhs, ast.Call) and isinstance(rhs.func, ast.Attribute) and rhs.func.attr == "start":
+                assigned_start = True
+                receiver = dotted(rhs.func.value)
                 for b in bindings:
                     if isinstance(b, ast.Name):
                         if targets:
                             state.patchers[b.id] = targets
-                        if isinstance(rhs, ast.Call) and isinstance(rhs.func, ast.Attribute) and rhs.func.attr == "start":
-                            assigned_calls.add(rhs)
-                            receiver = dotted(rhs.func.value)
-                            if receiver in state.patchers:
-                                state.started.add(receiver)
-                            else:
-                                state.started.add(b.id)
+                        if receiver in state.patchers:
+                            state.started.add(receiver)
+                        else:
+                            state.started.add(b.id)
+            else:
+                for b in bindings:
+                    if isinstance(b, ast.Name) and targets:
+                        state.patchers[b.id] = targets
+            if not assigned_start:
+                evaluate_expr_mutations(rhs, state)
+            return
 
-        for node in ast.walk(stmt):
-            if not isinstance(node, ast.Call) or node in assigned_calls:
-                continue
-            call_name = dotted(node.func)
-            if call_name.endswith(".stopall"):
-                state.started.clear()
-                state.unnamed_started.clear()
-            elif isinstance(node.func, ast.Attribute):
-                attr = node.func.attr
-                if attr == "start":
-                    receiver = dotted(node.func.value)
-                    if receiver in state.patchers:
-                        state.started.add(receiver)
-                    else:
-                        tgt = patch_target(node.func.value)
-                        if tgt:
-                            state.unnamed_started.update(tgt)
-                elif attr == "stop":
-                    receiver = dotted(node.func.value)
-                    state.started.discard(receiver)
-                elif attr == "setattr" and len(node.args) >= 2:
-                    tgt = setattr_target(node)
-                    if tgt:
-                        mp_name = dotted(node.func.value)
-                        state.mp_exemptions.setdefault(mp_name, set()).update(tgt)
-                elif attr == "undo":
-                    mp_name = dotted(node.func.value)
-                    state.mp_exemptions.pop(mp_name, None)
+        if isinstance(stmt, ast.Expr):
+            evaluate_expr_mutations(stmt.value, state)
+            return
+
+        for _, value in ast.iter_fields(stmt):
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        evaluate_expr_mutations(item, state)
+            elif isinstance(value, ast.AST):
+                evaluate_expr_mutations(value, state)
 
     def check_calls(node, lexical_mocks, scope, state):
         for child in ast.walk(node):

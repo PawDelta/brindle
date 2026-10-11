@@ -115,8 +115,13 @@ fi
 NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 AT_ONCE=$(( ${#LEGS[@]} < JOBS ? ${#LEGS[@]} : JOBS ))
 WORKERS=$(( NCPU / (AT_ONCE > 0 ? AT_ONCE : 1) )); [ "$WORKERS" -lt 2 ] && WORKERS=2
-PYTEST="pytest -q"
-[ "$SERIAL" = 0 ] && PYTEST="--with pytest-xdist~=3.6 pytest -q -n $WORKERS"
+if [ "$SERIAL" = 0 ]; then
+  PARALLEL_PASS="--with pytest-xdist~=3.6 pytest -q -n $WORKERS -m 'not serial'"
+  SERIAL_PASS="pytest -q -m serial"
+else
+  PARALLEL_PASS="pytest -q"
+  SERIAL_PASS=""
+fi
 
 leg() {   # leg host:3.12 | linux:3.12 -> runs the suite, exit status is the result
   local where="${1%%:*}" py="${1#*:}" dir="$WORK/${1/:/-}" log="$WORK/logs/${1/:/-}.log"
@@ -127,12 +132,13 @@ leg() {   # leg host:3.12 | linux:3.12 -> runs the suite, exit status is the res
     (cd "$dir" && export UV_PROJECT_ENVIRONMENT="$dir/.venv" TMUX= \
        && uv sync -q ${pyarg[@]+"${pyarg[@]}"} \
        && uv run -q ${pyarg[@]+"${pyarg[@]}"} python scripts/check_test_quality.py \
-       && uv run -q ${pyarg[@]+"${pyarg[@]}"} $PYTEST) >"$log" 2>&1
+       && uv run -q ${pyarg[@]+"${pyarg[@]}"} $PARALLEL_PASS \
+       ${SERIAL_PASS:+&& uv run -q ${pyarg[@]+"${pyarg[@]}"} $SERIAL_PASS}) >"$log" 2>&1
   else
     # The export is copied inside, so the runner-like user owns its checkout;
     # uv's cache (Pythons, wheels) persists in a volume between runs.
     docker run --rm -v "$dir:/src:ro" -v brindle-ci-uv-cache:/home/ci/.cache/uv brindle-ci-linux \
-      sh -c "cp -R /src /home/ci/work && cd /home/ci/work && uv sync -q --python $py && uv run -q --python $py python scripts/check_test_quality.py && uv run -q --python $py $PYTEST" \
+      sh -c "cp -R /src /home/ci/work && cd /home/ci/work && uv sync -q --python $py && uv run -q --python $py python scripts/check_test_quality.py && uv run -q --python $py $PARALLEL_PASS ${SERIAL_PASS:+&& uv run -q --python $py $SERIAL_PASS}" \
       >"$log" 2>&1
   fi
 }
