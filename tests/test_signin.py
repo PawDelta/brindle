@@ -102,7 +102,7 @@ def test_a_profile_env_key_counts_as_signed_in(db, repo, monkeypatch, tmp_path):
     ws = workspaces.adopt_root(db, str(repo))
     with pytest.raises(Stop):
         agents.spawn(db, ws, "developer-antigravity", prompt="write the readme")
-    assert len(seen) == 1 and seen[0].get("GEMINI_API_KEY") == "AIza-test" and calls == []
+    assert seen == [{"GEMINI_API_KEY": "AIza-test"}] and calls == []
     monkeypatch.chdir(repo)
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     assert "developer-antigravity (antigravity)" in mcp_server.list_agent_profiles()

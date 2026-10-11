@@ -599,7 +599,7 @@ def test_isolation_preserves_codex_notice_metadata(monkeypatch, tmp_path):
     def fake_worker(argv, **kw):
         payload = {"models": ["wanted"], "source": "codex", "complete": True,
                    "authoritative": False, "availability_notices": ["wanted"]}
-        return real_popen([sys.executable, "-c", f"print({json.dumps(payload)!r})"], **kw)
+        return real_popen([sys.executable, "-c", f"import sys; sys.stdin.read(); print({json.dumps(payload)!r})"], **kw)
 
     monkeypatch.setattr(ma.subprocess, "Popen", fake_worker)
     result = ma.ModelAvailabilityChecker().check(profile("codex"), effective_env={}, cwd=str(tmp_path))

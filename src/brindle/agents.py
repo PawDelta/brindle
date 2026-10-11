@@ -190,23 +190,6 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         company = {} if agent.provider != "claude" else company_login.stored_env()
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
-        # Provider credentials present in the current process environment:
-        # freshly exported keys take effect in new panes instead of relying on
-        # stale credentials in an existing tmux server.
-        from brindle import keystore, secrets
-        inherited = tmux.inherited_env(ws.tmux_session) if ws else {}
-        creds = set() if org else secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
-        exported = {}
-        if not inherited or (agent and agent.status in ("failed", "paused")):
-            exported = {
-                k: os.environ[k]
-                for k in creds
-                if k in os.environ and not secrets.is_job_secret(k)
-            }
-
-        # Check for re-read stored/session credentials
-        # A fresh session credential (from recovery) or fresh store rotation
-        # overrides stale credentials in long-running supervisor launchers.
         session_creds = {}
         try:
             from brindle.db import DB
@@ -223,26 +206,39 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         except Exception:
             pass
 
+        from brindle import keystore, secrets
+        guarded = _guarded_profile(agent, ws)
+        org_managed = agent.provider == "claude" and bool(providers.claude_org_managed())
+        deny = pane_auth.deny_names(agent.provider, getattr(guarded, "auth", "auto") if guarded is not None else "auto",
+                                    m, org_managed)
+        no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
+
+        creds = set() if org else secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
+        recovery_keys = {}
         for k in creds:
-            if k in session_creds:
-                sess_val, sess_time = session_creds[k]
+            if k in no_stored:
+                continue
+            sess_val, sess_time = session_creds.get(k, (None, 0.0))
+            env_val = os.environ.get(k)
+            if env_val and not secrets.is_job_secret(k) and agent and agent.status == "failed":
+                recovery_keys[k] = env_val
+            elif sess_val:
                 try:
                     ks_val, ks_time = keystore.get_key_info(k)
                 except Exception:
                     ks_val, ks_time = None, 0.0
                 if ks_val and ks_time > sess_time:
-                    exported[k] = ks_val
-                elif sess_val:
-                    exported[k] = sess_val
-
+                    recovery_keys[k] = ks_val
+                else:
+                    recovery_keys[k] = sess_val
 
         if enforced is None:
-            env = {**company, **exported, **profile_env, **managed_env, **env}
+            env = {**company, **recovery_keys, **profile_env, **managed_env, **env}
         else:
             # An enforced company identity (Enterprise): the pane runs on the route
             # launch_problem checked, whatever a profile's env lines say.
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
-            env = {**exported, **profile_env, **managed_env, **enforced, **env}
+            env = {**recovery_keys, **profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -539,8 +535,6 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
     env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}
-    exempt = set(org_env) | set(secrets.proxy_exempt(env))
-    env = {k: v for k, v in env.items() if k not in set(deny) or k in exempt}
     result = env, credentials, allow, deny, org_env
     # Resolve stored/org keys once for this launch: catalog, health identity
     # and pane must use the same key helper result, without repeated delays.
@@ -757,18 +751,20 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     # no personal keys (blank, so the launcher's own copy doesn't count).
     from brindle.pro import managed_models
 
-    effective_env = agent_env(ws, agent.id, agent, m)
-    credentials = secrets.agent_credentials(provider.name, profile.name, ws.repo_root)
+    launch_env = {**profile.env, **managed_models.agent_env(m, provider.name)}
     deny = pane_auth.deny_names(provider.name, profile.auth, m,
                                 provider.name == "claude" and bool(providers.claude_org_managed()))
-    effective_env = {**keystore.pane_keys(credentials - set(deny), effective_env), **effective_env}
     org_key = managed_models.has_org_key(m, provider.name)
-    effective_for_probe = {**effective_env, **{k: "" for k in secrets.pane_deny(deny, effective_env)}}
-    why = pane_auth.key_problem(profile, provider.name, deny, org_key, effective_env=effective_for_probe)
+    why = pane_auth.key_problem(profile, provider.name, deny, org_key)
     if why:
         raise AgentError(why)
     # The org's own key signs the agent in: there is no login to check.
-    why = None if org_key else signed_out(provider.name, effective_for_probe)
+    prov_creds = set() if org_key else secrets.agent_credentials(provider.name, profile.name, ws.repo_root)
+    eff_env = _window_environment(agent, ws, m)[0]
+    probe_keys = {k: eff_env[k] for k in prov_creds if k in eff_env}
+    probe_env = {**launch_env, **probe_keys}
+    why = None if org_key else signed_out(
+        provider.name, {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}})
     if why:
         raise AgentError(why)
     # Here rather than in spawn, so a resume checks too: a directory can be
@@ -2690,7 +2686,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 try:
                     send_message(db, agent.parent_id, msg, sender_id="brindle")
                 except Exception:
-                    pass
+                    try:
+                        db.enqueue(agent.parent_id, msg, "brindle")
+                    except Exception:
+                        pass
             root_id = pilot.root_of(db, agent_id)
             if db.get_autopilot(root_id):
                 pilot.need_user(db, root_id, f"Credentials need attention for agent {agent_id}: {err_desc}")
