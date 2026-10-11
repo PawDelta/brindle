@@ -16,6 +16,8 @@ import pytest
 from brindle import agents, tmux
 from brindle.db import DB, Agent, Workspace
 
+pytestmark = pytest.mark.serial
+
 
 @pytest.fixture
 def db(brindle_home):

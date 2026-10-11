@@ -10,3 +10,5 @@ graphify-out/
 docs/
 .brindle/config.local.json
 .brindle/bench.json
+.DS_Store
+commit_msg.txt

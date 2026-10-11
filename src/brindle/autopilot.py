@@ -427,7 +427,7 @@ def set_goal(db: DB, root_id: str, goal: str,
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
-        fields["goal_sha"] = _commit(ws)
+        fields["goal_sha"] = _commit(ws, tracked_only=True)
     # Changed milestones need a fresh audit.
     db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None,
                         auditor_id=None, audit_sha=None, audit_ok=None, **fields)
@@ -1047,15 +1047,16 @@ AUDIT_HOLD = {
               "auditor is checking the work against the original goal; its verdict arrives as a "
               "message. Don't tell the user the goal is reached yet."),
     "gaps": ("Every milestone's check passes, but the completion audit of this commit found "
-             "gaps. Close them, commit, and call check_milestone again to re-audit.\n\n{note}"),
+             "gaps. If a gap is an intentional scope choice, trade-off, or awaiting user decision, "
+             "record it with record_audit_decision so subsequent audits respect the decision. "
+             "Otherwise close them, commit, and call check_milestone again to re-audit.\n\n{note}"),
     "dirty": ("Every milestone's check passes, but your checkout has uncommitted changes, so "
               "there's no commit to audit. Commit them and call check_milestone again."),
 }
+MAX_AUDIT_PASSES = 2
 
-AUDIT = """You are auditing a finished autopilot goal, not a single branch. Every milestone's
-check command now passes, but a check can be too weak, test the wrong thing or be
-skipped, so don't take a passing check as proof. Be adversarial: assume something the
-user asked for is missing until the code shows otherwise.
+AUDIT = """You are conducting a fast, final audit to verify: did the updates do what the milestones say they did?
+Every milestone's check command has already passed. Your job is a quick delivery verification: check that the deliverables described in the milestones are genuinely implemented in the code.
 
 The goal: {goal}{detail}
 
@@ -1064,32 +1065,58 @@ Milestones, each with the check that passed:
 
 {work} No check summary will arrive for this audit; don't wait for one.
 
-For each milestone and each part of the goal: find the code that delivers it; read its
-check and judge whether it really proves the milestone (a test that asserts little, a
-check that only greps, or skipped tests are gaps); look for TODOs, stubs, placeholder
-returns, disabled or deleted tests and half-finished pieces. You may run a narrow test to
-probe a suspicion; don't re-run the whole suite.
-
-Audit convergence rules:
-- Conduct one comprehensive pass listing all gaps at once.
+Verification instructions:
+- Fast single pass: Inspect the changes (using the git commands above) to confirm that the requested features, fixes, or deliverables are present.
+- Trust passing checks unless a deliverable is visibly missing, stubbed out (`TODO`, `pass`, or dummy returns), or unhandled.
+- Do NOT debate test assertion depth, testing style, code architecture, or aesthetic choices. If a milestone's check passes and the deliverable is implemented in the diff, consider that milestone delivered.
+- Do NOT create scratch files, write temporary probe scripts, or run extensive test suites.
 - Separate findings into:
-  1. "Work not done" (missing implementation or test coverage).
+  1. "Work not done" (missing implementation for deliverables).
   2. "Disclosed and awaiting owner decision" (deliberate scope choices, proposals or options awaiting user decision).
 - Do not re-raise any gap or choice that earlier audits mentioned and the supervisor or owner has accepted.
 {prior_decisions}
-Call submit_review once. approved=true only if every part of the goal is really done.
-Otherwise approved=false, listing each gap most severe first: the milestone or part of the
-goal it concerns, file:line where it applies, what's missing, and what would close it."""
+Call submit_review once and immediately.
+- approved=true if the updates delivered what the milestones asked for.
+- approved=false only if a concrete milestone deliverable is missing or incomplete, listing each missing item: the milestone it concerns, file:line where it applies, what is missing, and what would close it."""
+
+RE_AUDIT = """You are conducting a fast, bounded re-audit of a finished autopilot goal.
+Prior audits identified specific gaps and recorded decisions.
+DO NOT move the goalposts or introduce new requirements that were not flagged in earlier audits.
+Your job is a quick delivery verification: did the latest updates resolve the previously identified gaps?
+
+The goal: {goal}{detail}
+
+Milestones, each with the check that passed:
+{milestones}
+
+{work} No check summary will arrive for this audit; don't wait for one.
+
+Prior audit findings and accepted decisions:
+{prior_decisions}
+
+Re-audit rules:
+- Strictly bounded scope: Only verify whether the previously flagged gaps have been addressed in the diff or resolved by an accepted decision.
+- Do NOT introduce new criteria, debate testing style, or re-open closed topics.
+- Fast single pass: Inspect the diff, verify whether the fixes were implemented, and immediately call submit_review. Do not create scratch files or run extra test suites.
+- Separate findings into:
+  1. "Work not done" (missing implementation for previously flagged gaps).
+  2. "Disclosed and awaiting owner decision" (deliberate scope choices, proposals or options awaiting user decision).
+- If a prior gap has been addressed by code or tests, consider it closed.
+- If an item was accepted as a decision or scope exclusion, do NOT flag it as a gap.
+- If and only if previously flagged gaps remain unresolved without an accepted decision, report them.
+
+Call submit_review once and immediately. approved=true if all previously identified gaps are resolved (or accepted).
+Otherwise approved=false, listing only the remaining unresolved gaps: what is still missing and what would close it."""
 
 
-def _commit(ws: Workspace | None) -> str | None:
+def _commit(ws: Workspace | None, *, tracked_only: bool = False) -> str | None:
     """``ws``'s HEAD, or None when it has uncommitted changes (or isn't a checkout)."""
     from brindle import git
 
     if ws is None:
         return None
     try:
-        return None if git.dirty_files(ws.path) else git.out(["rev-parse", "HEAD"], ws.path)
+        return None if git.dirty_files(ws.path, tracked_only=tracked_only) else git.out(["rev-parse", "HEAD"], ws.path)
     except git.GitError:
         return None
 
@@ -1114,8 +1141,9 @@ def audit_prompt(db: DB, ap: Autopilot, head: str) -> str:
     lines = [f"{m.position}. {m.title} (check: `{m.check_cmd or 'none'}`)"
              + (f"\n   {m.detail}" if m.detail else "") for m in ms]
     history_text = (getattr(ap, "audit_history", None) or ap.note or "").strip()
+    template = RE_AUDIT if history_text else AUDIT
     prior = f"\nPrior audit notes / accepted decisions:\n{history_text}\n" if history_text else ""
-    return AUDIT.format(
+    return template.format(
         goal=ap.goal, detail=f"\n\n{ap.detail.strip()}" if ap.detail and ap.detail.strip() else "",
         milestones="\n".join(lines), work=(
             f"The work since the goal was set: run `git log --oneline {ap.goal_sha}..{head}` and "
@@ -1133,7 +1161,7 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     from brindle import agents
 
     ap = db.get_autopilot(root_id)
-    head = _commit(ws)
+    head = _commit(ws, tracked_only=True)
     if ap is None or ap.state != "auditing" or head is None:
         return None
     running = db.get_agent(ap.auditor_id) if ap.auditor_id else None
@@ -1163,7 +1191,7 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
     ap = db.get_autopilot(root_id)
     sha = (ap.audit_sha or "")[:8] if ap else ""
     root = db.get_agent(root_id)
-    now = _commit(db.get_workspace(root.workspace_id) if root else None)
+    now = _commit(db.get_workspace(root.workspace_id) if root else None, tracked_only=True)
     entry = f"Audit of {sha} ({'approved' if approved else 'gaps found'}):\n{summary.strip()}"
     new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     if approved and (now is None or now != (ap.audit_sha if ap else None)):
@@ -1182,14 +1210,29 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
                 f"\n\n{summary}")
+    audit_fails = new_history.count("(gaps found)")
+    if audit_fails >= MAX_AUDIT_PASSES:
+        db.update_autopilot(root_id, state="blocked", note=summary.strip()[:4000], audit_ok=0,
+                            auditor_id=None, audit_history=new_history, nudges=0)
+        audit_ws = db.get_workspace(root.workspace_id) if root else None
+        if audit_ws is not None:
+            escapes.audit_gaps(db, audit_ws.repo_root, summary)
+        return (f"[brindle] Completion audit of {sha}: GAPS FOUND (persistent after {audit_fails} passes). "
+                "Autopilot paused to avoid an unbounded audit loop. Review the findings below with the "
+                "user: either address the remaining gaps, or record them as accepted scope decisions "
+                "with `record_audit_decision`, then call check_milestone."
+                f"\n\n{summary}")
+
     db.update_autopilot(root_id, state="running", note=summary.strip()[:4000], audit_ok=0,
                         auditor_id=None, audit_history=new_history)
     audit_ws = db.get_workspace(root.workspace_id) if root else None
     if audit_ws is not None:
         escapes.audit_gaps(db, audit_ws.repo_root, summary)
     return (f"[brindle] Completion audit of {sha}: GAPS FOUND. The goal isn't reached yet, even "
-            "though every milestone's check passes. Close each gap below (and where a check let "
-            "a gap through, tighten it with set_goal), then call check_milestone to re-audit."
+            "though every milestone's check passes. If a finding is an accepted scope choice or "
+            "trade-off, record it with `record_audit_decision(finding, rationale)` so subsequent audits "
+            "do not re-raise it. Otherwise close each gap below (and where a check let a gap through, "
+            "tighten it with set_goal), commit, and call check_milestone to re-audit."
             f"\n\n{summary}")
 
 
@@ -1443,15 +1486,31 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     """The supervisor is about to stop. Returns a "block" decision telling it
     to keep going, or None to let it stop."""
     ap = db.get_autopilot(agent.id)
-    if ap is None or not ap.enabled or not ap.goal or ap.state != "running":
+    if ap is None or not ap.enabled or not ap.goal:
         return None
+    from brindle import agents
+
+    if ap.state == "auditing":
+        if ap.auditor_id:
+            auditor = db.get_agent(ap.auditor_id)
+            if auditor is None or auditor.status in ("paused", "done") or not agents.is_alive(auditor) or auditor.result is not None:
+                # Auditor was spawned but is no longer running (dead or crashed without verdict).
+                # Reset state to running so autopilot can recover.
+                db.update_autopilot(agent.id, state="running", auditor_id=None)
+                ap = db.get_autopilot(agent.id)
+            else:
+                return None
+        else:
+            return None
+    elif ap.state != "running":
+        return None
+
     ws = db.get_workspace(agent.workspace_id)
     cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
     ms = db.milestones(agent.id)
-    if ms and all(m.status == "passed" for m in ms) and audit_due(ap, cfg, _commit(ws)) is None:
+    if ms and all(m.status == "passed" for m in ms) and audit_due(ap, cfg, _commit(ws, tracked_only=True)) is None:
         db.update_autopilot(agent.id, state="done")
         return None
-    from brindle import agents
 
     if over_limit(db, agent.id, cfg):
         return None  # workers included: they'd keep burning usage

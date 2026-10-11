@@ -317,6 +317,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle start [-a PROFILE] [-p PROMPT] [--no-watch] [--no-autopilot] [-b BRANCH] [-w PATH]` | the same, with options; `-b`/`-w` run it in that branch's worktree (created if needed, or the one you already made), which gets the repo's `.brindle` config |
 | `brindle handover --to BRANCH\|PATH [-n NOTE]` | hand the session to a new supervisor there: goal and milestones, workers, queued tasks and your note move across; the old one is paused |
 | `brindle autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
+| `brindle audit-decision FINDING [-r RATIONALE]` | record acceptance of an audit finding with rationale so subsequent audits respect it |
 | `brindle delegation [conservative\|balanced\|fast]` | how readily the supervisor delegates: fewest tokens, the default, or quickest |
 | `brindle transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `brindle ls [--all]` | workspaces and agents |
@@ -336,7 +337,6 @@ your own status line prints, so what you see doesn't change.
 | `brindle account [login\|logout\|status\|upgrade\|portal\|seats\|org]` | paid features: bare `brindle account` shows what your plan has and how to get the rest (see "brindle Pro and Team" below) |
 | `brindle login` | the same as `brindle account login`; when your org's policy has an `agent_setup` block it also signs you in to the Claude and Codex route the company chose (AWS SSO profile, `gcloud`, `az`, `claude auth login`, `codex login`), stores the Claude Code environment for brindle's panes in `~/.brindle/config.json`, and checks the pinned models. `brindle doctor --fix` does the same |
 | `brindle audit verify\|export\|pubkey\|ship\|prune` | the local tamper-evident audit log, and shipping it to your SIEM (brindle Enterprise; see "Audit log" below) |
-| `brindle audit-decision FINDING [--rationale RATIONALE]` | record acceptance of an audit finding with rationale |
 | `brindle watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks, `x` closes |
 | `brindle sidebar` | bring this session's sidebar into the tmux session you're in (also `Ctrl-b S` in a window without one); restarts it if it was closed |
 | `brindle attach / cd / open [WS]` | tmux session (at the agent waiting on you, else the busiest or newest) / path / editor |
@@ -379,7 +379,7 @@ knowing them helps when you tell the supervisor how to work.
 | `approve_plan` | supervisor | approve a worker's plan, or send it back with feedback (`approved=false`) |
 | `complete_subagent` | supervisor | record the result of a `subagent`-profile task |
 | `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
-| `record_audit_decision` | supervisor | record acceptance of an audit finding with rationale for subsequent audits |
+| `record_audit_decision` | supervisor | record acceptance of an audit finding with rationale so subsequent audits respect it |
 | `need_user` | supervisor | stop autopilot and ask you a question |
 | `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
 | `handover` | supervisor | hand the session to a new supervisor on another branch or worktree, with a note |
