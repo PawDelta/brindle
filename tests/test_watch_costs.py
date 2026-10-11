@@ -34,6 +34,7 @@ def test_usage_share_by_model_top_three_and_other():
     assert [t.split()[0] for t in body] == ["opus", "sonnet", "haiku", "other"]
     assert [t.split()[-1] for t in body] == ["62%", "31%", "4%", "3%"]
     assert "$" not in "".join(body)
+    assert "█" not in "".join(body) and "░" not in "".join(body)
     assert len(lines) == 5
 
 

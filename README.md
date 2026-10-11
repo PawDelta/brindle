@@ -501,7 +501,7 @@ Autopilot, merge gates and cleanup:
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
 | `check_concurrency` | `2` | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
-| `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` (Fable) before handing it to you; `true` turns it on for a cloud account, `false` off |
+| `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` before handing it to you; `true` turns it on for a cloud account, `false` off |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
@@ -554,27 +554,30 @@ When a workspace is created (including from the pool), brindle starts one contai
 
 ### Routing by weight
 
-The supervisor sizes a task and passes `weight` (`"light"`, `"medium"` or
-`"heavy"`) to `assign`/`handoff`; brindle picks an available profile for that tier.
+The supervisor sizes a task and passes `weight` (`"light"`, `"medium"`,
+`"heavy"` or `"reasoning"`, with `"complex"` accepted as an alias) to
+`assign`/`handoff`; brindle picks an available profile for that tier.
 Light is small, well-specified, mechanical work (docs, renames, simple tests);
-medium is a normal feature or bugfix in one area; heavy is design-heavy,
-cross-cutting work, subtle bugs or hard reasoning. The `routing` config maps each
-tier to profile names: the first is the tier's baseline, the rest are candidates
-hosted learning may pick instead (defaults shown; set one tier and the others
-keep theirs):
+medium is a normal feature or bugfix in one area; heavy is architecture design,
+broad cross-cutting refactors, or subtle bugs; reasoning is deep frontier
+reasoning, hard algorithmic constraints, or deadlock resolution. The `routing`
+config maps each tier to profile names: the first is the tier's baseline, the
+rest are candidates hosted learning may pick instead (defaults shown; set one
+tier and the others keep theirs):
 
 ```json
 {
   "routing": {
-    "light":  ["developer-light", "developer", "developer-codex", "developer-local"],
-    "medium": ["developer", "developer-codex", "developer-heavy"],
-    "heavy":  ["developer", "developer-heavy", "developer-codex"]
+    "light":     ["developer-light", "developer", "developer-codex", "developer-local"],
+    "medium":    ["developer", "developer-codex", "developer-heavy"],
+    "heavy":     ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
+    "reasoning": ["developer-fable", "developer-heavy", "developer-gemini"]
   }
 }
 ```
 
-No tier prefers another provider for its own sake: all-Claude or all-Codex may
-be what works best for you, and that's for the learner to find out.
+No tier prefers another provider for its own sake: all-Claude, all-Codex or
+all-Gemini may be what works best for you, and that's for the learner to find out.
 
 Routing merges per tier in this order: built-in defaults, `~/.brindle/config.json`
 (every repo), the repo's `.brindle/config.json` (shared with the team), then
@@ -592,8 +595,9 @@ each tier. Unknown profile names are skipped; doctor and the routing reply
 report the missing name and the file that supplied it.
 
 `developer-light` runs on Claude Haiku at low effort; `developer` on your Claude
-Code default model; `developer-codex` on Codex; `developer-heavy` on Claude Fable
-at high effort.
+Code default model; `developer-codex` on Codex; `developer-heavy` on Claude Opus
+at high effort; `developer-gemini` on Google Antigravity (Gemini) with high effort
+(Tier 3); `developer-fable` on Claude Fable at high effort (Tier 4 reasoning).
 A profile is skipped when its CLI isn't installed (`claude`, `codex`, `agy`), the
 local model server isn't answering, or its provider is at your `usage_limit`. If
 hosted learning is on it chooses among the profiles left; otherwise the first

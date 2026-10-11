@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 
 GROUP = plugins.EVENTS
 KINDS = ("assign", "handoff", "review", "escalated", "merge", "remove", "deny_assign",
-         "deny_merge")
+         "deny_merge", "cost")
 
 
 @dataclass(frozen=True)
@@ -100,9 +100,9 @@ def _model(profile: str | None, repo_root: str) -> str | None:
 
 
 def _cost(kind: str, worker: Agent | None, repo_root: str) -> float | None:
-    """What ``worker`` spent, for the ``remove`` event that ends it, when the
+    """What ``worker`` spent, for the ``remove`` or ``cost`` event that ends it or tracks spend, when the
     org counts spend (Team ``org_budgets``); None otherwise or when it can't be priced."""
-    if kind != "remove" or worker is None:
+    if kind not in ("remove", "cost") or worker is None:
         return None
     try:
         from brindle import budget
@@ -111,8 +111,14 @@ def _cost(kind: str, worker: Agent | None, repo_root: str) -> float | None:
 
         if not license.has("org_budgets"):
             return None
-        spent = budget.worker_spend(DB(), worker, repo_root)
-        return round(spent, 4) if spent else None
+        db = DB()
+        spent = budget.worker_spend(db, worker, repo_root)
+        if spent is None:
+            return None
+        get_rep = getattr(db, "get_reported_spend", None)
+        reported = get_rep(worker.id) if callable(get_rep) else 0.0
+        delta = round(spent - (reported or 0.0), 4)
+        return delta if delta > 0 else None
     except Exception:
         log.debug("brindle: couldn't price %s for the event", worker.id, exc_info=True)
         return None
@@ -125,7 +131,7 @@ def _by_model(kind: str, worker: Agent | None, repo_root: str,
     (which can include live usage) exceeds what the history rows add up to,
     the remainder is an "unknown model" entry with no tokens, so the split
     sums to ``cost_usd``."""
-    if kind != "remove" or worker is None:
+    if kind not in ("remove", "cost") or worker is None:
         return None
     try:
         from brindle import cost
@@ -146,10 +152,20 @@ def _by_model(kind: str, worker: Agent | None, repo_root: str,
             slot = out.setdefault(cost.model_label(p), {"tokens": 0, "usd": 0.0})
             slot["tokens"] += p.tokens
             slot["usd"] += p.dollars or 0.0
-        rest = round((cost_usd or 0.0) - sum(b["usd"] for b in out.values()), 4)
-        if rest > 0:
-            slot = out.setdefault("unknown model", {"tokens": 0, "usd": 0.0})
-            slot["usd"] += rest
+        total_usd = sum(b["usd"] for b in out.values())
+        if cost_usd is not None and total_usd > cost_usd > 0:
+            factor = cost_usd / total_usd
+            for b in out.values():
+                b["usd"] = round(b["usd"] * factor, 4)
+            diff = round(cost_usd - sum(b["usd"] for b in out.values()), 4)
+            if diff:
+                first = next(iter(out.values()))
+                first["usd"] = round(first["usd"] + diff, 4)
+        else:
+            rest = round((cost_usd or 0.0) - total_usd, 4)
+            if rest > 0:
+                slot = out.setdefault("unknown model", {"tokens": 0, "usd": 0.0})
+                slot["usd"] += rest
         return out or None
     except Exception:
         log.debug("brindle: couldn't split %s by model for the event", worker.id, exc_info=True)
@@ -173,8 +189,57 @@ def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None,
             cost_usd=cost_usd,
             by_model=_by_model(kind, worker, ws.repo_root, cost_usd),
         ))
+        if cost_usd and worker and kind in ("remove", "cost"):
+            try:
+                from brindle.db import DB
+                db = DB()
+                set_rep = getattr(db, "set_reported_spend", None)
+                get_rep = getattr(db, "get_reported_spend", None)
+                if callable(set_rep) and callable(get_rep):
+                    old_reported = get_rep(worker.id) or 0.0
+                    set_rep(worker.id, round(old_reported + cost_usd, 4))
+            except Exception:
+                pass
     except Exception:
         log.exception("brindle: the events plugin failed on a %s event", kind)
+
+
+def emit_periodic_cost(cfg: RepoConfig, repo_root: str) -> list[str]:
+    """Check active agents (workers and supervisor sessions) in ``repo_root``,
+    compute their delta spend since last report, and emit a 'cost' event
+    if delta >= 0.01."""
+    from brindle import budget
+    from brindle.db import DB
+    from brindle.pro import license
+
+    done: list[str] = []
+    try:
+        if not license.has("org_budgets"):
+            return done
+    except Exception:
+        return done
+
+    try:
+        db = DB()
+        for a in db.list_agents():
+            if a.dismissed_at is not None:
+                continue
+            ws = db.get_workspace(a.workspace_id)
+            if ws is None or ws.repo_root != repo_root:
+                continue
+            spent = budget.worker_spend(db, a, repo_root)
+            if spent is None:
+                continue
+            get_rep = getattr(db, "get_reported_spend", None)
+            reported = get_rep(a.id) if callable(get_rep) else 0.0
+            delta = round(spent - (reported or 0.0), 4)
+            if delta < 0.01:
+                continue
+            emit(cfg, "cost", ws, worker=a)
+            done.append(f"emitted periodic cost ${delta:.2f} for agent {a.id}")
+    except Exception:
+        log.exception("brindle: periodic cost check failed for %s", repo_root)
+    return done
 
 
 def emit_denial(cfg: RepoConfig, repo_root: str, what: str, reason: str, *,
@@ -194,5 +259,5 @@ def emit_denial(cfg: RepoConfig, repo_root: str, what: str, reason: str, *,
         log.exception("brindle: the events plugin failed on a deny_%s event", what)
 
 
-__all__ = ["GROUP", "KINDS", "Event", "EventsPlugin", "emit", "emit_denial", "plugin",
+__all__ = ["GROUP", "KINDS", "Event", "EventsPlugin", "emit", "emit_denial", "emit_periodic_cost", "plugin",
            "plugins_for"]

@@ -40,8 +40,20 @@ def test_light_starts_on_developer_light():
     assert p.model == "haiku" and p.effort == "low"
 
 
-def test_heavy_starts_on_developer_with_developer_heavy_next():
-    assert DEFAULT_ROUTING["heavy"][:2] == ["developer", "developer-heavy"]
+def test_heavy_starts_on_developer_heavy():
+    assert DEFAULT_ROUTING["heavy"][0] == "developer-heavy"
+    assert DEFAULT_ROUTING["heavy"][1:] == ["developer-gemini", "developer", "developer-codex"]
+    p = load_profile("developer-heavy")
+    assert p.model == "opus" and p.effort == "high"
+    gemini = load_profile("developer-gemini")
+    assert gemini.provider == "antigravity" and gemini.effort == "high"
+
+
+def test_reasoning_starts_on_developer_fable():
+    assert DEFAULT_ROUTING["reasoning"][0] == "developer-fable"
+    assert DEFAULT_ROUTING["reasoning"][1:] == ["developer-heavy", "developer-gemini"]
+    fable = load_profile("developer-fable")
+    assert fable.model == "fable" and fable.effort == "high"
 
 
 def test_an_unweighted_task_offers_the_learner_the_medium_candidates(db, repo, monkeypatch):

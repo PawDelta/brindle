@@ -98,7 +98,8 @@ def test_routing_merges_user_repo_and_local_per_tier(repo, tmp_path):
     cfg = load_repo_config(repo)
     assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer-local"], "medium": ["developer-heavy"]}
     assert cfg.routing_sources == {
-        "light": str(local), "medium": str(repo / ".brindle" / "config.json"), "heavy": "DEFAULT_ROUTING",
+        "light": str(local), "medium": str(repo / ".brindle" / "config.json"),
+        "heavy": "DEFAULT_ROUTING", "reasoning": "DEFAULT_ROUTING",
     }
     other_repo = tmp_path / "other-repo"
     other_repo.mkdir()
@@ -113,6 +114,7 @@ def test_repo_and_local_keep_untouched_user_tiers(repo):
         json.dumps({"routing": {"heavy": ["developer-local"]}}))
     assert load_repo_config(repo).routing == {
         "light": ["developer-codex"], "medium": ["developer-heavy"], "heavy": ["developer-local"],
+        "reasoning": DEFAULT_ROUTING["reasoning"],
     }
 
 
@@ -146,7 +148,7 @@ def test_doctor_prints_effective_routing_and_each_tiers_source(repo, monkeypatch
     monkeypatch.setattr(doctor, "native_checks", lambda root: [])
     # Exercise the section in the full report, not just its helper.
     checks = [c for c in doctor.checks(str(repo)) if c.name.startswith("routing ")]
-    assert len(checks) == 3
+    assert len(checks) == len(DEFAULT_ROUTING)
     assert all(c.level == doctor.OK for c in checks)
     rendered = doctor.render(checks)
     for tier in DEFAULT_ROUTING:
@@ -158,8 +160,10 @@ def test_doctor_prints_effective_routing_and_each_tiers_source(repo, monkeypatch
 
 def test_weight_picks_the_first_candidate(db, repo, boss):
     why = []
-    assert choose(db, repo, weight="heavy", why=why) == ("developer", False)
-    assert len(why) == 1 and why[0].startswith("weight heavy -> developer")
+    assert choose(db, repo, weight="reasoning", why=why) == ("developer-fable", False)
+    assert len(why) == 1 and why[0].startswith("weight reasoning -> developer-fable")
+    assert choose(db, repo, weight="complex")[0] == "developer-fable"
+    assert choose(db, repo, weight="heavy")[0] == "developer-heavy"
     # No tier prefers another provider for its own sake: the baselines are
     # Claude profiles; Codex and the local model are learner candidates.
     assert choose(db, repo, weight="medium")[0] == "developer"
@@ -183,13 +187,13 @@ def test_precedence_explicit_then_milestone_then_weight(db, repo, boss):
     assert choose(db, repo, None, "heavy")[0] == "developer-local"
     milestone = db.milestones("boss")[0]
     db.record_check(milestone.id, True, "", "sha")
-    assert choose(db, repo, None, "heavy")[0] == "developer"
+    assert choose(db, repo, None, "heavy")[0] == "developer-heavy"
 
 
 def test_weight_routing_beats_learning_candidates(db, repo, boss, monkeypatch):
     install(monkeypatch, Picker(prefer="developer-local"))
     config(repo, learning="cloud", learning_candidates=["developer-local"])
-    assert choose(db, repo, weight="heavy")[0] == "developer"
+    assert choose(db, repo, weight="heavy")[0] == "developer-heavy"
 
 
 def test_missing_cli_is_skipped(db, repo, boss, monkeypatch):

@@ -47,7 +47,7 @@ from brindle.pro._files import private_dir, read_private, write_private
 log = logging.getLogger(__name__)
 
 FEATURE = "team"
-KINDS = ("assign", "handoff", "review", "escalated", "merge", "remove")
+KINDS = ("assign", "handoff", "review", "escalated", "merge", "remove", "cost")
 PAYLOAD_KEYS = ("kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref",
                 "at", "approved", "merged", "cost_usd", "by_model")
 MAX_EVENT_COST_USD = 100_000     # the backend refuses more

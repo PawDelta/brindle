@@ -247,12 +247,12 @@ async def handoff(
     profile is used, else `weight` routes to an available profile, else the
     repo's default agent.
 
-    weight: "light", "medium" or "heavy" (when you don't need a specific
+    weight: "light", "medium", "heavy" or "reasoning" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = normal feature work, refactors, cross-cutting edits,
-    or bugfixes; heavy = reserved for exceptionally complex algorithmic work,
-    subtle bugs that failed earlier fix rounds, or deep reasoning.
+    simple tests); medium = normal feature work or bugfixes; heavy = system
+    architecture, broad refactoring; reasoning = complex frontier reasoning,
+    deep algorithmic proofs, or deadlock resolution.
 
     Waits up to wait_seconds (default 4 minutes). If the worker isn't done by
     then, this returns "still running": call wait_for_worker to keep waiting,
@@ -384,12 +384,12 @@ async def assign(
     profile is used, else `weight` routes to an available profile, else the
     repo's default agent.
 
-    weight: "light", "medium" or "heavy" (when you don't need a specific
+    weight: "light", "medium", "heavy" or "reasoning" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = normal feature work, refactors, cross-cutting edits,
-    or bugfixes; heavy = reserved for exceptionally complex algorithmic work,
-    subtle bugs that failed earlier fix rounds, or deep reasoning.
+    simple tests); medium = normal feature work or bugfixes; heavy = system
+    architecture, broad refactoring; reasoning = complex frontier reasoning,
+    deep algorithmic proofs, or deadlock resolution.
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.

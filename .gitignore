@@ -12,3 +12,5 @@ docs/
 .brindle/bench.json
 .DS_Store
 commit_msg.txt
+model_routing_plan.*
+open_plan.py

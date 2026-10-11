@@ -50,17 +50,13 @@ def test_routing_explanation_includes_model_and_cost_signal(db, repo, monkeypatc
     monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
 
     why = []
-    profile, learned = autopilot.choose_profile(db, "caller-3", str(repo), weight="heavy", why=why)
+    profile, learned = autopilot.choose_profile(db, "caller-3", str(repo), weight="medium", why=why)
     joined = " ".join(why)
     assert profile == "developer"
     assert "inherited CLI default" in joined
     assert "medium cost tier" in joined
 
     # When a heavy profile is selected, cost tier must show most expensive tier
-    cfg_heavy = RepoConfig()
-    cfg_heavy.routing["heavy"] = ["developer-heavy"]
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg_heavy)
-    monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
     why_h = []
     profile_h, _ = autopilot.choose_profile(db, "caller-h", str(repo), weight="heavy", why=why_h)
     joined_h = " ".join(why_h)

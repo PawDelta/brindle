@@ -473,6 +473,14 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
         return f"{problem}, skipped {name}"
     from brindle import model_access
 
+    try:
+        from brindle import policy as pol
+        d = pol.check_assign(cfg, repo_root, name, "", "assign", weight=weight)
+        if not d.allowed:
+            return f"policy refused ({d.reason}), skipped {name}"
+    except Exception:
+        pass
+
     denied = model_access.refused(name, repo_root)
     if denied:
         return f"model refused for this account ({denied.cause}; {denied.fix}), skipped {name}"
@@ -506,7 +514,7 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
-    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
     order = cfg.routing.get(weight, [])
     if effective_ceiling:
@@ -594,6 +602,13 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
                 m = applied.model
     except Exception:
         pass
+    if not m:
+        if provider == "codex":
+            m = "gpt-5.3-codex"
+        elif provider == "antigravity":
+            m = "gemini-2.5-pro"
+        elif provider == "claude":
+            m = "claude-sonnet-4-6"
     return m.strip()
 
 
@@ -608,7 +623,7 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
         if p.effort:
             model_info.append(f"{p.effort} effort")
         pw = profile_weight(name, cfg, repo_root)
-        if pw == "heavy":
+        if pw in ("heavy", "reasoning"):
             cost_tier = "most expensive tier"
         elif pw == "light":
             cost_tier = "lowest cost tier"
@@ -621,7 +636,9 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
 
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
-    """The tier/weight of a profile ('light', 'medium', 'heavy')."""
+    """The tier/weight of a profile ('light', 'medium', 'heavy', 'reasoning')."""
+    if "-fable" in name or "-reasoning" in name:
+        return "reasoning"
     try:
         p = load_profile(name, repo_root)
         m = effective_profile_model(p, repo_root).lower()
@@ -647,6 +664,9 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
         in_light = name in cfg.routing.get("light", [])
         in_med = name in cfg.routing.get("medium", [])
         in_heavy = name in cfg.routing.get("heavy", [])
+        in_reasoning = name in cfg.routing.get("reasoning", [])
+        if in_reasoning and not in_heavy and not in_med and not in_light:
+            return "reasoning"
         if in_heavy and not in_med and not in_light:
             return "heavy"
         if in_light and not in_med and not in_heavy:
@@ -670,7 +690,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     filled with what ``brindle.savings`` records: the ``profile``, the
     ``baseline`` (the pick without learning), ``learned`` and the ``weight``."""
     cfg = load_repo_config(repo_root)
-    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
 
     if requested:
@@ -700,20 +720,24 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                     why.append(f"milestone profile -> {name}{model_cost_info(name, cfg, repo_root)}")
     if not name:
         from brindle import learning
+        from brindle.config import normalize_weight
 
         if weight:
-            if weight not in WEIGHTS:
+            norm_weight = normalize_weight(weight)
+            if norm_weight not in WEIGHTS:
                 raise AutopilotError(f"weight must be one of {', '.join(WEIGHTS)}, not {weight!r}")
+            weight = norm_weight
             if ceiling and weight_order[weight] > weight_order[ceiling]:
                 orig_weight = weight
                 weight = ceiling
                 if why is not None:
                     why.append(f"weight {orig_weight} capped to {weight} by max_weight")
             if files and all(f.startswith("docs/") or f.endswith(".md") for f in files):
-                if weight == "heavy":
+                if weight in ("reasoning", "heavy"):
+                    orig_demote = weight
                     weight = "medium"
                     if why is not None:
-                        why.append("weight demoted from heavy to medium (docs only)")
+                        why.append(f"weight demoted from {orig_demote} to medium (docs only)")
                 elif weight == "medium":
                     weight = "light"
                     if why is not None:

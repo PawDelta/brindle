@@ -368,7 +368,7 @@ def start_queued(db: DB, task: Task) -> Agent:
     caller = db.get_agent(task.caller_id) if task.caller_id else None
     profile = task.profile
     cfg = load_repo_config(caller_ws.repo_root)
-    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
     if ceiling and profile:
         from brindle.autopilot import profile_weight, choose_profile

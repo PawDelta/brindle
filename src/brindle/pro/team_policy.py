@@ -843,10 +843,14 @@ class ProPolicy(PolicyPlugin):
             got = f"provider {info.provider!r}" if info.provider else "an undeclared provider"
             return deny(f"{who} uses {got}; org {p.org_id} allows only "
                         f"{', '.join(p.allowed_providers) or 'no providers'}")
-        if p.allowed_models is not None and info.model not in p.allowed_models:
-            got = f"model {info.model!r}" if info.model else "no declared model"
-            return deny(f"{who} uses {got}; org {p.org_id} allows only "
-                        f"{', '.join(p.allowed_models) or 'no models'} (set `model` in the profile)")
+        if p.allowed_models is not None:
+            from brindle import pricing
+            norm_model = pricing.normalize(info.model) if info.model else None
+            norm_allowed = {pricing.normalize(m) for m in p.allowed_models}
+            if norm_model not in norm_allowed and info.model not in p.allowed_models:
+                got = f"model {info.model!r}" if info.model else "no declared model"
+                return deny(f"{who} uses {got}; org {p.org_id} allows only "
+                            f"{', '.join(p.allowed_models) or 'no models'} (set `model` in the profile)")
         if p.allowed_profiles is not None and info.profile not in p.allowed_profiles:
             got = who if info.profile else "a delegation with no profile"
             return deny(f"{got} is not allowed; org {p.org_id} allows only "
