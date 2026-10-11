@@ -313,3 +313,21 @@ def test_inherited_anthropic_model_env_classifies_as_heavy(db, repo, monkeypatch
         autopilot.choose_profile(db, "caller-env", str(repo), requested="developer")
     assert "exceeds configured max_weight 'medium'" in str(exc_info.value)
 
+
+def test_cross_provider_model_env_isolation(db, repo, monkeypatch):
+    # Setting an expensive ANTHROPIC_MODEL must NOT bleed into Codex profiles
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-6")
+    assert autopilot.effective_profile_model("developer-codex") != "claude-opus-4-6"
+    assert autopilot.profile_weight("developer-codex") != "heavy"
+
+    cfg = RepoConfig(max_weight="medium")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+    p, _ = autopilot.choose_profile(db, "caller-codex", str(repo), requested="developer-codex")
+    assert p == "developer-codex"
+
+    # And setting CODEX_MODEL must NOT bleed into Claude profiles
+    monkeypatch.setenv("CODEX_MODEL", "o3")
+    assert autopilot.effective_profile_model("developer") == "claude-opus-4-6"
+    assert autopilot.effective_profile_model("developer-light") != "o3"
+
+

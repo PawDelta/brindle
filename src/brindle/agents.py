@@ -688,16 +688,16 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     # no personal keys (blank, so the launcher's own copy doesn't count).
     from brindle.pro import managed_models
 
-    launch_env = {**profile.env, **managed_models.agent_env(m, provider.name)}
+    effective_env = agent_env(ws, agent.id, agent, m)
     deny = pane_auth.deny_names(provider.name, profile.auth, m,
                                 provider.name == "claude" and bool(providers.claude_org_managed()))
     org_key = managed_models.has_org_key(m, provider.name)
-    why = pane_auth.key_problem(profile, provider.name, deny, org_key)
+    effective_for_probe = {**effective_env, **{k: "" for k in secrets.pane_deny(deny, effective_env)}}
+    why = pane_auth.key_problem(profile, provider.name, deny, org_key, effective_env=effective_for_probe)
     if why:
         raise AgentError(why)
     # The org's own key signs the agent in: there is no login to check.
-    why = None if org_key else signed_out(
-        provider.name, {**launch_env, **{k: "" for k in secrets.pane_deny(deny, launch_env)}})
+    why = None if org_key else signed_out(provider.name, effective_for_probe)
     if why:
         raise AgentError(why)
     # Here rather than in spawn, so a resume checks too: a directory can be
@@ -973,7 +973,8 @@ def latest_paused(db: DB, ws: Workspace) -> Agent | None:
 
 
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
-           only: set[str] | None = None) -> list[Agent]:
+           only: set[str] | list[str] | None = None,
+           recovery_env: dict[str, str] | None = None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task.
@@ -983,12 +984,21 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     providers.invalidate_signed_in()
     from brindle import keystore, secrets
 
+    # Explicit recovery replacements (from recovery_env or current process environment) take precedence
+    env_keys = recovery_env if recovery_env is not None else {
+        k: os.environ[k] for k in keystore.known_names()
+        if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)
+    }
+
     for k in keystore.known_names():
-        ks_val, ks_time = keystore.get_key_info(k)
-        if ks_val:
-            db.set_session_credential(root_id, k, ks_val)
-        elif k in os.environ and os.environ[k] and not secrets.is_job_secret(k):
-            db.set_session_credential(root_id, k, os.environ[k])
+        if k in env_keys:
+            db.set_session_credential(root_id, k, env_keys[k])
+            os.environ[k] = env_keys[k]
+        else:
+            ks_val, ks_time = keystore.get_key_info(k)
+            if ks_val:
+                db.set_session_credential(root_id, k, ks_val)
+                os.environ[k] = ks_val
 
     candidates = [a for a in tree(db, root_id)
                   if a.status in ("paused", "failed") and (only is None or a.id in only)]

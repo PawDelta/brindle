@@ -43,7 +43,7 @@ def deny_names(provider: str, auth: str, m, org_managed: bool = False) -> tuple[
 
 
 def key_problem(profile, provider: str, deny: Iterable[str], org_key: bool,
-                exec_mode: bool = False) -> str | None:
+                exec_mode: bool = False, effective_env: dict[str, str] | None = None) -> str | None:
     """Why ``profile`` (``auth: api_key``) can't start for lack of a key, or
     None. A key counts when the org supplies one, or one of the provider's key
     variables isn't denied and is set (the profile's env, the environment) or
@@ -57,6 +57,7 @@ def key_problem(profile, provider: str, deny: Iterable[str], org_key: bool,
         return None
     denied = set(deny)
     usable = [n for n in names if n not in denied]
+    eff = effective_env or {}
     if provider == "codex" and usable:
         from brindle import providers
 
@@ -66,14 +67,14 @@ def key_problem(profile, provider: str, deny: Iterable[str], org_key: bool,
                 return f"profile {profile.name!r} has auth: api_key, but " + providers.CODEX_INTERACTIVE_IGNORES_KEYS
             # `codex exec` takes CODEX_API_KEY and ignores OPENAI_API_KEY.
             had_openai = bool(profile.env.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-                              or keystore.pane_keys(["OPENAI_API_KEY"]))
+                              or eff.get("OPENAI_API_KEY") or keystore.pane_keys(["OPENAI_API_KEY"]))
             usable = [n for n in usable if n != "OPENAI_API_KEY"]
             have_codex = "CODEX_API_KEY" in usable and (
                 profile.env.get("CODEX_API_KEY") or os.environ.get("CODEX_API_KEY")
-                or keystore.pane_keys(["CODEX_API_KEY"]))
+                or eff.get("CODEX_API_KEY") or keystore.pane_keys(["CODEX_API_KEY"]))
             if had_openai and not have_codex:
                 return f"profile {profile.name!r} has auth: api_key, but " + providers.CODEX_EXEC_IGNORES_OPENAI_KEY
-    if any(profile.env.get(n) or os.environ.get(n) for n in usable) or keystore.pane_keys(usable):
+    if any(profile.env.get(n) or os.environ.get(n) or eff.get(n) for n in usable) or keystore.pane_keys(usable):
         if provider == "antigravity":
             from brindle import providers
 

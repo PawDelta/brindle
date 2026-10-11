@@ -116,6 +116,7 @@ def test_continue_cmd_recovers_live_session_with_failed_workers(db, repo, monkey
     resumed_ids = []
     def fake_resume(db_arg, root_id, **kwargs):
         resumed_ids.append(root_id)
+        db.set_status(worker.id, "idle")
         return [worker]
 
     monkeypatch.setattr(agents, "resume", fake_resume)
@@ -514,4 +515,107 @@ def test_resume_preserves_blocked_autopilot_state_when_agent_fails_to_restart(db
     ap = db.get_autopilot(supervisor.id)
     assert ap.state == "blocked"
     assert "Credentials need attention" in (ap.note or "")
+
+
+def test_launch_resolves_effective_credentials_before_signed_out_probe(db, repo, monkeypatch):
+    from brindle import keystore, providers
+    from brindle.db import Workspace
+    ws = Workspace("ws-launch-eff", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-le", 0)
+    db.add_workspace(ws)
+    worker = agents.spawn(db, ws, "developer", mode="assign")
+
+    # Set key in keystore (no key in os.environ)
+    keystore.set_key("ANTHROPIC_API_KEY", "dummy-replacement-key-555")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    # Fake signed_out probe: if ANTHROPIC_API_KEY is not in full_env, reports loggedIn=False
+    def fake_auth_probe(argv, env=None):
+        if env and env.get("ANTHROPIC_API_KEY") == "dummy-replacement-key-555":
+            return 0, '{"loggedIn": true}'
+        return 1, '{"loggedIn": false}'
+
+    monkeypatch.setattr(providers, "_auth_probe", fake_auth_probe)
+    monkeypatch.setattr(providers, "_SIGNED_IN", {})
+    opened = []
+    monkeypatch.setattr(agents, "_open_window", lambda *args, **kwargs: opened.append(True))
+    monkeypatch.setattr(agents.get_provider("claude"), "after_launch", lambda target: None)
+
+    agents._launch(db, worker, ws, prompt="Task", resume=None, watch_pane=False)
+    assert len(opened) == 1
+
+    # With auth: subscription, API key is denied and probe fails with AgentError
+    from brindle.profiles import Profile
+    sub_prof = Profile("sub-worker", "developer", "claude", "Prompt", auth="subscription")
+    monkeypatch.setattr(agents, "_profile_for", lambda *args, **kwargs: sub_prof)
+    with pytest.raises(agents.AgentError) as exc:
+        agents._launch(db, worker, ws, prompt="Task", resume=None, watch_pane=False)
+    assert "signed in" in str(exc.value).lower()
+
+
+def test_continue_cmd_does_not_clear_blocked_state_when_resume_fails_or_owner_block(db, repo, monkeypatch):
+    from brindle import cli, procs, workspaces
+    ws = Workspace("ws-cli-block", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-cb", 0)
+    db.add_workspace(ws)
+
+    sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=sup.id)
+    db.set_status(worker.id, "failed")
+    db.update_autopilot(sup.id, state="blocked", note="Credentials need attention")
+
+    # 1. Procs.stop fails so resume cannot restart the worker
+    monkeypatch.setattr(procs, "stop", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("shutdown error")))
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+    monkeypatch.setattr(cli, "_run", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    monkeypatch.setattr(workspaces, "adopt_root", lambda db, cwd: ws)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.chdir(repo)
+
+    cli.continue_cmd(session_id=None, attach=False)
+    # Autopilot MUST remain blocked because worker is still failed
+    ap = db.get_autopilot(sup.id)
+    assert ap.state == "blocked"
+    assert "Credentials need attention" in (ap.note or "")
+
+    # 2. Even when worker restarts, if the block was an owner decision (not credentials), it is not cleared
+    db.set_status(worker.id, "idle")
+    db.update_autopilot(sup.id, state="blocked", note="Need user decision on database migration")
+    monkeypatch.setattr(procs, "stop", lambda *args, **kwargs: 1)
+    cli.continue_cmd(session_id=None, attach=False)
+    ap2 = db.get_autopilot(sup.id)
+    assert ap2.state == "blocked"
+    assert "Need user decision on database migration" in (ap2.note or "")
+
+
+def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkeypatch):
+    from brindle import keystore
+    from brindle.db import Workspace
+    ws = Workspace("ws-stale-ks", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-sks", 0)
+    db.add_workspace(ws)
+
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    db.set_status(worker.id, "failed")
+
+    # Keystore has an old stale key
+    keystore.set_key("ANTHROPIC_API_KEY", "stale-revoked-key")
+
+    # Recovery process provides a fresh exported key
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fresh-replacement-key-999")
+    monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: None)
+
+    agents.resume(db, supervisor.id)
+
+    # Session credentials must have the fresh exported replacement, NOT the stale keystore key!
+    sess_creds = db.get_session_credentials(supervisor.id)
+    assert sess_creds.get("ANTHROPIC_API_KEY") == "fresh-replacement-key-999"
+
+    # Subsequent worker delegated by supervisor gets the fresh replacement
+    delegated_env = {}
+    def capture_launch(db_arg, agent_arg, ws_arg, **kwargs):
+        delegated_env.update(agents.agent_env(ws_arg, agent_arg.id, agent_arg))
+
+    monkeypatch.setattr(agents, "_launch", capture_launch)
+    worker2, _ = agents.delegate(db, supervisor, ws, "developer", "Next task", "assign")
+    assert delegated_env.get("ANTHROPIC_API_KEY") == "fresh-replacement-key-999"
+
 

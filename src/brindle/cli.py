@@ -465,11 +465,19 @@ def _ago(seconds: float) -> str:
 
 
 def _clear_credentials_block(db: DB, root_id: str) -> bool:
+    from brindle import agents
     ap = db.get_autopilot(root_id)
-    if ap and ap.state == "blocked":
-        db.update_autopilot(root_id, state="running", note=None)
-        return True
-    return False
+    if not ap or ap.state != "blocked":
+        return False
+    note = (ap.note or "").lower()
+    if "credential" not in note and "sign in" not in note and "api key" not in note and "auth" not in note:
+        return False
+    tree = agents.tree(db, root_id)
+    failed = [a for a in tree if a.status == "failed"]
+    if failed:
+        return False
+    db.update_autopilot(root_id, state="running", note=None)
+    return True
 
 
 @app.command("continue")
@@ -478,7 +486,7 @@ def continue_cmd(
     attach: bool = typer.Option(True, "--attach/--no-attach"),
 ) -> None:
     """Pick up a paused session: the chat and its workers resume where they stopped."""
-    from brindle import scratch, sessions
+    from brindle import keystore, scratch, secrets, sessions
 
     db = DB()
     cwd = os.getcwd()
@@ -502,8 +510,10 @@ def continue_cmd(
         if failed_workers or is_blocked or live.status == "failed":
             live_needs_recovery = True
 
+    recovery_env = {k: os.environ[k] for k in keystore.known_names() if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)}
+
     if session_id and live and live.id.startswith(session_id):
-        resumed = _run(agents.resume, db, live.id)
+        resumed = _run(agents.resume, db, live.id, recovery_env=recovery_env)
         _clear_credentials_block(db, live.id)
         typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
         live = db.get_agent(live.id) or live
@@ -512,7 +522,7 @@ def continue_cmd(
         return
 
     if not session_id and live_needs_recovery:
-        resumed = _run(agents.resume, db, live.id)
+        resumed = _run(agents.resume, db, live.id, recovery_env=recovery_env)
         _clear_credentials_block(db, live.id)
         typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
         live = db.get_agent(live.id) or live
@@ -538,7 +548,7 @@ def continue_cmd(
         chosen = available[0]
     others = [s for s in available if s.root.id != chosen.root.id]
     _pause_running(db, ws)
-    resumed = _run(agents.resume, db, chosen.root.id)
+    resumed = _run(agents.resume, db, chosen.root.id, recovery_env=recovery_env)
     _clear_credentials_block(db, chosen.root.id)
     typer.secho(f"↺ continuing {_describe(chosen)} ({len(resumed)} agent(s) restarted)", fg="green")
     _local_models_detached(ws.repo_root)

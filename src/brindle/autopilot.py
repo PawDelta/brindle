@@ -536,20 +536,38 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
 
 
 def effective_profile_model(p, repo_root: str | None = None) -> str:
-    """Resolve the effective model for a profile, checking model, env variables, and managed overrides."""
-    m = getattr(p, "model", None) or ""
-    if not m and getattr(p, "env", None):
-        for k in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL", "GEMINI_MODEL", "MODEL"):
-            if p.env.get(k):
-                m = p.env[k]
+    """Resolve the effective model for a profile, checking model, provider-specific env variables, and managed overrides."""
+    from brindle import profiles
+
+    prof = p
+    if isinstance(p, str):
+        try:
+            prof = profiles.load_profile(p, repo_root)
+        except Exception:
+            prof = p
+
+    m = getattr(prof, "model", None) or ""
+    provider = getattr(prof, "provider", None) or "claude"
+
+    # Provider-specific model environment variables in order of provider precedence
+    provider_keys = {
+        "claude": ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "MODEL"),
+        "codex": ("CODEX_MODEL", "OPENAI_MODEL", "MODEL"),
+        "antigravity": ("GEMINI_MODEL", "MODEL"),
+    }.get(provider, ("MODEL",))
+
+    if not m and getattr(prof, "env", None):
+        for k in provider_keys:
+            if prof.env.get(k):
+                m = prof.env[k]
                 break
         if not m:
-            for k, v in p.env.items():
+            for k, v in prof.env.items():
                 if "MODEL" in k and v:
                     m = v
                     break
     if not m:
-        for k in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL", "GEMINI_MODEL", "MODEL"):
+        for k in provider_keys:
             val = os.environ.get(k)
             if val and val.strip():
                 m = val.strip()
@@ -559,8 +577,8 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
         from brindle.pro import managed_models
         from brindle.agents import managed
         mg = managed(repo_root)
-        if mg:
-            applied = managed_models.apply_profile(mg, p)
+        if mg and not isinstance(prof, str):
+            applied = managed_models.apply_profile(mg, prof)
             if applied and applied.model:
                 m = applied.model
     except Exception:
