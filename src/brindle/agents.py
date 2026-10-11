@@ -992,11 +992,17 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         identity_lock.ensure(a)
     resumed = []
     for a in candidates:
-        if a.status == "failed" and a.tmux_window and same_server(a) and owns_pane(db, a):
+        if a.status == "failed":
+            if a.tmux_window and same_server(a) and owns_pane(db, a):
+                try:
+                    tmux.kill_window(a.tmux_window)
+                except Exception:
+                    pass
+            from brindle import procs
             try:
-                tmux.kill_window(a.tmux_window)
+                procs.stop([a.id], grace=2.0)
             except Exception:
-                pass
+                continue
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path):
             continue
@@ -1824,9 +1830,17 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
         return cfg.reviewer  # no learner: don't even probe the alternatives
     candidates = [cfg.reviewer]
     if unusable("antigravity") is None:
-        candidates.append("reviewer-gemini")
+        try:
+            load_profile("reviewer-gemini", repo_root)
+            candidates.append("reviewer-gemini")
+        except Exception:
+            pass
     if unusable("codex") is None:
-        candidates.append("reviewer-codex")
+        try:
+            load_profile("reviewer-codex", repo_root)
+            candidates.append("reviewer-codex")
+        except Exception:
+            pass
     if _local_reviewer_available():
         candidates.append("reviewer-local")
     candidates = list(dict.fromkeys(candidates))

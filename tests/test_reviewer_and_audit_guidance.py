@@ -400,3 +400,25 @@ def test_request_review_passes_full_brief_beyond_2000_chars(db, repo, monkeypatc
     prompt = spawned_prompts[0]
     # Verify that content beyond character 2000 is preserved
     assert "SCOPE EXCEPTION: Do not refactor legacy database connector." in prompt
+
+
+def test_clean_install_reviewer_selection_with_gemini(db, repo, monkeypatch):
+    from brindle.config import RepoConfig
+    from brindle import agents, profiles
+
+    cfg = RepoConfig()
+    # On a clean installation with antigravity usable:
+    monkeypatch.setattr(agents, "unusable", lambda p, *args, **kwargs: None if p == "antigravity" else "not installed")
+
+    from brindle import learning
+    monkeypatch.setattr(learning, "plugin", lambda c, r: object())
+    monkeypatch.setattr(learning, "choose_why", lambda db, cfg, repo, task, candidates, default: ("reviewer-gemini", "evidence"))
+
+    chosen = agents.default_review_profile(cfg, None, db=db, repo_root=str(repo), task="Test task")
+    assert chosen == "reviewer-gemini"
+
+    # Profile must be loadable on clean install without KeyError
+    p = profiles.load_profile(chosen, str(repo))
+    assert p.name == "reviewer-gemini"
+    assert p.provider == "antigravity"
+    assert "You are a code reviewer" in p.prompt

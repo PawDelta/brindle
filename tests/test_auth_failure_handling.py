@@ -376,3 +376,42 @@ def test_recovery_with_replacement_key_propagates_to_subsequent_delegated_worker
     monkeypatch.setattr(agents, "_launch", fake_launch)
     worker2, _ = agents.delegate(db, supervisor, ws, "developer", "Next task", "assign")
     assert delegated_env.get("ANTHROPIC_API_KEY") == "dummy-replacement-key-12345"
+
+
+def test_resume_calls_procs_stop_before_relaunch_and_preserves_failed_on_error(db, repo, monkeypatch):
+    from brindle import agents, procs
+
+    ws = Workspace("ws-stop-proc", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-sp", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    db.set_status(worker.id, "failed")
+
+    stopped = []
+    launched = []
+    def fake_stop(ids, grace=2.0):
+        stopped.extend(ids)
+        return len(ids)
+
+    def fake_launch(db_arg, agent_arg, ws_arg, **kwargs):
+        assert agent_arg.id in stopped
+        launched.append(agent_arg.id)
+
+    monkeypatch.setattr(procs, "stop", fake_stop)
+    monkeypatch.setattr(agents, "_launch", fake_launch)
+
+    resumed = agents.resume(db, supervisor.id)
+    assert worker.id in stopped
+    assert worker.id in launched
+
+    # When procs.stop fails/raises, failed status is preserved and agent is not relaunched
+    db.set_status(worker.id, "failed")
+    launched.clear()
+    def fail_stop(*args, **kwargs):
+        raise RuntimeError("shutdown failed")
+    monkeypatch.setattr(procs, "stop", fail_stop)
+
+    resumed_err = agents.resume(db, supervisor.id)
+    assert worker.id not in launched
+    w = db.get_agent(worker.id)
+    assert w.status == "failed"

@@ -204,18 +204,27 @@ def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch
     p_light.model = "claude-fable-5-1"
     p_light.effort = "low"
 
+    # 3. Custom 'research-env' profile with model=None but env.ANTHROPIC_MODEL='claude-fable-5-1'
+    p_env = MagicMock()
+    p_env.model = None
+    p_env.effort = None
+    p_env.env = {"ANTHROPIC_MODEL": "claude-fable-5-1"}
+
     def fake_load_profile(name, *args, **kwargs):
         if name == "research":
             return p_research
         if name == "research-light":
             return p_light
+        if name == "research-env":
+            return p_env
         return profiles.load_profile(name, *args, **kwargs)
 
     monkeypatch.setattr(autopilot, "load_profile", fake_load_profile)
 
-    # Both must classify as heavy regardless of 'medium' or 'low' effort or '-light' name
+    # All must classify as heavy regardless of 'medium' or 'low' effort, '-light' name, or model in env
     assert autopilot.profile_weight("research") == "heavy"
     assert autopilot.profile_weight("research-light") == "heavy"
+    assert autopilot.profile_weight("research-env") == "heavy"
 
     # Under max_weight="medium", requesting either must be refused
     cfg = RepoConfig(max_weight="medium")
@@ -228,6 +237,10 @@ def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch
     with pytest.raises(autopilot.AutopilotError) as exc_info2:
         autopilot.choose_profile(db, "caller-res-light", str(repo), requested="research-light")
     assert "exceeds configured max_weight 'medium'" in str(exc_info2.value)
+
+    with pytest.raises(autopilot.AutopilotError) as exc_info3:
+        autopilot.choose_profile(db, "caller-res-env", str(repo), requested="research-env")
+    assert "exceeds configured max_weight 'medium'" in str(exc_info3.value)
 
 
 def test_milestone_selected_profile_includes_cost_feedback(db, repo, monkeypatch):

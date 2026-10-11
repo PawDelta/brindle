@@ -535,12 +535,39 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     return name, bool(pick), why
 
 
+def effective_profile_model(p, repo_root: str | None = None) -> str:
+    """Resolve the effective model for a profile, checking model, env variables, and managed overrides."""
+    m = getattr(p, "model", None) or ""
+    if not m and getattr(p, "env", None):
+        for k in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL", "GEMINI_MODEL", "MODEL"):
+            if p.env.get(k):
+                m = p.env[k]
+                break
+        if not m:
+            for k, v in p.env.items():
+                if "MODEL" in k and v:
+                    m = v
+                    break
+    try:
+        from brindle.pro import managed_models
+        from brindle.agents import managed
+        mg = managed(repo_root)
+        if mg:
+            applied = managed_models.apply_profile(mg, p)
+            if applied and applied.model:
+                m = applied.model
+    except Exception:
+        pass
+    return m.strip()
+
+
 def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
     """Format model name, effort, and cost tier as a cost signal string."""
     try:
         from brindle.profiles import load_profile
         p = load_profile(name, repo_root)
-        model_name = p.model or "inherited CLI default"
+        eff = effective_profile_model(p, repo_root)
+        model_name = eff or p.model or "inherited CLI default"
         model_info = [model_name]
         if p.effort:
             model_info.append(f"{p.effort} effort")
@@ -557,12 +584,11 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
         return ""
 
 
-
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
     """The tier/weight of a profile ('light', 'medium', 'heavy')."""
     try:
         p = load_profile(name, repo_root)
-        m = (p.model or "").lower()
+        m = effective_profile_model(p, repo_root).lower()
         if any(h in m for h in ("fable", "opus", "o3", "deepseek-r1", "astra")):
             return "heavy"
         if getattr(p, "effort", None) in ("high", "xhigh", "max"):
