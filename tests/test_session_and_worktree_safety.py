@@ -140,8 +140,10 @@ def test_remove_workspace_refuses_to_forget_when_directory_remains(db, repo, mon
     ws = created.workspace
     assert os.path.isdir(ws.path)
 
-    # Simulate git worktree remove failing and directory remaining
-    monkeypatch.setattr(git, "remove_worktree", lambda *args, **kwargs: None)
+    # Simulate both git worktree remove failing and filesystem removal failing
+    def fail_remove(*args, **kwargs):
+        raise git.GitError("git worktree remove failed")
+    monkeypatch.setattr(git, "remove_worktree", fail_remove)
     monkeypatch.setattr(shutil, "rmtree", lambda *args, **kwargs: None)
 
     with pytest.raises(workspaces.WorkspaceError) as exc_info:

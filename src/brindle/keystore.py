@@ -304,11 +304,11 @@ def list_keys(repo_root: str | None = None) -> dict[str, str]:
 
 def pane_keys(names, present=()) -> dict[str, str]:
     """The stored keys among ``names`` (an agent's own credential names) that
-    aren't in ``present`` or the process environment: the environment beats
-    the store. Never raises: a broken store just means no stored keys."""
+    aren't in ``present``: stored keys reach new panes. Never raises: a broken
+    store just means no stored keys."""
     out: dict[str, str] = {}
     for name in sorted(names):
-        if name in REFUSED or name in present or os.environ.get(name):
+        if name in REFUSED or name in present:
             continue
         try:
             value = get_key(name)

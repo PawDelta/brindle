@@ -192,13 +192,46 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # Provider credentials present in the current process environment:
         # freshly exported keys take effect in new panes instead of relying on
         # stale credentials in an existing tmux server.
-        from brindle import secrets
+        from brindle import keystore, secrets
         creds = set() if org else secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
         exported = {
             k: os.environ[k]
             for k in creds
             if k in os.environ and not secrets.is_job_secret(k)
         }
+
+        # Check for re-read stored/session credentials
+        # A fresh session credential (from recovery) or stored key (keystore)
+        # overrides stale inherited os.environ in long-running supervisor launchers.
+        session_creds = {}
+        try:
+            from brindle.db import DB
+            db_inst = DB()
+            root_id = agent.parent_id or agent_id if agent else agent_id
+            curr_id = root_id
+            while curr_id:
+                ca = db_inst.get_agent(curr_id)
+                if ca and ca.parent_id:
+                    curr_id = ca.parent_id
+                else:
+                    break
+            session_creds = db_inst.get_session_credentials(curr_id or root_id)
+        except Exception:
+            pass
+
+        for k in creds:
+            if k in session_creds:
+                exported[k] = session_creds[k]
+                os.environ[k] = session_creds[k]
+                continue
+            try:
+                val = keystore.get_key(k)
+                if val:
+                    exported[k] = val
+                    os.environ[k] = val
+            except Exception:
+                pass
+
         if enforced is None:
             env = {**company, **exported, **profile_env, **managed_env, **env}
         else:
@@ -947,6 +980,12 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     from brindle import identity_lock, providers
 
     providers.invalidate_signed_in()
+    from brindle import keystore, secrets
+
+    for k in keystore.known_names():
+        if k in os.environ and os.environ[k] and not secrets.is_job_secret(k):
+            db.set_session_credential(root_id, k, os.environ[k])
+
     candidates = [a for a in tree(db, root_id)
                   if a.status in ("paused", "failed") and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity

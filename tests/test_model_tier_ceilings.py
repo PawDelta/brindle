@@ -246,3 +246,43 @@ def test_milestone_selected_profile_includes_cost_feedback(db, repo, monkeypatch
     joined = " ".join(why)
     assert "developer-heavy" in joined
     assert "most expensive tier" in joined
+
+
+def test_assignment_and_queue_replies_include_cost_feedback_for_all_selections(db, repo, monkeypatch):
+    import asyncio
+    from brindle import mcp_server
+
+    ws = Workspace("ws-mcp-cost", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-mcp", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
+
+    from brindle.db import DB
+    monkeypatch.setattr(mcp_server, "DB", lambda: DB(db.path))
+    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (sup, ws))
+    monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: None)
+
+    cfg = RepoConfig()
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    # 1. Explicit selection (developer-heavy)
+    reply_exp = asyncio.run(mcp_server.assign(agent_profile="developer-heavy", task="explicit task"))
+    assert "developer-heavy" in reply_exp
+    assert "most expensive tier" in reply_exp
+
+    # 2. Pending milestone selection
+    autopilot.set_goal(db, sup.id, "Goal", [("Step 1", "true", "", "developer-heavy")])
+    reply_ms = asyncio.run(mcp_server.assign(task="milestone task"))
+    assert "developer-heavy" in reply_ms
+    assert "most expensive tier" in reply_ms
+
+    # 3. Default selection (no milestone, no explicit, no weight)
+    db.conn.execute("DELETE FROM milestones WHERE root_id=?", (sup.id,))
+    reply_def = asyncio.run(mcp_server.assign(task="default task"))
+    assert "developer" in reply_def
+    assert "medium cost tier" in reply_def
+
+    # 4. Queued task reply with explicit selection
+    reply_q = asyncio.run(mcp_server.assign(agent_profile="developer-heavy", task="queued task", depends_on=["unmet-dep"]))
+    assert "Queued task" in reply_q
+    assert "developer-heavy" in reply_q
+    assert "most expensive tier" in reply_q

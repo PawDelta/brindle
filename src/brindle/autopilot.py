@@ -727,6 +727,13 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             f"no agent profile named {name!r}; see list_agent_profiles, "
             "or pass agent_profile explicitly"
         ) from None
+    if why is not None:
+        info_str = model_cost_info(name, cfg, repo_root)
+        if info_str and not any("cost tier" in w for w in why):
+            if why:
+                why[-1] += info_str
+            else:
+                why.append(f"{name}{info_str}")
     return name, learned
 
 

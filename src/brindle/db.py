@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS session_repos (
     added_at REAL NOT NULL,
     PRIMARY KEY (root_id, alias)
 );
+CREATE TABLE IF NOT EXISTS session_credentials (
+    session_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (session_id, key)
+);
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
 CREATE TABLE IF NOT EXISTS reviews (
@@ -843,6 +850,23 @@ class DB:
                 "DELETE FROM pool_failures WHERE repo_root=? AND base_branch=?",
                 (repo_root, base_branch),
             )
+
+    # -- session credentials -----------------------------------------------
+
+    def set_session_credential(self, session_id: str, key: str, value: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO session_credentials (session_id, key, value, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (session_id, key, value, time.time()),
+            )
+
+    def get_session_credentials(self, session_id: str) -> dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT key, value FROM session_credentials WHERE session_id=?",
+            (session_id,),
+        ).fetchall()
+        return {k: v for k, v in rows}
 
     # -- agents ------------------------------------------------------------
 

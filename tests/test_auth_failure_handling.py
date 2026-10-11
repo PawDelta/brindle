@@ -338,3 +338,41 @@ def test_paused_session_continue_clears_credential_block_and_resumes_autopilot_d
     decision = autopilot.on_stop(db, sup_agent, {})
     assert decision is not None
     assert decision.get("decision") == "block"
+
+
+def test_recovery_with_replacement_key_propagates_to_subsequent_delegated_worker(db, repo, monkeypatch):
+    from brindle import agents, cli, workspaces
+    import os
+
+    ws = Workspace("ws-rec-prop", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-prop", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    db.set_status(worker.id, "failed")
+    db.add_autopilot(supervisor.id)
+    db.update_autopilot(supervisor.id, state="blocked", note="Credentials need attention")
+
+    # Simulate supervisor launcher having an expired key in its environment
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "expired-old-key")
+
+    # Recovery happens (e.g. cli.continue_cmd with replacement key exported in CLI process)
+    with monkeypatch.context() as m:
+        m.setenv("ANTHROPIC_API_KEY", "dummy-replacement-key-12345")
+        monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+        monkeypatch.setattr(cli, "_run", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+        monkeypatch.setattr(workspaces, "adopt_root", lambda db, cwd: ws)
+        monkeypatch.setattr(agents, "is_alive", lambda a: True)
+        monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: None)
+        monkeypatch.chdir(repo)
+
+        cli.continue_cmd(session_id=None, attach=False)
+
+    # Delegating a subsequent worker from supervisor reaches the worker with replacement key
+    delegated_env = {}
+    def fake_launch(db_arg, agent_arg, ws_arg, **kwargs):
+        env = agents.agent_env(ws_arg, agent_arg.id, agent_arg)
+        delegated_env.update(env)
+
+    monkeypatch.setattr(agents, "_launch", fake_launch)
+    worker2, _ = agents.delegate(db, supervisor, ws, "developer", "Next task", "assign")
+    assert delegated_env.get("ANTHROPIC_API_KEY") == "dummy-replacement-key-12345"
