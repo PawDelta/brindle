@@ -1822,6 +1822,12 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     model on its own: a Claude worker reviewed by a Claude reviewer is fine."""
     if cfg.review_profile:
         return cfg.review_profile
+    if unusable("antigravity") is None:
+        try:
+            load_profile("reviewer-gemini", repo_root)
+            return "reviewer-gemini"
+        except Exception:
+            pass
     if db is None or not repo_root:
         return cfg.reviewer
     from brindle import learning

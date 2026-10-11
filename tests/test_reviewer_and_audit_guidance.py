@@ -157,7 +157,7 @@ def test_audit_history_persists_across_need_user_and_user_spoke(db, repo):
 def test_all_builtin_reviewer_profiles_include_tiering_guidance():
     from brindle.profiles import load_profile
 
-    for name in ("reviewer", "reviewer-codex", "reviewer-local"):
+    for name in ("reviewer", "reviewer-gemini", "reviewer-codex", "reviewer-local"):
         prof = load_profile(name)
         prompt = prof.prompt
         assert "`blocker`" in prompt, f"{name} missing blocker"
@@ -422,3 +422,14 @@ def test_clean_install_reviewer_selection_with_gemini(db, repo, monkeypatch):
     assert p.name == "reviewer-gemini"
     assert p.provider == "antigravity"
     assert "You are a code reviewer" in p.prompt
+
+
+def test_default_review_profile_prefers_gemini_over_codex(db, repo, monkeypatch):
+    from brindle.config import RepoConfig
+    from brindle import agents
+
+    cfg = RepoConfig()
+    monkeypatch.setattr(agents, "unusable", lambda p, *args, **kwargs: None)
+    chosen = agents.default_review_profile(cfg, None, db=db, repo_root=str(repo), task="Test task")
+    assert chosen == "reviewer-gemini"
+
