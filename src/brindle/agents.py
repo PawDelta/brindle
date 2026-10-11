@@ -1886,13 +1886,8 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     if learning.plugin(cfg, repo_root) is None:
         return cfg.reviewer  # no learner: don't even probe the alternatives
     candidates = [cfg.reviewer]
-    try:
-        from brindle.profiles import load_profile
-        load_profile("reviewer-gemini", repo_root)
-        if unusable("antigravity") is None:
-            candidates.append("reviewer-gemini")
-    except KeyError:
-        pass
+    if unusable("codex") is None:
+        candidates.append("reviewer-codex")
     if _local_reviewer_available():
         candidates.append("reviewer-local")
     candidates = list(dict.fromkeys(candidates))
