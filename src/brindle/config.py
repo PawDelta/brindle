@@ -68,8 +68,8 @@ class RepoConfig:
     autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
-    reviewer: str = "reviewer-gemini"         # agent profile that reviews branches
-    review_profile: str | None = "reviewer-gemini"  # force request_review's profile (skips its automatic cross-model pick)
+    reviewer: str = "reviewer"         # agent profile that reviews branches
+    review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
     # Weight -> reviewer profile for a second, independent review of work of that weight;
     # the pipeline merges only when both approve. Empty: one review (see brindle.pipeline).
     second_review: dict[str, str] = field(default_factory=dict)
