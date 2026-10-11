@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 4146
+TEST_BUDGET = 4148
 
 
 class Finding(NamedTuple):
@@ -46,7 +46,9 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
     """Inspect calls, ignoring strings/comments and lexically mocked sleeps.
 
     Recognize unittest.mock.patch/patch.object contexts and decorators, and
-    preceding monkeypatch.setattr calls in the same scope. Fixture-installed
+    preceding monkeypatch.setattr calls or explicitly started patchers in the
+    same scope. Patching the time module does not replace direct sleep imports.
+    Fixture-installed
     mocks cannot be proven statically; keep direct sleep calls in mock scopes.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -59,36 +61,52 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
         elif isinstance(node, ast.ImportFrom) and node.module == "time":
             for alias in node.names:
                 if alias.name == "sleep":
-                    aliases[alias.asname or alias.name] = "time.sleep"
+                    # A direct import retains its original function object when
+                    # time.sleep is later replaced. Keep its binding separate.
+                    binding = alias.asname or alias.name
+                    aliases[binding] = f"imported:{binding}"
 
     def name(node):
         value = dotted(node)
         head, _, tail = value.partition(".")
         return aliases.get(head, head) + (f".{tail}" if tail else "")
 
-    def mocks(node):
+    def patch_target(node):
         if not isinstance(node, ast.Call):
-            return False
+            return frozenset()
         target = dotted(node.func)
         args = node.args
         if target.endswith("patch") and args:
-            return isinstance(args[0], ast.Constant) and args[0].value == "time.sleep"
-        if target.endswith(("patch.object", ".setattr")) and len(args) >= 2:
-            return name(args[0]) == "time" and isinstance(args[1], ast.Constant) and args[1].value == "sleep"
-        return False
+            if isinstance(args[0], ast.Constant) and args[0].value == "time.sleep":
+                return frozenset({"time.sleep"})
+        if target.endswith("patch.object") and len(args) >= 2:
+            if name(args[0]) == "time" and isinstance(args[1], ast.Constant) and args[1].value == "sleep":
+                return frozenset({"time.sleep"})
+        return frozenset()
+
+    def immediate_target(node, patchers):
+        if not isinstance(node, ast.Call):
+            return frozenset()
+        if dotted(node.func).endswith(".setattr") and len(node.args) >= 2:
+            if name(node.args[0]) == "time" and isinstance(node.args[1], ast.Constant) and node.args[1].value == "sleep":
+                return frozenset({"time.sleep"})
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "start":
+            return patch_target(node.func.value) or patchers.get(dotted(node.func.value), frozenset())
+        return frozenset()
 
     issues = []
 
     relative = path.relative_to(root).as_posix() if root else path.name
 
-    def visit(node, mocked=False, scope=()):
+    def visit(node, mocked=frozenset(), scope=()):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             scope = (*scope, node.name)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            mocked = mocked or any(mocks(d) for d in node.decorator_list)
+            mocked = mocked.union(*(patch_target(d) for d in node.decorator_list))
         if isinstance(node, (ast.With, ast.AsyncWith)):
-            mocked = mocked or any(mocks(i.context_expr) for i in node.items)
-        if isinstance(node, ast.Call) and name(node.func) == "time.sleep" and not mocked:
+            mocked = mocked.union(*(patch_target(i.context_expr) for i in node.items))
+        binding = name(node.func) if isinstance(node, ast.Call) else ""
+        if (binding == "time.sleep" or binding.startswith("imported:")) and binding not in mocked:
             # Stable across unrelated line edits, but specific to the scope,
             # call expression and number of occurrences. A new sleep in another
             # test or another identical call cannot borrow a file-wide waiver.
@@ -98,11 +116,20 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
         for _, value in ast.iter_fields(node):
             if isinstance(value, list):
                 active = mocked
+                patchers = {}
                 for child in value:
                     if isinstance(child, ast.AST):
                         visit(child, active, scope)
-                        if isinstance(child, ast.Expr) and mocks(child.value):
-                            active = True
+                        if isinstance(child, ast.Assign):
+                            targets = patch_target(child.value)
+                            for target in child.targets:
+                                if isinstance(target, ast.Name):
+                                    patchers[target.id] = targets
+                        if isinstance(child, ast.Expr):
+                            active = active | immediate_target(child.value, patchers)
+                            call = child.value
+                            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "stop":
+                                active = active - patchers.get(dotted(call.func.value), frozenset())
             elif isinstance(value, ast.AST):
                 visit(value, mocked, scope)
 

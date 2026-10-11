@@ -65,6 +65,57 @@ def test_monkeypatch(monkeypatch):
     assert all("unmocked time.sleep" in issue.message for issue in issues)
 
 
+def test_bare_patchers_do_not_mock_sleep(tmp_path):
+    path = tmp_path / "test_patchers.py"
+    path.write_text('''
+import time
+from unittest.mock import patch
+def test_patchers(monkeypatch):
+    patch("time.sleep")
+    time.sleep(1)
+    patch.object(time, "sleep")
+    time.sleep(2)
+    patcher = patch("time.sleep")
+    patcher.start()
+    time.sleep(3)
+    patcher.stop()
+    time.sleep(4)
+    patch.object(time, "sleep").start()
+    time.sleep(5)
+def test_immediate(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    time.sleep(6)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == [
+        "time.sleep(1)", "time.sleep(2)", "time.sleep(4)"]
+
+
+def test_module_patch_does_not_replace_direct_sleep_imports(tmp_path):
+    path = tmp_path / "test_bindings.py"
+    path.write_text('''
+import time as clock
+from time import sleep
+from time import sleep as pause
+from unittest.mock import patch
+@patch("time.sleep")
+def test_decorator(mock):
+    sleep(1)
+    pause(2)
+    clock.sleep(3)
+def test_context(monkeypatch):
+    with patch.object(clock, "sleep"):
+        pause(4)
+        clock.sleep(5)
+    monkeypatch.setattr(clock, "sleep", lambda _: None)
+    sleep(6)
+    clock.sleep(7)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == [
+        "sleep(1)", "pause(2)", "pause(4)", "sleep(6)"]
+
+
 @pytest.mark.parametrize("count,budget,exit_code", [(12, 12, 0), (13, 12, 1)])
 def test_budget_boundary(tmp_path, monkeypatch, capsys, count, budget, exit_code):
     (tmp_path / "tests").mkdir()
