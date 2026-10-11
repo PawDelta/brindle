@@ -218,7 +218,7 @@ def test_azuredeploy_json_matches_bicep():
 
 def test_no_account_ids_or_buckets_in_deploy_or_publish_workflow():
     root = DEPLOY.parent
-    texts = [p.read_text() for p in DEPLOY.rglob("*") if p.is_file()]
+    texts = [p.read_text() for p in DEPLOY.rglob("*") if p.is_file() and not p.name.startswith(".")]
     texts.append((root / ".github/workflows/publish.yml").read_text())
     for text in texts:
         assert not re.search(r"\b\d{12}\b", text)

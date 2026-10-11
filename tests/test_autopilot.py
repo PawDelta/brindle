@@ -239,6 +239,7 @@ def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
     db.update_autopilot("boss", audit_sha=sh("git rev-parse HEAD", repo))
     out = autopilot.record_audit(db, "boss", False, "the UI never calls the API")
     assert "GAPS FOUND" in out
+    assert "record_audit_decision" in out
     ap = db.get_autopilot("boss")
     assert ap.state == "running" and ap.audit_ok == 0
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
@@ -484,3 +485,60 @@ def test_reported_worker_back_at_work_is_active(db, root, monkeypatch):
     assert autopilot.active_workers(db, "boss") == []
     db.set_status("w1", "processing")   # the supervisor sent review feedback
     assert [a.id for a in autopilot.active_workers(db, "boss")] == ["w1"]
+
+
+def test_commit_tracked_only_ignores_untracked_files(db, root, repo):
+    agent, ws = root
+    with_goal(db)
+    (repo / "file1.txt").write_text("hello")
+    commit_all(repo, "c1")
+    head_sha = sh("git rev-parse HEAD", repo)
+
+    # _commit returns head_sha when clean
+    assert autopilot._commit(ws) == head_sha
+
+    # Add an untracked file (e.g. test cache or unignored temporary file)
+    (repo / "untracked_cache.tmp").write_text("cache data")
+
+    # With tracked_only=False (the default), untracked files mark the workspace dirty
+    assert autopilot._commit(ws) is None
+    # With tracked_only=True, untracked artifacts are ignored and _commit returns head_sha
+    assert autopilot._commit(ws, tracked_only=True) == head_sha
+
+    # set_goal also records goal_sha despite untracked files
+    autopilot.set_goal(db, "boss", "Test Goal", [("M1", "true", None)])
+    assert db.get_autopilot("boss").goal_sha == head_sha
+
+    # Setting up an audit with audit_sha = head_sha
+    db.update_autopilot("boss", state="auditing", audit_sha=head_sha)
+    msg = autopilot.record_audit(db, "boss", True, "Everything looks good")
+    # Audit approval is accepted because tracked files are clean
+    assert "APPROVED" in msg
+    assert db.get_autopilot("boss").state == "done"
+
+
+def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
+    agent, ws = root
+    with_goal(db)
+    (repo / "file1.txt").write_text("hello")
+    commit_all(repo, "c1")
+    head_sha = sh("git rev-parse HEAD", repo)
+
+    # 1. State is auditing, but auditor agent does not exist or died
+    db.update_autopilot("boss", state="auditing", auditor_id="dead_auditor", audit_sha=head_sha)
+    monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
+    monkeypatch.setattr(autopilot, "over_limit", lambda *a: False)
+
+    # on_stop should detect dead auditor, reset state to running, and block stop to nudge supervisor
+    block = autopilot.on_stop(db, agent, {})
+    assert block is not None and block["decision"] == "block"
+    ap = db.get_autopilot("boss")
+    assert ap.state == "running"
+    assert ap.auditor_id is None
+
+    # 2. State is auditing, and auditor is alive and running: on_stop allows supervisor to stop/wait
+    add_agent(db, ws, "live_auditor", mode="review", parent="boss", status="processing")
+    monkeypatch.setattr(agents, "is_alive", lambda a: a.id == "live_auditor")
+    db.update_autopilot("boss", state="auditing", auditor_id="live_auditor", audit_sha=head_sha)
+    assert autopilot.on_stop(db, agent, {}) is None
+

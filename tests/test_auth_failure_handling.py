@@ -11,7 +11,6 @@ def test_auth_failure_classified_and_pauses_autopilot(db, repo, monkeypatch):
     db.add_workspace(ws)
     supervisor = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
     worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
 
     # Put a mock entry in _SIGNED_IN
     providers._SIGNED_IN[("claude", (("ANTHROPIC_API_KEY", "dummy"),))] = 9999999999.0
@@ -426,7 +425,6 @@ def test_resume_calls_procs_stop_before_relaunch_and_preserves_failed_on_error(d
     supervisor = agents.spawn(db, ws, "developer", mode="interactive")
     worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
     db.set_status(worker.id, "failed")
-    db.set_status(supervisor.id, "idle")
 
     stopped = []
     launched = []
@@ -508,7 +506,6 @@ def test_resume_preserves_blocked_autopilot_state_when_agent_fails_to_restart(db
     supervisor = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
     worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
     db.set_status(worker.id, "failed")
-    db.set_status(supervisor.id, "idle")
     db.update_autopilot(supervisor.id, state="blocked", note="Credentials need attention")
 
     # Simulate procs.stop failing so restart is aborted
@@ -563,7 +560,6 @@ def test_continue_cmd_does_not_clear_blocked_state_when_resume_fails_or_owner_bl
     sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
     worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=sup.id)
     db.set_status(worker.id, "failed")
-    db.set_status(sup.id, "idle")
     db.update_autopilot(sup.id, state="blocked", note="Credentials need attention")
 
     # 1. Procs.stop fails so resume cannot restart the worker

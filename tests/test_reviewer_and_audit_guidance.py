@@ -118,6 +118,47 @@ def test_audit_prompt_includes_convergence_rules_and_prior_notes(db, repo):
     assert "Prior audit accepted omission of legacy export" in prompt
 
 
+def test_audit_prompt_re_audit_bounded_incremental(db, repo):
+    # Initial audit without history uses AUDIT template
+    ap_initial = Autopilot(
+        root_id="boss_initial",
+        enabled=1,
+        goal="Build feature X",
+        detail="Must include metrics",
+        state="auditing",
+        note=None,
+        audit_history=None,
+        progress=0,
+        nudges=0,
+        nudged_at=None,
+        created_at=0.0,
+    )
+    prompt_initial = autopilot.audit_prompt(db, ap_initial, "headsha")
+    assert "Be adversarial" in prompt_initial
+    assert "bounded re-audit" not in prompt_initial
+
+    # Re-audit with history uses RE_AUDIT template with strict bounding
+    ap_re = Autopilot(
+        root_id="boss_re",
+        enabled=1,
+        goal="Build feature X",
+        detail="Must include metrics",
+        state="auditing",
+        note=None,
+        audit_history="Audit of abc1234 (gaps found):\nMissing edge case test for null input",
+        progress=0,
+        nudges=0,
+        nudged_at=None,
+        created_at=0.0,
+    )
+    prompt_re = autopilot.audit_prompt(db, ap_re, "headsha2")
+    assert "bounded re-audit" in prompt_re
+    assert "DO NOT move the goalposts" in prompt_re
+    assert "Strictly bounded scope" in prompt_re
+    assert "Missing edge case test for null input" in prompt_re
+
+
+
 def test_audit_history_persists_across_need_user_and_user_spoke(db, repo):
     ws = Workspace("ws-hist", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-hist", 0)
     db.add_workspace(ws)
@@ -206,6 +247,16 @@ def test_all_builtin_reviewer_profiles_include_tiering_guidance():
         assert approval_match, f"{name} missing approval criteria rule"
 
 
+def test_reviewer_cross_provider_parity_and_allowed_tools():
+    from brindle.profiles import load_profile
+
+    base_tools = load_profile("reviewer").allowed_tools
+    for name in ("reviewer-gemini", "reviewer-codex", "reviewer-local"):
+        prof = load_profile(name)
+        assert prof.permission_mode == "dontAsk", f"{name} missing dontAsk permission_mode"
+        assert prof.allowed_tools == base_tools, f"{name} allowed_tools does not match reviewer"
+
+
 def test_reviewer_tiered_guidance_application_and_routing_scenarios(db, repo, monkeypatch):
     """Scenario tests verifying that the tiered guidance is effectively applied and routed:
     - Minor findings only -> approved, no supervisor action, no fix loop
@@ -225,7 +276,6 @@ def test_reviewer_tiered_guidance_application_and_routing_scenarios(db, repo, mo
 
     monkeypatch.setattr(agents, "send_message", fake_send)
     monkeypatch.setattr(pipeline, "_retry_on_heavy", lambda *args: False)
-    monkeypatch.setattr(agents, "is_alive", lambda *args, **kwargs: True)
 
     # Scenario 1: Minor findings only - reviewer approves according to guidance
     minor_summary = "All checks pass.\n- minor: consider renaming variable `x` to `timeout_seconds` for clarity.\nNeeds supervisor action: None."

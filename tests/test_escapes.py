@@ -151,7 +151,7 @@ def test_second_review_config_loads_per_weight(repo):
 @pytest.fixture
 def piped(db, repo, monkeypatch):
     def setup(second=None, weight="heavy"):
-        cfg = {"review": True, "auto_merge_default_branch": True}
+        cfg = {"review": True, "auto_merge_default_branch": True, "review_profile": "reviewer"}
         if second is not None:
             cfg["second_review"] = second
         (repo / ".brindle").mkdir(exist_ok=True)
@@ -181,7 +181,6 @@ def piped(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "_detach", lambda argv: None)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
-    monkeypatch.setattr(agents, "unusable", lambda p, *a, **k: "not installed" if p == "antigravity" else None)
     return setup, started
 
 

@@ -257,7 +257,7 @@ def test_supervisor_refuses_a_provider_that_cant_supervise(repo, monkeypatch):
     from brindle.cli import app
 
     monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["supervisor", "--provider", "native"])
+    res = CliRunner().invoke(app, ["--provider", "native"])
     assert res.exit_code != 0 and "can't run the supervisor" in res.output
 
 
