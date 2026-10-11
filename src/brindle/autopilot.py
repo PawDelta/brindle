@@ -602,14 +602,8 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
                 m = applied.model
     except Exception:
         pass
-    if not m:
-        if provider == "codex":
-            m = "gpt-5.3-codex"
-        elif provider == "antigravity":
-            m = "gemini-2.5-pro"
-        elif provider == "claude":
-            m = "claude-sonnet-4-6"
     return m.strip()
+
 
 
 def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
