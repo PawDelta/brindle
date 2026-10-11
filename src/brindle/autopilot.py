@@ -1053,11 +1053,10 @@ AUDIT_HOLD = {
     "dirty": ("Every milestone's check passes, but your checkout has uncommitted changes, so "
               "there's no commit to audit. Commit them and call check_milestone again."),
 }
+MAX_AUDIT_PASSES = 2
 
-AUDIT = """You are auditing a finished autopilot goal, not a single branch. Every milestone's
-check command now passes, but a check can be too weak, test the wrong thing or be
-skipped, so don't take a passing check as proof. Be adversarial: assume something the
-user asked for is missing until the code shows otherwise.
+AUDIT = """You are conducting a fast, final audit to verify: did the updates do what the milestones say they did?
+Every milestone's check command has already passed. Your job is a quick delivery verification: check that the deliverables described in the milestones are genuinely implemented in the code.
 
 The goal: {goal}{detail}
 
@@ -1066,27 +1065,24 @@ Milestones, each with the check that passed:
 
 {work} No check summary will arrive for this audit; don't wait for one.
 
-For each milestone and each part of the goal: find the code that delivers it; read its
-check and judge whether it really proves the milestone (a test that asserts little, a
-check that only greps, or skipped tests are gaps); look for TODOs, stubs, placeholder
-returns, disabled or deleted tests and half-finished pieces. You may run a narrow test to
-probe a suspicion; don't re-run the whole suite.
-
-Audit convergence rules:
-- Conduct one comprehensive pass listing all gaps at once.
+Verification instructions:
+- Fast single pass: Inspect the changes (using the git commands above) to confirm that the requested features, fixes, or deliverables are present.
+- Trust passing checks unless a deliverable is visibly missing, stubbed out (`TODO`, `pass`, or dummy returns), or unhandled.
+- Do NOT debate test assertion depth, testing style, code architecture, or aesthetic choices. If a milestone's check passes and the deliverable is implemented in the diff, consider that milestone delivered.
+- Do NOT create scratch files, write temporary probe scripts, or run extensive test suites.
 - Separate findings into:
-  1. "Work not done" (missing implementation or test coverage).
+  1. "Work not done" (missing implementation for deliverables).
   2. "Disclosed and awaiting owner decision" (deliberate scope choices, proposals or options awaiting user decision).
 - Do not re-raise any gap or choice that earlier audits mentioned and the supervisor or owner has accepted.
 {prior_decisions}
-Call submit_review once. approved=true only if every part of the goal is really done.
-Otherwise approved=false, listing each gap most severe first: the milestone or part of the
-goal it concerns, file:line where it applies, what's missing, and what would close it."""
+Call submit_review once and immediately.
+- approved=true if the updates delivered what the milestones asked for.
+- approved=false only if a concrete milestone deliverable is missing or incomplete, listing each missing item: the milestone it concerns, file:line where it applies, what is missing, and what would close it."""
 
-RE_AUDIT = """You are conducting a bounded re-audit of a finished autopilot goal, not an initial pass.
+RE_AUDIT = """You are conducting a fast, bounded re-audit of a finished autopilot goal.
 Prior audits identified specific gaps and recorded decisions.
 DO NOT move the goalposts or introduce new requirements that were not flagged in earlier audits.
-Your responsibility is strictly bounded: verify whether the previously identified gaps have been addressed in the code and tests, and whether any accepted decisions/scope exclusions are respected.
+Your job is a quick delivery verification: did the latest updates resolve the previously identified gaps?
 
 The goal: {goal}{detail}
 
@@ -1099,15 +1095,17 @@ Prior audit findings and accepted decisions:
 {prior_decisions}
 
 Re-audit rules:
-- Strictly bounded scope: Only evaluate whether the prior gaps listed above have been resolved and whether accepted decisions are respected. Do NOT invent new requirements, debate testing style, or broaden criteria beyond the previous audit findings.
+- Strictly bounded scope: Only verify whether the previously flagged gaps have been addressed in the diff or resolved by an accepted decision.
+- Do NOT introduce new criteria, debate testing style, or re-open closed topics.
+- Fast single pass: Inspect the diff, verify whether the fixes were implemented, and immediately call submit_review. Do not create scratch files or run extra test suites.
 - Separate findings into:
-  1. "Work not done" (missing implementation or test coverage for previously flagged gaps).
+  1. "Work not done" (missing implementation for previously flagged gaps).
   2. "Disclosed and awaiting owner decision" (deliberate scope choices, proposals or options awaiting user decision).
 - If a prior gap has been addressed by code or tests, consider it closed.
 - If an item was accepted as a decision or scope exclusion, do NOT flag it as a gap.
 - If and only if previously flagged gaps remain unresolved without an accepted decision, report them.
 
-Call submit_review once. approved=true if all previously identified gaps are resolved (or accepted).
+Call submit_review once and immediately. approved=true if all previously identified gaps are resolved (or accepted).
 Otherwise approved=false, listing only the remaining unresolved gaps: what is still missing and what would close it."""
 
 
@@ -1212,6 +1210,19 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
                 f"\n\n{summary}")
+    audit_fails = new_history.count("(gaps found)")
+    if audit_fails >= MAX_AUDIT_PASSES:
+        db.update_autopilot(root_id, state="blocked", note=summary.strip()[:4000], audit_ok=0,
+                            auditor_id=None, audit_history=new_history, nudges=0)
+        audit_ws = db.get_workspace(root.workspace_id) if root else None
+        if audit_ws is not None:
+            escapes.audit_gaps(db, audit_ws.repo_root, summary)
+        return (f"[brindle] Completion audit of {sha}: GAPS FOUND (persistent after {audit_fails} passes). "
+                "Autopilot paused to avoid an unbounded audit loop. Review the findings below with the "
+                "user: either address the remaining gaps, or record them as accepted scope decisions "
+                "with `record_audit_decision`, then call check_milestone."
+                f"\n\n{summary}")
+
     db.update_autopilot(root_id, state="running", note=summary.strip()[:4000], audit_ok=0,
                         auditor_id=None, audit_history=new_history)
     audit_ws = db.get_workspace(root.workspace_id) if root else None

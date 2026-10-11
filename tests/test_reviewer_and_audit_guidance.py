@@ -134,7 +134,9 @@ def test_audit_prompt_re_audit_bounded_incremental(db, repo):
         created_at=0.0,
     )
     prompt_initial = autopilot.audit_prompt(db, ap_initial, "headsha")
-    assert "Be adversarial" in prompt_initial
+    assert "did the updates do what the milestones say they did" in prompt_initial
+    assert "Be adversarial" not in prompt_initial
+    assert "Trust passing checks" in prompt_initial
     assert "bounded re-audit" not in prompt_initial
 
     # Re-audit with history uses RE_AUDIT template with strict bounding
@@ -157,6 +159,27 @@ def test_audit_prompt_re_audit_bounded_incremental(db, repo):
     assert "Strictly bounded scope" in prompt_re
     assert "Missing edge case test for null input" in prompt_re
 
+
+def test_record_audit_max_passes_escalates_to_need_user(db, repo):
+    ws = Workspace("ws-max-audit", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-ma", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(supervisor.id)
+    autopilot.set_goal(db, supervisor.id, "Goal", [("M1", "true", "")])
+
+    # Pass 1: first failure keeps state running
+    out1 = autopilot.record_audit(db, supervisor.id, False, "Gap 1: Missing feature")
+    ap1 = db.get_autopilot(supervisor.id)
+    assert ap1.state == "running"
+    assert "GAPS FOUND" in out1
+    assert "persistent after" not in out1
+
+    # Pass 2: second failure hits MAX_AUDIT_PASSES (2) and blocks autopilot
+    out2 = autopilot.record_audit(db, supervisor.id, False, "Gap 1: Still missing feature")
+    ap2 = db.get_autopilot(supervisor.id)
+    assert ap2.state == "blocked"
+    assert "GAPS FOUND (persistent after 2 passes)" in out2
+    assert "Autopilot paused to avoid an unbounded audit loop" in out2
 
 
 def test_audit_history_persists_across_need_user_and_user_spoke(db, repo):
