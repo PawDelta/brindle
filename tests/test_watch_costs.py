@@ -276,3 +276,18 @@ def test_model_names_are_shortened_for_the_sidebar():
 def test_a_narrow_folded_header_drops_the_model_rather_than_cut_the_title():
     local_ = Local(models=[("claude-opus-5-5", 1)])
     assert watch_costs.title(True, 14, local_) == "▸ Costs"
+
+
+def test_provider_capacity_in_sidebar():
+    lines = section(Local(providers=[("claude", 85), ("codex", 100)]))
+    body = [t.strip() for t in texts(lines)[1:]]
+    assert any("claude" in t and "85%" in t for t in body)
+    assert any("codex" in t and "100%" in t for t in body)
+    assert "$" not in "".join(body)
+    assert "█" not in "".join(body) and "░" not in "".join(body)
+
+
+def test_provider_capacity_collapsed_title():
+    lines = section(Local(providers=[("claude", 85), ("codex", 100)]), collapsed=True)
+    assert lines[0].text == "▸ Costs (claude 85%)"
+
