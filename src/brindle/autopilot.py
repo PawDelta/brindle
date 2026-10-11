@@ -548,6 +548,13 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
                 if "MODEL" in k and v:
                     m = v
                     break
+    if not m:
+        for k in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL", "GEMINI_MODEL", "MODEL"):
+            val = os.environ.get(k)
+            if val and val.strip():
+                m = val.strip()
+                break
+
     try:
         from brindle.pro import managed_models
         from brindle.agents import managed

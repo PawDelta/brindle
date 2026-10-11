@@ -272,6 +272,44 @@ def test_continue_cmd_reloads_fresh_window_for_failed_root_with_attach(db, repo,
     assert attached_windows == ["%new"]
 
 
+def test_continue_cmd_recovers_dead_failed_interactive_root(db, repo, monkeypatch):
+    from brindle import cli, workspaces
+    ws = Workspace("ws-dead-root", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-dead-root", 0)
+    db.add_workspace(ws)
+
+    dead_sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_status(dead_sup.id, "failed")
+    db.add_autopilot(dead_sup.id)
+    db.update_autopilot(dead_sup.id, state="blocked", note="Credentials need attention")
+
+    resumed_ids = []
+    def fake_resume(db_arg, root_id, **kwargs):
+        resumed_ids.append(root_id)
+        db.set_status(root_id, "idle")
+        return [db.get_agent(root_id)]
+
+    monkeypatch.setattr(agents, "resume", fake_resume)
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+    monkeypatch.setattr(cli, "_run", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    monkeypatch.setattr(workspaces, "adopt_root", lambda db, cwd: ws)
+    # is_alive returns False because the process has died
+    monkeypatch.setattr(agents, "is_alive", lambda a: False)
+    monkeypatch.chdir(repo)
+
+    # 1. Calling continue with explicit session_id recovers the dead failed root
+    cli.continue_cmd(session_id=dead_sup.id[:6], attach=False)
+    assert resumed_ids == [dead_sup.id]
+
+    # Reset status to failed for test 2
+    db.set_status(dead_sup.id, "failed")
+    resumed_ids.clear()
+
+    # 2. Calling continue without session_id also recovers the dead failed root
+    cli.continue_cmd(session_id=None, attach=False)
+    assert resumed_ids == [dead_sup.id]
+
+
+
 def test_stop_failure_payloads_with_enums_and_last_assistant_message(db, repo):
     ws = Workspace("ws-enums", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-e", 0)
     db.add_workspace(ws)
@@ -415,3 +453,65 @@ def test_resume_calls_procs_stop_before_relaunch_and_preserves_failed_on_error(d
     assert worker.id not in launched
     w = db.get_agent(worker.id)
     assert w.status == "failed"
+
+
+def test_set_session_credential_enforces_0600_permissions(tmp_path):
+    db_file = tmp_path / "test.db"
+    db_file.write_text("")
+    db_file.chmod(0o666)
+    assert (db_file.stat().st_mode & 0o777) != 0o600
+
+    db = DB(str(db_file))
+    assert (db_file.stat().st_mode & 0o777) == 0o600
+
+    db_file.chmod(0o644)
+    db.set_session_credential("ws-1", "ANTHROPIC_API_KEY", "secret-key")
+    assert (db_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_fresher_keystore_takes_precedence_over_older_session_credential(db, repo, monkeypatch):
+    from brindle import keystore, agents
+    from brindle.db import Workspace
+
+    ws = Workspace("ws-time-cred", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-tc", 0)
+    db.add_workspace(ws)
+    worker = agents.spawn(db, ws, "developer", mode="assign")
+
+    # Set session credential at t=100
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+    db.set_session_credential(worker.id, "ANTHROPIC_API_KEY", "older-session-key")
+
+    # Keystore updated at t=200
+    monkeypatch.setattr(time, "time", lambda: 200.0)
+    keystore.set_key("ANTHROPIC_API_KEY", "fresh-keystore-key")
+
+    env = agents.agent_env(ws, worker.id, worker)
+    assert env.get("ANTHROPIC_API_KEY") == "fresh-keystore-key"
+
+    # Now simulate a fresher session credential at t=300
+    monkeypatch.setattr(time, "time", lambda: 300.0)
+    db.set_session_credential(worker.id, "ANTHROPIC_API_KEY", "freshest-session-key")
+
+    env2 = agents.agent_env(ws, worker.id, worker)
+    assert env2.get("ANTHROPIC_API_KEY") == "freshest-session-key"
+
+
+def test_resume_preserves_blocked_autopilot_state_when_agent_fails_to_restart(db, repo, monkeypatch):
+    from brindle import agents, procs
+    from brindle.db import Workspace
+
+    ws = Workspace("ws-fail-block", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-fb", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    db.set_status(worker.id, "failed")
+    db.update_autopilot(supervisor.id, state="blocked", note="Credentials need attention")
+
+    # Simulate procs.stop failing so restart is aborted
+    monkeypatch.setattr(procs, "stop", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("tmux error")))
+
+    agents.resume(db, supervisor.id)
+    ap = db.get_autopilot(supervisor.id)
+    assert ap.state == "blocked"
+    assert "Credentials need attention" in (ap.note or "")
+

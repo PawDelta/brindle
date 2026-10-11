@@ -27,6 +27,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ACCOUNT = "default"
@@ -276,13 +277,23 @@ def set_key(name: str, value: str, repo_root: str | None = None) -> None:
     value = value.strip()
     if not value:
         raise KeyNameError("empty key")
-    _key_store(name).save({"value": value})
+    _key_store(name).save({"value": value, "updated_at": time.time()})
 
 
 def get_key(name: str) -> str | None:
     rec = _key_store(name).load()
     value = rec.get("value") if rec else None
     return value if isinstance(value, str) and value else None
+
+
+def get_key_info(name: str) -> tuple[str | None, float]:
+    rec = _key_store(name).load()
+    if not rec:
+        return None, 0.0
+    val = rec.get("value")
+    ts = rec.get("updated_at", 0.0)
+    return (val if isinstance(val, str) and val else None), float(ts or 0.0)
+
 
 
 def unset_key(name: str) -> None:

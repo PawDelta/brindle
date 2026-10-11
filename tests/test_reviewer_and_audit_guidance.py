@@ -433,3 +433,14 @@ def test_default_review_profile_prefers_gemini_over_codex(db, repo, monkeypatch)
     chosen = agents.default_review_profile(cfg, None, db=db, repo_root=str(repo), task="Test task")
     assert chosen == "reviewer-gemini"
 
+
+def test_custom_configured_reviewer_honored_even_with_antigravity_installed(db, repo, monkeypatch):
+    from brindle.config import RepoConfig
+    from brindle import agents
+
+    cfg = RepoConfig(reviewer="reviewer-local")
+    monkeypatch.setattr(agents, "unusable", lambda p, *args, **kwargs: None)
+    chosen = agents.default_review_profile(cfg, None, db=db, repo_root=str(repo), task="Test task")
+    assert chosen == "reviewer-local"
+
+

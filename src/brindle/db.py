@@ -607,7 +607,20 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._enforce_permissions()
         self._migrate()
+
+    def _enforce_permissions(self) -> None:
+        if self.path == ":memory:":
+            return
+        import os
+        for target in (self.path, self.path + "-wal", self.path + "-shm"):
+            if os.path.exists(target):
+                try:
+                    os.chmod(target, 0o600)
+                except OSError:
+                    pass
+
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
@@ -854,12 +867,14 @@ class DB:
     # -- session credentials -----------------------------------------------
 
     def set_session_credential(self, session_id: str, key: str, value: str) -> None:
+        self._enforce_permissions()
         with self.tx() as c:
             c.execute(
                 "INSERT INTO session_credentials (session_id, key, value, updated_at) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                 (session_id, key, value, time.time()),
             )
+        self._enforce_permissions()
 
     def get_session_credentials(self, session_id: str) -> dict[str, str]:
         rows = self.conn.execute(
@@ -867,6 +882,18 @@ class DB:
             (session_id,),
         ).fetchall()
         return {k: v for k, v in rows}
+
+    def get_session_credentials_with_timestamps(self, session_id: str) -> dict[str, tuple[str, float]]:
+        rows = self.conn.execute(
+            "SELECT key, value, updated_at FROM session_credentials WHERE session_id=?",
+            (session_id,),
+        ).fetchall()
+        return {k: (v, float(ts or 0.0)) for k, v, ts in rows}
+
+    def clear_session_credentials(self, session_id: str) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM session_credentials WHERE session_id=?", (session_id,))
+
 
     # -- agents ------------------------------------------------------------
 

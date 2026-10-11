@@ -44,7 +44,7 @@ def paused(db: DB, repo_root: str) -> list[Session]:
     out = []
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
-            if a.mode == "interactive" and a.status == "paused":
+            if a.mode == "interactive" and a.status in ("paused", "failed"):
                 members = agents.tree(db, a.id)
                 branches = []
                 for m in members[1:]:

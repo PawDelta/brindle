@@ -215,22 +215,23 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
                     curr_id = ca.parent_id
                 else:
                     break
-            session_creds = db_inst.get_session_credentials(curr_id or root_id)
+            session_creds = db_inst.get_session_credentials_with_timestamps(curr_id or root_id)
         except Exception:
             pass
 
         for k in creds:
-            if k in session_creds:
-                exported[k] = session_creds[k]
-                os.environ[k] = session_creds[k]
-                continue
-            try:
-                val = keystore.get_key(k)
-                if val:
-                    exported[k] = val
-                    os.environ[k] = val
-            except Exception:
-                pass
+            ks_val, ks_time = keystore.get_key_info(k)
+            sess_val, sess_time = session_creds.get(k, (None, 0.0))
+            if ks_val and (sess_val is None or ks_time >= sess_time):
+                exported[k] = ks_val
+                os.environ[k] = ks_val
+            elif sess_val:
+                exported[k] = sess_val
+                os.environ[k] = sess_val
+            elif ks_val:
+                exported[k] = ks_val
+                os.environ[k] = ks_val
+
 
         if enforced is None:
             env = {**company, **exported, **profile_env, **managed_env, **env}
@@ -983,7 +984,10 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     from brindle import keystore, secrets
 
     for k in keystore.known_names():
-        if k in os.environ and os.environ[k] and not secrets.is_job_secret(k):
+        ks_val, ks_time = keystore.get_key_info(k)
+        if ks_val:
+            db.set_session_credential(root_id, k, ks_val)
+        elif k in os.environ and os.environ[k] and not secrets.is_job_secret(k):
             db.set_session_credential(root_id, k, os.environ[k])
 
     candidates = [a for a in tree(db, root_id)
@@ -1028,8 +1032,10 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
     ap = db.get_autopilot(root_id)
-    if ap and ap.state == "blocked":
+    failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
+    if ap and ap.state == "blocked" and resumed and not failed_still:
         db.update_autopilot(root_id, state="running", note=None)
+
     return resumed
 
 
@@ -1822,6 +1828,8 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     model on its own: a Claude worker reviewed by a Claude reviewer is fine."""
     if cfg.review_profile:
         return cfg.review_profile
+    if cfg.reviewer and cfg.reviewer != "reviewer":
+        return cfg.reviewer
     if unusable("antigravity") is None:
         try:
             load_profile("reviewer-gemini", repo_root)

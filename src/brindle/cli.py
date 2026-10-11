@@ -490,7 +490,7 @@ def continue_cmd(
         if ws is None:
             _fail("no scratch session started from this folder to continue; run `brindle` to start one")
     live = agents.find_running(db, ws, "supervisor") or next(
-        (a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and agents.is_alive(a)),
+        (a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and (agents.is_alive(a) or a.status == "failed")),
         None,
     )
     live_needs_recovery = False
@@ -499,7 +499,7 @@ def continue_cmd(
         failed_workers = [a for a in workers if a.status == "failed"]
         ap = db.get_autopilot(live.id)
         is_blocked = ap and ap.state == "blocked"
-        if failed_workers or is_blocked:
+        if failed_workers or is_blocked or live.status == "failed":
             live_needs_recovery = True
 
     if session_id and live and live.id.startswith(session_id):

@@ -299,3 +299,17 @@ def test_assignment_and_queue_replies_include_cost_feedback_for_all_selections(d
     assert "Queued task" in reply_q
     assert "developer-heavy" in reply_q
     assert "most expensive tier" in reply_q
+
+
+def test_inherited_anthropic_model_env_classifies_as_heavy(db, repo, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-fable-5-1")
+    assert autopilot.effective_profile_model("developer") == "claude-fable-5-1"
+    assert autopilot.profile_weight("developer") == "heavy"
+
+    cfg = RepoConfig(max_weight="medium")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    with pytest.raises(autopilot.AutopilotError) as exc_info:
+        autopilot.choose_profile(db, "caller-env", str(repo), requested="developer")
+    assert "exceeds configured max_weight 'medium'" in str(exc_info.value)
+
