@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 4061
+TEST_BUDGET = 4064
 
 
 class Finding(NamedTuple):
@@ -74,6 +74,8 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
     def patch_target(node):
         if not isinstance(node, ast.Call):
             return frozenset()
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "start":
+            return patch_target(node.func.value)
         target = dotted(node.func)
         args = node.args
         if target.endswith("patch") and args:
@@ -84,73 +86,164 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
                 return frozenset({"time.sleep"})
         return frozenset()
 
-    def immediate_target(node, patchers):
-        if not isinstance(node, ast.Call):
-            return frozenset()
-        if dotted(node.func).endswith(".setattr") and len(node.args) >= 2:
-            if name(node.args[0]) == "time" and isinstance(node.args[1], ast.Constant) and node.args[1].value == "sleep":
-                return frozenset({"time.sleep"})
-            if isinstance(node.args[0], ast.Constant) and node.args[0].value == "time.sleep":
-                return frozenset({"time.sleep"})
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "start":
-            return patch_target(node.func.value) or patchers.get(dotted(node.func.value), frozenset())
-        return frozenset()
-
     issues = []
 
     relative = path.relative_to(root).as_posix() if root else path.name
 
-    def visit(node, mocked=frozenset(), scope=(), started=frozenset()):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            scope = (*scope, node.name)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            mocked = mocked.union(*(patch_target(d) for d in node.decorator_list))
-        if isinstance(node, (ast.With, ast.AsyncWith)):
-            mocked = mocked.union(*(patch_target(i.context_expr) for i in node.items))
-        binding = name(node.func) if isinstance(node, ast.Call) else ""
-        if (binding == "time.sleep" or binding.startswith("imported:")) and binding not in (mocked | started):
-            # Stable across unrelated line edits, but specific to the scope,
-            # call expression and number of occurrences. A new sleep in another
-            # test or another identical call cannot borrow a file-wide waiver.
-            key = f"sleep:{relative}::{'.'.join(scope)}::{ast.unparse(node)}"
-            issues.append(Finding(key, f"{path}:{node.lineno}: unmocked time.sleep"))
-        # Process statement lists in order: a patch after a sleep cannot excuse it.
-        for _, value in ast.iter_fields(node):
-            if isinstance(value, list):
-                started_exemptions = started
-                patchers = {}
-                mp_exemptions = {}
-                for child in value:
-                    active = mocked | (frozenset().union(*mp_exemptions.values()) if mp_exemptions else frozenset())
-                    if isinstance(child, ast.AST):
-                        visit(child, active, scope, started_exemptions)
-                        if isinstance(child, (ast.Expr, ast.Assign, ast.AnnAssign)):
-                            call = child.value
-                            exemptions = immediate_target(call, patchers)
-                            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
-                                if call.func.attr == "start":
-                                    started_exemptions = started_exemptions | exemptions
-                                elif call.func.attr == "setattr":
-                                    mp_name = dotted(call.func.value)
-                                    mp_exemptions[mp_name] = mp_exemptions.get(mp_name, frozenset()) | exemptions
-                                if call.func.attr == "stop":
-                                    started_exemptions = started_exemptions - patchers.get(
-                                        dotted(call.func.value), frozenset())
-                                if call.func.attr == "undo":
-                                    mp_name = dotted(call.func.value)
-                                    mp_exemptions.pop(mp_name, None)
-                                if dotted(call.func).endswith(".stopall"):
-                                    started_exemptions = frozenset()
-                        if isinstance(child, (ast.Assign, ast.AnnAssign)):
-                            targets = patch_target(child.value)
-                            bindings = child.targets if isinstance(child, ast.Assign) else [child.target]
-                            for target in bindings:
-                                if isinstance(target, ast.Name):
-                                    patchers[target.id] = targets
-            elif isinstance(value, ast.AST):
-                visit(value, mocked, scope, started)
+    class State:
+        def __init__(self, patchers=None, started=None, unnamed_started=None, mp_exemptions=None):
+            self.patchers = dict(patchers) if patchers else {}
+            self.started = set(started) if started else set()
+            self.unnamed_started = set(unnamed_started) if unnamed_started else set()
+            self.mp_exemptions = {k: set(v) for k, v in mp_exemptions.items()} if mp_exemptions else {}
 
-    visit(tree)
+        def clone(self):
+            return State(self.patchers, self.started, self.unnamed_started, self.mp_exemptions)
+
+        @property
+        def active_started(self) -> frozenset[str]:
+            active = set(self.unnamed_started)
+            for p in self.started:
+                active.update(self.patchers.get(p, ()))
+            return frozenset(active)
+
+        @property
+        def active_mp(self) -> frozenset[str]:
+            if not self.mp_exemptions:
+                return frozenset()
+            return frozenset().union(*self.mp_exemptions.values())
+
+        @property
+        def active_mocks(self) -> frozenset[str]:
+            return self.active_started | self.active_mp
+
+    def setattr_target(call):
+        if not isinstance(call, ast.Call):
+            return frozenset()
+        if dotted(call.func).endswith(".setattr") and len(call.args) >= 2:
+            if name(call.args[0]) == "time" and isinstance(call.args[1], ast.Constant) and call.args[1].value == "sleep":
+                return frozenset({"time.sleep"})
+            if isinstance(call.args[0], ast.Constant) and call.args[0].value == "time.sleep":
+                return frozenset({"time.sleep"})
+        return frozenset()
+
+    def update_mutations(stmt, state):
+        assigned_calls = set()
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            rhs = stmt.value
+            if rhs is not None:
+                targets = patch_target(rhs)
+                bindings = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+                for b in bindings:
+                    if isinstance(b, ast.Name):
+                        if targets:
+                            state.patchers[b.id] = targets
+                        if isinstance(rhs, ast.Call) and isinstance(rhs.func, ast.Attribute) and rhs.func.attr == "start":
+                            assigned_calls.add(rhs)
+                            receiver = dotted(rhs.func.value)
+                            if receiver in state.patchers:
+                                state.started.add(receiver)
+                            else:
+                                state.started.add(b.id)
+
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call) or node in assigned_calls:
+                continue
+            call_name = dotted(node.func)
+            if call_name.endswith(".stopall"):
+                state.started.clear()
+                state.unnamed_started.clear()
+            elif isinstance(node.func, ast.Attribute):
+                attr = node.func.attr
+                if attr == "start":
+                    receiver = dotted(node.func.value)
+                    if receiver in state.patchers:
+                        state.started.add(receiver)
+                    else:
+                        tgt = patch_target(node.func.value)
+                        if tgt:
+                            state.unnamed_started.update(tgt)
+                elif attr == "stop":
+                    receiver = dotted(node.func.value)
+                    state.started.discard(receiver)
+                elif attr == "setattr" and len(node.args) >= 2:
+                    tgt = setattr_target(node)
+                    if tgt:
+                        mp_name = dotted(node.func.value)
+                        state.mp_exemptions.setdefault(mp_name, set()).update(tgt)
+                elif attr == "undo":
+                    mp_name = dotted(node.func.value)
+                    state.mp_exemptions.pop(mp_name, None)
+
+    def check_calls(node, lexical_mocks, scope, state):
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                binding = name(child.func)
+                if binding == "time.sleep" or binding.startswith("imported:"):
+                    active = lexical_mocks | state.active_mocks
+                    if binding not in active:
+                        key = f"sleep:{relative}::{'.'.join(scope)}::{ast.unparse(child)}"
+                        issues.append(Finding(key, f"{path}:{child.lineno}: unmocked time.sleep"))
+
+    def visit_stmt(stmt, lexical_mocks, scope, state):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn_scope = (*scope, stmt.name)
+            fn_lexical = lexical_mocks | frozenset().union(*(patch_target(d) for d in stmt.decorator_list))
+            fn_state = state.clone()
+            visit_statements(stmt.body, fn_lexical, fn_scope, fn_state)
+            return
+
+        if isinstance(stmt, ast.ClassDef):
+            cls_scope = (*scope, stmt.name)
+            cls_lexical = lexical_mocks | frozenset().union(*(patch_target(d) for d in stmt.decorator_list))
+            cls_state = state.clone()
+            visit_statements(stmt.body, cls_lexical, cls_scope, cls_state)
+            return
+
+        if isinstance(stmt, (ast.With, ast.AsyncWith)):
+            for item in stmt.items:
+                check_calls(item.context_expr, lexical_mocks, scope, state)
+            with_lexical = lexical_mocks | frozenset().union(*(
+                patch_target(i.context_expr) or state.patchers.get(dotted(i.context_expr), frozenset())
+                for i in stmt.items
+            ))
+            visit_statements(stmt.body, with_lexical, scope, state)
+            return
+
+        if isinstance(stmt, ast.Try):
+            visit_statements(stmt.body, lexical_mocks, scope, state)
+            for handler in stmt.handlers:
+                if handler.type:
+                    check_calls(handler.type, lexical_mocks, scope, state)
+                visit_statements(handler.body, lexical_mocks, scope, state)
+            if stmt.orelse:
+                visit_statements(stmt.orelse, lexical_mocks, scope, state)
+            if stmt.finalbody:
+                visit_statements(stmt.finalbody, lexical_mocks, scope, state)
+            return
+
+        if isinstance(stmt, (ast.If, ast.While)):
+            check_calls(stmt.test, lexical_mocks, scope, state)
+            visit_statements(stmt.body, lexical_mocks, scope, state)
+            if stmt.orelse:
+                visit_statements(stmt.orelse, lexical_mocks, scope, state)
+            return
+
+        if isinstance(stmt, (ast.For, ast.AsyncFor)):
+            check_calls(stmt.iter, lexical_mocks, scope, state)
+            visit_statements(stmt.body, lexical_mocks, scope, state)
+            if stmt.orelse:
+                visit_statements(stmt.orelse, lexical_mocks, scope, state)
+            return
+
+        check_calls(stmt, lexical_mocks, scope, state)
+        update_mutations(stmt, state)
+
+    def visit_statements(stmts, lexical_mocks, scope, state):
+        for stmt in stmts:
+            visit_stmt(stmt, lexical_mocks, scope, state)
+
+    visit_statements(tree.body, frozenset(), (), State())
     return issues
 
 

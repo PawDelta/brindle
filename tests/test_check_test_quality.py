@@ -363,3 +363,62 @@ def test_string_target(monkeypatch):
 ''')
     assert quality.sleep_issues(path) == []
 
+
+def test_nested_block_monkeypatch_undo(tmp_path):
+    path = tmp_path / "test_nested_undo.py"
+    path.write_text('''
+import time
+import pytest
+def test_nested(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    time.sleep(0)
+    with pytest.raises(Exception):
+        time.sleep(1)
+        monkeypatch.undo()
+        time.sleep(2)
+    time.sleep(3)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == [
+        "time.sleep(2)", "time.sleep(3)"]
+
+
+def test_nested_block_patcher_stop(tmp_path):
+    path = tmp_path / "test_nested_stop.py"
+    path.write_text('''
+import time
+from unittest.mock import patch
+def test_nested_try():
+    patcher = patch("time.sleep")
+    try:
+        patcher.start()
+        time.sleep(0)
+        patcher.stop()
+        time.sleep(1)
+    finally:
+        pass
+    time.sleep(2)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == [
+        "time.sleep(1)", "time.sleep(2)"]
+
+
+def test_nested_try_finally_patcher_stop(tmp_path):
+    path = tmp_path / "test_nested_finally.py"
+    path.write_text('''
+import time
+from unittest.mock import patch
+def test_finally():
+    patcher = patch("time.sleep")
+    patcher.start()
+    try:
+        time.sleep(0)
+    finally:
+        patcher.stop()
+    time.sleep(1)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(1)"]
+
+
