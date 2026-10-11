@@ -2688,7 +2688,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 try:
                     send_message(db, agent.parent_id, msg, sender_id="brindle")
                 except Exception:
-                    pass
+                    try:
+                        db.enqueue(agent.parent_id, msg, "brindle")
+                    except Exception:
+                        pass
             root_id = pilot.root_of(db, agent_id)
             if db.get_autopilot(root_id):
                 pilot.need_user(db, root_id, f"Credentials need attention for agent {agent_id}: {err_desc}")
