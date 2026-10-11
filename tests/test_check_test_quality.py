@@ -422,3 +422,78 @@ def test_finally():
     assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(1)"]
 
 
+def test_conditional_mock_does_not_exempt_other_branch_or_post_conditional(tmp_path):
+    path = tmp_path / "test_if.py"
+    path.write_text('''
+import time
+def test_conditional(monkeypatch, use_mock):
+    if use_mock:
+        monkeypatch.setattr(time, "sleep", lambda _: None)
+    else:
+        time.sleep(1)
+    time.sleep(2)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == [
+        "time.sleep(1)", "time.sleep(2)"]
+
+
+def test_empty_loop_mock_does_not_exempt_post_loop(tmp_path):
+    path = tmp_path / "test_loop.py"
+    path.write_text('''
+import time
+def test_loop(monkeypatch, items):
+    for item in items:
+        monkeypatch.setattr(time, "sleep", lambda _: None)
+    time.sleep(1)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(1)"]
+
+
+def test_try_except_mock_does_not_exempt_handler_or_post_try(tmp_path):
+    path = tmp_path / "test_try.py"
+    path.write_text('''
+import time
+def test_try(monkeypatch):
+    try:
+        monkeypatch.setattr(time, "sleep", lambda _: None)
+    except Exception:
+        time.sleep(1)
+    time.sleep(2)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == [
+        "time.sleep(1)", "time.sleep(2)"]
+
+
+def test_monkeypatch_context_restores_sleep_at_exit(tmp_path):
+    path = tmp_path / "test_ctx.py"
+    path.write_text('''
+import time
+def test_context(monkeypatch):
+    with monkeypatch.context() as m:
+        m.setattr(time, "sleep", lambda _: None)
+        time.sleep(0)
+    time.sleep(10)
+''')
+    issues = quality.sleep_issues(path)
+    assert [issue.key.rsplit("::", 1)[-1] for issue in issues] == ["time.sleep(10)"]
+
+
+def test_monkeypatch_context_preserves_outer_mocks(tmp_path):
+    path = tmp_path / "test_ctx_outer.py"
+    path.write_text('''
+import time
+def test_context_outer(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    time.sleep(0)
+    with monkeypatch.context() as m:
+        m.setattr(time, "sleep", lambda _: None)
+        time.sleep(1)
+    time.sleep(2)
+''')
+    assert quality.sleep_issues(path) == []
+
+
+

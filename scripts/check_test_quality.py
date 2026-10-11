@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 4064
+TEST_BUDGET = 4069
 
 
 class Finding(NamedTuple):
@@ -99,6 +99,26 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
 
         def clone(self):
             return State(self.patchers, self.started, self.unnamed_started, self.mp_exemptions)
+
+        def join(self, other: State) -> State:
+            patchers = {
+                k: v for k, v in self.patchers.items()
+                if k in other.patchers and other.patchers[k] == v
+            }
+            started = self.started & other.started
+            unnamed_started = self.unnamed_started & other.unnamed_started
+            mp_exemptions = {}
+            for mp in set(self.mp_exemptions.keys()) & set(other.mp_exemptions.keys()):
+                common = self.mp_exemptions[mp] & other.mp_exemptions[mp]
+                if common:
+                    mp_exemptions[mp] = set(common)
+            return State(patchers, started, unnamed_started, mp_exemptions)
+
+        def apply(self, other: State):
+            self.patchers = dict(other.patchers)
+            self.started = set(other.started)
+            self.unnamed_started = set(other.unnamed_started)
+            self.mp_exemptions = {k: set(v) for k, v in other.mp_exemptions.items()}
 
         @property
         def active_started(self) -> frozenset[str]:
@@ -201,39 +221,93 @@ def sleep_issues(path: Path, root: Path | None = None) -> list[Finding]:
             return
 
         if isinstance(stmt, (ast.With, ast.AsyncWith)):
+            context_mp_names = set()
             for item in stmt.items:
                 check_calls(item.context_expr, lexical_mocks, scope, state)
+                if isinstance(item.context_expr, ast.Call) and dotted(item.context_expr.func).endswith(".context"):
+                    if item.optional_vars:
+                        for v in ast.walk(item.optional_vars):
+                            if isinstance(v, ast.Name):
+                                context_mp_names.add(v.id)
             with_lexical = lexical_mocks | frozenset().union(*(
                 patch_target(i.context_expr) or state.patchers.get(dotted(i.context_expr), frozenset())
                 for i in stmt.items
             ))
             visit_statements(stmt.body, with_lexical, scope, state)
+            for name in context_mp_names:
+                state.mp_exemptions.pop(name, None)
             return
 
         if isinstance(stmt, ast.Try):
-            visit_statements(stmt.body, lexical_mocks, scope, state)
-            for handler in stmt.handlers:
-                if handler.type:
-                    check_calls(handler.type, lexical_mocks, scope, state)
-                visit_statements(handler.body, lexical_mocks, scope, state)
+            state_try = state.clone()
+            visit_statements(stmt.body, lexical_mocks, scope, state_try)
+
+            handler_states = []
+            if stmt.handlers:
+                state_handler_entry = state.join(state_try)
+                for handler in stmt.handlers:
+                    if handler.type:
+                        check_calls(handler.type, lexical_mocks, scope, state_handler_entry)
+                    h_state = state_handler_entry.clone()
+                    visit_statements(handler.body, lexical_mocks, scope, h_state)
+                    handler_states.append(h_state)
+
             if stmt.orelse:
-                visit_statements(stmt.orelse, lexical_mocks, scope, state)
+                state_else = state_try.clone()
+                visit_statements(stmt.orelse, lexical_mocks, scope, state_else)
+                normal_state = state_else
+            else:
+                normal_state = state_try
+
+            if handler_states:
+                joined = normal_state
+                for h_state in handler_states:
+                    joined = joined.join(h_state)
+            else:
+                joined = normal_state
+
             if stmt.finalbody:
-                visit_statements(stmt.finalbody, lexical_mocks, scope, state)
+                visit_statements(stmt.finalbody, lexical_mocks, scope, joined)
+
+            state.apply(joined)
             return
 
-        if isinstance(stmt, (ast.If, ast.While)):
+        if isinstance(stmt, ast.If):
             check_calls(stmt.test, lexical_mocks, scope, state)
-            visit_statements(stmt.body, lexical_mocks, scope, state)
+            state_body = state.clone()
+            visit_statements(stmt.body, lexical_mocks, scope, state_body)
             if stmt.orelse:
-                visit_statements(stmt.orelse, lexical_mocks, scope, state)
+                state_else = state.clone()
+                visit_statements(stmt.orelse, lexical_mocks, scope, state_else)
+            else:
+                state_else = state.clone()
+            state.apply(state_body.join(state_else))
+            return
+
+        if isinstance(stmt, ast.While):
+            check_calls(stmt.test, lexical_mocks, scope, state)
+            state_body = state.clone()
+            visit_statements(stmt.body, lexical_mocks, scope, state_body)
+            if stmt.orelse:
+                state_else = state.clone()
+                visit_statements(stmt.orelse, lexical_mocks, scope, state_else)
+                state_zero = state_else
+            else:
+                state_zero = state.clone()
+            state.apply(state_zero.join(state_body))
             return
 
         if isinstance(stmt, (ast.For, ast.AsyncFor)):
             check_calls(stmt.iter, lexical_mocks, scope, state)
-            visit_statements(stmt.body, lexical_mocks, scope, state)
+            state_body = state.clone()
+            visit_statements(stmt.body, lexical_mocks, scope, state_body)
             if stmt.orelse:
-                visit_statements(stmt.orelse, lexical_mocks, scope, state)
+                state_else = state.clone()
+                visit_statements(stmt.orelse, lexical_mocks, scope, state_else)
+                state_zero = state_else
+            else:
+                state_zero = state.clone()
+            state.apply(state_zero.join(state_body))
             return
 
         check_calls(stmt, lexical_mocks, scope, state)
