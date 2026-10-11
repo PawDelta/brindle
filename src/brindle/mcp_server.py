@@ -1065,6 +1065,20 @@ async def check_milestone(milestone: int | None = None) -> str:
     return await asyncio.to_thread(run)
 
 
+@mcp.tool()
+def record_audit_decision(finding: str, rationale: str = "") -> str:
+    """Autopilot: record the supervisor's acceptance of an audit finding with rationale,
+    so subsequent completion audits take the recorded decision into account."""
+    db = DB()
+    found = _session(db)
+    if isinstance(found, str):
+        return found
+    root_id, _ = found
+    decision = f"Accepted finding '{finding}': {rationale}" if rationale else f"Accepted finding '{finding}'"
+    autopilot.record_accepted_decision(db, root_id, decision)
+    return f"Recorded audit decision for finding '{finding}'."
+
+
 def record_milestone_changes(db: DB, root_id: str, ws: Workspace, before: dict,
                              caller, position: int | None, text: str) -> None:
     """History rows for a milestone check: one per milestone whose status it

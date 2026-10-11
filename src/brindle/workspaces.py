@@ -270,7 +270,7 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
                 except git.GitError:
                     pass
 
-            surviving = [f.name for f in Path(ws.path).glob("[!.]*")]
+            surviving = [f.name for f in Path(ws.path).iterdir() if f.name != ".git"]
             if surviving:
                 shown = ", ".join(surviving[:5])
                 raise WorkspaceError(

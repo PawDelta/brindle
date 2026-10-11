@@ -360,7 +360,8 @@ def clear_finished_goal(db: DB, root_id: str) -> None:
                 path.write_bytes(b"")
         db.set_milestones(root_id, [])
         db.update_autopilot(root_id, goal=None, detail=None, goals_file=None, goal_sha=None,
-                            audit_sha=None, audit_ok=None, auditor_id=None, note=None)
+                            audit_sha=None, audit_ok=None, auditor_id=None, note=None,
+                            audit_history=None)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't clear the finished goal")
 
@@ -419,6 +420,8 @@ def set_goal(db: DB, root_id: str, goal: str,
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
     fields: dict[str, object] = {}
+    if ap is None or ap.goal != goal.strip():
+        fields["audit_history"] = None
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -536,6 +539,31 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     return name, bool(pick), why
 
 
+def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+    """The tier/weight of a profile ('light', 'medium', 'heavy')."""
+    if "-heavy" in name:
+        return "heavy"
+    if "-light" in name:
+        return "light"
+    if cfg is not None and hasattr(cfg, "routing") and cfg.routing:
+        in_light = name in cfg.routing.get("light", [])
+        in_med = name in cfg.routing.get("medium", [])
+        in_heavy = name in cfg.routing.get("heavy", [])
+        if in_heavy and not in_med and not in_light:
+            return "heavy"
+        if in_light:
+            return "light"
+        if in_med:
+            return "medium"
+    try:
+        p = load_profile(name, repo_root)
+        if getattr(p, "effort", None) in ("high", "xhigh", "max"):
+            return "heavy"
+    except Exception:
+        pass
+    return "medium"
+
+
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
@@ -549,26 +577,42 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     explanation of a routed pick is appended to ``why``. ``decision`` is
     filled with what ``brindle.savings`` records: the ``profile``, the
     ``baseline`` (the pick without learning), ``learned`` and the ``weight``."""
-    name = (requested or "").strip()
+    cfg = load_repo_config(repo_root)
+    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
+
+    if requested:
+        req = requested.strip()
+        if ceiling and weight_order[profile_weight(req, cfg, repo_root)] > weight_order[ceiling]:
+            raise AutopilotError(f"profile {req!r} exceeds configured max_weight {ceiling!r}")
+        name = req
+    else:
+        name = ""
+
     learned = False
     routed: dict = {}
     if not name:
         pending = next((m for m in db.milestones(root_of(db, caller_id)) if m.status != "passed"), None)
-        name = (pending.profile if pending else None) or ""
+        if pending and pending.profile:
+            m_profile = pending.profile.strip()
+            if ceiling and weight_order[profile_weight(m_profile, cfg, repo_root)] > weight_order[ceiling]:
+                candidates = cfg.routing.get(ceiling, [cfg.default_agent])
+                name = candidates[0] if candidates else cfg.default_agent
+                if why is not None:
+                    why.append(f"milestone profile {m_profile} capped to {name} by max_weight {ceiling}")
+            else:
+                name = m_profile
     if not name:
         from brindle import learning
 
-        cfg = load_repo_config(repo_root)
         if weight:
             if weight not in WEIGHTS:
                 raise AutopilotError(f"weight must be one of {', '.join(WEIGHTS)}, not {weight!r}")
-            weight_order = {"light": 0, "medium": 1, "heavy": 2}
-            if cfg.max_weight and cfg.max_weight in WEIGHTS:
-                if weight_order[weight] > weight_order[cfg.max_weight]:
-                    orig_weight = weight
-                    weight = cfg.max_weight
-                    if why is not None:
-                        why.append(f"weight {orig_weight} capped to {weight} by max_weight")
+            if ceiling and weight_order[weight] > weight_order[ceiling]:
+                orig_weight = weight
+                weight = ceiling
+                if why is not None:
+                    why.append(f"weight {orig_weight} capped to {weight} by max_weight")
             if files and all(f.startswith("docs/") or f.endswith(".md") for f in files):
                 if weight == "heavy":
                     weight = "medium"
@@ -600,6 +644,12 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                                    default=cfg.default_agent) or ""
             learned = bool(name)
             name = name or cfg.default_agent
+            if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
+                candidates = cfg.routing.get(ceiling, [cfg.default_agent])
+                orig_name = name
+                name = candidates[0] if candidates else cfg.default_agent
+                if why is not None:
+                    why.append(f"fallback profile {orig_name} capped to {name} by max_weight {ceiling}")
             routed["baseline"] = cfg.default_agent
         routed["prior"] = learned and learning.used_prior(cfg, repo_root)
     if decision is not None:

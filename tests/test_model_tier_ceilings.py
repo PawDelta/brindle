@@ -71,3 +71,38 @@ def test_list_agents_includes_token_usage_when_available(db, repo, monkeypatch):
     out = mcp_server.list_agents(repo=None)
     assert f"{worker.id}" in out
     assert "tokens=5k tokens" in out
+
+
+def test_explicit_heavy_profile_refused_under_light_ceiling(db, repo, monkeypatch):
+    cfg = RepoConfig(max_weight="light")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    with pytest.raises(autopilot.AutopilotError) as exc_info:
+        autopilot.choose_profile(db, "caller-exp", str(repo), requested="developer-heavy")
+    assert "exceeds configured max_weight 'light'" in str(exc_info.value)
+
+
+def test_pending_milestone_heavy_profile_capped_under_light_ceiling(db, repo, monkeypatch):
+    ws = Workspace("ws-mile", str(repo), "feat/mile", "main", "main", "main", str(repo), 20000, "tmux-m", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(sup.id)
+    autopilot.set_goal(db, sup.id, "Goal", [("Step 1", "true", "", "developer-heavy")])
+
+    cfg = RepoConfig(max_weight="light")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    why = []
+    profile, learned = autopilot.choose_profile(db, sup.id, str(repo), why=why)
+    assert any("capped to" in w and "by max_weight" in w for w in why)
+    assert profile in cfg.routing["light"]
+
+
+def test_fallback_heavy_capped_under_light_ceiling(db, repo, monkeypatch):
+    cfg = RepoConfig(max_weight="light", default_agent="developer-heavy")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    why = []
+    profile, learned = autopilot.choose_profile(db, "caller-fallback", str(repo), why=why)
+    assert any("capped to" in w for w in why)
+    assert profile in cfg.routing["light"]

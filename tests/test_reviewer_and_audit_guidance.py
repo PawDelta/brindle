@@ -164,3 +164,81 @@ def test_all_builtin_reviewer_profiles_include_tiering_guidance():
         assert "`minor`" in prompt, f"{name} missing minor"
         assert "`needs supervisor action" in prompt, f"{name} missing needs supervisor action"
         assert "actionable by the worker" in prompt, f"{name} missing actionability"
+
+
+def test_record_audit_decision_mcp_records_for_subsequent_audit(db, repo, monkeypatch):
+    from brindle import mcp_server
+    ws = Workspace("ws-mcp-dec", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-dec", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(supervisor.id)
+    autopilot.set_goal(db, supervisor.id, "Build widget", [("Step 1", "true", "")])
+
+    monkeypatch.setattr(mcp_server, "DB", lambda: db)
+    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (supervisor, ws))
+
+    res = mcp_server.record_audit_decision("Omit legacy export", "Superseded by v2 export")
+    assert "Recorded audit decision" in res
+
+    ap = db.get_autopilot(supervisor.id)
+    prompt = autopilot.audit_prompt(db, ap, "headsha")
+    assert "Accepted finding 'Omit legacy export': Superseded by v2 export" in prompt
+
+
+def test_audit_history_goal_isolation(db, repo):
+    ws = Workspace("ws-iso", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-iso", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(supervisor.id)
+
+    # 1. Set Goal 1 and record accepted decision
+    autopilot.set_goal(db, supervisor.id, "Goal 1", [("Step 1", "true", "")])
+    autopilot.record_accepted_decision(db, supervisor.id, "Accepted finding 'Omit legacy export'")
+    ap = db.get_autopilot(supervisor.id)
+    assert "Accepted finding 'Omit legacy export'" in (ap.audit_history or "")
+
+    # 2. Same-goal revision preserves audit_history
+    autopilot.set_goal(db, supervisor.id, "Goal 1", [("Step 1", "true", ""), ("Step 2", "true", "")])
+    ap = db.get_autopilot(supervisor.id)
+    assert "Accepted finding 'Omit legacy export'" in (ap.audit_history or "")
+
+    # 3. Setting unrelated new goal resets audit_history
+    autopilot.set_goal(db, supervisor.id, "Unrelated Goal 2", [("Task", "true", "")])
+    ap = db.get_autopilot(supervisor.id)
+    assert ap.audit_history is None
+    assert "Omit legacy export" not in autopilot.audit_prompt(db, ap, "headsha")
+
+    # 4. Finishing goal clears audit_history
+    autopilot.record_accepted_decision(db, supervisor.id, "Accepted something in Goal 2")
+    assert db.get_autopilot(supervisor.id).audit_history is not None
+    autopilot.clear_finished_goal(db, supervisor.id)
+    assert db.get_autopilot(supervisor.id).audit_history is None
+
+
+def test_request_review_includes_worker_profile_restrictions(db, repo, monkeypatch):
+    agents_dir = repo / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "restricted.md").write_text(
+        "---\nname: restricted\nprovider: claude\nallowed_tools: [\"Bash(git add:*)\"]\npermission_mode: acceptEdits\n---\nRestricted agent\n"
+    )
+    ws = Workspace("ws-restr", str(repo), "feat/restr", "main", "main", "main", str(repo), 20000, "tmux-restr", 0)
+    db.add_workspace(ws)
+    worker = agents.spawn(db, ws, "restricted", mode="assign")
+    worker_from_db = db.get_agent(worker.id)
+    monkeypatch.setattr(agents, "workspace_worker", lambda db_arg, ws_arg: worker_from_db)
+
+    spawned_prompts = []
+    def fake_spawn(db_arg, ws_arg, profile_arg, **kwargs):
+        spawned_prompts.append(kwargs.get("prompt", ""))
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.id = "rev-restr"
+        return m
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    agents.request_review(db, None, ws)
+    assert len(spawned_prompts) == 1
+    prompt = spawned_prompts[0]
+    assert "Worker restrictions:" in prompt
+    assert "allowed_tools: Bash(git add:*)" in prompt
+    assert "permission_mode: acceptEdits" in prompt

@@ -189,13 +189,23 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         company = {} if agent.provider != "claude" else company_login.stored_env()
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
+        # Provider credentials present in the current process environment:
+        # freshly exported keys take effect in new panes instead of relying on
+        # stale credentials in an existing tmux server.
+        from brindle import secrets
+        creds = set() if org else secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
+        exported = {
+            k: os.environ[k]
+            for k in creds
+            if k in os.environ and not secrets.is_job_secret(k)
+        }
         if enforced is None:
-            env = {**company, **profile_env, **managed_env, **env}
+            env = {**company, **exported, **profile_env, **managed_env, **env}
         else:
             # An enforced company identity (Enterprise): the pane runs on the route
             # launch_problem checked, whatever a profile's env lines say.
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
-            env = {**profile_env, **managed_env, **enforced, **env}
+            env = {**exported, **profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -1967,6 +1977,28 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
         task += f"\n\nThe worker's original task:\n{worker.task.strip()[:TASK_TRIM]}"
     if worker:
         task += f"\n\nWorker profile: {worker.profile} (provider: {worker.provider})"
+        try:
+            from brindle.profiles import load_profile
+            wp = load_profile(worker.profile, ws.repo_root)
+            restrictions = []
+            if wp.allowed_tools:
+                restrictions.append(f"allowed_tools: {', '.join(wp.allowed_tools)}")
+            if wp.permission_mode:
+                restrictions.append(f"permission_mode: {wp.permission_mode}")
+            if wp.permission_denies:
+                restrictions.append(f"permission_denies: {', '.join(wp.permission_denies)}")
+            if getattr(wp, "write_scope", None):
+                restrictions.append(f"write_scope: {', '.join(wp.write_scope)}")
+            if getattr(wp, "read_scope", None):
+                restrictions.append(f"read_scope: {', '.join(wp.read_scope)}")
+            if getattr(wp, "env_allow", None):
+                restrictions.append(f"env_allow: {', '.join(wp.env_allow)}")
+            if wp.strict_mcp:
+                restrictions.append("strict_mcp: true")
+            if restrictions:
+                task += f"\nWorker restrictions:\n" + "\n".join(f"- {r}" for r in restrictions)
+        except Exception:
+            pass
     if worker_files:
         task += f"\n\nDeclared files: {', '.join(worker_files)}"
     if worker_done_when:

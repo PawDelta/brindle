@@ -831,6 +831,20 @@ def autopilot_cmd(
         typer.echo(pilot.usage_note(u))
 
 
+@app.command("audit-decision")
+def audit_decision_cmd(
+    finding: str = typer.Argument(..., help="The finding or gap from the completion audit to accept."),
+    rationale: str = typer.Option("", "--rationale", "-r", help="Reasoning for accepting this finding without code changes."),
+) -> None:
+    """Record acceptance of a completion audit finding with rationale."""
+    from brindle import autopilot as pilot
+    db = DB()
+    root_id = _session_root(db)
+    decision = f"Accepted finding '{finding}': {rationale}" if rationale else f"Accepted finding '{finding}'"
+    pilot.record_accepted_decision(db, root_id, decision)
+    typer.echo(f"Recorded audit decision for finding {finding!r}.")
+
+
 @app.command()
 def doctor(
     fix: bool = typer.Option(False, "--fix", help="Offer to let Claude Code use an exported ANTHROPIC_API_KEY without asking, and agy a GEMINI_API_KEY (modelProvider \"gemini\")."),

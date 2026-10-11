@@ -97,6 +97,8 @@ def has_session(session: str) -> bool:
 def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
     """Create a detached session whose first window is a plain shell."""
     if has_session(session):
+        for k, v in env.items():
+            _tmux("set-environment", "-t", f"={session}", k, v, check=False)
         return
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *env_args)

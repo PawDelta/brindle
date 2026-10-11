@@ -44,6 +44,34 @@ def test_damaged_worktree_missing_git_with_surviving_files_raises(db, repo):
     assert (Path(ws.path) / "surviving_notes.txt").exists()
 
 
+def test_damaged_worktree_missing_git_with_hidden_files_and_dirs_raises(db, repo):
+    created = workspaces.create(db, str(repo), "feat/hidden-git-loss", reuse_registered=True)
+    ws = created.workspace
+    assert os.path.isdir(ws.path)
+    # Remove .git and all visible files, leaving only .env and .claude/
+    git_file = Path(ws.path) / ".git"
+    if git_file.is_file():
+        git_file.unlink()
+    elif git_file.is_dir():
+        shutil.rmtree(git_file)
+    for f in list(Path(ws.path).glob("*")):
+        if f.is_file():
+            f.unlink()
+        elif f.is_dir():
+            shutil.rmtree(f)
+    (Path(ws.path) / ".env").write_text("SECRET_KEY=keep_me\n")
+    hidden_dir = Path(ws.path) / ".claude"
+    hidden_dir.mkdir()
+    (hidden_dir / "config.json").write_text("{}")
+
+    # Reusing registered workspace must refuse destructive recovery and preserve .env and .claude/
+    with pytest.raises(workspaces.WorkspaceError) as exc_info:
+        workspaces.create(db, str(repo), "feat/hidden-git-loss", reuse_registered=True)
+    assert "surviving files" in str(exc_info.value)
+    assert (Path(ws.path) / ".env").exists()
+    assert (Path(ws.path) / ".claude" / "config.json").exists()
+
+
 def test_damaged_worktree_missing_git_empty_recreated(db, repo):
     created = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True)
     ws = created.workspace

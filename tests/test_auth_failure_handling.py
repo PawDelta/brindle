@@ -147,3 +147,23 @@ def test_antigravity_stop_classifies_auth_failure(db, repo, monkeypatch):
     event, payload = hook_calls[0]
     assert event == "stop-failure"
     assert payload.get("error_type") == "auth"
+
+
+def test_fresh_exported_key_included_in_agent_env(db, repo):
+    from brindle.db import Workspace, Agent
+    from brindle import agents, keystore
+    import os
+    from unittest.mock import patch
+
+    ws = Workspace("ws-auth-rot", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-rot", 0)
+    db.add_workspace(ws)
+    a = Agent(id="a", workspace_id=ws.id, profile="developer", provider="claude",
+              parent_id=None, mode="assign", status="failed", tmux_window="", result=None, created_at=0)
+
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "new-rotated-key"}), \
+         patch.object(agents.company_login, "stored_env", return_value={}), \
+         patch.object(agents.company_identity, "enforced_route_env", return_value=None), \
+         patch.object(agents.providers, "claude_org_managed", return_value=False):
+        env = agents.agent_env(ws, "a", a, m=None)
+        env = {**keystore.pane_keys({"ANTHROPIC_API_KEY"}, env), **env}
+        assert env.get("ANTHROPIC_API_KEY") == "new-rotated-key"
