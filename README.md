@@ -88,11 +88,11 @@ a writable home) and, in a repo, what's set up for it, and says what to do about
 anything missing. Bare `brindle` runs the essential ones (tmux, the chat's CLI)
 before it launches anything.
 
-That's it. `brindle` opens a supervisor chat (Claude Code) in your repo, with a
-narrow sidebar on the left showing every agent: who's working, who's idle, and
-who's waiting for your approval. Tell the supervisor what you want. It splits the
-work between workers, each on its own branch, then reviews and merges their
-branches. It starts in under a second.
+That's it. Bare `brindle` opens a fresh interactive developer chat (Claude Code)
+in your repo (with autopilot off), with a narrow sidebar on the left showing every
+agent: who's working, who's idle, and who's waiting for your approval. To launch an
+autopilot supervisor that splits work between parallel workers, reviews, and merges
+their branches toward verified milestones, run `brindle supervisor`. It starts in under a second.
 
 **The sidebar follows you.** There's one sidebar pane per session root, not
 one per window: switch to any other brindle window or session (⏎ in the
@@ -212,7 +212,7 @@ for mechanical edits and a Codex reviewer for a second model's opinion.
 
 ## Autopilot
 
-`brindle` starts the supervisor with autopilot on. Tell it what we're building,
+`brindle supervisor` starts the supervisor with autopilot on (or `brindle start -a supervisor`). Tell it what we're building,
 or put the goal in `.brindle/goals.md`, and it works like a project manager:
 
 1. **Goal and milestones.** The goal is split into milestones, and each one has
@@ -307,7 +307,8 @@ your own status line prints, so what you see doesn't change.
 
 | | |
 |---|---|
-| `brindle` | a fresh supervisor chat here, dashboard alongside |
+| `brindle` | a fresh developer chat here (autopilot off), dashboard alongside |
+| `brindle supervisor` | start an explicit autopilot supervisor chat to coordinate parallel workers and milestones |
 | `brindle init` | detect setup and test commands, write `.brindle/config.json`, check tools |
 | `brindle demo [--local]` | watch brindle finish a tiny practice repo: parallel workers, reviews, gated merges |
 | `brindle new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
@@ -1406,6 +1407,22 @@ A profile chooses between the two with `auth`:
 | `api_key` | Only a key: the worker refuses to start without one. |
 
 Your org's `deny_personal_keys` (Enterprise) still applies on top of `auth`.
+
+#### Running unattended on API keys
+
+When running long, unattended autopilot sessions with API keys:
+
+- **Quota, token and cost measurements per provider**:
+  - Autopilot's automatic usage pause (`usage_limit: 90`) relies on the percentage numbers emitted by Claude Code's status line under subscription plans. Under API-key billing (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), the CLIs report no subscription percentage, so subscription usage pause thresholds do not trigger; manage spend via provider account budget limits or brindle budget policies.
+  - Token and cost tracking: Token counts and cost estimates are captured from Claude and Codex transcripts. Antigravity (`agy`) currently has **no token/cost measurements**, so budget policies and cost tracking cannot monitor Antigravity spend; enforce usage caps directly in Google AI Studio or your Google Cloud project billing settings.
+- **Runtime auth failure handling and provider differences**:
+  - **Claude and Antigravity**: Runtime authentication failures (such as 401/403, revoked API keys, or credit/billing errors) are intercepted via StopFailure and exit hooks. Brindle marks the worker as failed, alerts the supervisor, invalidates cached sign-in checks, and pauses autopilot with a `Credentials need attention` notice rather than cycling idle nudges.
+  - **Codex (unsupported runtime auth detection)**: Codex CLI turn completion (`agent-turn-complete`) does not classify auth errors at runtime. If an OpenAI API key expires or is rejected, Codex workers will not automatically transition to `failed` or trigger an autopilot credential pause. When running Codex workers unattended, monitor their progress via `brindle watch` or check tmux panes; if an auth failure occurs, manually restart or rotate keys.
+- **Supervisor credential refresh and key rotation**:
+  - **Recovering failed/blocked workers**: When an agent fails on an expired key or autopilot pauses with a credential error, export the fresh key (or update `brindle keys set`), then run `brindle continue`. This unpauses the session and relaunches paused/failed agents with the new credentials. The replacement credentials are automatically synced to the session credential store, dynamically refreshed by the supervisor's launcher on all subsequent worker delegations (`assign`/`handoff`).
+  - **Proactive rotation in live sessions**: Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
+  - **Precedence**: Newly stored keys (`brindle keys set`) or session credentials updated during recovery take effect dynamically for all new panes, overriding stale launcher environments. For profile-level overrides, an explicit profile key (`env.NAME`) takes precedence over default provider credentials.
+- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts unless permissions are pre-populated in `settings.json` (see Permissions) or run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
 
 ### Cheap workers
 

@@ -80,9 +80,11 @@ to be asked each step.
   overlaps, and `depends_on` (an earlier task's agent id or branch) when one
   task's work must merge before another starts; brindle queues it until then.
 - Unless you need a specific profile, pass `weight` on every `assign`:
-  "light" (small, well-specified, mechanical), "medium" (a normal feature or
-  bugfix in one area) or "heavy" (design-heavy, cross-cutting, subtle). brindle
-  picks an available profile for that tier.
+  "light" (small, well-specified, mechanical: docs, renames, simple tests),
+  "medium" (normal feature work, refactors, cross-cutting edits, or bugfixes) or
+  "heavy" (reserved for exceptionally complex algorithmic work, subtle bugs that
+  failed earlier fix rounds, or deep reasoning). brindle picks an available
+  profile for that tier.
 - Keep task briefs short: the goal in a sentence or two, the files, and the
   test that proves it done. Workers read the tests and code themselves;
   never paste them. Writing is the slowest thing you do.
@@ -360,7 +362,8 @@ def clear_finished_goal(db: DB, root_id: str) -> None:
                 path.write_bytes(b"")
         db.set_milestones(root_id, [])
         db.update_autopilot(root_id, goal=None, detail=None, goals_file=None, goal_sha=None,
-                            audit_sha=None, audit_ok=None, auditor_id=None, note=None)
+                            audit_sha=None, audit_ok=None, auditor_id=None, note=None,
+                            audit_history=None)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't clear the finished goal")
 
@@ -419,6 +422,8 @@ def set_goal(db: DB, root_id: str, goal: str,
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
     fields: dict[str, object] = {}
+    if ap is None or ap.goal != goal.strip():
+        fields["audit_history"] = None
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -489,7 +494,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
 
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
                      files: list[str] | None,
-                     decision: dict | None = None, gate=None) -> tuple[str | None, bool, str]:
+                     decision: dict | None = None, gate=None,
+                     ceiling: str | None = None) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
     every candidate for the tier is out. ``decision`` gets the ``baseline``
     (the pick without learning), and ``over_budget`` (why each candidate was
@@ -500,7 +506,11 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
     order = cfg.routing.get(weight, [])
+    if effective_ceiling:
+        order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
         why = _unavailable(name, cfg, repo_root, gate, weight)
         if why:
@@ -523,7 +533,10 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     name = pick or remaining[0]
     if decision is not None:
         decision["baseline"] = remaining[0]
-    why = f"weight {weight} -> {name}"
+
+    info_str = model_cost_info(name, cfg, repo_root)
+
+    why = f"weight {weight} -> {name}{info_str}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
     kept = learning.kept_note(cfg, repo_root)
     detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
@@ -531,6 +544,116 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if detail:
         why += f" ({', '.join(detail)})"
     return name, bool(pick), why
+
+
+def effective_profile_model(p, repo_root: str | None = None) -> str:
+    """Resolve the effective model for a profile, checking model, provider-specific env variables, and managed overrides."""
+    from brindle import profiles
+
+    prof = p
+    if isinstance(p, str):
+        try:
+            prof = profiles.load_profile(p, repo_root)
+        except Exception:
+            prof = p
+
+    m = getattr(prof, "model", None) or ""
+    provider = getattr(prof, "provider", None) or "claude"
+
+    # Provider-specific model environment variables in order of provider precedence
+    provider_keys = {
+        "claude": ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "MODEL"),
+        "codex": ("CODEX_MODEL", "OPENAI_MODEL", "MODEL"),
+        "antigravity": ("GEMINI_MODEL", "MODEL"),
+    }.get(provider, ("MODEL",))
+
+    if not m and getattr(prof, "env", None):
+        for k in provider_keys:
+            if prof.env.get(k):
+                m = prof.env[k]
+                break
+        if not m:
+            for k, v in prof.env.items():
+                if "MODEL" in k and v:
+                    m = v
+                    break
+    if not m:
+        for k in provider_keys:
+            val = os.environ.get(k)
+            if val and val.strip():
+                m = val.strip()
+                break
+
+    try:
+        from brindle.pro import managed_models
+        from brindle.agents import managed
+        mg = managed(repo_root)
+        if mg and not isinstance(prof, str):
+            applied = managed_models.apply_profile(mg, prof)
+            if applied and applied.model:
+                m = applied.model
+    except Exception:
+        pass
+    return m.strip()
+
+
+def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+    """Format model name, effort, and cost tier as a cost signal string."""
+    try:
+        from brindle.profiles import load_profile
+        p = load_profile(name, repo_root)
+        eff = effective_profile_model(p, repo_root)
+        model_name = eff or p.model or "inherited CLI default"
+        model_info = [model_name]
+        if p.effort:
+            model_info.append(f"{p.effort} effort")
+        pw = profile_weight(name, cfg, repo_root)
+        if pw == "heavy":
+            cost_tier = "most expensive tier"
+        elif pw == "light":
+            cost_tier = "lowest cost tier"
+        else:
+            cost_tier = "medium cost tier"
+        cost_tag = f"; {cost_tier}"
+        return f" ({', '.join(model_info)}{cost_tag})"
+    except Exception:
+        return ""
+
+
+def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+    """The tier/weight of a profile ('light', 'medium', 'heavy')."""
+    try:
+        p = load_profile(name, repo_root)
+        m = effective_profile_model(p, repo_root).lower()
+        if any(h in m for h in ("fable", "opus", "o3", "deepseek-r1", "astra")):
+            return "heavy"
+        if getattr(p, "effort", None) in ("high", "xhigh", "max"):
+            return "heavy"
+        if "-heavy" in name:
+            return "heavy"
+        if getattr(p, "effort", None) in ("low",):
+            return "light"
+        if any(l in m for l in ("haiku", "flash", "mini", "4o-mini", "luna")):
+            return "light"
+        if "-light" in name:
+            return "light"
+    except Exception:
+        pass
+    if "-heavy" in name:
+        return "heavy"
+    if "-light" in name:
+        return "light"
+    if cfg is not None and hasattr(cfg, "routing") and cfg.routing:
+        in_light = name in cfg.routing.get("light", [])
+        in_med = name in cfg.routing.get("medium", [])
+        in_heavy = name in cfg.routing.get("heavy", [])
+        if in_heavy and not in_med and not in_light:
+            return "heavy"
+        if in_light and not in_med and not in_heavy:
+            return "light"
+        if in_med:
+            return "medium"
+    return "medium"
 
 
 def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,
@@ -546,23 +669,62 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     explanation of a routed pick is appended to ``why``. ``decision`` is
     filled with what ``brindle.savings`` records: the ``profile``, the
     ``baseline`` (the pick without learning), ``learned`` and the ``weight``."""
-    name = (requested or "").strip()
+    cfg = load_repo_config(repo_root)
+    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
+
+    if requested:
+        req = requested.strip()
+        if ceiling and weight_order[profile_weight(req, cfg, repo_root)] > weight_order[ceiling]:
+            raise AutopilotError(f"profile {req!r} exceeds configured max_weight {ceiling!r}")
+        name = req
+        if why is not None:
+            why.append(f"requested profile -> {name}{model_cost_info(name, cfg, repo_root)}")
+    else:
+        name = ""
+
     learned = False
     routed: dict = {}
     if not name:
         pending = next((m for m in db.milestones(root_of(db, caller_id)) if m.status != "passed"), None)
-        name = (pending.profile if pending else None) or ""
+        if pending and pending.profile:
+            m_profile = pending.profile.strip()
+            if ceiling and weight_order[profile_weight(m_profile, cfg, repo_root)] > weight_order[ceiling]:
+                candidates = cfg.routing.get(ceiling, [cfg.default_agent])
+                name = candidates[0] if candidates else cfg.default_agent
+                if why is not None:
+                    why.append(f"milestone profile {m_profile} capped to {name}{model_cost_info(name, cfg, repo_root)} by max_weight {ceiling}")
+            else:
+                name = m_profile
+                if why is not None:
+                    why.append(f"milestone profile -> {name}{model_cost_info(name, cfg, repo_root)}")
     if not name:
         from brindle import learning
 
-        cfg = load_repo_config(repo_root)
         if weight:
             if weight not in WEIGHTS:
                 raise AutopilotError(f"weight must be one of {', '.join(WEIGHTS)}, not {weight!r}")
+            if ceiling and weight_order[weight] > weight_order[ceiling]:
+                orig_weight = weight
+                weight = ceiling
+                if why is not None:
+                    why.append(f"weight {orig_weight} capped to {weight} by max_weight")
+            if files and all(f.startswith("docs/") or f.endswith(".md") for f in files):
+                if weight == "heavy":
+                    weight = "medium"
+                    if why is not None:
+                        why.append("weight demoted from heavy to medium (docs only)")
+                elif weight == "medium":
+                    weight = "light"
+                    if why is not None:
+                        why.append("weight demoted from medium to light (docs only)")
+                docs_cap = weight
+                if ceiling is None or weight_order[docs_cap] < weight_order[ceiling]:
+                    ceiling = docs_cap
             from brindle import budget
 
             gate = budget.Gate(db, cfg, repo_root, caller_id)
-            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate)
+            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate, ceiling=ceiling)
             if routed.get("over_budget"):
                 message = budget.refusal(routed["over_budget"])
                 try:
@@ -573,7 +735,14 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             if picked:
                 name = picked
             else:
-                note += f"; using {cfg.default_agent}"
+                fallback = cfg.default_agent
+                if ceiling and weight_order[profile_weight(fallback, cfg, repo_root)] > weight_order[ceiling]:
+                    candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
+                    fallback = candidates[0] if candidates else None
+                if not fallback:
+                    raise AutopilotError(f"no permissible agent profile under max_weight ceiling {ceiling!r}")
+                name = fallback
+                note += f"; using {name}"
             if why is not None:
                 why.append(note)
         if not name:
@@ -581,6 +750,12 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                                    default=cfg.default_agent) or ""
             learned = bool(name)
             name = name or cfg.default_agent
+            if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
+                candidates = cfg.routing.get(ceiling, [cfg.default_agent])
+                orig_name = name
+                name = candidates[0] if candidates else cfg.default_agent
+                if why is not None:
+                    why.append(f"fallback profile {orig_name} capped to {name} by max_weight {ceiling}")
             routed["baseline"] = cfg.default_agent
         routed["prior"] = learned and learning.used_prior(cfg, repo_root)
     if decision is not None:
@@ -588,6 +763,25 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                         prior=bool(routed.get("prior")),
                         baseline=routed.get("baseline", name) if learned else name,
                         demoted_from=routed.get("demoted_from"))
+    if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
+        permissible = [
+            n for n in cfg.routing.get(ceiling, [])
+            if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]
+        ]
+        if not permissible:
+            for tier in ("medium", "light"):
+                if weight_order[tier] <= weight_order[ceiling]:
+                    permissible.extend([
+                        n for n in cfg.routing.get(tier, [])
+                        if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]
+                    ])
+        if permissible:
+            orig_name = name
+            name = permissible[0]
+            if why is not None:
+                why.append(f"profile {orig_name} capped to {name} by max_weight {ceiling}")
+        else:
+            raise AutopilotError(f"no permissible agent profile under max_weight {ceiling!r}")
     try:
         load_profile(name, repo_root)
     except KeyError:
@@ -595,6 +789,13 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             f"no agent profile named {name!r}; see list_agent_profiles, "
             "or pass agent_profile explicitly"
         ) from None
+    if why is not None:
+        info_str = model_cost_info(name, cfg, repo_root)
+        if info_str and not any("cost tier" in w for w in why):
+            if why:
+                why[-1] += info_str
+            else:
+                why.append(f"{name}{info_str}")
     return name, learned
 
 
@@ -809,7 +1010,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     if done and audit is None:
         db.update_autopilot(root_id, state="done", note=None)
     elif done and audit == "start":
-        db.update_autopilot(root_id, state="auditing", note=None)
+        db.update_autopilot(root_id, state="auditing")
     elif done:
         db.update_autopilot(root_id, state="running")
     elif ap and ap.state in ("done", "auditing"):
@@ -869,6 +1070,13 @@ check that only greps, or skipped tests are gaps); look for TODOs, stubs, placeh
 returns, disabled or deleted tests and half-finished pieces. You may run a narrow test to
 probe a suspicion; don't re-run the whole suite.
 
+Audit convergence rules:
+- Conduct one comprehensive pass listing all gaps at once.
+- Separate findings into:
+  1. "Work not done" (missing implementation or test coverage).
+  2. "Disclosed and awaiting owner decision" (deliberate scope choices, proposals or options awaiting user decision).
+- Do not re-raise any gap or choice that earlier audits mentioned and the supervisor or owner has accepted.
+{prior_decisions}
 Call submit_review once. approved=true only if every part of the goal is really done.
 Otherwise approved=false, listing each gap most severe first: the milestone or part of the
 goal it concerns, file:line where it applies, what's missing, and what would close it."""
@@ -905,6 +1113,8 @@ def audit_prompt(db: DB, ap: Autopilot, head: str) -> str:
     ms = db.milestones(ap.root_id)
     lines = [f"{m.position}. {m.title} (check: `{m.check_cmd or 'none'}`)"
              + (f"\n   {m.detail}" if m.detail else "") for m in ms]
+    history_text = (getattr(ap, "audit_history", None) or ap.note or "").strip()
+    prior = f"\nPrior audit notes / accepted decisions:\n{history_text}\n" if history_text else ""
     return AUDIT.format(
         goal=ap.goal, detail=f"\n\n{ap.detail.strip()}" if ap.detail and ap.detail.strip() else "",
         milestones="\n".join(lines), work=(
@@ -912,6 +1122,7 @@ def audit_prompt(db: DB, ap: Autopilot, head: str) -> str:
             f"`git diff {ap.goal_sha}..{head}` in this checkout." if ap.goal_sha else
             f"The goal's starting commit wasn't recorded: use `git log` to find where this "
             f"work began, and audit up to {head}."),
+        prior_decisions=prior,
     )
 
 
@@ -928,7 +1139,9 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     running = db.get_agent(ap.auditor_id) if ap.auditor_id else None
     if running and running.result is None and running.status not in ("paused", "done") \
             and agents.is_alive(running):
-        return None
+        if ap.audit_sha == head:
+            return None
+        agents.close(db, running.id)
     cfg = cfg or load_repo_config(ws.repo_root)
     profile = agents.default_review_profile(cfg, db.get_agent(root_id), db, ws.repo_root, ap.goal)
     auditor = agents.spawn(db, ws, profile, prompt=audit_prompt(db, ap, head), parent_id=root_id,
@@ -937,28 +1150,40 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     return auditor
 
 
+def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
+    """Record a supervisor/user-accepted scope exclusion or decision into persistent audit history."""
+    ap = db.get_autopilot(root_id)
+    entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
+    new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
+    db.update_autopilot(root_id, audit_history=new_history, audit_sha=None, audit_ok=None, auditor_id=None, state="running")
+
+
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
     """The auditor's verdict. Returns the message for the supervisor."""
     ap = db.get_autopilot(root_id)
     sha = (ap.audit_sha or "")[:8] if ap else ""
     root = db.get_agent(root_id)
     now = _commit(db.get_workspace(root.workspace_id) if root else None)
+    entry = f"Audit of {sha} ({'approved' if approved else 'gaps found'}):\n{summary.strip()}"
+    new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     if approved and (now is None or now != (ap.audit_sha if ap else None)):
         # Work landed (or is uncommitted) since the audit began: an approval of
         # the old commit says nothing about it, so the goal stays open.
-        db.update_autopilot(root_id, state="running", note=None, audit_ok=1, auditor_id=None)
+        db.update_autopilot(root_id, state="running", note=None, audit_ok=1, auditor_id=None,
+                            audit_history=new_history)
         return (f"[brindle] Completion audit of {sha}: approved, but your checkout has changed since "
                 "it started, so the goal isn't reached yet. Commit any changes and call "
                 f"check_milestone to audit the current commit.\n\n{summary}")
     if approved:
-        db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None)
+        db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None,
+                            audit_history=new_history)
         db.bump_progress(root_id)
         clear_finished_goal(db, root_id)
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
                 f"\n\n{summary}")
     db.update_autopilot(root_id, state="running", note=summary.strip()[:4000], audit_ok=0,
-                        auditor_id=None)
+                        auditor_id=None, audit_history=new_history)
     audit_ws = db.get_workspace(root.workspace_id) if root else None
     if audit_ws is not None:
         escapes.audit_gaps(db, audit_ws.repo_root, summary)

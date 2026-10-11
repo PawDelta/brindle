@@ -21,6 +21,7 @@ import stat
 import subprocess
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +38,18 @@ TRUST_SCREEN = (
     " /Users/me/.brindle/worktrees/proj/feature\n\n"
     " ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to exit\n"
 )
+
+
+@pytest.fixture
+def isolated_health_clock(monkeypatch):
+    # Virtual health deadlines must not advance during subprocess.wait's
+    # Linux polling sleeps (git and trust setup use real subprocesses).
+    from brindle import launch_health, providers
+
+    clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time)})
+    monkeypatch.setattr(launch_health, "time", clock)
+    monkeypatch.setattr(cli, "time", clock)
+    monkeypatch.setattr(providers, "time", clock)
 
 
 def flag(argv: list[str], name: str) -> str | None:
@@ -1293,15 +1306,16 @@ def test_codex_launch_readiness_rejects_menus_with_shortcuts(menu):
     assert Codex().launch_ready(menu + "\nCompleted.\n" + CODEX_EMPTY_PANE)
 
 
-def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launches, detached, monkeypatch):
+def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launches, detached, monkeypatch,
+                                                               isolated_health_clock):
     from brindle import launch_health as lh, model_access
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
     def sleep(delay):
         sleeps.append(delay)
         now[0] += delay
-    monkeypatch.setattr(time, "time", lambda: now[0])
-    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(lh.time, "time", lambda: now[0])
+    monkeypatch.setattr(lh.time, "sleep", sleep)
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda *a: True)

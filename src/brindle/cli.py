@@ -36,8 +36,8 @@ class _App(typer.Typer):
 
 app = _App(add_completion=False, help="""brindle: run coding agents in parallel, each on its own git branch.
 
-Run `brindle` with no arguments to open (or reopen) a supervisor chat here, with
-the live dashboard underneath. Outside a git repo it starts a scratch session;
+Run `brindle` with no arguments to open (or reopen) a developer chat here (or `brindle supervisor`
+for an autopilot supervisor), with the live dashboard underneath. Outside a git repo it starts a scratch session;
 `brindle transfer <repo>` moves that work into a real repository later.
 
 Paid features (hosted learning, per-worktree services, team policies, CI):
@@ -157,7 +157,7 @@ def init(
         typer.echo(f"optional, not set up: {', '.join(optional)} (`brindle doctor` says how)")
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)
-    typer.secho("Ready. Commit .brindle/config.json, then run `brindle` and tell the supervisor what to build.",
+    typer.secho("Ready. Commit .brindle/config.json, then run `brindle` for a chat or `brindle supervisor` to coordinate parallel workers.",
                 fg="green")
 
 
@@ -237,7 +237,7 @@ def new(
 
 @app.command()
 def start(
-    agent: str = typer.Option("supervisor", "--agent", "-a", help="Agent profile."),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile (default: repo default_agent, developer)."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
@@ -246,7 +246,7 @@ def start(
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
 ) -> None:
-    """Start a fresh chat with an agent here (default: a supervisor), with the dashboard alongside.
+    """Start a fresh chat with an agent here (default: repo default_agent, developer), with the dashboard alongside.
 
     If a session is still running here, you choose: open it, start the new
     one in its own worktree (both run at once), or pause it and start fresh.
@@ -254,6 +254,7 @@ def start(
     it back. With --branch or --worktree it runs in that worktree instead,
     which gets the repo's .brindle config."""
     from brindle.config import load_repo_config
+    from brindle import scratch
 
     db = DB()
     if branch or worktree:
@@ -269,6 +270,23 @@ def start(
             if choice == "n":
                 ws = _run(_session_worktree, db, ws)
                 typer.echo(f"✓ new session in its own worktree: {ws.path} ({ws.branch})")
+
+    if not branch and not worktree and not scratch.is_scratch(ws.path):
+        curr_b = git.current_branch(ws.path)
+        if curr_b and git.merged_into_default(ws.repo_root, curr_b):
+            default_b = git.default_branch(ws.repo_root)
+            typer.secho(f"! Branch '{curr_b}' is already merged into '{default_b}'.", fg="yellow")
+            try:
+                if not git.dirty_files(ws.path):
+                    git.run(["checkout", default_b], ws.path)
+                    ws = workspaces.refresh_branch(db, ws)
+                    typer.secho(f"✓ Switched to '{default_b}'.", fg="green")
+            except Exception:
+                pass
+
+    if agent is None:
+        agent = _run(load_repo_config, ws.repo_root).default_agent
+
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
 
     if provider and agent == "supervisor" and provider in NOT_SUPERVISOR:
@@ -454,13 +472,29 @@ def _ago(seconds: float) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+def _clear_credentials_block(db: DB, root_id: str) -> bool:
+    from brindle import agents
+    ap = db.get_autopilot(root_id)
+    if not ap or ap.state != "blocked":
+        return False
+    note = (ap.note or "").lower()
+    if "credential" not in note and "sign in" not in note and "api key" not in note and "auth" not in note:
+        return False
+    tree = agents.tree(db, root_id)
+    failed = [a for a in tree if a.status == "failed"]
+    if failed:
+        return False
+    db.update_autopilot(root_id, state="running", note=None)
+    return True
+
+
 @app.command("continue")
 def continue_cmd(
     session_id: Optional[str] = typer.Argument(None, help="Session to resume (default: the most recent)."),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
 ) -> None:
     """Pick up a paused session: the chat and its workers resume where they stopped."""
-    from brindle import scratch, sessions
+    from brindle import keystore, scratch, secrets, sessions
 
     db = DB()
     cwd = os.getcwd()
@@ -471,13 +505,46 @@ def continue_cmd(
         ws = scratch.for_origin(db, cwd)
         if ws is None:
             _fail("no scratch session started from this folder to continue; run `brindle` to start one")
+    live = agents.find_running(db, ws, "supervisor") or next(
+        (a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and (agents.is_alive(a) or a.status == "failed")),
+        None,
+    )
+    live_needs_recovery = False
+    if live:
+        workers = agents.tree(db, live.id)
+        failed_workers = [a for a in workers if a.status == "failed"]
+        ap = db.get_autopilot(live.id)
+        is_blocked = ap and ap.state == "blocked"
+        if failed_workers or is_blocked or live.status == "failed":
+            live_needs_recovery = True
+
+    recovery_env = {k: os.environ[k] for k in keystore.known_names() if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)}
+
+    if session_id and live and live.id.startswith(session_id):
+        resumed = _run(agents.resume, db, live.id, recovery_env=recovery_env)
+        _clear_credentials_block(db, live.id)
+        typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
+        live = db.get_agent(live.id) or live
+        if attach:
+            _attach(ws, live.tmux_window)
+        return
+
+    if not session_id and live_needs_recovery:
+        resumed = _run(agents.resume, db, live.id, recovery_env=recovery_env)
+        _clear_credentials_block(db, live.id)
+        typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
+        live = db.get_agent(live.id) or live
+        if attach:
+            _attach(ws, live.tmux_window)
+        return
+
     available = sessions.paused(db, ws.repo_root)
     if not available:
-        live = agents.find_running(db, ws, "supervisor")
-        if live and attach:
-            typer.echo(f"Session {live.id} is already running; reopening it.")
-            _attach(ws, live.tmux_window)
-            return
+        if live:
+            if attach:
+                typer.echo(f"Session {live.id} is already running; reopening it.")
+                _attach(ws, live.tmux_window)
+                return
         _fail("no paused sessions here. Run `brindle` to start a fresh one.")
     if session_id:
         matches = [s for s in available if s.root.id.startswith(session_id)]
@@ -489,7 +556,8 @@ def continue_cmd(
         chosen = available[0]
     others = [s for s in available if s.root.id != chosen.root.id]
     _pause_running(db, ws)
-    resumed = _run(agents.resume, db, chosen.root.id)
+    resumed = _run(agents.resume, db, chosen.root.id, recovery_env=recovery_env)
+    _clear_credentials_block(db, chosen.root.id)
     typer.secho(f"↺ continuing {_describe(chosen)} ({len(resumed)} agent(s) restarted)", fg="green")
     _local_models_detached(ws.repo_root)
     if others:
@@ -650,7 +718,7 @@ def default(
     provider: Optional[str] = typer.Option(None, "--provider", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity)."),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
 ) -> None:
-    """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
+    """Bare `brindle`: a fresh developer chat here (autopilot off; run `brindle supervisor` for an autopilot supervisor; a scratch session outside git)."""
     if show_version:
         from brindle import __version__
 
@@ -667,8 +735,23 @@ def default(
         if cont:
             continue_cmd(session_id=None, attach=True)
         else:
-            start(agent="supervisor", prompt=None, provider=provider, attach=True, watch=True,
+            start(agent=None, prompt=None, provider=provider, attach=True, watch=True,
                   autopilot=autopilot, branch=None, worktree=None)
+
+
+@app.command()
+def supervisor(
+    prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
+    provider: Optional[str] = typer.Option(None),
+    attach: bool = typer.Option(True, "--attach/--no-attach"),
+    watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
+    branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
+    worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
+) -> None:
+    """Start an explicit supervisor session to coordinate coding agents."""
+    start(agent="supervisor", prompt=prompt, provider=provider, attach=attach, watch=watch,
+          autopilot=autopilot, branch=branch, worktree=worktree)
 
 
 def _session_root(db: DB) -> str:
@@ -788,6 +871,20 @@ def autopilot_cmd(
     u = pilot.usage()
     if u:
         typer.echo(pilot.usage_note(u))
+
+
+@app.command("audit-decision")
+def audit_decision_cmd(
+    finding: str = typer.Argument(..., help="The finding or gap from the completion audit to accept."),
+    rationale: str = typer.Option("", "--rationale", "-r", help="Reasoning for accepting this finding without code changes."),
+) -> None:
+    """Record acceptance of a completion audit finding with rationale."""
+    from brindle import autopilot as pilot
+    db = DB()
+    root_id = _session_root(db)
+    decision = f"Accepted finding '{finding}': {rationale}" if rationale else f"Accepted finding '{finding}'"
+    pilot.record_accepted_decision(db, root_id, decision)
+    typer.echo(f"Recorded audit decision for finding {finding!r}.")
 
 
 @app.command()

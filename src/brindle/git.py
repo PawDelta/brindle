@@ -22,17 +22,20 @@ class GitError(RuntimeError):
     pass
 
 
-def run(args: list[str], cwd: str | Path, check: bool = True) -> subprocess.CompletedProcess:
-    return run_env(args, cwd, None, check=check)
+def run(args: list[str], cwd: str | Path, check: bool = True,
+        timeout: int | float | None = None, input: str | None = None) -> subprocess.CompletedProcess:
+    return run_env(args, cwd, None, check=check, timeout=timeout, input=input)
 
 
 def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
-            check: bool = True) -> subprocess.CompletedProcess:
+            check: bool = True, timeout: int | float | None = None,
+            input: str | None = None) -> subprocess.CompletedProcess:
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
     index that leaves the checkout's real index alone; see brindle.rewind)."""
+    to = TIMEOUT if timeout is None else timeout
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT, env=env
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=to, env=env, input=input
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
@@ -87,6 +90,67 @@ def branch_exists(root: str | Path, branch: str) -> bool:
 
 def remote_branch_exists(root: str | Path, branch: str, remote: str = "origin") -> bool:
     return ok(["show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"], root)
+
+
+def merged_into_default(root: str | Path, branch: str) -> bool:
+    """True if ``branch`` has already been merged into the default branch
+    (main/master) or has no unique changes remaining against it."""
+    base = default_branch(root)
+    if not branch or branch == base or branch == "HEAD":
+        return False
+    if has_remote(root, "origin"):
+        try:
+            run(["fetch", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], root, timeout=5, check=False)
+        except GitError:
+            pass
+    targets = [base]
+    if remote_branch_exists(root, base):
+        targets.append(f"origin/{base}")
+    for target in targets:
+        if ok(["merge-base", "--is-ancestor", branch, target], root):
+            return True
+        try:
+            b_tree = out(["rev-parse", f"{branch}^{{tree}}"], root).strip()
+            t_tree = out(["rev-parse", f"{target}^{{tree}}"], root).strip()
+            if b_tree == t_tree:
+                return True
+            mb = out(["merge-base", target, branch], root).strip()
+            if mb:
+                mb_tree = out(["rev-parse", f"{mb}^{{tree}}"], root).strip()
+                if b_tree == mb_tree:
+                    return True
+                try:
+                    res = out(["merge-tree", "--write-tree", target, branch], root).strip()
+                    if res == t_tree:
+                        return True
+                except GitError:
+                    pass
+        except GitError:
+            pass
+        try:
+            cherry = out(["cherry", target, branch], root).splitlines()
+            if cherry and all(line.startswith("-") for line in cherry):
+                return True
+        except GitError:
+            pass
+        try:
+            mb = out(["merge-base", target, branch], root).strip()
+            if mb:
+                feat_diff = out(["diff", f"{mb}..{branch}"], root)
+                if feat_diff:
+                    feat_pid_res = run(["patch-id"], root, input=feat_diff, check=False)
+                    if feat_pid_res.returncode == 0 and feat_pid_res.stdout.strip():
+                        feat_pid = feat_pid_res.stdout.strip().split()[0]
+                        commits = out(["rev-list", f"{mb}..{target}"], root).splitlines()
+                        for c in commits:
+                            c_diff = out(["diff", f"{c}~1..{c}"], root)
+                            c_pid_res = run(["patch-id"], root, input=c_diff, check=False)
+                            if c_pid_res.returncode == 0 and c_pid_res.stdout.strip():
+                                if c_pid_res.stdout.strip().split()[0] == feat_pid:
+                                    return True
+        except GitError:
+            pass
+    return False
 
 
 def list_branches(root: str | Path, pattern: str = "*") -> list[str]:

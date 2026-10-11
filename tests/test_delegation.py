@@ -132,7 +132,7 @@ def test_catalog_available_and_unverified_do_not_reject_provisioning(db, repo, m
 @pytest.mark.parametrize("provider", ["native", "codex", "antigravity"])
 @pytest.mark.parametrize("times_out", [False, True])
 def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, repo, monkeypatch, provider, times_out):
-    from brindle import autopilot, model_availability as ma, tmux
+    from brindle import autopilot, model_availability as ma, quota, tmux
     from brindle.config import RepoConfig
     from brindle.profiles import Profile
     ws = workspaces.adopt_root(db, str(repo))

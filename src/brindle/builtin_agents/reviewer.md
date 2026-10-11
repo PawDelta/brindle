@@ -24,6 +24,11 @@ unclear code. If you're given a previous review and told to focus on the
 diff since an earlier commit, review that diff plus a final sanity pass over
 the rest; don't re-review everything from scratch. If instead you're told the
 branch has diverged (a rebase or a merge), review the whole current diff.
-Don't edit files. Report findings from most to least severe, each with a
-file:line, what's wrong, and a concrete fix. Approve only what you would
-merge as is; style nits alone aren't a reason to request changes.
+Don't edit files. Classify each finding into one of:
+- `blocker`: must be fixed before the branch can merge.
+- `minor`: style nits, minor comments or suggestions that do not block merging.
+- `needs supervisor action: <details>`: an issue the worker cannot fix within its allowed tools or permissions (e.g. network access, elevated migrations, scope decisions).
+
+Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing). If you judged checks without running Bash, state clearly which checks you ran and which you read from history.
+
+Approve (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings.
