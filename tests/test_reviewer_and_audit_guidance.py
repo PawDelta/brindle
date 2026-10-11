@@ -295,6 +295,16 @@ def test_pipeline_supervisor_action_parsing_distinguishes_negation_from_actionab
     # Worker received the fix instructions
     assert any(m[0] == worker.id for m in sent_messages)
 
+    # Case A2: Punctuated 'None.' and 'N/A' through _on_review
+    for punct in ("Needs supervisor action: None.", "Needs supervisor action: N/A", "Needs supervisor action: - None."):
+        db.update_agent(worker.id, pipeline="reviewing", pipeline_rounds=0)
+        sent_messages.clear()
+        summary_punct = f"Blocker: fix assertion\n\n{punct}\n\nMinor: none"
+        h, r = pipeline._on_review(db, reviewer, ws, False, summary_punct)
+        assert h is True
+        assert r is False
+        assert db.get_agent(worker.id).pipeline == "fixing"
+
     # Case B: Summary has substantive supervisor action
     db.update_agent(worker.id, pipeline="reviewing", pipeline_rounds=0)
     sent_messages.clear()
@@ -307,6 +317,39 @@ def test_pipeline_supervisor_action_parsing_distinguishes_negation_from_actionab
     assert w.pipeline is None
     # Supervisor received escalation message
     assert any(m[0] == sup.id and "needs supervisor action" in m[1] for m in sent_messages)
+
+
+def test_record_audit_decision_rejects_unauthorized_callers(db, repo, monkeypatch):
+    from brindle import mcp_server
+    ws = Workspace("ws-authz", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-az", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(sup.id)
+    autopilot.set_goal(db, sup.id, "Goal", [("M1", "true", "")])
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=sup.id)
+    reviewer = agents.spawn(db, ws, "reviewer", mode="review", parent_id=sup.id)
+
+    # 1. Worker tries to waive finding
+    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (worker, ws))
+    res_worker = mcp_server.record_audit_decision("Finding 1", "Worker waives finding")
+    assert "Not authorized" in res_worker
+    ap = db.get_autopilot(sup.id)
+    assert ap.audit_history is None or "Finding 1" not in ap.audit_history
+
+    # 2. Reviewer tries to waive finding
+    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (reviewer, ws))
+    res_rev = mcp_server.record_audit_decision("Finding 2", "Reviewer waives finding")
+    assert "Not authorized" in res_rev
+    ap = db.get_autopilot(sup.id)
+    assert ap.audit_history is None or "Finding 2" not in ap.audit_history
+
+    # 3. Supervisor authorizes acceptance
+    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (sup, ws))
+    res_sup = mcp_server.record_audit_decision("Finding 3", "Supervisor accepted exclusion")
+    assert "Recorded audit decision" in res_sup
+    ap = db.get_autopilot(sup.id)
+    assert "Finding 3" in ap.audit_history
+    assert "Supervisor accepted exclusion" in ap.audit_history
 
 
 def test_session_handover_preserves_audit_history_and_accepted_decisions(db, repo, monkeypatch):

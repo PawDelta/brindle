@@ -1072,10 +1072,13 @@ def record_audit_decision(finding: str, rationale: str = "") -> str:
     """Autopilot: record the supervisor's acceptance of an audit finding with rationale,
     so subsequent completion audits take the recorded decision into account."""
     db = DB()
+    caller, _ = _caller(db)
     found = _session(db)
     if isinstance(found, str):
         return found
     root_id, _ = found
+    if caller and caller.id != root_id:
+        return "Not authorized: only the supervisor (session root) can accept an audit finding."
     decision = f"Accepted finding '{finding}': {rationale}" if rationale else f"Accepted finding '{finding}'"
     autopilot.record_accepted_decision(db, root_id, decision)
     return f"Recorded audit decision for finding '{finding}'."

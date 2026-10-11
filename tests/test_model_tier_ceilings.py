@@ -188,3 +188,43 @@ def test_queued_task_rerouted_when_ceiling_lowered_before_launch(db, repo, monke
     updated_t = db.get_task(task.id)
     assert updated_t.profile == delegated[0]
     assert updated_t.weight == "medium"
+
+
+def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch):
+    from unittest.mock import MagicMock
+    from brindle import profiles
+
+    # 1. Custom 'research' profile using claude-fable-5-1, effort='medium'
+    p_research = MagicMock()
+    p_research.model = "claude-fable-5-1"
+    p_research.effort = "medium"
+
+    # 2. Custom 'research-light' profile using claude-fable-5-1, effort='low'
+    p_light = MagicMock()
+    p_light.model = "claude-fable-5-1"
+    p_light.effort = "low"
+
+    def fake_load_profile(name, *args, **kwargs):
+        if name == "research":
+            return p_research
+        if name == "research-light":
+            return p_light
+        return profiles.load_profile(name, *args, **kwargs)
+
+    monkeypatch.setattr(autopilot, "load_profile", fake_load_profile)
+
+    # Both must classify as heavy regardless of 'medium' or 'low' effort or '-light' name
+    assert autopilot.profile_weight("research") == "heavy"
+    assert autopilot.profile_weight("research-light") == "heavy"
+
+    # Under max_weight="medium", requesting either must be refused
+    cfg = RepoConfig(max_weight="medium")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    with pytest.raises(autopilot.AutopilotError) as exc_info:
+        autopilot.choose_profile(db, "caller-res", str(repo), requested="research")
+    assert "exceeds configured max_weight 'medium'" in str(exc_info.value)
+
+    with pytest.raises(autopilot.AutopilotError) as exc_info2:
+        autopilot.choose_profile(db, "caller-res-light", str(repo), requested="research-light")
+    assert "exceeds configured max_weight 'medium'" in str(exc_info2.value)

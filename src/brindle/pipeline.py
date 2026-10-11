@@ -294,7 +294,7 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
 
 def has_supervisor_action(summary: str) -> bool:
     """Parse review summary for actionable supervisor findings.
-    Distinguishes empty or negated sections (e.g. 'Needs supervisor action: none')
+    Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
     from actual items requiring escalation."""
     m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]?\s*(.*)", summary, re.IGNORECASE)
     if not m:
@@ -303,13 +303,20 @@ def has_supervisor_action(summary: str) -> bool:
     rest = summary[m.start(1):]
     next_sec = re.search(r"\n\s*(?:#+\s*|[A-Z][a-zA-Z\s]{1,20}:)", rest)
     section_text = rest[:next_sec.start()] if next_sec else rest
-    cleaned = re.sub(r"[\s\-_*:`#]+", " ", section_text).strip().lower()
+    cleaned = re.sub(r"[^\w]+", " ", section_text).strip().lower()
     negations = {
         "", "none", "n a", "na", "nil", "nothing", "no", "no action",
         "no action needed", "no action required", "none needed", "none required",
-        "not needed", "false", "none identified", "none observed"
+        "not needed", "false", "none identified", "none observed", "none reported",
+        "n a none"
     }
-    return cleaned not in negations
+    if cleaned in negations:
+        return False
+    first_sentence = re.split(r"[.\n;]", section_text.strip())[0]
+    first_cleaned = re.sub(r"[^\w]+", " ", first_sentence).strip().lower()
+    if first_cleaned in negations:
+        return False
+    return True
 
 
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,

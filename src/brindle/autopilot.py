@@ -554,23 +554,27 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
     """The tier/weight of a profile ('light', 'medium', 'heavy')."""
+    try:
+        p = load_profile(name, repo_root)
+        m = (p.model or "").lower()
+        if any(h in m for h in ("fable", "opus", "o3", "deepseek-r1", "astra")):
+            return "heavy"
+        if getattr(p, "effort", None) in ("high", "xhigh", "max"):
+            return "heavy"
+        if "-heavy" in name:
+            return "heavy"
+        if getattr(p, "effort", None) in ("low",):
+            return "light"
+        if any(l in m for l in ("haiku", "flash", "mini", "4o-mini", "luna")):
+            return "light"
+        if "-light" in name:
+            return "light"
+    except Exception:
+        pass
     if "-heavy" in name:
         return "heavy"
     if "-light" in name:
         return "light"
-    try:
-        p = load_profile(name, repo_root)
-        if getattr(p, "effort", None) in ("high", "xhigh", "max"):
-            return "heavy"
-        if getattr(p, "effort", None) in ("low",):
-            return "light"
-        m = (p.model or "").lower()
-        if any(h in m for h in ("opus", "pro", "o3", "deepseek-r1")):
-            return "heavy"
-        if any(l in m for l in ("haiku", "flash", "mini", "4o-mini")):
-            return "light"
-    except Exception:
-        pass
     if cfg is not None and hasattr(cfg, "routing") and cfg.routing:
         in_light = name in cfg.routing.get("light", [])
         in_med = name in cfg.routing.get("medium", [])

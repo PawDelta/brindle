@@ -19,3 +19,6 @@ def test_docs_unattended_runs_on_api_keys():
     # Verify manual restart / key rotation procedure
     assert "brindle stop" in section
     assert "brindle continue" in section
+    assert "recovering failed/blocked workers" in section.lower()
+    assert "proactive rotation in live sessions" in section.lower()
+    assert "precedence" in section.lower()
