@@ -237,7 +237,7 @@ def new(
 
 @app.command()
 def start(
-    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile (default: supervisor in scratch, repo default_agent in checkouts)."),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile (default: repo default_agent, developer)."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
@@ -246,7 +246,7 @@ def start(
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
 ) -> None:
-    """Start a fresh chat with an agent here (default: repo default_agent in checkouts, supervisor in scratch), with the dashboard alongside.
+    """Start a fresh chat with an agent here (default: repo default_agent, developer), with the dashboard alongside.
 
     If a session is still running here, you choose: open it, start the new
     one in its own worktree (both run at once), or pause it and start fresh.
@@ -277,10 +277,7 @@ def start(
             typer.secho(f"! Branch '{curr_b}' is already merged into '{git.default_branch(ws.repo_root)}'.", fg="yellow")
 
     if agent is None:
-        if scratch.is_scratch(ws.path):
-            agent = "supervisor"
-        else:
-            agent = _run(load_repo_config, ws.repo_root).default_agent
+        agent = _run(load_repo_config, ws.repo_root).default_agent
 
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
 
@@ -484,22 +481,42 @@ def continue_cmd(
         ws = scratch.for_origin(db, cwd)
         if ws is None:
             _fail("no scratch session started from this folder to continue; run `brindle` to start one")
+    live = agents.find_running(db, ws, "supervisor") or next(
+        (a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and agents.is_alive(a)),
+        None,
+    )
+    live_needs_recovery = False
+    if live:
+        workers = agents.tree(db, live.id)
+        failed_workers = [a for a in workers if a.status == "failed"]
+        ap = db.get_autopilot(live.id)
+        is_blocked = ap and ap.state == "blocked"
+        if failed_workers or is_blocked:
+            live_needs_recovery = True
+
+    if session_id and live and live.id.startswith(session_id):
+        resumed = _run(agents.resume, db, live.id)
+        ap = db.get_autopilot(live.id)
+        if ap and ap.state == "blocked":
+            db.update_autopilot(live.id, state="running", note=None)
+        typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
+        if attach:
+            _attach(ws, live.tmux_window)
+        return
+
+    if not session_id and live_needs_recovery:
+        resumed = _run(agents.resume, db, live.id)
+        ap = db.get_autopilot(live.id)
+        if ap and ap.state == "blocked":
+            db.update_autopilot(live.id, state="running", note=None)
+        typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
+        if attach:
+            _attach(ws, live.tmux_window)
+        return
+
     available = sessions.paused(db, ws.repo_root)
     if not available:
-        live = agents.find_running(db, ws, "supervisor") or next((a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and agents.is_alive(a)), None)
         if live:
-            workers = agents.tree(db, live.id)
-            failed_workers = [a for a in workers if a.status == "failed"]
-            ap = db.get_autopilot(live.id)
-            is_blocked = ap and ap.state == "blocked"
-            if failed_workers or is_blocked:
-                resumed = _run(agents.resume, db, live.id)
-                if ap and is_blocked:
-                    db.update_autopilot(live.id, state="running", note=None)
-                typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
-                if attach:
-                    _attach(ws, live.tmux_window)
-                return
             if attach:
                 typer.echo(f"Session {live.id} is already running; reopening it.")
                 _attach(ws, live.tmux_window)

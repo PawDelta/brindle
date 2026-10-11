@@ -492,7 +492,11 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
     order = cfg.routing.get(weight, [])
+    if ceiling:
+        order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
     for name in order:
         why = _unavailable(name, cfg, repo_root, gate, weight)
         if why:
@@ -657,6 +661,25 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                         prior=bool(routed.get("prior")),
                         baseline=routed.get("baseline", name) if learned else name,
                         demoted_from=routed.get("demoted_from"))
+    if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
+        permissible = [
+            n for n in cfg.routing.get(ceiling, [])
+            if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]
+        ]
+        if not permissible:
+            for tier in ("medium", "light"):
+                if weight_order[tier] <= weight_order[ceiling]:
+                    permissible.extend([
+                        n for n in cfg.routing.get(tier, [])
+                        if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]
+                    ])
+        if permissible:
+            orig_name = name
+            name = permissible[0]
+            if why is not None:
+                why.append(f"profile {orig_name} capped to {name} by max_weight {ceiling}")
+        else:
+            raise AutopilotError(f"no permissible agent profile under max_weight {ceiling!r}")
     try:
         load_profile(name, repo_root)
     except KeyError:
@@ -1023,7 +1046,7 @@ def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
     ap = db.get_autopilot(root_id)
     entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
     new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
-    db.update_autopilot(root_id, audit_history=new_history)
+    db.update_autopilot(root_id, audit_history=new_history, audit_sha=None, audit_ok=None, auditor_id=None, state="running")
 
 
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:

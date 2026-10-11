@@ -242,3 +242,30 @@ def test_request_review_includes_worker_profile_restrictions(db, repo, monkeypat
     assert "Worker restrictions:" in prompt
     assert "allowed_tools: Bash(git add:*)" in prompt
     assert "permission_mode: acceptEdits" in prompt
+
+
+def test_accepted_decision_invalidates_verdict_allowing_re_audit_without_commit(db, repo, monkeypatch):
+    ws = Workspace("ws-reaud", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-reaud", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    db.add_autopilot(supervisor.id)
+    autopilot.set_goal(db, supervisor.id, "Goal", [("M1", "true", "")])
+    m = db.milestones(supervisor.id)[0]
+    db.record_check(m.id, True, "passed", "commit-1", passed_sha="commit-1")
+
+    # 1. Audit fails on commit-1
+    db.update_autopilot(supervisor.id, audit_sha="commit-1")
+    autopilot.record_audit(db, supervisor.id, False, "Gap 1: Missing feature X")
+    ap = db.get_autopilot(supervisor.id)
+    assert ap.audit_ok == 0
+    assert ap.audit_sha == "commit-1"
+    cfg = RepoConfig()
+    monkeypatch.setattr(autopilot, "_commit", lambda ws_arg: "commit-1")
+    assert autopilot.audit_due(ap, cfg, "commit-1") == "gaps"
+
+    # 2. Record accepted decision for Gap 1
+    autopilot.record_accepted_decision(db, supervisor.id, "Accepted exclusion of feature X")
+
+    # 3. audit_due at the SAME commit must now return "start" (re-audit allowed without code change)
+    ap = db.get_autopilot(supervisor.id)
+    assert autopilot.audit_due(ap, cfg, "commit-1") == "start"

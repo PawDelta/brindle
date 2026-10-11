@@ -166,3 +166,32 @@ def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatc
     profile, autopilot = spawned_profiles[0]
     assert profile == "developer"
     assert autopilot is False
+def test_scratch_implicit_start_defaults_to_developer(db, tmp_path, monkeypatch):
+    from brindle import cli, agents
+    # When starting outside a git repo (scratch directory) without --agent,
+    # it must use default_agent (developer) and autopilot=False
+    spawned_profiles = []
+    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
+        spawned_profiles.append((agent_arg, kwargs.get("autopilot")))
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.id = "agent-scratch-123"
+        m.profile = agent_arg
+        m.tmux_window = "w1"
+        return m
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
+    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
+    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
+    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
+    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
+    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
+    monkeypatch.chdir(tmp_path)
+
+    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
+    assert len(spawned_profiles) == 1
+    profile, autopilot = spawned_profiles[0]
+    assert profile == "developer"
+    assert autopilot is False

@@ -953,7 +953,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         identity_lock.ensure(a)
     resumed = []
     for a in candidates:
-        if a.status == "failed" and a.tmux_window:
+        if a.status == "failed" and a.tmux_window and same_server(a) and owns_pane(db, a):
             try:
                 tmux.kill_window(a.tmux_window)
             except Exception:

@@ -106,3 +106,28 @@ def test_fallback_heavy_capped_under_light_ceiling(db, repo, monkeypatch):
     profile, learned = autopilot.choose_profile(db, "caller-fallback", str(repo), why=why)
     assert any("capped to" in w for w in why)
     assert profile in cfg.routing["light"]
+
+
+def test_max_weight_medium_filters_heavy_candidate_from_medium_routing(db, repo, monkeypatch):
+    from brindle import learning
+    cfg = RepoConfig(max_weight="medium")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    candidates_seen = []
+    def fake_choose_why(db_arg, cfg_arg, repo_arg, task_arg, files_arg, candidates, weight, default):
+        candidates_seen.extend(candidates)
+        return candidates[0], "first"
+
+    monkeypatch.setattr(learning, "choose_why", fake_choose_why)
+    profile, learned = autopilot.choose_profile(db, "caller-med", str(repo), weight="medium")
+    assert "developer-heavy" not in candidates_seen
+    assert profile != "developer-heavy"
+
+
+def test_no_permissible_candidates_under_ceiling_raises(db, repo, monkeypatch):
+    cfg = RepoConfig(max_weight="light", default_agent="developer-heavy", routing={"light": ["developer-heavy"], "medium": ["developer-heavy"], "heavy": ["developer-heavy"]})
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    with pytest.raises(autopilot.AutopilotError) as exc_info:
+        autopilot.choose_profile(db, "caller-none", str(repo), weight="light")
+    assert "no permissible agent profile under max_weight" in str(exc_info.value)
