@@ -60,6 +60,7 @@ def test_routing_explanation_includes_model_and_cost_signal(db, repo, monkeypatc
     cfg_heavy = RepoConfig()
     cfg_heavy.routing["heavy"] = ["developer-heavy"]
     monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg_heavy)
+    monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
     why_h = []
     profile_h, _ = autopilot.choose_profile(db, "caller-h", str(repo), weight="heavy", why=why_h)
     joined_h = " ".join(why_h)

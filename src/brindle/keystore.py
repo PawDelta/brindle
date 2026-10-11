@@ -319,7 +319,7 @@ def pane_keys(names, present=()) -> dict[str, str]:
     store just means no stored keys."""
     out: dict[str, str] = {}
     for name in sorted(names):
-        if name in REFUSED or name in present:
+        if name in REFUSED or name in present or os.environ.get(name):
             continue
         try:
             value = get_key(name)

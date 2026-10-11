@@ -225,6 +225,7 @@ def test_reviewer_tiered_guidance_application_and_routing_scenarios(db, repo, mo
 
     monkeypatch.setattr(agents, "send_message", fake_send)
     monkeypatch.setattr(pipeline, "_retry_on_heavy", lambda *args: False)
+    monkeypatch.setattr(agents, "is_alive", lambda *args, **kwargs: True)
 
     # Scenario 1: Minor findings only - reviewer approves according to guidance
     minor_summary = "All checks pass.\n- minor: consider renaming variable `x` to `timeout_seconds` for clarity.\nNeeds supervisor action: None."
