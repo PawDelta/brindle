@@ -250,8 +250,9 @@ async def handoff(
     weight: "light", "medium" or "heavy" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = a normal feature or bugfix in one area; heavy =
-    design-heavy, cross-cutting, subtle bugs, hard reasoning.
+    simple tests); medium = normal feature work, refactors, cross-cutting edits,
+    or bugfixes; heavy = reserved for exceptionally complex algorithmic work,
+    subtle bugs that failed earlier fix rounds, or deep reasoning.
 
     Waits up to wait_seconds (default 4 minutes). If the worker isn't done by
     then, this returns "still running": call wait_for_worker to keep waiting,
@@ -386,8 +387,9 @@ async def assign(
     weight: "light", "medium" or "heavy" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = a normal feature or bugfix in one area; heavy =
-    design-heavy, cross-cutting, subtle bugs, hard reasoning.
+    simple tests); medium = normal feature work, refactors, cross-cutting edits,
+    or bugfixes; heavy = reserved for exceptionally complex algorithmic work,
+    subtle bugs that failed earlier fix rounds, or deep reasoning.
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.

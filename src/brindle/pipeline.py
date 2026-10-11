@@ -292,6 +292,26 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
     return handled
 
 
+def has_supervisor_action(summary: str) -> bool:
+    """Parse review summary for actionable supervisor findings.
+    Distinguishes empty or negated sections (e.g. 'Needs supervisor action: none')
+    from actual items requiring escalation."""
+    m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]?\s*(.*)", summary, re.IGNORECASE)
+    if not m:
+        return False
+    # Capture text under this section until the next header/section
+    rest = summary[m.start(1):]
+    next_sec = re.search(r"\n\s*(?:#+\s*|[A-Z][a-zA-Z\s]{1,20}:)", rest)
+    section_text = rest[:next_sec.start()] if next_sec else rest
+    cleaned = re.sub(r"[\s\-_*:`#]+", " ", section_text).strip().lower()
+    negations = {
+        "", "none", "n a", "na", "nil", "nothing", "no", "no action",
+        "no action needed", "no action required", "none needed", "none required",
+        "not needed", "false", "none identified", "none observed"
+    }
+    return cleaned not in negations
+
+
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                summary: str) -> tuple[bool, bool]:
     """(handled, ready): whether the pipeline took the verdict, and whether
@@ -348,7 +368,7 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False   # the other reviewer's verdict decides; both must approve
         db.update_agent(worker.id, pipeline="ready")
         return True, True
-    needs_sup = bool(re.search(r"needs[-_ ]?supervisor(?:[-_ ]?action)?", summary, re.I))
+    needs_sup = has_supervisor_action(summary)
     rounds = (worker.pipeline_rounds or 0) + 1
     if not needs_sup and rounds <= cfg.review_rounds and agents.is_alive(worker):
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)

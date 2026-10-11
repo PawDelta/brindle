@@ -269,3 +269,91 @@ def test_accepted_decision_invalidates_verdict_allowing_re_audit_without_commit(
     # 3. audit_due at the SAME commit must now return "start" (re-audit allowed without code change)
     ap = db.get_autopilot(supervisor.id)
     assert autopilot.audit_due(ap, cfg, "commit-1") == "start"
+
+
+def test_pipeline_supervisor_action_parsing_distinguishes_negation_from_actionable_findings(db, repo, monkeypatch):
+    ws = Workspace("ws-pip-parse", str(repo), "feat/pip-parse", "main", "main", "main", str(repo), 20000, "tmux-pp", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=sup.id)
+    reviewer = agents.spawn(db, ws, "reviewer", mode="review", parent_id=sup.id)
+    db.update_agent(worker.id, pipeline="reviewing", pipeline_rounds=0)
+
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    sent_messages = []
+    monkeypatch.setattr(agents, "send_message", lambda db, to, text, **kwargs: sent_messages.append((to, text)))
+
+    # Case A: Summary has 'Needs supervisor action: None' but actionable blocker
+    summary_negated = "Blocker: fix the missing assertion\n\nNeeds supervisor action: None\n\nMinor: none"
+    handled, ready = pipeline._on_review(db, reviewer, ws, False, summary_negated)
+    assert handled is True
+    assert ready is False
+    # Worker must be in 'fixing' mode, NOT escalated
+    w = db.get_agent(worker.id)
+    assert w.pipeline == "fixing"
+    assert w.pipeline_rounds == 1
+    # Worker received the fix instructions
+    assert any(m[0] == worker.id for m in sent_messages)
+
+    # Case B: Summary has substantive supervisor action
+    db.update_agent(worker.id, pipeline="reviewing", pipeline_rounds=0)
+    sent_messages.clear()
+    summary_actionable = "Blocker: change API signature\n\nNeeds supervisor action: Require supervisor to approve public API deprecation"
+    handled, ready = pipeline._on_review(db, reviewer, ws, False, summary_actionable)
+    assert handled is True
+    assert ready is False
+    # Worker pipeline cleared (escalated)
+    w = db.get_agent(worker.id)
+    assert w.pipeline is None
+    # Supervisor received escalation message
+    assert any(m[0] == sup.id and "needs supervisor action" in m[1] for m in sent_messages)
+
+
+def test_session_handover_preserves_audit_history_and_accepted_decisions(db, repo, monkeypatch):
+    from brindle import sessions
+    ws1 = Workspace("ws-ho1", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-ho1", 0)
+    ws2 = Workspace("ws-ho2", str(repo), "feat/ho2", "main", "main", "worktree", str(repo), 20010, "tmux-ho2", 0)
+    db.add_workspace(ws1)
+    db.add_workspace(ws2)
+
+    old_sup = agents.spawn(db, ws1, "developer", mode="interactive", autopilot=True)
+    autopilot.set_goal(db, old_sup.id, "Refactor core engine", [("Step 1", "true", "")])
+    autopilot.record_accepted_decision(db, old_sup.id, "Accepted exclusion of deprecated driver")
+    old_ap = db.get_autopilot(old_sup.id)
+    assert "Accepted exclusion of deprecated driver" in (old_ap.audit_history or "")
+
+    monkeypatch.setattr(agents, "pause", lambda db, id, **kwargs: None)
+    monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: None)
+    new_sup = sessions.handover(db, old_sup.id, ws2, note="Handing over to feature branch")
+
+    new_ap = db.get_autopilot(new_sup.id)
+    assert new_ap is not None
+    assert new_ap.audit_history == old_ap.audit_history
+    assert "Accepted exclusion of deprecated driver" in (new_ap.audit_history or "")
+
+    prompt = autopilot.audit_prompt(db, new_ap, "commit-head")
+    assert "Accepted exclusion of deprecated driver" in prompt
+
+
+def test_request_review_passes_full_brief_beyond_2000_chars(db, repo, monkeypatch):
+    ws = Workspace("ws-long", str(repo), "feat/long", "main", "main", "main", str(repo), 20000, "tmux-long", 0)
+    db.add_workspace(ws)
+    long_task = "Task preamble: " + ("x" * 2100) + "\n\nSCOPE EXCEPTION: Do not refactor legacy database connector."
+    worker = agents.spawn(db, ws, "developer", mode="assign", prompt=long_task)
+    worker_from_db = db.get_agent(worker.id)
+    monkeypatch.setattr(agents, "workspace_worker", lambda db_arg, ws_arg: worker_from_db)
+
+    spawned_prompts = []
+    def fake_spawn(db_arg, ws_arg, profile_arg, **kwargs):
+        spawned_prompts.append(kwargs.get("prompt", ""))
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.id = "rev-long"
+        return m
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    agents.request_review(db, None, ws)
+    assert len(spawned_prompts) == 1
+    prompt = spawned_prompts[0]
+    # Verify that content beyond character 2000 is preserved
+    assert "SCOPE EXCEPTION: Do not refactor legacy database connector." in prompt

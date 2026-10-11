@@ -80,9 +80,11 @@ to be asked each step.
   overlaps, and `depends_on` (an earlier task's agent id or branch) when one
   task's work must merge before another starts; brindle queues it until then.
 - Unless you need a specific profile, pass `weight` on every `assign`:
-  "light" (small, well-specified, mechanical), "medium" (a normal feature or
-  bugfix in one area) or "heavy" (design-heavy, cross-cutting, subtle). brindle
-  picks an available profile for that tier.
+  "light" (small, well-specified, mechanical: docs, renames, simple tests),
+  "medium" (normal feature work, refactors, cross-cutting edits, or bugfixes) or
+  "heavy" (reserved for exceptionally complex algorithmic work, subtle bugs that
+  failed earlier fix rounds, or deep reasoning). brindle picks an available
+  profile for that tier.
 - Keep task briefs short: the goal in a sentence or two, the files, and the
   test that proves it done. Workers read the tests and code themselves;
   never paste them. Writing is the slowest thing you do.
@@ -481,7 +483,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
 
 def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task: str | None,
                      files: list[str] | None,
-                     decision: dict | None = None, gate=None) -> tuple[str | None, bool, str]:
+                     decision: dict | None = None, gate=None,
+                     ceiling: str | None = None) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
     every candidate for the tier is out. ``decision`` gets the ``baseline``
     (the pick without learning), and ``over_budget`` (why each candidate was
@@ -493,10 +496,10 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     remaining: list[str] = []
     over: dict[str, str] = {}
     weight_order = {"light": 0, "medium": 1, "heavy": 2}
-    ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
+    effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
     order = cfg.routing.get(weight, [])
-    if ceiling:
-        order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
+    if effective_ceiling:
+        order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
         why = _unavailable(name, cfg, repo_root, gate, weight)
         if why:
@@ -523,13 +526,19 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     try:
         from brindle.profiles import load_profile
         p = load_profile(name, repo_root)
-        model_info = []
-        if p.model:
-            model_info.append(p.model)
+        model_name = p.model or "inherited CLI default"
+        model_info = [model_name]
         if p.effort:
             model_info.append(f"{p.effort} effort")
-        cost_tag = "; most expensive tier" if weight == "heavy" else ("; lowest cost tier" if weight == "light" else "")
-        info_str = f" ({', '.join(model_info)}{cost_tag})" if model_info or cost_tag else ""
+        pw = profile_weight(name, cfg, repo_root)
+        if pw == "heavy":
+            cost_tier = "most expensive tier"
+        elif pw == "light":
+            cost_tier = "lowest cost tier"
+        else:
+            cost_tier = "medium cost tier"
+        cost_tag = f"; {cost_tier}"
+        info_str = f" ({', '.join(model_info)}{cost_tag})"
     except Exception:
         info_str = ""
 
@@ -549,22 +558,29 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
         return "heavy"
     if "-light" in name:
         return "light"
+    try:
+        p = load_profile(name, repo_root)
+        if getattr(p, "effort", None) in ("high", "xhigh", "max"):
+            return "heavy"
+        if getattr(p, "effort", None) in ("low",):
+            return "light"
+        m = (p.model or "").lower()
+        if any(h in m for h in ("opus", "pro", "o3", "deepseek-r1")):
+            return "heavy"
+        if any(l in m for l in ("haiku", "flash", "mini", "4o-mini")):
+            return "light"
+    except Exception:
+        pass
     if cfg is not None and hasattr(cfg, "routing") and cfg.routing:
         in_light = name in cfg.routing.get("light", [])
         in_med = name in cfg.routing.get("medium", [])
         in_heavy = name in cfg.routing.get("heavy", [])
         if in_heavy and not in_med and not in_light:
             return "heavy"
-        if in_light:
+        if in_light and not in_med and not in_heavy:
             return "light"
         if in_med:
             return "medium"
-    try:
-        p = load_profile(name, repo_root)
-        if getattr(p, "effort", None) in ("high", "xhigh", "max"):
-            return "heavy"
-    except Exception:
-        pass
     return "medium"
 
 
@@ -626,10 +642,13 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                     weight = "light"
                     if why is not None:
                         why.append("weight demoted from medium to light (docs only)")
+                docs_cap = weight
+                if ceiling is None or weight_order[docs_cap] < weight_order[ceiling]:
+                    ceiling = docs_cap
             from brindle import budget
 
             gate = budget.Gate(db, cfg, repo_root, caller_id)
-            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate)
+            picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate, ceiling=ceiling)
             if routed.get("over_budget"):
                 message = budget.refusal(routed["over_budget"])
                 try:
@@ -640,7 +659,14 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             if picked:
                 name = picked
             else:
-                note += f"; using {cfg.default_agent}"
+                fallback = cfg.default_agent
+                if ceiling and weight_order[profile_weight(fallback, cfg, repo_root)] > weight_order[ceiling]:
+                    candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
+                    fallback = candidates[0] if candidates else None
+                if not fallback:
+                    raise AutopilotError(f"no permissible agent profile under max_weight ceiling {ceiling!r}")
+                name = fallback
+                note += f"; using {name}"
             if why is not None:
                 why.append(note)
         if not name:

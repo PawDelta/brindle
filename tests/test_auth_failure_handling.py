@@ -1,4 +1,5 @@
 import json
+import time
 import pytest
 
 from brindle import agents, antigravity, autopilot, providers, watch
@@ -269,3 +270,71 @@ def test_continue_cmd_reloads_fresh_window_for_failed_root_with_attach(db, repo,
     attached_windows.clear()
     cli.continue_cmd(session_id=live_sup.id[:6], attach=True)
     assert attached_windows == ["%new"]
+
+
+def test_stop_failure_payloads_with_enums_and_last_assistant_message(db, repo):
+    ws = Workspace("ws-enums", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-e", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=sup.id)
+
+    # 1. oauth_org_not_allowed error
+    agents.handle_hook(db, worker.id, "stop-failure", {"error": "oauth_org_not_allowed", "error_details": "Organization not authorized"})
+    w = db.get_agent(worker.id)
+    assert w.status == "failed"
+    ap = db.get_autopilot(sup.id)
+    assert ap.state == "blocked"
+    assert "Organization not authorized" in (ap.note or "")
+
+    # Reset worker and autopilot
+    db.set_status(worker.id, "processing")
+    db.update_autopilot(sup.id, state="running", note=None)
+
+    # 2. billing_error in last_assistant_message
+    agents.handle_hook(db, worker.id, "stop-failure", {"last_assistant_message": "Account billing error: credit balance depleted"})
+    w = db.get_agent(worker.id)
+    assert w.status == "failed"
+    ap = db.get_autopilot(sup.id)
+    assert ap.state == "blocked"
+
+
+def test_paused_session_continue_clears_credential_block_and_resumes_autopilot_drive(db, repo, monkeypatch):
+    from brindle import cli, workspaces, sessions
+    ws = Workspace("ws-paused-rec", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-pr", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
+    autopilot.set_goal(db, sup.id, "My Goal", [("Milestone 1", "true", "")])
+
+    # Session encountered auth failure and blocked
+    db.update_autopilot(sup.id, state="blocked", note="Credentials need attention: revoked API key")
+    # User paused/stopped the session
+    db.set_status(sup.id, "paused")
+
+    resumed_ids = []
+    def fake_resume(db_arg, root_id, **kwargs):
+        resumed_ids.append(root_id)
+        db.set_status(root_id, "idle")
+        return [db.get_agent(root_id)]
+
+    monkeypatch.setattr(agents, "resume", fake_resume)
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
+    monkeypatch.setattr(cli, "_run", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    monkeypatch.setattr(workspaces, "adopt_root", lambda db, cwd: ws)
+    monkeypatch.setattr(sessions, "paused", lambda db, root: [sessions.Session(db.get_agent(sup.id), ws, [db.get_agent(sup.id)], [ws.branch])])
+    monkeypatch.setattr(agents, "is_alive", lambda a: False)
+    monkeypatch.chdir(repo)
+
+    # Continue the paused session
+    cli.continue_cmd(session_id=sup.id[:6], attach=False)
+    assert resumed_ids == [sup.id]
+
+    # Verify credentials block was cleared
+    ap = db.get_autopilot(sup.id)
+    assert ap.state == "running"
+    assert ap.note is None
+
+    # Verify autopilot can drive again via on_stop
+    sup_agent = db.get_agent(sup.id)
+    decision = autopilot.on_stop(db, sup_agent, {})
+    assert decision is not None
+    assert decision.get("decision") == "block"

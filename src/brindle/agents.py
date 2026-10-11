@@ -982,6 +982,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         _launch(db, a, ws, prompt=prompt, resume=ref,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
+    ap = db.get_autopilot(root_id)
+    if ap and ap.state == "blocked":
+        db.update_autopilot(root_id, state="running", note=None)
     return resumed
 
 
@@ -1974,7 +1977,7 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
                 if not worker_done_when and t.done_when:
                     worker_done_when = t.done_when
     if worker and worker.task:
-        task += f"\n\nThe worker's original task:\n{worker.task.strip()[:TASK_TRIM]}"
+        task += f"\n\nThe worker's original task:\n{worker.task.strip()}"
     if worker:
         task += f"\n\nWorker profile: {worker.profile} (provider: {worker.provider})"
         try:
@@ -2423,23 +2426,36 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # The turn ended on an API error; no Stop hook follows.
         err_fields = " ".join(
             str(payload.get(k) or "") for k in (
-                "error", "error_type", "message", "reason", "details", "status", "status_code", "code"
+                "error", "error_type", "error_details", "last_assistant_message",
+                "message", "reason", "details", "status", "status_code", "code"
             )
         ).lower()
-        is_rate_limit = bool(re.search(r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b|rate_limit", err_fields))
+        is_rate_limit = bool(re.search(r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
+        auth_enums = {
+            "oauth_org_not_allowed", "billing_error", "authentication_error",
+            "permission_error", "invalid_api_key", "account_suspended", "revoked_api_key"
+        }
         is_auth = not is_rate_limit and (
             payload.get("error_type") == "auth"
-            or bool(re.search(r"\b(401|403)\b", err_fields))
-            or any(w in err_fields for w in ("unauthorized", "authentication", "auth_fail", "auth fail", "invalid api key", "invalid_api_key", "expired token", "credit balance"))
+            or str(payload.get("error") or "").lower() in auth_enums
+            or str(payload.get("error_type") or "").lower() in auth_enums
+            or bool(re.search(r"\b(401|403|oauth_org_not_allowed|billing_error)\b", err_fields))
+            or any(w in err_fields for w in (
+                "unauthorized", "authentication", "auth_fail", "auth fail",
+                "invalid api key", "invalid_api_key", "expired token", "expired_token",
+                "credit balance", "credit-balance", "revoked", "forbidden",
+                "oauth_org_not_allowed", "billing_error"
+            ))
         )
         if is_auth:
             db.set_status(agent_id, "failed")
             db.clear_permission_requests(agent_id)
             from brindle import providers, autopilot as pilot
             providers.invalidate_signed_in(agent.provider)
+            err_desc = payload.get("error_details") or payload.get("error") or payload.get("error_type") or "401/403"
             msg = (
                 f"[brindle] Agent {agent_id} encountered an authentication failure "
-                f"(invalid or expired credentials): {payload.get('error') or payload.get('error_type') or '401/403'}. "
+                f"(invalid or expired credentials): {err_desc}. "
                 "Check API keys or login status."
             )
             if agent.parent_id:
@@ -2449,7 +2465,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                     pass
             root_id = pilot.root_of(db, agent_id)
             if db.get_autopilot(root_id):
-                pilot.need_user(db, root_id, f"Credentials need attention for agent {agent_id}: authentication failure.")
+                pilot.need_user(db, root_id, f"Credentials need attention for agent {agent_id}: {err_desc}")
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)

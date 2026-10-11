@@ -31,7 +31,9 @@ def test_retry_on_heavy_refuses_when_max_weight_medium(db, repo):
 
 
 def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
+    # Even if developer-heavy is in medium candidates, docs-only must NOT select a heavy profile
     cfg = RepoConfig()
+    cfg.routing["medium"] = ["developer-heavy", "developer"]
     monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
 
     why = []
@@ -39,7 +41,8 @@ def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
         db, "caller-2", str(repo), weight="heavy", files=["docs/guide.md", "docs/index.md"], why=why
     )
     assert any("demoted" in w for w in why)
-    assert profile in cfg.routing["medium"]
+    assert profile != "developer-heavy"
+    assert profile == "developer"
 
 
 def test_routing_explanation_includes_model_and_cost_signal(db, repo, monkeypatch):
@@ -49,9 +52,19 @@ def test_routing_explanation_includes_model_and_cost_signal(db, repo, monkeypatc
     why = []
     profile, learned = autopilot.choose_profile(db, "caller-3", str(repo), weight="heavy", why=why)
     joined = " ".join(why)
-    # Must show tier, profile, and cost indication
-    assert "weight heavy ->" in joined
-    assert "most expensive tier" in joined or "effort" in joined
+    assert profile == "developer"
+    assert "inherited CLI default" in joined
+    assert "medium cost tier" in joined
+
+    # When a heavy profile is selected, cost tier must show most expensive tier
+    cfg_heavy = RepoConfig()
+    cfg_heavy.routing["heavy"] = ["developer-heavy"]
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg_heavy)
+    why_h = []
+    profile_h, _ = autopilot.choose_profile(db, "caller-h", str(repo), weight="heavy", why=why_h)
+    joined_h = " ".join(why_h)
+    assert profile_h == "developer-heavy"
+    assert "most expensive tier" in joined_h
 
 
 def test_list_agents_includes_token_usage_when_available(db, repo, monkeypatch):

@@ -36,8 +36,8 @@ class _App(typer.Typer):
 
 app = _App(add_completion=False, help="""brindle: run coding agents in parallel, each on its own git branch.
 
-Run `brindle` with no arguments to open (or reopen) a supervisor chat here, with
-the live dashboard underneath. Outside a git repo it starts a scratch session;
+Run `brindle` with no arguments to open (or reopen) a developer chat here (or `brindle supervisor`
+for an autopilot supervisor), with the live dashboard underneath. Outside a git repo it starts a scratch session;
 `brindle transfer <repo>` moves that work into a real repository later.
 
 Paid features (hosted learning, per-worktree services, team policies, CI):
@@ -157,7 +157,7 @@ def init(
         typer.echo(f"optional, not set up: {', '.join(optional)} (`brindle doctor` says how)")
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)
-    typer.secho("Ready. Commit .brindle/config.json, then run `brindle` and tell the supervisor what to build.",
+    typer.secho("Ready. Commit .brindle/config.json, then run `brindle` for a chat or `brindle supervisor` to coordinate parallel workers.",
                 fg="green")
 
 
@@ -464,6 +464,14 @@ def _ago(seconds: float) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+def _clear_credentials_block(db: DB, root_id: str) -> bool:
+    ap = db.get_autopilot(root_id)
+    if ap and ap.state == "blocked":
+        db.update_autopilot(root_id, state="running", note=None)
+        return True
+    return False
+
+
 @app.command("continue")
 def continue_cmd(
     session_id: Optional[str] = typer.Argument(None, help="Session to resume (default: the most recent)."),
@@ -496,9 +504,7 @@ def continue_cmd(
 
     if session_id and live and live.id.startswith(session_id):
         resumed = _run(agents.resume, db, live.id)
-        ap = db.get_autopilot(live.id)
-        if ap and ap.state == "blocked":
-            db.update_autopilot(live.id, state="running", note=None)
+        _clear_credentials_block(db, live.id)
         typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
         live = db.get_agent(live.id) or live
         if attach:
@@ -507,9 +513,7 @@ def continue_cmd(
 
     if not session_id and live_needs_recovery:
         resumed = _run(agents.resume, db, live.id)
-        ap = db.get_autopilot(live.id)
-        if ap and ap.state == "blocked":
-            db.update_autopilot(live.id, state="running", note=None)
+        _clear_credentials_block(db, live.id)
         typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
         live = db.get_agent(live.id) or live
         if attach:
@@ -535,6 +539,7 @@ def continue_cmd(
     others = [s for s in available if s.root.id != chosen.root.id]
     _pause_running(db, ws)
     resumed = _run(agents.resume, db, chosen.root.id)
+    _clear_credentials_block(db, chosen.root.id)
     typer.secho(f"↺ continuing {_describe(chosen)} ({len(resumed)} agent(s) restarted)", fg="green")
     _local_models_detached(ws.repo_root)
     if others:
@@ -695,7 +700,7 @@ def default(
     provider: Optional[str] = typer.Option(None, "--provider", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity)."),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
 ) -> None:
-    """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
+    """Bare `brindle`: a fresh developer chat here (autopilot off; run `brindle supervisor` for an autopilot supervisor; a scratch session outside git)."""
     if show_version:
         from brindle import __version__
 
