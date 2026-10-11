@@ -132,7 +132,7 @@ def test_catalog_available_and_unverified_do_not_reject_provisioning(db, repo, m
 @pytest.mark.parametrize("provider", ["native", "codex", "antigravity"])
 @pytest.mark.parametrize("times_out", [False, True])
 def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, repo, monkeypatch, provider, times_out):
-    from brindle import autopilot, model_availability as ma, tmux
+    from brindle import autopilot, model_availability as ma, quota, tmux
     from brindle.config import RepoConfig
     from brindle.profiles import Profile
     ws = workspaces.adopt_root(db, str(repo))
@@ -143,6 +143,9 @@ def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, r
     from brindle import providers
     monkeypatch.setattr(providers, "signed_out", lambda *a, **k: None)
     monkeypatch.setattr(providers, "unusable", lambda *a: None)
+    # This test covers catalog reuse, independently of an installed Ollama
+    # server or the host account's current provider quota.
+    monkeypatch.setattr(quota, "headroom", lambda *a: 100)
     now, requests = [0.0], []
 
     def slow_discovery(request, timeout):
