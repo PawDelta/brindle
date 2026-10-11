@@ -611,6 +611,7 @@ def test_real_codex_profile_prefixed_argv_prompt_permits_current_provider_failur
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task", parent_id=boss.id,
                      mode="assign", background_setup=True)
     full_prompt = launches[-1][-1]
@@ -799,6 +800,7 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     shown = ["Trust this folder?"]
     monkeypatch.setattr(lh, "capture", lambda a: shown[0])
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name=provider, prompt="real task", parent_id=boss.id,
                      mode="assign", background_setup=True)
     token = a._launch_health_token
@@ -1177,6 +1179,7 @@ def test_readiness_timeout_keeps_real_task_queued(db, root, launches, detached, 
     monkeypatch.setattr(agents, "ready", lambda *a: pytest.fail("timeout is not readiness"))
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(lh, "inspect", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name="antigravity", prompt="real task",
                      parent_id=boss.id, mode="assign", background_setup=background)
     if background:
