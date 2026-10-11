@@ -206,19 +206,41 @@ def test_start_writes_plan_and_token(plan, tmp_path):
     assert form["repo"] == REPO and form["providers_available"] == ["claude"] and "client" in form
 
 
-def test_start_duplicate_exits_zero_and_errors_raise(plan, tmp_path):
-    t = FakeTransport({"POST /ci/runs": [(409, {"error": "duplicate", "existing": {"pr": 5}}),
-                                         (403, {"error": "repo_not_linked", "message": "install the app"})]})
-    client = ci_client.Client(BASE, t)
-    said = []
-    assert ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=client, token=CI_TOKEN,
-                           providers=[], say=said.append) == 0
-    assert "#5" in said[0]
-    with pytest.raises(CIError, match="repo_not_linked") as e:
-        ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=client, token=CI_TOKEN,
-                        providers=[], say=said.append)
-    assert e.value.code == "repo_not_linked"
-    assert not (tmp_path / "plan.jwt").exists()
+def test_start_not_started_responses_exit_zero(tmp_path):
+    cases = [
+        (409, {"error": "duplicate", "existing": {"pr": 5}}, {"kind": "issue", "issue": 1}, "#5"),
+        (409, {"error": "branch_conflict", "message": "brindle/ci-123 has commits brindle didn't make"},
+         {"kind": "issue", "issue": 123},
+         "not started: brindle/ci-123 has commits brindle didn't make (the server has commented)"),
+        (410, {"error": "jira_text_gone"}, {"kind": "dispatch", "run_id": "run_abc"},
+         "not started: the Jira ticket's text has expired"),
+    ]
+    for status, body, trigger, message in cases:
+        t = FakeTransport({"POST /ci/runs": [(status, body)]})
+        said = []
+        code = ci_client.start(REPO, trigger, tmp_path / "out", client=ci_client.Client(BASE, t),
+                               token=CI_TOKEN, providers=[], say=said.append)
+        assert code == 0, body
+        assert len(said) == 1 and message in said[0], body
+        if body["error"] == "branch_conflict":
+            assert said == [message]
+        elif body["error"] == "jira_text_gone":
+            assert said[0].startswith(message)
+        assert not (tmp_path / "out").exists(), body
+
+
+def test_start_other_errors_raise(tmp_path):
+    cases = [
+        (403, {"error": "repo_not_linked", "message": "install the app"}, {"kind": "issue", "issue": 1}),
+        (410, {"error": "gone"}, {"kind": "dispatch", "run_id": "run_abc"}),
+    ]
+    for status, body, trigger in cases:
+        t = FakeTransport({"POST /ci/runs": [(status, body)]})
+        with pytest.raises(CIError, match=body["error"]) as e:
+            ci_client.start(REPO, trigger, tmp_path / "out", client=ci_client.Client(BASE, t),
+                            token=CI_TOKEN, providers=[], say=lambda s: None)
+        assert e.value.code == body["error"]
+        assert not (tmp_path / "out").exists(), body
 
 
 def test_trigger_for():
@@ -329,13 +351,12 @@ def test_oidc_refreshes_before_the_token_expires():
     assert len(fetched) == 2
 
 
-@pytest.mark.parametrize("exp", ["NaN", "Infinity", "-Infinity", "1e999", "10" + "0" * 400, '"soon"', "true",
-                                 "null"])
-def test_jwt_exp_ignores_a_non_finite_or_non_numeric_exp(exp):
+def test_jwt_exp_ignores_a_non_finite_or_non_numeric_exp():
     import base64
 
-    payload = base64.urlsafe_b64encode(('{"exp": %s}' % exp).encode()).decode().rstrip("=")
-    assert ci_client._jwt_exp(f"h.{payload}.s") is None
+    for exp in ["NaN", "Infinity", "-Infinity", "1e999", "10" + "0" * 400, '"soon"', "true", "null"]:
+        payload = base64.urlsafe_b64encode(('{"exp": %s}' % exp).encode()).decode().rstrip("=")
+        assert ci_client._jwt_exp(f"h.{payload}.s") is None, exp
     assert ci_client._jwt_exp(_jwt(2000)) == 2000.0
     assert ci_client._jwt_exp("not-a-jwt") is None
 
@@ -695,29 +716,6 @@ def test_report_posts_a_failed_validation_run_job(plan, tmp_path):
         ci_client.report(tmp_path, client=client, token=CI_TOKEN, start=None, run="nope", say=said.append)
 
 
-def test_start_branch_conflict_exits_zero(plan, tmp_path):
-    t = FakeTransport({"POST /ci/runs": [(409, {"error": "branch_conflict",
-                                                "message": "brindle/ci-123 has commits brindle didn't make"})]})
-    said = []
-    code = ci_client.start(REPO, {"kind": "issue", "issue": 123}, tmp_path / "out", client=ci_client.Client(BASE, t),
-                           token=CI_TOKEN, providers=[], say=said.append)
-    assert code == 0 and said == ["not started: brindle/ci-123 has commits brindle didn't make (the server has commented)"]
-    assert not (tmp_path / "out").exists()
-
-
-def test_start_dispatch_jira_text_gone_exits_zero(plan, tmp_path):
-    t = FakeTransport({"POST /ci/runs": [(410, {"error": "jira_text_gone"})]})
-    said = []
-    code = ci_client.start(REPO, {"kind": "dispatch", "run_id": "run_abc"}, tmp_path / "out",
-                           client=ci_client.Client(BASE, t), token=CI_TOKEN, providers=[], say=said.append)
-    assert code == 0 and said[0].startswith("not started: the Jira ticket's text has expired")
-    assert not (tmp_path / "out").exists()
-    # any other 410 is still an error
-    t = FakeTransport({"POST /ci/runs": [(410, {"error": "gone"})]})
-    with pytest.raises(ci_client.CIError):
-        ci_client.start(REPO, {"kind": "dispatch", "run_id": "run_abc"}, tmp_path / "out",
-                        client=ci_client.Client(BASE, t), token=CI_TOKEN, providers=[], say=said.append)
-
 def push_branch(repo, branch: str) -> str:
     """A branch with one commit past main, pushed to origin and deleted
     locally (as a fresh CI checkout would see it). Returns its tip."""
@@ -872,12 +870,12 @@ def test_plan_defaults_limits(plan):
 # -- the org's protected paths and dollar budget (Team org_budgets) --------------------------------
 
 
-@pytest.mark.parametrize("over", [{"protected_paths": "infra/"}, {"protected_paths": [""]},
-                                  {"protected_paths": [1]}, {"protected_paths": ["x"] * 65},
-                                  {"budget_usd": "5"}, {"budget_usd": -1}, {"budget_usd": True}])
-def test_plan_org_limits_must_be_well_formed(plan, over):
-    with pytest.raises(CIError, match="malformed"):
-        ci_client.verify_plan(plan(**over), repo=REPO)
+def test_plan_org_limits_must_be_well_formed(plan):
+    for over in [{"protected_paths": "infra/"}, {"protected_paths": [""]},
+                 {"protected_paths": [1]}, {"protected_paths": ["x"] * 65},
+                 {"budget_usd": "5"}, {"budget_usd": -1}, {"budget_usd": True}]:
+        with pytest.raises(CIError, match="malformed"):
+            ci_client.verify_plan(plan(**over), repo=REPO)
 
 
 def test_plan_org_limits_are_optional_and_kept(plan):
