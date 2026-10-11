@@ -3,9 +3,6 @@
   "violations": {
     "parametrize:tests/test_codex_notify.py::test_codex_approval_is_not_an_input_prompt::24": 1,
     "parametrize:tests/test_launch_health.py::test_full_codex_ui_assistant_and_tool_output_cannot_report_or_cool_down::16": 1,
-    "parametrize:tests/test_model_availability.py::test_default_never_discovers_or_rejects::16": 1,
-    "parametrize:tests/test_model_availability.py::test_external_plain_http_catalog_never_sends_credentials::32": 1,
-    "parametrize:tests/test_model_availability.py::test_unsupported_providers_never_call_claude_or_discovery::16": 1,
     "sleep:tests/pro_fixtures.py::FakeBackend._refresh::time.sleep(self.delay)": 1,
     "sleep:tests/test_agents.py::test_chat_exit_closes_its_session_even_with_extra_windows::time.sleep(0.2)": 1,
     "sleep:tests/test_agents.py::test_interactive_agent_exit_pauses_its_session::time.sleep(0.2)": 1,

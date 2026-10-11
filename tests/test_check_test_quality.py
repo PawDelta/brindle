@@ -305,3 +305,30 @@ def test_default_baseline_is_loaded_from_selected_root(tmp_path, monkeypatch, ca
     monkeypatch.setattr(quality.pytest, "main", lambda *a, **kw: 0)
     assert quality.main(["--root", str(tmp_path)]) == 0
     assert "1 grandfathered" in capsys.readouterr().out
+
+
+def test_github_ci_runs_check_test_quality_before_tests():
+    workflow = (quality.ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    step = "uv run python scripts/check_test_quality.py"
+    assert step in workflow
+    lines = [line.strip() for line in workflow.splitlines()]
+    step_idx = lines.index(f"- run: {step}")
+    assert lines[step_idx + 1] == "if: env.CODE == 'true'"
+    assert workflow.index(step) < workflow.index("uv run pytest -q -n auto -m 'not serial'")
+
+
+def test_removed_model_availability_matrices_fail_guardrail():
+    # Verify that the pruned 16/32-case matrices cannot be reintroduced without failing the guardrail.
+    matrix_keys = [
+        "parametrize:tests/test_model_availability.py::test_default_never_discovers_or_rejects::16",
+        "parametrize:tests/test_model_availability.py::test_external_plain_http_catalog_never_sends_credentials::32",
+        "parametrize:tests/test_model_availability.py::test_unsupported_providers_never_call_claude_or_discovery::16",
+    ]
+    baseline = quality.load_baseline(quality.ROOT / "scripts" / "test_quality_baseline.json")
+    for key in matrix_keys:
+        assert key not in baseline
+        finding = quality.Finding(key, f"reintroduced matrix {key}")
+        new = quality.new_findings([finding], baseline)
+        assert len(new) == 1
+        assert new[0].key == key
+

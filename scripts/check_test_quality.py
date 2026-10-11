@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 4150
+TEST_BUDGET = 4059
 
 
 class Finding(NamedTuple):
