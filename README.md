@@ -59,7 +59,7 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.3.2`). A session started before an upgrade keeps
+session shows it too (`brindle 0.3.3`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -598,6 +598,53 @@ hosted learning is on it chooses among the profiles left; otherwise the first
 wins. When every candidate is out, the repo's `default_agent` runs. The reply says
 what was picked and why, e.g. `weight medium -> developer (Codex at 93%, skipped developer-codex)`.
 An `agent_profile` you pass, or a milestone's `profile`, always wins over weight.
+
+Provisioning and routing also check explicit models against supported read-only
+catalogs, with the managed model, stored keys and the worker's filtered pane
+environment. A model absent from a complete authoritative catalog is rejected
+before creating a worker worktree or process. Partial catalogs, aliases,
+discovery errors and Codex's bundled catalogs remain unverified; being listed
+does not prove generation access, billing or quota. Catalog discovery is bounded
+to five seconds for standalone checks; foreground routing/provisioning limits
+discovery to one second, leaving room in the three-second launch budget for
+provisioning and bounded helper cleanup. A timeout remains unverified and
+launch proceeds with the real-task health follow-up. Catalogs are cached
+briefly by environment and local account/config
+revision where available. Routing and provisioning reuse equivalent catalog
+context across worktrees, excluding launch bookkeeping while retaining project
+settings, credentials and account selectors. CLI catalogs remain advisory;
+unobservable external/keychain login changes may remain cached for 30 seconds.
+Custom CLI binaries retain separate cache entries per working directory.
+Claude, Bedrock, Vertex and Foundry have no catalog
+probe here; no Claude CLI or synthetic generation request is used for these checks.
+
+The real first worker task is sent once. A detached helper inspects its current
+pane five seconds after delivery, so readiness delays do not use up that window.
+Fresh interactive Antigravity chats without a task still receive their profile,
+tool instructions and any autopilot context once after readiness; worker
+instructions accompany the actual task in the same delivery.
+For argv tasks, the timer starts at prompt submission or observed CLI readiness,
+after trust/startup handling; readiness timeout does not establish delivery or
+release queued work. Paused workers, replaced launches and reassigned panes are
+excluded from the observation.
+Explicit fresh authentication, access, model and capacity errors, or an early
+exit, produce a safe supervisor message with a next step. A live process with
+no clear result is recorded as pending for diagnostics, not verified model
+access; it does not send a supervisor notification. Refusals use
+the existing one-hour cooldown, scoped to the effective model/environment and
+local login revision. Changing the account, model or credentials invalidates
+that refusal; CLI/keychain account changes without an observable local revision
+may require waiting for the cooldown or clearing `model_refusals.json`.
+This is a single observation, not an entitlement test: unfamiliar error layouts,
+later failures and slow requests can remain pending. It does not scan
+historical transcripts, and excludes task text, previous pane lines and older
+marked replies, fenced examples and ordinary assistant/tool explanations. A
+Codex follow-up retains the complete submitted argv prompt (including profile
+instructions) and distinguishes assistant/tool responses from the idle composer.
+Quoted prompts and error-looking markers inside assistant/tool output remain
+ambiguous and pending; markers from another provider do not establish failure.
+A separate detached check covers headless and argv startup exits before task
+delivery. Existing readiness and watch/cull handling continues afterward.
 
 **Hosted learning (brindle Pro).** With a plan that includes it, brindle learns
 which of your `learning_candidates` profiles suits which kind of task, and picks

@@ -288,6 +288,8 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
         print(f"\n── brindle: turn {turn} ──\n{_preview(msg.body)}\n", flush=True)
         streamed["text"] = ""
         try:
+            from brindle import launch_health
+            launch_health.delivered(db, agent, launch_health.before_delivery(db, agent))
             answer = loop.run(msg.body)
         except ClientError as e:
             print(f"\n── brindle: the model endpoint failed: {e}; this worker has stopped ──", flush=True)

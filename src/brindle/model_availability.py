@@ -24,6 +24,10 @@ Cache entries live in memory for 30 seconds, with salted identity digests only.
 CLI callers must supply ``account_identity`` (an opaque login/config revision)
 to opt into caching, and change it on login/config/keyring changes. Without it
 CLI discovery is uncached, since env alone cannot identify a subscription.
+Provisioning may supply ``catalog_context`` to reuse equivalent project
+settings across worktrees and omit launch bookkeeping from cache identity.
+Those CLI results remain advisory, including when the local login revision is
+unknown; external/keychain login changes may remain unseen for the 30s TTL.
 ``clear()`` also invalidates entries. Injected discovery functions accept a
 Request and timeout in seconds and must honor that timeout; production callers
 should use the default process-isolated discovery.
@@ -48,6 +52,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Literal, Mapping, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -56,6 +61,9 @@ if TYPE_CHECKING:
 Status = Literal["available", "unavailable", "unverified"]
 Source = Literal["codex", "antigravity", "ollama", "openai", "anthropic", "compatible"]
 TIMEOUT = 5.0
+# Leave room in the foreground launch's three-second budget for provisioning
+# and the discovery helper's bounded process-group cleanup.
+PROVISIONING_TIMEOUT = 1.0
 CACHE_TTL = 30.0
 MAX_BYTES = 1024 * 1024
 MAX_PAGES = 10
@@ -122,13 +130,17 @@ class ModelAvailabilityChecker:
             self._cache.clear()
 
     def check(self, profile: Profile, *, effective_env: Mapping[str, str],
-              cwd: str | None = None, account_identity: str | None = None) -> Availability:
+              cwd: str | None = None, account_identity: str | None = None,
+              catalog_context: str | None = None, timeout: float | None = None) -> Availability:
         """Check an explicit model using exactly the environment of its worker.
 
         Profile.env is intentionally not re-applied; effective_env has already
         resolved its precedence and may have removed credentials from it.
         Account identities, model names, URLs and error bodies are never echoed.
         """
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("timeout must be positive and finite")
+        discovery_timeout = self._timeout if timeout is None else min(self._timeout, timeout)
         model = profile.model
         if not model or not model.strip() or model == "default":
             return Availability("unverified", "No explicit model to check; keep the provider's default selection.")
@@ -144,17 +156,24 @@ class ModelAvailabilityChecker:
                           profile.api_key_env, dict(effective_env), os.path.abspath(cwd or os.getcwd()))
         # Hash the WHOLE effective environment: provider plugins may choose
         # their account via arbitrary env_key names. Never retain raw keys.
+        identity_env = request.env
+        if catalog_context is not None:
+            from brindle.launch_health import _LAUNCH_ENV
+            identity_env = {k: v for k, v in request.env.items()
+                            if k not in _LAUNCH_ENV or k == request.api_key_env}
         payload = [request.provider, model, request.base_url, request.api,
-                   request.api_key_env, sorted(request.env.items()), request.cwd, account_identity]
+                   request.api_key_env, sorted(identity_env.items()),
+                   catalog_context if catalog_context is not None else request.cwd, account_identity]
         key = hmac.digest(self._salt, json.dumps(payload).encode(), hashlib.sha256)
-        cacheable = bool(self._ttl and (request.provider == "native" or account_identity is not None))
+        cacheable = bool(self._ttl and (request.provider == "native" or account_identity is not None
+                                       or catalog_context is not None))
         now = self._clock()
         with self._lock:
             self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
             if cacheable and key in self._cache:
                 return self._cache[key][1]
         try:
-            catalog = self._discover(request, self._timeout)
+            catalog = self._discover(request, discovery_timeout)
             result = _selected(model, catalog)
         except (TimeoutError, subprocess.TimeoutExpired):
             result = Availability("unverified", _FAILURES["timeout"])
@@ -168,6 +187,34 @@ class ModelAvailabilityChecker:
                     self._cache.pop(next(iter(self._cache)))
                 self._cache[key] = (self._clock() + self._ttl, result)
         return result
+
+
+def provisioning_context(provider: str, cwd: str, env: Mapping[str, str]) -> str:
+    """Reuse routing/preflight discovery when only launch bookkeeping changes.
+
+    HTTP catalogs don't use cwd. CLI catalogs can load project settings, so
+    include their ordered contents from the cwd ancestry, rather than absolute
+    worktree names. Credentials and account revisions remain in the cache key.
+    Custom CLI binaries may interpret cwd arbitrarily: retain it for those.
+    CLI results are advisory even when no local login revision is available.
+    """
+    if provider == "native":
+        return "native-http"
+    if env.get("BRINDLE_CODEX_BIN") or env.get("BRINDLE_AGY_BIN"):
+        return os.path.abspath(cwd)
+    settings = (".codex/config.toml",) if provider == "codex" else (".gemini/settings.json",)
+    digest = hashlib.sha256()
+    path = Path(cwd).absolute()
+    for parent in (*reversed(path.parents), path):
+        for name in settings:
+            try:
+                content = (parent / name).read_bytes()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return str(path)  # unreadable settings cannot establish equivalence
+            digest.update(json.dumps([name, hashlib.sha256(content).hexdigest()]).encode())
+    return digest.hexdigest()
 
 
 def _selected(model: str, catalog: Catalog) -> Availability:

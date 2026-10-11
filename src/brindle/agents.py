@@ -23,6 +23,7 @@ import uuid
 from brindle import company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
+from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.profiles import load_profile, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, signed_out, unusable
 from brindle.sidebar_follow import (
@@ -363,6 +364,9 @@ def spawn(
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
         done_when=done_when, review_sha=review_sha,
     )
+    why = model_problem(profile_name, ws, agent=agent)
+    if why:
+        raise AgentError(why)
     db.add_agent(agent)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
         db.update_agent(agent_id, plan_first=1)
@@ -374,7 +378,7 @@ def spawn(
             db.update_agent(agent_id, task=prompt)
     try:
         _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
-                background_setup=background_setup)
+                background_setup=background_setup, model_checked=True)
     except Exception:
         db.delete_agent(agent_id)
         raise
@@ -475,14 +479,40 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
 
     argv = inbox.without_launcher_inbox(argv)
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
+    env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
+    with secrets.org_key(org_env):
+        target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
+                                 tag=(AGENT_TAG, agent.id),
+                                 keep=credentials,
+                                 **({"allow": allow} if allow is not None else {}),
+                                 **({"deny": deny} if deny else {}))
+    agent.__dict__.pop("_pane_environment", None)
+    # The pane id only means anything on the server that issued it (a
+    # resumed agent may come back on a different one), so record both.
+    server = tmux.current_server()
+    db.update_agent(agent.id, tmux_window=target, tmux_server=server)
+    agent.tmux_window, agent.tmux_server = target, server
+    if watch_pane:
+        try:
+            _ensure_sidebar(db, root_of(db, agent.id), ws, target)
+        except Exception:
+            pass
+    tmux.apply_theme(ws.tmux_session)
+    return target
+
+
+def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
+    if m is _UNREAD:
+        m = managed(ws.repo_root)
+    cached = getattr(agent, "_pane_environment", None)
+    if cached is not None and cached[0] == m:
+        return cached[1]
     # A profile's env_allow (brindle Pro guardrails): the pane starts with
     # only those variables, brindle's own and the provider's sign-in.
     guarded = _guarded_profile(agent, ws)
     allow = guarded.env_allow if guarded is not None else None
     # An org's deny_personal_keys (Enterprise): the person's own keys never
     # reach the pane, kept or not.
-    if m is _UNREAD:
-        m = managed(ws.repo_root)
     env = agent_env(ws, agent.id, agent, m)
     credentials = secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
     # Keys stored with `brindle keys` reach this window's env only (never the
@@ -510,28 +540,58 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
     env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}
+    result = env, credentials, allow, deny, org_env
+    # Resolve stored/org keys once for this launch: catalog, health identity
+    # and pane must use the same key helper result, without repeated delays.
+    agent._pane_environment = m, result
+    return result
+
+
+def _effective_window_env(agent: Agent, ws: Workspace, m=_UNREAD) -> dict[str, str]:
+    env, keep, allow, deny, org_env = _window_environment(agent, ws, m)
+    inherited = tmux.inherited_env(ws.tmux_session)
     with secrets.org_key(org_env):
-        target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
-                                 tag=(AGENT_TAG, agent.id),
-                                 keep=credentials,
-                                 **({"allow": allow} if allow is not None else {}),
-                                 **({"deny": deny} if deny else {}))
-    # The pane id only means anything on the server that issued it (a
-    # resumed agent may come back on a different one), so record both.
-    server = tmux.current_server()
-    db.update_agent(agent.id, tmux_window=target, tmux_server=server)
-    agent.tmux_window = target
-    agent.tmux_server = server
-    if watch_pane:
-        # Best effort: a failed split (or a lock some other process held
-        # past _sidebar_lock's timeout) must not fail the agent it sits
-        # beside or the hook that triggered this launch.
-        try:
-            _ensure_sidebar(db, root_of(db, agent.id), ws, target)
-        except Exception:
-            pass
-    tmux.apply_theme(ws.tmux_session)
-    return target
+        env = {**env, **secrets.proxy_exempt(env)}
+        unset = secrets.pane_unset(inherited, keep=(*keep, *env), allow=allow,
+                                   deny=secrets.pane_deny(deny, env))
+    return {k: v for k, v in {**inherited, **env}.items() if k not in unset}
+
+
+def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = None,
+                  profile=None, m=_UNREAD) -> str | None:
+    """Read-only provisioning/routing gate, using the worker's actual identity."""
+    from dataclasses import replace
+    from brindle import guardrails, model_access
+    from brindle.pro import managed_models
+    from brindle.launch_health import account_revision, fingerprint
+
+    if m is _UNREAD:
+        m = managed(ws.repo_root)
+    if profile is None:
+        profile = guardrails.effective(load_profile(profile_name, ws.repo_root))
+        why = managed_models.refusal(m, profile) if m is not None else None
+        if why:
+            return f"managed models: {why}"
+        if m is not None:
+            profile = managed_models.apply_profile(m, profile)
+    _airgap_check(profile, ws.repo_root)
+    if not get_provider(profile.provider).launches_process:
+        return None
+    agent = agent or Agent("preflight", ws.id, profile_name, profile.provider, None,
+                           "assign", "starting", "", None, time.time())
+    effective = _effective_window_env(agent, ws, m)
+    profile = replace(profile, provider=agent.provider)
+    denied = model_access.refused(profile_name, ws.repo_root, fp=fingerprint(profile, effective))
+    if denied:
+        return denied.line()
+    result = _model_checker.check(profile, effective_env=effective, cwd=ws.path,
+                                  account_identity=account_revision(profile.provider, effective),
+                                  catalog_context=provisioning_context(profile.provider, ws.path, effective),
+                                  timeout=PROVISIONING_TIMEOUT)
+    return result.explanation if result.status == "unavailable" else None
+
+
+_model_checker = ModelAvailabilityChecker()
 
 
 # Set on every agent pane at creation (see _open_window), so a pane can say
@@ -665,7 +725,8 @@ def add_dirs_warning(agent: Agent, ws: Workspace) -> str | None:
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
-            resume: str | None, watch_pane: bool, background_setup: bool = False) -> None:
+            resume: str | None, watch_pane: bool, background_setup: bool = False,
+            model_checked: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
     whatever the mode: a worker, a reviewer, a subagent or the chat itself."""
@@ -673,6 +734,10 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)
     provider = get_provider(agent.provider)
+    if not model_checked:
+        why = model_problem(agent.profile, ws, agent=agent, profile=profile, m=m)
+        if why:
+            raise AgentError(why)
     if not provider.launches_process:
         # Nothing to start: the caller's own subagent does the work.
         status = "done" if agent.result is not None else "processing"
@@ -715,10 +780,14 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
-        # Typed in once it's ready, after any warm-up message.
-        for text in ((provider.warmup(profile) if not resume else None), prompt):
-            if text:
-                db.enqueue(agent.id, text, None)
+        # Workers receive their instructions and real task in one delivery.
+        # A fresh interactive chat without a task still needs its profile.
+        if provider.name == "antigravity" and not resume and (prompt or agent.mode == "interactive"):
+            from brindle import antigravity
+            instructions = "\n\n".join(filter(None, (antigravity.TOOLS_NOTE, profile.prompt)))
+            prompt = "\n\n".join(filter(None, (antigravity.format_delivered_message(instructions), prompt)))
+        if prompt:
+            db.enqueue(agent.id, prompt, None)
         prompt = None
     # Recorded before launching: the agent's hooks may fire within milliseconds.
     status = "processing" if prompt else "starting"
@@ -733,28 +802,63 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         trust_folder(ws.path)  # no trust dialog for nobody to answer
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first)))
+    if prompt or db.pending_count(agent.id):
+        _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
+                              submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
+    else:
+        # Resuming a conversation without delivering a new task must not
+        # classify the previous turn's error as a current launch failure.
+        db.conn.execute("DELETE FROM launch_health WHERE agent_id=?", (agent.id,))
     target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
                           **({"m": m} if m is not None else {}))
+    from brindle import launch_health
+    launch_health.bind(db, agent, target)
+    if provider.name != "shell":
+        from brindle import launch_health
+        from brindle.providers import brindle_invocation
+        # Observe early startup exits independently; a live startup must not
+        # consume the follow-up before the CLI accepts its argv task.
+        if launch_health.helper_token(agent):
+            _detach([*brindle_invocation(), "_launch-health", agent.id,
+                     *launch_health.helper_token(agent), "--startup"])
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)
+        from brindle import launch_health
+        launch_health.delivered(db, agent)
     if background_setup:
         # Startup dialogs (folder trust) are handled by a detached helper so
         # the person gets their terminal immediately.
-        from brindle import inbox
+        from brindle import inbox, launch_health
         from brindle.providers import brindle_invocation
 
         # Without this process's own Claude Code inbox, if it has one: the
         # helper marks the agent ready, and must not take that inbox for it.
         base = {k: v for k, v in os.environ.items() if k not in (inbox.SOCKET_VAR, inbox.TOKEN_VAR)}
         subprocess.Popen(
-            [*brindle_invocation(), "_after-launch", agent.id],
+            [*brindle_invocation(), "_after-launch", agent.id, *launch_health.helper_token(agent)],
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env={**base, **agent_env(ws, agent.id)},
         )
     else:
-        provider.after_launch(target)
-        ready(db, agent.id)
+        accepted = provider.after_launch(target)
+        if accepted:
+            ready(db, agent.id)
+            from brindle import launch_health
+            launch_health.accepted(db, agent)
+
+
+def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
+                           *, argv_task: bool = False, submitted_prompt: str = "") -> None:
+    if not agent.parent_id or not agent.task:
+        return
+    from dataclasses import replace
+
+    from brindle import launch_health
+    effective = _effective_window_env(agent, ws, m)
+    profile = replace(profile, provider=agent.provider)
+    launch_health.prepare(db, agent, launch_health.fingerprint(profile, effective), argv_task=argv_task,
+                          submitted_prompt=submitted_prompt)
 
 
 # -- headless workers (claude -p) ------------------------------------------------
@@ -797,8 +901,17 @@ def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     agent.status = status
     runner = get_provider(agent.provider).runner
     argv = [*brindle_invocation(), runner, agent.id, *(["--resume", resume] if resume else [])]
-    _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane,
-                 **({"m": m} if m is not None else {}))
+    _prepare_launch_health(db, agent, ws, _profile_for(db, agent, ws, m), m)
+    target = _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane,
+                          **({"m": m} if m is not None else {}))
+    from brindle import launch_health
+    launch_health.bind(db, agent, target)
+    if agent.parent_id and agent.task:
+        # A runner can fail before it consumes the task (bad config/imports).
+        # This helper observes only that startup; delivery arms its own timer.
+        from brindle import launch_health
+        _detach([*brindle_invocation(), "_launch-health", agent.id,
+                 *launch_health.helper_token(agent), "--startup"])
 
 
 def _preview(text: str, lines: int = 6) -> str:
@@ -841,6 +954,8 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
                             plan_first=bool(agent.plan_first))
         print(f"\n── brindle: turn {turn} ──\n{_preview(msg.body)}\n", flush=True)
         try:
+            from brindle import launch_health
+            launch_health.delivered(db, agent, launch_health.before_delivery(db, agent))
             code = subprocess.call(provider.command(ctx), cwd=ws.path, stdin=subprocess.DEVNULL)
         except OSError as e:
             print(f"brindle: couldn't start {provider.name}: {e}", flush=True)
@@ -1403,6 +1518,7 @@ def flush(db: DB, agent_id: str) -> bool:
     has one, else typed into its pane once it's idle. Returns True if
     something was delivered."""
     from brindle import inbox
+    from brindle import launch_health
 
     agent = db.get_agent(agent_id)
     if agent is None or agent.headless:
@@ -1410,8 +1526,10 @@ def flush(db: DB, agent_id: str) -> bool:
     if inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
+            baseline = launch_health.before_delivery(db, agent)
             if inbox.send(agent, msg.body, sender="brindle"):
                 delivered = True
+                launch_health.delivered(db, agent, baseline)
             else:
                 db.enqueue(agent_id, msg.body, msg.sender_id)  # back in the queue, for the pane
                 break
@@ -1430,8 +1548,10 @@ def flush(db: DB, agent_id: str) -> bool:
         return False
     agent = db.get_agent(agent_id)
     assert agent is not None
+    baseline = launch_health.before_delivery(db, agent)
     tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
                server=server_of(agent))
+    launch_health.delivered(db, agent, baseline)
     return True
 
 
@@ -1788,6 +1908,9 @@ def delegate(
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, caller_ws)
+    why = model_problem(profile, caller_ws)
+    if why:
+        raise AgentError(why)
     if isolate and branch:   # naming a branch must not reuse another identity's worktree
         for other in db.find_workspaces(caller_ws.repo_root):
             if other.branch == branch:
@@ -2442,6 +2565,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             )
     elif event == "prompt-submit":
         db.set_status(agent_id, "processing")
+        from brindle import launch_health
+        launch_health.accepted(db, agent)
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))
