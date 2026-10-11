@@ -150,7 +150,14 @@ Acting on what you find:
   shared branch, deleting) and for decisions that are the user's to make.
 - Format your own verbose outputs or message transcripts in collapsible
   `<details><summary>Title</summary>...</details>` blocks so they are not
-  sprawling in the chat UI."""
+  sprawling in the chat UI.
+- Running shell commands: keep commands simple (letters, digits, spaces, and
+  `_-./:=@%+,`). Automated permission policies will deny or prompt on compound
+  commands, pipes, subshells, quotes, or backslashes. For code search, grep bare
+  symbols without quotes or backslashes (e.g. `git grep -n my_func src/`). For
+  complex logic, string manipulation, or scripts needing quotes/pipes, execute
+  a Python file via `uv run python script.py` rather than inline `python -c "..."`
+  or shell pipelines."""
 
 
 def supervisor_rules(cfg: RepoConfig) -> str:
