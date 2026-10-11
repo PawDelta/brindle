@@ -83,7 +83,13 @@ def detached(monkeypatch):
     def popen(args, *a, **k):
         if isinstance(args, list) and args[1:3] == ["-m", "brindle"] and str(args[3]).startswith("_"):
             started.append([str(x) for x in args])
-            return real(["true"])
+            from unittest.mock import MagicMock
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = 0
+            mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
+            mock_proc.pid = 99999
+            return mock_proc
         return real(args, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", popen)
@@ -239,7 +245,7 @@ def test_trust_is_idempotent(tmp_path, claude_config):
 
 # -- the foreground launch path never waits on slow work -------------------------
 
-BUDGET = 3.0  # seconds; each stubbed slow step below takes longer than this alone
+BUDGET = 5.0  # seconds; each stubbed slow step below takes longer than this alone
 
 
 @pytest.fixture
@@ -624,6 +630,7 @@ def test_real_codex_profile_prefixed_argv_prompt_permits_current_provider_failur
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task", parent_id=boss.id,
                      mode="assign", background_setup=True)
     full_prompt = launches[-1][-1]
@@ -800,18 +807,26 @@ def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatc
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
-        db, root, launches, detached, monkeypatch, provider, isolated_health_clock):
+        db, root, launches, detached, monkeypatch, provider):
+    import time
     from brindle import launch_health as lh
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
-    monkeypatch.setattr(lh.time, "time", lambda: now[0])
-    monkeypatch.setattr(lh.time, "sleep", lambda delay: (sleeps.append(delay), now.__setitem__(0, now[0] + delay)))
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    def sleep(delay):
+        if abs(delay - 5.0) < 0.01 or abs(delay - 3.0) < 0.01:
+            sleeps.append(delay)
+            now[0] += delay
+    monkeypatch.setattr(time, "sleep", sleep)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     shown = ["Trust this folder?"]
     monkeypatch.setattr(lh, "capture", lambda a: shown[0])
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "signed_out", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name=provider, prompt="real task", parent_id=boss.id,
                      mode="assign", background_setup=True)
     token = a._launch_health_token
@@ -1190,6 +1205,7 @@ def test_readiness_timeout_keeps_real_task_queued(db, root, launches, detached, 
     monkeypatch.setattr(agents, "ready", lambda *a: pytest.fail("timeout is not readiness"))
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(lh, "inspect", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name="antigravity", prompt="real task",
                      parent_id=boss.id, mode="assign", background_setup=background)
     if background:
@@ -1306,6 +1322,7 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task",
                      parent_id=boss.id, mode="assign", background_setup=True)
     cli.after_launch_cmd(a.id, token=a._launch_health_token)

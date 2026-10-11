@@ -598,35 +598,48 @@ def test_agy_pre_tool_denies_and_otherwise_asks(db, ws, monkeypatch):
     assert row.result.startswith("deny:")
 
 
+@pytest.mark.parametrize("strict,expected", [(False, "ask"), (True, "deny")])
 @pytest.mark.parametrize("stdin", ["", "{broken", "[]", "null", '{"toolCall": 5}', "\x00\xff"])
-def test_agy_pre_tool_never_answers_nothing(db, ws, monkeypatch, stdin):
+def test_agy_pre_tool_fails_closed_on_bad_input(db, ws, monkeypatch, stdin, strict, expected):
     a = worker(db, ws, provider="antigravity", id_="g1")
     turn_on(ws)
     monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
-    assert json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db))["decision"] == "ask"
+    assert json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=strict))["decision"] == expected
 
 
-def test_agy_pre_tool_failures_are_ask(db, monkeypatch):
+@pytest.mark.parametrize("strict,expected", [(False, "ask"), (True, "deny")])
+def test_agy_failures_fail_closed(db, monkeypatch, strict, expected):
     def broken_db():
         raise RuntimeError("no db")
 
-    out = antigravity.pre_tool_main(json.dumps(agy_payload("run_command", {"CommandLine": "x"})),
-                                    db_factory=broken_db)
-    assert json.loads(out)["decision"] == "ask"
-    # No agent (agy outside brindle, in a checkout brindle set up): ask, never empty.
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "g1")
+    payload = json.dumps(agy_payload("run_command", {"CommandLine": "x"}))
+    assert json.loads(antigravity.pre_tool_main(payload, db_factory=broken_db, strict=strict))["decision"] == expected
+    # An agent brindle doesn't know: fail closed.
+    assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=strict))["decision"] == expected
+
+    monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
     monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
-    assert json.loads(antigravity.pre_tool_main("{}", db_factory=lambda: db))["decision"] == "ask"
-    # Even brindle's own answer-maker failing still answers ask.
-    monkeypatch.setattr(permissions, "agy_output", lambda d: (_ for _ in ()).throw(RuntimeError()))
-    assert json.loads(antigravity.pre_tool_main("{}", db_factory=lambda: db))["decision"] == "ask"
+    
+    if strict:
+        for launched, expected_launched in ((False, "ask"), (True, "deny"), (None, "deny")):
+            monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda launched=launched: launched)
+            assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=strict))["decision"] == expected_launched
+    else:
+        assert json.loads(antigravity.pre_tool_main("{}", db_factory=lambda: db, strict=strict))["decision"] == "ask"
+        monkeypatch.setattr(permissions, "agy_output", lambda d: (_ for _ in ()).throw(RuntimeError()))
+        assert json.loads(antigravity.pre_tool_main("{}", db_factory=lambda: db, strict=strict))["decision"] == "ask"
 
 
-def test_agy_pre_tool_cli_always_prints_json(monkeypatch):
+@pytest.mark.parametrize("strict,expected,hook_name", [(False, "ask", "agy-pre-tool"), (True, "deny", "agy-pre-tool-strict")])
+def test_agy_cli_always_prints_json(monkeypatch, strict, expected, hook_name):
     monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
+    if strict:
+        monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
     for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "git push"}))):
-        res = CliRunner().invoke(app, ["_hook", "agy-pre-tool"], input=stdin)
+        res = CliRunner().invoke(app, ["_hook", hook_name], input=stdin)
         assert res.exit_code == 0
-        assert json.loads(res.stdout)["decision"] == "ask"
+        assert json.loads(res.stdout)["decision"] == expected
 
 
 def test_agy_install_adds_the_pre_tool_hook_only_with_the_policy(ws, monkeypatch):
@@ -809,39 +822,10 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
         assert decision(tool, {}) == "deny", tool
 
 
-@pytest.mark.parametrize("stdin", ["", "{broken", "[]", "null", '{"toolCall": 5}'])
-def test_agy_strict_fails_closed(db, ws, monkeypatch, stdin):
-    a = worker(db, ws, provider="antigravity", id_="g1")
-    turn_on(ws)
-    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
-    assert json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))["decision"] == "deny"
 
 
-def test_agy_strict_failures_are_deny_unless_agy_plainly_prompts(db, monkeypatch):
-    def broken_db():
-        raise RuntimeError("no db")
-
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "g1")
-    payload = json.dumps(agy_payload("run_command", {"CommandLine": "x"}))
-    assert json.loads(antigravity.pre_tool_main(payload, db_factory=broken_db, strict=True))["decision"] == "deny"
-    # An agent brindle doesn't know: deny.
-    assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=True))["decision"] == "deny"
-    monkeypatch.delenv("BRINDLE_AGENT_ID")
-    monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
-    # No agent: the person's own agy in this checkout. Started without the
-    # flag, it prompts, so ask; with the flag, or when that can't be told, deny.
-    for launched, expected in ((False, "ask"), (True, "deny"), (None, "deny")):
-        monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda launched=launched: launched)
-        assert json.loads(antigravity.pre_tool_main(payload, db_factory=lambda: db, strict=True))["decision"] == expected
 
 
-def test_agy_strict_cli_event(monkeypatch):
-    monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
-    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
-    for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "ls"}))):
-        res = CliRunner().invoke(app, ["_hook", "agy-pre-tool-strict"], input=stdin)
-        assert res.exit_code == 0
-        assert json.loads(res.stdout)["decision"] == "deny"
 
 
 def test_agy_strict_launch_skips_prompts_and_hooks_every_tool(db, ws, monkeypatch):

@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 
 from brindle import codemap, tmux
+from brindle.config import brindle_home
 from brindle.profiles import Profile
 
 
@@ -743,11 +744,49 @@ def _signed_in_key(provider: str, env: dict[str, str] | None) -> tuple:
     return provider, tuple(sorted(env.items())) if env else ()
 
 
+def _invalidation_file(provider: str | None = None) -> Path:
+    from pathlib import Path
+
+    name = f".auth_invalidated_{provider}" if provider else ".auth_invalidated"
+    return Path(brindle_home()) / name
+
+
+def _last_invalidated(provider: str) -> float:
+    try:
+        t1 = _invalidation_file(None).stat().st_mtime
+    except OSError:
+        t1 = 0.0
+    try:
+        t2 = _invalidation_file(provider).stat().st_mtime
+    except OSError:
+        t2 = 0.0
+    return max(t1, t2)
+
+
 def seen_signed_in(provider: str) -> bool:
     """Whether a status check answered "signed in" for ``provider`` recently,
     with any profile env (brindle doctor's "its own login")."""
     now = time.time()
-    return any(k[0] == provider and now - t < SIGNED_IN_TTL for k, t in _SIGNED_IN.items())
+    inv = _last_invalidated(provider)
+    return any(k[0] == provider and t > inv and now - t < SIGNED_IN_TTL for k, t in _SIGNED_IN.items())
+
+
+def invalidate_signed_in(provider: str | None = None) -> None:
+    """Clear cached positive sign-in probes (e.g. after an auth failure or when rotating keys)."""
+    global _SIGNED_IN
+    if provider is None:
+        _SIGNED_IN.clear()
+    else:
+        _SIGNED_IN = {k: v for k, v in _SIGNED_IN.items() if k[0] != provider}
+    try:
+        f = _invalidation_file(provider)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+        if provider is None:
+            for p in ("claude", "codex", "antigravity"):
+                _invalidation_file(p).touch()
+    except Exception:
+        pass
 
 
 def subscription_login(provider: str = "claude") -> bool:
@@ -984,7 +1023,8 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
         return None
     key = _signed_in_key(provider, env)
     seen = _SIGNED_IN.get(key)
-    if seen and time.time() - seen < SIGNED_IN_TTL:
+    inv = _last_invalidated(provider)
+    if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
         return None
     reason = None
     if provider == "claude":

@@ -44,7 +44,7 @@ def paused(db: DB, repo_root: str) -> list[Session]:
     out = []
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
-            if a.mode == "interactive" and a.status == "paused":
+            if a.mode == "interactive" and a.status in ("paused", "failed"):
                 members = agents.tree(db, a.id)
                 branches = []
                 for m in members[1:]:
@@ -103,7 +103,7 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
             if prev.status != "pending":
                 db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
                                 passed_sha=prev.passed_sha)
-        db.update_autopilot(new.id, goal_sha=ap.goal_sha)   # the audit reviews the whole goal's work
+        db.update_autopilot(new.id, goal_sha=ap.goal_sha, audit_history=ap.audit_history)   # the audit reviews the whole goal's work
         db.update_autopilot(old_root_id, enabled=0)   # the old session stops syncing goals.md
         pilot.sync_goals_file(db, new.id)
     with db.tx() as c:

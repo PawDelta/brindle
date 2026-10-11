@@ -267,8 +267,11 @@ def _isolated_discovery(request: Request, timeout: float) -> Catalog:
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                           start_new_session=True) as proc:
         try:
-            proc.stdin.write(payload)
-            proc.stdin.close()
+            try:
+                proc.stdin.write(payload)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
             chunks = bytearray()
             with selectors.DefaultSelector() as selector:
                 selector.register(proc.stdout, selectors.EVENT_READ)

@@ -209,10 +209,29 @@ def live_workers(db: DB, ws: Workspace) -> list:
     return [a for a in db.list_agents(ws.id) if agents.is_alive(a)]
 
 
+def _is_worktree_gutted(path: str | Path) -> bool:
+    """True if directory is missing, or is a worktree where files were wiped by an interrupted removal."""
+    p = Path(path)
+    if not p.is_dir():
+        return True
+    if not (p / ".git").exists():
+        return True
+    try:
+        deleted = git.out(["ls-files", "--deleted"], p).splitlines()
+        tracked = git.out(["ls-files"], p).splitlines()
+        if not any(p.glob("[!.]*")):
+            return True
+        if tracked and len(deleted) > 0 and len(deleted) >= len(tracked) / 2:
+            return True
+    except git.GitError:
+        return True
+    return False
+
+
 def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created | None:
     """A workspace already registered for ``branch``: refuse if a worker is
     live in it, else hand it back (recreating its worktree if the folder is
-    gone) rather than registering a second row on the same branch and path."""
+    gone or gutted) rather than registering a second row on the same branch and path."""
     registered = db.workspaces_sharing(repo_root, branch=branch)
     if not registered:
         return None
@@ -226,7 +245,44 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
             )
     ws = registered[0]
     how = "existing"
-    if not os.path.isdir(ws.path):
+    if not os.path.isdir(ws.path) or _is_worktree_gutted(ws.path):
+        if os.path.isdir(ws.path):
+            git_file = Path(ws.path) / ".git"
+            if git_file.exists():
+                try:
+                    proc = git.run(["status", "--porcelain", "--untracked-files=all"], ws.path)
+                    lines = [l for l in proc.stdout.splitlines() if l.strip()]
+                    dirty_work = []
+                    for line in lines:
+                        code = line[:2]
+                        path_str = line[3:]
+                        if code == " D":
+                            continue
+                        dirty_work.append(path_str)
+                    if dirty_work:
+                        shown = ", ".join(dirty_work[:5])
+                        raise WorkspaceError(
+                            f"workspace {ws.id} at {ws.path} appears damaged but has uncommitted or untracked work ({shown}). "
+                            f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
+                        )
+                    git.run(["checkout", "HEAD", "--", "."], ws.path)
+                    return Created(ws, "existing", branch, [], None)
+                except git.GitError:
+                    pass
+
+            surviving = [f.name for f in Path(ws.path).iterdir() if f.name != ".git"]
+            if surviving:
+                shown = ", ".join(surviving[:5])
+                raise WorkspaceError(
+                    f"workspace {ws.id} at {ws.path} appears damaged but has surviving files ({shown}). "
+                    f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
+                )
+        try:
+            git.remove_worktree(repo_root, ws.path, force=True)
+        except Exception:
+            pass
+        if os.path.exists(ws.path):
+            shutil.rmtree(ws.path, ignore_errors=True)
         git.run(["worktree", "prune"], repo_root, check=False)
         how = git.add_worktree(repo_root, ws.path, branch, base)
     return Created(ws, how, branch, [], None)
@@ -555,7 +611,18 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
         _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)
     if exists:
-        git.remove_worktree(ws.repo_root, ws.path, force=force)
+        try:
+            git.remove_worktree(ws.repo_root, ws.path, force=force)
+        except git.GitError:
+            if force:
+                shutil.rmtree(ws.path, ignore_errors=True)
+                git.run(["worktree", "prune"], ws.repo_root, check=False)
+            else:
+                raise
+        if force and os.path.exists(ws.path):
+            shutil.rmtree(ws.path, ignore_errors=True)
+        if os.path.exists(ws.path):
+            raise WorkspaceError(f"could not remove worktree directory at {ws.path}")
     else:
         git.run(["worktree", "prune"], ws.repo_root, check=False)
 

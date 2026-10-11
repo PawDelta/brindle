@@ -250,8 +250,9 @@ async def handoff(
     weight: "light", "medium" or "heavy" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = a normal feature or bugfix in one area; heavy =
-    design-heavy, cross-cutting, subtle bugs, hard reasoning.
+    simple tests); medium = normal feature work, refactors, cross-cutting edits,
+    or bugfixes; heavy = reserved for exceptionally complex algorithmic work,
+    subtle bugs that failed earlier fix rounds, or deep reasoning.
 
     Waits up to wait_seconds (default 4 minutes). If the worker isn't done by
     then, this returns "still running": call wait_for_worker to keep waiting,
@@ -306,11 +307,12 @@ async def handoff(
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
             return str(e)
+        effective_weight = decision.get("weight") or weight
         if unmet:
             t = tasks.enqueue(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=weight,
+                weight=effective_weight,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
@@ -329,7 +331,7 @@ async def handoff(
             return _start_failure(profile, e)
         started = tasks.record_started(
             db, ws, worker, profile, task,"handoff", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, weight=weight,
+            done_when=done_when, files=files, depends_on=depends_on, weight=effective_weight,
         )
         savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
@@ -385,8 +387,9 @@ async def assign(
     weight: "light", "medium" or "heavy" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = a normal feature or bugfix in one area; heavy =
-    design-heavy, cross-cutting, subtle bugs, hard reasoning.
+    simple tests); medium = normal feature work, refactors, cross-cutting edits,
+    or bugfixes; heavy = reserved for exceptionally complex algorithmic work,
+    subtle bugs that failed earlier fix rounds, or deep reasoning.
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.
@@ -432,11 +435,12 @@ async def assign(
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
             return str(e)
+        effective_weight = decision.get("weight") or weight
         if unmet:
             t = tasks.enqueue(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=weight,
+                weight=effective_weight,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
@@ -455,7 +459,7 @@ async def assign(
             return _start_failure(profile, e)
         started = tasks.record_started(
             db, ws, worker, profile, task,"assign", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, weight=weight,
+            done_when=done_when, files=files, depends_on=depends_on, weight=effective_weight,
         )
         savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
@@ -603,9 +607,16 @@ def list_agents(repo: str | None = None) -> str:
             for a in db.list_agents(ws.id):
                 me = " (you)" if caller and a.id == caller.id else ""
                 parent = f" parent={a.parent_id}" if a.parent_id else ""
+                usage_str = ""
+                try:
+                    from brindle import usage as usage_mod
+                    u = usage_mod.agent_usage(db, a)
+                    usage_str = f" tokens={usage_mod.short_summary(u)}" if u and u.total else ""
+                except Exception:
+                    pass
                 lines.append(
                     f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
-                    f"ws={ws.id} branch={ws.branch}{_last_activity(a)}"
+                    f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}"
                 )
         return "\n".join(lines) or "No agents."
 
@@ -1054,6 +1065,23 @@ async def check_milestone(milestone: int | None = None) -> str:
         return autopilot.check_in_background(db, root_id, ws, milestone)
 
     return await asyncio.to_thread(run)
+
+
+@mcp.tool()
+def record_audit_decision(finding: str, rationale: str = "") -> str:
+    """Autopilot: record the supervisor's acceptance of an audit finding with rationale,
+    so subsequent completion audits take the recorded decision into account."""
+    db = DB()
+    caller, _ = _caller(db)
+    found = _session(db)
+    if isinstance(found, str):
+        return found
+    root_id, _ = found
+    if caller and caller.id != root_id:
+        return "Not authorized: only the supervisor (session root) can accept an audit finding."
+    decision = f"Accepted finding '{finding}': {rationale}" if rationale else f"Accepted finding '{finding}'"
+    autopilot.record_accepted_decision(db, root_id, decision)
+    return f"Recorded audit decision for finding '{finding}'."
 
 
 def record_milestone_changes(db: DB, root_id: str, ws: Workspace, before: dict,

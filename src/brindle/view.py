@@ -107,6 +107,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         u = None
     if not agents.runs_process(a):
         status = a.status  # a supervisor's own subagent: no terminal to check
+    elif a.status == "failed":
+        status = "failed"
     elif agents.is_alive(a, panes) if alive is None else alive:
         a = agents.reconcile(db, a, samples=1)
         status = a.status

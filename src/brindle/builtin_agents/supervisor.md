@@ -26,10 +26,12 @@ How to work:
   goals.md). `assign`/`handoff` without `agent_profile` use the first
   unverified milestone's profile, else the repo's default agent.
 - When you don't need a specific profile, pass `weight` on each `assign`/
-  `handoff`: "light" (small, well-specified, mechanical), "medium" (a normal
-  feature or bugfix in one area) or "heavy" (design-heavy, cross-cutting,
-  subtle bugs, hard reasoning). brindle picks an available profile for the tier
-  and tells you which and why.
+  `handoff`: "light" (small, well-specified, mechanical; cheapest), "medium" (a normal
+  feature or bugfix in one area; standard tier) or "heavy" (design-heavy, cross-cutting,
+  security boundaries, subtle concurrency; most expensive tier). Heavy is only for work where
+  a wrong choice is expensive to detect and undo: writing a doc, filling tables, applying
+  review fixes, or re-running recipes is medium or light even when long. brindle picks an
+  available profile for the tier and tells you which and why.
 - Workers only see what you've committed. Commit before delegating if they
   need your latest changes.
 - Write each task so it stands on its own: the goal, relevant files, the

@@ -181,6 +181,7 @@ def piped(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "_detach", lambda argv: None)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
+    monkeypatch.setattr(agents, "unusable", lambda p, *a, **k: "not installed" if p == "antigravity" else None)
     return setup, started
 
 

@@ -190,13 +190,55 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         company = {} if agent.provider != "claude" else company_login.stored_env()
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
+        session_creds = {}
+        try:
+            from brindle.db import DB
+            db_inst = DB()
+            root_id = agent.parent_id or agent_id if agent else agent_id
+            curr_id = root_id
+            while curr_id:
+                ca = db_inst.get_agent(curr_id)
+                if ca and ca.parent_id:
+                    curr_id = ca.parent_id
+                else:
+                    break
+            session_creds = db_inst.get_session_credentials_with_timestamps(curr_id or root_id)
+        except Exception:
+            pass
+
+        from brindle import keystore, secrets
+        guarded = _guarded_profile(agent, ws)
+        org_managed = agent.provider == "claude" and bool(providers.claude_org_managed())
+        deny = pane_auth.deny_names(agent.provider, getattr(guarded, "auth", "auto") if guarded is not None else "auto",
+                                    m, org_managed)
+        no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
+
+        creds = set() if org else secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
+        recovery_keys = {}
+        for k in creds:
+            if k in no_stored:
+                continue
+            sess_val, sess_time = session_creds.get(k, (None, 0.0))
+            env_val = os.environ.get(k)
+            if env_val and not secrets.is_job_secret(k) and agent and agent.status == "failed":
+                recovery_keys[k] = env_val
+            elif sess_val:
+                try:
+                    ks_val, ks_time = keystore.get_key_info(k)
+                except Exception:
+                    ks_val, ks_time = None, 0.0
+                if ks_val and ks_time > sess_time:
+                    recovery_keys[k] = ks_val
+                else:
+                    recovery_keys[k] = sess_val
+
         if enforced is None:
-            env = {**company, **profile_env, **managed_env, **env}
+            env = {**company, **recovery_keys, **profile_env, **managed_env, **env}
         else:
             # An enforced company identity (Enterprise): the pane runs on the route
             # launch_problem checked, whatever a profile's env lines say.
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
-            env = {**profile_env, **managed_env, **enforced, **env}
+            env = {**recovery_keys, **profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -717,8 +759,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     if why:
         raise AgentError(why)
     # The org's own key signs the agent in: there is no login to check.
+    prov_creds = set() if org_key else secrets.agent_credentials(provider.name, profile.name, ws.repo_root)
+    eff_env = _window_environment(agent, ws, m)[0]
+    probe_keys = {k: eff_env[k] for k in prov_creds if k in eff_env}
+    probe_env = {**launch_env, **probe_keys}
     why = None if org_key else signed_out(
-        provider.name, {**launch_env, **{k: "" for k in secrets.pane_deny(deny, launch_env)}})
+        provider.name, {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}})
     if why:
         raise AgentError(why)
     # Here rather than in spawn, so a resume checks too: a directory can be
@@ -1044,19 +1090,61 @@ def latest_paused(db: DB, ws: Workspace) -> Agent | None:
 
 
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
-           only: set[str] | None = None) -> list[Agent]:
+           only: set[str] | list[str] | None = None,
+           recovery_env: dict[str, str] | None = None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task.
     With ``only``, just those agents (if paused) restart."""
-    from brindle import identity_lock
+    from brindle import identity_lock, providers
+
+    providers.invalidate_signed_in()
+    from brindle import keystore, secrets
+
+    # Explicit recovery replacements (from recovery_env or current process environment)
+    env_keys = recovery_env if recovery_env is not None else {
+        k: os.environ[k] for k in keystore.known_names()
+        if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)
+    }
+
+    session_creds = db.get_session_credentials_with_timestamps(root_id)
+    for k in keystore.known_names():
+        try:
+            ks_val, ks_time = keystore.get_key_info(k)
+        except Exception:
+            ks_val, ks_time = None, 0.0
+        sess_val, sess_time = session_creds.get(k, (None, 0.0))
+        env_val = env_keys.get(k)
+
+        val = None
+        if ks_val and (ks_time > sess_time or (sess_val and env_val == sess_val and ks_val != sess_val) or not env_val):
+            val = ks_val
+        elif env_val:
+            val = env_val
+        elif ks_val:
+            val = ks_val
+
+        if val:
+            db.set_session_credential(root_id, k, val)
+            os.environ[k] = val
 
     candidates = [a for a in tree(db, root_id)
-                  if a.status == "paused" and (only is None or a.id in only)]
+                  if a.status in ("paused", "failed") and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
     resumed = []
     for a in candidates:
+        if a.status == "failed":
+            if a.tmux_window and same_server(a) and owns_pane(db, a):
+                try:
+                    tmux.kill_window(a.tmux_window)
+                except Exception:
+                    pass
+            from brindle import procs
+            try:
+                procs.stop([a.id], grace=2.0)
+            except Exception:
+                continue
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path):
             continue
@@ -1081,6 +1169,14 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         _launch(db, a, ws, prompt=prompt, resume=ref,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
+    ap = db.get_autopilot(root_id)
+    failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
+    if ap and ap.state == "blocked" and resumed and not failed_still:
+        note = (ap.note or "").lower()
+        auth_indicators = ("auth", "credential", "sign in", "signed out", "login", "api key", "key", "token", "unauthorized", "forbidden")
+        if any(ind in note for ind in auth_indicators):
+            db.update_autopilot(root_id, state="running", note=None)
+
     return resumed
 
 
@@ -1642,8 +1738,9 @@ def detach(db: DB, agent_id: str) -> str | None:
     """Stop waiting synchronously on a handoff worker: from now on its result
     is forwarded to its parent as a message. Returns the result instead if it
     arrived in the meantime (so it's never lost between the two paths)."""
-    db.update_agent(agent_id, mode="handoff_detached")
     agent = db.get_agent(agent_id)
+    if agent and agent.mode == "handoff":
+        db.update_agent(agent_id, mode="handoff_detached")
     return agent.result if agent else None
 
 
@@ -1662,11 +1759,12 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
 
     caller = db.get_agent(caller_id)
     ws = db.get_workspace(caller.workspace_id) if caller else None
-    if not caller or caller.mode != "review" or ws is None:
+    root_id = autopilot.root_of(db, caller.id) if caller else None
+    ap = db.get_autopilot(root_id) if root_id else None
+    is_auditor = bool(ap and ap.auditor_id == caller_id)
+    if not caller or (caller.mode != "review" and not is_auditor) or ws is None:
         return "Only a reviewer started with request_review can submit a review."
-    root_id = autopilot.root_of(db, caller.id)
-    ap = db.get_autopilot(root_id)
-    if ap and ap.auditor_id == caller.id:   # the completion audit, not a branch review
+    if is_auditor:   # the completion audit, not a branch review
         text = autopilot.record_audit(db, root_id, approved, summary)
         report_result(db, caller.id, text, forward=False)
         try:
@@ -1879,6 +1977,14 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     model on its own: a Claude worker reviewed by a Claude reviewer is fine."""
     if cfg.review_profile:
         return cfg.review_profile
+    if cfg.reviewer and cfg.reviewer != "reviewer":
+        return cfg.reviewer
+    if unusable("antigravity") is None:
+        try:
+            load_profile("reviewer-gemini", repo_root)
+            return "reviewer-gemini"
+        except Exception:
+            pass
     if db is None or not repo_root:
         return cfg.reviewer
     from brindle import learning
@@ -1886,8 +1992,18 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     if learning.plugin(cfg, repo_root) is None:
         return cfg.reviewer  # no learner: don't even probe the alternatives
     candidates = [cfg.reviewer]
+    if unusable("antigravity") is None:
+        try:
+            load_profile("reviewer-gemini", repo_root)
+            candidates.append("reviewer-gemini")
+        except Exception:
+            pass
     if unusable("codex") is None:
-        candidates.append("reviewer-codex")
+        try:
+            load_profile("reviewer-codex", repo_root)
+            candidates.append("reviewer-codex")
+        except Exception:
+            pass
     if _local_reviewer_available():
         candidates.append("reviewer-local")
     candidates = list(dict.fromkeys(candidates))
@@ -2062,10 +2178,52 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
             "it isn't pre-approved). "
             "Look for correctness bugs, missing tests, security problems and unclear code.")
 
+    worker_files = []
+    worker_done_when = getattr(worker, "done_when", None) if worker else None
+    if worker:
+        if getattr(worker, "files", None):
+            worker_files = worker.files
+        else:
+            t = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
+            if t:
+                if t.files:
+                    import json
+                    try:
+                        worker_files = json.loads(t.files)
+                    except Exception:
+                        worker_files = [t.files]
+                if not worker_done_when and t.done_when:
+                    worker_done_when = t.done_when
     if worker and worker.task:
-        task += f"\n\nThe worker's original task:\n{worker.task.strip()[:TASK_TRIM]}"
-    if worker and worker.done_when:
-        task += f"\n\nIts finish line: {worker.done_when.strip()}"
+        task += f"\n\nThe worker's original task:\n{worker.task.strip()}"
+    if worker:
+        task += f"\n\nWorker profile: {worker.profile} (provider: {worker.provider})"
+        try:
+            from brindle.profiles import load_profile
+            wp = load_profile(worker.profile, ws.repo_root)
+            restrictions = []
+            if wp.allowed_tools:
+                restrictions.append(f"allowed_tools: {', '.join(wp.allowed_tools)}")
+            if wp.permission_mode:
+                restrictions.append(f"permission_mode: {wp.permission_mode}")
+            if wp.permission_denies:
+                restrictions.append(f"permission_denies: {', '.join(wp.permission_denies)}")
+            if getattr(wp, "write_scope", None):
+                restrictions.append(f"write_scope: {', '.join(wp.write_scope)}")
+            if getattr(wp, "read_scope", None):
+                restrictions.append(f"read_scope: {', '.join(wp.read_scope)}")
+            if getattr(wp, "env_allow", None):
+                restrictions.append(f"env_allow: {', '.join(wp.env_allow)}")
+            if wp.strict_mcp:
+                restrictions.append("strict_mcp: true")
+            if restrictions:
+                task += f"\nWorker restrictions:\n" + "\n".join(f"- {r}" for r in restrictions)
+        except Exception:
+            pass
+    if worker_files:
+        task += f"\n\nDeclared files: {', '.join(worker_files)}"
+    if worker_done_when:
+        task += f"\n\nIts finish line: {worker_done_when.strip()}"
 
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
@@ -2085,6 +2243,19 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
 
     if focus:
         task += f"\n\nFocus: {focus}"
+
+    task += (
+        "\n\nClassify each finding into one of:\n"
+        "- `blocker`: must be fixed before the branch can merge.\n"
+        "- `minor`: style nits, minor comments or suggestions that do not block merging.\n"
+        "- `needs supervisor action: <details>`: an issue the worker cannot fix within its allowed tools or permissions (e.g. network access, elevated migrations, scope decisions).\n\n"
+        "Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing)."
+    )
+    if check_summary:
+        task += " If you judged checks without running Bash, state clearly which checks you ran and which you read from history."
+    task += (
+        "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
+    )
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
                  mode="review", background_setup=True, review_sha=sha)
 
@@ -2477,12 +2648,58 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 flush(db, agent_id)
     elif event == "stop-failure":
         # The turn ended on an API error; no Stop hook follows.
-        db.set_status(agent_id, "idle")
-        db.clear_permission_requests(agent_id)
-        if "rate_limit" in json.dumps(payload):
-            from brindle import autopilot as pilot
+        err_fields = " ".join(
+            str(payload.get(k) or "") for k in (
+                "error", "error_type", "error_details", "last_assistant_message",
+                "message", "reason", "details", "status", "status_code", "code"
+            )
+        ).lower()
+        is_rate_limit = bool(re.search(r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
+        auth_enums = {
+            "oauth_org_not_allowed", "billing_error", "authentication_error",
+            "permission_error", "invalid_api_key", "account_suspended", "revoked_api_key"
+        }
+        is_auth = not is_rate_limit and (
+            payload.get("error_type") == "auth"
+            or str(payload.get("error") or "").lower() in auth_enums
+            or str(payload.get("error_type") or "").lower() in auth_enums
+            or bool(re.search(r"\b(401|403|oauth_org_not_allowed|billing_error)\b", err_fields))
+            or any(w in err_fields for w in (
+                "unauthorized", "authentication", "auth_fail", "auth fail",
+                "invalid api key", "invalid_api_key", "expired token", "expired_token",
+                "credit balance", "credit-balance", "revoked", "forbidden",
+                "oauth_org_not_allowed", "billing_error"
+            ))
+        )
+        if is_auth:
+            db.set_status(agent_id, "failed")
+            db.clear_permission_requests(agent_id)
+            from brindle import providers, autopilot as pilot
+            providers.invalidate_signed_in(agent.provider)
+            err_desc = payload.get("error_details") or payload.get("error") or payload.get("error_type") or "401/403"
+            msg = (
+                f"[brindle] Agent {agent_id} encountered an authentication failure "
+                f"(invalid or expired credentials): {err_desc}. "
+                "Check API keys or login status."
+            )
+            if agent.parent_id:
+                try:
+                    send_message(db, agent.parent_id, msg, sender_id="brindle")
+                except Exception:
+                    try:
+                        db.enqueue(agent.parent_id, msg, "brindle")
+                    except Exception:
+                        pass
+            root_id = pilot.root_of(db, agent_id)
+            if db.get_autopilot(root_id):
+                pilot.need_user(db, root_id, f"Credentials need attention for agent {agent_id}: {err_desc}")
+        else:
+            db.set_status(agent_id, "idle")
+            db.clear_permission_requests(agent_id)
+            if is_rate_limit:
+                from brindle import autopilot as pilot
 
-            pilot.limit_reached(db, agent)
+                pilot.limit_reached(db, agent)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:
         # the sidebar hides a subagent that's been "running" too long instead.

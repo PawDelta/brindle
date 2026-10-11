@@ -42,6 +42,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import re
 import threading
 from contextlib import contextmanager
 
@@ -291,6 +292,33 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
     return handled
 
 
+def has_supervisor_action(summary: str) -> bool:
+    """Parse review summary for actionable supervisor findings.
+    Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
+    from actual items requiring escalation."""
+    m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)
+    if not m:
+        return False
+    # Capture text under this section until the next header/section
+    rest = summary[m.start(1):]
+    next_sec = re.search(r"\n\s*(?:#+\s*|[A-Z][a-zA-Z\s]{1,20}:)", rest)
+    section_text = rest[:next_sec.start()] if next_sec else rest
+    cleaned = re.sub(r"[^\w]+", " ", section_text).strip().lower()
+    negations = {
+        "", "none", "n a", "na", "nil", "nothing", "no", "no action",
+        "no action needed", "no action required", "none needed", "none required",
+        "not needed", "false", "none identified", "none observed", "none reported",
+        "n a none"
+    }
+    if cleaned in negations:
+        return False
+    first_sentence = re.split(r"[.\n;]", section_text.strip())[0]
+    first_cleaned = re.sub(r"[^\w]+", " ", first_sentence).strip().lower()
+    if first_cleaned and first_cleaned in negations:
+        return False
+    return True
+
+
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                summary: str) -> tuple[bool, bool]:
     """(handled, ready): whether the pipeline took the verdict, and whether
@@ -347,8 +375,9 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False   # the other reviewer's verdict decides; both must approve
         db.update_agent(worker.id, pipeline="ready")
         return True, True
+    needs_sup = has_supervisor_action(summary)
     rounds = (worker.pipeline_rounds or 0) + 1
-    if rounds <= cfg.review_rounds and agents.is_alive(worker):
+    if not needs_sup and rounds <= cfg.review_rounds and agents.is_alive(worker):
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
         try:
             agents.send_message(
@@ -361,15 +390,15 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         except agents.AgentError:
             pass
-    if _retry_on_heavy(db, worker, ws, cfg,
+    if not needs_sup and _retry_on_heavy(db, worker, ws, cfg,
                        f"the review still asked for changes after {rounds - 1} fix round(s): "
                        f"{summary}", report):
         return True, False
     db.update_agent(worker.id, pipeline=None)
     _escalate(db, ws, worker)
+    reason = "needs supervisor action" if needs_sup else f"still has review findings after {rounds - 1} fix round(s)"
     _tell(db, parent_id,
-          f"[brindle pipeline] `{ws.branch}` still has review findings after {rounds - 1} fix "
-          f"round(s). This needs you: decide what to do.\n\nLatest review ({reviewer.id}):\n"
+          f"[brindle pipeline] `{ws.branch}` {reason}. This needs you: decide what to do.\n\nLatest review ({reviewer.id}):\n"
           f"{summary}\n\nWorker's last report:\n{report}", worker.id)
     return True, False
 
@@ -549,6 +578,8 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
     task isn't heavy, Fable isn't enabled, this was already the retry, or no
     worker could start; the caller then escalates as before."""
     if worker.profile == ESCALATION_PROFILE or not fable_enabled(cfg, worker, ws):
+        return False
+    if cfg.max_weight and cfg.max_weight in ("light", "medium"):
         return False
     if ESCALATION_PROFILE not in cfg.routing.get("heavy", []):
         return False

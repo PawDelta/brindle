@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS autopilot (
     goal_sha TEXT,                 -- the checkout's HEAD when the goal was set: the completion audit reviews from here
     auditor_id TEXT,               -- the reviewer auditing the finished goal (state 'auditing')
     audit_sha TEXT,                -- the commit the last completion audit judged
-    audit_ok INTEGER               -- its verdict: 1 approved, 0 gaps found
+    audit_ok INTEGER,              -- its verdict: 1 approved, 0 gaps found
+    audit_history TEXT             -- persistent audit notes and prior accepted decisions
 );
 CREATE TABLE IF NOT EXISTS milestones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +122,13 @@ CREATE TABLE IF NOT EXISTS session_repos (
     repo_root TEXT NOT NULL,
     added_at REAL NOT NULL,
     PRIMARY KEY (root_id, alias)
+);
+CREATE TABLE IF NOT EXISTS session_credentials (
+    session_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (session_id, key)
 );
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
@@ -435,6 +443,7 @@ class Autopilot:
     auditor_id: str | None = None      # the reviewer auditing the finished goal
     audit_sha: str | None = None       # the commit the last completion audit judged
     audit_ok: int | None = None        # its verdict
+    audit_history: str | None = None   # persistent audit notes and accepted decisions
 
 
 @dataclass
@@ -598,7 +607,7 @@ def _load(cls, row):
 
 class DB:
     def __init__(self, path: str | None = None) -> None:
-        p = path or str(db_path())
+        p = str(path) if path is not None else str(db_path())
         if p != ":memory:":
             from pathlib import Path
 
@@ -609,7 +618,21 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._enforce_permissions()
         self._migrate()
+
+    def _enforce_permissions(self) -> None:
+        if self.path == ":memory:":
+            return
+        import os
+        base = str(self.path)
+        for target in (base, base + "-wal", base + "-shm"):
+            if os.path.exists(target):
+                try:
+                    os.chmod(target, 0o600)
+                except OSError:
+                    pass
+
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
@@ -644,7 +667,7 @@ class DB:
         if "usage_paused_ids" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_paused_ids TEXT")
         for col, kind in (("goal_sha", "TEXT"), ("auditor_id", "TEXT"), ("audit_sha", "TEXT"),
-                          ("audit_ok", "INTEGER")):
+                          ("audit_ok", "INTEGER"), ("audit_history", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE autopilot ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
@@ -859,6 +882,38 @@ class DB:
                 "DELETE FROM pool_failures WHERE repo_root=? AND base_branch=?",
                 (repo_root, base_branch),
             )
+
+    # -- session credentials -----------------------------------------------
+
+    def set_session_credential(self, session_id: str, key: str, value: str, updated_at: float | None = None) -> None:
+        self._enforce_permissions()
+        ts = time.time() if updated_at is None else float(updated_at)
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO session_credentials (session_id, key, value, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (session_id, key, value, ts),
+            )
+        self._enforce_permissions()
+
+    def get_session_credentials(self, session_id: str) -> dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT key, value FROM session_credentials WHERE session_id=?",
+            (session_id,),
+        ).fetchall()
+        return {k: v for k, v in rows}
+
+    def get_session_credentials_with_timestamps(self, session_id: str) -> dict[str, tuple[str, float]]:
+        rows = self.conn.execute(
+            "SELECT key, value, updated_at FROM session_credentials WHERE session_id=?",
+            (session_id,),
+        ).fetchall()
+        return {k: (v, float(ts or 0.0)) for k, v, ts in rows}
+
+    def clear_session_credentials(self, session_id: str) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM session_credentials WHERE session_id=?", (session_id,))
+
 
     # -- agents ------------------------------------------------------------
 

@@ -97,6 +97,8 @@ def has_session(session: str) -> bool:
 def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
     """Create a detached session whose first window is a plain shell."""
     if has_session(session):
+        for k, v in env.items():
+            _tmux("set-environment", "-t", f"={session}", k, v, check=False)
         return
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *env_args)
@@ -479,7 +481,8 @@ def current_session() -> str | None:
 def active_window(session: str) -> str | None:
     """The id of ``session``'s currently active window, or None if the
     session doesn't exist."""
-    proc = _tmux("display-message", "-p", "-t", session, "#{window_id}", check=False)
+    target = session if session.startswith("=") else f"={session}:"
+    proc = _tmux("display-message", "-p", "-t", target, "#{window_id}", check=False)
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None

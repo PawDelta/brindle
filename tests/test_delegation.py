@@ -140,12 +140,10 @@ def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, r
     monkeypatch.setattr(agents, "load_profile", lambda *a: p)
     monkeypatch.setattr(autopilot, "load_profile", lambda *a: p)
     monkeypatch.setattr(tmux, "inherited_env", lambda *a: {"HOME": str(repo), "PATH": "/usr/bin"})
-    from brindle import providers
+    from brindle import providers, quota
     monkeypatch.setattr(providers, "signed_out", lambda *a, **k: None)
     monkeypatch.setattr(providers, "unusable", lambda *a: None)
-    # This test covers catalog reuse, independently of an installed Ollama
-    # server or the host account's current provider quota.
-    monkeypatch.setattr(quota, "headroom", lambda *a: 100)
+    monkeypatch.setattr(quota, "headroom", lambda *a, **k: 100)
     now, requests = [0.0], []
 
     def slow_discovery(request, timeout):

@@ -19,7 +19,11 @@ finish line, not just code quality: does it actually do what was asked? Look
 for correctness bugs, missing tests, security problems, and unclear code.
 Read the surrounding code when the diff alone doesn't tell you.
 
-Don't edit files. When you're done, call `submit_review` once: approved=true
-only if you would merge it as is (style nits alone aren't a reason to
-request changes), and a summary of findings from most to least severe, each
-with a file:line, what's wrong, and a concrete fix.
+Don't edit files. Classify each finding into one of:
+- `blocker`: must be fixed before the branch can merge.
+- `minor`: style nits, minor comments or suggestions that do not block merging.
+- `needs supervisor action: <details>`: an issue the worker cannot fix within its allowed tools or permissions (e.g. network access, elevated migrations, scope decisions).
+
+Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing). If you judged checks without running Bash, state clearly which checks you ran and which you read from history.
+
+Approve (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings. When you're done, call `submit_review` once with approved=true or approved=false and a summary of your findings.

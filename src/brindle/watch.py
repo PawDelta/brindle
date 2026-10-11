@@ -39,6 +39,7 @@ STATUS_STYLE = {
     "starting": "busy",
     "idle": "ok",
     "waiting": "alert",
+    "failed": "alert",
     "exited": "bad",
     "paused": "dim",
     "done": "ok",
@@ -50,6 +51,7 @@ STATUS_LABEL = {
     "starting": ("◌", "starting up"),
     "idle": ("○", "idle"),
     "waiting": ("◆", "needs you"),
+    "failed": ("◆", "credentials need attention"),
     "exited": ("✕", "stopped"),
     "paused": ("‖", "paused"),
     "done": ("✓", "done"),
@@ -117,6 +119,8 @@ def needs_you(agent: dict, ws: dict) -> str | None:
     autopilot on, the supervisor reviews it)."""
     if agent["status"] == "waiting":
         return "needs you"
+    if agent["status"] == "failed":
+        return "credentials need attention"
     if ws.get("asking") == agent["id"]:
         return "has a question"
     return None if ws.get("autopilot") else awaiting_review(agent, ws)
