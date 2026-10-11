@@ -317,6 +317,8 @@ def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatc
     monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
     monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
     monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
+    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
+    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
     monkeypatch.chdir(repo)
 
     # Calling start with agent=None (default behavior)

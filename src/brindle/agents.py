@@ -190,25 +190,16 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         company = {} if agent.provider != "claude" else company_login.stored_env()
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
-        # Provider credentials present in the current process environment:
-        # freshly exported keys take effect in new panes instead of relying on
-        # stale credentials in an existing tmux server.
+
         from brindle import keystore, secrets
         creds = set() if org else secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
-        exported = {
-            k: os.environ[k]
-            for k in creds
-            if k in os.environ and not secrets.is_job_secret(k)
-        }
+        exported = {}
 
-        # Check for re-read stored/session credentials
-        # A fresh session credential (from recovery) or stored key (keystore)
-        # overrides stale inherited os.environ in long-running supervisor launchers.
         session_creds = {}
         try:
             from brindle.db import DB
             db_inst = DB()
-            root_id = agent.parent_id or agent_id if agent else agent_id
+            root_id = (agent.parent_id or agent_id) if agent else agent_id
             curr_id = root_id
             while curr_id:
                 ca = db_inst.get_agent(curr_id)
@@ -220,22 +211,31 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         except Exception:
             pass
 
-        for k in creds:
-            try:
-                ks_val, ks_time = keystore.get_key_info(k)
-            except Exception:
-                ks_val, ks_time = None, 0.0
-            sess_val, sess_time = session_creds.get(k, (None, 0.0))
-            if ks_val and (sess_val is None or ks_time >= sess_time):
-                exported[k] = ks_val
-                os.environ[k] = ks_val
-            elif sess_val:
-                exported[k] = sess_val
-                os.environ[k] = sess_val
-            elif ks_val:
-                exported[k] = ks_val
-                os.environ[k] = ks_val
+        if session_creds:
+            for k in creds:
+                try:
+                    ks_val, ks_time = keystore.get_key_info(k)
+                except Exception:
+                    ks_val, ks_time = None, 0.0
+                sess_val, sess_time = session_creds.get(k, (None, 0.0))
+                if ks_val and (sess_val is None or ks_time >= sess_time):
+                    exported[k] = ks_val
+                elif sess_val:
+                    exported[k] = sess_val
+                elif ks_val:
+                    exported[k] = ks_val
 
+        if (agent and agent.status in ("failed", "paused")) or session_creds:
+            for k in creds:
+                if k not in exported:
+                    try:
+                        ks_val, _ = keystore.get_key_info(k)
+                    except Exception:
+                        ks_val = None
+                    if ks_val:
+                        exported[k] = ks_val
+                    elif k in os.environ and not secrets.is_job_secret(k):
+                        exported[k] = os.environ[k]
 
         if enforced is None:
             env = {**company, **exported, **profile_env, **managed_env, **env}
@@ -756,16 +756,20 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     # no personal keys (blank, so the launcher's own copy doesn't count).
     from brindle.pro import managed_models
 
-    effective_env = agent_env(ws, agent.id, agent, m)
+    launch_env = {**profile.env, **managed_models.agent_env(m, provider.name)}
     deny = pane_auth.deny_names(provider.name, profile.auth, m,
                                 provider.name == "claude" and bool(providers.claude_org_managed()))
     org_key = managed_models.has_org_key(m, provider.name)
-    effective_for_probe = {**effective_env, **{k: "" for k in secrets.pane_deny(deny, effective_env)}}
-    why = pane_auth.key_problem(profile, provider.name, deny, org_key, effective_env=effective_for_probe)
+    from brindle import keystore, secrets
+    creds = secrets.agent_credentials(provider.name, profile.name, ws.repo_root)
+    stored = keystore.pane_keys(creds - set(deny), launch_env)
+    probe_env = {**stored, **launch_env}
+    probe_for_launch = {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}
+    why = pane_auth.key_problem(profile, provider.name, deny, org_key, effective_env=probe_for_launch)
     if why:
         raise AgentError(why)
     # The org's own key signs the agent in: there is no login to check.
-    why = None if org_key else signed_out(provider.name, effective_for_probe)
+    why = None if org_key else signed_out(provider.name, probe_for_launch)
     if why:
         raise AgentError(why)
     # Here rather than in spawn, so a resume checks too: a directory can be
@@ -2245,12 +2249,13 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     if focus:
         task += f"\n\nFocus: {focus}"
 
+    judged_note = " If you judged checks without running Bash, state clearly which checks you ran and which you read from history." if check_summary else ""
     task += (
         "\n\nClassify each finding into one of:\n"
         "- `blocker`: must be fixed before the branch can merge.\n"
         "- `minor`: style nits, minor comments or suggestions that do not block merging.\n"
         "- `needs supervisor action: <details>`: an issue the worker cannot fix within its allowed tools or permissions (e.g. network access, elevated migrations, scope decisions).\n\n"
-        "Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing). If you judged checks without running Bash, state clearly which checks you ran and which you read from history.\n\n"
+        f"Check whether your findings are actionable by the worker: if a fix requires capabilities outside the worker's brief, flag it as `needs supervisor action`. Check the finish line (`done_when`) for substance, not just placeholder presence (e.g. data populated, not merely keys existing).{judged_note}\n\n"
         "Approve (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
     )
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
