@@ -1,15 +1,9 @@
 import pytest
 
-from brindle import autopilot, pipeline, mcp_server, quota
+from brindle import autopilot, pipeline, mcp_server
 from brindle.config import RepoConfig
 from brindle.db import Workspace, Task
 from brindle import agents
-
-
-@pytest.fixture(autouse=True)
-def everything_available(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
-    monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
 
 
 def test_max_weight_ceiling_caps_heavy_to_medium(db, repo, monkeypatch):
@@ -66,6 +60,7 @@ def test_routing_explanation_includes_model_and_cost_signal(db, repo, monkeypatc
     cfg_heavy = RepoConfig()
     cfg_heavy.routing["heavy"] = ["developer-heavy"]
     monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg_heavy)
+    monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
     why_h = []
     profile_h, _ = autopilot.choose_profile(db, "caller-h", str(repo), weight="heavy", why=why_h)
     joined_h = " ".join(why_h)

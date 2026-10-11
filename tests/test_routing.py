@@ -159,7 +159,7 @@ def test_doctor_prints_effective_routing_and_each_tiers_source(repo, monkeypatch
 def test_weight_picks_the_first_candidate(db, repo, boss):
     why = []
     assert choose(db, repo, weight="heavy", why=why) == ("developer", False)
-    assert why == ["weight heavy -> developer"]
+    assert len(why) == 1 and why[0].startswith("weight heavy -> developer")
     # No tier prefers another provider for its own sake: the baselines are
     # Claude profiles; Codex and the local model are learner candidates.
     assert choose(db, repo, weight="medium")[0] == "developer"
@@ -204,7 +204,7 @@ def test_limited_provider_is_skipped(db, repo, boss, monkeypatch):
                         lambda provider, cfg=None, repo_root=None: 7.0 if provider == "codex" else 100.0)
     why = []
     assert choose(db, repo, weight="medium", why=why)[0] == "developer"
-    assert why == ["weight medium -> developer (Codex at 93%, skipped developer-codex)"]
+    assert len(why) == 1 and "weight medium -> developer" in why[0] and "Codex at 93%, skipped developer-codex" in why[0]
 
 
 def test_provider_below_the_usage_limit_is_kept(db, repo, boss, monkeypatch):
@@ -296,7 +296,7 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     config(repo, pipeline=False)
     out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
     assert "Started worker" in out
-    assert "weight medium -> developer (Codex at 93%, skipped developer-codex)" in out
+    assert "weight medium -> developer" in out and "Codex at 93%, skipped developer-codex" in out
     [t] = db.list_tasks(str(repo), state="started")
     assert t.weight == "medium" and t.profile == "developer"
 

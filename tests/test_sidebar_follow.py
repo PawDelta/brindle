@@ -138,7 +138,7 @@ def test_sidebar_follow_stays_with_the_person_when_an_unwatched_session_changes_
     placeholder shell window closes once the agent's window is up) and the
     follow hook fires with nobody attached to it. The sidebar must stay in
     the session the person is actually looking at."""
-    worker_session = "brindle_followtest_worker"
+    worker_session = "brindle_worker_followtest"
     tmux.ensure_session(worker_session, str(tmp_path), {})
     try:
         root_win = make_window(session, "root")

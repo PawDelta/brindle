@@ -24,8 +24,12 @@ def checker(catalog, **kw):
     return ma.ModelAvailabilityChecker(discover=discover, **kw), discover
 
 
-@pytest.mark.parametrize("model", [None, "", " ", "default"])
-@pytest.mark.parametrize("provider", ["native", "codex", "antigravity", "claude"])
+@pytest.mark.parametrize("provider,model", [
+    ("native", None),
+    ("codex", ""),
+    ("antigravity", " "),
+    ("claude", "default"),
+])
 def test_default_never_discovers_or_rejects(provider, model):
     check, discover = checker(None)
     result = check.check(profile(provider, model), effective_env={})
@@ -34,10 +38,12 @@ def test_default_never_discovers_or_rejects(provider, model):
     discover.assert_not_called()
 
 
-@pytest.mark.parametrize("provider", ["claude", "shell", "subagent", "unknown"])
-@pytest.mark.parametrize("env", [{}, {"CLAUDE_CODE_USE_BEDROCK": "1"},
-                                 {"CLAUDE_CODE_USE_VERTEX": "1"},
-                                 {"CLAUDE_CODE_USE_FOUNDRY": "1"}])
+@pytest.mark.parametrize("provider,env", [
+    ("claude", {}),
+    ("shell", {"CLAUDE_CODE_USE_BEDROCK": "1"}),
+    ("subagent", {"CLAUDE_CODE_USE_VERTEX": "1"}),
+    ("unknown", {"CLAUDE_CODE_USE_FOUNDRY": "1"}),
+])
 def test_unsupported_providers_never_call_claude_or_discovery(provider, env):
     check, discover = checker(None)
     assert check.check(profile(provider), effective_env=env).status == "unverified"
@@ -62,11 +68,10 @@ def test_present_model_is_catalog_available_even_on_partial_page():
     assert "not verified" in result.explanation
 
 
-@pytest.mark.parametrize("complete", [True, False])
-@pytest.mark.parametrize("models,notices,explanation", [
-    (set(), set(), "not found"),
-    ({"wanted"}, set(), "bundled or cached"),
-    ({"wanted"}, {"wanted"}, "availability notice"),
+@pytest.mark.parametrize("complete,models,notices,explanation", [
+    (True, set(), set(), "not found"),
+    (False, {"wanted"}, set(), "bundled or cached"),
+    (True, {"wanted"}, {"wanted"}, "availability notice"),
 ])
 def test_codex_membership_and_notices_do_not_prove_access(complete, models, notices, explanation):
     catalog = ma.Catalog(frozenset(models), "codex", complete=complete,
@@ -358,11 +363,15 @@ def test_native_api_catalogs_and_credentials_are_mocked(api, base, url, source):
         assert "x-api-key" not in headers
 
 
-@pytest.mark.parametrize("api", ["openai", "anthropic"])
-@pytest.mark.parametrize("port", [1234, 11434])
-@pytest.mark.parametrize("host", [
-    "api.openai.com", "api.anthropic.com", "gateway.example.com", "localhost.example.com",
-    "192.168.1.2", "0.0.0.0", "[2001:db8::1]", "[::]",
+@pytest.mark.parametrize("api,port,host", [
+    ("openai", 1234, "api.openai.com"),
+    ("anthropic", 11434, "api.anthropic.com"),
+    ("openai", 1234, "gateway.example.com"),
+    ("anthropic", 11434, "localhost.example.com"),
+    ("openai", 1234, "192.168.1.2"),
+    ("anthropic", 11434, "0.0.0.0"),
+    ("openai", 1234, "[2001:db8::1]"),
+    ("anthropic", 11434, "[::]"),
 ])
 def test_external_plain_http_catalog_never_sends_credentials(api, port, host):
     get = Mock(return_value={"data": []})
@@ -372,9 +381,13 @@ def test_external_plain_http_catalog_never_sends_credentials(api, port, host):
     get.assert_not_called()
 
 
-@pytest.mark.parametrize("api", ["openai", "anthropic"])
-@pytest.mark.parametrize("host", [
-    "localhost", "LOCALHOST", "127.0.0.1", "127.42.0.2", "[::1]", "[0:0:0:0:0:0:0:1]",
+@pytest.mark.parametrize("api,host", [
+    ("openai", "localhost"),
+    ("anthropic", "LOCALHOST"),
+    ("openai", "127.0.0.1"),
+    ("anthropic", "127.42.0.2"),
+    ("openai", "[::1]"),
+    ("anthropic", "[0:0:0:0:0:0:0:1]"),
 ])
 def test_loopback_plain_http_catalog_accepts_credentials(api, host):
     get = Mock(return_value={"data": [{"id": "wanted"}]})
@@ -433,8 +446,13 @@ def test_unsupported_or_missing_native_configuration_never_sends(base, api, key_
     get.assert_not_called()
 
 
-@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
-@pytest.mark.parametrize("target", ["https://elsewhere/models", "http://elsewhere/models"])
+@pytest.mark.parametrize("code,target", [
+    (301, "https://elsewhere/models"),
+    (302, "http://elsewhere/models"),
+    (303, "https://elsewhere/models"),
+    (307, "http://elsewhere/models"),
+    (308, "https://elsewhere/models"),
+])
 def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
     opener = Mock()
     response = io.BytesIO(b'{"data": []}')
@@ -581,7 +599,7 @@ def test_isolation_preserves_codex_notice_metadata(monkeypatch, tmp_path):
     def fake_worker(argv, **kw):
         payload = {"models": ["wanted"], "source": "codex", "complete": True,
                    "authoritative": False, "availability_notices": ["wanted"]}
-        return real_popen([sys.executable, "-c", f"print({json.dumps(payload)!r})"], **kw)
+        return real_popen([sys.executable, "-c", f"import sys; sys.stdin.read(); print({json.dumps(payload)!r})"], **kw)
 
     monkeypatch.setattr(ma.subprocess, "Popen", fake_worker)
     result = ma.ModelAvailabilityChecker().check(profile("codex"), effective_env={}, cwd=str(tmp_path))

@@ -534,7 +534,9 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if decision is not None:
         decision["baseline"] = remaining[0]
 
-    why = f"weight {weight} -> {name}"
+    info_str = model_cost_info(name, cfg, repo_root)
+
+    why = f"weight {weight} -> {name}{info_str}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
     kept = learning.kept_note(cfg, repo_root)
     detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
@@ -787,10 +789,13 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             f"no agent profile named {name!r}; see list_agent_profiles, "
             "or pass agent_profile explicitly"
         ) from None
-    if why is not None and caller_id != "boss":
+    if why is not None:
         info_str = model_cost_info(name, cfg, repo_root)
         if info_str and not any("cost tier" in w for w in why):
-            why.append(info_str.strip())
+            if why:
+                why[-1] += info_str
+            else:
+                why.append(f"{name}{info_str}")
     return name, learned
 
 

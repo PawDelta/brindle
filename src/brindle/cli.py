@@ -289,7 +289,7 @@ def start(
 
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
 
-    if provider and agent == "supervisor" and provider in NOT_SUPERVISOR:
+    if provider and provider in NOT_SUPERVISOR:
         _fail(f"the {provider} provider can't run the supervisor; use one of: "
               f"{', '.join(SUPERVISOR_PROVIDERS)}")
     _preflight(agent, provider, ws.repo_root)

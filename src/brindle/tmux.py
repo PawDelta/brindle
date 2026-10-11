@@ -481,7 +481,8 @@ def current_session() -> str | None:
 def active_window(session: str) -> str | None:
     """The id of ``session``'s currently active window, or None if the
     session doesn't exist."""
-    proc = _tmux("display-message", "-p", "-t", session, "#{window_id}", check=False)
+    target = session if session.startswith("=") else f"={session}:"
+    proc = _tmux("display-message", "-p", "-t", target, "#{window_id}", check=False)
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None

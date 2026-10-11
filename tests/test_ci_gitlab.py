@@ -19,6 +19,14 @@ JOB_ENV = {"GITLAB_CI": "true", "CI_PROJECT_PATH": "acme/sub/app", "CI_API_V4_UR
            "CI_JOB_TOKEN": "jobtok"}
 
 
+@pytest.fixture(autouse=True)
+def clean_cloud_env(monkeypatch):
+    for _, (_, _, use, ids) in ci_hosts.CLOUD_ID_TOKENS.items():
+        monkeypatch.delenv(use, raising=False)
+        for id_var in ids:
+            monkeypatch.delenv(id_var, raising=False)
+
+
 def jwt(exp=None) -> str:
     def b(d):
         return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
