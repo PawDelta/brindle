@@ -306,10 +306,12 @@ def from_codex(payload: dict, worktree: str = "", repo_root: str = "") -> list[R
             patch = ti["command"][-1] if isinstance(ti["command"][-1], str) else None
         files = [(CODEX_PATCH_KINDS[m.group(1)], m.group(2)) for m in CODEX_PATCH_FILE.finditer(patch or "")]
         files += [("write", m.group(1)) for m in CODEX_PATCH_MOVE.finditer(patch or "")]
-        if not files or not _codex_patch_accounted(patch or ""):
-            return [Request(kind="edit", **base)]  # no path (or not every one known): ask
         out = list(dict.fromkeys((k, _abs_path(f, cwd)) for k, f in files))
-        return [Request(kind=k, path=path, **base) for k, path in out]
+        reqs = [Request(kind=k, path=path, **base) for k, path in out]
+        if not files or not _codex_patch_accounted(patch or ""):
+            # An unknown file prevents allow, but must not erase a known deny.
+            reqs.append(Request(kind="edit", **base))
+        return reqs
     return [Request(kind="other", **base)]
 
 
@@ -748,8 +750,8 @@ PROFILE_BASH = re.compile(r"Bash\(([^()*]+?)(:\*)?\)")
 
 
 def profile_bash_allows(profile) -> list[Rule]:
-    """The profile's ``allowed_tools`` shell entries as allow rules, for an
-    agy worker under agy_approvals "brindle", which Claude Code's
+    """The profile's ``allowed_tools`` shell entries as allow rules, for a
+    Codex worker or agy worker under agy_approvals "brindle", which Claude Code's
     ``--allowedTools`` never reaches: ``Bash(git status)`` is that exact
     command, ``Bash(uv run:*)`` it alone or followed by arguments. Like
     every bash allow, a compound or quoted command never matches."""

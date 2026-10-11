@@ -79,6 +79,35 @@ def test_codex_patch_is_a_request_per_file(ws):
     assert r.kind == "edit" and r.path is None
 
 
+@pytest.mark.parametrize("patch,kind", [
+    ("*** Begin Patch\n*** Update File: secret.py\n*** Move to: public.py\n@@\n-old\n+new\n*** End Patch\n", "edit"),
+    ("*** Begin Patch\n*** Delete File: secret.py\n*** End Patch\n", "write"),
+])
+def test_codex_patch_rename_and_delete_preserve_source_deny(db, ws, patch, kind):
+    a = worker(db, ws)
+    turn_on(ws)
+    permissions.add_rule("edit", "*", "allow", "glob")
+    permissions.add_rule("write", "*", "allow", "glob")
+    permissions.add_rule(kind, "secret.py", "deny")
+    out = agents.hook_main(db, a.id, "codex-permission-request",
+                          json.dumps(codex_payload("apply_patch", {"command": patch}, ws.path)))
+    assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+
+@pytest.mark.parametrize("source,destination", [
+    ("a/secret.py", "b/public.py"),
+    ("a/secret.py", "/dev/null"),
+    ("/dev/null", "b/public.py"),
+])
+def test_codex_unsupported_unified_diff_never_auto_allows(ws, source, destination):
+    # Codex apply_patch uses *** headers. Don't interpret an unsupported
+    # diff's destination as enough evidence to allow the whole operation.
+    patch = f"--- {source}\n+++ {destination}\n@@ -1 +1 @@\n-old\n+new\n"
+    reqs = from_codex(codex_payload("apply_patch", {"command": patch}, ws.path), ws.path, ws.repo_root)
+    rules = [Rule("edit", "*", "glob", "allow"), Rule("write", "*", "glob", "allow")]
+    assert decide_all(reqs, rules=rules).decision == "ask"
+
+
 @pytest.mark.parametrize("patch", [
     "*** Begin Patch\n*** Update File: a.py\n  *** Update File: /etc/hosts\n*** End Patch\n",
     "*** Begin Patch\n*** Update File: a.py\n\t*** Add File: b.py\n*** End Patch\n",
@@ -130,7 +159,7 @@ def test_codex_hook_decides_and_records(db, ws):
     assert json.loads(out)["hookSpecificOutput"]["decision"] == {"behavior": "allow"}
     # Ask: no output, and nothing kept to learn from (Codex has no tool_use_id).
     assert agents.hook_main(db, a.id, "codex-permission-request",
-                            json.dumps(codex_payload("Bash", {"command": "make deploy"}, ws.path))) == ""
+                            json.dumps(codex_payload("Bash", {"command": "unlisted deploy"}, ws.path))) == ""
     assert db.latest_permission_request(a.id) is None
     rows = db.list_history(ws.repo_root, "permission")
     assert {r.result.split(":")[0] for r in rows} == {"deny", "allow", "ask"}
@@ -151,6 +180,80 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     assert agents.hook_main(db, a.id, "codex-permission-request", payload) == ""
 
 
+@pytest.mark.parametrize("command,expected", [
+    ("make verify", "allow"),  # repo check
+    ("just lint", "allow"),  # exact profile allowance
+    ("task test unit", "allow"),  # profile prefix allowance
+    ("task test-extra", None),
+    ("just lint extra", None),
+    ("task test unit && deploy", None),
+    ("git push", "deny"),  # default deny beats profile allow
+    ("task test secret", "deny"),  # profile deny beats profile allow
+    ("make blocked", "deny"),  # repo deny beats a check
+    ("task test user-denied", "deny"),
+])
+def test_codex_checks_and_profile_commands(db, ws, command, expected):
+    from pathlib import Path
+
+    turn_on(ws)
+    set_local(ws.repo_root, "checks", ["make verify", "make blocked"])
+    profiles = Path(ws.repo_root) / ".brindle" / "agents"
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / "developer.md").write_text(
+        '---\nname: developer\n'
+        'allowed_tools: [Bash(just lint), Bash(task test:*), Bash(git push:*)]\n'
+        'permission_denies: ["bash exact task test secret"]\n---\n'
+    )
+    permissions.repo_rules_path(ws.repo_root).write_text(json.dumps({"rules": [
+        Rule("bash", "make blocked", "exact", "deny").to_dict()]}))
+    permissions.add_rule("bash", "task test user-denied", "deny")
+    a = worker(db, ws)
+    out = agents.hook_main(db, a.id, "codex-permission-request",
+                          json.dumps(codex_payload("Bash", {"command": command}, ws.path)))
+    assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
+
+
+@pytest.mark.parametrize("command,expected", [("git status", "allow"), ("git push", "deny")])
+def test_codex_session_bookkeeping_failure_preserves_decision(db, ws, monkeypatch, command, expected):
+    a = worker(db, ws)
+    turn_on(ws)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("session write failed")
+
+    monkeypatch.setattr(db, "update_agent", boom)
+    out = agents.hook_main(db, a.id, "codex-permission-request",
+                          json.dumps(codex_payload("Bash", {"command": command}, ws.path)))
+    assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == expected
+
+
+@pytest.mark.parametrize("payload", ["null", "[]", "42", '"text"', "{bad"])
+def test_codex_untrusted_dispatch_rejects_nonobjects(db, ws, payload):
+    a = worker(db, ws)
+    turn_on(ws)
+    assert agents.hook_main(db, a.id, "codex-permission-request", payload, trusted=False) == ""
+
+
+def test_codex_unknown_and_failed_resolution_leave_approval(db, ws, monkeypatch):
+    a = worker(db, ws)
+    turn_on(ws)
+    payload = json.dumps(codex_payload("unknown_tool", {}, ws.path))
+    assert agents.hook_main(db, a.id, "codex-permission-request", payload, trusted=False) == ""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("lookup failed")
+
+    monkeypatch.setattr(agents, "agent_for_session", boom)
+    assert agents.hook_main(db, a.id, "codex-permission-request", payload, trusted=False) == ""
+
+
+def test_codex_patch_unknown_header_cannot_hide_a_known_deny(ws):
+    patch = "*** Begin Patch\n*** Update File: denied.py\n*** Rename File: mystery.py\n*** End Patch\n"
+    reqs = from_codex(codex_payload("apply_patch", {"command": patch}, ws.path), ws.path, ws.repo_root)
+    rules = [Rule("edit", "*", "glob", "allow"), Rule("edit", "denied.py", "exact", "deny")]
+    assert decide_all(reqs, rules=rules).decision == "deny"
+
+
 def test_codex_hook_cli_finds_its_agent_in_the_environment(db, ws, monkeypatch):
     a = worker(db, ws)
     turn_on(ws)
@@ -164,6 +267,97 @@ def test_codex_hook_cli_finds_its_agent_in_the_environment(db, ws, monkeypatch):
 
 
 # -- Codex: trusting the hook once -----------------------------------------------------------
+
+
+def test_codex_app_server_uses_local_protocol_and_ignores_notifications(monkeypatch):
+    from io import StringIO
+
+    # initialize + hooks/list shapes observed from local codex-cli 0.162.1.
+    hook = {"key": "/<session-flags>/config.toml:permission_request:0:0",
+            "eventName": "permissionRequest", "handlerType": "command", "command": "true",
+            "async": False, "matcher": None, "timeoutSec": 30, "source": "sessionFlags",
+            "enabled": True, "isManaged": False, "currentHash": "sha256:abc", "trustStatus": "modified"}
+    messages = [
+        {"id": 1, "result": {"userAgent": "brindle/0.162.1", "platformFamily": "unix"}},
+        {"method": "account/updated", "params": {"authMode": "chatgpt"}},
+        {"id": 2, "result": {"data": [{"cwd": "/", "hooks": [hook], "warnings": [], "errors": []}]}},
+    ]
+    proc = _fake_codex_process(monkeypatch, StringIO("\n".join(json.dumps(m) for m in messages)))
+    state = codex_hook.inspect("codex", "true")
+    assert (state.command, state.key, state.hash, state.status) == (
+        "true", hook["key"], "sha256:abc", "modified")
+    sent = [json.loads(line) for line in proc.stdin.getvalue().splitlines()]
+    assert [m["method"] for m in sent] == ["initialize", "initialized", "hooks/list"]
+    assert proc.killed and proc.waited
+
+
+def _fake_codex_process(monkeypatch, stdout):
+    from io import StringIO
+    from types import SimpleNamespace
+
+    proc = SimpleNamespace(stdin=StringIO(), stdout=stdout, killed=False, waited=False)
+
+    def kill():
+        proc.killed = True
+
+    def wait(**kwargs):
+        proc.waited = True
+        return 0
+
+    proc.kill, proc.wait = kill, wait
+    monkeypatch.setattr(codex_hook.subprocess, "Popen", lambda *a, **kw: proc)
+    return proc
+
+
+@pytest.mark.parametrize("response,error", [
+    ('{"id":1,"error":{"message":"unsupported"}}\n', "unsupported"),
+    ('{"id":1,"result":[]}\n', "invalid result"),
+    ('{"id":1}\n', "invalid result"),
+    ('', "exited during initialize"),
+])
+def test_codex_app_server_initialization_failure_reaps_child(monkeypatch, response, error):
+    from io import StringIO
+
+    proc = _fake_codex_process(monkeypatch, StringIO(response))
+    with pytest.raises(codex_hook.CodexHookError, match=error):
+        codex_hook._AppServer("codex", [])
+    assert proc.killed and proc.waited
+
+
+def test_codex_app_server_notifications_do_not_reset_deadline(monkeypatch):
+    from io import StringIO
+
+    proc = _fake_codex_process(monkeypatch, StringIO('null\n{"method":"notice"}\n' * 10))
+    ticks = iter(range(20))
+    monkeypatch.setattr(codex_hook.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(codex_hook.CodexHookError, match="didn't answer initialize"):
+        codex_hook._AppServer("codex", [], timeout=3)
+    assert proc.killed and proc.waited
+
+
+def test_codex_app_server_silent_reader_cannot_block_rpc_deadline(monkeypatch):
+    import threading
+
+    released = threading.Event()
+
+    class SilentStdout:
+        def __iter__(self):
+            # Simulate a pipe that never produces a newline. Bound even the
+            # fake reader's wait so a regression cannot hang the test runner.
+            released.wait(2)
+            return iter(())
+
+    proc = _fake_codex_process(monkeypatch, SilentStdout())
+    kill = proc.kill
+
+    def release_reader():
+        kill()
+        released.set()
+
+    proc.kill = release_reader
+    with pytest.raises(codex_hook.CodexHookError, match="didn't answer initialize"):
+        codex_hook._AppServer("codex", [], timeout=0.05)
+    assert released.is_set() and proc.killed and proc.waited
 
 
 class FakeAppServer:
@@ -237,6 +431,20 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert codex_hook.status() == codex_hook.TRUSTED
 
 
+def test_codex_launch_does_not_override_explicit_hook_disablement(ws, monkeypatch):
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    config = codex_hook.codex_home() / "config.toml"
+    disabled = config.read_text() + "\n[features]\nhooks = false\n"
+    config.write_text(disabled)
+    argv = launch_argv(ws)
+    assert "--enable" not in argv
+    assert not any("features.hooks" in arg or "features.codex_hooks" in arg for arg in argv)
+    assert "--dangerously-bypass-hook-trust" not in argv
+    assert config.read_text() == disabled
+
+
 def test_a_removed_trust_stays_removed(ws, monkeypatch):
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
     turn_on(ws)
@@ -248,6 +456,37 @@ def test_a_removed_trust_stays_removed(ws, monkeypatch):
     assert codex_hook.launch_flags(ws.path) == []
     assert "sha256:abc" not in (codex_hook.codex_home() / "config.toml").read_text()
     assert "removed" in codex_hook.launch_warning("codex", ws.path)
+
+
+@pytest.mark.parametrize("config", ["not valid TOML", "[hooks.state]\n", '[hooks]\nstate = "bad"'])
+def test_unreadable_or_missing_codex_trust_never_gets_reinstalled(ws, monkeypatch, config):
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    (codex_hook.codex_home() / "config.toml").write_text(config)
+    FakeAppServer.calls = []
+    move_brindle(monkeypatch)
+    assert codex_hook.launch_flags(ws.path) == []
+    assert FakeAppServer.calls == []
+    assert (codex_hook.codex_home() / "config.toml").read_text() == config
+
+
+def test_codex_failed_trust_keeps_launch_approvals(ws, monkeypatch):
+    from brindle.providers import Codex, LaunchContext
+    from brindle.profiles import load_profile
+
+    def boom(*args, **kwargs):
+        raise codex_hook.CodexHookError("unsupported")
+
+    turn_on(ws)
+    monkeypatch.setattr(codex_hook, "inspect", boom)
+    argv = Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path))
+    assert not any("hooks.PermissionRequest=" in arg for arg in argv)
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "--dangerously-bypass-hook-trust" not in argv
+    assert "--ask-for-approval" not in argv
+    assert permissions.load_store().codex_hook == {}
+    assert codex_hook.launch_warning("codex", ws.path)
 
 
 def move_brindle(monkeypatch):

@@ -155,6 +155,19 @@ def no_signin_pause(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_launch_catalog_network(monkeypatch):
+    """Integration tests never discover real model accounts or endpoints.
+    Catalog protocol tests instantiate their own checker; integration tests
+    that exercise decisions replace agents' checker explicitly."""
+    from brindle import agents, model_availability as ma
+
+    def unknown(request, timeout):
+        raise ma._DiscoveryError("unsupported")
+
+    monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(discover=unknown))
+
+
+@pytest.fixture(autouse=True)
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))

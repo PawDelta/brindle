@@ -450,10 +450,22 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     try:
         p = load_profile(name, repo_root)
     except KeyError:
-        return f"no profile {name}"
+        source = cfg.routing_sources.get(weight or "", "DEFAULT_ROUTING")
+        return f"no profile {name} in {source}, skipped {name}"
     over = gate.why_not(name, weight) if gate is not None and gate.active else None
     if over:
         return f"over budget, skipped {name} ({over})"
+    from brindle import agents
+    from brindle.db import Workspace
+    # Read-only preview: no adopted workspace, branch, setup or model turn.
+    ws = Workspace("preflight", repo_root, "preflight", "root", "", None,
+                   repo_root, None, "", 0.0)
+    try:
+        problem = agents.model_problem(name, ws)
+    except agents.AgentError as e:
+        problem = str(e)
+    if problem:
+        return f"{problem}, skipped {name}"
     from brindle import model_access
 
     denied = model_access.refused(name, repo_root)

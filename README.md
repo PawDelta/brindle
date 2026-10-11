@@ -59,7 +59,7 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.3.2`). A session started before an upgrade keeps
+session shows it too (`brindle 0.3.3`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -573,6 +573,21 @@ keep theirs):
 No tier prefers another provider for its own sake: all-Claude or all-Codex may
 be what works best for you, and that's for the learner to find out.
 
+Routing merges per tier in this order: built-in defaults, `~/.brindle/config.json`
+(every repo), the repo's `.brindle/config.json` (shared with the team), then
+`.brindle/config.local.json` (your override for that repo). Each tier you set
+replaces that tier's list; tiers you leave out keep the list from the layer below.
+For example, put this in `~/.brindle/config.json` to use Codex for light tasks
+in every repo, or in a repo's `.brindle/config.local.json` to do so only there:
+
+```json
+{"routing": {"light": ["developer-codex", "developer"]}}
+```
+
+Run `brindle doctor` in the repo to see the effective list and source file for
+each tier. Unknown profile names are skipped; doctor and the routing reply
+report the missing name and the file that supplied it.
+
 `developer-light` runs on Claude Haiku at low effort; `developer` on your Claude
 Code default model; `developer-codex` on Codex; `developer-heavy` on Claude Fable
 at high effort.
@@ -582,6 +597,53 @@ hosted learning is on it chooses among the profiles left; otherwise the first
 wins. When every candidate is out, the repo's `default_agent` runs. The reply says
 what was picked and why, e.g. `weight medium -> developer (Codex at 93%, skipped developer-codex)`.
 An `agent_profile` you pass, or a milestone's `profile`, always wins over weight.
+
+Provisioning and routing also check explicit models against supported read-only
+catalogs, with the managed model, stored keys and the worker's filtered pane
+environment. A model absent from a complete authoritative catalog is rejected
+before creating a worker worktree or process. Partial catalogs, aliases,
+discovery errors and Codex's bundled catalogs remain unverified; being listed
+does not prove generation access, billing or quota. Catalog discovery is bounded
+to five seconds for standalone checks; foreground routing/provisioning limits
+discovery to one second, leaving room in the three-second launch budget for
+provisioning and bounded helper cleanup. A timeout remains unverified and
+launch proceeds with the real-task health follow-up. Catalogs are cached
+briefly by environment and local account/config
+revision where available. Routing and provisioning reuse equivalent catalog
+context across worktrees, excluding launch bookkeeping while retaining project
+settings, credentials and account selectors. CLI catalogs remain advisory;
+unobservable external/keychain login changes may remain cached for 30 seconds.
+Custom CLI binaries retain separate cache entries per working directory.
+Claude, Bedrock, Vertex and Foundry have no catalog
+probe here; no Claude CLI or synthetic generation request is used for these checks.
+
+The real first worker task is sent once. A detached helper inspects its current
+pane five seconds after delivery, so readiness delays do not use up that window.
+Fresh interactive Antigravity chats without a task still receive their profile,
+tool instructions and any autopilot context once after readiness; worker
+instructions accompany the actual task in the same delivery.
+For argv tasks, the timer starts at prompt submission or observed CLI readiness,
+after trust/startup handling; readiness timeout does not establish delivery or
+release queued work. Paused workers, replaced launches and reassigned panes are
+excluded from the observation.
+Explicit fresh authentication, access, model and capacity errors, or an early
+exit, produce a safe supervisor message with a next step. A live process with
+no clear result is recorded as pending for diagnostics, not verified model
+access; it does not send a supervisor notification. Refusals use
+the existing one-hour cooldown, scoped to the effective model/environment and
+local login revision. Changing the account, model or credentials invalidates
+that refusal; CLI/keychain account changes without an observable local revision
+may require waiting for the cooldown or clearing `model_refusals.json`.
+This is a single observation, not an entitlement test: unfamiliar error layouts,
+later failures and slow requests can remain pending. It does not scan
+historical transcripts, and excludes task text, previous pane lines and older
+marked replies, fenced examples and ordinary assistant/tool explanations. A
+Codex follow-up retains the complete submitted argv prompt (including profile
+instructions) and distinguishes assistant/tool responses from the idle composer.
+Quoted prompts and error-looking markers inside assistant/tool output remain
+ambiguous and pending; markers from another provider do not establish failure.
+A separate detached check covers headless and argv startup exits before task
+delivery. Existing readiness and watch/cull handling continues afterward.
 
 **Hosted learning (brindle Pro).** With a plan that includes it, brindle learns
 which of your `learning_candidates` profiles suits which kind of task, and picks
@@ -680,6 +742,38 @@ install-codex-hook --yes` puts it back.
 Codex patches are checked file by file: allowed only if every file is. Codex
 doesn't say which tool run followed which prompt, so brindle doesn't learn from
 Codex approvals. To undo, delete that entry (or untrust it in Codex's `/hooks`).
+
+Codex also uses the profile's `allowed_tools` shell entries: `Bash(just lint)`
+allows that exact command, and `Bash(task test:*)` allows it with arguments.
+The same simple-command restriction applies, and default, user, repo and
+profile denies still win. Other `allowed_tools` entries aren't translated.
+An unrecognized patch header prevents automatic approval without discarding
+denies for files brindle can identify. Session/status bookkeeping failures
+don't discard the hook's decision; failures to evaluate the policy leave
+Codex's normal approval flow in place.
+
+Scope and platform limits: this is an **approval-request hook**, not a gate
+on every tool call. Codex commands already permitted by its sandbox or own
+rules never reach it, so brindle cannot enforce denies on those calls. It
+doesn't change Codex's sandbox or approval mode, and cannot make a `never`
+approval mode interactive. Disabled hooks, managed-only hook policies, older
+Codex versions without `PermissionRequest`, and nonlocal execution can prevent
+the hook from running. Keep Codex's own restrictions for tools that must always
+be blocked. See the [OpenAI hook protocol](https://learn.chatgpt.com/docs/hooks).
+
+The integration targets local macOS/Linux Codex CLI processes (POSIX shell
+quoting); native Windows hook commands aren't supported. The local app-server
+protocol was checked on macOS with Codex CLI **0.162.1**: newline-delimited
+`initialize`, `initialized`, and `hooks/list` returned the session-flags key
+above, `eventName: "permissionRequest"`, `source: "sessionFlags"`,
+`currentHash`, `enabled: true`, and `trustStatus: "trusted"` for the installed
+brindle hook. This read-only probe made no model calls or trust edits; hook
+dispatch/allow/deny behavior is covered by the permission tests. Linux runtime
+and native Windows behavior were not exercised by that probe.
+`codex features list` also reported `hooks stable true` without a user
+`features.hooks` setting, both on 0.162.1 and the bundled 0.158.0-alpha.2.1.
+A session override of `features.hooks=false` reported false. No feature-enable
+flag is needed on these versions, and brindle leaves explicit disablement alone.
 
 **Antigravity.** agy's hook can deny but its "allow" is ignored (an agy bug),
 and it has no "no opinion" answer. So the hook denies what the policy denies,
