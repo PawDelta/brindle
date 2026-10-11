@@ -220,7 +220,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             pass
 
         for k in creds:
-            ks_val, ks_time = keystore.get_key_info(k)
+            try:
+                ks_val, ks_time = keystore.get_key_info(k)
+            except Exception:
+                ks_val, ks_time = None, 0.0
             sess_val, sess_time = session_creds.get(k, (None, 0.0))
             if ks_val and (sess_val is None or ks_time >= sess_time):
                 exported[k] = ks_val
@@ -984,21 +987,32 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     providers.invalidate_signed_in()
     from brindle import keystore, secrets
 
-    # Explicit recovery replacements (from recovery_env or current process environment) take precedence
+    # Explicit recovery replacements (from recovery_env or current process environment)
     env_keys = recovery_env if recovery_env is not None else {
         k: os.environ[k] for k in keystore.known_names()
         if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)
     }
 
+    session_creds = db.get_session_credentials_with_timestamps(root_id)
     for k in keystore.known_names():
-        if k in env_keys:
-            db.set_session_credential(root_id, k, env_keys[k])
-            os.environ[k] = env_keys[k]
-        else:
+        try:
             ks_val, ks_time = keystore.get_key_info(k)
-            if ks_val:
-                db.set_session_credential(root_id, k, ks_val)
-                os.environ[k] = ks_val
+        except Exception:
+            ks_val, ks_time = None, 0.0
+        sess_val, sess_time = session_creds.get(k, (None, 0.0))
+        env_val = env_keys.get(k)
+
+        val = None
+        if ks_val and (ks_time > sess_time or (sess_val and env_val == sess_val and ks_val != sess_val) or not env_val):
+            val = ks_val
+        elif env_val:
+            val = env_val
+        elif ks_val:
+            val = ks_val
+
+        if val:
+            db.set_session_credential(root_id, k, val)
+            os.environ[k] = val
 
     candidates = [a for a in tree(db, root_id)
                   if a.status in ("paused", "failed") and (only is None or a.id in only)]
@@ -1044,7 +1058,10 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:
-        db.update_autopilot(root_id, state="running", note=None)
+        note = (ap.note or "").lower()
+        auth_indicators = ("auth", "credential", "sign in", "signed out", "login", "api key", "key", "token", "unauthorized", "forbidden")
+        if any(ind in note for ind in auth_indicators):
+            db.update_autopilot(root_id, state="running", note=None)
 
     return resumed
 

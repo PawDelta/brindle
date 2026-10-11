@@ -444,3 +444,54 @@ def test_custom_configured_reviewer_honored_even_with_antigravity_installed(db, 
     assert chosen == "reviewer-local"
 
 
+def test_has_supervisor_action_markdown_formatting():
+    from brindle import pipeline
+
+    # Bold headings with following lists
+    assert pipeline.has_supervisor_action(
+        "**Needs supervisor action**\n- Run the production migration; worker has no network access."
+    ) is True
+    assert pipeline.has_supervisor_action(
+        "**Needs supervisor action:**\n- Run the production migration; worker has no network access."
+    ) is True
+    assert pipeline.has_supervisor_action("Needs supervisor action: run migration") is True
+
+    # Empty and negated headings
+    assert pipeline.has_supervisor_action("### Needs supervisor action\nNone.") is False
+    assert pipeline.has_supervisor_action("Needs supervisor action: None") is False
+    assert pipeline.has_supervisor_action("Needs supervisor action: N/A") is False
+    assert pipeline.has_supervisor_action("Needs supervisor action: No action needed.") is False
+    assert pipeline.has_supervisor_action("Needs supervisor action: None needed. Everything looks good.") is False
+
+
+def test_on_review_escalates_on_markdown_supervisor_action(db, repo, monkeypatch):
+    from brindle import agents, pipeline
+    from brindle.db import Workspace
+
+    ws = Workspace("ws-pipe", str(repo), "feat/pipe", "main", "main", "main", str(repo), 20000, "tmux-pipe", 0)
+    db.add_workspace(ws)
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=sup.id)
+    reviewer = agents.spawn(db, ws, "reviewer", mode="review", parent_id=sup.id)
+    db.update_agent(worker.id, pipeline="reviewing")
+
+    escalated = []
+    messages = []
+    monkeypatch.setattr(pipeline, "_escalate", lambda db_arg, ws_arg, worker_arg: escalated.append(worker_arg.id))
+    monkeypatch.setattr(pipeline, "_tell", lambda db_arg, parent_arg, text, sender: messages.append((parent_arg, text)))
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+
+    summary = "**Needs supervisor action:**\n- Run the production migration; worker has no network access."
+    handled, ready = pipeline._on_review(db, reviewer, ws, approved=False, summary=summary)
+
+    assert handled is True
+    assert ready is False
+    # Must immediately escalate to supervisor without sending worker to 'fixing'
+    assert worker.id in escalated
+    w_updated = db.get_agent(worker.id)
+    assert w_updated.pipeline is None
+    assert len(messages) == 1
+    assert "needs supervisor action" in messages[0][1]
+
+
+

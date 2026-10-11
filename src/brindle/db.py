@@ -596,7 +596,7 @@ def _load(cls, row):
 
 class DB:
     def __init__(self, path: str | None = None) -> None:
-        p = path or str(db_path())
+        p = str(path) if path is not None else str(db_path())
         if p != ":memory:":
             from pathlib import Path
 
@@ -614,7 +614,8 @@ class DB:
         if self.path == ":memory:":
             return
         import os
-        for target in (self.path, self.path + "-wal", self.path + "-shm"):
+        base = str(self.path)
+        for target in (base, base + "-wal", base + "-shm"):
             if os.path.exists(target):
                 try:
                     os.chmod(target, 0o600)
@@ -866,13 +867,14 @@ class DB:
 
     # -- session credentials -----------------------------------------------
 
-    def set_session_credential(self, session_id: str, key: str, value: str) -> None:
+    def set_session_credential(self, session_id: str, key: str, value: str, updated_at: float | None = None) -> None:
         self._enforce_permissions()
+        ts = time.time() if updated_at is None else float(updated_at)
         with self.tx() as c:
             c.execute(
                 "INSERT INTO session_credentials (session_id, key, value, updated_at) "
                 "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                (session_id, key, value, time.time()),
+                (session_id, key, value, ts),
             )
         self._enforce_permissions()
 

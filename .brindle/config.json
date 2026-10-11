@@ -1,4 +1,6 @@
 {
+  "reviewer": "reviewer-gemini",
+  "review_profile": "reviewer-gemini",
   "checks": [
     "uv run pytest -q -n auto -m 'not serial'",
     "uv run pytest -q -m serial"

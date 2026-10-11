@@ -23,18 +23,19 @@ class GitError(RuntimeError):
 
 
 def run(args: list[str], cwd: str | Path, check: bool = True,
-        timeout: int | float | None = None) -> subprocess.CompletedProcess:
-    return run_env(args, cwd, None, check=check, timeout=timeout)
+        timeout: int | float | None = None, input: str | None = None) -> subprocess.CompletedProcess:
+    return run_env(args, cwd, None, check=check, timeout=timeout, input=input)
 
 
 def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
-            check: bool = True, timeout: int | float | None = None) -> subprocess.CompletedProcess:
+            check: bool = True, timeout: int | float | None = None,
+            input: str | None = None) -> subprocess.CompletedProcess:
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
     index that leaves the checkout's real index alone; see brindle.rewind)."""
     to = TIMEOUT if timeout is None else timeout
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=to, env=env
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=to, env=env, input=input
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
@@ -130,6 +131,23 @@ def merged_into_default(root: str | Path, branch: str) -> bool:
             cherry = out(["cherry", target, branch], root).splitlines()
             if cherry and all(line.startswith("-") for line in cherry):
                 return True
+        except GitError:
+            pass
+        try:
+            mb = out(["merge-base", target, branch], root).strip()
+            if mb:
+                feat_diff = out(["diff", f"{mb}..{branch}"], root)
+                if feat_diff:
+                    feat_pid_res = run(["patch-id"], root, input=feat_diff, check=False)
+                    if feat_pid_res.returncode == 0 and feat_pid_res.stdout.strip():
+                        feat_pid = feat_pid_res.stdout.strip().split()[0]
+                        commits = out(["rev-list", f"{mb}..{target}"], root).splitlines()
+                        for c in commits:
+                            c_diff = out(["diff", f"{c}~1..{c}"], root)
+                            c_pid_res = run(["patch-id"], root, input=c_diff, check=False)
+                            if c_pid_res.returncode == 0 and c_pid_res.stdout.strip():
+                                if c_pid_res.stdout.strip().split()[0] == feat_pid:
+                                    return True
         except GitError:
             pass
     return False

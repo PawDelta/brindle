@@ -208,6 +208,29 @@ def test_remote_only_squash_merge_detected(tmp_path):
     assert git.merged_into_default(str(local), "feat/remote-squash")
 
 
+def test_squash_merged_branch_detected_after_main_advances(tmp_path):
+    repo = tmp_path / "repo_squash"
+    repo.mkdir()
+    sh("git init -b main", repo)
+    sh("git config user.name 'Test' && git config user.email 'test@test.invalid'", repo)
+    (repo / "a.txt").write_text("base\n")
+    sh("git add . && git commit -m 'base'", repo)
+    sh("git checkout -b feature", repo)
+    (repo / "a.txt").write_text("feature\n")
+    sh("git add . && git commit -m 'first feature change'", repo)
+    (repo / "b.txt").write_text("second change\n")
+    sh("git add . && git commit -m 'second feature change'", repo)
+    sh("git checkout main", repo)
+    sh("git merge --squash feature", repo)
+    sh("git commit -m 'squash feature'", repo)
+    assert git.merged_into_default(str(repo), "feature") is True
+
+    # Main advances with a subsequent edit touching the same file
+    (repo / "a.txt").write_text("feature with subsequent improvement\n")
+    sh("git add . && git commit -m 'subsequent improvement on main'", repo)
+    assert git.merged_into_default(str(repo), "feature") is True
+
+
 def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatch):
     from brindle import cli, agents
     # When starting in an existing repo without specifying --agent, it must use default_agent (developer)

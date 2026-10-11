@@ -296,7 +296,7 @@ def has_supervisor_action(summary: str) -> bool:
     """Parse review summary for actionable supervisor findings.
     Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
     from actual items requiring escalation."""
-    m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]?\s*(.*)", summary, re.IGNORECASE)
+    m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)
     if not m:
         return False
     # Capture text under this section until the next header/section
@@ -314,7 +314,7 @@ def has_supervisor_action(summary: str) -> bool:
         return False
     first_sentence = re.split(r"[.\n;]", section_text.strip())[0]
     first_cleaned = re.sub(r"[^\w]+", " ", first_sentence).strip().lower()
-    if first_cleaned in negations:
+    if first_cleaned and first_cleaned in negations:
         return False
     return True
 

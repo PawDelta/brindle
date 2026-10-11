@@ -576,10 +576,11 @@ def test_continue_cmd_does_not_clear_blocked_state_when_resume_fails_or_owner_bl
     assert ap.state == "blocked"
     assert "Credentials need attention" in (ap.note or "")
 
-    # 2. Even when worker restarts, if the block was an owner decision (not credentials), it is not cleared
-    db.set_status(worker.id, "idle")
+    # 2. When worker successfully restarts, if the block was an owner decision (not credentials), it is not cleared
+    db.set_status(worker.id, "failed")
     db.update_autopilot(sup.id, state="blocked", note="Need user decision on database migration")
     monkeypatch.setattr(procs, "stop", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(agents, "_launch", lambda db_arg, a_arg, ws_arg, **kwargs: db_arg.set_status(a_arg.id, "idle"))
     cli.continue_cmd(session_id=None, attach=False)
     ap2 = db.get_autopilot(sup.id)
     assert ap2.state == "blocked"
@@ -588,6 +589,7 @@ def test_continue_cmd_does_not_clear_blocked_state_when_resume_fails_or_owner_bl
 
 def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkeypatch):
     from brindle import keystore
+    from brindle.keystore import _key_store
     from brindle.db import Workspace
     ws = Workspace("ws-stale-ks", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-sks", 0)
     db.add_workspace(ws)
@@ -596,8 +598,9 @@ def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkey
     worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
     db.set_status(worker.id, "failed")
 
-    # Keystore has an old stale key
-    keystore.set_key("ANTHROPIC_API_KEY", "stale-revoked-key")
+    # Keystore has an old stale key (from before session started)
+    _key_store("ANTHROPIC_API_KEY").save({"value": "stale-revoked-key", "updated_at": 10.0})
+    db.set_session_credential(supervisor.id, "ANTHROPIC_API_KEY", "stale-revoked-key")
 
     # Recovery process provides a fresh exported key
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fresh-replacement-key-999")
@@ -617,5 +620,80 @@ def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkey
     monkeypatch.setattr(agents, "_launch", capture_launch)
     worker2, _ = agents.delegate(db, supervisor, ws, "developer", "Next task", "assign")
     assert delegated_env.get("ANTHROPIC_API_KEY") == "fresh-replacement-key-999"
+
+
+def test_resume_retains_owner_decision_block_on_successful_restart(db, repo, monkeypatch):
+    from brindle.db import Workspace
+    from brindle import identity_lock
+    ws = Workspace("ws-owner-block", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-ob", 0)
+    db.add_workspace(ws)
+
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_status(sup.id, "paused")
+    db.add_autopilot(sup.id)
+    db.update_autopilot(sup.id, state="blocked", note="Need user decision on database migration")
+
+    monkeypatch.setattr(agents, "_launch", lambda db_arg, a_arg, ws_arg, **kwargs: db_arg.set_status(a_arg.id, "idle"))
+    monkeypatch.setattr(identity_lock, "ensure", lambda a: None)
+
+    resumed = agents.resume(db, sup.id, recovery_env={})
+    assert len(resumed) == 1
+    # Autopilot state MUST remain blocked for owner decisions even after successful resume
+    ap = db.get_autopilot(sup.id)
+    assert ap.state == "blocked"
+    assert ap.note == "Need user decision on database migration"
+
+
+def test_resume_store_rotation_wins_over_stale_inherited_shell_env(db, repo, monkeypatch):
+    from brindle.db import Workspace
+    from brindle import keystore, identity_lock
+    ws = Workspace("ws-rot", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-rot", 0)
+    db.add_workspace(ws)
+
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_status(sup.id, "paused")
+    db.set_session_credential(sup.id, "ANTHROPIC_API_KEY", "stale-inherited-value", updated_at=10.0)
+    # Keystore has a freshly rotated key with recent timestamp
+    monkeypatch.setattr(keystore, "known_names", lambda *args: ["ANTHROPIC_API_KEY"])
+    monkeypatch.setattr(keystore, "get_key_info", lambda name: ("fresh-store-value", 100.0))
+    monkeypatch.setattr(agents, "_launch", lambda db_arg, a_arg, ws_arg, **kwargs: db_arg.set_status(a_arg.id, "idle"))
+    monkeypatch.setattr(identity_lock, "ensure", lambda a: None)
+
+    # Shell retains stale inherited value
+    agents.resume(db, sup.id, recovery_env={"ANTHROPIC_API_KEY": "stale-inherited-value"})
+    resolved = agents.agent_env(ws, sup.id, sup, m=None)
+    assert resolved.get("ANTHROPIC_API_KEY") == "fresh-store-value"
+
+
+def test_unavailable_keystore_does_not_abort_launch_or_resume(db, repo, monkeypatch):
+    from brindle.db import Workspace
+    from brindle import keystore, identity_lock
+    ws = Workspace("ws-unavail", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-unavail", 0)
+    db.add_workspace(ws)
+
+    sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_status(sup.id, "paused")
+    # Simulate unavailable keychain / Secret Service
+    monkeypatch.setattr(keystore, "known_names", lambda *args: ["ANTHROPIC_API_KEY"])
+    def fail_keystore(name):
+        raise keystore.CredentialError("keychain locked")
+    monkeypatch.setattr(keystore, "get_key_info", fail_keystore)
+    monkeypatch.setattr(agents, "_launch", lambda db_arg, a_arg, ws_arg, **kwargs: db_arg.set_status(a_arg.id, "idle"))
+    monkeypatch.setattr(identity_lock, "ensure", lambda a: None)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "valid-exported-key")
+
+    # Resume must succeed despite unavailable keystore
+    resumed = agents.resume(db, sup.id)
+    assert len(resumed) == 1
+
+    # agent_env must succeed and select ambient valid exported key
+    env = agents.agent_env(ws, sup.id, sup, m=None)
+    assert env.get("ANTHROPIC_API_KEY") == "valid-exported-key"
+    assert len(resumed) == 1
+
+    # agent_env must succeed and select ambient valid exported key
+    env = agents.agent_env(ws, sup.id, sup, m=None)
+    assert env.get("ANTHROPIC_API_KEY") == "valid-exported-key"
+
 
 
