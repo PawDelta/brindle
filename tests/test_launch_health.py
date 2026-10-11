@@ -70,7 +70,13 @@ def detached(monkeypatch):
     def popen(args, *a, **k):
         if isinstance(args, list) and args[1:3] == ["-m", "brindle"] and str(args[3]).startswith("_"):
             started.append([str(x) for x in args])
-            return real(["true"])
+            from unittest.mock import MagicMock
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = 0
+            mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
+            mock_proc.pid = 99999
+            return mock_proc
         return real(args, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", popen)
