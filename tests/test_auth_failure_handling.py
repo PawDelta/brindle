@@ -233,3 +233,39 @@ def test_continue_cmd_prioritizes_live_recoverable_over_older_paused(db, repo, m
     resumed_ids.clear()
     cli.continue_cmd(session_id=live_sup.id[:6], attach=False)
     assert resumed_ids == [live_sup.id]
+
+
+def test_continue_cmd_reloads_fresh_window_for_failed_root_with_attach(db, repo, monkeypatch):
+    from brindle import cli, workspaces
+    ws = Workspace("ws-failed-root", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-failed-root", 0)
+    db.add_workspace(ws)
+
+    # Supervisor itself failed with old window %old
+    live_sup = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_status(live_sup.id, "failed")
+    db.update_agent(live_sup.id, tmux_window="%old")
+    db.add_autopilot(live_sup.id)
+    db.update_autopilot(live_sup.id, state="blocked", note="Credentials need attention")
+
+    def fake_resume(db_arg, root_id, **kwargs):
+        # Resume updates live_sup in DB with %new
+        db.update_agent(root_id, tmux_window="%new", status="idle")
+        fresh = db.get_agent(root_id)
+        return [fresh]
+
+    attached_windows = []
+    monkeypatch.setattr(agents, "resume", fake_resume)
+    monkeypatch.setattr(cli, "_attach", lambda ws, win: attached_windows.append(win))
+    monkeypatch.setattr(cli, "_run", lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    monkeypatch.setattr(workspaces, "adopt_root", lambda db, cwd: ws)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.chdir(repo)
+
+    # continue_cmd with attach=True must attach to %new, not %old!
+    cli.continue_cmd(session_id=None, attach=True)
+    assert attached_windows == ["%new"]
+
+    # Also test explicit session_id with attach=True
+    attached_windows.clear()
+    cli.continue_cmd(session_id=live_sup.id[:6], attach=True)
+    assert attached_windows == ["%new"]

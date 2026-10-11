@@ -22,17 +22,19 @@ class GitError(RuntimeError):
     pass
 
 
-def run(args: list[str], cwd: str | Path, check: bool = True) -> subprocess.CompletedProcess:
-    return run_env(args, cwd, None, check=check)
+def run(args: list[str], cwd: str | Path, check: bool = True,
+        timeout: int | float | None = None) -> subprocess.CompletedProcess:
+    return run_env(args, cwd, None, check=check, timeout=timeout)
 
 
 def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
-            check: bool = True) -> subprocess.CompletedProcess:
+            check: bool = True, timeout: int | float | None = None) -> subprocess.CompletedProcess:
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
     index that leaves the checkout's real index alone; see brindle.rewind)."""
+    to = TIMEOUT if timeout is None else timeout
     try:
         proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=TIMEOUT, env=env
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=to, env=env
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
@@ -98,7 +100,7 @@ def merged_into_default(root: str | Path, branch: str) -> bool:
     if has_remote(root, "origin"):
         try:
             run(["fetch", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], root, timeout=5, check=False)
-        except Exception:
+        except GitError:
             pass
     targets = [base]
     if remote_branch_exists(root, base):

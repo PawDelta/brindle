@@ -360,12 +360,36 @@ def record_started(
 def start_queued(db: DB, task: Task) -> Agent:
     """Start a queued task now that its dependencies are met, cutting its
     branch from the caller workspace's current (updated) base."""
+    from brindle.config import load_repo_config
+
     caller_ws = db.get_workspace(task.caller_ws_id)
     if caller_ws is None:
         raise agents.AgentError(f"workspace {task.caller_ws_id} for queued task {task.id} is gone")
     caller = db.get_agent(task.caller_id) if task.caller_id else None
+    profile = task.profile
+    cfg = load_repo_config(caller_ws.repo_root)
+    weight_order = {"light": 0, "medium": 1, "heavy": 2}
+    ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
+    if ceiling and profile:
+        from brindle.autopilot import profile_weight, choose_profile
+        pw = profile_weight(profile, cfg, caller_ws.repo_root)
+        if weight_order.get(pw, 0) > weight_order[ceiling]:
+            if task.weight:
+                effective_weight = ceiling if weight_order.get(task.weight, 0) > weight_order[ceiling] else task.weight
+                routed_profile, _learned = choose_profile(
+                    db, task.caller_id or "", caller_ws.repo_root,
+                    requested=None,
+                    weight=effective_weight,
+                    task=task.task_text,
+                    files=_loads(task.files),
+                )
+                profile = routed_profile
+                db.update_task(task.id, profile=profile, weight=effective_weight)
+            else:
+                choose_profile(db, task.caller_id or "", caller_ws.repo_root, requested=profile, weight=None)
+
     worker, _wws = agents.delegate(
-        db, caller, caller_ws, task.profile, task.task_text, task.mode,
+        db, caller, caller_ws, profile, task.task_text, task.mode,
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
     )

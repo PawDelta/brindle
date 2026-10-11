@@ -256,7 +256,7 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
                     for line in lines:
                         code = line[:2]
                         path_str = line[3:]
-                        if code.strip() == "D":
+                        if code == " D":
                             continue
                         dirty_work.append(path_str)
                     if dirty_work:

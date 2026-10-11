@@ -115,6 +115,26 @@ def test_damaged_worktree_with_uncommitted_work_raises(db, repo):
     assert (Path(ws.path) / "untracked_notes.txt").exists()
 
 
+def test_damaged_worktree_with_staged_deletion_raises(db, repo):
+    created = workspaces.create(db, str(repo), "feat/staged-del", reuse_registered=True)
+    ws = created.workspace
+    assert os.path.isdir(ws.path)
+    # Add a second tracked file
+    (Path(ws.path) / "extra.py").write_text("extra")
+    sh("git add extra.py && git commit -m 'add extra'", ws.path)
+    # Stage a deletion of extra.py
+    sh("git rm extra.py", ws.path)
+    # Delete app.py without staging it so it appears damaged/gutted
+    (Path(ws.path) / "app.py").unlink()
+
+    # Reusing registered workspace must NOT silently discard the staged deletion
+    with pytest.raises(workspaces.WorkspaceError) as exc_info:
+        workspaces.create(db, str(repo), "feat/staged-del", reuse_registered=True)
+    assert "uncommitted or untracked work" in str(exc_info.value)
+    status_out = git.out(["status", "--porcelain"], ws.path)
+    assert "D  extra.py" in status_out
+
+
 def test_start_on_merged_branch_detects_merge(repo):
     # Create a feature branch and merge it into main
     sh("git checkout -b feat/merged", repo)
@@ -137,6 +157,35 @@ def test_start_on_squash_merged_branch_detects_squash(repo):
     sh("git merge --squash feat/multi-squash && git commit -m 'squashed feat'", repo)
     sh("git checkout feat/multi-squash", repo)
     assert git.merged_into_default(str(repo), "feat/multi-squash")
+
+
+def test_remote_only_squash_merge_detected(tmp_path):
+    # Set up a bare remote with default branch main and clone it
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    sh("git init --bare -b main", remote)
+
+    local = tmp_path / "local"
+    sh(f"git clone {remote} {local}", tmp_path)
+    sh("git checkout -b main", local)
+    (local / "init.txt").write_text("initial")
+    sh("git add init.txt && git commit -m 'initial' && git push origin main", local)
+
+    # Create feature branch locally
+    sh("git checkout -b feat/remote-squash", local)
+    (local / "feature.txt").write_text("feature work")
+    sh("git add feature.txt && git commit -m 'feat commit' && git push origin feat/remote-squash", local)
+
+    # In another clone, squash merge feat/remote-squash into main and push to remote
+    other = tmp_path / "other"
+    sh(f"git clone {remote} {other}", tmp_path)
+    sh("git checkout main && git merge --squash origin/feat/remote-squash", other)
+    sh("git commit -m 'squashed feature' && git push origin main", other)
+
+    # Now in local, main and origin/main are stale; merged_into_default must fetch origin
+    # and detect the squash merge
+    sh("git checkout feat/remote-squash", local)
+    assert git.merged_into_default(str(local), "feat/remote-squash")
 
 
 def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatch):

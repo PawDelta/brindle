@@ -500,6 +500,7 @@ def continue_cmd(
         if ap and ap.state == "blocked":
             db.update_autopilot(live.id, state="running", note=None)
         typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
+        live = db.get_agent(live.id) or live
         if attach:
             _attach(ws, live.tmux_window)
         return
@@ -510,6 +511,7 @@ def continue_cmd(
         if ap and ap.state == "blocked":
             db.update_autopilot(live.id, state="running", note=None)
         typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
+        live = db.get_agent(live.id) or live
         if attach:
             _attach(ws, live.tmux_window)
         return
