@@ -1,6 +1,5 @@
 import time
 import pytest
-from types import SimpleNamespace
 
 from brindle import cull, events
 from brindle.config import RepoConfig

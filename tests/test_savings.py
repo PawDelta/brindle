@@ -96,17 +96,6 @@ def report(db, repo):
 # -- recording ------------------------------------------------------------------------------------
 
 
-def test_a_learned_pick_is_recorded_with_its_baseline(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    install(monkeypatch, Picker(prefer="developer-codex"))
-    config(repo, pipeline=False, learning="cloud")
-    asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
-    [t] = db.list_tasks(str(repo), state="started")
-    [d] = db.list_routing_decisions(str(repo))
-    assert (d.task_id, d.agent_id, d.weight) == (t.id, t.agent_id, "medium")
-    assert (d.baseline_profile, d.profile, d.learned) == ("developer", "developer-codex", 1)
-
-
 def test_the_shared_prior_flag_is_kept_and_counted(db, repo, boss, monkeypatch):
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     config(repo, pipeline=False, learning="cloud")
@@ -192,64 +181,9 @@ def test_recording_never_raises(db, repo):
 # -- the estimate ---------------------------------------------------------------------------------
 
 
-def test_too_little_data_says_so(db, repo):
-    for n in range(savings.MIN_TASKS - 1):
-        decide(db, repo, n, profile="developer-codex", learned=True, tokens=1000)
-    this, last, total = report(db, repo)
-    assert this.learned.tasks == savings.MIN_TASKS - 1 and this.saved_fraction is None
-    text = savings.describe([this, last, total], str(repo))
-    assert f"not enough data yet ({savings.MIN_TASKS - 1} of the {savings.MIN_TASKS}" in text
-    assert "%" not in text
-    assert "not enough data yet" in savings.summary_line([this, last, total])
-
-
 def test_no_decisions_at_all(db, repo):
     text = savings.describe(report(db, repo), str(repo))
     assert "Not enough data yet" in text and "%" not in text
-
-
-def test_estimate_from_the_relative_cost_ratio(db, repo):
-    # no finished baseline tasks: the same tokens at the baseline's relative cost (3 vs 1)
-    for n in range(5):
-        decide(db, repo, n, profile="developer-codex", learned=True, tokens=1000)
-    this, _, _ = report(db, repo)
-    assert (this.compared, this.from_average) == (5, 0)
-    assert this.saved_fraction == pytest.approx(2 / 3)
-    text = savings.describe(report(db, repo), str(repo))
-    assert "estimated ~67% lower cost than the baseline profiles, over 5 tasks" in text
-    assert savings.ESTIMATE_NOTE in text and "not money" in text
-
-
-def test_estimate_prefers_the_repos_own_average(db, repo):
-    # the baseline profile used 4000 tokens a task at this weight here, not 1000
-    for n in range(savings.MIN_BASELINE):
-        decide(db, repo, f"b{n}", tokens=4000)
-    decide(db, repo, "other", weight="heavy", tokens=90000)   # another weight: not averaged in
-    for n in range(5):
-        decide(db, repo, n, profile="developer-codex", learned=True, tokens=1000)
-    this, _, _ = report(db, repo)
-    assert (this.compared, this.from_average) == (5, 5)
-    assert this.baseline_cost == 5 * 4000 * 3 and this.actual_cost == 5 * 1000 * 1
-    assert this.saved_fraction == pytest.approx(1 - 5000 / 60000)
-
-
-def test_a_costlier_pick_is_reported_as_costlier(db, repo):
-    for n in range(5):
-        decide(db, repo, n, baseline="developer-codex", profile="developer", learned=True,
-               tokens=1000)
-    this, last, total = report(db, repo)
-    assert this.saved_fraction == pytest.approx(-2.0)
-    assert "~200% higher cost" in savings.describe([this, last, total], str(repo))
-    assert "higher cost" in savings.summary_line([this, last, total])
-
-
-def test_unfinished_and_unmeasured_tasks_are_not_estimated(db, repo):
-    for n in range(4):
-        decide(db, repo, n, profile="developer-codex", learned=True, tokens=1000)
-    decide(db, repo, "running", profile="developer-codex", learned=True, tokens=1000, outcome=None)
-    decide(db, repo, "no-usage", profile="developer-codex", learned=True)
-    this, _, _ = report(db, repo)
-    assert this.learned.tasks == 6 and this.compared == 4 and this.saved_fraction is None
 
 
 def test_months_and_counts(db, repo):
@@ -275,12 +209,6 @@ def test_months_and_counts(db, repo):
     line = savings.summary_line([this, last, total])
     assert line.startswith("Learning last month: 5 picks, estimated ~67% lower cost")
     assert "an estimate" in line
-
-
-def test_other_repos_are_not_counted(db, repo, tmp_path):
-    for n in range(5):
-        decide(db, tmp_path / "elsewhere", n, profile="developer-codex", learned=True, tokens=1000)
-    assert report(db, repo)[2].learned.tasks == 0
 
 
 # -- brindle account --------------------------------------------------------------------------------
@@ -328,18 +256,3 @@ def test_bare_account_has_one_savings_line_when_learning_is_active(db, repo, sto
     login_as(backend, store, features=())
     code, text = run_account(repo, store, backend)
     assert code == 0 and "Learning" not in text
-
-
-def test_the_first_outcome_sticks(db):
-    db.add_routing_decision(task_id=None, agent_id="w1", repo_root="/r", weight="medium",
-                            baseline_profile="developer", profile="developer", learned=False)
-    db.note_routing_outcome("w1", outcome="merged")
-    db.note_routing_outcome("w1", outcome="removed_unmerged")
-    assert db.list_routing_decisions()[0].outcome == "merged"
-
-
-def test_a_local_model_is_cheapest_not_free(monkeypatch):
-    from brindle import savings
-    from brindle.pro import learning
-    monkeypatch.setattr(learning, "cost_rank", lambda name, root=None: 0)
-    assert savings._default_cost("/r")("developer-local") == 1

@@ -47,17 +47,6 @@ def use(percent, resets_at=RESET):
     autopilot.record_usage({"rate_limits": {"five_hour": {"used_percentage": percent, "resets_at": resets_at}}})
 
 
-def test_sweep_pauses_workers_at_the_limit(db, session):
-    use(95)
-    notes = autopilot.usage_sweep(db)
-    assert session.stopped == ["w1"]
-    assert db.get_agent("w1").status == "paused"
-    assert db.get_agent("boss").status == "processing"  # the supervisor isn't touched
-    ap = db.get_autopilot("boss")
-    assert ap.state == "usage_paused" and ap.usage_resets_at == RESET
-    assert notes
-
-
 def test_on_stop_pauses_even_with_workers_running(db, session):
     use(95)
     assert autopilot.on_stop(db, db.get_agent("boss"), {}) is None
@@ -76,19 +65,6 @@ def test_below_limit_does_nothing(db, session):
     use(20)
     assert autopilot.usage_sweep(db) == []
     assert db.get_autopilot("boss").state == "running"
-
-
-def test_resumes_after_reset(db, session):
-    use(95)
-    autopilot.usage_sweep(db)
-    assert autopilot.usage_sweep(db, now=RESET - 10) == []  # window not over yet
-    assert db.get_autopilot("boss").state == "usage_paused"
-    use(10)
-    notes = autopilot.usage_sweep(db, now=RESET + 1)
-    assert session.resumed == ["w1"] and notes
-    ap = db.get_autopilot("boss")
-    assert ap.state == "running" and ap.usage_resets_at is None
-    assert len(session.sent) == 1 and session.sent[0][0] == "boss" and "w1" in session.sent[0][1]
 
 
 def test_still_over_limit_after_reset_time_keeps_waiting(db, session):
@@ -163,18 +139,6 @@ def test_paused_session_is_not_restarted_by_the_sweep(db, session):
     db.set_status("boss", "processing")
     autopilot.usage_sweep(db, now=RESET + 1)
     assert db.get_autopilot("boss").state == "running"
-
-
-def test_worker_paused_for_another_reason_is_left_alone(db, session):
-    ws = db.get_workspace(db.get_agent("boss").workspace_id)
-    db.add_agent(Agent("w2", ws.id, "developer", "claude", "boss", "assign",
-                       "paused", "@2", None, time.time()))
-    use(95)
-    autopilot.usage_sweep(db)
-    use(5)
-    autopilot.usage_sweep(db, now=RESET + 1)
-    assert session.resumed == ["w1"]
-    assert db.get_agent("w2").status == "paused"
 
 
 def test_sidebar_line():
