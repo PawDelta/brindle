@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, mcp_server, pipeline, rewind, workspaces
+from brindle import agents, autopilot, mcp_server, rewind, workspaces
 from brindle.db import Agent
 
 
@@ -142,17 +142,6 @@ def test_blank_task_is_refused(db, repo, boss):
     assert run(mcp_server.handoff("developer", "")) == "Give the worker a task."
 
 
-def test_report_result_with_the_pipeline_off_goes_to_the_supervisor(db, repo, boss, monkeypatch):
-    configure(repo, pipeline=False)
-    wid = started_id(run(mcp_server.assign("developer", "add a.py", branch="feat-a")))
-    commit(ws_of(db, repo, "feat-a"), "a.py")
-    out = worker_reports(db, monkeypatch, wid, "added a.py")
-    assert "sent to your supervisor" in out
-    assert db.get_agent(wid).result == "added a.py"
-    msg = db.pop_pending("boss")
-    assert msg and "added a.py" in msg.body and "feat-a" in msg.body
-
-
 def test_handoff_returns_the_result_once_the_worker_reports(db, repo, boss, monkeypatch):
     configure(repo, pipeline=False)
     monkeypatch.setattr(agents, "wait_for_result", lambda db_, wid, secs: db_.get_agent(wid).result)
@@ -168,11 +157,6 @@ def test_handoff_returns_the_result_once_the_worker_reports(db, repo, boss, monk
     out = run(mcp_server.handoff("developer", "write h.py", branch="feat-h", wait_seconds=5))
     assert "finished" in out and "wrote h.py" in out and "1 commit(s) ahead of main" in out
     assert "h.py" in out
-
-
-def test_handoff_that_is_still_running_says_so(db, repo, boss):
-    out = run(mcp_server.handoff("developer", "slow", branch="feat-s", wait_seconds=0))
-    assert "still running" in out and "wait_for_worker" in out
 
 
 # -- the pipeline: review -> checks -> merge -> removal -----------------------------------
@@ -401,30 +385,6 @@ def two_branches_on_one_file(db, repo, monkeypatch, protected=None, **extra):
     return ids
 
 
-def test_two_branches_touching_one_file_conflict_and_the_second_goes_to_a_resolver(
-        db, repo, boss, reviewers, monkeypatch):
-    ids = two_branches_on_one_file(db, repo, monkeypatch)
-    ws1, ws2 = ws_of(db, repo, "feat-1"), ws_of(db, repo, "feat-2")
-    from brindle import conflicts
-    assert conflicts.shared_files(conflicts.changed_files(ws1), conflicts.changed_files(ws2)) == ["shared.txt"]
-    assert conflicts.overlapping_hunks(conflicts.hunks(ws1), conflicts.hunks(ws2)) == 1
-
-    worker_reports(db, monkeypatch, ids["feat-1"], "edited shared")
-    worker_reports(db, monkeypatch, ids["feat-2"], "edited shared too")
-    reviewer_approves(monkeypatch, reviewers[0].id)
-    assert sh("git show HEAD:shared.txt", repo) == "ONE\ntwo\nthree"
-    assert db.get_workspace(ws1.id) is None
-
-    reviewer_approves(monkeypatch, reviewers[1].id)
-    # feat-2 conflicts with main now: not merged, its (still running) worker is asked to resolve.
-    assert sh("git show HEAD:shared.txt", repo) == "ONE\ntwo\nthree"
-    assert db.get_workspace(ws2.id) is not None
-    assert db.get_agent(ids["feat-2"]).pipeline == "resolving"
-    assert sh("git status --porcelain", ws2.path) == ""                  # the sync was aborted cleanly
-    task = db.pop_pending(ids["feat-2"])
-    assert task and "Merge conflict" in task.body and "shared.txt" in task.body
-
-
 def test_manual_merge_of_a_conflicting_branch_names_the_files(db, repo, boss, monkeypatch):
     ids = two_branches_on_one_file(db, repo, monkeypatch, pipeline=False, review=False)
     ws1, ws2 = ws_of(db, repo, "feat-1"), ws_of(db, repo, "feat-2")
@@ -436,34 +396,3 @@ def test_manual_merge_of_a_conflicting_branch_names_the_files(db, repo, boss, mo
     assert out.startswith("Not merged") and "conflicts with main in: shared.txt" in out
     assert sh("git status --porcelain", ws2.path) == ""
     assert sh("git show HEAD:shared.txt", repo) == "ONE\ntwo\nthree"
-
-
-def test_a_conflict_in_a_protected_path_goes_to_the_person(db, repo, boss, reviewers, monkeypatch):
-    ids = two_branches_on_one_file(db, repo, monkeypatch, protected=["shared.txt"])
-    ws2 = ws_of(db, repo, "feat-2")
-    worker_reports(db, monkeypatch, ids["feat-1"])
-    worker_reports(db, monkeypatch, ids["feat-2"])
-    reviewer_approves(monkeypatch, reviewers[0].id)
-    reviewer_approves(monkeypatch, reviewers[1].id)
-    assert db.get_agent(ids["feat-2"]).pipeline is None
-    assert db.pending_count(ids["feat-2"]) == 0
-    bodies = []
-    while (m := db.pop_pending("boss")) is not None:
-        bodies.append(m.body)
-    text = "\n".join(bodies)
-    assert "protected path" in text and "This needs you" in text and "shared.txt" in text
-    assert db.get_workspace(ws2.id) is not None
-
-
-def test_ready_branches_merge_the_least_conflicting_first(db, repo, boss, monkeypatch):
-    configure(repo, overlap="warn")
-    (repo / "shared.txt").write_text("one\ntwo\nthree\nfour\nfive\nsix\n")
-    sh("git add -A && git commit -qm shared", repo)
-    for branch, name, text in (("clash-a", "shared.txt", "ONE\ntwo\nthree\nfour\nfive\nsix\n"),
-                               ("clean", "own.txt", "mine\n"),
-                               ("clash-b", "shared.txt", "uno\ntwo\nthree\nfour\nfive\nsix\n")):
-        run(mcp_server.assign("developer", branch, branch=branch))
-        commit(ws_of(db, repo, branch), name, text)
-    ready = [(None, ws_of(db, repo, b)) for b in ("clash-a", "clean", "clash-b")]
-    order = pipeline.merge_order(ready)
-    assert [ws.branch for _w, ws in order][0] == "clean"

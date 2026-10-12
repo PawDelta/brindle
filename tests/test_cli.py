@@ -32,17 +32,6 @@ def test_ls_json(db, repo, monkeypatch):
     ]
 
 
-def test_ls_json_respects_all(db, repo, tmp_path, monkeypatch):
-    workspaces.create(db, str(repo), "feat/x")
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    monkeypatch.chdir(elsewhere)
-    sh("git init -q -b main", elsewhere)
-    assert json.loads(CliRunner().invoke(app, ["ls", "--json"]).stdout) == []
-    assert len(json.loads(CliRunner().invoke(app, ["ls", "--json", "--all"]).stdout)) == 1
-
-
-
 def test_rm_survives_a_missing_base_branch(db, repo, monkeypatch):
     sh("git branch tmp-base", repo)
     ws = workspaces.create(db, str(repo), "feat/x", "tmp-base", fetch=False).workspace

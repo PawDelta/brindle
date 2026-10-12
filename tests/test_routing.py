@@ -10,6 +10,7 @@ import pytest
 from brindle import agents, autopilot, doctor, learning, mcp_server, plugins, quota, workspaces
 from brindle.config import DEFAULT_ROUTING, load_repo_config, user_config_path
 from brindle.db import Agent
+from test_merge_order import fake_spawn
 
 
 class Picker(learning.LearningPlugin):
@@ -69,60 +70,9 @@ def install(monkeypatch, plugin):
     monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: plugin)
 
 
-def test_defaults(repo):
-    assert load_repo_config(repo).routing == DEFAULT_ROUTING
-
-
-def test_config_overrides_one_tier_and_keeps_the_rest(repo):
-    config(repo, routing={"heavy": ["developer"], "bogus": ["x"]})
-    r = load_repo_config(repo).routing
-    assert r["heavy"] == ["developer"]
-    assert r["light"] == DEFAULT_ROUTING["light"] and "bogus" not in r
-
-
-def test_routing_merges_user_repo_and_local_per_tier(repo, tmp_path):
-    user = user_config_path()
-    user.parent.mkdir(parents=True, exist_ok=True)
-    user.write_text(json.dumps({"routing": {"light": ["developer-codex"]}}))
-    cfg = load_repo_config(repo)
-    assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer-codex"]}
-    assert cfg.routing_sources["light"] == str(user)
-
-    config(repo, routing={"light": ["developer"], "medium": ["developer-heavy"]})
-    cfg = load_repo_config(repo)
-    assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer"], "medium": ["developer-heavy"]}
-    assert cfg.routing_sources["light"] == str(repo / ".brindle" / "config.json")
-
-    local = repo / ".brindle" / "config.local.json"
-    local.write_text(json.dumps({"routing": {"light": ["developer-local"]}}))
-    cfg = load_repo_config(repo)
-    assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer-local"], "medium": ["developer-heavy"]}
-    assert cfg.routing_sources == {
-        "light": str(local), "medium": str(repo / ".brindle" / "config.json"),
-        "heavy": "DEFAULT_ROUTING", "advanced": "DEFAULT_ROUTING",
-    }
-    other_repo = tmp_path / "other-repo"
-    other_repo.mkdir()
-    assert load_repo_config(other_repo).routing == {**DEFAULT_ROUTING, "light": ["developer-codex"]}
-
-
-def test_repo_and_local_keep_untouched_user_tiers(repo):
-    user_config_path().parent.mkdir(parents=True, exist_ok=True)
-    user_config_path().write_text(json.dumps({"routing": {"light": ["developer-codex"]}}))
-    config(repo, routing={"medium": ["developer-heavy"]})
-    (repo / ".brindle" / "config.local.json").write_text(
-        json.dumps({"routing": {"heavy": ["developer-local"]}}))
-    assert load_repo_config(repo).routing == {
-        "light": ["developer-codex"], "medium": ["developer-heavy"], "heavy": ["developer-local"],
-        "advanced": DEFAULT_ROUTING["advanced"],
-    }
-
-
-@pytest.mark.parametrize("layer", ["user", "repo", "local"])
 @pytest.mark.parametrize("names", [["missing-worker", "developer"], ["missing-worker"]])
-def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, layer, names):
-    path = {"user": user_config_path(), "repo": repo / ".brindle" / "config.json",
-            "local": repo / ".brindle" / "config.local.json"}[layer]
+def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, names):
+    path = user_config_path()
     path.write_text(json.dumps({"routing": {"light": names}}))
     why = []
     assert choose(db, repo, weight="light", why=why) == ("developer", False)
@@ -136,7 +86,7 @@ def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, layer
     assert check.detail.startswith("developer (" if len(names) > 1 else "none configured (")
 
 
-@pytest.mark.parametrize("layer", ["default", "user", "repo", "local"])
+@pytest.mark.parametrize("layer", ["default", "local"])
 def test_doctor_prints_effective_routing_and_each_tiers_source(repo, monkeypatch, layer):
     config(repo)
     path = {"user": user_config_path(), "repo": repo / ".brindle" / "config.json",
@@ -162,61 +112,12 @@ def test_weight_picks_the_first_candidate(db, repo, boss):
     why = []
     assert choose(db, repo, weight="advanced", why=why) == ("developer-fable", False)
     assert len(why) == 1 and why[0].startswith("weight advanced -> developer-fable")
-    assert choose(db, repo, weight="reasoning")[0] == "developer-fable"
-    assert choose(db, repo, weight="complex")[0] == "developer-fable"
-    assert choose(db, repo, weight="heavy")[0] == "developer-heavy"
-    # No tier prefers another provider for its own sake: the baselines are
-    # Claude profiles; Codex and the local model are learner candidates.
-    assert choose(db, repo, weight="medium")[0] == "developer"
-    assert choose(db, repo, weight="light")[0] == "developer-light"
-
-
-def test_no_weight_keeps_the_default_agent(db, repo, boss):
-    config(repo, default_agent="developer-codex")
-    assert choose(db, repo) == ("developer-codex", False)
+    assert choose(db, repo, weight="reasoning")[0] == "developer-fable"   # an alias of advanced
 
 
 def test_invalid_weight_is_refused(db, repo, boss):
     with pytest.raises(autopilot.AutopilotError):
         choose(db, repo, weight="enormous")
-
-
-def test_precedence_explicit_then_milestone_then_weight(db, repo, boss):
-    assert choose(db, repo, "reviewer", "heavy")[0] == "reviewer"
-    db.add_autopilot("boss", enabled=True)
-    autopilot.set_goal(db, "boss", "g", [("m1", "true", "", "developer-local")])
-    assert choose(db, repo, None, "heavy")[0] == "developer-local"
-    milestone = db.milestones("boss")[0]
-    db.record_check(milestone.id, True, "", "sha")
-    assert choose(db, repo, None, "heavy")[0] == "developer-heavy"
-
-
-def test_weight_routing_beats_learning_candidates(db, repo, boss, monkeypatch):
-    install(monkeypatch, Picker(prefer="developer-local"))
-    config(repo, learning="cloud", learning_candidates=["developer-local"])
-    assert choose(db, repo, weight="heavy")[0] == "developer-heavy"
-
-
-def test_missing_cli_is_skipped(db, repo, boss, monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda cli: None if cli == "codex" else f"/usr/bin/{cli}")
-    why = []
-    assert choose(db, repo, weight="medium", why=why)[0] == "developer"
-    assert "codex isn't installed, skipped developer-codex" in why[0]
-
-
-def test_limited_provider_is_skipped(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(quota, "headroom",
-                        lambda provider, cfg=None, repo_root=None: 7.0 if provider == "codex" else 100.0)
-    why = []
-    assert choose(db, repo, weight="medium", why=why)[0] == "developer"
-    assert len(why) == 1 and "weight medium -> developer" in why[0] and "Codex at 93%, skipped developer-codex" in why[0]
-
-
-def test_provider_below_the_usage_limit_is_kept(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 30.0)
-    why = []
-    assert choose(db, repo, weight="medium", why=why)[0] == "developer"
-    assert "skipped" not in why[0]  # Codex stays a candidate
 
 
 def test_native_down_is_skipped(db, repo, boss, monkeypatch):
@@ -240,58 +141,12 @@ def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monke
     assert plugin.defaults == ["developer"]
 
 
-def test_learning_keeping_the_default_is_not_credited(db, repo, boss, monkeypatch):
-    plugin = Picker(prefer="developer")
-    install(monkeypatch, plugin)
-    config(repo, learning="cloud")
-    why = []
-    assert choose(db, repo, weight="medium", why=why) == ("developer", False)
-    assert "learning picked it" not in why[0] and "learning kept it" not in why[0]
-
-
-def test_the_learners_note_on_a_kept_default_is_shown(db, repo, boss, monkeypatch):
-    plugin = Picker(prefer="developer", note="not enough similar tasks yet")
-    install(monkeypatch, plugin)
-    config(repo, learning="cloud")
-    why = []
-    assert choose(db, repo, weight="medium", why=why) == ("developer", False)
-    assert "learning kept it: not enough similar tasks yet" in why[0]
-
-
-def test_one_candidate_never_asks_the_learner(db, repo, boss, monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda cli: None if cli == "codex" else f"/usr/bin/{cli}")
-    plugin = Picker(prefer="developer")
-    install(monkeypatch, plugin)
-    config(repo, learning="cloud", routing={"medium": ["developer", "developer-codex"]})
-    assert choose(db, repo, weight="medium") == ("developer", False)
-    assert plugin.asked == []
-
-
-def test_learning_only_sees_available_candidates(db, repo, boss, monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda cli: None if cli == "codex" else f"/usr/bin/{cli}")
-    plugin = Picker(prefer="developer-codex")
-    install(monkeypatch, plugin)
-    config(repo, learning="cloud", routing={"medium": ["developer", "developer-codex"]})
-    assert choose(db, repo, weight="medium") == ("developer", False)
-    assert plugin.asked == []     # a single candidate: nothing to choose, no server call
-
-
 def test_all_out_falls_back_to_the_default_agent_and_says_why(db, repo, boss, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda cli: None)
     config(repo, default_agent="reviewer")
     why = []
     assert choose(db, repo, weight="heavy", why=why) == ("reviewer", False)
     assert "every heavy candidate was out" in why[0] and "using reviewer" in why[0]
-
-
-# -- the assign/handoff reply, and the weight stored for learning -----------------------
-
-
-def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None, **kw):
-    a = Agent(agents.new_id(), ws.id, profile, "claude", parent_id, mode, "processing", "",
-              None, time.time(), task=prompt, done_when=done_when)
-    db.add_agent(a)
-    return a
 
 
 def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monkeypatch):

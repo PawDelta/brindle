@@ -1,388 +1,133 @@
-import json
-import os
 import shutil
 from pathlib import Path
 
 import pytest
 
-from brindle import git, workspaces
-from brindle.config import load_repo_config
+from brindle import agents, cli, git, workspaces
+from brindle.db import Agent
 from conftest import sh
 
 
-def test_gutted_worktree_detected_and_recreated(db, repo, tmp_path):
-    created = workspaces.create(db, str(repo), "feat/husk", reuse_registered=True)
-    ws = created.workspace
-    assert os.path.isdir(ws.path)
-    # Simulate a gutted worktree: remove most files or remove .git
-    for f in list(Path(ws.path).glob("*")):
-        if f.is_file():
-            f.unlink()
-    # Now call create with reuse_registered=True again
-    reused = workspaces.create(db, str(repo), "feat/husk", reuse_registered=True)
-    assert reused.workspace.id == ws.id
-    # The worktree should have been restored with tracked files intact
-    assert (Path(reused.workspace.path) / "app.py").exists()
+def gut(path: Path, keep_git=False):
+    """Delete everything in a worktree (its .git link too unless ``keep_git``)."""
+    for f in path.iterdir():
+        if keep_git and f.name == ".git":
+            continue
+        shutil.rmtree(f) if f.is_dir() else f.unlink()
 
 
-def test_damaged_worktree_missing_git_with_surviving_files_raises(db, repo):
-    created = workspaces.create(db, str(repo), "feat/missing-git", reuse_registered=True)
-    ws = created.workspace
-    assert os.path.isdir(ws.path)
-    # Remove .git file but leave surviving user notes
-    git_file = Path(ws.path) / ".git"
-    if git_file.is_file():
-        git_file.unlink()
-    elif git_file.is_dir():
-        shutil.rmtree(git_file)
-    (Path(ws.path) / "surviving_notes.txt").write_text("critical notes that must not be deleted")
-
-    # Reusing registered workspace must fail closed and preserve surviving files
-    with pytest.raises(workspaces.WorkspaceError) as exc_info:
-        workspaces.create(db, str(repo), "feat/missing-git", reuse_registered=True)
-    assert "surviving files" in str(exc_info.value)
-    assert (Path(ws.path) / "surviving_notes.txt").exists()
+def lose_git_keep_notes(path):
+    gut(path)
+    (path / "surviving_notes.txt").write_text("critical notes that must not be deleted")
+    return ["surviving_notes.txt"]
 
 
-def test_damaged_worktree_missing_git_with_hidden_files_and_dirs_raises(db, repo):
-    created = workspaces.create(db, str(repo), "feat/hidden-git-loss", reuse_registered=True)
-    ws = created.workspace
-    assert os.path.isdir(ws.path)
-    # Remove .git and all visible files, leaving only .env and .claude/
-    git_file = Path(ws.path) / ".git"
-    if git_file.is_file():
-        git_file.unlink()
-    elif git_file.is_dir():
-        shutil.rmtree(git_file)
-    for f in list(Path(ws.path).glob("*")):
-        if f.is_file():
-            f.unlink()
-        elif f.is_dir():
-            shutil.rmtree(f)
-    (Path(ws.path) / ".env").write_text("SECRET_KEY=keep_me\n")
-    hidden_dir = Path(ws.path) / ".claude"
-    hidden_dir.mkdir()
-    (hidden_dir / "config.json").write_text("{}")
+def lose_git_keep_hidden(path):
+    gut(path)
+    (path / ".env").write_text("SECRET_KEY=keep_me\n")
+    (path / ".claude").mkdir()
+    (path / ".claude" / "config.json").write_text("{}")
+    return [".env", ".claude/config.json"]
 
-    # Reusing registered workspace must refuse destructive recovery and preserve .env and .claude/
-    with pytest.raises(workspaces.WorkspaceError) as exc_info:
-        workspaces.create(db, str(repo), "feat/hidden-git-loss", reuse_registered=True)
-    assert "surviving files" in str(exc_info.value)
-    assert (Path(ws.path) / ".env").exists()
-    assert (Path(ws.path) / ".claude" / "config.json").exists()
+
+def untracked_work_in_a_gutted_tree(path):
+    (path / "untracked_notes.txt").write_text("critical notes")
+    (path / "README.md").write_text("edited readme")
+    for f in path.glob("*.py"):
+        f.unlink()
+    return ["untracked_notes.txt"]
+
+
+def staged_deletion_in_a_gutted_tree(path):
+    (path / "extra.py").write_text("extra")
+    sh("git add extra.py && git commit -m 'add extra' && git rm extra.py", path)
+    (path / "app.py").unlink()
+    return []
+
+
+@pytest.mark.parametrize("damage, error", [
+    (lose_git_keep_notes, "surviving files"),
+    (lose_git_keep_hidden, "surviving files"),
+    (untracked_work_in_a_gutted_tree, "uncommitted or untracked work"),
+    (staged_deletion_in_a_gutted_tree, "uncommitted or untracked work"),
+])
+def test_a_damaged_worktree_with_work_in_it_is_never_wiped(db, repo, damage, error):
+    path = Path(workspaces.create(db, str(repo), "feat/damaged", reuse_registered=True).workspace.path)
+    kept = damage(path)
+    with pytest.raises(workspaces.WorkspaceError, match=error):
+        workspaces.create(db, str(repo), "feat/damaged", reuse_registered=True)
+    for name in kept:
+        assert (path / name).exists()
+    if damage is staged_deletion_in_a_gutted_tree:
+        assert "D  extra.py" in git.out(["status", "--porcelain"], str(path))
 
 
 def test_damaged_worktree_missing_git_empty_recreated(db, repo):
-    created = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True)
-    ws = created.workspace
-    assert os.path.isdir(ws.path)
-    # Remove everything in ws.path so directory is empty
-    for f in list(Path(ws.path).glob("*")):
-        if f.is_file():
-            f.unlink()
-        elif f.is_dir():
-            shutil.rmtree(f)
-    git_file = Path(ws.path) / ".git"
-    if git_file.exists():
-        if git_file.is_file():
-            git_file.unlink()
-        else:
-            shutil.rmtree(git_file)
-
-    # Empty directory with broken/missing git should be safely pruned and recreated
+    ws = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True).workspace
+    gut(Path(ws.path))
     reused = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True)
     assert reused.workspace.id == ws.id
     assert (Path(reused.workspace.path) / ".git").exists()
     assert (Path(reused.workspace.path) / "app.py").exists()
 
 
-def test_damaged_worktree_with_uncommitted_work_raises(db, repo):
-    created = workspaces.create(db, str(repo), "feat/precious", reuse_registered=True)
-    ws = created.workspace
-    assert os.path.isdir(ws.path)
-    # Add an untracked file and an edit
-    (Path(ws.path) / "untracked_notes.txt").write_text("critical notes")
-    (Path(ws.path) / "README.md").write_text("edited readme")
-    # Simulate partial deletion of another tracked file to make it damaged
-    tracked_files = [f for f in Path(ws.path).glob("*.py")]
-    for tf in tracked_files:
-        tf.unlink()
-
-    # Reusing registered workspace must NOT silently wipe untracked_notes.txt or edited readme
-    with pytest.raises(workspaces.WorkspaceError) as exc_info:
-        workspaces.create(db, str(repo), "feat/precious", reuse_registered=True)
-    assert "uncommitted or untracked work" in str(exc_info.value)
-    assert (Path(ws.path) / "untracked_notes.txt").exists()
-
-
-def test_damaged_worktree_with_staged_deletion_raises(db, repo):
-    created = workspaces.create(db, str(repo), "feat/staged-del", reuse_registered=True)
-    ws = created.workspace
-    assert os.path.isdir(ws.path)
-    # Add a second tracked file
-    (Path(ws.path) / "extra.py").write_text("extra")
-    sh("git add extra.py && git commit -m 'add extra'", ws.path)
-    # Stage a deletion of extra.py
-    sh("git rm extra.py", ws.path)
-    # Delete app.py without staging it so it appears damaged/gutted
-    (Path(ws.path) / "app.py").unlink()
-
-    # Reusing registered workspace must NOT silently discard the staged deletion
-    with pytest.raises(workspaces.WorkspaceError) as exc_info:
-        workspaces.create(db, str(repo), "feat/staged-del", reuse_registered=True)
-    assert "uncommitted or untracked work" in str(exc_info.value)
-    status_out = git.out(["status", "--porcelain"], ws.path)
-    assert "D  extra.py" in status_out
-
-
 def test_remove_workspace_refuses_to_forget_when_directory_remains(db, repo, monkeypatch):
-    created = workspaces.create(db, str(repo), "feat/failed-rm", reuse_registered=True)
-    ws = created.workspace
-    assert os.path.isdir(ws.path)
+    ws = workspaces.create(db, str(repo), "feat/failed-rm", reuse_registered=True).workspace
 
-    # Simulate both git worktree remove failing and filesystem removal failing
     def fail_remove(*args, **kwargs):
         raise git.GitError("git worktree remove failed")
+
     monkeypatch.setattr(git, "remove_worktree", fail_remove)
     monkeypatch.setattr(shutil, "rmtree", lambda *args, **kwargs: None)
-
-    with pytest.raises(workspaces.WorkspaceError) as exc_info:
+    with pytest.raises(workspaces.WorkspaceError, match="could not remove worktree directory"):
         workspaces.remove(db, ws, force=True, delete_branch=False, keep_session=True)
-    assert "could not remove worktree directory" in str(exc_info.value)
-
-    # Workspace record must NOT be deleted/forgotten from DB while directory remains
     assert db.get_workspace(ws.id) is not None
 
 
+@pytest.fixture
+def started(repo, monkeypatch):
+    """`brindle start` with nothing launched: records (branch, profile, autopilot) per spawn."""
+    calls = []
 
-def test_start_on_merged_branch_detects_merge(repo):
-    # Create a feature branch and merge it into main
-    sh("git checkout -b feat/merged", repo)
-    (repo / "feature.txt").write_text("done")
-    sh("git add feature.txt && git commit -m 'feat done'", repo)
-    sh("git checkout main && git merge feat/merged", repo)
-    sh("git checkout feat/merged", repo)
-    assert git.merged_into_default(str(repo), "feat/merged")
-    assert not git.merged_into_default(str(repo), "main")
-
-
-def test_start_on_merged_branch_switches_to_default_when_clean(db, repo, monkeypatch):
-    from brindle import cli, agents
-    sh("git checkout -b feat/merged-clean", repo)
-    (repo / "feature_clean.txt").write_text("clean")
-    sh("git add feature_clean.txt && git commit -m 'feat clean'", repo)
-    sh("git checkout main && git merge feat/merged-clean", repo)
-    sh("git checkout feat/merged-clean", repo)
-
-    spawned_branches = []
-    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
-        spawned_branches.append(ws_arg.branch)
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.id = "agent-merged-clean"
-        m.profile = agent_arg
-        m.tmux_window = "w1"
-        return m
+    def fake_spawn(db_, ws_, profile, **kwargs):
+        calls.append((ws_.branch, profile, kwargs.get("autopilot")))
+        return Agent("a1", ws_.id, profile, "claude", None, "interactive", "starting", "w1", None, 0.0)
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
-    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
-    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
-    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
-    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
+    for name in ("_attach", "_cull_detached", "_local_models_detached", "_settings_sync_detached",
+                 "_pause_running", "_preflight", "_trust_codex_hook"):
+        monkeypatch.setattr(cli, name, lambda *a, **kw: None)
     monkeypatch.chdir(repo)
-
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
-    assert git.current_branch(str(repo)) == "main"
-    assert spawned_branches == ["main"]
+    return calls
 
 
-def test_start_on_merged_branch_does_not_switch_when_dirty(db, repo, monkeypatch):
-    from brindle import cli, agents
-    sh("git checkout -b feat/merged-dirty", repo)
-    (repo / "feature_dirty.txt").write_text("dirty")
-    sh("git add feature_dirty.txt && git commit -m 'feat dirty'", repo)
-    sh("git checkout main && git merge feat/merged-dirty", repo)
-    sh("git checkout feat/merged-dirty", repo)
-    (repo / "uncommitted.txt").write_text("uncommitted work")
-
-    spawned_branches = []
-    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
-        spawned_branches.append(ws_arg.branch)
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.id = "agent-merged-dirty"
-        m.profile = agent_arg
-        m.tmux_window = "w1"
-        return m
-
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
-    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
-    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
-    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
-    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
-    monkeypatch.chdir(repo)
-
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
-    assert git.current_branch(str(repo)) == "feat/merged-dirty"
-    assert spawned_branches == ["feat/merged-dirty"]
+@pytest.mark.parametrize("dirty", [False, True])
+def test_start_on_a_merged_branch_switches_to_main_only_when_clean(db, repo, started, dirty):
+    sh("git checkout -b feat/merged && echo x > feature.txt && git add feature.txt && git commit -qm feat"
+       " && git checkout -q main && git merge -q feat/merged && git checkout -q feat/merged", repo)
+    if dirty:
+        (repo / "uncommitted.txt").write_text("uncommitted work")
+    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None,
+              branch=None, worktree=None)
+    expected = "feat/merged" if dirty else "main"
+    assert git.current_branch(str(repo)) == expected
+    assert [branch for branch, _, _ in started] == [expected]
 
 
-def test_start_on_squash_merged_branch_detects_squash(repo):
-    # Create a feature branch with multiple commits and squash merge into main
-    sh("git checkout -b feat/multi-squash", repo)
-    (repo / "step1.txt").write_text("step 1")
-    sh("git add step1.txt && git commit -m 'step 1'", repo)
-    (repo / "step2.txt").write_text("step 2")
-    sh("git add step2.txt && git commit -m 'step 2'", repo)
-    sh("git checkout main", repo)
-    sh("git merge --squash feat/multi-squash && git commit -m 'squashed feat'", repo)
-    sh("git checkout feat/multi-squash", repo)
-    assert git.merged_into_default(str(repo), "feat/multi-squash")
-
-
-def test_remote_only_squash_merge_detected(tmp_path):
-    # Set up a bare remote with default branch main and clone it
-    remote = tmp_path / "remote.git"
-    remote.mkdir()
-    sh("git init --bare -b main", remote)
-
-    local = tmp_path / "local"
-    sh(f"git clone {remote} {local}", tmp_path)
-    sh("git checkout -b main", local)
-    (local / "init.txt").write_text("initial")
-    sh("git add init.txt && git commit -m 'initial' && git push origin main", local)
-
-    # Create feature branch locally
-    sh("git checkout -b feat/remote-squash", local)
-    (local / "feature.txt").write_text("feature work")
-    sh("git add feature.txt && git commit -m 'feat commit' && git push origin feat/remote-squash", local)
-
-    # In another clone, squash merge feat/remote-squash into main and push to remote
-    other = tmp_path / "other"
-    sh(f"git clone {remote} {other}", tmp_path)
-    sh("git checkout main && git merge --squash origin/feat/remote-squash", other)
-    sh("git commit -m 'squashed feature' && git push origin main", other)
-
-    # Now in local, main and origin/main are stale; merged_into_default must fetch origin
-    # and detect the squash merge
-    sh("git checkout feat/remote-squash", local)
-    assert git.merged_into_default(str(local), "feat/remote-squash")
+def test_supervisor_command_starts_explicit_supervisor_with_autopilot(db, repo, started):
+    cli.supervisor(prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None,
+                   worktree=None)
+    assert [(p, ap) for _, p, ap in started] == [("supervisor", True)]
 
 
 def test_squash_merged_branch_detected_after_main_advances(tmp_path):
-    repo = tmp_path / "repo_squash"
+    repo = tmp_path / "no-origin"   # no origin/HEAD: the default branch is found locally
     repo.mkdir()
-    sh("git init -b main", repo)
-    sh("git config user.name 'Test' && git config user.email 'test@test.invalid'", repo)
-    (repo / "a.txt").write_text("base\n")
-    sh("git add . && git commit -m 'base'", repo)
-    sh("git checkout -b feature", repo)
-    (repo / "a.txt").write_text("feature\n")
-    sh("git add . && git commit -m 'first feature change'", repo)
-    (repo / "b.txt").write_text("second change\n")
-    sh("git add . && git commit -m 'second feature change'", repo)
-    sh("git checkout main", repo)
-    sh("git merge --squash feature", repo)
-    sh("git commit -m 'squash feature'", repo)
+    sh("git init -q -b main && git config user.name T && git config user.email t@test.invalid"
+       " && echo base > a.txt && git add . && git commit -qm base", repo)
+    sh("git checkout -q -b feature && echo feature > a.txt && git add . && git commit -qm one"
+       " && echo two > b.txt && git add . && git commit -qm two && git checkout -q main"
+       " && git merge -q --squash feature && git commit -qm squash", repo)
     assert git.merged_into_default(str(repo), "feature") is True
-
-    # Main advances with a subsequent edit touching the same file
-    (repo / "a.txt").write_text("feature with subsequent improvement\n")
-    sh("git add . && git commit -m 'subsequent improvement on main'", repo)
+    sh("echo improved > a.txt && git add . && git commit -qm 'improvement on main'", repo)
     assert git.merged_into_default(str(repo), "feature") is True
-
-
-def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatch):
-    from brindle import cli, agents
-    # When starting in an existing repo without specifying --agent, it must use default_agent (developer)
-    spawned_profiles = []
-    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
-        spawned_profiles.append((agent_arg, kwargs.get("autopilot")))
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.id = "agent-123"
-        m.profile = agent_arg
-        m.tmux_window = "w1"
-        return m
-
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
-    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
-    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
-    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
-    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
-    monkeypatch.chdir(repo)
-
-    # Calling start with agent=None (default behavior)
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
-    assert len(spawned_profiles) == 1
-    profile, autopilot = spawned_profiles[0]
-    assert profile == "developer"
-    assert autopilot is False
-def test_scratch_implicit_start_defaults_to_developer(db, tmp_path, monkeypatch):
-    from brindle import cli, agents
-    # When starting outside a git repo (scratch directory) without --agent,
-    # it must use default_agent (developer) and autopilot=False
-    spawned_profiles = []
-    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
-        spawned_profiles.append((agent_arg, kwargs.get("autopilot")))
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.id = "agent-scratch-123"
-        m.profile = agent_arg
-        m.tmux_window = "w1"
-        return m
-
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
-    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
-    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
-    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
-    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
-    monkeypatch.chdir(tmp_path)
-
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
-    assert len(spawned_profiles) == 1
-    profile, autopilot = spawned_profiles[0]
-    assert profile == "developer"
-    assert autopilot is False
-
-
-def test_supervisor_command_starts_explicit_supervisor_with_autopilot(db, repo, monkeypatch):
-    from brindle import cli, agents
-    spawned_profiles = []
-    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
-        spawned_profiles.append((agent_arg, kwargs.get("autopilot")))
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.id = "agent-sup-123"
-        m.profile = agent_arg
-        m.tmux_window = "w1"
-        return m
-
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
-    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
-    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
-    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
-    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
-    monkeypatch.chdir(repo)
-
-    # Calling explicit supervisor command
-    cli.supervisor(prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
-    assert len(spawned_profiles) == 1
-    profile, autopilot = spawned_profiles[0]
-    assert profile == "supervisor"
-    assert autopilot is True

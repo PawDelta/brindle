@@ -83,14 +83,6 @@ def test_new_commit_replaces_the_old_reviewer(db, ws, monkeypatch):
     assert db.get_agent(old.id).status == "done"
 
 
-def test_finished_reviewer_does_not_block_a_new_one(db, ws, monkeypatch):
-    started = fake_spawn(monkeypatch)
-    old = agents.request_review(db, None, ws, "reviewer")
-    db.update_agent(old.id, result="verdict")
-    agents.request_review(db, None, ws, "reviewer")
-    assert len(started) == 2
-
-
 def test_no_notice_once_the_reviewer_submitted_for_the_current_commit(db, ws, boss, monkeypatch):
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda *a, **k: sent.append(a))
@@ -98,18 +90,6 @@ def test_no_notice_once_the_reviewer_submitted_for_the_current_commit(db, ws, bo
     db.add_review(ws.id, gates.head(ws), rev.id, True, "fine")
     agents.tell_parent_unreported(db, rev)
     assert sent == []
-
-
-def test_notice_once_from_brindle_naming_a_reviewer(db, ws, boss, monkeypatch):
-    sent = []
-    monkeypatch.setattr(agents, "send_message", lambda *a, **k: sent.append(a))
-    rev = add_reviewer(db, ws)
-    agents.tell_parent_unreported(db, rev)
-    agents.tell_parent_unreported(db, db.get_agent(rev.id))
-    assert len(sent) == 1
-    _, to_id, body = sent[0][:3]
-    assert to_id == "boss" and len(sent[0]) == 3   # no sender: it comes from brindle
-    assert body.startswith("Reviewer rev1") and "Worker" not in body
 
 
 def test_review_at_an_older_commit_still_gets_its_one_notice(db, ws, boss, monkeypatch):

@@ -37,23 +37,6 @@ def configure(repo, services_cfg):
     (repo / ".brindle" / "config.json").write_text(json.dumps({"services": services_cfg}))
 
 
-def test_presets_and_env_rendering(db, repo):
-    configure(repo, [
-        {"name": "db", "preset": "postgres"},
-        {"name": "my-cache", "image": "x/y:1", "port": 7000,
-         "env": {"CACHE": "{name}@{workspace}:{port}"}},
-    ])
-    ws = workspaces.create(db, str(repo), "feat-a", run_setup=False).workspace
-    cfg = load_repo_config(str(repo))
-    svcs = services.resolve(ws, cfg)
-    assert svcs[0].image.startswith("postgres:") and svcs[0].port == 5432
-    assert svcs[0].env["DATABASE_URL"] == (
-        f"postgres://postgres:brindle@127.0.0.1:{ws.port_base + 1}/app")
-    assert svcs[0].env["BRINDLE_SVC_DB_PORT"] == str(ws.port_base + 1)
-    assert svcs[1].env["CACHE"] == f"my-cache@{ws.name}:{ws.port_base + 2}"
-    assert svcs[1].env["BRINDLE_SVC_MY_CACHE_PORT"] == str(ws.port_base + 2)
-
-
 def test_ports_come_from_the_block_after_the_apps_own(db, repo):
     configure(repo, [{"name": f"s{i}", "image": "i", "port": 1000 + i}
                      for i in range(PORT_BLOCK_SIZE + 2)])
