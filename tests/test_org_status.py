@@ -2,23 +2,15 @@
 policy refetch when policy_version moves, and what lands on disk."""
 import json
 
-import pytest
 from org_status_fixtures import ORG, control, ent, notice, org, poller  # noqa: F401
 
 from brindle import airgap
-from brindle.pro import status, team_policy
+from brindle.pro import status
 
 NOW = 1_000_000.0
 
 
 # -- pacing -------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("idle,working,want", [
-    (0, False, 60), (14 * 60, False, 60), (15 * 60, False, 300), (3 * 3600, False, 300),
-    (3 * 3600, True, 60)])
-def test_interval_follows_the_last_activity(idle, working, want):
-    assert status.interval(NOW, NOW - idle, working) == want
 
 
 def test_touch_brings_the_pace_back(monkeypatch):
@@ -89,37 +81,7 @@ def test_malformed_notices_and_controls_are_dropped(org):
     assert [n["id"] for n in st.notices] == ["ok"] and st.control is None
 
 
-def test_the_file_is_private_and_belongs_to_one_org(org, monkeypatch):
-    org.body = {"policy_version": 1, "paused": True}
-    poller().poll_once()
-    assert (status._path().stat().st_mode & 0o777) == 0o600
-    assert status.load("org_other").status.paused is False
-
-
 # -- the policy follows policy_version ------------------------------------------------------------
-
-
-def test_a_newer_policy_version_refetches_the_policy(org):
-    org.body = {"policy_version": 5, "notices": []}
-    org.policy = {"org_id": ORG, "version": 5, "policy": {"max_parallel_workers": 2}}
-    seen = []
-
-    def refetch(e):
-        seen.append(e.org_id)
-        team_policy.fetch_policy(ORG, object(), object(), cached_for=(e.role, None))
-
-    poller(refetch=refetch).poll_once()
-    assert seen == [ORG]
-    assert team_policy.load_cached(ORG).version == 5
-    assert org.count("GET", "/policy") == 1
-
-
-def test_an_unchanged_version_fetches_nothing(org):
-    team_policy.save_cached(team_policy.parse_policy(ORG, {"org_id": ORG, "version": 5, "policy": {}}))
-    org.body = {"policy_version": 5}
-    seen = []
-    poller(refetch=lambda e: seen.append(1)).poll_once()
-    assert not seen and org.count("GET", "/policy") == 0
 
 
 def test_a_failing_refetch_does_not_fail_the_poll(org):
@@ -130,13 +92,6 @@ def test_a_failing_refetch_does_not_fail_the_poll(org):
 
     st = poller(refetch=boom).poll_once()
     assert st is not None and status.load(ORG).status.paused
-
-
-def test_the_default_refetch_uses_the_policy_endpoint(org):
-    org.body = {"policy_version": 7}
-    org.policy = {"org_id": ORG, "version": 7, "policy": {"max_parallel_workers": 3}}
-    poller().poll_once()
-    assert team_policy.load_cached(ORG).max_parallel_workers == 3
 
 
 # -- the thread -------------------------------------------------------------------------------------

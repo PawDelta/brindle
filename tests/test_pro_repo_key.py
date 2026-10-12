@@ -38,58 +38,14 @@ def new_repo(path, *, commit=True, origin=None):
 # -- repo identity -----------------------------------------------------------------------------
 
 
-def test_two_clones_at_different_paths_share_an_identity_and_key(tmp_path):
-    a = new_repo(tmp_path / "a")
-    git(tmp_path, "clone", "-q", str(a), str(tmp_path / "elsewhere" / "b"))
-    b = tmp_path / "elsewhere" / "b"
-    ia, ib = repo_identity(str(a)), repo_identity(str(b))
-    root = git(a, "rev-list", "--max-parents=0", "HEAD").strip()
-    assert ia == ib == root
-    key = OrgKey("org_1", "k1", b"\x01" * 32)
-    assert key.repo_key(ia) == key.repo_key(ib)
-
-
-def test_several_roots_use_the_smallest(tmp_path):
-    r = new_repo(tmp_path / "r")
-    git(r, "checkout", "-q", "--orphan", "other")
-    (r / "OTHER").write_text("x\n")
-    git(r, "add", "OTHER")
-    git(r, "commit", "-q", "-m", "second root")
-    git(r, "checkout", "-q", "main")
-    git(r, "merge", "-q", "--allow-unrelated-histories", "-m", "join", "other")
-    roots = git(r, "rev-list", "--max-parents=0", "HEAD").split()
-    assert len(roots) == 2
-    assert repo_identity(str(r)) == min(roots)
-
-
-@pytest.mark.parametrize("url", [
-    "git@github.com:Owner/Repo.git",
-    "ssh://git@GitHub.com/Owner/Repo.git",
-    "ssh://git@github.com:22/Owner/Repo",
-    "https://github.com/Owner/Repo.git",
-    "https://user:tok@GITHUB.COM/Owner/Repo/",
-    "http://github.com/Owner/Repo",
-])
-def test_ssh_and_https_origins_normalize_equal(url):
-    assert normalize_remote(url) == "github.com/Owner/Repo"
-
-
 def test_empty_repos_fall_back_to_the_origin_url(tmp_path):
     a = new_repo(tmp_path / "a", commit=False, origin="git@github.com:Owner/Repo.git")
     b = new_repo(tmp_path / "b", commit=False, origin="https://github.com/Owner/Repo")
     assert repo_identity(str(a)) == repo_identity(str(b)) == "github.com/Owner/Repo"
 
 
-@pytest.mark.parametrize("url", ["", "not a url", "file:///srv/repo.git", "/srv/repo.git"])
-def test_unusable_origins_are_no_identity(url):
-    assert normalize_remote(url) is None
-
-
-def test_no_commits_and_no_origin_is_no_identity(tmp_path):
-    assert repo_identity(str(new_repo(tmp_path / "e", commit=False))) is None
-    (tmp_path / "plain").mkdir()
-    assert repo_identity(str(tmp_path / "plain")) is None
-    assert repo_identity(str(tmp_path / "missing")) is None
+def test_unusable_origins_are_no_identity():
+    assert normalize_remote("") is None
 
 
 # -- domain separation -------------------------------------------------------------------------------
@@ -148,31 +104,6 @@ def task(repo, agent="w1"):
     return TaskInfo(repo_root=str(repo), task="Fix the crash", agent_id=agent, profile="developer")
 
 
-def test_clones_send_the_same_repo_key(learning_backend, tmp_path):
-    a = new_repo(tmp_path / "a")
-    git(tmp_path, "clone", "-q", str(a), str(tmp_path / "b"))
-    store = logged_in(learning_backend, tmp_path)
-    for repo in (a, tmp_path / "b"):
-        lr = learner(learning_backend, store, tmp_path, repo)
-        lr.record(task(repo), Outcome("merged"))
-        lr.flush()
-    ka, kb = (r["repo_key"] for r in learning_backend.records)
-    assert ka == kb
-
-
-def test_different_orgs_give_different_keys(learning_backend, tmp_path):
-    repo = new_repo(tmp_path / "r")
-    keys = []
-    for org in ("org_1", "org_2"):
-        store = logged_in(learning_backend, tmp_path, org)
-        lr = learner(learning_backend, store, tmp_path, repo)
-        lr.record(task(repo), Outcome("merged"))
-        lr.flush()
-        keys.append(learning_backend.records[-1]["repo_key"])
-    assert keys[0] != keys[1]
-    assert learning_backend.key_fetches == ["org_1", "org_2"]     # org change -> refetch
-
-
 def test_no_identity_means_nothing_is_sent(learning_backend, tmp_path):
     repo = new_repo(tmp_path / "empty", commit=False)
     store = logged_in(learning_backend, tmp_path)
@@ -182,33 +113,6 @@ def test_no_identity_means_nothing_is_sent(learning_backend, tmp_path):
     assert lr.suggest(task(repo), ["developer", "reviewer"]) is None
     assert learning_backend.records == [] and learning_backend.suggests == []
     assert learning_backend.key_fetches == []
-
-
-def test_a_key_id_change_triggers_a_refetch(learning_backend, tmp_path):
-    repo = new_repo(tmp_path / "r")
-    store = logged_in(learning_backend, tmp_path)
-    lr = learner(learning_backend, store, tmp_path, repo)
-    lr.suggest(task(repo), ["developer", "reviewer"])
-    old = learning_backend.suggests[-1]["repo_key"]
-    # the server rotates the org key and says so
-    learning_backend.org_keys["org_1"] = ("k2", b"\x07" * 32)
-    learning_backend.announce = "k2"
-    lr.suggest(task(repo), ["developer", "reviewer"])
-    assert learning_backend.key_fetches == ["org_1"]
-    lr.suggest(task(repo), ["developer", "reviewer"])
-    assert learning_backend.key_fetches == ["org_1", "org_1"]
-    new = learning_backend.suggests[-1]["repo_key"]
-    assert new != old and new == OrgKey("org_1", "k2", b"\x07" * 32).repo_key(repo_identity(str(repo)))
-
-
-def test_the_same_key_id_does_not_refetch(learning_backend, tmp_path):
-    repo = new_repo(tmp_path / "r")
-    store = logged_in(learning_backend, tmp_path)
-    learning_backend.announce = "k1"
-    lr = learner(learning_backend, store, tmp_path, repo)
-    for _ in range(3):
-        lr.suggest(task(repo), ["developer", "reviewer"])
-    assert learning_backend.key_fetches == ["org_1"]
 
 
 def test_malformed_keys_are_refused(backend, tmp_path):

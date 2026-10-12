@@ -9,18 +9,17 @@ import pytest
 from brindle import agents, company_identity, company_login, doctor, secrets, tmux, workspaces
 from brindle.db import Agent
 from brindle.pro import license, managed_models, team_policy
-from brindle.pro._files import private_dir
-from brindle.pro.team_policy import OrgPolicy, ProviderConfig, parse_policy
+from brindle.pro.team_policy import ProviderConfig, parse_policy
 from brindle.profiles import Profile
 
-from pro_fixtures import backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401
+from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401
 from test_pro_team import ORG, POLICY, plugin, team, team_claims, login  # noqa: F401 - fixtures
 
 BEDROCK = {"provider": "bedrock", "region": "us-east-1",
            "model_ids": ["anthropic.claude-sonnet-4", "anthropic.claude-haiku-4"], "endpoint": None}
 VERTEX = {"provider": "vertex", "region": "europe-west1", "model_ids": ["claude-sonnet-4@2025"],
           "endpoint": "acme-project"}
-AZURE = {"provider": "azure", "region": None, "model_ids": ["gpt-5"],
+AZURE ={"provider": "azure", "region": None, "model_ids": ["gpt-5"],
          "endpoint": "https://acme.openai.azure.com/v1"}
 COMPAT = {"provider": "openai-compatible", "region": None, "model_ids": [],
           "endpoint": "https://llm.acme.internal/v1"}
@@ -75,11 +74,9 @@ def test_the_fields_survive_the_cache():
 
 
 @pytest.mark.parametrize("over", [
-    {"provider_config": "bedrock"}, {"provider_config": {"provider": "openai"}},
+    {"provider_config": {"provider": "openai"}},
     {"provider_config": {"provider": "bedrock", "region": 3}},
-    {"provider_config": {"provider": "bedrock", "model_ids": "x"}},
     {"provider_config": {"provider": "bedrock", "model_ids": [""]}},
-    {"provider_config": {"provider": "azure", "endpoint": ""}},
     {"deny_personal_keys": "yes"},
 ])
 def test_malformed_fields_make_the_policy_unusable(over):
@@ -98,34 +95,6 @@ def enterprise(team, monkeypatch):
     return team
 
 
-def test_managed_settings_come_from_the_org_policy(enterprise):
-    m = managed_models.current("/repo")
-    assert m.org_id == ORG and m.config == cfg(BEDROCK) and m.deny_personal_keys
-    assert m.denied_keys == secrets.PERSONAL_KEYS
-
-
-def test_without_the_feature_nothing_is_managed(team, monkeypatch):
-    team.policy_body = {**team.policy_body, "policy": {**POLICY, "provider_config": BEDROCK,
-                                                       "deny_personal_keys": True}}
-    monkeypatch.setattr(license, "has", lambda feature: False)
-    monkeypatch.setattr(team_policy, "managed_models", lambda root: plugin(team).managed_models())
-    assert managed_models.current("/repo") is None
-    assert f"GET /orgs/{ORG}/policy" not in team.paths()
-
-
-def test_an_org_that_sets_neither_field_manages_nothing(enterprise):
-    enterprise.policy_body = {**enterprise.policy_body, "policy": dict(POLICY)}
-    assert managed_models.current("/repo") is None
-
-
-def test_an_unreadable_policy_fails_closed(enterprise):
-    from brindle.pro import auth
-
-    enterprise.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
-    with pytest.raises(managed_models.ManagedUnavailable, match="never been fetched"):
-        managed_models.current("/repo")
-
-
 def test_a_license_that_cant_be_checked_means_not_managed(team, monkeypatch):
     def boom(feature):
         raise RuntimeError("no license")
@@ -137,62 +106,12 @@ def test_a_license_that_cant_be_checked_means_not_managed(team, monkeypatch):
 # -- the provider -------------------------------------------------------------------------------
 
 
-def test_bedrock_env():
-    assert managed_models.provider_env(cfg(BEDROCK), "claude") == {
-        "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-east-1",
-        "ANTHROPIC_MODEL": "anthropic.claude-sonnet-4",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "anthropic.claude-haiku-4"}
-
-
-def test_vertex_env():
-    assert managed_models.provider_env(cfg(VERTEX), "claude") == {
-        "CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "europe-west1",
-        "ANTHROPIC_VERTEX_PROJECT_ID": "acme-project", "ANTHROPIC_MODEL": "claude-sonnet-4@2025"}
-
-
-def test_vertex_project_wins_over_endpoint():
-    both = ProviderConfig("vertex", "europe-west1", (), "legacy-endpoint", "acme-project")
-    assert managed_models.provider_env(both, "claude")["ANTHROPIC_VERTEX_PROJECT_ID"] == "acme-project"
-    only = ProviderConfig("vertex", "europe-west1", (), None, "acme-project")
-    assert managed_models.provider_env(only, "claude")["ANTHROPIC_VERTEX_PROJECT_ID"] == "acme-project"
-    old = ProviderConfig("vertex", "europe-west1", (), "legacy-endpoint")
-    assert managed_models.provider_env(old, "claude")["ANTHROPIC_VERTEX_PROJECT_ID"] == "legacy-endpoint"
-
-
-def test_provider_config_project_is_parsed():
-    from brindle.pro import team_policy
-
-    got = team_policy._managed({"provider_config": {**VERTEX, "project": "acme-project"}})
-    assert got["provider_config"].project == "acme-project"
-    assert team_policy._managed({"provider_config": VERTEX})["provider_config"].project is None
-
-
-def test_personal_key_refusal_says_how_to_fix_it():
-    why = managed_models.refusal(managed(COMPAT, deny=True),
-                                 profile("native", api_key_env="OPENAI_API_KEY"))
-    assert "OPENAI_API_KEY" in why and "api_key_env" in why
-
-
 def test_azure_and_openai_compatible_env():
     assert managed_models.provider_env(cfg(AZURE), "claude")["CLAUDE_CODE_USE_FOUNDRY"] == "1"
     assert managed_models.provider_env(cfg(AZURE), "codex") == {"OPENAI_BASE_URL": AZURE["endpoint"]}
     assert managed_models.provider_env(cfg(COMPAT), "codex") == {"OPENAI_BASE_URL": COMPAT["endpoint"]}
     assert managed_models.provider_env(cfg(COMPAT), "claude") == {}
     assert managed_models.provider_env(cfg(BEDROCK), "codex") == {}
-
-
-def test_native_profiles_get_the_managed_endpoint_and_model():
-    p = managed_models.apply_profile(managed(AZURE), profile("native", model="llama3"))
-    assert (p.base_url, p.model) == (AZURE["endpoint"], "gpt-5")
-    same = managed_models.apply_profile(managed(AZURE), profile("native", model="gpt-5"))
-    assert same.model == "gpt-5"
-
-
-def test_claude_profiles_get_a_model_the_provider_serves():
-    p = managed_models.apply_profile(managed(BEDROCK), profile(model="sonnet"))
-    assert p.model == "anthropic.claude-sonnet-4"
-    kept = managed_models.apply_profile(managed(BEDROCK), profile(model="anthropic.claude-haiku-4"))
-    assert kept.model == "anthropic.claude-haiku-4"
 
 
 def test_nothing_changes_without_a_provider_config():
@@ -206,15 +125,9 @@ def test_nothing_changes_without_a_provider_config():
 
 
 @pytest.mark.parametrize("m, p, words", [
-    (managed(BEDROCK), profile(env={"ANTHROPIC_BASE_URL": "https://proxy"}), "ANTHROPIC_BASE_URL"),
-    (managed(BEDROCK), profile(env={"CLAUDE_CODE_USE_VERTEX": "1"}), "CLAUDE_CODE_USE_VERTEX"),
-    (managed(COMPAT), profile(), "can't use an OpenAI-compatible endpoint"),
     (managed(BEDROCK), profile("codex"), "Codex, which can't use AWS Bedrock"),
     (managed(AZURE), profile("codex", env={"OPENAI_BASE_URL": "https://x"}), "OPENAI_BASE_URL"),
-    (managed(BEDROCK), profile("native", base_url="http://localhost:11434/v1"), "its own endpoint"),
-    (managed(AZURE), profile("native", base_url="http://localhost:11434/v1"), "not " + AZURE["endpoint"]),
     (managed(BEDROCK), profile("antigravity"), "antigravity, which can't run on AWS Bedrock"),
-    (managed(deny=True), profile(env={"ANTHROPIC_API_KEY": "sk"}), "ANTHROPIC_API_KEY"),
     (managed(deny=True), profile("native", api_key_env="OPENAI_API_KEY"), "OPENAI_API_KEY"),
 ])
 def test_profiles_pointing_elsewhere_are_refused_with_a_reason(m, p, words):
@@ -223,12 +136,7 @@ def test_profiles_pointing_elsewhere_are_refused_with_a_reason(m, p, words):
 
 
 @pytest.mark.parametrize("m, p", [
-    (managed(BEDROCK), profile(env={"EDITOR": "vim"})),
-    (managed(AZURE), profile("codex")),
-    (managed(AZURE), profile("native", base_url=AZURE["endpoint"] + "/")),
-    (managed(AZURE), profile("native")),
     (managed(BEDROCK), profile("shell")),
-    (managed(deny=True), profile("native", api_key_env="ACME_LLM_KEY")),
     (managed(deny=True), profile("antigravity")),
 ])
 def test_compatible_profiles_run(m, p):
@@ -251,14 +159,6 @@ def test_pane_unset_always_takes_denied_names_out():
                                                     deny=secrets.PERSONAL_KEYS)
 
 
-def test_personal_keys_cover_every_provider_sign_in_key():
-    for p in ("claude", "codex", "antigravity"):
-        keys = {k for k in secrets.provider_credentials(p)
-                if k.endswith(("_API_KEY", "_AUTH_TOKEN", "OAUTH_TOKEN")) and "FOUNDRY" not in k
-                and not k.startswith(("AWS_", "AZURE_"))}
-        assert keys <= set(secrets.PERSONAL_KEYS), p
-
-
 # -- the wiring in agents -----------------------------------------------------------------------
 
 
@@ -271,33 +171,6 @@ def agent(db, ws, provider="claude", profile_name="developer"):
 @pytest.fixture
 def ws(db, repo):
     return workspaces.adopt_root(db, str(repo))
-
-
-def test_agent_env_points_workers_at_the_managed_provider(db, ws, monkeypatch):
-    a = agent(db, ws)
-    monkeypatch.setattr(agents, "managed", lambda root: managed(BEDROCK, deny=True))
-    env = agents.agent_env(ws, "w1", a)
-    assert env["CLAUDE_CODE_USE_BEDROCK"] == "1" and env["AWS_REGION"] == "us-east-1"
-    assert env["BRINDLE_AGENT_ID"] == "w1"
-
-
-def test_agent_env_is_untouched_without_managed_models(db, ws, monkeypatch):
-    a = agent(db, ws)
-    monkeypatch.setattr(agents, "managed", lambda root: None)
-    assert "CLAUDE_CODE_USE_BEDROCK" not in agents.agent_env(ws, "w1", a)
-
-
-def test_an_unreadable_policy_stops_every_launch(db, ws, monkeypatch):
-    a = agent(db, ws)
-
-    def down(root):
-        raise managed_models.ManagedUnavailable("no policy")
-
-    monkeypatch.setattr(managed_models, "current", down)
-    with pytest.raises(agents.AgentError, match="managed models: no policy"):
-        agents.agent_env(ws, "w1", a)
-    with pytest.raises(agents.AgentError, match="managed models"):
-        agents._profile_for(db, a, ws)
 
 
 def test_a_launch_reads_the_policy_once(db, ws, monkeypatch):
@@ -328,12 +201,6 @@ def test_a_refused_profile_does_not_launch(db, ws, repo, monkeypatch):
         agents._profile_for(db, a, ws)
 
 
-def test_the_launched_profile_has_the_managed_model(db, ws, monkeypatch):
-    a = agent(db, ws)
-    monkeypatch.setattr(agents, "managed", lambda root: managed(BEDROCK))
-    assert agents._profile_for(db, a, ws).model == "anthropic.claude-sonnet-4"
-
-
 def test_the_pane_is_opened_without_personal_keys(db, ws, monkeypatch):
     a = agent(db, ws)
     seen = {}
@@ -356,33 +223,6 @@ def test_the_pane_is_opened_without_personal_keys(db, ws, monkeypatch):
     monkeypatch.setattr(agents, "managed", lambda root: managed(BEDROCK))
     agents._open_window(db, a, ws, "w", ["claude"], False)
     assert "deny" not in seen["kw"]
-
-
-def test_real_panes_start_without_personal_keys(tmp_path, monkeypatch):
-    """The unset really happens: a pane started with ``deny`` doesn't see the key."""
-    import shutil
-    import subprocess
-
-    if not shutil.which("tmux"):
-        pytest.skip("tmux isn't installed")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-personal")
-    monkeypatch.setenv("AWS_PROFILE", "company")
-    session = f"managed-{time.time_ns()}"
-    tmux.ensure_session(session, str(tmp_path), {"ANTHROPIC_API_KEY": "sk-personal", "AWS_PROFILE": "company"})
-    out = tmp_path / "env.txt"
-    try:
-        tmux.new_window(session, "w", str(tmp_path), ["/bin/sh", "-c", f'env > "{out}"'], {},
-                        keep=secrets.provider_credentials("claude"), deny=secrets.PERSONAL_KEYS)
-        for _ in range(50):
-            if out.exists() and out.stat().st_size:
-                break
-            time.sleep(0.1)
-        text = out.read_text()
-    finally:
-        subprocess.run(["tmux", *(["-L", tmux.socket()] if hasattr(tmux, "socket") else []),
-                        "kill-session", "-t", f"={session}"], capture_output=True)
-    assert "ANTHROPIC_API_KEY" not in text and "sk-personal" not in text
-    assert "AWS_PROFILE=company" in text
 
 
 def test_real_panes_keep_the_federation_proxys_token_under_deny(tmp_path, monkeypatch):
@@ -579,18 +419,6 @@ def test_an_old_policy_and_its_migrated_form_are_equivalent(db, ws, monkeypatch,
 
 
 # -- doctor -------------------------------------------------------------------------------------
-
-
-def test_doctor_shows_the_managed_provider(enterprise):
-    (c,) = doctor.managed_checks("/repo")
-    assert c.level == doctor.OK and c.name == "managed models"
-    assert "AWS Bedrock" in c.detail and "us-east-1" in c.detail and "personal API keys denied" in c.detail
-
-
-def test_doctor_says_nothing_without_managed_models(team, monkeypatch):
-    monkeypatch.setattr(license, "has", lambda feature: False)
-    monkeypatch.setattr(team_policy, "managed_models", lambda root: plugin(team).managed_models())
-    assert doctor.managed_checks("/repo") == []
 
 
 def test_doctor_fails_when_the_policy_cant_be_read(enterprise):

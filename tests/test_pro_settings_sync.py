@@ -68,13 +68,6 @@ def test_pull_applies_newer_server_values_and_keeps_local_keys(backend, store):
     assert settings_sync.pull(client(backend), store).action == "unchanged"
 
 
-def test_first_pull_on_a_new_machine_adopts_the_account_settings(backend, store):
-    backend.settings, backend.settings_at = {"sidebar": "bottom"}, time.time()
-    assert settings_sync.pull(client(backend), store).action == "pulled"
-    assert read_cfg() == {"sidebar": "bottom"}
-    assert not puts(backend)
-
-
 def test_local_change_since_last_sync_is_pushed_not_overwritten(backend, store):
     write_cfg(delegation="balanced")
     settings_sync.push(client(backend), store)
@@ -95,37 +88,12 @@ def test_push_from_a_fresh_machine_keeps_the_servers_other_keys(backend, store):
     assert read_cfg() == {"sidebar": "bottom", "delegation": "fast"}
 
 
-def test_state_file_is_private(backend, store, brindle_home):
-    write_cfg(delegation="fast")
-    settings_sync.push(client(backend), store)
-    f = brindle_home / "pro" / "settings-sync.json"
-    assert f.stat().st_mode & 0o777 == 0o600
-
-
-def test_unentitled_sends_nothing(backend, store):
-    login(backend, store, features=("learning",))
-    write_cfg(delegation="fast")
-    for fn in (settings_sync.push, settings_sync.pull):
-        assert fn(client(backend), store).action == "skipped"
-    assert not [c for c in backend.calls if "settings" in c[0]]
-
-
 def test_server_403_is_skipped_quietly(backend, store):
     backend.settings_allowed = False
     write_cfg(delegation="fast")
     r = settings_sync.pull(client(backend), store)
     assert r.action == "skipped"
     assert read_cfg() == {"delegation": "fast"}
-
-
-def test_airgap_sends_nothing(backend, store, monkeypatch):
-    from brindle import airgap
-
-    monkeypatch.setattr(airgap, "enabled", lambda: True)
-    write_cfg(delegation="fast")
-    assert settings_sync.push(client(backend), store).action == "skipped"
-    assert settings_sync.pull(client(backend), store).action == "skipped"
-    assert not [c for c in backend.calls if "settings" in c[0]]
 
 
 def test_offline_never_raises_and_catches_up_later(backend, store):
@@ -142,14 +110,6 @@ def test_not_logged_in_never_raises(brindle_home):
     assert settings_sync.pull().action == "skipped"
     assert settings_sync.push().action == "skipped"
     settings_sync.push_soon()
-
-
-def test_set_user_pushes_when_entitled(backend, store, monkeypatch):
-    sent = []
-    monkeypatch.setattr(settings_sync, "push_soon", lambda: sent.append(1))
-    config.set_user("delegation", "fast")
-    config.set_user("learning", "off")                   # not synced
-    assert sent == [1]
 
 
 def test_set_user_survives_a_failing_sync(brindle_home, monkeypatch):

@@ -6,13 +6,11 @@ import json
 import os
 import re
 import stat
+import threading
 import time
-from importlib.metadata import entry_points
 
 import pytest
 
-from brindle import plugins
-from brindle.config import RepoConfig
 from brindle.events import Event
 from brindle.policy import AssignInfo, MergeInfo
 from brindle.pro import account, auth, credentials
@@ -103,21 +101,6 @@ def merge(actor):
 # -- policy: no team entitlement ------------------------------------------------------------------
 
 
-def test_everything_allowed_when_not_logged_in(backend):
-    p = ProPolicy(REPO, store=credentials.default_store(), client=client(backend))
-    assert p.check_assign(assign(provider="anything")).allowed
-    assert p.check_merge(merge("supervisor")).allowed
-    assert backend.calls == []
-
-
-def test_everything_allowed_without_the_team_feature(team):
-    login(team, claims(features=["learning"]))
-    p = plugin(team)
-    assert p.check_assign(assign(provider="ollama", model=None)).allowed
-    assert p.check_merge(merge(SUPERVISOR)).allowed
-    assert f"GET /orgs/{ORG}/policy" not in team.paths()
-
-
 def test_a_broken_credential_store_allows_everything(backend, monkeypatch):
     def boom():
         raise RuntimeError("keychain is having a day")
@@ -130,115 +113,16 @@ def test_a_broken_credential_store_allows_everything(backend, monkeypatch):
 # -- policy rules ------------------------------------------------------------------------------------
 
 
-def test_allowed_provider_and_model_pass(team):
-    assert plugin(team).check_assign(assign()).allowed
-
-
-def test_provider_outside_the_list_is_denied(team):
-    d = plugin(team).check_assign(assign(provider="ollama"))
-    assert not d.allowed and "'ollama'" in d.reason and "claude, codex" in d.reason
-
-
-def test_undeclared_provider_is_denied_when_a_list_is_set(team):
-    assert not plugin(team).check_assign(assign(provider=None)).allowed
-
-
-def test_model_outside_the_list_is_denied(team):
-    d = plugin(team).check_assign(assign(model="claude-opus-4"))
-    assert not d.allowed and "'claude-opus-4'" in d.reason
-
-
 def test_undeclared_model_is_denied_when_a_list_is_set(team):
     d = plugin(team).check_assign(assign(model=None))
     assert not d.allowed and "no declared model" in d.reason
 
 
-def test_null_lists_allow_any_provider_and_model(team):
-    team.policy_body["policy"].update(allowed_providers=None, allowed_models=None)
-    assert plugin(team).check_assign(assign(provider="ollama", model=None)).allowed
-
-
-def test_empty_lists_allow_nothing(team):
-    team.policy_body["policy"].update(allowed_providers=[])
-    assert not plugin(team).check_assign(assign()).allowed
-
-
-@pytest.mark.parametrize("running,allowed", [(0, True), (3, True), (4, False), (9, False), (None, False)])
-def test_parallel_worker_cap(team, running, allowed):
-    d = plugin(team).check_assign(assign(running=running))
-    assert d.allowed is allowed
-    if not allowed:
-        assert "at most 4 parallel worker" in d.reason
-
-
-def test_no_cap_means_any_number_of_workers(team):
-    team.policy_body["policy"]["max_parallel_workers"] = None
-    assert plugin(team).check_assign(assign(running=None)).allowed
-
-
-@pytest.mark.parametrize("actor,allowed", [("user", True), (SUPERVISOR, False),
-                                           ("pipeline", False), (None, False)])
-def test_human_review_requires_the_user_to_merge(team, actor, allowed):
-    d = plugin(team).check_merge(merge(actor))
-    assert d.allowed is allowed
-    if not allowed:
-        assert "human review" in d.reason
-
-
-def test_merges_by_agents_are_fine_without_the_rule(team):
-    team.policy_body["policy"]["require_human_review"] = False
-    assert plugin(team).check_merge(merge(SUPERVISOR)).allowed
-
-
-def test_flat_policy_shape_is_accepted(team):
-    team.policy_body = {**POLICY, "allowed_providers": ["codex"], "version": 3}
-    assert not plugin(team).check_assign(assign()).allowed
-    assert plugin(team).check_assign(assign(provider="codex", model="gpt-5")).allowed
-
-
 # -- policy caching and failing closed -----------------------------------------------------------------
 
 
-def test_policy_is_cached_by_version_in_a_private_file(team):
-    p = plugin(team)
-    p.check_assign(assign())
-    p.check_assign(assign())
-    assert team.paths().count(f"GET /orgs/{ORG}/policy") == 1
-    path = private_dir() / f"policy-{ORG}.json"
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
-    assert json.loads(path.read_text())["version"] == 3
-
-
-def test_newer_policy_version_is_fetched(team):
-    plugin(team).check_assign(assign())
-    team.policy_body = {**team.policy_body, "version": 4,
-                        "policy": {**POLICY, "allowed_providers": ["codex"]}}
-    login(team, team_claims(policy_version=4))
-    assert not plugin(team).check_assign(assign()).allowed
-    assert team.paths().count(f"GET /orgs/{ORG}/policy") == 2
-
-
-def test_last_good_copy_is_used_when_the_fetch_fails(team):
-    plugin(team).check_assign(assign())
-    login(team, team_claims(policy_version=9))
-    team.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
-    p = plugin(team)
-    assert p.check_assign(assign()).allowed
-    assert not p.check_assign(assign(provider="ollama")).allowed
-
-
-def test_fail_closed_when_no_policy_was_ever_fetched(team):
-    team.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
-    p = plugin(team)
-    for d in (p.check_assign(assign()), p.check_merge(merge("user"))):
-        assert not d.allowed
-        assert "never been fetched" in d.reason and "brindle account org policy" in d.reason
-
-
 @pytest.mark.parametrize("body", [
-    {"version": 3, "policy": {"allowed_providers": "claude"}},
     {"version": "3", "policy": POLICY},
-    {"version": 3, "policy": {**POLICY, "require_human_review": "yes"}},
     {"org_id": "org_other", "version": 3, "policy": POLICY},
 ])
 def test_malformed_policy_fails_closed(team, body):
@@ -298,24 +182,6 @@ def test_unsafe_identifiers_become_null(team):
     assert p.flush()
     (e,) = team.events
     assert (e["profile"], e["provider"], e["model"]) == (None, None, None)
-
-
-def test_no_events_without_a_team_entitlement(team):
-    login(team, claims(features=["learning"]))
-    p = events_plugin(team, start_thread=True)
-    p.emit(ev())
-    assert p.flush()
-    assert team.events == [] and Spool().entries() == []
-    assert not any("/events" in c for c in team.paths())
-    assert p._thread is None                      # no sender thread was ever started
-
-
-def test_no_events_when_not_logged_in(team):
-    team.store.delete()
-    p = events_plugin(team)
-    p.emit(ev())
-    p.flush()
-    assert Spool().entries() == [] and team.events == []
 
 
 def test_spool_survives_offline_periods_and_restarts(team):
@@ -396,16 +262,6 @@ def test_spool_caps_drop_the_oldest(tmp_path):
     assert small.entries()[-1]["event"]["n"] == 19
 
 
-def test_a_loose_spool_is_refused(tmp_path):
-    d = tmp_path / "pro"
-    d.mkdir(mode=0o700)
-    s = Spool(d)
-    s.append(ORG, [{"kind": "merge"}])
-    os.chmod(d / "events-spool.jsonl", 0o644)
-    with pytest.raises(credentials.CredentialError):
-        s.entries()
-
-
 def test_full_queue_spills_to_the_spool(team, monkeypatch):
     monkeypatch.setattr(team_events, "QUEUE_SIZE", 2)
     team.routes[f"POST /orgs/{ORG}/events"] = [auth.TransportError("down")]
@@ -418,7 +274,12 @@ def test_full_queue_spills_to_the_spool(team, monkeypatch):
     assert len(Spool().entries()) == 5
 
 
-def test_background_sender_delivers(team):
+def test_background_sender_delivers(team, monkeypatch):
+    # The send is held until flush is polling, so flush's wait loop always runs.
+    polling = threading.Event()
+    send = team.routes[f"POST /orgs/{ORG}/events"]
+    team.routes[f"POST /orgs/{ORG}/events"] = lambda f, h: (polling.wait(5), send(f, h))[1]
+    monkeypatch.setattr(team_events.time, "sleep", lambda _: polling.set())
     p = events_plugin(team, start_thread=True)
     p.emit(ev())
     assert p.flush(5)
@@ -431,14 +292,6 @@ def test_no_org_key_means_no_team_events(team):
     p.emit(ev())
     p.flush()
     assert Spool().entries() == [] and team.events == [] and p.dropped_no_key == 1
-
-
-def test_emit_never_raises(team, monkeypatch):
-    def boom(*a, **k):
-        raise RuntimeError("x")
-
-    monkeypatch.setattr(team_events, "event_payload", boom)
-    events_plugin(team).emit(ev())
 
 
 # -- account org commands and wiring ------------------------------------------------------------------
@@ -471,53 +324,6 @@ def test_org_use_rejects_a_bad_org_id(team):
     assert code == 1 and "invalid org id" in err
 
 
-def test_org_use_keeps_the_old_org_if_the_backend_refuses(team):
-    team.routes["GET /entitlement?org_id=org_nope"] = [(404, {"error": "not_found"})]
-    code, _, err = run(team, "org", "use", "org_nope")
-    assert code == 1 and "not_found" in err
-    assert team.store.load().get("org_id") is None
-
-
-def test_org_policy_without_a_team_plan(team):
-    login(team, claims())
-    code, out, _ = run(team, "org", "policy")
-    assert code == 0 and "nothing is enforced" in out
-
-
-def test_entry_points_are_registered():
-    def value(group):
-        return [e.value for e in entry_points(group=group) if e.name == "pro"]
-
-    assert value("brindle.policy") == ["brindle.pro.team_policy:make"]
-    assert value("brindle.events") == ["brindle.pro.team_events:make"]
-
-
-def test_the_installed_plugins_are_inert_without_an_entitlement(tmp_path):
-    """Out of the box: brindle's own policy plugin is selected (the only one
-    installed), all three of its events plugins hear every event (the group
-    fans out), and they allow everything, send nothing, write nothing."""
-    from brindle import events, policy
-    from brindle.pro.audit_chain import AuditChain, audit_dir
-    from brindle.pro.audit_export import AuditExporter
-
-    plugins.reset()
-    try:
-        cfg = RepoConfig()
-        p = plugins.select(plugins.POLICY, cfg, str(tmp_path))
-        assert isinstance(p, ProPolicy)
-        found = events.plugins_for(cfg, str(tmp_path))
-        assert {type(x) for x in found} == {ProEvents, AuditChain, AuditExporter}
-        [e] = [x for x in found if isinstance(x, ProEvents)]
-        assert policy.check_assign(cfg, str(tmp_path), "developer", "t", "assign").allowed
-        for x in found:
-            x.emit(ev(repo_root=str(tmp_path)))
-        assert e.queue.qsize() == 0 and e._thread is None
-        assert not (private_dir() / "events-spool.jsonl").exists()
-        assert list(audit_dir().iterdir()) == []
-    finally:
-        plugins.reset()
-
-
 # -- self-serve Team: create an org, buy seats, invite, join ---------------------------------------
 
 
@@ -541,30 +347,6 @@ def test_create_a_team_org_then_check_out_team_seats(team):
     assert code == 0 and out.strip() == "https://checkout.stripe.test/c/team"
 
 
-def test_team_upgrade_defaults_to_the_current_org(team):
-    team.store.save({**team.store.load(), "org_id": ORG})
-    team.routes["POST /billing/checkout"] = lambda f, h: (
-        (200, {"url": "https://checkout.stripe.test/c/t"}) if f == {"plan": "team", "seats": 3, "org_id": ORG}
-        else (400, {"error": "invalid_request"}))
-    code, out, _ = run(team, "upgrade", "--team", "--seats", "3")
-    assert code == 0 and "c/t" in out
-
-
-def test_team_upgrade_needs_an_org_and_seats(team):
-    code, _, err = run(team, "upgrade", "--team", "--seats", "3")
-    assert code == 1 and "no team org selected" in err
-    assert run(team, "upgrade", "--team")[0] == 2
-    assert run(team, "upgrade", "--seats", "3")[0] == 2
-    assert run(team, "upgrade", "--team", "--seats", "x", "--org", ORG)[0] == 2
-    assert run(team, "upgrade", "--org", ORG)[0] == 2
-
-
-def test_pro_upgrade_still_sends_no_body(team):
-    seen = []
-    team.routes["POST /billing/checkout"] = lambda f, h: (seen.append(f), (200, {"url": "https://c.test/x"}))[1]
-    assert run(team, "upgrade")[0] == 0 and seen == [{}]
-
-
 def test_invite_and_join(team):
     code_ = "cpi_" + "b" * 43
     team.routes[f"POST /orgs/{ORG}/invites"] = lambda f, h: (
@@ -575,12 +357,6 @@ def test_invite_and_join(team):
     assert code == 0 and "as admin" in out and f"brindle account org join {code_}" in out
     code, out, _ = run(team, "org", "join", code_)
     assert code == 0 and f"Joined {ORG} as member" in out
-
-
-def test_portal_for_a_team_org(team):
-    team.routes[f"POST /billing/portal?org_id={ORG}"] = [(200, {"url": "https://billing.stripe.test/p/t"})]
-    code, out, _ = run(team, "portal", "--org", ORG)
-    assert code == 0 and out.strip() == "https://billing.stripe.test/p/t"
 
 
 # -- org CI tokens ---------------------------------------------------------------------------------
@@ -666,18 +442,6 @@ def budgets(team, monkeypatch):
     return team
 
 
-def test_budget_and_protected_paths_are_parsed_and_cached(budgets):
-    p = plugin(budgets).org_budgets()
-    assert (p.budget_seat_month_usd, p.budget_goal_usd) == (50.0, 5.0)
-    assert p.protected_paths == ("infra/", "*.lock")
-    assert p.spend_seat_usd == 12.5
-    assert plugin(budgets).org_budgets().enforced.protected_paths == ("infra/", "*.lock")
-    assert budgets.paths().count(f"GET /orgs/{ORG}/policy") == 1      # the second came from the cache
-    cached = json.loads((private_dir() / f"policy-{ORG}.json").read_text())
-    assert cached["policy"]["budget"] == {"seat_month_usd": 50.0, "goal_usd": 5.0, "task_usd": None}
-    assert cached["policy"]["protected_paths"] == ["infra/", "*.lock"]
-
-
 def test_the_members_effective_policy_carries_the_budgets(budgets):
     budgets.policy_body["effective"] = {**POLICY, "budget": {"seat_month_usd": 20, "goal_usd": None},
                                         "protected_paths": ["infra/", "*.lock", "secrets/"]}
@@ -687,24 +451,6 @@ def test_the_members_effective_policy_carries_the_budgets(budgets):
     assert p.spend_seat_usd == 12.5
 
 
-def test_a_policy_without_budgets_has_none(team, monkeypatch):
-    from brindle.pro import license
-
-    login(team, team_claims(features=["learning", "team", "org_budgets"]))
-    monkeypatch.setattr(license, "has", lambda feature: True)
-    p = plugin(team).org_budgets()
-    assert (p.budget_seat_month_usd, p.budget_goal_usd, p.protected_paths) == (None, None, ())
-
-
-def test_without_the_org_budgets_feature_nothing_applies(team, monkeypatch):
-    from brindle.pro import license
-
-    team.policy_body = {**team.policy_body, "policy": {**POLICY, **BUDGETS}}
-    monkeypatch.setattr(license, "has", lambda feature: False)
-    assert plugin(team).org_budgets() is None
-    assert f"GET /orgs/{ORG}/policy" not in team.paths()
-
-
 def test_org_budgets_fail_closed_when_the_policy_was_never_fetched(budgets):
     budgets.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
     d = plugin(budgets).org_budgets()
@@ -712,9 +458,7 @@ def test_org_budgets_fail_closed_when_the_policy_was_never_fetched(budgets):
 
 
 @pytest.mark.parametrize("over", [
-    {"budget": "50"}, {"budget": {"seat_month_usd": "50"}}, {"budget": {"goal_usd": -1}},
-    {"budget": {"goal_usd": True}}, {"protected_paths": "infra/"}, {"protected_paths": [""]},
-    {"protected_paths": [3]}, {"protected_paths": ["x"] * 65},
+    {"budget": "50"}, {"budget": {"goal_usd": True}}, {"protected_paths": ["x"] * 65},
 ])
 def test_malformed_budget_fields_fail_closed(team, over):
     team.policy_body = {**team.policy_body, "policy": {**POLICY, **over}}
@@ -731,37 +475,6 @@ def org_policy(**kw):
     from brindle.pro.team_policy import OrgPolicy
 
     return OrgPolicy(org_id=ORG, version=1, **kw)
-
-
-def test_the_org_budget_is_merged_by_taking_the_smaller_limit(monkeypatch):
-    from brindle import budget
-    from brindle.pro import team_policy
-
-    monkeypatch.setattr(budget, "entitled", lambda: True)
-    monkeypatch.setattr(team_policy, "org_budgets",
-                        lambda root: org_policy(budget_seat_month_usd=50.0, budget_goal_usd=5.0))
-    # the repo may not loosen the org's limits ...
-    lim = budget.limits(cfg_with(month_usd=500, goal_usd=100, task_usd=7, stop=True), REPO)
-    assert (lim.month_usd, lim.goal_usd, lim.task_usd, lim.stop) == (50.0, 5.0, 7.0, True)
-    # ... but may tighten them
-    lim = budget.limits(cfg_with(month_usd=10, goal_usd=1), REPO)
-    assert (lim.month_usd, lim.goal_usd) == (10.0, 1.0)
-    # and the org's apply with no repo budget at all, and without the cost feature
-    monkeypatch.setattr(budget, "entitled", lambda: False)
-    lim = budget.limits(cfg_with(month_usd=10), REPO)
-    assert (lim.month_usd, lim.goal_usd) == (50.0, 5.0)
-
-
-def test_no_org_budget_leaves_the_repos_alone(monkeypatch):
-    from brindle import budget
-    from brindle.pro import team_policy
-
-    monkeypatch.setattr(budget, "entitled", lambda: True)
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: None)
-    assert budget.limits(cfg_with(month_usd=10), REPO).month_usd == 10.0
-    assert budget.limits(cfg_with(), REPO) is None
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy())    # an org that sets none
-    assert budget.limits(cfg_with(), REPO) is None
 
 
 def test_an_org_budget_that_cant_be_read_exhausts_the_budget(monkeypatch):

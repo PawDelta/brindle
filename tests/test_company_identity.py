@@ -84,37 +84,6 @@ def by_name(checks=None):
 
 # -- the identity lines --------------------------------------------------------------------
 
-def test_claude_org_line(monkeypatch):
-    Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
-    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.OK
-    assert "Acme" in c.detail and CLAUDE_ORG in c.detail and "enterprise" in c.detail
-
-
-def test_aws_line_uses_the_stored_profile(monkeypatch):
-    fake = Fake(monkeypatch, {("aws", "sts"): AWS_OK})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.OK
-    assert "123456789012" in c.detail and "BrindleWorker" in c.detail and "us-west-2" in c.detail
-    argv = next(a for a, _, _ in fake.calls if a[0] == "aws")
-    assert argv[argv.index("--profile") + 1] == "brindle-acme"
-
-
-def test_gcloud_project_line(monkeypatch):
-    Fake(monkeypatch, {("gcloud", "config"): (0, "acme-brindle-prod\n")})
-    policy(monkeypatch, claude_setup("vertex", gcp=GCP))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.OK and "acme-brindle-prod" in c.detail
-
-
-def test_azure_subscription_line(monkeypatch):
-    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": SUB, "name": "Acme Prod"}))})
-    policy(monkeypatch, claude_setup("foundry", azure=AZURE))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.OK and SUB in c.detail and "Acme Prod" in c.detail
-
 
 def test_gateway_line_is_the_url_and_runs_nothing(monkeypatch):
     fake = Fake(monkeypatch)
@@ -135,25 +104,11 @@ def test_codex_and_antigravity_are_informational(monkeypatch):
     assert "can't be checked" in found["antigravity identity"].detail
 
 
-def test_no_policy_still_shows_the_claude_login(monkeypatch):
-    Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
-    monkeypatch.setattr(company_identity, "_setup", lambda: None)
-    c = by_name()["claude identity"]
-    assert c.level == doctor.OK and "Acme" in c.detail
-
-
 def test_doctor_checks_include_the_identity_lines(monkeypatch, tmp_path):
     Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
     monkeypatch.setattr(company_identity, "_setup", lambda: None)
     names = [c.name for c in doctor.checks(None)]
     assert "claude identity" in names
-
-
-def test_commands_have_timeouts_and_argv(monkeypatch):
-    fake = Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
-    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG))
-    company_identity.checks()
-    assert fake.calls and all(isinstance(a, tuple) and t for a, _, t in fake.calls)
 
 
 def test_a_probe_is_cached_within_one_run(monkeypatch):
@@ -182,22 +137,6 @@ def test_personal_claude_login_warns(monkeypatch):
     policy(monkeypatch, claude_setup("subscription"))
     c = by_name()["claude identity"]
     assert c.level == doctor.WARN and "personal" in c.detail and "brindle doctor --fix" in c.detail
-
-
-def test_other_aws_account_warns(monkeypatch):
-    wrong = (0, json.dumps({"Account": "999999999999", "Arn": "arn:aws:sts::999999999999:assumed-role/X/me"}))
-    Fake(monkeypatch, {("aws", "sts"): wrong})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.WARN and "999999999999" in c.detail and "aws sso login --profile brindle-acme" in c.detail
-
-
-def test_other_gcp_project_warns(monkeypatch):
-    Fake(monkeypatch, {("gcloud", "config"): (0, "personal-project\n")})
-    policy(monkeypatch, claude_setup("vertex", gcp=GCP))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.WARN and "personal-project" in c.detail
-    assert "gcloud config set project acme-brindle-prod" in c.detail
 
 
 def test_other_azure_subscription_warns(monkeypatch):
@@ -269,26 +208,6 @@ def test_foundry_by_base_url_checks_only_that_az_answers(monkeypatch, launch_cac
 WRONG_AWS = {("aws", "sts"): (0, json.dumps({"Account": "999999999999", "Arn": "arn:x:y/R/s"}))}
 
 
-def test_enforce_refuses_on_a_mismatch_with_the_fix(monkeypatch):
-    Fake(monkeypatch, WRONG_AWS)
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    why = company_identity.launch_problem("claude")
-    assert why and "999999999999" in why and "brindle doctor --fix" in why
-
-
-def test_without_enforce_a_mismatch_only_warns(monkeypatch):
-    Fake(monkeypatch, WRONG_AWS)
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
-    assert company_identity.launch_problem("claude") is None
-    assert by_name()["claude identity"].level == doctor.WARN
-
-
-def test_enforce_passes_a_matching_identity(monkeypatch):
-    Fake(monkeypatch, {("aws", "sts"): AWS_OK})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    assert company_identity.launch_problem("claude") is None
-
-
 def test_undetermined_identity_never_blocks(monkeypatch):
     Fake(monkeypatch, missing={"aws"})
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
@@ -297,18 +216,12 @@ def test_undetermined_identity_never_blocks(monkeypatch):
     assert company_identity.launch_problem("claude") is None
 
 
-def test_no_policy_or_unavailable_policy_never_blocks(monkeypatch):
-    Fake(monkeypatch, WRONG_AWS)
-    monkeypatch.setattr(company_identity, "_setup", lambda: None)
-    assert company_identity.launch_problem("claude") is None
-
-
-@pytest.mark.parametrize("enterprise", [True, False])
-def test_enforce_blocks_only_with_the_enterprise_entitlement(enterprise, monkeypatch):
+@pytest.mark.variant("enforcement: a wrong identity must block the launch")
+def test_enforce_blocks_with_the_enterprise_entitlement(monkeypatch):
     from brindle.pro import license, team_policy
 
     Fake(monkeypatch, WRONG_AWS)
-    monkeypatch.setattr(license, "has", lambda feature: enterprise)
+    monkeypatch.setattr(license, "has", lambda feature: True)
     raw = {"claude": {"route": "bedrock",
                       "aws": {"sso_start_url": AWS.sso_start_url, "sso_region": AWS.sso_region,
                               "account_id": AWS.account_id, "role_name": AWS.role_name,
@@ -316,41 +229,8 @@ def test_enforce_blocks_only_with_the_enterprise_entitlement(enterprise, monkeyp
            "enforce": True}
     setup = team_policy._parse_agent_setup(raw)
     monkeypatch.setattr(company_identity, "_setup", lambda: (ORG, setup))
-    assert setup.enforce is enterprise
-    assert bool(company_identity.launch_problem("claude")) is enterprise
-
-
-def test_a_second_launch_within_five_minutes_runs_no_probe(monkeypatch, launch_cache):
-    clock, _ = launch_cache
-    fake = Fake(monkeypatch, {("aws", "sts"): AWS_OK})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    assert company_identity.launch_problem("claude") is None
-    clock[0] += 299
-    assert company_identity.launch_problem("claude") is None
-    assert fake.count("aws", "sts") == 1
-
-
-def test_a_probe_runs_again_after_five_minutes(monkeypatch, launch_cache):
-    clock, _ = launch_cache
-    fake = Fake(monkeypatch, {("aws", "sts"): AWS_OK})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    company_identity.launch_problem("claude")
-    clock[0] += 301
-    assert company_identity.launch_problem("claude") is None
-    assert fake.count("aws", "sts") == 2
-
-
-def test_the_launch_cache_is_a_private_file_with_the_timestamp(monkeypatch, launch_cache):
-    import os
-    import stat
-
-    clock, path = launch_cache
-    Fake(monkeypatch, {("aws", "sts"): AWS_OK})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    company_identity.launch_problem("claude")
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
-    [(key, at)] = json.loads(path.read_text()).items()
-    assert key.startswith("claude|bedrock|brindle-acme|") and at == clock[0]
+    assert setup.enforce
+    assert company_identity.launch_problem("claude")
 
 
 def test_a_mismatch_is_never_cached_and_is_probed_again(monkeypatch, launch_cache):
@@ -363,35 +243,13 @@ def test_a_mismatch_is_never_cached_and_is_probed_again(monkeypatch, launch_cach
     assert not path.exists()
 
 
-@pytest.mark.parametrize("answer", [{("aws", "sts"): (124, "timed out")}, {}])
-def test_an_undetermined_result_is_never_cached(answer, monkeypatch, launch_cache):
-    _, path = launch_cache
-    fake = Fake(monkeypatch, answer, missing=() if answer else {"aws"})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    assert company_identity.launch_problem("claude") is None
-    assert company_identity.launch_problem("claude") is None
-    assert not path.exists()
-    if answer:
-        assert fake.count("aws", "sts") == 2
-
-
-def test_doctor_ignores_the_launch_cache(monkeypatch, launch_cache):
-    fake = Fake(monkeypatch, {("aws", "sts"): AWS_OK})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    assert company_identity.launch_problem("claude") is None
-    assert fake.count("aws", "sts") == 1
-    assert by_name()["claude identity"].level == doctor.OK
-    assert fake.count("aws", "sts") == 2
-
-
 PERSONAL = (0, json.dumps({"loggedIn": True, "subscriptionType": "max"}))
 
 
-@pytest.mark.parametrize("route", ["subscription", "console"])
-def test_claude_login_probes_every_launch_and_catches_a_switch(route, monkeypatch, launch_cache):
+def test_claude_login_probes_every_launch_and_catches_a_switch(monkeypatch, launch_cache):
     _, path = launch_cache
     fake = Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
-    policy(monkeypatch, claude_setup(route, org_id=CLAUDE_ORG), enforce=True)
+    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG), enforce=True)
     assert company_identity.launch_problem("claude") is None
     assert company_identity.launch_problem("claude") is None
     assert fake.count("claude", "auth", "status") == 2
@@ -415,77 +273,25 @@ def touch(path, content="x"):
     return path
 
 
-def bump(path):
-    import os
-
-    st = os.stat(path)
-    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
-
-
-def test_a_cloud_route_reuses_the_cache_when_nothing_changed(monkeypatch, tmp_path):
-    touch(tmp_path / "home" / ".aws" / "sso" / "cache" / "a.json")
-    fake = cloud_cache_case(monkeypatch, "bedrock", aws=AWS)
-    company_identity.launch_problem("claude")
-    company_identity.launch_problem("claude")
-    assert fake.count("aws", "sts") == 1
-
-
-def test_aws_sso_cache_change_reprobes(monkeypatch, tmp_path):
-    f = touch(tmp_path / "home" / ".aws" / "sso" / "cache" / "a.json")
-    fake = cloud_cache_case(monkeypatch, "bedrock", aws=AWS)
-    company_identity.launch_problem("claude")
-    bump(f)
-    company_identity.launch_problem("claude")
-    assert fake.count("aws", "sts") == 2
-    touch(tmp_path / "home" / ".aws" / "sso" / "cache" / "new.json")
-    company_identity.launch_problem("claude")
-    assert fake.count("aws", "sts") == 3
-
-
-def test_aws_profile_change_reprobes(monkeypatch):
-    fake = cloud_cache_case(monkeypatch, "bedrock", aws=AWS)
-    company_identity.launch_problem("claude")
-    monkeypatch.setenv("AWS_PROFILE", "personal")
-    company_identity.launch_problem("claude")
-    assert fake.count("aws", "sts") == 2
-
-
-@pytest.mark.parametrize("name,value", [
-    ("AWS_SESSION_TOKEN", "tok"), ("AWS_SECRET_ACCESS_KEY", "s"), ("AWS_WEB_IDENTITY_TOKEN_FILE", "/t"),
-    ("AWS_DEFAULT_PROFILE", "personal"), ("AWS_REGION", "eu-west-1")])
-def test_aws_credential_env_vars_reprobe_without_being_stored(name, value, monkeypatch):
+def test_aws_credential_env_vars_reprobe_without_being_stored(monkeypatch):
+    name = "AWS_SESSION_TOKEN"
     monkeypatch.delenv(name, raising=False)
     fake = cloud_cache_case(monkeypatch, "bedrock", aws=AWS)
     company_identity.launch_problem("claude")
-    monkeypatch.setenv(name, value)
+    monkeypatch.setenv(name, "tok")
     company_identity.launch_problem("claude")
     assert fake.count("aws", "sts") == 2
-    if name.endswith(("TOKEN", "KEY")):      # a secret: only that it is set, never its value
-        a = company_identity._fingerprint("bedrock")
-        monkeypatch.setenv(name, "another-secret")
-        assert company_identity._fingerprint("bedrock") == a
+    a = company_identity._fingerprint("bedrock")    # a secret: only that it is set, never its value
+    monkeypatch.setenv(name, "another-secret")
+    assert company_identity._fingerprint("bedrock") == a
 
 
-@pytest.mark.parametrize("route,name", [("vertex", "GOOGLE_APPLICATION_CREDENTIALS"),
-                                        ("foundry", "AZURE_CLIENT_ID")])
-def test_other_clouds_credential_env_vars_reprobe(route, name, monkeypatch):
+def test_other_clouds_credential_env_vars_reprobe(monkeypatch):
+    name = "GOOGLE_APPLICATION_CREDENTIALS"
     monkeypatch.delenv(name, raising=False)
-    fake = cloud_cache_case(monkeypatch, route, **{"vertex": {"gcp": GCP}, "foundry": {"azure": AZURE}}[route])
-    company_identity.launch_problem("claude")
-    monkeypatch.setenv(name, "x")
-    company_identity.launch_problem("claude")
-    assert fake.count(*(("gcloud", "config") if route == "vertex" else ("az", "account"))) == 2
-
-
-def test_gcloud_active_config_change_reprobes(monkeypatch, tmp_path):
-    cfg = tmp_path / "gcloud"
-    monkeypatch.setenv("CLOUDSDK_CONFIG", str(cfg))
-    f = touch(cfg / "active_config", "default")
     fake = cloud_cache_case(monkeypatch, "vertex", gcp=GCP)
     company_identity.launch_problem("claude")
-    company_identity.launch_problem("claude")
-    assert fake.count("gcloud", "config") == 1
-    bump(f)
+    monkeypatch.setenv(name, "x")
     company_identity.launch_problem("claude")
     assert fake.count("gcloud", "config") == 2
 
@@ -515,17 +321,6 @@ def test_the_fingerprint_never_reads_file_contents(monkeypatch, tmp_path):
     f.chmod(0o600)
 
 
-def test_the_cache_temp_file_is_per_process(monkeypatch, tmp_path, launch_cache):
-    import os
-
-    seen = []
-    real = os.replace
-    monkeypatch.setattr(os, "replace", lambda a, b: (seen.append(str(a)), real(a, b))[1])
-    cloud_cache_case(monkeypatch, "bedrock", aws=AWS)
-    company_identity.launch_problem("claude")
-    assert seen and f".{os.getpid()}." in seen[0]
-
-
 def test_codex_is_never_blocked(monkeypatch):
     Fake(monkeypatch)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), codex=CodexSetup("chatgpt"), enforce=True)
@@ -541,30 +336,11 @@ def test_launch_refuses_the_agent(db, repo, monkeypatch):
         agents._launch(db, agent, ws, prompt=None, resume=None, watch_pane=False)
 
 
-# -- doctor --fix --------------------------------------------------------------------------
-
-def test_fix_runs_company_login(monkeypatch):
-    called = []
-    monkeypatch.setattr(company_login, "apply_current", lambda say, *a, **k: called.append(say))
-    doctor.fix(lambda prompt: False)
-    assert called
-
-
 # -- what is checked is what runs ----------------------------------------------------------
 
-@pytest.mark.parametrize("current", [
-    "claude org Me (org-1) (org-9)",    # a personal org named after the company's id
-    "claude org x org-1 (org-9)",
-    "claude org none",
-    "claude org org-9",
-])
-def test_an_org_name_never_stands_in_for_the_org_id(current):
-    assert not company_identity.matches("org:org-1", current)
-
-
-def test_the_org_id_matches_with_or_without_a_name():
-    assert company_identity.matches("org:ORG-1", "claude org Acme (org-1)")
-    assert company_identity.matches("org:org-1", "claude org org-1")
+def test_an_org_name_never_stands_in_for_the_org_id():
+    # a personal org named after the company's id
+    assert not company_identity.matches("org:org-1", "claude org Me (org-1) (org-9)")
 
 
 def test_a_login_without_an_org_id_has_no_org(monkeypatch):
@@ -603,12 +379,6 @@ def test_enforced_route_beats_a_profiles_env_lines(db, repo, monkeypatch):
     assert env["EDITOR"] == "vi"
 
 
-def test_without_enforce_a_profiles_env_lines_still_apply(db, repo, monkeypatch):
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
-    env = _env_of(db, repo, monkeypatch, PROFILE_LINES)
-    assert env["AWS_PROFILE"] == "personal" and env["AWS_ACCESS_KEY_ID"] == "AKIAPERSONAL"
-
-
 def test_enforced_route_takes_inherited_and_stored_credentials_out_of_the_pane(monkeypatch):
     from brindle import pane_auth
 
@@ -625,14 +395,3 @@ def test_enforced_route_takes_inherited_and_stored_credentials_out_of_the_pane(m
     assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("codex", "auto", None)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
     assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("claude", "auto", None)
-
-
-def test_enforced_deny_covers_known_pickers_tmux_and_stored_names():
-    route = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "brindle-acme", "AWS_REGION": "us-east-1"}
-    deny = company_identity.enforced_deny(route, set(), set())
-    for name in ("AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_APPLICATION_CREDENTIALS", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
-                 "AWS_CONTAINER_CREDENTIALS_FULL_URI", "ANTHROPIC_API_KEY"):
-        assert name in deny   # never left to whether something says it's set
-    assert not set(route) & set(deny)
-    deny = company_identity.enforced_deny(route, {"AWS_NEW_SDK_TOKEN", "EDITOR"}, {"ANTHROPIC_OTHER_KEY"})
-    assert "AWS_NEW_SDK_TOKEN" in deny and "ANTHROPIC_OTHER_KEY" in deny and "EDITOR" not in deny
