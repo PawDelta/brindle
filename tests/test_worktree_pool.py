@@ -81,6 +81,7 @@ def test_pool_entries_do_not_appear_in_workspace_listings(db, repo):
     assert view.snapshot(db, str(repo)) == []
 
 
+@pytest.mark.variant("data loss: a claim must never reset an existing branch")
 @pytest.mark.parametrize("where", ["local", "remote"])
 def test_claim_skipped_when_the_branch_exists(db, repo, tmp_path, where):
     """A pool claim must never `checkout -B` an existing branch (that would

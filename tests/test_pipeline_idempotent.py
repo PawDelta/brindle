@@ -149,6 +149,7 @@ def test_a_second_reviewer_submitting_after_the_removal_is_told_it_is_done(db, a
     assert drain(db) == [] and len(runs) == 1
 
 
+@pytest.mark.variant("safety: an approval never merges into the default branch on its own")
 def test_default_branch_is_not_merged_into_without_opt_in(db, repo, approved):
     ws, runs = approved
     (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True}))
@@ -159,6 +160,7 @@ def test_default_branch_is_not_merged_into_without_opt_in(db, repo, approved):
     assert db.get_workspace(ws.id) is not None and db.get_agent("w1").pipeline is None
 
 
+@pytest.mark.variant("the only test asserting the merge_into setting")
 def test_merge_into_puts_workers_on_that_branch(db, repo, monkeypatch):
     sh("git branch integration", repo)
     (repo / ".brindle").mkdir()
