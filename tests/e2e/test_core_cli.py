@@ -1,5 +1,5 @@
 """End to end: the core CLI workspace lifecycle, driven through the real
-commands in a throwaway git repo. No agent runs (``--agent none``), no network."""
+commands in a throwaway git repo. No agent runs (``--no-agent``), no network."""
 
 import json
 import os
@@ -29,7 +29,7 @@ def proj(repo, monkeypatch):
 
 @pytest.fixture
 def ws_path(proj, db):
-    run("new", "feat/e2e", "--agent", "none", "--no-setup")
+    run("new", "feat/e2e", "--no-agent", "--no-setup")
     (ws,) = db.find_workspaces(str(proj.resolve())) or db.find_workspaces(str(proj))
     return ws
 
@@ -165,7 +165,7 @@ def test_rm_keeps_an_unmerged_branch_and_needs_force_for_dirty(proj, ws_path):
 
 
 def test_new_reports_when_the_branch_is_taken(proj, ws_path):
-    res = run("new", "feat/e2e", "--agent", "none", "--no-setup", ok=False)
+    res = run("new", "feat/e2e", "--no-agent", "--no-setup", ok=False)
     assert res.exit_code == 1 and "Traceback" not in res.output
 
 

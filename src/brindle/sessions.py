@@ -93,7 +93,8 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         raise agents.AgentError(f"no session {old_root_id}")
     ap = db.get_autopilot(old_root_id)
     prompt = handover_prompt(db, old, note)
-    new = agents.spawn(db, dest, old.profile, prompt=prompt, provider_name=old.provider,
+    # Always a supervisor, even from a session started as something else.
+    new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
                        watch_pane=True, background_setup=True, autopilot=bool(ap and ap.enabled))
     if ap and ap.enabled and ap.goal:
         old_ms = db.milestones(old_root_id)

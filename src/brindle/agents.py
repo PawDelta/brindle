@@ -92,6 +92,9 @@ When you have finished:
 """
 
 
+SUPERVISOR = "supervisor"   # the only profile a launch starts
+
+
 class AgentError(RuntimeError):
     pass
 

@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -107,11 +108,19 @@ def test_start_on_a_merged_branch_switches_to_main_only_when_clean(db, repo, sta
        " && git checkout -q main && git merge -q feat/merged && git checkout -q feat/merged", repo)
     if dirty:
         (repo / "uncommitted.txt").write_text("uncommitted work")
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None,
+    cli.start(prompt=None, provider=None, attach=False, watch=False, autopilot=None,
               branch=None, worktree=None)
     expected = "feat/merged" if dirty else "main"
     assert git.current_branch(str(repo)) == expected
     assert [branch for branch, _, _ in started] == [expected]
+
+
+def test_bare_brindle_always_starts_a_supervisor(db, repo, started, monkeypatch):
+    # default_agent is for workers; a launch is always a supervisor, autopilot on
+    monkeypatch.setattr(cli, "_say_autopilot", lambda *a: None)
+    cli.default(SimpleNamespace(invoked_subcommand=None), cont=False, autopilot=None,
+                provider=None, show_version=False)
+    assert [(p, ap) for _, p, ap in started] == [("supervisor", True)]
 
 
 def test_supervisor_command_starts_explicit_supervisor_with_autopilot(db, repo, started):

@@ -13,6 +13,8 @@ How to work:
   report.
 - Break the request into independent, well-scoped tasks. Tasks that touch the
   same files should go to one worker, or run one after another.
+- Delegate to developers and other worker profiles. Start another supervisor
+  only when a piece of work is big enough to need its own workers, which is rare.
 - Delegate with the brindle MCP tools. `assign` runs workers in parallel (their
   results arrive later as messages). `handoff` waits for a single result.
   Leave `isolate` on: each worker gets its own git worktree and branch cut

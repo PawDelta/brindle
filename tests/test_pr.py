@@ -56,7 +56,7 @@ def test_gh_failures_are_clear(tmp_path, monkeypatch):
 def test_cli_new_pr(db, pr_repo, monkeypatch):
     fake_gh(monkeypatch)
     monkeypatch.chdir(pr_repo)
-    result = runner.invoke(app, ["new", "--pr", "42", "--agent", "none"])
+    result = runner.invoke(app, ["new", "--pr", "42", "--no-agent"])
     assert result.exit_code == 0, result.output
     ws = workspaces.resolve(db, "fix/typo", cwd=str(pr_repo))
     assert ws.base_branch == "release"
@@ -66,7 +66,7 @@ def test_cli_new_pr(db, pr_repo, monkeypatch):
 def test_cli_new_pr_rejects_branch_or_base(pr_repo, monkeypatch, extra):
     calls = fake_gh(monkeypatch)
     monkeypatch.chdir(pr_repo)
-    result = runner.invoke(app, ["new", "--pr", "42", "--agent", "none", *extra])
+    result = runner.invoke(app, ["new", "--pr", "42", "--no-agent", *extra])
     assert result.exit_code == 1
     assert "--pr" in result.output
     assert calls == []

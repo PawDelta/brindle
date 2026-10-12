@@ -231,7 +231,7 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     old = agents.spawn(db, ws, "supervisor", provider_name="shell")
     try:
         t0 = time.monotonic()
-        cli.start(agent="supervisor", prompt=None, provider="shell", attach=False,
+        cli.start(prompt=None, provider="shell", attach=False,
                   watch=False, autopilot=False, branch=None, worktree=None)
         elapsed = time.monotonic() - t0
     finally:

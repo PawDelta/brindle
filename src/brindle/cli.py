@@ -36,8 +36,8 @@ class _App(typer.Typer):
 
 app = _App(add_completion=False, help="""brindle: run coding agents in parallel, each on its own git branch.
 
-Run `brindle` with no arguments to open (or reopen) a developer chat here (or `brindle supervisor`
-for an autopilot supervisor), with the live dashboard underneath. Outside a git repo it starts a scratch session;
+Run `brindle` with no arguments to open (or reopen) a supervisor chat here, with
+the live dashboard underneath. Outside a git repo it starts a scratch session;
 `brindle transfer <repo>` moves that work into a real repository later.
 
 Paid features (hosted learning, per-worktree services, team policies, CI):
@@ -157,7 +157,7 @@ def init(
         typer.echo(f"optional, not set up: {', '.join(optional)} (`brindle doctor` says how)")
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)
-    typer.secho("Ready. Commit .brindle/config.json, then run `brindle` for a chat or `brindle supervisor` to coordinate parallel workers.",
+    typer.secho("Ready. Commit .brindle/config.json, then run `brindle` and tell the supervisor what to build.",
                 fg="green")
 
 
@@ -176,7 +176,7 @@ def demo(
     root = demo_mod.create(local=local)
     typer.echo(f"demo repo: {root}")
     os.chdir(root)
-    start(agent="supervisor", prompt=None, provider=None, attach=attach, watch=True,
+    start(prompt=None, provider=None, attach=attach, watch=True,
           autopilot=True, branch=None, worktree=None)
 
 
@@ -185,14 +185,19 @@ def new(
     branch: Optional[str] = typer.Argument(None, help="Branch for the workspace (created if needed). Required unless --pr is given."),
     base: Optional[str] = typer.Option(None, "--base", "-b", help="Base branch (default: repo default). Not allowed with --pr."),
     pr: Optional[int] = typer.Option(None, "--pr", help="Check out this GitHub PR's head branch (via `gh`), based on the PR's base branch. Don't also pass BRANCH or --base; the head branch is always fetched."),
-    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile to start (default from config; 'none' for no agent)."),
-    prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the agent."),
-    provider: Optional[str] = typer.Option(None, help="Override the profile's provider (claude, codex, antigravity, shell)."),
+    no_agent: bool = typer.Option(False, "--no-agent", help="Only create the worktree; start no supervisor."),
+    prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the supervisor."),
+    provider: Optional[str] = typer.Option(None, help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity)."),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Don't fetch the base branch first."),
     no_setup: bool = typer.Option(False, "--no-setup", help="Skip setup commands."),
     attach: bool = typer.Option(False, "--attach", help="Attach to the tmux session afterward."),
 ) -> None:
-    """Create a worktree on a new branch and start an agent in it."""
+    """Create a worktree on a new branch and start a supervisor in it."""
+    from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
+
+    if provider and provider in NOT_SUPERVISOR:
+        _fail(f"the {provider} provider can't run the supervisor; use one of: "
+              f"{', '.join(SUPERVISOR_PROVIDERS)}")
     if pr is not None:
         if branch:
             _fail("pass either BRANCH or --pr, not both (--pr uses the PR's head branch)")
@@ -224,12 +229,15 @@ def new(
 
     from brindle.config import load_repo_config
 
-    profile = agent or load_repo_config(ws.repo_root).default_agent
     window = None
-    if profile != "none":
-        a = _run(agents.spawn, db, ws, profile, prompt=prompt, provider_name=provider)
+    if not no_agent:
+        autopilot = load_repo_config(ws.repo_root).autopilot
+        a = _run(agents.spawn, db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
+                 autopilot=autopilot)
         window = a.tmux_window
         typer.echo(f"  agent   {a.id} ({a.profile}/{a.provider})")
+        if autopilot:
+            _say_autopilot(db, a.id)
     typer.echo(f"\n  brindle attach {ws.name}")
     if attach:
         _attach(ws, window)
@@ -237,7 +245,6 @@ def new(
 
 @app.command()
 def start(
-    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile (default: repo default_agent, developer)."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
@@ -246,7 +253,7 @@ def start(
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
 ) -> None:
-    """Start a fresh chat with an agent here (default: repo default_agent, developer), with the dashboard alongside.
+    """Start a fresh supervisor chat here, with the dashboard alongside. A launch only ever starts a supervisor; it starts the other agents itself.
 
     If a session is still running here, you choose: open it, start the new
     one in its own worktree (both run at once), or pause it and start fresh.
@@ -284,23 +291,20 @@ def start(
             except Exception:
                 pass
 
-    if agent is None:
-        agent = _run(load_repo_config, ws.repo_root).default_agent
-
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
 
     if provider and provider in NOT_SUPERVISOR:
         _fail(f"the {provider} provider can't run the supervisor; use one of: "
               f"{', '.join(SUPERVISOR_PROVIDERS)}")
-    _preflight(agent, provider, ws.repo_root)
+    _preflight(agents.SUPERVISOR, provider, ws.repo_root)
     _trust_codex_hook(ws.repo_root)
     # Nothing slow before the chat starts: the paused session's leftover
     # processes, old paused sessions' worktrees and the pool refill are all
     # handled by the detached cull.
     _pause_running(db, ws, stop_procs=False)
     if autopilot is None:
-        autopilot = agent == "supervisor" and _run(load_repo_config, ws.repo_root).autopilot
-    a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
+        autopilot = _run(load_repo_config, ws.repo_root).autopilot
+    a = _run(agents.spawn, db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
              watch_pane=watch, background_setup=True, autopilot=autopilot)
     # After the chat's window exists and is recorded: the cull's session
     # retention closes dropped sessions' windows by their stored pane ids,
@@ -718,7 +722,7 @@ def default(
     provider: Optional[str] = typer.Option(None, "--provider", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity)."),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
 ) -> None:
-    """Bare `brindle`: a fresh developer chat here (autopilot off; run `brindle supervisor` for an autopilot supervisor; a scratch session outside git)."""
+    """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
     if show_version:
         from brindle import __version__
 
@@ -735,7 +739,7 @@ def default(
         if cont:
             continue_cmd(session_id=None, attach=True)
         else:
-            start(agent=None, prompt=None, provider=provider, attach=True, watch=True,
+            start(prompt=None, provider=provider, attach=True, watch=True,
                   autopilot=autopilot, branch=None, worktree=None)
 
 
@@ -750,7 +754,7 @@ def supervisor(
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
 ) -> None:
     """Start an explicit supervisor session to coordinate coding agents."""
-    start(agent="supervisor", prompt=prompt, provider=provider, attach=attach, watch=watch,
+    start(prompt=prompt, provider=provider, attach=attach, watch=watch,
           autopilot=autopilot, branch=branch, worktree=worktree)
 
 
@@ -2201,20 +2205,6 @@ def rm(
 
 
 # -- agents -----------------------------------------------------------------
-
-
-@agent_app.command("spawn")
-def agent_spawn(
-    profile: str,
-    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
-    prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
-    provider: Optional[str] = typer.Option(None),
-) -> None:
-    """Start another agent in an existing workspace."""
-    db = DB()
-    ws = _ws(db, workspace)
-    a = _run(agents.spawn, db, ws, profile, prompt=prompt, provider_name=provider)
-    typer.echo(f"✓ {a.id} ({a.profile}/{a.provider}) in {ws.id}")
 
 
 @agent_app.command("profiles")
