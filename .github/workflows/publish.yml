@@ -13,6 +13,13 @@ permissions:
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
+    # A called workflow can't ask for more than its caller grants: ci.yml's test
+    # job reads pull requests and issues (for the new-test check, which a
+    # release skips), and the run fails to start without these.
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
 
   build:
     needs: test
