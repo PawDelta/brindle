@@ -14,7 +14,7 @@ import pytest
 from brindle.events import Event
 from brindle.policy import AssignInfo, MergeInfo
 from brindle.pro import account, auth, credentials
-from brindle.pro import team_events
+from brindle.pro import route_health, team_events
 from brindle.pro._files import private_dir
 from brindle.pro.orgkey import OrgKey
 from brindle.pro.team_events import ProEvents, Spool
@@ -212,6 +212,42 @@ def test_failed_sends_back_off_exponentially(team):
         delays.append(p._delay)
     assert delays == [1.0, 2.0, 4.0, 8.0]
     assert len(Spool().entries()) == 1
+
+
+def test_route_health_rides_the_feed_for_a_pro_org_as_codes_without_provider_text(team):
+    login(team, claims(org_id=ORG, plan="pro", features=["learning"]))     # paid, but not a team org
+    p = events_plugin(team)
+    error = "API Error: 401 {'type':'authentication_error','message':'invalid x-api-key sk-ant-api03-zebra'}"
+    p.emit(Event(kind="route_health", repo_root=REPO, provider="claude", model="claude-opus-5-5",
+                 route="console", outcome=route_health.provider_outcome(error), count=3, at=1_800_000_000.5))
+    p.emit(ev())                                                           # an audit event needs a team org
+    assert p.flush()
+    assert team.events == [{"kind": "route_health", "agent": "claude", "route": "console",
+                            "model": "claude-opus-5-5", "outcome": "provider_401", "count": 3,
+                            "at": 1_800_000_000.5}]
+    blob = json.dumps(team.events)
+    assert "zebra" not in blob and "x-api-key" not in blob and "authentication_error" not in blob
+    assert p.dropped_no_key == 0 and not any("/key" in c for c in team.paths())
+
+
+def test_a_backend_without_route_health_keeps_the_audit_events_and_drops_the_counts(team):
+    sent, answers = [], iter([422, 200, 403])
+
+    def route(f, h):
+        sent.append(f["events"])
+        return next(answers), {}
+
+    team.routes[f"POST /orgs/{ORG}/events"] = route
+    p = events_plugin(team)
+    key = OrgKey(ORG, "k1", b"k" * 32)
+    health = route_health.payload(Event(kind="route_health", repo_root=REPO, provider="claude", route="bedrock",
+                                        model="m", outcome="provider_403", count=2, at=1_800_000_000.5))
+    Spool().append(ORG, [team_events.event_payload(key, ROOT_SHA, ev()), health])
+    assert p.send_pending()      # 422 for the mixed batch: the audit event goes alone
+    assert [[e["kind"] for e in b] for b in sent] == [["merge", "route_health"], ["merge"]]
+    Spool().append(ORG, [health])
+    assert p.send_pending()      # 403: this org can't report route health; dropped, not retried
+    assert len(sent) == 3 and Spool().entries() == []
 
 
 def test_rejected_batches_are_dropped_not_retried_forever(team):

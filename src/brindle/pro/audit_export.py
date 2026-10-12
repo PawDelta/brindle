@@ -604,10 +604,10 @@ class AuditExporter(EventsPlugin):
         return team_events.event_payload(key, self._identity(event.repo_root), event)
 
     def emit(self, event: Event) -> None:
-        from brindle import airgap
+        from brindle import airgap, events
 
-        if airgap.enabled():
-            return
+        if airgap.enabled() or event.kind == events.ROUTE_HEALTH:
+            return                      # route health is a count for the Team feed, not an audit record
         try:
             cfg = self.config()
             if not cfg.sinks and self._fixed_sinks is None:

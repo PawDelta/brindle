@@ -19,6 +19,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from brindle import model_access, tmux
+from brindle.pro import route_health
 
 FOLLOWUP_SECONDS = 5.0
 _LAUNCH_ENV = frozenset({"BRINDLE_AGENT_ID", "BRINDLE_ROOT_PATH", "BRINDLE_WORKSPACE_PATH",
@@ -189,6 +190,13 @@ def before_delivery(db, agent) -> str:
 def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",
             provider: str | None = None):
     """Read complete response context before accepting a provider error block."""
+    return _failure(screen, baseline=baseline, task=task, submitted_prompt=submitted_prompt,
+                    provider=provider)[0]
+
+
+def _failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",
+             provider: str | None = None):
+    """(the cause, the provider's error block it was read from, or "")."""
     old = {line.strip() for line in baseline.splitlines()}
     text = re.sub(r"\x1b\[[0-9;]*m", "", screen)
     lines = text.splitlines()
@@ -309,7 +317,7 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
             # Unmarked prose after an error is ambiguous (a recovery, example,
             # or tool output). Do not keep an earlier candidate authoritative.
             context, candidate = "prose", None
-    return candidate
+    return candidate, (error_block if candidate else "")
 
 
 def _cause(line: str):
@@ -349,8 +357,8 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     if row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:
         return None
     alive = agents.is_alive(agent)
-    cause = failure(capture(agent), baseline=row["baseline"], task=agent.task or "",
-                    submitted_prompt=row["submitted_prompt"], provider=agent.provider)
+    cause, error_block = _failure(capture(agent), baseline=row["baseline"], task=agent.task or "",
+                                  submitted_prompt=row["submitted_prompt"], provider=agent.provider)
     if alive and row["delivered_at"] is None and not cause:
         return None
     if not agents.owns_pane(db, agent):
@@ -368,6 +376,11 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     ws = db.get_workspace(agent.workspace_id)
     if cause and ws:
         model_access.refuse(agent.profile, cause, repo_root=ws.repo_root, fp=row["fingerprint"])
+        refused = route_health.provider_outcome(error_block)   # the status code only, never the text
+        if refused:
+            route, model = agents.route_context(db, agent, ws)
+            route_health.record(ws.repo_root, agent=agent.provider, route=route, model=model,
+                                outcome=refused)
     detail = (cause.line() if cause else
               "the worker exited before launch health could be established. Check its pane and CLI installation/login, then retry.")
     # Never forward provider output, which can contain URLs, keys or prompt text.

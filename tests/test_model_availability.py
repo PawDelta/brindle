@@ -542,3 +542,24 @@ def test_codex_config_identity_retains_provider_and_auth_changes(tmp_path):
     assert launch_health.fingerprint(profile("codex"), env) != before
 
 
+
+
+@pytest.mark.parametrize("status,env,refusal,route,outcome", [
+    ("unavailable", {"CLAUDE_CODE_USE_BEDROCK": "1"}, None, "bedrock", "model_unavailable"),
+    ("available", {"ANTHROPIC_API_KEY": "k"}, "a personal key", "console", "policy_refused"),
+])
+def test_launch_gates_count_toward_route_health(db, repo, monkeypatch, status, env, refusal, route, outcome):
+    from brindle import agents, workspaces
+    from brindle.pro import managed_models, route_health
+    p = profile("claude", model="claude-opus-5-5")
+    ws = workspaces.adopt_root(db, str(repo))
+    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: env)
+    monkeypatch.setattr(agents, "_model_checker", Mock(check=Mock(return_value=ma.Availability(status, "why"))))
+    monkeypatch.setattr(managed_models, "refusal", lambda *a: refusal)
+    monkeypatch.setattr(managed_models, "agent_env", lambda *a: env)
+    monkeypatch.setattr(route_health, "reporting", lambda: True)
+    route_health.reset()
+    assert agents.model_problem("test", ws, m=managed_models.Managed("org", None, False))
+    assert route_health.pending() == {(ws.repo_root, "claude", route, "claude-opus-5-5", outcome): 1}
+    route_health.reset()
