@@ -506,7 +506,7 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
-    weight_order = {"light": 0, "medium": 1, "heavy": 2, "reasoning": 3, "complex": 3}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
     order = cfg.routing.get(weight, [])
     if effective_ceiling:
@@ -609,7 +609,7 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
         if p.effort:
             model_info.append(f"{p.effort} effort")
         pw = profile_weight(name, cfg, repo_root)
-        if pw in ("heavy", "reasoning"):
+        if pw in ("heavy", "advanced", "reasoning"):
             cost_tier = "most expensive tier"
         elif pw == "light":
             cost_tier = "lowest cost tier"
@@ -622,9 +622,9 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
 
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
-    """The tier/weight of a profile ('light', 'medium', 'heavy', 'reasoning')."""
-    if "-fable" in name or "-reasoning" in name:
-        return "reasoning"
+    """The tier/weight of a profile ('light', 'medium', 'heavy', 'advanced')."""
+    if "-fable" in name or "-advanced" in name or "-reasoning" in name:
+        return "advanced"
     try:
         p = load_profile(name, repo_root)
         m = effective_profile_model(p, repo_root).lower()
@@ -650,9 +650,9 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
         in_light = name in cfg.routing.get("light", [])
         in_med = name in cfg.routing.get("medium", [])
         in_heavy = name in cfg.routing.get("heavy", [])
-        in_reasoning = name in cfg.routing.get("reasoning", [])
-        if in_reasoning and not in_heavy and not in_med and not in_light:
-            return "reasoning"
+        in_advanced = name in cfg.routing.get("advanced", []) or name in cfg.routing.get("reasoning", [])
+        if in_advanced and not in_heavy and not in_med and not in_light:
+            return "advanced"
         if in_heavy and not in_med and not in_light:
             return "heavy"
         if in_light and not in_med and not in_heavy:
@@ -676,7 +676,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     filled with what ``brindle.savings`` records: the ``profile``, the
     ``baseline`` (the pick without learning), ``learned`` and the ``weight``."""
     cfg = load_repo_config(repo_root)
-    weight_order = {"light": 0, "medium": 1, "heavy": 2, "reasoning": 3, "complex": 3}
+    weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
 
     if requested:
@@ -719,7 +719,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 if why is not None:
                     why.append(f"weight {orig_weight} capped to {weight} by max_weight")
             if files and all(f.startswith("docs/") or f.endswith(".md") for f in files):
-                if weight in ("reasoning", "heavy"):
+                if weight in ("advanced", "reasoning", "heavy"):
                     orig_demote = weight
                     weight = "medium"
                     if why is not None:

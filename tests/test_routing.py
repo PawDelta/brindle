@@ -99,7 +99,7 @@ def test_routing_merges_user_repo_and_local_per_tier(repo, tmp_path):
     assert cfg.routing == {**DEFAULT_ROUTING, "light": ["developer-local"], "medium": ["developer-heavy"]}
     assert cfg.routing_sources == {
         "light": str(local), "medium": str(repo / ".brindle" / "config.json"),
-        "heavy": "DEFAULT_ROUTING", "reasoning": "DEFAULT_ROUTING",
+        "heavy": "DEFAULT_ROUTING", "advanced": "DEFAULT_ROUTING",
     }
     other_repo = tmp_path / "other-repo"
     other_repo.mkdir()
@@ -114,7 +114,7 @@ def test_repo_and_local_keep_untouched_user_tiers(repo):
         json.dumps({"routing": {"heavy": ["developer-local"]}}))
     assert load_repo_config(repo).routing == {
         "light": ["developer-codex"], "medium": ["developer-heavy"], "heavy": ["developer-local"],
-        "reasoning": DEFAULT_ROUTING["reasoning"],
+        "advanced": DEFAULT_ROUTING["advanced"],
     }
 
 
@@ -160,8 +160,9 @@ def test_doctor_prints_effective_routing_and_each_tiers_source(repo, monkeypatch
 
 def test_weight_picks_the_first_candidate(db, repo, boss):
     why = []
-    assert choose(db, repo, weight="reasoning", why=why) == ("developer-fable", False)
-    assert len(why) == 1 and why[0].startswith("weight reasoning -> developer-fable")
+    assert choose(db, repo, weight="advanced", why=why) == ("developer-fable", False)
+    assert len(why) == 1 and why[0].startswith("weight advanced -> developer-fable")
+    assert choose(db, repo, weight="reasoning")[0] == "developer-fable"
     assert choose(db, repo, weight="complex")[0] == "developer-fable"
     assert choose(db, repo, weight="heavy")[0] == "developer-heavy"
     # No tier prefers another provider for its own sake: the baselines are

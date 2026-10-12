@@ -555,11 +555,11 @@ When a workspace is created (including from the pool), brindle starts one contai
 ### Routing by weight
 
 The supervisor sizes a task and passes `weight` (`"light"`, `"medium"`,
-`"heavy"` or `"reasoning"`, with `"complex"` accepted as an alias) to
+`"heavy"` or `"advanced"`, with `"reasoning"` and `"complex"` accepted as aliases) to
 `assign`/`handoff`; brindle picks an available profile for that tier.
 Light is small, well-specified, mechanical work (docs, renames, simple tests);
 medium is a normal feature or bugfix in one area; heavy is architecture design,
-broad cross-cutting refactors, or subtle bugs; reasoning is deep frontier
+broad cross-cutting refactors, or subtle bugs; advanced is deep frontier
 reasoning, hard algorithmic constraints, or deadlock resolution. The `routing`
 config maps each tier to profile names: the first is the tier's baseline, the
 rest are candidates hosted learning may pick instead (defaults shown; set one
@@ -568,10 +568,10 @@ tier and the others keep theirs):
 ```json
 {
   "routing": {
-    "light":     ["developer-light", "developer", "developer-codex", "developer-local"],
-    "medium":    ["developer", "developer-codex", "developer-heavy"],
-    "heavy":     ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
-    "reasoning": ["developer-fable", "developer-heavy", "developer-gemini"]
+    "light":    ["developer-light", "developer", "developer-codex", "developer-local"],
+    "medium":   ["developer", "developer-codex", "developer-heavy"],
+    "heavy":    ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
+    "advanced": ["developer-fable", "developer-heavy", "developer-gemini"]
   }
 }
 ```
@@ -597,7 +597,7 @@ report the missing name and the file that supplied it.
 `developer-light` runs on Claude Haiku at low effort; `developer` on your Claude
 Code default model; `developer-codex` on Codex; `developer-heavy` on Claude Opus
 at high effort; `developer-gemini` on Google Antigravity (Gemini) with high effort
-(Tier 3); `developer-fable` on Claude Fable at high effort (Tier 4 reasoning).
+(Tier 3); `developer-fable` on Claude Fable at high effort (Tier 4 advanced).
 A profile is skipped when its CLI isn't installed (`claude`, `codex`, `agy`), the
 local model server isn't answering, or its provider is at your `usage_limit`. If
 hosted learning is on it chooses among the profiles left; otherwise the first

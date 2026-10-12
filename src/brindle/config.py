@@ -43,16 +43,17 @@ def user_config_path() -> Path:
     return brindle_home() / CONFIG_FILE
 
 
-WEIGHTS = ("light", "medium", "heavy", "reasoning")
+WEIGHTS = ("light", "medium", "heavy", "advanced")
 WEIGHT_ALIASES = {
-    "complex": "reasoning",
-    "complex reasoning": "reasoning",
-    "deep": "reasoning",
+    "reasoning": "advanced",
+    "complex": "advanced",
+    "complex reasoning": "advanced",
+    "deep": "advanced",
 }
 
 
 def normalize_weight(weight: str | None) -> str | None:
-    """Normalize a weight string, resolving aliases like 'complex' to 'reasoning'."""
+    """Normalize a weight string, resolving aliases like 'reasoning' or 'complex' to 'advanced'."""
     if not weight:
         return None
     w = weight.strip().lower()
@@ -67,7 +68,7 @@ DEFAULT_ROUTING = {
     "light": ["developer-light", "developer", "developer-codex", "developer-local"],
     "medium": ["developer", "developer-codex", "developer-heavy"],
     "heavy": ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
-    "reasoning": ["developer-fable", "developer-heavy", "developer-gemini"],
+    "advanced": ["developer-fable", "developer-heavy", "developer-gemini"],
 }
 
 
@@ -107,7 +108,7 @@ class RepoConfig:
     merge_into: str | None = None      # branch worker branches are cut from and merge into (None: the supervisor's / default branch)
     auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
-    max_weight: str | None = None      # ceiling for weight routing: "light", "medium", "heavy", "reasoning", or None (unlimited)
+    max_weight: str | None = None      # ceiling for weight routing: "light", "medium", "heavy", "advanced", or None (unlimited)
     plan_first: bool = False           # workers propose a plan and wait for approval before editing
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
@@ -261,15 +262,17 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
         routing = source.get("routing")
         if isinstance(routing, dict):
             for tier, names in routing.items():
-                if tier in WEIGHTS and isinstance(names, list):
-                    cfg.routing[tier] = [n for n in names if isinstance(n, str)]
-                    cfg.routing_sources[tier] = str(path)
+                norm_tier = normalize_weight(tier)
+                if norm_tier in WEIGHTS and isinstance(names, list):
+                    cfg.routing[norm_tier] = [n for n in names if isinstance(n, str)]
+                    cfg.routing_sources[norm_tier] = str(path)
     for source in (shared, local):  # per weight, so a repo can override one and keep the rest
         second = source.get("second_review")
         if isinstance(second, dict):
             for tier, name in second.items():
-                if tier in WEIGHTS and isinstance(name, str) and name:
-                    cfg.second_review[tier] = name
+                norm_tier = normalize_weight(tier)
+                if norm_tier in WEIGHTS and isinstance(name, str) and name:
+                    cfg.second_review[norm_tier] = name
     for source in (user, shared, local):  # per model, so a repo can override one and keep the rest
         pricing = source.get("pricing")
         if isinstance(pricing, dict):

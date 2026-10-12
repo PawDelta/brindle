@@ -247,11 +247,11 @@ async def handoff(
     profile is used, else `weight` routes to an available profile, else the
     repo's default agent.
 
-    weight: "light", "medium", "heavy" or "reasoning" (when you don't need a specific
+    weight: "light", "medium", "heavy" or "advanced" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
     simple tests); medium = normal feature work or bugfixes; heavy = system
-    architecture, broad refactoring; reasoning = complex frontier reasoning,
+    architecture, broad refactoring; advanced = complex frontier reasoning,
     deep algorithmic proofs, or deadlock resolution.
 
     Waits up to wait_seconds (default 4 minutes). If the worker isn't done by
@@ -384,11 +384,11 @@ async def assign(
     profile is used, else `weight` routes to an available profile, else the
     repo's default agent.
 
-    weight: "light", "medium", "heavy" or "reasoning" (when you don't need a specific
+    weight: "light", "medium", "heavy" or "advanced" (when you don't need a specific
     profile): brindle picks an available profile for the tier and the reply says
     which and why. light = small, well-specified, mechanical (docs, renames,
     simple tests); medium = normal feature work or bugfixes; heavy = system
-    architecture, broad refactoring; reasoning = complex frontier reasoning,
+    architecture, broad refactoring; advanced = complex frontier reasoning,
     deep algorithmic proofs, or deadlock resolution.
 
     When it finishes, its result arrives in your conversation as a message.

@@ -49,9 +49,9 @@ def test_heavy_starts_on_developer_heavy():
     assert gemini.provider == "antigravity" and gemini.effort == "high"
 
 
-def test_reasoning_starts_on_developer_fable():
-    assert DEFAULT_ROUTING["reasoning"][0] == "developer-fable"
-    assert DEFAULT_ROUTING["reasoning"][1:] == ["developer-heavy", "developer-gemini"]
+def test_advanced_starts_on_developer_fable():
+    assert DEFAULT_ROUTING["advanced"][0] == "developer-fable"
+    assert DEFAULT_ROUTING["advanced"][1:] == ["developer-heavy", "developer-gemini"]
     fable = load_profile("developer-fable")
     assert fable.model == "fable" and fable.effort == "high"
 
