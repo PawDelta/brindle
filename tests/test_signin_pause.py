@@ -9,7 +9,7 @@ from brindle.company_identity import Identity
 from brindle.db import Agent, Workspace
 from brindle.pro.team_policy import AgentSetup, AwsSetup, ClaudeSetup
 
-AWS = AwsSetup("https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker", "us-west-2")
+AWS = AwsSetup("us-west-2", "https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker")
 
 OK = Identity("claude", "Claude: org Acme", ident="claude org Acme (org-1)")
 PERSONAL = Identity("claude", "Claude: org Me", ident="claude org Me (org-9)")

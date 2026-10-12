@@ -1995,14 +1995,26 @@ def _set_cloud(repo: str, cloud: str, values: Mapping[str, str], *, run=subproce
 
 
 def managed_cloud(cwd: str) -> tuple[str, dict[str, str]] | None:
-    """On Enterprise, the cloud the org policy's ``provider_config`` names
-    (bedrock, vertex or azure) and the region/project to prefill; else None."""
+    """On Enterprise, the cloud the org policy routes Claude to (its enforced
+    ``agent_setup`` route, else its ``provider_config``: bedrock, vertex or
+    azure) and the region/project to prefill; else None."""
     from brindle.pro import managed_models
 
     try:
         m = managed_models.current(cwd)
     except Exception:  # noqa: BLE001 - not managed, or unreadable: no default
         return None
+    claude = m.claude if m else None
+    if claude is not None:
+        cloud = {"bedrock": BEDROCK, "vertex": VERTEX, "foundry": FOUNDRY}.get(claude.route)
+        if not cloud:
+            return None
+        if cloud == BEDROCK:
+            return cloud, {"AWS_REGION": claude.aws.region}
+        if cloud == VERTEX:
+            return cloud, {"CLOUD_ML_REGION": claude.gcp.region,
+                           "ANTHROPIC_VERTEX_PROJECT_ID": claude.gcp.project}
+        return cloud, {}
     cfg = m.config if m else None
     cloud = POLICY_CLOUDS.get(cfg.provider) if cfg else None
     if not cloud:

@@ -13,9 +13,11 @@ from brindle.pro.team_policy import (AgentSetup, AwsSetup, AzureSetup, ClaudeSet
 ORG = "acme"
 CLAUDE_ORG = "11111111-2222-3333-4444-555555555555"
 SUB = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c"
-AWS = AwsSetup("https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker", "us-west-2")
+AWS = AwsSetup("us-west-2", "https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker")
+OWN_AWS = AwsSetup("us-west-2")          # no SSO group: the machine's own AWS sign-in
 GCP = GcpSetup("acme-brindle-prod", "us-east5")
 AZURE = AzureSetup(SUB, "acme-foundry")
+FOUNDRY_URL = AzureSetup(base_url="https://acme.services.ai.azure.com/anthropic")
 
 CLAUDE_OK = (0, json.dumps({"loggedIn": True, "orgId": CLAUDE_ORG, "orgName": "Acme",
                             "subscriptionType": "enterprise"}))
@@ -210,6 +212,88 @@ def test_missing_cli_warns_without_a_mismatch(monkeypatch):
     policy(monkeypatch, claude_setup("bedrock", aws=AWS))
     c = by_name()["claude identity"]
     assert c.level == doctor.WARN and "isn't installed" in c.detail
+
+
+# -- a route that leaves the cloud sign-in to the person ---------------------------------
+
+OTHER_AWS = (0, json.dumps({"Account": "999999999999", "Arn": "arn:aws:sts::999999999999:assumed-role/Mine/me"}))
+
+
+def test_bedrock_without_sso_only_checks_that_sts_answers(monkeypatch):
+    fake = Fake(monkeypatch, {("aws", "sts"): OTHER_AWS})
+    policy(monkeypatch, claude_setup("bedrock", aws=OWN_AWS), enforce=True)
+    c = by_name()["claude identity"]
+    assert c.level == doctor.OK and "999999999999" in c.detail and "your own AWS sign-in" in c.detail
+    argv = next(a for a, _, _ in fake.calls if a[0] == "aws")
+    assert "--profile" not in argv and argv[argv.index("--region") + 1] == "us-west-2"
+    assert company_identity.launch_problem("claude") is None      # any account: no match to make
+    assert company_identity.expected_ident(claude_setup("bedrock", aws=OWN_AWS)) is None
+
+
+def test_bedrock_without_sso_still_needs_a_sign_in(monkeypatch):
+    Fake(monkeypatch, {("aws", "sts"): (255, "Unable to locate credentials")})
+    policy(monkeypatch, claude_setup("bedrock", aws=OWN_AWS), enforce=True)
+    c = by_name()["claude identity"]
+    assert c.level == doctor.WARN and "AWS isn't signed in" in c.detail and "the way you usually do" in c.detail
+    assert "aws sso login --profile" not in c.detail
+    why = company_identity.launch_problem("claude")
+    assert why and "AWS isn't signed in" in why
+    Fake(monkeypatch, missing={"aws"})
+    assert company_identity.launch_problem("claude") is None       # undetermined never blocks
+
+
+def test_bedrock_without_sso_caches_the_launch_under_its_own_key(monkeypatch, launch_cache):
+    _, path = launch_cache
+    fake = Fake(monkeypatch, {("aws", "sts"): OTHER_AWS})
+    policy(monkeypatch, claude_setup("bedrock", aws=OWN_AWS), enforce=True)
+    assert company_identity.launch_problem("claude") is None
+    assert company_identity.launch_problem("claude") is None
+    assert fake.count("aws", "sts") == 1
+    [(key, _)] = json.loads(path.read_text()).items()
+    assert key.startswith("claude|bedrock|own|")
+
+
+def test_foundry_by_base_url_only_checks_that_az_answers(monkeypatch, launch_cache):
+    clock, _ = launch_cache
+    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
+    policy(monkeypatch, claude_setup("foundry", azure=FOUNDRY_URL), enforce=True)
+    c = by_name()["claude identity"]
+    assert c.level == doctor.OK and "other-sub" in c.detail
+    assert company_identity.launch_problem("claude") is None
+    assert company_identity.expected_ident(claude_setup("foundry", azure=FOUNDRY_URL)) is None
+    clock[0] += 301                                  # past the launch cache
+    Fake(monkeypatch, {("az", "account"): (1, "Please run 'az login'")})
+    c = by_name()["claude identity"]
+    assert c.level == doctor.WARN and "az login" in c.detail and "az account set" not in c.detail
+    assert company_identity.launch_problem("claude")
+
+
+def test_the_persons_own_aws_sign_in_reaches_the_pane_under_enforcement(monkeypatch):
+    from brindle import pane_auth
+
+    policy(monkeypatch, claude_setup("bedrock", aws=OWN_AWS), enforce=True)
+    monkeypatch.setenv("AWS_PROFILE", "mine")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAMINE")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    deny = pane_auth.deny_names("claude", "auto", None)
+    for name in ("AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK"):
+        assert name not in deny            # the route left the AWS sign-in to the person
+    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_VERTEX",
+                 "GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_BASE_URL"):
+        assert name in deny                # everything else that picks an account still goes
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
+    assert "AWS_ACCESS_KEY_ID" in pane_auth.deny_names("claude", "auto", None)    # with SSO: as before
+
+
+def test_own_signin_families():
+    assert company_identity.own_signin(claude_setup("bedrock", aws=OWN_AWS)) == ("AWS_",)
+    assert company_identity.own_signin(claude_setup("bedrock", aws=AWS)) == ()
+    assert company_identity.own_signin(claude_setup("foundry", azure=FOUNDRY_URL)) == ("AZURE_",)
+    assert company_identity.own_signin(claude_setup("foundry", azure=AZURE)) == ()
+    assert company_identity.own_signin(claude_setup("vertex", gcp=GCP)) == ()
+    route = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2"}
+    deny = company_identity.enforced_deny(route, {"AWS_PROFILE", "ANTHROPIC_OTHER_KEY"}, own=("AWS_",))
+    assert "ANTHROPIC_OTHER_KEY" in deny and not [n for n in deny if n.startswith("AWS_")]
 
 
 # -- enforce at launch ---------------------------------------------------------------------

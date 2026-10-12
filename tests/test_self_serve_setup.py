@@ -269,8 +269,8 @@ def test_no_nudge_when_the_setup_isnt_ready(env, monkeypatch):
 
 def test_saved_setup_round_trips_through_the_org_parser():
     setup = AgentSetup(
-        claude=ClaudeSetup(route="bedrock", aws=AwsSetup("https://a.awsapps.com/start", "us-east-1",
-                                                         "123456789012", "Dev", "us-west-2")),
+        claude=ClaudeSetup(route="bedrock", aws=AwsSetup("us-west-2", "https://a.awsapps.com/start",
+                                                         "us-east-1", "123456789012", "Dev")),
         codex=team_policy.CodexSetup("chatgpt"), enforce=False)
     self_serve.save_local(setup)
     assert self_serve.local_setup() == setup
@@ -449,7 +449,7 @@ def test_doctor_labels_a_self_serve_claude_plan(monkeypatch):
 
 def test_doctor_labels_a_self_serve_bedrock_account(monkeypatch):
     local = AgentSetup(claude=ClaudeSetup(route="bedrock", aws=AwsSetup(
-        "https://a.awsapps.com/start", "us-east-1", "123456789012", "Dev", "us-west-2")))
+        "us-west-2", "https://a.awsapps.com/start", "us-east-1", "123456789012", "Dev")))
     c = doctor_lines(monkeypatch, {("aws", "sts"): AWS_OK}, local)["claude identity"]
     assert "self-serve" in c.detail and "billed to Bedrock: AWS account 1234…" in c.detail
 

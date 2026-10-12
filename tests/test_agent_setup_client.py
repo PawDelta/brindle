@@ -1,6 +1,7 @@
 """The org policy's ``agent_setup`` block, parsed by the client."""
 
 import copy
+import json
 import logging
 
 import pytest
@@ -111,6 +112,162 @@ def test_bedrock_model_ids_with_colon_and_dots(no_enterprise):
 
 def test_absent_block_is_none(no_enterprise):
     assert parse_policy(ORG, body()).agent_setup is None
+
+
+# -- the routing fields (model-routing phase 1) --------------------------------
+
+OWN_AWS = {"region": "us-west-2"}
+FOUNDRY_URL = "https://acme.services.ai.azure.com/anthropic"
+IDS = ["us.anthropic.claude-opus-4-5-v1:0", "us.anthropic.claude-sonnet-4-5-v1:0"]
+
+
+def test_bedrock_without_the_sso_group_keeps_the_region_only(no_enterprise):
+    c = parse({"claude": {"route": "bedrock", "aws": OWN_AWS}}).claude
+    assert c.aws.region == "us-west-2" and c.aws.sso is False
+    assert (c.aws.sso_start_url, c.aws.sso_region, c.aws.account_id, c.aws.role_name) == (None,) * 4
+    assert parse({"claude": {"route": "bedrock", "aws": AWS}}).claude.aws.sso is True
+
+
+@pytest.mark.parametrize("missing", ["sso_start_url", "sso_region", "account_id", "role_name"])
+def test_a_partial_sso_group_is_malformed(missing, no_enterprise, caplog):
+    aws = {k: v for k, v in AWS.items() if k != missing}
+    with caplog.at_level(logging.WARNING, logger="brindle.pro.team_policy"):
+        assert parse({"claude": {"route": "bedrock", "aws": aws}}) is None
+    assert any("all four or none" in r.getMessage() and missing in r.getMessage() for r in caplog.records)
+
+
+def test_bedrock_region_stays_required(no_enterprise):
+    assert parse({"claude": {"route": "bedrock", "aws": {}}}) is None
+
+
+def test_foundry_by_base_url(no_enterprise):
+    c = parse({"claude": {"route": "foundry", "azure": {"base_url": FOUNDRY_URL}}}).claude
+    assert c.azure.base_url == FOUNDRY_URL
+    assert c.azure.resource is None and c.azure.subscription_id is None
+
+
+def test_foundry_by_resource_may_also_name_the_base_url(no_enterprise):
+    c = parse({"claude": {"route": "foundry", "azure": {**AZURE, "base_url": FOUNDRY_URL}}}).claude
+    assert (c.azure.subscription_id, c.azure.resource, c.azure.base_url) == (UUID, "acme-foundry", FOUNDRY_URL)
+
+
+@pytest.mark.parametrize("azure", [
+    {}, {"subscription_id": UUID},                       # neither resource nor base_url
+    {"resource": "acme-foundry"},                        # a resource needs its subscription
+    {"base_url": "http://acme.services.ai.azure.com"},   # not https
+    {"base_url": "https://u@acme.services.ai.azure.com"},
+    {"base_url": FOUNDRY_URL + "?api-key=abc"},          # secret-shaped
+])
+def test_malformed_azure_blocks(azure, no_enterprise):
+    assert parse({"claude": {"route": "foundry", "azure": azure}}) is None
+
+
+def test_model_ids_and_default_model(no_enterprise):
+    c = parse({"claude": {"route": "bedrock", "aws": OWN_AWS, "model_ids": IDS,
+                          "default_model": IDS[1]}}).claude
+    assert c.model_ids == tuple(IDS) and c.default_model == IDS[1]
+
+
+def test_model_ids_default_to_none(no_enterprise):
+    c = parse({"claude": {"route": "bedrock", "aws": OWN_AWS}}).claude
+    assert c.model_ids == () and c.default_model is None
+    c = parse({"claude": {"route": "bedrock", "aws": OWN_AWS, "model_ids": []}}).claude
+    assert c.model_ids == () and c.default_model is None
+
+
+def test_model_ids_are_deduplicated_in_order(no_enterprise):
+    c = parse({"claude": {"route": "vertex", "gcp": GCP, "model_ids": [IDS[1], IDS[0], IDS[1]]}}).claude
+    assert c.model_ids == (IDS[1], IDS[0])
+
+
+def test_a_default_model_alone_is_fine(no_enterprise):
+    c = parse({"claude": {"route": "gateway", "gateway": GATEWAY, "default_model": "claude-sonnet-4-5"}}).claude
+    assert c.model_ids == () and c.default_model == "claude-sonnet-4-5"
+
+
+@pytest.mark.parametrize("name,over", [
+    ("default not in ids", {"model_ids": IDS, "default_model": "claude-haiku-4-5"}),
+    ("too many ids", {"model_ids": [f"model-{i}" for i in range(33)]}),
+    ("not a list", {"model_ids": IDS[0]}),
+    ("id with a space", {"model_ids": ["claude opus"]}),
+    ("id with a slash", {"model_ids": ["a/b"]}),
+    ("id not a string", {"model_ids": [4]}),
+    ("secret-shaped id", {"model_ids": ["sk-ant-api03-abcdefghijklmnop"]}),
+    ("default not a string", {"default_model": 4}),
+])
+def test_malformed_model_ids(name, over, no_enterprise):
+    assert parse({"claude": {"route": "bedrock", "aws": OWN_AWS, **over}}) is None, name
+
+
+@pytest.mark.parametrize("route,block", [("console", {}), ("bedrock", {"aws": OWN_AWS}), ("vertex", {"gcp": GCP}),
+                                         ("foundry", {"azure": AZURE}), ("gateway", {"gateway": GATEWAY})])
+def test_model_ids_kept_for_every_route_but_subscription(route, block, no_enterprise):
+    c = parse({"claude": {"route": route, "org_id": UUID, **block, "model_ids": IDS, "default_model": IDS[0]}}).claude
+    assert c.model_ids == tuple(IDS) and c.default_model == IDS[0]
+
+
+def test_model_ids_pruned_from_subscription_but_still_validated(no_enterprise):
+    c = parse({"claude": {"route": "subscription", "org_id": UUID, "model_ids": IDS, "default_model": IDS[0]}}).claude
+    assert c.model_ids == () and c.default_model is None
+    assert parse({"claude": {"route": "subscription", "org_id": UUID, "model_ids": ["a b"]}}) is None
+
+
+def test_codex_gateway_needs_its_base_url(no_enterprise):
+    s = parse({"codex": {"route": "gateway", "base_url": "https://llm.acme.internal/v1"}})
+    assert s.codex.route == "gateway" and s.codex.base_url == "https://llm.acme.internal/v1"
+    assert parse({"codex": {"route": "gateway"}}) is None
+    assert parse({"codex": {"route": "gateway", "base_url": "http://llm.acme.internal/v1"}}) is None
+
+
+def test_codex_azure_base_url_is_optional(no_enterprise):
+    assert parse({"codex": {"route": "azure"}}).codex.base_url is None    # policies older than the field
+    s = parse({"codex": {"route": "azure", "base_url": "https://acme.openai.azure.com/v1"}})
+    assert s.codex.base_url == "https://acme.openai.azure.com/v1"
+    assert parse({"codex": {"route": "azure", "base_url": "ftp://x"}}) is None
+
+
+@pytest.mark.parametrize("route", ["chatgpt", "api_key"])
+def test_codex_login_routes_drop_a_base_url(route, no_enterprise):
+    assert parse({"codex": {"route": route, "base_url": "https://llm.acme.internal/v1"}}).codex.base_url is None
+    assert parse({"codex": {"route": route, "base_url": "nope"}}) is None
+
+
+def test_deny_personal_keys_in_the_block(no_enterprise):
+    assert parse({"codex": {"route": "chatgpt"}}).deny_personal_keys is None
+    assert parse({"codex": {"route": "chatgpt"}, "deny_personal_keys": True}).deny_personal_keys is True
+    assert parse({"codex": {"route": "chatgpt"}, "deny_personal_keys": False}).deny_personal_keys is False
+    assert parse({"codex": {"route": "chatgpt"}, "deny_personal_keys": "yes"}) is None
+
+
+def test_routed_names_the_routes_an_enforced_policy_manages(no_enterprise):
+    assert parse({"claude": {"route": "bedrock", "aws": OWN_AWS}}).routed is True
+    assert parse({"claude": {"route": "gateway", "gateway": GATEWAY}}).routed is True
+    assert parse({"codex": {"route": "gateway", "base_url": "https://llm.acme.internal/v1"}}).routed is True
+    assert parse({"codex": {"route": "azure", "base_url": "https://acme.openai.azure.com/v1"}}).routed is True
+    assert parse({"codex": {"route": "azure"}}).routed is False
+    assert parse({"claude": {"route": "subscription", "org_id": UUID}, "codex": {"route": "chatgpt"}}).routed is False
+    assert parse({"enforce": True}).routed is False
+
+
+def test_routing_fields_round_trip_through_the_cache(enterprise):
+    raw = {"enforce": True, "deny_personal_keys": True,
+           "claude": {"route": "foundry", "azure": {"base_url": FOUNDRY_URL}, "model_ids": IDS,
+                      "default_model": IDS[0]},
+           "codex": {"route": "gateway", "base_url": "https://llm.acme.internal/v1"}}
+    p = parse_policy(ORG, body(raw))
+    for again in (parse_policy(ORG, p.to_json()), parse_policy(ORG, json.loads(json.dumps(p.to_json())))):
+        assert again.agent_setup == p.agent_setup
+    assert p.agent_setup.claude.model_ids == tuple(IDS) and p.agent_setup.deny_personal_keys is True
+
+
+def test_the_effective_policy_carries_the_block(no_enterprise):
+    raw = body({"claude": {"route": "bedrock", "aws": OWN_AWS}})
+    raw["effective"] = {"allowed_providers": ["claude"], "require_human_review": False}
+    p = parse_policy(ORG, raw)
+    assert p.enforced is p.effective and p.effective.agent_setup == p.agent_setup
+    p = parse_policy(ORG, body({"claude": {"route": "bedrock", "aws": OWN_AWS}},
+                               roles={"member": {"max_parallel_workers": 1}}))
+    assert team_policy.with_role_overrides(p, "member", None).enforced.agent_setup == p.agent_setup
 
 
 # -- pruning -----------------------------------------------------------------

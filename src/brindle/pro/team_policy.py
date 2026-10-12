@@ -84,20 +84,36 @@ class ProviderConfig:
 
 
 AGENT_CLAUDE_ROUTES = ("subscription", "console", "bedrock", "vertex", "foundry", "gateway")
-AGENT_CODEX_ROUTES = ("chatgpt", "api_key", "azure")
+AGENT_CODEX_ROUTES = ("chatgpt", "api_key", "azure", "gateway")
 # The sub-block a Claude route needs; the others are pruned from the parsed block.
 CLAUDE_ROUTE_BLOCK = {"bedrock": "aws", "vertex": "gcp", "foundry": "azure", "gateway": "gateway"}
 CLAUDE_ORG_ROUTES = ("subscription", "console")     # the routes that sign in to a Claude org
+# The Claude routes that point Claude Code at a cloud or an endpoint of the org's
+# (the rest sign in to a Claude org), and the Codex routes that point Codex at
+# an endpoint (``base_url``): the routes an enforced policy manages as
+# ``provider_config`` always did (see brindle.pro.managed_models).
+CLAUDE_CLOUD_ROUTES = ("bedrock", "vertex", "foundry", "gateway")
+CODEX_ENDPOINT_ROUTES = ("azure", "gateway")
+CLAUDE_MODEL_ROUTES = ("console", "bedrock", "vertex", "foundry", "gateway")   # model_ids kept
 AGENT_ENFORCE_FEATURE = MANAGED_FEATURE             # ``enforce`` needs this Enterprise entitlement
+MAX_MODEL_IDS = 32
 
 
 @dataclass(frozen=True)
 class AwsSetup:
-    sso_start_url: str
-    sso_region: str
-    account_id: str
-    role_name: str
+    """The AWS account Bedrock is called in. The SSO group (``sso_start_url``,
+    ``sso_region``, ``account_id``, ``role_name``) comes all four or none:
+    without it, the machine's own AWS sign-in applies (no profile is written
+    and no account is matched)."""
     region: str
+    sso_start_url: str | None = None
+    sso_region: str | None = None
+    account_id: str | None = None
+    role_name: str | None = None
+
+    @property
+    def sso(self) -> bool:
+        return self.sso_start_url is not None
 
 
 @dataclass(frozen=True)
@@ -108,8 +124,11 @@ class GcpSetup:
 
 @dataclass(frozen=True)
 class AzureSetup:
-    subscription_id: str
-    resource: str
+    """A Foundry resource (``resource``, with its ``subscription_id``) or the
+    endpoint itself (``base_url``); at least one of the two."""
+    subscription_id: str | None = None
+    resource: str | None = None
+    base_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,21 +152,38 @@ class ClaudeSetup:
     azure: AzureSetup | None = None
     gateway: GatewaySetup | None = None
     models: ModelsSetup | None = None
+    # The model ids the route serves (Bedrock ids or ARNs, Vertex ids, ...) and
+    # the one panes start on (``ANTHROPIC_MODEL``; it is one of model_ids when
+    # those are set). Kept for every route but subscription.
+    model_ids: tuple[str, ...] = ()
+    default_model: str | None = None
 
 
 @dataclass(frozen=True)
 class CodexSetup:
     route: str
+    base_url: str | None = None     # azure, gateway: the endpoint (``OPENAI_BASE_URL``)
 
 
 @dataclass(frozen=True)
 class AgentSetup:
     """Org policy ``agent_setup``: how the org's workers sign in to Claude and
     Codex. Names only, never a secret. ``enforce`` is False unless the org has
-    the Enterprise entitlement."""
+    the Enterprise entitlement. ``deny_personal_keys`` (Enterprise too) is
+    None when the block doesn't set it (an older server): the policy's
+    top-level field applies then (see brindle.pro.managed_models)."""
     claude: ClaudeSetup | None = None
     codex: CodexSetup | None = None
     enforce: bool = False
+    deny_personal_keys: bool | None = None
+
+    @property
+    def routed(self) -> bool:
+        """Whether an agent's route points at a cloud or an endpoint of the
+        org's: what ``enforce`` manages as ``provider_config`` always did."""
+        return bool((self.claude is not None and self.claude.route in CLAUDE_CLOUD_ROUTES)
+                    or (self.codex is not None and self.codex.route in CODEX_ENDPOINT_ROUTES
+                        and self.codex.base_url))
 
 
 @dataclass(frozen=True)
@@ -388,14 +424,16 @@ def _org_key(pc: dict) -> tuple[str | None, tuple[str, ...] | None]:
     return None, tuple(helper)
 
 
-AWS_KEYS = ("sso_start_url", "sso_region", "account_id", "role_name", "region")
+AWS_SSO_KEYS = ("sso_start_url", "sso_region", "account_id", "role_name")
+AWS_KEYS = AWS_SSO_KEYS + ("region",)
 GCP_KEYS = ("project", "region")
-AZURE_KEYS = ("subscription_id", "resource")
+AZURE_KEYS = ("subscription_id", "resource", "base_url")
 GATEWAY_KEYS = ("base_url",)
 MODEL_KEYS = ("opus", "sonnet", "haiku")
-CLAUDE_KEYS = ("route", "org_id", "aws", "gcp", "azure", "gateway", "models")
-CODEX_KEYS = ("route",)
-AGENT_KEYS = ("claude", "codex", "enforce")
+CLAUDE_KEYS = ("route", "org_id", "aws", "gcp", "azure", "gateway", "models", "model_ids",
+               "default_model")
+CODEX_KEYS = ("route", "base_url")
+AGENT_KEYS = ("claude", "codex", "enforce", "deny_personal_keys")
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 AWS_ACCOUNT_RE = re.compile(r"\d{12}")
 IAM_ROLE_RE = re.compile(r"[A-Za-z0-9+=,.@_-]{1,64}")
@@ -403,7 +441,7 @@ AWS_REGION_RE = re.compile(r"[a-z]{2}(?:-gov)?-[a-z]+-\d{1,2}")
 GCP_REGION_RE = re.compile(r"[a-z]+-[a-z]+\d{1,2}")
 GCP_PROJECT_RE = re.compile(r"[a-z][a-z0-9-]{4,28}[a-z0-9]")
 AZURE_RESOURCE_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?")   # a name: no dots, no URL
-MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")      # @: Vertex ids (model@version)
 HTTPS_URL_RE = re.compile(r"https://[^\s/?#@]+(?:/[^\s?#]*)?")
 # Secret-shaped values: none belongs in a policy. Matched on any string field.
 SECRET_RE = re.compile(r"(?<![A-Za-z0-9])sk-|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_|"
@@ -466,11 +504,17 @@ def _aws(v) -> AwsSetup:
     if isinstance(url, str) and url.endswith("#"):
         # AWS shows its start URL as ".../start/#"; the trailing # isn't part of it.
         a = {**a, "sso_start_url": url[:-1]}
-    return AwsSetup(sso_start_url=_https(a, "sso_start_url"),
+    region = _field(a, "region", AWS_REGION_RE)
+    given = [k for k in AWS_SSO_KEYS if a.get(k) is not None]
+    if not given:
+        return AwsSetup(region=region)      # the machine's own AWS sign-in applies
+    if len(given) != len(AWS_SSO_KEYS):
+        raise _Malformed("aws SSO fields come all four or none (missing "
+                         + ", ".join(k for k in AWS_SSO_KEYS if k not in given) + ")")
+    return AwsSetup(region=region, sso_start_url=_https(a, "sso_start_url"),
                     sso_region=_field(a, "sso_region", AWS_REGION_RE),
                     account_id=_field(a, "account_id", AWS_ACCOUNT_RE),
-                    role_name=_field(a, "role_name", IAM_ROLE_RE, max_len=64),
-                    region=_field(a, "region", AWS_REGION_RE))
+                    role_name=_field(a, "role_name", IAM_ROLE_RE, max_len=64))
 
 
 def _gcp(v) -> GcpSetup:
@@ -481,8 +525,31 @@ def _gcp(v) -> GcpSetup:
 
 def _azure(v) -> AzureSetup:
     z = _obj(v, AZURE_KEYS, "azure")
-    return AzureSetup(subscription_id=_field(z, "subscription_id", UUID_RE),
-                      resource=_field(z, "resource", AZURE_RESOURCE_RE, max_len=64))
+    sub = _field(z, "subscription_id", UUID_RE, required=False)
+    resource = _field(z, "resource", AZURE_RESOURCE_RE, required=False, max_len=64)
+    base_url = _https(z, "base_url") if z.get("base_url") is not None else None
+    if resource is None and base_url is None:
+        raise _Malformed("azure needs a resource or a base_url")
+    if resource is not None and sub is None:
+        raise _Malformed("azure resource needs its subscription_id")
+    return AzureSetup(subscription_id=sub, resource=resource, base_url=base_url)
+
+
+def _model_ids(c: dict) -> tuple[tuple[str, ...], str | None]:
+    """``model_ids`` (de-duplicated, in order) and ``default_model`` of a
+    claude block; the default is one of the ids when there are any."""
+    ids = c.get("model_ids")
+    if ids is None:
+        ids = []
+    if not isinstance(ids, (list, tuple)) or len(ids) > MAX_MODEL_IDS:   # a tuple: the cache's asdict
+        raise _Malformed("invalid model_ids")
+    seen: dict[str, None] = {}
+    for raw in ids:
+        seen[_field({"model_ids": raw}, "model_ids", MODEL_ID_RE)] = None
+    default = _field(c, "default_model", MODEL_ID_RE, required=False)
+    if default is not None and seen and default not in seen:
+        raise _Malformed("default_model isn't one of model_ids")
+    return tuple(seen), default
 
 
 def _gateway(v) -> GatewaySetup:
@@ -508,19 +575,26 @@ def _claude(v) -> ClaudeSetup:
     if need and blocks[need] is None:
         raise _Malformed(f"claude route {route} needs {need}")
     models = _models(c["models"]) if c.get("models") is not None else None
+    ids, default = _model_ids(c)        # validated for every route, kept where they apply
+    if route not in CLAUDE_MODEL_ROUTES:
+        ids, default = (), None
     return ClaudeSetup(route=route, org_id=org if route in CLAUDE_ORG_ROUTES else None,
                        aws=blocks["aws"] if need == "aws" else None,
                        gcp=blocks["gcp"] if need == "gcp" else None,
                        azure=blocks["azure"] if need == "azure" else None,
                        gateway=blocks["gateway"] if need == "gateway" else None,
-                       models=models)
+                       models=models, model_ids=ids, default_model=default)
 
 
 def _codex(v) -> CodexSetup:
     c = _obj(v, CODEX_KEYS, "codex")
-    if c.get("route") not in AGENT_CODEX_ROUTES:
+    route = c.get("route")
+    if route not in AGENT_CODEX_ROUTES:
         raise _Malformed("invalid codex route")
-    return CodexSetup(route=c["route"])
+    # gateway needs its endpoint; azure may have one (policies older than the
+    # field have none); the login routes have no use for it.
+    base_url = _https(c, "base_url") if (route == "gateway" or c.get("base_url") is not None) else None
+    return CodexSetup(route=route, base_url=base_url if route in CODEX_ENDPOINT_ROUTES else None)
 
 
 def _enforce_entitled() -> bool:
@@ -539,9 +613,13 @@ def _parse_agent_setup(raw) -> AgentSetup:
         enforce = False
     if not isinstance(enforce, bool):
         raise _Malformed("invalid enforce")
+    deny = a.get("deny_personal_keys")
+    if not (deny is None or isinstance(deny, bool)):
+        raise _Malformed("invalid deny_personal_keys")
     claude = _claude(a["claude"]) if a.get("claude") is not None else None
     codex = _codex(a["codex"]) if a.get("codex") is not None else None
-    return AgentSetup(claude=claude, codex=codex, enforce=enforce and _enforce_entitled())
+    return AgentSetup(claude=claude, codex=codex, enforce=enforce and _enforce_entitled(),
+                      deny_personal_keys=deny)
 
 
 def _agent_setup(p: dict) -> AgentSetup | None:
@@ -618,17 +696,18 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
              "visibility": _visibility(body.get("visibility", p.get("visibility")))}
     roll = _rollout(p)
     managed = _managed(p)
+    setup = _agent_setup(p)       # org-wide, like the rollout: the effective policy carries it too
     return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p), **_budgets(p),
                      **roll, **managed, roles=_roles(p.get("roles")),
                      effective=None if eff is None else OrgPolicy(
                          org_id=org_id, version=version, fetched_at=at, **_rules(eff),
                          **_budgets(eff), **roll, **(_managed(eff) if (
                              "provider_config" in eff or "deny_personal_keys" in eff) else managed),
-                         **spend),
+                         agent_setup=setup, **spend),
                      role=_role_name(body.get("role")),
                      policy_role=_role_name(body.get("policy_role")),
                      cached_for=tuple(key) if ok_key else None,
-                     agent_setup=_agent_setup(p), **spend)
+                     agent_setup=setup, **spend)
 
 
 def cache_path(org_id: str):
@@ -689,6 +768,7 @@ def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None)
                                           **_budgets(p.budgets()), **_rollout(p.rollout()),
                                           provider_config=p.provider_config,
                                           deny_personal_keys=p.deny_personal_keys,
+                                          agent_setup=p.agent_setup,
                                           spend_seat_usd=p.spend_seat_usd,
                                           spend_month=p.spend_month,
                                           visibility=p.visibility))
@@ -809,8 +889,9 @@ class ProPolicy(PolicyPlugin):
         return p
 
     def managed_models(self) -> OrgPolicy | Decision | None:
-        """The org policy whose ``provider_config`` and ``deny_personal_keys``
-        apply here: None when managed_models isn't entitled
+        """The org policy whose managed routes (an enforced ``agent_setup``,
+        else ``provider_config``) and ``deny_personal_keys`` apply here
+        (brindle.pro.managed_models): None when managed_models isn't entitled
         (:func:`license.has`, fail closed) or there is no team org, a denial
         when it is but the policy can't be had."""
         from brindle.pro import license

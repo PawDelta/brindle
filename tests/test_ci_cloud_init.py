@@ -170,6 +170,24 @@ def test_managed_cloud_reads_the_org_policy(monkeypatch, provider, cloud):
         assert got[1] == {"CLOUD_ML_REGION": "us-east-1", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-proj-123"}
 
 
+@pytest.mark.parametrize("claude, cloud, prefill", [
+    ({"route": "bedrock", "aws": {"region": "us-east-1"}}, "bedrock", {"AWS_REGION": "us-east-1"}),
+    ({"route": "vertex", "gcp": {"project": "acme-proj-123", "region": "us-east5"}}, "vertex",
+     {"CLOUD_ML_REGION": "us-east5", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-proj-123"}),
+    ({"route": "foundry", "azure": {"base_url": "https://acme.services.ai.azure.com/anthropic"}}, "foundry", {}),
+    ({"route": "gateway", "gateway": {"base_url": "https://llm.acme.internal/v1"}}, None, None),
+])
+def test_managed_cloud_reads_an_enforced_agent_setup_route(monkeypatch, claude, cloud, prefill):
+    from brindle.pro import license, managed_models, team_policy
+
+    monkeypatch.setattr(license, "has", lambda feature: True)
+    setup = team_policy._parse_agent_setup({"enforce": True, "claude": claude})
+    monkeypatch.setattr(managed_models, "current",
+                        lambda root: managed_models.Managed("org_1", None, False, setup=setup))
+    got = ci_client.managed_cloud("/x")
+    assert got == ((cloud, prefill) if cloud else None)
+
+
 def test_managed_cloud_is_none_without_a_policy_or_when_unreadable(monkeypatch):
     from brindle.pro import managed_models
 
