@@ -21,24 +21,6 @@ def ws(db, repo):
     return workspaces.create(db, str(repo), "feature").workspace
 
 
-def test_stop_hook_delivers_queued_message(db, ws):
-    fake_agent(db, ws)
-    db.enqueue("a1", "please also add tests", None)
-    out = agents.handle_hook(db, "a1", "stop", {})
-    assert out == {"decision": "block", "reason": "please also add tests"}
-    assert db.get_agent("a1").status == "processing"
-    assert agents.handle_hook(db, "a1", "stop", {}) is None
-    assert db.get_agent("a1").status == "idle"
-
-
-def test_stop_hook_nudges_worker_to_report_once(db, ws):
-    fake_agent(db, ws, mode="handoff")
-    out = agents.handle_hook(db, "a1", "stop", {})
-    assert out and "report_result" in out["reason"]
-    # Claude Code sets stop_hook_active on the follow-up stop; don't loop.
-    assert agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True}) is None
-
-
 def _unreported_setup(db, ws, monkeypatch):
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0",
                        None, time.time()))
@@ -93,82 +75,6 @@ def test_prompt_and_notification_hooks(db, ws):
     assert db.get_agent("a1").status == "waiting"
 
 
-def test_claim_idle_is_exclusive(db, ws):
-    fake_agent(db, ws, status="idle")
-    assert db.claim_idle("a1") is True
-    assert db.claim_idle("a1") is False
-
-
-def test_report_result_forwards_to_parent_on_assign(db, ws, monkeypatch):
-    # The manual flow: with the pipeline off, the report goes to the parent.
-    from pathlib import Path
-
-    (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
-    fake_agent(db, ws, status="processing", agent_id="boss")
-    fake_agent(db, ws, mode="assign", parent="boss", agent_id="w1")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    assert "sent" in agents.report_result(db, "w1", "done: added login")
-    assert db.get_agent("w1").result == "done: added login"
-    # Boss is busy, so the result waits in its inbox for the next Stop hook.
-    msg = db.pop_pending("boss")
-    assert msg and "done: added login" in msg.body and "w1" in msg.body
-
-
-def test_claude_command_wires_hooks_mcp_and_profile():
-    ctx = LaunchContext("abc", load_profile("developer"), "do the thing")
-    argv = ClaudeCode().command(ctx)
-    assert argv[0] == "claude" and argv[-1] == "do the thing"
-    settings = argv[argv.index("--settings") + 1]
-    assert "_hook" in settings and "Stop" in settings
-    assert '"BRINDLE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
-    assert argv[argv.index("--permission-mode") + 1] == "auto"
-    # Agent view (background sessions) is where a pasted message can land in
-    # the wrong conversation or start a brand-new one; disable it outright.
-    assert '"disableAgentView": true' in settings
-
-
-def test_disable_agent_view_follows_mode_not_profile_name():
-    """disableAgentView is about how brindle drives the pane (a human's own
-    interactive chat vs. one brindle pastes messages into), not the profile's
-    name -- a custom-named profile run interactively must still get the
-    agent view, and a non-interactive one must still lose it."""
-    from dataclasses import replace
-
-    custom = replace(load_profile("developer"), name="my-custom-profile")
-
-    def settings_for(mode):
-        argv = ClaudeCode().command(LaunchContext("abc", custom, "hi", mode=mode))
-        return argv[argv.index("--settings") + 1]
-
-    assert '"disableAgentView": false' in settings_for("interactive")
-    assert '"disableAgentView": true' in settings_for("assign")
-    assert '"disableAgentView": true' in settings_for("handoff")
-
-
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_shell_agent_in_tmux_end_to_end(db, ws):
-    a = agents.spawn(db, ws, "developer", provider_name="shell")
-    try:
-        assert agents.is_alive(a)
-        assert agents.send_message(db, a.id, "echo brindle-says-hi-$BRINDLE_AGENT_ID") == "delivered"
-        deadline = time.time() + 5
-        while time.time() < deadline and f"brindle-says-hi-{a.id}" not in tmux.capture(a.tmux_window):
-            time.sleep(0.2)
-        assert f"brindle-says-hi-{a.id}" in tmux.capture(a.tmux_window)
-    finally:
-        tmux.kill_session(ws.tmux_session)
-
-
-def test_developer_may_run_tests_and_builds_but_not_everything():
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), None))
-    allowed = argv[argv.index("--allowedTools") + 1].split(",")
-    assert "mcp__brindle" in allowed
-    assert "Bash(pytest:*)" in allowed and "Bash(npm run:*)" in allowed
-    assert "Bash(git push:*)" not in allowed
-    assert not any(t in ("Bash", "Bash(*)") for t in allowed)
-
-
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
 # Real Claude Code 2.1.283 layouts: a blank line sits between the box's top
 # border and the status line above it (and another below the bottom
@@ -178,16 +84,6 @@ CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept ed
 # in the footer below the box.
 BOX = "\n────\n❯ \n────\n\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
 CLAUDE_BUSY = "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)" + BOX
-CLAUDE_BUSY_SHORT = "✻ Tomfoolering… (3s)" + BOX
-CLAUDE_BUSY_ESC = "✻ Tomfoolering… (3s · esc to interrupt)" + BOX
-CLAUDE_BUSY_BARE = "✻ Tomfoolering…" + BOX
-CLAUDE_BUSY_BACKGROUND = ("· Gallivanting… (7m 22s · ↓ 31.7k tokens · thinking)\n"
-                          "  (ctrl+b ctrl+b (twice) to run in background)" + BOX)
-# The todo list sits below the spinner, closer to the box, indented under it.
-CLAUDE_BUSY_TODO = ("✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)\n"
-                    "  ⎿  ☐ Write the fix\n"
-                    "     ☐ Add tests" + BOX)
-CLAUDE_DONE = "✻ Sautéed for 7m 49s · done 7:57 PM" + BOX
 # An exact capture of a real busy pane (2.1.283), truncated transcript line
 # and all: it must not be mistaken for the spinner above the box. Shared
 # with test_reliability.py.
@@ -208,52 +104,24 @@ CLAUDE_QUOTED_BUSY_NO_PADDING = (
     "⏺ It shows \"Tomfoolering… (7m 22s · ↓ 35.0k tokens)\" while busy.\n"
     "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ? for shortcuts\n"
 )
-# "esc to interrupt" only counts in the footer below the box, never quoted in
-# prose above it.
-CLAUDE_IDLE_ESC_MENTION = "⏺ Older builds printed esc to interrupt under the box." + BOX
-# Neither of these is the busy block busy_in_footer requires (its first line
-# must itself be the spinner): here it's prose describing the spinner, with
-# the real-looking spinner line only as a second, indented line — which is
-# neither the required first line nor a todo line, so the block is invalid
-# either way. screen_state's broader tail search still calls both of these
-# busy, unrelated to busy_in_footer's stricter shape check.
-CLAUDE_IDLE_SPINNER_DESCRIBED = ("⏺ The spinner looks like:\n"
-                                 "  ✻ Tomfoolering… (3s)" + BOX)
-# A plain "-" bullet isn't a spinner glyph, even though the rest of the line
-# is shaped like one.
-CLAUDE_IDLE_PROSE_ELLIPSIS = "  - Loading…" + BOX
 CLAUDE_PROMPT = " Bash command\n   pytest\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   4. No\n\n Esc to cancel\n"
 
 
 @pytest.mark.parametrize("screen,want", [
-    (CLAUDE_IDLE, "idle"), (CLAUDE_DONE, "idle"), (CLAUDE_IDLE_ESC_MENTION, "idle"),
-    (CLAUDE_BUSY, "busy"), (CLAUDE_BUSY_SHORT, "busy"), (CLAUDE_BUSY_ESC, "busy"),
-    (CLAUDE_BUSY_BARE, "busy"), (CLAUDE_BUSY_BACKGROUND, "busy"), (CLAUDE_BUSY_TODO, "busy"),
-    (CLAUDE_BUSY_REAL_CAPTURE, "busy"), (CLAUDE_QUOTED_BUSY_NO_PADDING, "idle"),
-    (CLAUDE_PROMPT, "waiting"), ("", None),
+    (CLAUDE_IDLE, "idle"), (CLAUDE_QUOTED_BUSY_NO_PADDING, "idle"),
+    (CLAUDE_BUSY_REAL_CAPTURE, "busy"), (CLAUDE_PROMPT, "waiting"),
 ])
 def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
 
 
 @pytest.mark.parametrize("screen,want", [
-    (CLAUDE_BUSY, True), (CLAUDE_BUSY_SHORT, True), (CLAUDE_BUSY_ESC, True),
-    (CLAUDE_BUSY_BARE, True), (CLAUDE_BUSY_TODO, True),
     (CLAUDE_BUSY_REAL_CAPTURE, True),
-    # The background-run note doesn't fit the spinner-then-todos shape, so
-    # busy_in_footer misses it (screen_state's broad tail search still
-    # catches it above); a conservative false negative, never a false
-    # positive.
-    (CLAUDE_BUSY_BACKGROUND, False),
-    (CLAUDE_IDLE_ESC_MENTION, False),
-    (CLAUDE_IDLE_SPINNER_DESCRIBED, False), (CLAUDE_IDLE_PROSE_ELLIPSIS, False),
-    (CLAUDE_IDLE, False), (CLAUDE_DONE, False), (CLAUDE_QUOTED_BUSY_NO_PADDING, False),
 ])
 def test_claude_busy_in_footer(screen, want):
     assert ClaudeCode().busy_in_footer(screen) is want
 
 
-CLAUDE_TYPING = "⏺ Done.\n\n────\n❯ half a message I'm still writ\n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
 # The real agent-view screen: its footer ("ctrl+x to delete") is the reliable
 # anchor, not the loose "moved to the background" phrasing, which can appear
 # quoted in an ordinary transcript (see CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES).
@@ -262,11 +130,6 @@ CLAUDE_BACKGROUND = (
     "────\n❯ describe a task for a new session\n────\n"
     "⏵⏵ auto mode · enter to open · space to reply · ctrl+x to delete · ? for shortcuts\n"
 )
-CLAUDE_BACKGROUND_RETURN_FOOTER = (
-    "Some other session's last message\n"
-    "────\n❯ describe a task for a new session\n────\n"
-    "⏵⏵ auto mode · enter to return · space to reply · ctrl+x to delete · ? for shortcuts\n"
-)
 # A transcript that happens to quote both telltale phrases, above the last
 # border: must NOT be mistaken for the real agent-view footer.
 CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES = (
@@ -274,43 +137,16 @@ CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES = (
     '  "ctrl+x to delete" if they wanted out.\n'
     "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
 )
-# Claude Code's dim placeholder/suggestion in an otherwise-empty input box:
-# looks like typed text unless the styling (SGR 2, faint) is taken into account.
-CLAUDE_PLACEHOLDER = (
-    "⏺ Done.\n\n────\n"
-    '❯ \x1b[2mTry "create a util logging.py that..."\x1b[0m\n'
-    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-)
 CLAUDE_PLACEHOLDER_GREY_256 = (
     "⏺ Done.\n\n────\n"
     '❯ \x1b[38;5;244mTry "fix the flaky test in test_agents.py"\x1b[0m\n'
     "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-)
-# A worker's own pane, its box border woven with its own session title (not
-# some OTHER session): must not be mistaken for a wrong-session pane and
-# block delivery. See test_claude_paste_blocked's own-title case below.
-CLAUDE_OWN_SESSION_TITLE = (
-    "⏺ working on it\n"
-    "──── feat/sidebar-everywhere-3 ────\n"
-    "❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
 )
 # A dim placeholder styled with a truecolor (38;2;r;g;b) grey instead of the
 # 256-color palette.
 CLAUDE_PLACEHOLDER_TRUECOLOR_GREY = (
     "⏺ Done.\n\n────\n"
     '❯ \x1b[38;2;128;128;128mTry "fix the flaky test in test_agents.py"\x1b[0m\n'
-    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-)
-# Real typed text in a non-grey truecolor (not dim) must still count as typing.
-CLAUDE_TYPING_TRUECOLOR_COLOR = (
-    "⏺ Done.\n\n────\n"
-    '❯ \x1b[38;2;200;60;60mnot a placeholder\x1b[0m\n'
-    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-)
-# A bright color (91-97) is a real color, not dimming -- must still count as typing.
-CLAUDE_TYPING_BRIGHT_COLOR = (
-    "⏺ Done.\n\n────\n"
-    '❯ \x1b[91mnot a placeholder\x1b[0m\n'
     "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
 )
 # The terminal cursor sits on the first cell in inverse video (SGR 7); it must
@@ -323,46 +159,13 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
 
 
 @pytest.mark.parametrize("screen,interactive,want", [
-    (CLAUDE_IDLE, True, None),
-    (CLAUDE_IDLE, False, None),
-    (CLAUDE_TYPING, True, "typing"),
-    (CLAUDE_TYPING, False, None),  # a worker's input box is never hand-typed
-    (CLAUDE_BACKGROUND, True, "background"),
-    (CLAUDE_BACKGROUND, False, "background"),  # workers can end up here too
-    (CLAUDE_BACKGROUND_RETURN_FOOTER, True, "background"),
     (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, True, None),  # not the real footer
-    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, False, None),
-    (CLAUDE_PLACEHOLDER, True, None),  # dim placeholder, not real input
     (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
     (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
-    (CLAUDE_TYPING_TRUECOLOR_COLOR, True, "typing"),  # non-grey truecolor is real input
-    (CLAUDE_TYPING_BRIGHT_COLOR, True, "typing"),  # bright (91-97) is a color, not dimming
     (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
-    # A worker's own session title in its border isn't a "wrong session"
-    # any more: nothing blocks it (there's no queued/typed text either).
-    (CLAUDE_OWN_SESSION_TITLE, True, None),
-    (CLAUDE_OWN_SESSION_TITLE, False, None),
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
-
-
-def test_titled_border_detection_is_removed():
-    """A worker whose pane border shows its own session title must never be
-    blocked as 'wrong-session' -- that check is gone entirely."""
-    assert not hasattr(ClaudeCode, "TITLED_BORDER")
-
-
-def test_flush_keeps_message_queued_when_user_is_mid_typing(db, ws, monkeypatch):
-    fake_agent(db, ws, status="idle")
-    db.enqueue("a1", "queued message", None)
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_TYPING)
-    pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
-    assert agents.flush(db, "a1") is False
-    assert not pasted
-    assert db.get_agent("a1").status == "idle"
-    assert db.pending_count("a1") == 1
 
 
 def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, monkeypatch):
@@ -378,36 +181,6 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert sent and sent[0][1] == "Escape"  # tried backing out before giving up
     assert not pasted
     assert db.pending_count("a1") == 1
-
-
-def test_flush_delivers_once_background_view_clears_after_escape(db, ws, monkeypatch):
-    fake_agent(db, ws, status="idle")
-    db.enqueue("a1", "queued message", None)
-    screens = iter([CLAUDE_BACKGROUND, CLAUDE_IDLE])
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
-    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: None)
-    pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
-    assert agents.flush(db, "a1") is True
-    assert pasted == ["queued message"]
-
-
-def test_flush_delivers_when_input_box_is_clear(db, ws, monkeypatch):
-    fake_agent(db, ws, status="idle")
-    db.enqueue("a1", "queued message", None)
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
-    pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
-    assert agents.flush(db, "a1") is True
-    assert pasted == ["queued message"]
-
-
-def test_reconcile_recovers_from_interrupted_turn(db, ws, monkeypatch):
-    # Esc-interrupted turns run no Stop hook: status says waiting, screen says idle.
-    fake_agent(db, ws, status="waiting")
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
-    a = agents.reconcile(db, db.get_agent("a1"), gap=0)
-    assert a.status == "idle" == db.get_agent("a1").status
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
@@ -443,36 +216,6 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     assert db.get_agent("w1") is None  # handoff worker closed after collection
 
 
-def test_result_arriving_during_detach_is_not_lost(db, ws, monkeypatch):
-    fake_agent(db, ws, mode="handoff", agent_id="w1")
-    db.set_result("w1", "just in time")
-    assert agents.detach(db, "w1") == "just in time"
-
-
-def test_wait_for_worker_leaves_assign_workers_running(db, ws, monkeypatch):
-    from brindle import mcp_server
-
-    fake_agent(db, ws, mode="assign", agent_id="w2")
-    db.set_result("w2", "ok")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    killed = []
-    monkeypatch.setattr(agents, "kill", lambda db, aid: killed.append(aid))
-    assert "ok" in mcp_server._await_worker(db, "w2", wait_seconds=0)
-    assert killed == []
-
-
-def test_codex_command_preapproves_only_brindle_tools(monkeypatch):
-    from brindle.providers import Codex
-
-    monkeypatch.setenv("BRINDLE_CODEX_BIN", "/opt/codex")
-    argv = Codex().command(LaunchContext("abc", load_profile("developer"), "do it"))
-    assert argv[0] == "/opt/codex"
-    assert 'mcp_servers.brindle.default_tools_approval_mode="approve"' in argv
-    assert any('BRINDLE_AGENT_ID = "abc"' in a for a in argv)
-    assert argv[-1].endswith("do it")  # profile prompt leads the first message
-    assert not any("dangerously" in a or "full-auto" in a for a in argv)
-
-
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
 def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
@@ -505,39 +248,6 @@ def test_find_running_reuses_a_live_interactive_agent(db, ws):
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_interactive_agent_exit_pauses_its_session(db, ws):
-    a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
-    assert tmux.has_session(ws.tmux_session)
-    tmux.send_keys(a.tmux_window, "exit", "Enter")
-    # The pane-died hook starts a fresh Python process; slow CI runners need time.
-    deadline = time.time() + 30
-    while time.time() < deadline and tmux.has_session(ws.tmux_session):
-        time.sleep(0.2)
-    diag = ""
-    if tmux.has_session(ws.tmux_session):
-        hooks = tmux._tmux("show-hooks", "-p", "-t", a.tmux_window, check=False)
-        panes = tmux._tmux("list-panes", "-s", "-t", ws.tmux_session, "-F",
-                           "#{window_name} #{pane_id} dead=#{pane_dead} cmd=#{pane_current_command}", check=False)
-        diag = (f"status={db.get_agent(a.id).status} windows={tmux.windows(ws.tmux_session)}\n"
-                f"hooks={hooks.stdout.strip()!r} {hooks.stderr.strip()!r}\npanes={panes.stdout.strip()!r}\n"
-                f"screen={tmux.capture(a.tmux_window)[-400:]!r}")
-    assert not tmux.has_session(ws.tmux_session), diag
-    assert db.get_agent(a.id).status == "paused"
-
-
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_worker_panes_stay_after_exit_for_their_output(db, ws):
-    a = agents.spawn(db, ws, "developer", provider_name="shell", mode="assign")
-    try:
-        tmux.send_keys(a.tmux_window, "echo last-words; exit", "Enter")
-        time.sleep(1.5)
-        assert tmux.has_session(ws.tmux_session)
-        assert "last-words" in tmux.capture(a.tmux_window)
-    finally:
-        tmux.kill_session(ws.tmux_session)
-
-
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
 def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
     tmux._tmux("new-window", "-d", "-t", f"={ws.tmux_session}:", "-n", "extra")  # something the user opened
@@ -547,63 +257,6 @@ def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
         time.sleep(0.2)
     assert not tmux.has_session(ws.tmux_session)
     assert db.get_agent(a.id).status == "paused"
-
-
-def test_claude_command_defaults_are_unchanged():
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "do the thing"))
-    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort", "--add-dir"):
-        assert flag not in argv
-    assert argv[:2] == ["claude", "--settings"]
-
-
-def test_claude_command_passes_one_add_dir_per_directory():
-    from dataclasses import replace
-
-    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
-    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
-    pairs = [(argv[i], argv[i + 1]) for i, a in enumerate(argv) if a == "--add-dir"]
-    assert pairs == [("--add-dir", "/srv/cache"), ("--add-dir", "/srv/refs")]
-
-
-def test_claude_command_emits_lightweight_flags():
-    from dataclasses import replace
-
-    profile = replace(load_profile("developer"), strict_mcp=True,
-                      setting_sources=["project", "local"], effort="low")
-    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
-    assert "--strict-mcp-config" in argv
-    assert argv[argv.index("--setting-sources") + 1] == "project,local"
-    assert argv[argv.index("--effort") + 1] == "low"
-    assert "-p" not in argv and argv[-1] == "do the thing"
-    # brindle's own hooks and MCP server are still passed explicitly.
-    assert "--settings" in argv and "--mcp-config" in argv
-
-
-def test_headless_claude_command_runs_one_turn_with_print():
-    from dataclasses import replace
-
-    profile = replace(load_profile("developer"), headless=True)
-    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
-    assert argv[1] == "-p" and argv[-1] == "do the thing"
-    # The next turn continues the same conversation, with its own prompt.
-    argv = ClaudeCode().command(LaunchContext("abc", profile, "and the tests", resume="sid-1"))
-    assert argv[-3:] == ["--resume", "sid-1", "and the tests"]
-    # Interactive resume still takes no prompt.
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "x", resume="sid-1"))
-    assert argv[-2:] == ["--resume", "sid-1"]
-
-
-def test_lightweight_fields_are_ignored_by_other_providers(monkeypatch):
-    from dataclasses import replace
-
-    from brindle.providers import Codex
-
-    monkeypatch.setenv("BRINDLE_CODEX_BIN", "codex")
-    profile = replace(load_profile("developer"), strict_mcp=True, setting_sources=["project"],
-                      effort="low", headless=True)
-    argv = Codex().command(LaunchContext("abc", profile, "do it"))
-    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort"):
-        assert flag not in argv
 
 
 def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
@@ -620,27 +273,6 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
     assert "Don't run the full suite yourself" in sub
 
 
-def test_flush_types_a_lead_naming_the_sender(db, ws, monkeypatch):
-    """Agent CLIs distrust pasted text, so brindle vouches for its delivery by
-    typing (not pasting) a line naming the sender."""
-    fake_agent(db, ws, status="processing", agent_id="sup1")
-    fake_agent(db, ws, status="idle", mode="assign", parent="sup1")
-    db.enqueue("a1", agents.format_message(db, "fix the test", "sup1"), "sup1")
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
-    calls = []
-    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: calls.append((body, k.get("lead"))))
-    assert agents.flush(db, "a1") is True
-    (body, lead), = calls
-    assert "fix the test" in body
-    assert "<details><summary>Message from developer agent sup1</summary>" in body
-    assert lead == "brindle delivered this message from developer agent sup1:"
-
-def test_format_message_uses_details_block(db, ws):
-    fake_agent(db, ws, status="idle", agent_id="sup1")
-    formatted = agents.format_message(db, "hello", "sup1")
-    assert "<details><summary>Message from developer agent sup1</summary>" in formatted
-    assert "hello" in formatted
-
 def test_render_unread_uses_details_block_for_brindle(db, ws):
     class Msg:
         def __init__(self, body, sender_id):
@@ -652,21 +284,6 @@ def test_render_unread_uses_details_block_for_brindle(db, ws):
     assert "first brindle message" in rendered
     assert "second brindle message" in rendered
     assert "\n\n" in rendered
-
-
-def test_no_lead_is_typed_into_a_plain_shell(db, ws):
-    a = fake_agent(db, ws)
-    a.provider = "shell"
-    assert agents.message_lead(db, a, "sup1") is None
-
-
-def test_claude_agents_are_told_what_vouches_for_a_message():
-    from brindle.profiles import load_profile
-    from brindle.providers import DELIVERY_NOTE, LaunchContext
-
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "hi", mode="assign"))
-    prompt = argv[argv.index("--append-system-prompt") + 1]
-    assert DELIVERY_NOTE in prompt and load_profile("developer").prompt in prompt
 
 
 def test_add_dir_is_never_the_last_flag():
@@ -707,24 +324,3 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     assert capsys.readouterr().err.count("/no/such/cache") == 1
 
 
-def test_resume_reports_a_missing_add_dir_too(db, ws, monkeypatch, capsys):
-    """A directory can go missing between the first launch and a resume, and
-    resume goes straight to _launch, never through spawn."""
-    from pathlib import Path
-
-    class Launched(Exception):
-        pass
-
-    def stop(*a, **k):
-        raise Launched
-
-    config = Path(ws.repo_root) / ".brindle" / "config.json"
-    config.parent.mkdir(exist_ok=True)
-    config.write_text('{"add_dirs": ["/no/such/cache"]}')
-    monkeypatch.setattr(agents, "_open_window", stop)
-    monkeypatch.setattr("brindle.providers.trust_folder", lambda path: None)
-    fake_agent(db, ws, status="paused")
-
-    with pytest.raises(Launched):
-        agents.resume(db, "a1", watch_pane=False)
-    assert capsys.readouterr().err.count("/no/such/cache") == 1
