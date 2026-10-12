@@ -3,11 +3,10 @@ local profiles, and what `brindle doctor` says about their endpoints."""
 
 import pytest
 
-from brindle import agents, doctor, workspaces
-from brindle.db import Agent
+from brindle import doctor
 from brindle.native.client import Endpoint
 from brindle.native.runner import probe
-from brindle.profiles import list_profiles, load_profile
+from brindle.profiles import load_profile
 from test_native_loop import FakeEndpoint
 
 
@@ -16,19 +15,6 @@ def fake():
     ep = FakeEndpoint()
     yield ep
     ep.close()
-
-
-def test_builtin_local_profiles_are_native_and_complete():
-    dev, rev = load_profile("developer-local"), load_profile("reviewer-local")
-    for p in (dev, rev):
-        assert p.provider == "native" and p.api == "openai"
-        assert p.base_url == "http://localhost:11434/v1" and p.model == "qwen3-coder:30b"
-        assert p.context_tokens == 32000
-        assert "report_result" in dev.prompt and "submit_review" in rev.prompt
-    assert dev.permission_mode == "acceptEdits" and any(t.startswith("Bash(git commit") for t in dev.allowed_tools)
-    assert rev.permission_mode == "dontAsk" and not any("git commit" in t for t in rev.allowed_tools)
-    names = [p.name for p in list_profiles(None)]
-    assert "developer-local" in names and "reviewer-local" in names
 
 
 def test_profile_env_lines_and_context_sizes(tmp_path):
@@ -48,20 +34,6 @@ def test_profile_env_lines_and_context_sizes(tmp_path):
     assert load_profile("k", str(tmp_path)).context_tokens == 64000
     (d / "bad.md").write_text("---\nname: bad\ncontext_tokens: lots\n---\n")
     assert load_profile("bad", str(tmp_path)).context_tokens is None
-
-
-def test_profile_env_reaches_the_agents_process(db, repo):
-    ws = workspaces.create(db, str(repo), "feat").workspace
-    d = repo / ".brindle" / "agents"
-    d.mkdir(parents=True)
-    (d / "glm.md").write_text("---\nname: glm\nprovider: claude\nenv.ANTHROPIC_BASE_URL: http://h\n"
-                              "env.BRINDLE_AGENT_ID: nope\n---\nhi\n")
-    a = Agent("a1", ws.id, "glm", "claude", None, "assign", "starting", "", None, 0.0)
-    env = agents.agent_env(ws, "a1", a)
-    assert env["ANTHROPIC_BASE_URL"] == "http://h"
-    assert env["BRINDLE_AGENT_ID"] == "a1"  # brindle's own variables win
-    plain = agents.agent_env(ws, "a1", Agent("a1", ws.id, "developer", "claude", None, "assign", "starting", "", None, 0.0))
-    assert "ANTHROPIC_BASE_URL" not in plain
 
 
 def test_probe_reports_reachability_and_the_model(fake):

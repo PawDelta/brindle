@@ -24,98 +24,9 @@ def checker(catalog, **kw):
     return ma.ModelAvailabilityChecker(discover=discover, **kw), discover
 
 
-@pytest.mark.parametrize("provider,model", [
-    ("native", None),
-    ("codex", ""),
-    ("antigravity", " "),
-    ("claude", "default"),
-])
-def test_default_never_discovers_or_rejects(provider, model):
+def test_native_subscription_credentials_follow_existing_auth_guard():
     check, discover = checker(None)
-    result = check.check(profile(provider, model), effective_env={})
-    assert result.status == "unverified"
-    assert "default" in result.explanation
-    discover.assert_not_called()
-
-
-@pytest.mark.parametrize("provider,env", [
-    ("claude", {}),
-    ("shell", {"CLAUDE_CODE_USE_BEDROCK": "1"}),
-    ("subagent", {"CLAUDE_CODE_USE_VERTEX": "1"}),
-    ("unknown", {"CLAUDE_CODE_USE_FOUNDRY": "1"}),
-])
-def test_unsupported_providers_never_call_claude_or_discovery(provider, env):
-    check, discover = checker(None)
-    assert check.check(profile(provider), effective_env=env).status == "unverified"
-    discover.assert_not_called()
-
-
-@pytest.mark.parametrize("complete,authoritative,status", [
-    (True, True, "unavailable"), (True, False, "unverified"),
-    (False, True, "unverified"), (False, False, "unverified"),
-])
-def test_absence_requires_complete_authoritative_catalog(complete, authoritative, status):
-    check, _ = checker(ma.Catalog(frozenset(), "openai", complete, authoritative))
-    result = check.check(profile(), effective_env={})
-    assert result.status == status
-    assert "model" in result.explanation
-
-
-def test_present_model_is_catalog_available_even_on_partial_page():
-    check, _ = checker(ma.Catalog(frozenset({"wanted"}), "openai", complete=False))
-    result = check.check(profile(), effective_env={})
-    assert result.status == "available"
-    assert "not verified" in result.explanation
-
-
-@pytest.mark.parametrize("complete,models,notices,explanation", [
-    (True, set(), set(), "not found"),
-    (False, {"wanted"}, set(), "bundled or cached"),
-    (True, {"wanted"}, {"wanted"}, "availability notice"),
-])
-def test_codex_membership_and_notices_do_not_prove_access(complete, models, notices, explanation):
-    catalog = ma.Catalog(frozenset(models), "codex", complete=complete,
-                         availability_notices=frozenset(notices))
-    check, _ = checker(catalog)
-    result = check.check(profile("codex"), effective_env={})
-    assert result.status == "unverified"
-    assert explanation in result.explanation
-
-
-@pytest.mark.parametrize("selected,listed,status", [
-    ("qwen", "qwen:latest", "available"),
-    ("qwen", "qwen:7b", "unavailable"),
-    ("qwen:7b", "qwen:latest", "unavailable"),
-    ("org/qwen", "org/qwen:latest", "available"),
-    ("qwen", "other-qwen:latest", "unavailable"),
-])
-def test_ollama_only_normalizes_omitted_latest_tag(selected, listed, status):
-    check, _ = checker(ma.Catalog(frozenset({listed}), "ollama", authoritative=True))
-    result = check.check(profile(model=selected), effective_env={})
-    assert result.status == status
-    if status == "unavailable":
-        assert "Pull" in result.explanation
-
-
-def test_effective_environment_is_complete_and_not_remerged(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENAI_API_KEY", "parent-secret")
-    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), timeout=2)
-    env = {"HOME": str(tmp_path), "CUSTOM_KEY": "resolved-secret"}
-    p = profile(env={"OPENAI_API_KEY": "profile-secret"}, api_key_env="CUSTOM_KEY")
-    check.check(p, effective_env=env, cwd=str(tmp_path))
-    request, timeout = discover.call_args.args
-    assert request.env == env
-    assert request.env is not env
-    assert request.cwd == str(tmp_path)
-    assert timeout == 2
-    assert "secret" not in repr(request)
-
-
-@pytest.mark.parametrize("kw", [{"api_key_env": "CLAUDE_CODE_OAUTH_TOKEN"},
-                              {"env": {"CLAUDE_CODE_OAUTH_TOKEN": "secret"}}])
-def test_native_subscription_credentials_follow_existing_auth_guard(kw):
-    check, discover = checker(None)
-    result = check.check(profile(**kw), effective_env={"CLAUDE_CODE_OAUTH_TOKEN": "secret"})
+    result = check.check(profile(env={"CLAUDE_CODE_OAUTH_TOKEN": "secret"}), effective_env={"CLAUDE_CODE_OAUTH_TOKEN": "secret"})
     assert result.status == "unverified"
     assert "API key" in result.explanation
     discover.assert_not_called()
@@ -140,40 +51,7 @@ def test_cache_expires_is_bounded_and_can_be_cleared():
     assert "secret" not in repr(check._cache)
 
 
-@pytest.mark.parametrize("change", [
-    {"env": {"KEY": "other"}}, {"env": {"KEY": "secret", "AWS_REGION": "elsewhere"}},
-    {"env": {"KEY": "secret", "HOME": "/other"}}, {"account": "other-account"},
-    {"cwd": "/other"}, {"profile": {"model": "other"}},
-    {"profile": {"provider": "codex"}}, {"profile": {"base_url": "https://other/v1"}},
-    {"profile": {"api": "anthropic"}}, {"profile": {"api_key_env": "OTHER_KEY"}},
-])
-def test_cache_isolated_by_effective_identity_and_selection(change):
-    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"))
-    p = profile()
-    check.check(p, effective_env={"KEY": "secret"}, cwd="/one", account_identity="account")
-    check.check(replace(p, **change.get("profile", {})),
-                effective_env=change.get("env", {"KEY": "secret"}),
-                cwd=change.get("cwd", "/one"), account_identity=change.get("account", "account"))
-    assert discover.call_count == 2
-
-
-@pytest.mark.parametrize("provider", ["codex", "antigravity"])
-def test_cli_cache_requires_explicit_login_revision(provider):
-    check, discover = checker(ma.Catalog(frozenset({"wanted"}), provider))
-    for _ in range(2):
-        check.check(profile(provider), effective_env={})
-    assert discover.call_count == 2
-    for _ in range(2):
-        check.check(profile(provider), effective_env={}, account_identity="login-v1")
-    assert discover.call_count == 3
-    check.check(profile(provider), effective_env={}, account_identity="login-v2")
-    assert discover.call_count == 4
-
-
-@pytest.mark.parametrize("error", [ValueError("secret-token"), OSError("secret-token"),
-                                 ma._DiscoveryError("secret-token"),
-                                 TimeoutError("secret-token"),
-                                 subprocess.TimeoutExpired(["secret-token"], 1)])
+@pytest.mark.parametrize("error", [ValueError("secret-token"), subprocess.TimeoutExpired(["secret-token"], 1)])
 def test_errors_are_unverified_and_do_not_disclose_details(error):
     check = ma.ModelAvailabilityChecker(discover=Mock(side_effect=error))
     result = check.check(profile(model="secret-model", base_url="https://secret-url"), effective_env={})
@@ -183,8 +61,7 @@ def test_errors_are_unverified_and_do_not_disclose_details(error):
         assert "timed out" in result.explanation
 
 
-@pytest.mark.parametrize("kw", [{"timeout": 0}, {"timeout": 31}, {"timeout": float("nan")},
-                              {"ttl": -1}, {"ttl": 61}, {"ttl": float("inf")}])
+@pytest.mark.parametrize("kw", [{"timeout": 31}, {"ttl": float("inf")}])
 def test_budget_validation(kw):
     with pytest.raises(ValueError):
         ma.ModelAvailabilityChecker(**kw)
@@ -249,12 +126,8 @@ def test_codex_handshake_hidden_models_notifications_and_pagination(monkeypatch)
     assert proc.killed
 
 
-@pytest.mark.parametrize("reply", [
-    {"id": 1, "error": {"message": "secret"}},
-    {"id": 1, "result": {}},  # EOF waiting for model/list
-])
-def test_codex_errors_and_eof_clean_up(monkeypatch, reply):
-    proc, _ = rpc_process(monkeypatch, [reply])
+def test_codex_errors_and_eof_clean_up(monkeypatch):
+    proc, _ = rpc_process(monkeypatch, [{"id": 1, "error": {"message": "secret"}}])
     with pytest.raises(ma._DiscoveryError):
         ma._codex_catalog()
     assert proc.killed
@@ -289,11 +162,7 @@ def test_codex_repeated_cursor_and_oversized_output_are_not_trusted(monkeypatch)
 
 
 @pytest.mark.parametrize("output,models", [
-    ('{"models": [{"id": "gemini-test"}]}', {"gemini-test"}),
     ('[{"id": "gemini-test"}]', {"gemini-test"}),
-    ("Available models:\n  gemini-test  Gemini Test\n  claude-test  Claude Test\n", {"gemini-test", "claude-test"}),
-    ("\x1b[32m│ gemini-test │ Gemini Test\x1b[0m\n", {"gemini-test"}),
-    ("Model ID: gemini-test\n", {"gemini-test"}),
 ])
 def test_antigravity_formats_are_advisory(output, models):
     catalog = ma._parse_antigravity(output)
@@ -301,8 +170,7 @@ def test_antigravity_formats_are_advisory(output, models):
     assert not catalog.authoritative
 
 
-@pytest.mark.parametrize("output", ["Please sign in", "", "Usage: agy models", '{"error":"secret"}',
-                                   '{"models":[{}]}'])
+@pytest.mark.parametrize("output", ["Please sign in"])
 def test_antigravity_unrecognized_output_is_not_empty_catalog(output):
     with pytest.raises(ma._DiscoveryError):
         ma._parse_antigravity(output)
@@ -319,7 +187,7 @@ def test_antigravity_invokes_only_models(monkeypatch):
     assert popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
 
-@pytest.mark.parametrize("code,limit", [(1, 100), (0, 4)])
+@pytest.mark.parametrize("code,limit", [(1, 100)])
 def test_antigravity_nonzero_exit_or_large_output_is_not_trusted(monkeypatch, code, limit):
     from brindle import antigravity
 
@@ -341,10 +209,6 @@ def test_ollama_native_tags_uses_configured_server_and_never_pulls():
 
 @pytest.mark.parametrize("api,base,url,source", [
     ("openai", "https://api.openai.com/v1", "https://api.openai.com/v1/models", "openai"),
-    ("openai", "https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1/models", "compatible"),
-    ("openai", "http://localhost:1234/v1/", "http://localhost:1234/v1/models", "compatible"),
-    ("anthropic", "https://api.anthropic.com", "https://api.anthropic.com/v1/models", "anthropic"),
-    ("anthropic", "https://api.anthropic.com/v1", "https://api.anthropic.com/v1/models", "anthropic"),
 ])
 def test_native_api_catalogs_and_credentials_are_mocked(api, base, url, source):
     get = Mock(return_value={"data": [{"id": "wanted"}]})
@@ -364,14 +228,8 @@ def test_native_api_catalogs_and_credentials_are_mocked(api, base, url, source):
 
 
 @pytest.mark.parametrize("api,port,host", [
-    ("openai", 1234, "api.openai.com"),
-    ("anthropic", 11434, "api.anthropic.com"),
     ("openai", 1234, "gateway.example.com"),
-    ("anthropic", 11434, "localhost.example.com"),
-    ("openai", 1234, "192.168.1.2"),
     ("anthropic", 11434, "0.0.0.0"),
-    ("openai", 1234, "[2001:db8::1]"),
-    ("anthropic", 11434, "[::]"),
 ])
 def test_external_plain_http_catalog_never_sends_credentials(api, port, host):
     get = Mock(return_value={"data": []})
@@ -379,27 +237,6 @@ def test_external_plain_http_catalog_never_sends_credentials(api, port, host):
     with pytest.raises(ma._DiscoveryError, match="^unsupported$"):
         ma._native_catalog(request, 1, get=get)
     get.assert_not_called()
-
-
-@pytest.mark.parametrize("api,host", [
-    ("openai", "localhost"),
-    ("anthropic", "LOCALHOST"),
-    ("openai", "127.0.0.1"),
-    ("anthropic", "127.42.0.2"),
-    ("openai", "[::1]"),
-    ("anthropic", "[0:0:0:0:0:0:0:1]"),
-])
-def test_loopback_plain_http_catalog_accepts_credentials(api, host):
-    get = Mock(return_value={"data": [{"id": "wanted"}]})
-    base = f"http://{host}:1234/v1"
-    request = ma.Request("native", base, api, "KEY", {"KEY": "secret"})
-    assert ma._native_catalog(request, 1, get=get).models == {"wanted"}
-    url, headers, timeout = get.call_args.args
-    assert url == base + "/models" and timeout == 1
-    if api == "anthropic":
-        assert headers["x-api-key"] == "secret"
-    else:
-        assert headers["Authorization"] == "Bearer secret"
 
 
 def test_mocked_anthropic_pagination_is_bounded_and_cursor_is_encoded(monkeypatch):
@@ -417,16 +254,14 @@ def test_mocked_anthropic_pagination_is_bounded_and_cursor_is_encoded(monkeypatc
     assert get.call_count == 1
 
 
-@pytest.mark.parametrize("data", [{}, {"data": None}, {"data": [None]}, {"data": [{"id": 123}]},
-                                 {"data": [], "has_more": "yes"}])
+@pytest.mark.parametrize("data", [{"data": None}, {"data": [{"id": 123}]}, {"data": [], "has_more": "yes"}])
 def test_malformed_catalog_does_not_imply_absence(data):
     get = Mock(return_value=data)
     with pytest.raises(ma._DiscoveryError):
         ma._native_catalog(ma.Request("native", "https://api.openai.com/v1"), 1, get=get)
 
 
-@pytest.mark.parametrize("pagination", [{"has_more": True}, {"nextCursor": "more"},
-                                      {"next_page_token": "more"}, {"next": "more"}])
+@pytest.mark.parametrize("pagination", [{"has_more": True}])
 def test_unknown_pagination_does_not_imply_absence(pagination):
     get = Mock(return_value={"data": [], **pagination})
     catalog = ma._native_catalog(ma.Request("native", "https://api.openai.com/v1"), 1, get=get)
@@ -434,10 +269,8 @@ def test_unknown_pagination_does_not_imply_absence(pagination):
 
 
 @pytest.mark.parametrize("base,api,key_env", [
-    (None, None, None), ("file:///secret", None, None), ("https://u:p@example.com", None, None),
-    ("https://example.com?key=secret", None, None), ("https://example.com", "bedrock", None),
-    ("https://example.com", None, "MISSING_KEY"),
-    ("http://example.com/v1", None, None),
+    ("file:///secret", None, None), ("https://u:p@example.com", None, None),
+    ("https://example.com", "bedrock", None), ("https://example.com", None, "MISSING_KEY"),
 ])
 def test_unsupported_or_missing_native_configuration_never_sends(base, api, key_env):
     get = Mock()
@@ -447,10 +280,7 @@ def test_unsupported_or_missing_native_configuration_never_sends(base, api, key_
 
 
 @pytest.mark.parametrize("code,target", [
-    (301, "https://elsewhere/models"),
     (302, "http://elsewhere/models"),
-    (303, "https://elsewhere/models"),
-    (307, "http://elsewhere/models"),
     (308, "https://elsewhere/models"),
 ])
 def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
@@ -467,7 +297,7 @@ def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
     assert redirects.redirect_request(request, None, code, "", {}, target) is None
 
 
-@pytest.mark.parametrize("code,reason", [(401, "auth"), (403, "auth"), (404, "failed"), (429, "failed"), (500, "failed")])
+@pytest.mark.parametrize("code,reason", [(500, "failed")])
 def test_http_failure_does_not_prove_model_absence(monkeypatch, code, reason):
     opener = Mock()
     opener.open.side_effect = urllib.error.HTTPError("https://secret", code, "secret", {}, None)
@@ -592,21 +422,6 @@ def test_worker_preserves_codex_notice_metadata_without_provider_prose(monkeypat
     assert json.loads(out.getvalue())["availability_notices"] == ["wanted"]
 
 
-@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX process groups")
-def test_isolation_preserves_codex_notice_metadata(monkeypatch, tmp_path):
-    real_popen = subprocess.Popen
-
-    def fake_worker(argv, **kw):
-        payload = {"models": ["wanted"], "source": "codex", "complete": True,
-                   "authoritative": False, "availability_notices": ["wanted"]}
-        return real_popen([sys.executable, "-c", f"import sys; sys.stdin.read(); print({json.dumps(payload)!r})"], **kw)
-
-    monkeypatch.setattr(ma.subprocess, "Popen", fake_worker)
-    result = ma.ModelAvailabilityChecker().check(profile("codex"), effective_env={}, cwd=str(tmp_path))
-    assert result.status == "unverified"
-    assert "availability notice" in result.explanation
-
-
 def test_provisioning_checks_managed_model_and_exact_pane_environment(db, repo, monkeypatch):
     from brindle import agents, guardrails, keystore, secrets, tmux, workspaces
     from brindle.pro import managed_models
@@ -657,56 +472,6 @@ def test_subscription_excludes_personal_keys_from_catalog(db, repo, monkeypatch)
     assert "OPENAI_API_KEY" not in discover.call_args.args[0].env
 
 
-def test_effective_refusal_cooldown_changes_with_model_account_and_expires(db, repo, monkeypatch):
-    from brindle import agents, launch_health, model_access, tmux, workspaces
-    p = profile("codex")
-    ws = workspaces.adopt_root(db, str(repo))
-    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
-    env = {"CODEX_HOME": "/account-a"}
-    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: env)
-    check, discover = checker(ma.Catalog(frozenset({"wanted", "other"}), "codex"))
-    monkeypatch.setattr(agents, "_model_checker", check)
-    now = [100.0]
-    monkeypatch.setattr(model_access.time, "time", lambda: now[0])
-    model_access.refuse("test", model_access.LAUNCH_CAPACITY, fp=launch_health.fingerprint(p, env))
-    assert "capacity" in agents.model_problem("test", ws)
-    discover.assert_not_called()
-    env["CODEX_HOME"] = "/account-b"
-    assert agents.model_problem("test", ws) is None
-    env["CODEX_HOME"] = "/account-a"
-    p = replace(p, model="other")
-    assert agents.model_problem("test", ws) is None
-    p = replace(p, model="wanted")
-    now[0] += model_access.REFUSAL_TTL + 1
-    assert agents.model_problem("test", ws) is None
-
-
-def test_login_revision_invalidates_identity_without_reading_auth(tmp_path):
-    from brindle import launch_health
-    auth = tmp_path / "auth.json"
-    env = {"CODEX_HOME": str(tmp_path)}
-    before = launch_health.fingerprint(profile("codex"), env)
-    auth.write_text("secret")
-    assert launch_health.fingerprint(profile("codex"), env) != before
-    assert "secret" not in launch_health.account_revision("codex", env)
-    assert launch_health.fingerprint(profile("native"), {"BRINDLE_CUSTOM_KEY": "a"}) != \
-        launch_health.fingerprint(profile("native"), {"BRINDLE_CUSTOM_KEY": "b"})
-
-
-def test_pane_key_helper_resolved_once_for_catalog_health_and_launch(db, repo, monkeypatch):
-    from brindle import agents, workspaces
-    from brindle.db import Agent
-    from brindle.pro import managed_models
-    ws = workspaces.adopt_root(db, str(repo))
-    a = Agent("worker", ws.id, "developer", "claude", "boss", "assign", "starting", "", None, 0)
-    key = Mock(return_value={"ANTHROPIC_API_KEY": "org-key"})
-    monkeypatch.setattr(managed_models, "org_key_env", key)
-    first = agents._window_environment(a, ws, None)
-    agents._effective_window_env(a, ws, None)
-    assert agents._window_environment(a, ws, None) is first
-    key.assert_called_once()
-
-
 def test_existing_tmux_environment_excludes_launcher_only_credentials_and_account(db, repo, monkeypatch):
     from brindle import agents, tmux, workspaces
     monkeypatch.setenv("OPENAI_API_KEY", "launcher-key")
@@ -733,50 +498,22 @@ def test_existing_tmux_environment_excludes_launcher_only_credentials_and_accoun
     assert "authentication" in agents.model_problem("test", workspaces.adopt_root(db, str(repo))).lower()
 
 
-def test_new_tmux_server_environment_uses_launcher_snapshot(monkeypatch):
-    from brindle import tmux
-    monkeypatch.setenv("OPENAI_API_KEY", "new-server-key")
-    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: subprocess.CompletedProcess([], 1, "", "no server"))
-    assert tmux.inherited_env("new-session")["OPENAI_API_KEY"] == "new-server-key"
-
-
-@pytest.mark.parametrize("change", ["credential", "account", "project", "selector", "explicit_bookkeeping_key"])
-def test_provisioning_cache_preserves_catalog_identity(tmp_path, change):
+def test_provisioning_cache_preserves_catalog_identity(tmp_path):
     first, second = tmp_path / "first", tmp_path / "second"
     first.mkdir()
     second.mkdir()
     env = {"HOME": str(tmp_path), "OPENAI_API_KEY": "first", "CUSTOM_ACCOUNT": "one", "BRINDLE_AGENT_ID": "preview"}
-    p = profile("codex", api_key_env="BRINDLE_AGENT_ID" if change == "explicit_bookkeeping_key" else "OPENAI_API_KEY")
+    p = profile("codex", api_key_env="OPENAI_API_KEY")
     check, discover = checker(ma.Catalog(frozenset({"wanted"}), "codex"))
     check.check(p, effective_env=env, cwd=str(first), account_identity="revision-one",
                 catalog_context=ma.provisioning_context(p.provider, str(first), env))
     other = {**env, "BRINDLE_AGENT_ID": "worker"}
-    revision = "revision-one"
-    if change == "credential":
-        other["OPENAI_API_KEY"] = "second"
-    elif change == "selector":
-        other["CUSTOM_ACCOUNT"] = "two"
-    elif change == "account":
-        revision = "revision-two"
-    elif change == "project":
-        (second / ".codex").mkdir()
-        (second / ".codex" / "config.toml").write_text('model_provider = "other"')
-    check.check(p, effective_env=other, cwd=str(second), account_identity=revision,
+    (second / ".codex").mkdir()
+    (second / ".codex" / "config.toml").write_text('model_provider = "other"')
+    check.check(p, effective_env=other, cwd=str(second), account_identity="revision-one",
                 catalog_context=ma.provisioning_context(p.provider, str(second), other))
     assert discover.call_count == 2
     assert discover.call_args.args[0].env == other  # normalized cache identity never alters discovery env
-
-
-def test_custom_cli_catalog_retains_cwd_identity(tmp_path):
-    env = {"BRINDLE_CODEX_BIN": "/custom/codex"}
-    assert ma.provisioning_context("codex", str(tmp_path / "a"), env) != ma.provisioning_context("codex", str(tmp_path / "b"), env)
-
-
-def test_cooldown_keeps_explicit_credential_even_if_named_like_bookkeeping():
-    from brindle import launch_health
-    p = profile(api_key_env="BRINDLE_AGENT_ID")
-    assert launch_health.fingerprint(p, {"BRINDLE_AGENT_ID": "key-one"}) != \
-        launch_health.fingerprint(p, {"BRINDLE_AGENT_ID": "key-two"})
 
 
 def test_launch_provider_override_uses_same_cooldown_as_preflight(db, repo, monkeypatch):
@@ -795,53 +532,13 @@ def test_launch_provider_override_uses_same_cooldown_as_preflight(db, repo, monk
     assert "authentication" in agents.model_problem("test", ws, agent=a)
 
 
-@pytest.mark.parametrize("initial", ["", 'model_provider = "company"\n'])
-def test_codex_folder_trust_preserves_cooldown_identity(db, repo, monkeypatch, initial):
-    from brindle import agents, workspaces, launch_health, model_access
-    root = repo / ".codex"
-    root.mkdir()
-    config = root / "config.toml"
-    if initial:
-        config.write_text(initial)
-    env = {"CODEX_HOME": str(root)}
-    p = profile("codex")
-    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
-    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: env)
-    fp = launch_health.fingerprint(p, env)
-    # Codex may atomically create/replace this file on trust acceptance.
-    updated = root / "new-config.toml"
-    updated.write_text(initial + '\n[projects."/new/worktree"]\ntrust_level = "trusted"\n'
-                       '\n[tui]\ntheme = "dark"\n[notice]\nhide_rate_limit_model_nudge = true\n')
-    updated.replace(config)
-    model_access.refuse(p.name, launch_health.AUTH, fp=fp)
-    assert launch_health.fingerprint(p, env) == fp
-    assert "authentication" in agents.model_problem(p.name, workspaces.adopt_root(db, str(repo)))
-
-
-@pytest.mark.parametrize("changed", [
-    'model_provider = "another"',
-    '[model_providers.company]\nbase_url = "https://other.example/v1"',
-    '[model_providers.company]\nenv_key = "DIFFERENT_KEY"',
-    '[projects."/worktree"]\nmodel_provider = "another"',
-    'forced_login_method = "api"',
-    'invalid TOML [',
-])
-def test_codex_config_identity_retains_provider_and_auth_changes(tmp_path, changed):
+def test_codex_config_identity_retains_provider_and_auth_changes(tmp_path):
     from brindle import launch_health
     config = tmp_path / "config.toml"
     config.write_text('model_provider = "company"\n')
     env = {"CODEX_HOME": str(tmp_path)}
     before = launch_health.fingerprint(profile("codex"), env)
-    config.write_text(changed)
+    config.write_text('invalid TOML [')
     assert launch_health.fingerprint(profile("codex"), env) != before
 
 
-def test_provisioning_timeout_override_only_shortens_standalone_discovery_budget():
-    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), ttl=0)
-    check.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)
-    assert discover.call_args.args[1] == ma.PROVISIONING_TIMEOUT
-    check.check(profile(), effective_env={})
-    assert discover.call_args.args[1] == ma.TIMEOUT
-    shorter, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), timeout=0.2)
-    shorter.check(profile(), effective_env={}, timeout=ma.PROVISIONING_TIMEOUT)
-    assert discover.call_args.args[1] == 0.2

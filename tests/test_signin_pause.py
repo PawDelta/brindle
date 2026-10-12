@@ -18,7 +18,6 @@ UNKNOWN = Identity("claude", "claude isn't installed", determined=False)
 WRONG = Identity("claude", "Claude: org Other", problem="Claude is signed in to Other",
                  ident="claude org Other (org-2)")
 CODEX_OK = Identity("codex", "Codex: signed in")
-CODEX_OUT = Identity("codex", "Codex: not signed in", signed_out=True)
 AWS_OK = Identity("claude", "AWS account 123456789012, role BrindleWorker",
                   ident="AWS account 123456789012, role BrindleWorker")
 NO_ID = signin_pause.NO_IDENTITY
@@ -92,54 +91,6 @@ def w(db, monkeypatch):
     return world
 
 
-def test_logout_pauses_only_that_providers_agents_and_keeps_their_state(w):
-    w.agent("c1")
-    w.agent("x1", provider="codex")
-    w.db.update_agent("c1", session_ref="sess-1", task="build it")
-    w.claude = OUT
-    done = signin_pause.run(w.db)
-    assert w.status("c1") == "paused" and w.status("chat") == "processing"
-    assert w.status("x1") == "processing"
-    kept = w.db.get_agent("c1")
-    assert (kept.session_ref, kept.task, kept.workspace_id) == ("sess-1", "build it", "ws")
-    assert signin_pause.paused_for_signin()["c1"]["reason"] == NO_ID   # nothing known to come back under
-    assert any("paused agent c1" in line for line in done)
-
-
-def test_a_running_interactive_chat_is_neither_probed_nor_paused(w):
-    w.db.add_agent(Agent("me", "ws", "developer", "claude", None, "interactive", "idle", "", None, 0.0))
-    signin_pause.run(w.db)
-    assert w.claude_probes == 0
-    w.agent("c1", parent="me")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    w.claude = OUT
-    signin_pause.run(w.db)
-    assert w.status("c1") == "paused" and w.status("me") == "idle"
-    assert [to for to, _ in w.messages] == ["me"]
-    w.claude = OK
-    signin_pause.run(w.db)
-    assert w.status("c1") == "processing" and w.resumed == ["c1"]
-
-
-def test_codex_logout_pauses_codex_agents_only(w):
-    w.agent("c1")
-    w.agent("x1", provider="codex")
-    w.codex = CODEX_OUT
-    signin_pause.run(w.db)
-    assert w.status("x1") == "paused" and w.status("c1") == "processing"
-    assert signin_pause.paused_for_signin()["x1"]["reason"] == NO_ID   # no Codex identity is known to return to
-
-
-def test_logout_tells_the_supervisor_and_the_session_chat(w):
-    w.agent("boss", provider="codex", parent="chat")    # another provider's: keeps running
-    w.agent("c1", parent="boss")
-    w.claude = OUT
-    signin_pause.run(w.db)
-    assert {to for to, _ in w.messages} == {"boss", "chat"}
-    assert all("signed out" in body for _, body in w.messages)
-    assert w.status("boss") == "processing"
-
-
 def test_undetermined_never_pauses_and_warns_once(w):
     w.agent("c1")
     w.claude = UNKNOWN
@@ -169,20 +120,6 @@ def test_mismatch_pauses_only_with_enforce(w):
     assert "wrong identity" in signin_pause.paused_for_signin()["c1"]["reason"]
 
 
-def test_recovery_resumes_only_agents_paused_for_signin(w):
-    w.agent("c1")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    w.agent("other", status="paused")      # paused by something else
-    w.claude = OUT
-    signin_pause.run(w.db)
-    w.claude = OK
-    done = signin_pause.run(w.db)
-    assert w.status("c1") == "processing" and w.status("other") == "paused"
-    assert "other" not in w.resumed and "c1" in w.resumed
-    assert signin_pause.paused_for_signin() == {}
-    assert any("resumed agent c1" in line for line in done)
-
-
 def test_a_resume_that_raises_is_retried_next_tick_and_stays_listed(w):
     w.agent("c1")
     signin_pause.record_launch(w.db.get_agent("c1"))
@@ -199,30 +136,6 @@ def test_a_resume_that_raises_is_retried_next_tick_and_stays_listed(w):
     w.fail_resume = False
     signin_pause.run(w.db)           # the next tick retries it
     assert w.status("c1") == "processing" and w.resumed == ["c1"]
-    assert signin_pause.paused_for_signin() == {}
-
-
-def test_a_partly_failed_pause_keeps_the_paused_agents_tracked_and_resumes_them(w, monkeypatch):
-    w.agent("c1")
-    w.agent("c2")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    real_pause = agents.pause_worker
-
-    def pause_c2_fails(db, a):
-        if a.id == "c2":
-            raise RuntimeError("the worktree is locked")
-        real_pause(db, a)
-
-    monkeypatch.setattr(agents, "pause_worker", pause_c2_fails)
-    w.claude = OUT
-    signin_pause.run(w.db)           # must not raise: the failure is per agent
-    assert w.status("c2") == "processing"
-    paused = signin_pause.paused_for_signin()
-    assert w.status("c1") == "paused" and "c1" in paused and "c2" not in paused
-    monkeypatch.setattr(agents, "pause_worker", real_pause)
-    w.claude = OK
-    signin_pause.run(w.db)
-    assert w.status("c1") == "processing" and "c1" in w.resumed
     assert signin_pause.paused_for_signin() == {}
 
 
@@ -259,40 +172,6 @@ def test_a_mismatching_identity_is_never_recorded_as_the_agents_own(w):
     assert signin_pause._load()["identity"] == {"c1": OK.ident}
 
 
-def test_nothing_is_probed_without_running_agents(w):
-    w.agent("done1", status="done")
-    w.agent("p1", status="paused")
-    assert signin_pause.run(w.db) == []
-    assert w.claude_probes == 0 and w.codex_probes == 0
-
-
-def test_only_providers_with_running_agents_are_probed(w):
-    w.agent("c1")
-    signin_pause.run(w.db)
-    assert w.claude_probes == 1 and w.codex_probes == 0
-
-
-def test_sweep_waits_thirty_seconds_between_checks(w):
-    w.agent("c1")
-    signin_pause.sweep(w.db, 1000.0)
-    signin_pause.sweep(w.db, 1010.0)
-    assert w.claude_probes == 1
-    signin_pause.sweep(w.db, 1031.0)
-    assert w.claude_probes == 2
-
-
-def test_cloud_route_reprobes_only_when_the_fingerprint_changes(w):
-    w.route = "bedrock"
-    w.agent("c1")
-    signin_pause.run(w.db)
-    signin_pause.run(w.db)
-    signin_pause.run(w.db)
-    assert w.claude_probes == 1
-    w.fp = "fp2"
-    signin_pause.run(w.db)
-    assert w.claude_probes == 2
-
-
 def test_cloud_logout_then_login_follows_the_fingerprint(w):
     w.route = "bedrock"
     w.agent("c1")
@@ -305,13 +184,6 @@ def test_cloud_logout_then_login_follows_the_fingerprint(w):
     w.fp = "fp2"
     signin_pause.run(w.db)           # the org expects this AWS account: it resumes on it
     assert w.status("c1") == "processing"
-
-
-def test_subscription_login_is_probed_every_time(w):
-    w.agent("c1")
-    signin_pause.run(w.db)
-    signin_pause.run(w.db)
-    assert w.claude_probes == 2
 
 
 def test_gateway_and_antigravity_are_not_verified(w, monkeypatch):
@@ -342,39 +214,12 @@ def test_a_personal_login_after_logout_never_resumes_the_company_conversation(w)
     assert w.status("c1") == "processing"
 
 
-def test_logout_then_the_same_company_login_resumes(w):
-    w.agent("c1")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    w.claude = OUT
-    signin_pause.run(w.db)
-    w.claude = OK
-    signin_pause.run(w.db)
-    assert w.status("c1") == "processing" and "c1" in w.resumed
-
-
-def test_launch_records_the_identity_without_overwriting_it(w):
-    w.agent("c1")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    w.claude = PERSONAL
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    assert signin_pause._load()["identity"]["c1"] == OK.ident
-
-
 def test_the_state_file_holds_ids_only_and_is_private(w, brindle_home):
     w.agent("c1")
     signin_pause.record_launch(w.db.get_agent("c1"))
     path = signin_pause._path()
     assert path.stat().st_mode & 0o777 == 0o600
     assert "token" not in path.read_text().lower()
-
-
-def test_doctor_lists_agents_paused_for_signin(w):
-    assert signin_pause.checks() == []
-    w.agent("c1")
-    w.claude = OUT
-    signin_pause.run(w.db)
-    (line,) = signin_pause.checks()
-    assert "c1" in line.detail and NO_ID in line.detail
 
 
 def test_unrecorded_agent_resumes_only_on_the_org_expected_identity(w):

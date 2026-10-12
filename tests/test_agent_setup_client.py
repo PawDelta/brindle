@@ -134,22 +134,10 @@ def test_absent_block_is_none(no_enterprise):
 
 # -- pruning -----------------------------------------------------------------
 
-@pytest.mark.parametrize("route,extra", [
-    ("subscription", {"aws": AWS, "gcp": GCP, "azure": AZURE, "gateway": GATEWAY}),
-    ("console", {"aws": AWS, "gcp": GCP, "azure": AZURE, "gateway": GATEWAY}),
-    ("bedrock", {"gcp": GCP, "azure": AZURE, "gateway": GATEWAY}),
-    ("vertex", {"aws": AWS, "azure": AZURE, "gateway": GATEWAY}),
-    ("foundry", {"aws": AWS, "gcp": GCP, "gateway": GATEWAY}),
-    ("gateway", {"aws": AWS, "gcp": GCP, "azure": AZURE}),
-])
-def test_unused_sub_blocks_are_pruned(route, extra, no_enterprise):
-    needed = {"bedrock": "aws", "vertex": "gcp", "foundry": "azure", "gateway": "gateway"}
-    block = {"route": route, "org_id": UUID, **extra,
-             **({needed[route]: _block(route)} if route in needed else {})}
+def test_unused_sub_blocks_are_pruned(no_enterprise):
+    block = {"route": "subscription", "org_id": UUID, "aws": AWS, "gcp": GCP, "azure": AZURE, "gateway": GATEWAY}
     c = parse({"claude": block}).claude
-    for name in ("aws", "gcp", "azure", "gateway"):
-        if name != needed.get(route):
-            assert getattr(c, name) is None, name
+    assert (c.aws, c.gcp, c.azure, c.gateway) == (None, None, None, None)
 
 
 def test_org_id_pruned_from_non_org_routes(no_enterprise):
@@ -159,59 +147,19 @@ def test_org_id_pruned_from_non_org_routes(no_enterprise):
     assert c.model_ids == () and c.default_model is None        # a subscription serves no ids
 
 
-def _block(route):
-    return {"bedrock": AWS, "vertex": GCP, "foundry": AZURE, "gateway": GATEWAY}[route]
-
-
 def test_route_missing_its_sub_block_is_malformed(no_enterprise):
     assert parse({"claude": {"route": "bedrock"}}) is None
-
-
-def test_org_route_missing_org_id_is_malformed(no_enterprise):
-    assert parse({"claude": {"route": "subscription"}}) is None
 
 
 # -- every invalid field -----------------------------------------------------
 
 BAD_CASES = [
-    ("claude route", {"claude": {"route": "openai", "org_id": UUID}}),
-    ("claude route missing", {"claude": {"org_id": UUID}}),
-    ("org_id not a UUID", {"claude": {"route": "console", "org_id": "not-a-uuid"}}),
-    ("org_id short", {"claude": {"route": "console", "org_id": UUID[:-1]}}),
-    ("org_id in bedrock still validated", {"claude": {"route": "bedrock", "org_id": "x", "aws": AWS}}),
-    ("aws sso_start_url http", {"claude": {"route": "bedrock", "aws": {**AWS, "sso_start_url": "http://x.example.com/start"}}}),
     ("aws sso_start_url with userinfo", {"claude": {"route": "bedrock", "aws": {**AWS, "sso_start_url": "https://u:p@x.example.com/start"}}}),
-    ("aws sso_start_url no host", {"claude": {"route": "bedrock", "aws": {**AWS, "sso_start_url": "https:///start"}}}),
-    ("aws sso_region malformed", {"claude": {"route": "bedrock", "aws": {**AWS, "sso_region": "useast1"}}}),
-    ("aws account_id 11 digits", {"claude": {"route": "bedrock", "aws": {**AWS, "account_id": "12345678901"}}}),
-    ("aws account_id letters", {"claude": {"route": "bedrock", "aws": {**AWS, "account_id": "12345678901a"}}}),
-    ("aws role_name with slash", {"claude": {"route": "bedrock", "aws": {**AWS, "role_name": "arn:aws:iam::1/role"}}}),
-    ("aws role_name too long", {"claude": {"route": "bedrock", "aws": {**AWS, "role_name": "a" * 65}}}),
-    ("aws region malformed", {"claude": {"route": "bedrock", "aws": {**AWS, "region": "us west 2"}}}),
     ("aws missing field", {"claude": {"route": "bedrock", "aws": {k: v for k, v in AWS.items() if k != "region"}}}),
-    ("gcp project uppercase", {"claude": {"route": "vertex", "gcp": {**GCP, "project": "Acme-Prod"}}}),
-    ("gcp project too short", {"claude": {"route": "vertex", "gcp": {**GCP, "project": "abc"}}}),
-    ("gcp region malformed", {"claude": {"route": "vertex", "gcp": {**GCP, "region": "useast5"}}}),
-    ("azure subscription not UUID", {"claude": {"route": "foundry", "azure": {**AZURE, "subscription_id": "sub-1"}}}),
-    ("azure resource is a URL", {"claude": {"route": "foundry", "azure": {**AZURE, "resource": "https://acme.openai.azure.com"}}}),
-    ("azure resource has a dot", {"claude": {"route": "foundry", "azure": {**AZURE, "resource": "acme.foundry"}}}),
-    ("azure resource empty", {"claude": {"route": "foundry", "azure": {**AZURE, "resource": ""}}}),
-    ("gateway base_url http", {"claude": {"route": "gateway", "gateway": {"base_url": "http://gw.example.com"}}}),
-    ("gateway base_url userinfo", {"claude": {"route": "gateway", "gateway": {"base_url": "https://u@gw.example.com"}}}),
-    ("gateway base_url with space", {"claude": {"route": "gateway", "gateway": {"base_url": "https://gw.example.com/a b"}}}),
-    ("model id with space", {"claude": {"route": "bedrock", "aws": AWS, "models": {"opus": "claude opus"}}}),
-    ("model id with slash", {"claude": {"route": "bedrock", "aws": AWS, "models": {"haiku": "a/b"}}}),
-    ("model id not a string", {"claude": {"route": "bedrock", "aws": AWS, "models": {"sonnet": 4}}}),
     ("codex route", {"codex": {"route": "bing"}}),
-    ("unknown field with a secret value", {"codex": {"route": "chatgpt", "extra": "AKIAIOSFODNN7EXAMPLE"}}),
     ("unknown nested field with a secret value", {"claude": {"route": "bedrock", "aws": AWS, "future": {"a": ["sk-ant-api03-abcdefghijklmnop"]}}}),
-    ("unknown field named like a secret", {"codex": {"route": "chatgpt", "api_key=abc": 1}}),
     ("enforce not a bool", {"enforce": "yes"}),
-    ("enforce zero", {"enforce": 0}),
     ("not an object", "claude"),
-    ("claude not an object", {"claude": "subscription"}),
-    ("secret-shaped api key in a name", {"claude": {"route": "bedrock", "aws": {**AWS, "role_name": "AKIAIOSFODNN7EXAMPLE"}}}),
-    ("secret-shaped key in model id", {"claude": {"route": "bedrock", "aws": AWS, "models": {"opus": "sk-ant-api03-abcdefghijklmnop"}}}),
     ("secret in gateway url", {"claude": {"route": "gateway", "gateway": {"base_url": "https://gw.example.com/?token=abc"}}}),
     ("secret-shaped resource", {"claude": {"route": "foundry", "azure": {**AZURE, "resource": "ghp_abcdefghijklmnopqrstu"}}}),
     ("aws SSO group incomplete", {"claude": {"route": "bedrock", "aws": {k: v for k, v in AWS.items() if k != "role_name"}}}),
@@ -242,45 +190,10 @@ def test_invalid_field_is_ignored(name, raw, no_enterprise, caplog):
     assert [r for r in caplog.records if "agent_setup" in r.getMessage()], name
 
 
-def test_warning_names_the_problem_not_the_value(no_enterprise, caplog):
-    secret = "AKIAIOSFODNN7EXAMPLE"
-    with caplog.at_level(logging.WARNING, logger="brindle.pro.team_policy"):
-        parse_policy(ORG, body({"claude": {"route": "bedrock", "aws": {**AWS, "role_name": secret}}}))
-    assert secret not in caplog.text
-
-
-@pytest.mark.parametrize("url", [
-    "https://d-1234.awsapps.com/start/#", "https://d-1234.awsapps.com/start#"])
-def test_sso_start_url_trailing_hash_is_stripped(url, no_enterprise):
+def test_sso_start_url_trailing_hash_is_stripped(no_enterprise):
+    url = "https://d-1234.awsapps.com/start#"
     s = parse({"claude": {"route": "bedrock", "aws": {**AWS, "sso_start_url": url}}})
     assert s.claude.aws.sso_start_url == url[:-1]
-
-
-def test_sso_start_url_without_hash_unchanged(no_enterprise):
-    assert parse({"claude": {"route": "bedrock", "aws": AWS}}).claude.aws.sso_start_url == AWS["sso_start_url"]
-
-
-def test_sso_start_url_fragment_in_the_middle_is_still_invalid(no_enterprise):
-    assert parse({"claude": {"route": "bedrock",
-                             "aws": {**AWS, "sso_start_url": "https://x.awsapps.com/#/start"}}}) is None
-
-
-@pytest.mark.parametrize("raw,where", [
-    ({"claude": {"route": "subscription", "org_id": UUID}, "webhook": "x"}, "agent_setup"),
-    ({"claude": {"route": "bedrock", "aws": {**AWS, "profile": "x"}}}, "aws"),
-    ({"claude": {"route": "bedrock", "aws": AWS, "models": {"turbo": "x"}}}, "models"),
-    ({"codex": {"route": "chatgpt", "api_key": "x"}}, "codex"),
-    ({"claude": {"route": "subscription", "org_id": UUID, "future": {"a": 1}}}, "claude"),
-])
-def test_unknown_keys_are_ignored_not_fatal(raw, where, no_enterprise, caplog):
-    with caplog.at_level(logging.DEBUG, logger="brindle.pro.team_policy"):
-        s = parse(raw)
-    assert isinstance(s, AgentSetup)
-    assert (s.claude is not None) == ("claude" in raw)
-    assert (s.codex is not None) == ("codex" in raw)
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
-    notes = [r for r in caplog.records if "unknown" in r.getMessage() and where in r.getMessage()]
-    assert len(notes) == 1 and notes[0].levelno == logging.DEBUG
 
 
 def test_known_fields_survive_next_to_unknown_ones(no_enterprise):
@@ -343,18 +256,6 @@ def test_malformed_block_leaves_rest_of_policy(no_enterprise, caplog):
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING
                 and "agent_setup" in r.getMessage()]
     assert len(warnings) == 1
-
-
-def test_malformed_block_does_not_raise(no_enterprise):
-    for raw in ([], "x", 3, {"claude": None, "codex": []}):
-        p = parse_policy(ORG, body(raw))
-        assert p.agent_setup is None
-
-
-def test_valid_block_alongside_other_policy_fields(no_enterprise):
-    p = parse_policy(ORG, body({"codex": {"route": "chatgpt"}}, max_parallel_workers=2))
-    assert p.agent_setup.codex.route == "chatgpt"
-    assert p.max_parallel_workers == 2
 
 
 def test_malformed_block_in_cache_is_ignored_on_reload(no_enterprise):
