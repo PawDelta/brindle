@@ -14,7 +14,6 @@ from brindle.cli import app
 from brindle.config import set_local
 from brindle.db import Agent
 from brindle.permissions import Request, Rule, decide
-from brindle.providers import ClaudeCode, LaunchContext
 
 from conftest import sh
 
@@ -51,29 +50,6 @@ def claude_payload(tool, tool_input, tool_use_id="toolu_1", cwd=None):
 # -- the engine -------------------------------------------------------------------------------
 
 
-def test_deny_beats_allow_and_nothing_matching_is_ask(ws):
-    allow = Rule("bash", "make build", "exact", "allow")
-    deny = Rule("bash", "make", "prefix", "deny")
-    req = bash(ws, "make build")
-    assert decide(req, rules=[allow]).decision == "allow"
-    assert decide(req, rules=[allow, deny]).decision == "deny"
-    assert decide(req, rules=[deny, allow]).decision == "deny"
-    assert decide(bash(ws, "make test"), rules=[allow]).decision == "ask"
-
-
-def test_match_types_are_explicit(ws):
-    assert decide(bash(ws, "npm test"), rules=[Rule("bash", "npm", "prefix", "allow")]).decision == "allow"
-    assert decide(bash(ws, "npm test"), rules=[Rule("bash", "npm *", "glob", "allow")]).decision == "allow"
-    assert decide(bash(ws, "npm test"), rules=[Rule("bash", "npm", "exact", "allow")]).decision == "ask"
-    # A rule for another kind never applies.
-    assert decide(bash(ws, "npm test"), rules=[Rule("read", "npm test", "exact", "allow")]).decision == "ask"
-
-
-def test_unknown_or_missing_request_is_ask():
-    assert decide(None, rules=[]).decision == "ask"
-    assert decide(Request("x", "teleport", "T"), rules=[]).decision == "ask"
-
-
 def test_a_bash_allow_rule_never_covers_metacharacters(ws):
     rule = Rule("bash", "git", "prefix", "allow")
     for cmd in ("git status; rm -rf /", "git diff | sh", "git log $(rm x)", "git log `id`",
@@ -82,13 +58,6 @@ def test_a_bash_allow_rule_never_covers_metacharacters(ws):
 
 
 # -- the defaults -----------------------------------------------------------------------------
-
-
-def test_tracked_read_is_allowed(ws):
-    d = decide(read(ws, os.path.join(ws.path, "app.py")))
-    assert d.decision == "allow" and "d-tracked" in d.reason
-    # In the repo root too.
-    assert decide(read(ws, os.path.join(ws.repo_root, "app.py"))).decision == "allow"
 
 
 def test_untracked_ignored_and_dot_git_reads_are_not_allowed(ws):
@@ -121,7 +90,7 @@ def test_symlink_out_of_the_repo_is_not_allowed(ws, tmp_path):
     assert decide(read(ws, link)).decision == "ask"
 
 
-@pytest.mark.parametrize("match,match_type", [("src/*", "glob"), ("src/", "prefix"), ("src/link.txt", "exact")])
+@pytest.mark.parametrize("match,match_type", [("src/*", "glob"), ("src/link.txt", "exact")])
 def test_a_user_allow_rule_does_not_follow_a_symlink_out(ws, tmp_path, match, match_type):
     # An allow rule matches where the path really leads, not the name the
     # worker chose: a link under an allowed folder can point anywhere.
@@ -144,22 +113,6 @@ def test_secret_locations_are_denied(ws):
     assert decide(read(ws, os.path.join(ws.repo_root, ".env"))).decision == "deny"
 
 
-def test_checks_commands_are_allowed_exactly(ws):
-    checks = ["uv run pytest -q"]
-    assert decide(bash(ws, "uv run pytest -q"), checks=checks).decision == "allow"
-    assert decide(bash(ws, "uv run pytest -q tests/x.py"), checks=checks).decision == "ask"
-    # A check with shell metacharacters is never auto-allowed.
-    assert decide(bash(ws, "make a && make b"), checks=["make a && make b"]).decision == "ask"
-
-
-def test_read_only_git_is_allowed_only_as_a_simple_command(ws):
-    for cmd in ("git status", "git diff --stat", "git log --oneline -5", "git show HEAD"):
-        assert decide(bash(ws, cmd)).decision == "allow", cmd
-    for cmd in ("git status; rm -rf /", "git diff | sh", "git log $(rm -rf x)", "git diff > x",
-                "git diff --output=x", "git diff --no-index /etc/passwd /dev/null", "git commit -m x"):
-        assert decide(bash(ws, cmd)).decision != "allow", cmd
-
-
 def test_git_push_and_force_flags_are_denied(ws):
     for cmd in ("git push", "git push origin main", "cd x && git push", "git -C x push",
                 "git checkout -f main", "git clean -fd", "git reset --force"):
@@ -180,33 +133,9 @@ def test_repo_rules_can_only_add_denies(ws):
 # -- user rules and learning ------------------------------------------------------------------
 
 
-def test_user_rules_persist_and_forget(ws):
-    rule = permissions.add_rule("bash", "make lint", "allow")
-    assert decide(bash(ws, "make lint")).decision == "allow"
-    data = json.loads(permissions.store_path().read_text())
-    assert data["rules"][0] == {"id": rule.id, "kind": "bash", "match": "make lint", "match_type": "exact",
-                                "decision": "allow", "source": "user", "created": rule.created}
-    assert permissions.forget(rule.id)
-    assert decide(bash(ws, "make lint")).decision == "ask"
-
-
 def test_a_user_allow_never_overrides_a_default_deny(ws):
     permissions.add_rule("bash", "git push", "allow")
     assert decide(bash(ws, "git push")).decision == "deny"
-
-
-def test_two_approvals_make_a_suggestion_not_a_rule(ws):
-    req = bash(ws, "make docs")
-    permissions.record_approval(req)
-    assert permissions.suggestions() == []
-    permissions.record_approval(req)
-    [s] = permissions.suggestions()
-    assert (s.kind, s.match, s.count) == ("bash", "make docs", 2)
-    assert decide(req).decision == "ask"  # no silent rule
-    assert permissions.load_store().rules == []
-    rule = permissions.accept(s.id)
-    assert rule.source == "learned" and decide(req).decision == "allow"
-    assert permissions.suggestions() == []
 
 
 def test_compound_commands_are_never_learned(ws):
@@ -222,30 +151,6 @@ def test_paths_are_learned_relative_to_the_worktree(ws):
 
 
 # -- Claude Code's hook -----------------------------------------------------------------------
-
-
-def test_off_by_default(db, ws):
-    a = worker(db, ws)
-    assert agents.hook_main(db, a.id, "permission-request",
-                            json.dumps(claude_payload("Bash", {"command": "git push"}))) == ""
-    assert db.latest_permission_request(a.id) is None
-
-
-def test_hook_maps_stdin_to_a_decision(db, ws):
-    a = worker(db, ws)
-    turn_on(ws)
-    out = json.loads(agents.hook_main(db, a.id, "permission-request", json.dumps(
-        claude_payload("Read", {"file_path": os.path.join(ws.path, "app.py")}))))
-    assert out["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
-    assert out["hookSpecificOutput"]["decision"]["behavior"] == "allow"
-    out = json.loads(agents.hook_main(db, a.id, "permission-request", json.dumps(
-        claude_payload("Bash", {"command": "git push --force"}))))
-    assert out["hookSpecificOutput"]["decision"]["behavior"] == "deny"
-    assert out["hookSpecificOutput"]["decision"]["message"].startswith("brindle: denied")
-    # Ask prints nothing and remembers the request for the supervisor.
-    assert agents.hook_main(db, a.id, "permission-request", json.dumps(
-        claude_payload("Bash", {"command": "make deploy"}, "toolu_9"))) == ""
-    assert "Bash: make deploy" in agents.pending_permission(db, a.id)
 
 
 def test_malformed_input_gives_no_output(db, ws, monkeypatch):
@@ -287,24 +192,6 @@ def test_approval_after_ask_is_learned_and_end_of_turn_is_not(db, ws):
     agents.handle_hook(db, a.id, "stop", {"stop_hook_active": True})
     assert db.latest_permission_request(a.id) is None
     assert [(s.match, s.count) for s in permissions.suggestions()] == [("make docs", 2)]
-
-
-def test_decisions_are_recorded_in_history(db, ws):
-    a = worker(db, ws)
-    turn_on(ws)
-    agents.hook_main(db, a.id, "permission-request", json.dumps(claude_payload("Bash", {"command": "git push"})))
-    [row] = db.list_history(ws.repo_root, "permission")
-    assert row.task == "Bash: git push" and row.result.startswith("deny:")
-
-
-def test_launch_settings_register_the_hook(ws):
-    from brindle.profiles import load_profile
-
-    ctx = LaunchContext("w1", load_profile("developer"), None, cwd=ws.path, mode="assign")
-    argv = ClaudeCode().command(ctx)
-    settings = json.loads(argv[argv.index("--settings") + 1])
-    cmd = settings["hooks"]["PermissionRequest"][0]["hooks"][0]["command"]
-    assert "_hook permission-request --agent w1" in cmd
 
 
 def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch):

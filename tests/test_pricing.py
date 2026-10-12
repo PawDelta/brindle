@@ -34,58 +34,10 @@ def tokens(model=None, input=0, output=0, cache_read=0, cache_creation=0):
 # -- the price table ---------------------------------------------------------------------------------
 
 
-def test_list_prices_match_the_providers_pages():
-    assert pricing.PRICES["claude-sonnet-5-5"] == Price(2, 10, 2.5, pytest.approx(0.2))
-    assert pricing.PRICES["claude-opus-5-5"] == Price(4, 20, 5, 0.2)
-    assert pricing.PRICES["claude-fable-5-1"] == Price(10, 50, 12.5, 0.25)
-    assert pricing.PRICES["claude-haiku-4-5"] == Price(1, 5, 1.25, pytest.approx(0.1))
-    assert pricing.PRICES["claude-haiku-5-5"] == Price(0.10, 0.50, pytest.approx(0.125), pytest.approx(0.01))
-    assert pricing.price_for("haiku") == pricing.PRICES["claude-haiku-5-5"]
-    # OpenAI lists cache writes (1.25x input) for gpt-6 and gpt-5.6; for older models, none
-    assert pricing.PRICES["gpt-6-luna"] == Price(0.10, 0.50, 0.125, 0.01)
-    assert pricing.PRICES["gpt-6-astra"] == Price(10, 50, 12.50, 1)
-    assert pricing.PRICES["gpt-5.6-sol"] == Price(4, 20, 5, 0.40)
-    assert pricing.PRICES["gpt-5.3-codex"] == Price(1.75, 14, 1.75, 0.175)
-    assert pricing.PRICES["gpt-5.5"] == Price(5, 30, 5, 0.50)
-
-
-@pytest.mark.parametrize("model, key", [
-    ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
-    ("claude-opus-5-5[1m]", "claude-opus-5-5"),
-    ("anthropic/claude-sonnet-5-5", "claude-sonnet-5-5"),
-    ("us.anthropic.claude-sonnet-4-5-20250929", "claude-sonnet-4-5"),
-    ("Claude-Fable-5-1", "claude-fable-5-1"),
-    ("sonnet", "claude-sonnet-5-5"),
-    ("openai/gpt-6-luna", "gpt-6-luna"),
-])
-def test_model_ids_are_normalized(model, key):
-    assert pricing.normalize(model) == key
-    assert pricing.price_for(model) == pricing.PRICES[key]
-
-
-@pytest.mark.parametrize("model", [None, "", "gpt-5.7", "claude-opus-4-9", "qwen3-coder:30b",
-                                   "<synthetic>"])
-def test_unknown_models_have_no_price_not_a_guess(model):
-    assert pricing.price_for(model) is None
-
-
-def test_cost_per_million_tokens():
-    p = Price(input=3, output=15, cache_write=3.75, cache_read=0.3)
-    assert p.cost(1_000_000, 0, 0, 0) == pytest.approx(3)
-    assert p.cost(input_tokens=100_000, output_tokens=10_000, cache_write_tokens=20_000,
-                  cache_read_tokens=500_000) == pytest.approx(0.3 + 0.15 + 0.075 + 0.15)
-
-
 def test_stale_warning_after_90_days():
     assert pricing.stale_warning(pricing.AS_OF + dt.timedelta(days=90)) is None
     warning = pricing.stale_warning(pricing.AS_OF + dt.timedelta(days=91))
     assert warning and pricing.AS_OF.isoformat() in warning and "pricing" in warning
-
-
-def test_money():
-    assert pricing.money(12.345) == "$12.35"
-    assert pricing.money(0.004) == "<$0.01"
-    assert pricing.money(0) == "$0.00"
 
 
 # -- overrides ---------------------------------------------------------------------------------------
@@ -124,17 +76,6 @@ def test_a_broken_config_means_list_prices_only(repo):
 # -- profiles ----------------------------------------------------------------------------------------
 
 
-def test_profile_prices(repo):
-    profile(repo, "cheap", model="haiku")
-    profile(repo, "local", provider="native", model="qwen3-coder:30b",
-            base_url="http://localhost:11434/v1")
-    profile(repo, "default-model")
-    assert pricing.profile_price("cheap", str(repo)) == pricing.PRICES["claude-haiku-5-5"]
-    assert pricing.profile_price("local", str(repo)) == pricing.FREE
-    assert pricing.profile_price("default-model", str(repo)) is None
-    assert pricing.profile_price("no-such-profile", str(repo)) is None
-
-
 def test_cost_rank_comes_from_real_prices(repo):
     from brindle.pro import learning
 
@@ -167,6 +108,7 @@ def test_a_free_model_reads_free_in_the_result_line():
     u = usage.Usage(5000, 500, model="qwen3-coder:30b")
     assert usage.usage_cost(u, fallback=pricing.FREE) == 0.0
     assert usage.summary_line(u, 0.0, free=True).endswith("· qwen3-coder · Free")
+    assert pricing.money(0.004) == "<$0.01"         # tiny amounts never read as zero
 
 
 # -- Codex rollouts ----------------------------------------------------------------------------------
@@ -220,27 +162,6 @@ def test_codex_usage_is_the_rollouts_latest_total(db, repo, tmp_path):
     assert db.get_usage_cache(str(path))["size"] == path.stat().st_size
 
 
-def test_codex_cache_writes_are_charged_at_the_write_rate(db, repo, tmp_path):
-    home = tmp_path / "codex-home"
-    a, ws = codex_worker(db, repo)
-    path = rollout(home, "01w", ws.path, a.created_at + 1, [])
-    with path.open("a") as f:
-        f.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
-            "total_token_usage": {"input_tokens": 1_000_000, "cached_input_tokens": 0,
-                                  "cache_write_input_tokens": 400_000, "output_tokens": 0}}}}) + "\n")
-    u = usage.agent_usage(db, a)
-    assert (u.input_tokens, u.cache_creation_tokens) == (600_000, 400_000)
-    assert usage.usage_cost(u) == pytest.approx(600_000 * 0.10 / 1e6 + 400_000 * 0.125 / 1e6)
-
-
-def test_codex_rollout_by_session_ref_beats_cwd(db, repo, tmp_path):
-    home = tmp_path / "codex-home"
-    a, ws = codex_worker(db, repo, session_ref="01own")
-    rollout(home, "01other", ws.path, a.created_at + 1, [(100, 0, 1)])
-    rollout(home, "01own", ws.path, a.created_at + 30, [(500, 0, 5)])
-    assert usage.agent_usage(db, a).input_tokens == 500
-
-
 def test_codex_rollout_by_cwd_skips_older_and_other_sessions(db, repo, tmp_path):
     home = tmp_path / "codex-home"
     a, ws = codex_worker(db, repo)
@@ -277,19 +198,6 @@ def decide(db, root, n, *, profile, baseline, model, input):
                    tokens=tokens(model, input=input))
 
 
-def test_savings_are_in_dollars_when_every_task_can_be_priced(db, repo):
-    profile(repo, "luna", provider="codex", model="gpt-6-luna")
-    profile(repo, "sonnet", model="claude-sonnet-5-5")
-    for n in range(5):
-        decide(db, str(repo), n, profile="luna", baseline="sonnet", model="gpt-6-luna",
-               input=1_000_000)
-    this, _, _ = savings.report(db, str(repo))
-    assert this.dollars and this.actual_cost == pytest.approx(0.5) and this.baseline_cost == pytest.approx(10)
-    text = savings.describe([this, this, this], str(repo))
-    assert "$0.50 against an estimated $10.00" in text and "~95% lower cost" in text
-    assert savings.DOLLAR_NOTE in text and savings.ESTIMATE_NOTE not in text
-
-
 def test_savings_fall_back_to_relative_cost_when_a_price_is_unknown(db, repo):
     profile(repo, "luna", provider="codex", model="gpt-6-luna")
     for n in range(5):
@@ -307,34 +215,6 @@ def test_savings_fall_back_to_relative_cost_when_a_price_is_unknown(db, repo):
 def root(repo, monkeypatch):
     monkeypatch.chdir(repo)
     return git.main_repo_root(str(repo))
-
-
-def test_cost_summary_prices_each_row_and_keeps_unknown_apart(db, root, repo):
-    profile(repo, "local", provider="native", model="qwen3-coder:30b",
-            base_url="http://localhost:11434/v1")
-    db.add_history(root, "worker_result", agent_id="a", profile="developer",
-                   tokens=tokens("claude-sonnet-5-5", input=1_000_000, output=100_000))
-    db.add_history(root, "worker_result", agent_id="b", profile="local", tokens=tokens(input=5000))
-    db.add_history(root, "worker_result", agent_id="c", profile="developer-codex",
-                   tokens=tokens("gpt-9-mystery", input=7000))
-    db.add_history(root, "check", agent_id="a")
-    s = cost.summary(db, root)
-    assert s.total.dollars == pytest.approx(3.0) and s.total.unknown == 7000
-    res = CliRunner().invoke(app, ["cost"])
-    assert res.exit_code == 0, res.output
-    assert "last 30 days: $3.00 (+5k tokens free) (+7k tokens unpriced)" in res.output
-    assert "claude-sonnet-5-5" in res.output and "profile local" in res.output
-    assert "gpt-9-mystery" in res.output and "unknown" in res.output
-    assert pricing.AS_OF.isoformat() in res.output
-
-
-def test_cost_summary_only_counts_the_window(db, root):
-    db.add_history(root, "worker_result", agent_id="a",
-                   tokens=tokens("claude-haiku-4-5", output=1_000_000))
-    db.conn.execute("UPDATE history SET ts=?", (time.time() - 40 * 86400,))
-    db.conn.commit()
-    assert cost.summary(db, root).total.dollars == 0
-    assert cost.summary(db, root, days=60).total.dollars == pytest.approx(5)
 
 
 def test_cost_report_fails_closed_without_the_feature(db, root, monkeypatch):

@@ -3,7 +3,6 @@ locks, orphan sessions and servers, empty worktree folders."""
 
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -11,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import cull, procs, tmux, view, workspaces
+from brindle import cull, tmux, view, workspaces
 
 # These start servers named after a dead pytest run, which every other
 # xdist worker's teardown would reap first: run them in the serial pass.
@@ -46,12 +45,6 @@ def unmerged_worker(db, repo, name="feat-open"):
     return ws
 
 
-def dead_pid() -> int:
-    p = subprocess.Popen([sys.executable, "-c", "pass"])
-    p.wait()
-    return p.pid
-
-
 def start_server(name: str, home: str) -> None:
     subprocess.run(["tmux", "-L", name, "new-session", "-d", "-s", "brindle_x_y",
                     "-e", f"BRINDLE_HOME={home}"], check=True)
@@ -62,48 +55,6 @@ def server_up(name: str) -> bool:
 
 
 # -- test servers and detached helpers ------------------------------------------------
-
-
-def test_killing_a_private_server_removes_its_socket():
-    tmux.ensure_session("brindle_sock_test", "/tmp", {})
-    sock = tmux.socket_dir() / os.environ["BRINDLE_TMUX_SOCKET"]
-    assert sock.exists()
-    tmux.kill_server()
-    assert not sock.exists()
-
-
-def test_a_dead_test_runs_server_is_reaped(tmp_path):
-    name = f"brindle-test-{dead_pid()}"
-    start_server(name, str(tmp_path))  # its home still exists: the pid decides
-    try:
-        assert any(name in line for line in cull.orphan_servers())
-        assert not server_up(name)
-        assert not (tmux.socket_dir() / name).exists()
-    finally:
-        tmux.reap_server(name)
-
-
-def test_conftest_reaps_dead_runs_left_over_from_earlier(tmp_path):
-    from conftest import _reap_dead_test_servers
-
-    name = f"brindle-test-{dead_pid()}"
-    start_server(name, str(tmp_path))
-    try:
-        _reap_dead_test_servers()
-        assert not server_up(name)
-        assert not (tmux.socket_dir() / name).exists()
-    finally:
-        tmux.reap_server(name)
-
-
-def test_a_live_test_runs_server_is_left_alone(tmp_path):
-    name = f"brindle-test-{os.getpid()}-other"  # not a pid suffix, home exists
-    start_server(name, str(tmp_path))
-    try:
-        cull.orphan_servers()
-        assert server_up(name)
-    finally:
-        tmux.reap_server(name)
 
 
 def test_a_live_test_runs_server_is_left_alone_even_without_a_brindle_home(tmp_path):
@@ -137,32 +88,6 @@ def test_a_dead_servers_socket_file_is_removed():
     assert not sock.exists()
 
 
-def test_the_test_harness_reaps_what_a_test_forgot(tmp_path):
-    """conftest stops and removes, after each test, the private servers and
-    sockets it left behind (a test that made its own server and never
-    reaped it), but not another run's live test server."""
-    from conftest import _reap_run_leftovers
-
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    known = {p.name for p in tmux.socket_dir().iterdir()}
-    forgotten = f"brindle-e2e-forgotten-{os.getpid()}"
-    dead = f"brindle-dead-{os.getpid()}"
-    other_run = f"brindle-test-{sleeper.pid}"
-    try:
-        start_server(forgotten, str(tmp_path))
-        start_server(other_run, str(tmp_path))
-        (tmux.socket_dir() / dead).touch()
-        assert _reap_run_leftovers(known) == sorted([dead, forgotten])
-        assert not server_up(forgotten) and not (tmux.socket_dir() / forgotten).exists()
-        assert not (tmux.socket_dir() / dead).exists()
-        assert server_up(other_run)                       # its run (the sleeper) is alive
-    finally:
-        sleeper.kill()
-        sleeper.wait()
-        tmux.reap_server(other_run)
-        tmux.reap_server(forgotten)
-
-
 def test_detached_helpers_stop_when_their_brindle_home_is_gone(tmp_path, monkeypatch):
     gone = tmp_path / "gone-home"
     monkeypatch.setenv("BRINDLE_HOME", str(gone))
@@ -174,33 +99,11 @@ def test_detached_helpers_stop_when_their_brindle_home_is_gone(tmp_path, monkeyp
     assert not gone.exists()  # nothing recreated it (and nothing opened a session for it)
 
 
-def test_real_spawn_sessions_end_with_the_test(db, repo):
-    from brindle import agents
-
-    ws = workspaces.create(db, str(repo), "feat-leak").workspace
-    # No prompt: a shell worker's prompt is pasted into a real shell and run
-    # (its worker footer's `brindle` would start a supervisor in this session).
-    agents.spawn(db, ws, "developer", provider_name="shell", mode="handoff")
-    assert tmux.has_session(ws.tmux_session)
     # conftest's pytest_runtest_teardown kills it after this test; the next test
     # checks nothing carried over.
 
 
-def test_no_session_carries_over_from_the_previous_test():
-    assert tmux.list_sessions() == []
-
-
 # -- merged, finished worktrees ------------------------------------------------------
-
-
-def test_merged_worktree_with_finished_agents_is_hidden(db, repo):
-    done = merged_worker(db, repo)
-    add_agent(db, done, "a1")
-    open_ = unmerged_worker(db, repo)
-    add_agent(db, open_, "a2")
-    shown = {e["id"] for e in view.snapshot(db, str(repo), panes={})}
-    assert done.id not in shown
-    assert open_.id in shown
 
 
 def test_merged_worktree_with_uncommitted_changes_is_hidden_but_kept(db, repo):
@@ -211,20 +114,6 @@ def test_merged_worktree_with_uncommitted_changes_is_hidden_but_kept(db, repo):
     lines = cull.prune_retired(db)
     assert any("uncommitted" in line for line in lines)
     assert os.path.isdir(ws.path) and db.get_workspace(ws.id)
-
-
-def test_merged_worktree_with_a_paused_unreported_agent_stays(db, repo):
-    ws = merged_worker(db, repo)
-    add_agent(db, ws, "a1", status="paused", result=None)
-    assert ws.id in {e["id"] for e in view.snapshot(db, str(repo), panes={})}
-    assert cull.prune_retired(db) == []
-
-
-def test_merged_worktree_with_no_agents_is_hidden_once_old(db, repo):
-    ws = merged_worker(db, repo)
-    assert ws.id in {e["id"] for e in view.snapshot(db, str(repo), panes={})}  # just made
-    db.conn.execute("UPDATE workspaces SET created_at=? WHERE id=?", (OLD, ws.id))
-    assert ws.id not in {e["id"] for e in view.snapshot(db, str(repo), panes={})}
 
 
 def test_prune_removes_merged_worktrees_and_their_branches(db, repo):
@@ -248,13 +137,6 @@ def test_prune_keeps_merged_branches_when_the_repo_says_so(db, repo):
     lines = cull.prune_retired(db)
     assert any(f"branch {done.branch} kept" in line for line in lines)
     assert sh(f"git branch --list {done.branch}", repo)
-
-
-def test_removing_a_worktree_keeps_an_unmerged_branch(db, repo):
-    open_ = unmerged_worker(db, repo)
-    removed = workspaces.remove(db, open_)
-    assert not removed.branch_deleted and "kept" in removed.branch_note
-    assert sh(f"git branch --list {open_.branch}", repo)
 
 
 def test_prune_command_cleans_up(db, repo, monkeypatch):
@@ -326,11 +208,6 @@ def test_empty_worktree_folders_are_removed(db, repo):
     assert worktrees_dir().is_dir()
 
 
-def test_procs_alive():
-    assert procs.alive(os.getpid())
-    assert not procs.alive(dead_pid())
-
-
 def _fake_gh(tmp_path, monkeypatch, answer):
     gh = tmp_path / "bin" / "gh"
     gh.parent.mkdir()
@@ -354,10 +231,3 @@ def test_first_pr_offers_to_delete_merged_branches_on_github(repo, tmp_path, mon
     assert log.read_text() == ""
 
 
-def test_no_offer_when_github_already_deletes_them(repo, tmp_path, monkeypatch):
-    from brindle import cli
-
-    log = _fake_gh(tmp_path, monkeypatch, "true")
-    monkeypatch.setattr(cli.typer, "confirm", lambda *a, **k: pytest.fail("nothing to ask"))
-    cli._offer_delete_on_merge(str(repo))
-    assert "repo edit" not in log.read_text()

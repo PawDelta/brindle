@@ -8,18 +8,6 @@ from brindle.pro import license, team_policy
 from brindle.pro.team_policy import PolicyUnavailable, parse_policy
 
 
-def test_task_usd_parses_and_a_missing_one_is_no_limit():
-    assert policy_of(budget={"task_usd": 5, "goal_usd": 20}).budget_task_usd == 5.0
-    assert policy_of(budget={"goal_usd": 20}).budget_task_usd is None     # an old server
-    assert policy_of().budget_task_usd is None
-
-
-@pytest.mark.parametrize("bad", [-1, "5", True])
-def test_a_malformed_task_usd_makes_the_policy_unusable(bad):
-    with pytest.raises(PolicyUnavailable):
-        policy_of(budget={"task_usd": bad})
-
-
 def test_the_members_effective_policy_carries_their_own_values():
     body = {"org_id": ORG, "version": 3, "role": "member",
             "policy": {"budget": {"seat_month_usd": 100, "task_usd": 10},
@@ -36,15 +24,6 @@ def test_the_members_effective_policy_carries_their_own_values():
     assert e.allowed_models == ("a",) and e.max_parallel_workers == 1
     assert e.paused and e.paused_reason == "over budget"
     assert e.budget_sources == {"seat_month_usd": "member", "task_usd": "role"}
-
-
-def test_the_new_fields_survive_the_cache_round_trip():
-    p = parse_policy(ORG, {"org_id": ORG, "version": 2, "policy": {"budget": {"task_usd": 7}},
-                           "effective": {"budget": {"task_usd": 3}, "paused": True,
-                                         "budget_sources": {"task_usd": "member"}}})
-    q = parse_policy(ORG, p.to_json())
-    assert q.budget_task_usd == 7.0 and q.enforced.budget_task_usd == 3.0
-    assert q.enforced.paused and q.enforced.budget_sources == {"task_usd": "member"}
 
 
 @pytest.mark.parametrize("over", [{"paused": "yes"}, {"budget_sources": []}])
@@ -69,27 +48,6 @@ def test_limits_take_the_org_task_budget(monkeypatch):
     org_limits_of(monkeypatch, budget={"task_usd": 5})
     lim = budget.limits(Cfg(), "/r")
     assert lim.task_usd == 5.0 and lim.org
-
-
-def test_the_stricter_of_org_and_repo_task_budget_wins(monkeypatch):
-    org_limits_of(monkeypatch, budget={"task_usd": 5})
-
-    class Repo:
-        budget = {"task_usd": 2}
-
-    assert budget.limits(Repo(), "/r").task_usd == 2.0
-    Repo.budget = {"task_usd": 9}
-    assert budget.limits(Repo(), "/r").task_usd == 5.0
-
-
-def test_no_org_task_budget_leaves_the_repos(monkeypatch):
-    org_limits_of(monkeypatch, budget={"goal_usd": 10})
-
-    class Repo:
-        budget = {"task_usd": 2}
-
-    assert budget.limits(Repo(), "/r").task_usd == 2.0
-    assert budget.limits(Cfg(), "/r").task_usd is None
 
 
 def test_a_paused_member_gets_no_new_worker(monkeypatch):

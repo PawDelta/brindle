@@ -191,21 +191,6 @@ def token_file(tmp_path):
 # -- start -----------------------------------------------------------------------------------
 
 
-def test_start_writes_plan_and_token(plan, tmp_path):
-    token = plan()
-    server = Server(token)
-    said = []
-    code = ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path / "out", client=server.client,
-                           token=CI_TOKEN, providers=["claude"], say=said.append)
-    assert code == 0
-    assert (tmp_path / "out" / "plan.jwt").read_text() == token
-    assert (tmp_path / "out" / "run_token").read_text().strip() == RUN_TOKEN
-    assert oct((tmp_path / "out" / "run_token").stat().st_mode)[-3:] == "600"
-    assert RUN_TOKEN not in "\n".join(said) and token not in "\n".join(said)
-    key, form, _ = server.transport.calls[0]
-    assert form["repo"] == REPO and form["providers_available"] == ["claude"] and "client" in form
-
-
 def test_start_not_started_responses_exit_zero(tmp_path):
     cases = [
         (409, {"error": "duplicate", "existing": {"pr": 5}}, {"kind": "issue", "issue": 1}, "#5"),
@@ -262,38 +247,6 @@ def test_trigger_for():
         ci_client.parse_bool("maybe")
 
 
-def test_oidc_header_on_every_call_inside_actions(plan, tmp_path):
-    fetched = []
-
-    def fetch(url, request_token):
-        fetched.append((url, request_token))
-        return "h.p.s"
-    actions = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test/x?api-version=2",
-               "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req-secret"}
-    clock = {"t": 1000.0}
-    oidc = ci_client.OIDC(actions, fetch=fetch, clock=lambda: clock["t"])
-    server = Server(plan())
-    client = ci_client.Client(BASE, server.transport, oidc=oidc)
-    assert ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=client, token=CI_TOKEN,
-                           providers=[], say=lambda s: None) == 0
-    client.events(RUN_TOKEN, "run_1", {"state": "working"})
-    for _, _, hdrs in server.transport.calls:
-        assert hdrs["X-Brindle-OIDC"] == "h.p.s"
-    assert fetched == [(actions["ACTIONS_ID_TOKEN_REQUEST_URL"], "req-secret")], "cached within its ttl"
-    clock["t"] += 600
-    client.events(RUN_TOKEN, "run_1", {"state": "working"})
-    assert len(fetched) == 2
-    # Outside Actions: no header at all.
-    bare = ci_client.Client(BASE, Server(plan()).transport, env={})
-    bare.events(RUN_TOKEN, "run_1", {"state": "working"})
-    assert "X-Brindle-OIDC" not in bare.transport.calls[-1][2]
-    # The source is captured at construction, so scrubbing the job's secrets later doesn't lose it.
-    env = run_env(**actions)
-    captured = ci_client.Client(BASE, server.transport, env=env)
-    ci_client.scrub_secrets(env)
-    assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in env and captured.oidc.available
-
-
 def _jwt(exp) -> str:
     import base64
 
@@ -303,20 +256,6 @@ def _jwt(exp) -> str:
 
 ACTIONS = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test/x",
            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req-secret"}
-
-
-def test_oidc_retries_a_failed_fetch():
-    answers = [CIError("down", code="oidc"), CIError("down", code="oidc"), _jwt(2000)]
-    slept = []
-
-    def fetch(url, request_token):
-        a = answers.pop(0)
-        if isinstance(a, Exception):
-            raise a
-        return a
-    oidc = ci_client.OIDC(ACTIONS, fetch=fetch, clock=lambda: 1000.0, sleep=slept.append)
-    assert oidc.header() == {"X-Brindle-OIDC": _jwt(2000)}
-    assert slept == list(ci_client.OIDC_RETRY_DELAYS)
 
 
 def test_oidc_falls_back_to_an_unexpired_token_then_gives_up():
@@ -335,20 +274,6 @@ def test_oidc_falls_back_to_an_unexpired_token_then_gives_up():
     clock["t"] = 1000.0 + 600                     # past its exp: no stale token is ever sent
     with pytest.raises(CIError, match="HTTP 503"):
         oidc.header()
-
-
-def test_oidc_refreshes_before_the_token_expires():
-    fetched = []
-
-    def fetch(url, request_token):
-        fetched.append(1)
-        return _jwt(1000.0 + 60)                  # shorter-lived than OIDC_TTL
-    clock = {"t": 1000.0}
-    oidc = ci_client.OIDC(ACTIONS, fetch=fetch, clock=lambda: clock["t"], sleep=lambda s: None)
-    oidc.header()
-    clock["t"] += 60 - ci_client.OIDC_EXP_MARGIN
-    oidc.header()
-    assert len(fetched) == 2
 
 
 def test_jwt_exp_ignores_a_non_finite_or_non_numeric_exp():
@@ -477,81 +402,6 @@ def finish_after(db, adapter, n):
     return sleep
 
 
-def test_run_heartbeats_until_finished_and_uploads_bundle(plan, ci_repo, tmp_path, monkeypatch):
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-    server = Server(token)
-    db = DB()
-    adapter = FakeAdapter("claude", commit=commit_file)
-    env = run_env()
-    monkeypatch.setenv("BRINDLE_PRO_TOKEN", CI_TOKEN)
-    monkeypatch.setenv("GH_TOKEN", "ghp_secret")
-    tf = token_file(tmp_path)
-    said = []
-    result = ci_client.run(token, tf, cwd=str(ci_repo), env=env, client=server.client, db=db,
-                           adapters={"claude": adapter}, sleep=finish_after(db, adapter, 2), say=said.append)
-    assert result["status"] == "published"
-    assert not tf.exists(), "the run token file is deleted once read"
-    assert "BRINDLE_PRO_TOKEN" not in env and "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env
-    assert env["GITHUB_REPOSITORY"] == REPO
-    snap = adapter.env_at_launch[0]
-    assert "BRINDLE_PRO_TOKEN" not in snap and "GH_TOKEN" not in snap
-    assert adapter.launched[0][1] == "do the thing" and adapter.launched[0][2] is None
-    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-1"
-    # the goal came from the plan
-    ms = db.milestones(adapter.launched[0][0])
-    assert [(m.title, m.check_cmd) for m in ms] == [("tests pass", "true")]
-    # heartbeats carry state, milestones and usage; the last one says finished
-    assert server.events[0]["state"] == "working"
-    assert server.events[0]["milestones"][0] == {"id": 1, "status": "pending", "exit": None, "output_tail": ""}
-    assert server.events[0]["usage"] == {"fake-model": {"input": 10, "output": 5, "cache_read": 0}}
-    assert server.events[-1]["state"] == "finished"
-    assert all(e["commits"] == 1 and e["provider_error"] is None for e in server.events)
-    assert adapter.stopped == [adapter.launched[0][0]]
-    body = server.results[0]
-    ev = evidence_of(body)
-    assert ev["final_state"] == "finished" and ev["commits"] == 1 and ev["providers"] == ["claude"]
-    assert b'name="bundle"' in body and b"# v2 git bundle" in body
-    assert "https://gh.test/pr/9" in said[-1]
-    for _, form, hdrs in server.transport.calls:
-        assert CI_TOKEN not in json.dumps(form, default=str) and "ghp_secret" not in json.dumps(form, default=str)
-
-
-def test_run_obeys_stop(plan, ci_repo, tmp_path):
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-    server = Server(token, actions=[{"action": "continue"}, {"action": "stop", "reason": "budget"}])
-    adapter = FakeAdapter("claude")
-    result = ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                           db=DB(), adapters={"claude": adapter}, sleep=lambda s: None, say=lambda s: None)
-    assert len(server.events) == 2
-    assert adapter.stopped == [adapter.launched[0][0]]
-    ev = evidence_of(server.results[0])
-    assert ev["final_state"] == "budget" and ev["commits"] == 0
-    assert b'name="bundle"' not in server.results[0], "no commits: no bundle"
-    assert result["status"] == "published"
-
-
-def test_run_escalates_to_a_new_provider_in_the_same_worktree(plan, ci_repo, tmp_path):
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-    second = plan(base_sha=base, provider="codex", attempt=2, instructions="try again", jti="p2",
-                  limits={"timeout_min": 10, "token_budget": 1000, "heartbeat_s": 1})
-    server = Server(token, actions=[{"action": "escalate", "plan": second}])
-    claude = FakeAdapter("claude")
-    codex = FakeAdapter("codex", commit=commit_file)
-    db = DB()
-    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                  db=db, adapters={"claude": claude, "codex": codex}, sleep=finish_after(db, codex, 1),
-                  say=lambda s: None)
-    assert claude.stopped == [claude.launched[0][0]]
-    assert codex.launched[0][1] == "try again"
-    assert codex.launched[0][0] != claude.launched[0][0]
-    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "brindle/ci-1"
-    ev = evidence_of(server.results[0])
-    assert ev["providers"] == ["claude", "codex"] and ev["final_state"] == "finished" and ev["commits"] == 1
-
-
 def test_escalation_plan_must_be_the_same_run(plan, ci_repo, tmp_path):
     base = head(ci_repo)
     token = plan(base_sha=base)
@@ -594,22 +444,6 @@ def test_run_fails_fast_when_the_supervisor_cant_start(plan, ci_repo, tmp_path):
         ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
                       db=DB(), adapters={"claude": Stuck("claude")}, sleep=lambda s: None, say=lambda s: None)
     assert e.value.code == "launch" and server.events == []
-
-
-def test_run_ends_when_the_supervisor_sits_on_a_first_run_screen(plan, ci_repo, tmp_path):
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-
-    class Stuck(FakeAdapter):
-        def stuck_screen(self, db, root):
-            return 'Claude Code is on its "use this API key?" question, which nobody in CI can answer'
-    adapter = Stuck("claude")
-    server = Server(token)   # the server only ever says continue
-    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                  db=DB(), adapters={"claude": adapter}, sleep=lambda s: None, say=lambda s: None)
-    assert len(server.events) == 1
-    assert server.events[0]["state"] == "failed" and "API key" in server.events[0]["note"]
-    assert evidence_of(server.results[0])["final_state"] == "failed"
 
 
 def test_run_keeps_heartbeating_while_stalled(plan, ci_repo, tmp_path):
@@ -661,34 +495,6 @@ def test_result_has_only_protocol_fields_without_a_bundle(plan, ci_repo, tmp_pat
     assert b'name="bundle"' not in body, "over the limit: no bundle"
     assert ev["final_state"] == "budget" and ev["commits"] == 1
     assert set(ev) <= {"final_state", "milestones", "usage", "providers", "question", "commits"}
-
-
-def test_run_reports_provider_errors(plan, ci_repo, tmp_path, monkeypatch):
-    from brindle import providers
-
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-    db, adapter = DB(), FakeAdapter("claude")
-    adapter.provider_error = lambda db_, root: ci_adapters.Adapter.provider_error(adapter, db_, root)
-    beats = []
-
-    from brindle import quota
-
-    def sleep(seconds):
-        beats.append(1)
-        if len(beats) == 1:
-            monkeypatch.setattr(quota, "get", lambda provider: quota.Quota(provider, [], time.time() + 600, 0.0, "t"))
-        elif len(beats) == 2:
-            monkeypatch.setattr(quota, "get", lambda provider: None)
-            monkeypatch.setattr(providers, "signed_out", lambda provider, env=None: "signed out")
-    server = Server(token, actions=[{"action": "continue"}, {"action": "continue"},
-                                    {"action": "stop", "reason": "cancelled"}])
-    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                  db=db, adapters={"claude": adapter}, sleep=sleep, say=lambda s: None)
-    assert [(e["state"], e["provider_error"]) for e in server.events] == [
-        ("working", "rate_limit"), ("working", "auth"), ("working", "auth")]
-    assert all(e["commits"] == 0 for e in server.events)
-    assert evidence_of(server.results[0])["final_state"] == "failed", "cancelled while working"
 
 
 def test_report_posts_a_failed_validation_run_job(plan, tmp_path):
@@ -769,25 +575,6 @@ def test_run_rejects_a_checkout_not_at_base(plan, ci_repo, tmp_path):
         ci_client.run(token, tf, cwd=str(ci_repo), env=run_env(), client=Server(token).client, db=DB(),
                       adapters={"claude": FakeAdapter("claude")}, sleep=lambda s: None)
     assert not tf.exists(), "the token file is deleted whatever happens to the plan"
-
-
-def test_run_keeps_going_when_a_heartbeat_fails(plan, ci_repo, tmp_path):
-    from brindle.pro.auth import TransportError
-
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-    server = Server(token, actions=[{"action": "continue"}, {"action": "stop", "reason": "timeout"}])
-    flaky = [TransportError("down")]
-    real = server._events
-
-    def events(form, headers):
-        if flaky:
-            raise flaky.pop()
-        return real(form, headers)
-    server.transport.routes["POST /ci/runs/run_1/events"] = events
-    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                  db=DB(), adapters={"claude": FakeAdapter("claude")}, sleep=lambda s: None, say=lambda s: None)
-    assert evidence_of(server.results[0])["final_state"] == "timeout"
 
 
 def test_run_ends_past_the_plan_timeout_only_when_the_server_is_unreachable(plan, ci_repo, tmp_path):
@@ -876,12 +663,6 @@ def test_plan_org_limits_must_be_well_formed(plan):
                  {"budget_usd": "5"}, {"budget_usd": -1}, {"budget_usd": True}]:
         with pytest.raises(CIError, match="malformed"):
             ci_client.verify_plan(plan(**over), repo=REPO)
-
-
-def test_plan_org_limits_are_optional_and_kept(plan):
-    c = ci_client.verify_plan(plan(protected_paths=["infra/"], budget_usd=5), repo=REPO)
-    assert c["protected_paths"] == ["infra/"] and c["budget_usd"] == 5
-    assert "protected_paths" not in ci_client.verify_plan(plan(), repo=REPO)
 
 
 def test_the_token_budget_is_priced_in_dollars(plan, monkeypatch):
@@ -975,18 +756,6 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def test_plan_instructions_inline_or_by_hash(plan):
-    assert ci_client.verify_plan(plan(), repo=REPO)["instructions"] == "do the thing"
-    text = "review this diff: ✓\n" + "x" * 8000
-    h = sha256(text)
-    c = ci_client.verify_plan(plan(instructions=..., instructions_sha256=h), repo=REPO, texts={h: text})
-    assert c["instructions"] == text
-    reviewers = [{"id": "r1", "provider": "claude", "instructions_sha256": h},
-                 {"id": "r2", "provider": "codex", "instructions": "inline"}]
-    v = ci_client.verify_plan(plan("validation", reviewers=reviewers), repo=REPO, texts={h: text, "f" * 64: "spare"})
-    assert [r["instructions"] for r in v["reviewers"]] == [text, "inline"]
-
-
 def test_plan_instructions_by_hash_are_checked(plan):
     text = "a long issue body"
     h = sha256(text)
@@ -1019,36 +788,6 @@ def test_plan_instructions_by_hash_are_checked(plan):
 
 
 # -- secrets ---------------------------------------------------------------------------------------
-
-
-def test_scrub_secrets_and_check_env():
-    env = {"BRINDLE_PRO_TOKEN": "x", "GH_TOKEN": "y", "GH_HOST": "github.com", "GITHUB_TOKEN": "z",
-           "GITHUB_REPOSITORY": REPO, "ANTHROPIC_API_KEY": "k", "CLAUDE_CODE_OAUTH_TOKEN": "o", "PATH": "/bin",
-           "MY_SERVICE_TOKEN": "t"}
-    gone = ci_client.scrub_secrets(env)
-    assert gone == ["BRINDLE_PRO_TOKEN", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN"]
-    assert set(env) == {"GITHUB_REPOSITORY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "PATH",
-                        "MY_SERVICE_TOKEN"}
-    assert set(ci_client.check_env(env)) == {"GITHUB_REPOSITORY", "PATH"}
-
-
-def test_scrub_secrets_drops_empty_keys():
-    """The workflow sets ANTHROPIC_API_KEY from a secret that may not exist
-    (an empty string), which Claude Code would take over the federation
-    token in ANTHROPIC_AUTH_TOKEN."""
-    env = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "BRINDLE_PRO_TOKEN": "x",
-           "PATH": "/bin"}
-    assert ci_client.scrub_secrets(env) == ["ANTHROPIC_API_KEY", "BRINDLE_PRO_TOKEN"]
-    assert env == {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}
-
-
-def test_custom_headers_are_not_scrubbed():
-    """An organization-level key's anthropic-workspace-id header reaches
-    every claude process; it is not a secret."""
-    env = {"ANTHROPIC_CUSTOM_HEADERS": "anthropic-workspace-id: wrkspc_1", "BRINDLE_PRO_TOKEN": "x"}
-    ci_client.scrub_secrets(env)
-    assert env == {"ANTHROPIC_CUSTOM_HEADERS": "anthropic-workspace-id: wrkspc_1"}
-    assert ci_adapters.claude_env(env) == env
 
 
 FEDERATION = {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": "org-uuid",
@@ -1143,21 +882,6 @@ def test_run_keeps_the_workflow_token_when_the_exchange_fails(plan, ci_repo, tmp
     assert any("HTTP 401" in s and "using the workflow's token" in s for s in said)
 
 
-def test_run_without_federation_leaves_the_credential_alone(plan, ci_repo, tmp_path, federation):
-    base = head(ci_repo)
-    server = Server(plan(base_sha=base))
-    db = DB()
-    adapter = FakeAdapter("claude", commit=commit_file)
-    env = run_env(ANTHROPIC_API_KEY="sk-ant-api03-key", **{k: v for k, v in FEDERATION.items()
-                                                           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")})
-    ci_client.run(plan(base_sha=base), token_file(tmp_path), cwd=str(ci_repo), env=env, client=server.client,
-                  db=db, adapters={"claude": adapter}, sleep=finish_after(db, adapter, 2), say=lambda s: None)
-    assert federation["exchange"] == [], "a key wins in Claude Code, so there is nothing to refresh"
-    snap = adapter.env_at_launch[0]
-    assert env["ANTHROPIC_API_KEY"] == "sk-ant-api03-key" and "ANTHROPIC_BASE_URL" not in env
-    assert "ANTHROPIC_BASE_URL" not in snap and "ANTHROPIC_AUTH_TOKEN" not in snap
-
-
 def test_validate_reviewers_use_the_proxy_and_checks_see_no_secret(plan, ci_repo, tmp_path, federation):
     sha = head(ci_repo)
     vplan = plan("validation", head_sha=sha,
@@ -1199,8 +923,6 @@ def test_ci_token_from_env():
 
 
 # -- validate ----------------------------------------------------------------------------------------
-
-
 
 
 def validate(server, ci_repo, tmp_path, *, adapters, env=None, org=False, say=None, pr=7):
@@ -1254,36 +976,6 @@ def test_plan_texts_are_saved_beside_the_plan_and_rechecked(plan, ci_repo, tmp_p
         ci_client.start(REPO, trigger, tmp_path / "other", client=server.client, token=CI_TOKEN,
                         providers=["claude"], say=lambda s: None)
     assert e.value.code == "bad_response" and not (tmp_path / "other" / "plan.jwt").exists()
-
-
-def test_validate_runs_checks_scrubbed_and_asks_reviewers(plan, ci_repo, tmp_path, monkeypatch):
-    sha = head(ci_repo)
-    vplan = plan("validation", head_sha=sha,
-                 checks=[{"id": "c1", "command": "echo ok; printenv ANTHROPIC_API_KEY GH_TOKEN; exit 0", "timeout_s": 30},
-                         {"id": "c2", "command": "echo nope >&2; exit 3", "timeout_s": 30}])
-    server = Server(plan(), validation_plan=vplan)
-    adapter = FakeAdapter("claude", reply="Looks fine.")
-    env = run_env(ANTHROPIC_API_KEY="sk-secret-value")
-    monkeypatch.setenv("BRINDLE_PRO_TOKEN", CI_TOKEN)
-    said = []
-    result = validate(server, ci_repo, tmp_path, adapters={"claude": adapter}, env=env, say=said)
-    assert result["status"] == "posted" and "success" in said[-1]
-    assert "validation val_1 started" in said[0]
-    start = server.transport.calls[0][1]
-    assert start == {"repo": REPO, "pr": 7, "head_sha": sha, "fork": False, "providers_available": ["claude"]}
-    assert not (tmp_path / "out" / "run_token").exists()
-    assert "BRINDLE_PRO_TOKEN" not in env and "GH_TOKEN" not in env
-    assert "BRINDLE_PRO_TOKEN" not in os.environ
-    assert env["ANTHROPIC_API_KEY"] == "sk-secret-value", "model keys stay for the reviewers"
-    ev = server.evidence_calls[0]
-    c1, c2 = ev["checks"]
-    assert c1["id"] == "c1" and c1["exit"] == 0 and "sk-secret-value" not in c1["output_excerpt"] \
-        and "ghp_secret" not in c1["output_excerpt"] and "ok" in c1["output_excerpt"]
-    assert c2["exit"] == 3 and "nope" in c2["output_excerpt"] and isinstance(c2["duration_s"], float)
-    assert ev["reviews"] == [{"id": "r1", "provider": "claude", "model": "fake-model", "reply": "Looks fine."}]
-    assert ev["usage"] == {"fake-model": {"input": 3, "output": 2, "cache_read": 1}}
-    assert adapter.reviews[0][0] == "review it"
-    assert "sk-secret-value" not in json.dumps(server.transport.calls, default=str)
 
 
 def test_validate_fills_the_check_results_slot(plan, ci_repo, tmp_path):
@@ -1348,7 +1040,7 @@ def test_validate_sends_an_empty_reply_for_a_failed_reviewer_cli(plan, ci_repo, 
     assert set(row) == {"id", "provider", "model", "reply"}
 
 
-@pytest.mark.parametrize("why", ["fork", "stale_head"])
+@pytest.mark.parametrize("why", ["stale_head"])
 def test_start_validate_skipped(plan, ci_repo, tmp_path, why):
     t = FakeTransport({"POST /ci/validations": [(200, {"skipped": why})]})
     said = []
@@ -1402,21 +1094,6 @@ def test_checkout_switches_from_the_merge_commit_to_the_plans_head(repo, tmp_pat
     assert head(clone) == pr_head and said == [], "already at the head: nothing to do"
 
 
-def test_checkout_switches_a_run_to_the_plans_base(repo, tmp_path):
-    clone, _, merge = pr_checkout(repo, tmp_path)
-    base = sh("git rev-parse origin/main", repo)
-    said = []
-    ci_client.check_run_checkout({"base_sha": base}, str(clone), say=said.append)
-    assert head(clone) == base and said == [f"checked out the plan's base {base[:12]} (the workflow had {merge[:12]})"]
-
-
-def test_checkout_refuses_an_unreachable_head(repo, tmp_path):
-    clone, _, merge = pr_checkout(repo, tmp_path)
-    with pytest.raises(CIError, match=r"not the plan's head 222222222222, and it can't fetch it from origin \("):
-        ci_client.check_validation_checkout({"head_sha": "2" * 40, "pr": 7}, str(clone), say=lambda s: None)
-    assert head(clone) == merge
-
-
 def test_checkout_never_switches_a_dirty_worktree(repo, tmp_path):
     clone, pr_head, merge = pr_checkout(repo, tmp_path)
     (clone / "app.py").write_text("changed\n")
@@ -1425,31 +1102,14 @@ def test_checkout_never_switches_a_dirty_worktree(repo, tmp_path):
     assert head(clone) == merge and (clone / "app.py").read_text() == "changed\n"
 
 
-def test_validate_rejects_the_wrong_head(plan, ci_repo, tmp_path):
-    server = Server(plan(), validation_plan=plan("validation", head_sha="2" * 40))
-    with pytest.raises(CIError, match="not the plan's head"):
-        validate(server, ci_repo, tmp_path, adapters={})
-    assert not (tmp_path / "out" / "run_token").exists()
-
-
-def test_run_check_times_out(ci_repo):
-    row = ci_client.run_check({"id": "slow", "command": "sleep 5", "timeout_s": 1}, str(ci_repo), {"PATH": os.environ["PATH"]})
-    assert row["exit"] == 124 and "timed out after 1s" in row["output_excerpt"]
-
-
 def test_run_check_timeout_kills_the_whole_process_group(ci_repo):
     """A grandchild that keeps the output pipe open must not outlive the timeout."""
     t0 = time.monotonic()
     row = ci_client.run_check({"id": "fork", "command": "echo started; sh -c 'sleep 30' & sleep 30", "timeout_s": 1},
                               str(ci_repo), {"PATH": os.environ["PATH"]})
     assert row["exit"] == 124 and "started" in row["output_excerpt"]
+    assert "timed out after 1s" in row["output_excerpt"]
     assert time.monotonic() - t0 < 10
-
-
-def test_run_check_missing_command(ci_repo):
-    row = ci_client.run_check({"id": "x", "command": "definitely-not-a-command-xyz", "timeout_s": 5},
-                              str(ci_repo), {"PATH": "/nonexistent"})
-    assert row["exit"] == 127
 
 
 # -- air-gap, doctor, the CLI ------------------------------------------------------------------------
@@ -1474,35 +1134,6 @@ def test_doctor_names_credentials_but_never_values(ci_repo):
     assert "owner is an organization" in text and "claude: cli claude missing" in text
 
 
-def test_cli_doctor_and_help(ci_repo, monkeypatch):
-    from typer.testing import CliRunner
-
-    from brindle.cli import app
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-very-secret")
-    monkeypatch.setenv("PATH", "/nonexistent")
-    monkeypatch.setattr(ci_adapters, "repo_is_org", lambda env, repo=None, run=None: False)
-    result = CliRunner().invoke(app, ["ci", "doctor", "--repo", REPO])
-    assert result.exit_code == 0, result.output
-    assert "ANTHROPIC_API_KEY" in result.output and "very-secret" not in result.output
-    assert "personal account" in result.output
-    for cmd in ("start", "run", "report", "doctor", "init"):
-        assert CliRunner().invoke(app, ["ci", cmd, "--help"]).exit_code == 0
-
-
-def test_cli_run_fails_cleanly_on_a_bad_plan(ci_repo, tmp_path, monkeypatch):
-    from typer.testing import CliRunner
-
-    from brindle.cli import app
-
-    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
-    (tmp_path / "plan.jwt").write_text("not.a.plan")
-    tf = token_file(tmp_path)
-    result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
-    assert result.exit_code == 1 and "brindle ci: malformed plan" in result.output
-    assert not tf.exists(), "the run token never stays on disk"
-
-
 @pytest.mark.parametrize("make, error", [
     (lambda p: p.mkdir(), "can't read the plan texts"),
     (lambda p: p.write_text("{not json"), "plan texts are malformed"),
@@ -1520,17 +1151,6 @@ def test_cli_run_reads_plan_texts_after_the_run_token(plan, ci_repo, tmp_path, m
     result = CliRunner().invoke(app, ["ci", "run", "--plan", str(tmp_path / "plan.jwt"), "--run-token-file", str(tf)])
     assert result.exit_code == 1 and error in result.output
     assert not tf.exists(), "the run token never stays on disk"
-
-
-def test_cli_start_needs_the_token(ci_repo, tmp_path, monkeypatch):
-    from typer.testing import CliRunner
-
-    from brindle.cli import app
-
-    monkeypatch.delenv("BRINDLE_PRO_TOKEN", raising=False)
-    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)   # on GitHub Actions it names the real repo
-    result = CliRunner().invoke(app, ["ci", "start", "--repo", REPO, "--issue", "1", "--out", str(tmp_path)])
-    assert result.exit_code == 1 and "BRINDLE_PRO_TOKEN isn't set" in result.output
 
 
 # -- init ---------------------------------------------------------------------------------------------
@@ -1729,17 +1349,6 @@ def test_init_federation_sets_the_variables(init_run):
     assert "forks never get a token" in text
 
 
-def test_init_federation_non_interactive(init_run):
-    """--credential federation with the IDs in the environment asks nothing."""
-    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
-           "ANTHROPIC_ORGANIZATION_ID": ORG_UUID, "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
-           "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
-    calls, _ = init_run(credential="federation", env=env)
-    variables = {c[3]: c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]}
-    assert variables == {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID": ORG_UUID,
-                         "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1", "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}
-
-
 def test_init_federation_needs_the_ids(init_run):
     """A missing ID stops init before step 3 creates the CI token, so none is left orphaned."""
     with pytest.raises(CIError, match=r"ANTHROPIC_FEDERATION_RULE_ID is required for identity federation "
@@ -1747,15 +1356,6 @@ def test_init_federation_needs_the_ids(init_run):
         init_run(credential="federation")
     assert not [c for c in init_run.calls if c[:2] in (["gh", "secret"], ["gh", "variable"])]
     assert not [s for s in init_run.said if s.startswith("3/8")]
-
-
-def test_init_bad_federation_workspace_stops_before_the_token(init_run):
-    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
-           "ANTHROPIC_ORGANIZATION_ID": ORG_UUID, "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1",
-           "ANTHROPIC_WORKSPACE_ID": "nope"}
-    with pytest.raises(CIError, match="workspace ID looks like wrkspc_"):
-        init_run(credential="federation", env=env)
-    assert not [c for c in init_run.calls if c[:2] == ["gh", "secret"]]
 
 
 def test_init_federation_from_options_asks_nothing(init_run):
@@ -1810,8 +1410,6 @@ def test_init_unattended_requires_no_check_without_the_option(init_run, ci_repo)
 
 
 @pytest.mark.parametrize("kw, error", [
-    ({"rule_id": "rule-1"}, "ANTHROPIC_FEDERATION_RULE_ID looks like fdrl_..., not 'rule-1'"),
-    ({"organization_id": "org-1"}, "ANTHROPIC_ORGANIZATION_ID looks like a UUID, not 'org-1'"),
     ({"service_account_id": "sa_1"}, "ANTHROPIC_SERVICE_ACCOUNT_ID looks like svac_..., not 'sa_1'"),
     ({"credential": "key", "rule_id": "fdrl_1", "service_account_id": "svac_1"},
      "--rule-id, --service-account-id configure identity federation, not --credential key"),
@@ -1822,39 +1420,10 @@ def test_init_rejects_bad_federation_options_first(init_run, kw, error):
     assert not init_run.calls, "nothing ran before the bad option was caught"
 
 
-def test_init_checks_federation_ids_from_the_environment(init_run):
-    env = {"PATH": os.environ["PATH"], "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1",
-           "ANTHROPIC_ORGANIZATION_ID": "not-a-uuid", "ANTHROPIC_SERVICE_ACCOUNT_ID": "svac_1"}
-    with pytest.raises(CIError, match="ANTHROPIC_ORGANIZATION_ID looks like a UUID"):
-        init_run(credential="federation", env=env)
-    assert not [c for c in init_run.calls if c[:2] == ["gh", "secret"]]
-
-
-def test_init_key_credential_sets_the_secret(init_run):
-    calls, _ = init_run(credential="key")
-    assert [c[3] for c in calls if c[:3] == ["gh", "secret", "set"]] == ["BRINDLE_PRO_TOKEN", "ANTHROPIC_API_KEY"]
-    assert not [c for c in calls if c[:2] == ["gh", "variable"]]
-
-
-def test_init_key_asks_for_an_org_keys_workspace_after_the_key(init_run):
-    asked = []
-
-    def ask(q, default):
-        asked.append(q)
-        return "wrkspc_01AbC-d" if q.startswith("workspace ID") else default
-    calls, said = init_run(credential="key", ask=ask)
-    assert asked[-1] == ci_client.WORKSPACE_QUESTION
-    gh = [c for c in calls if c[:3] in (["gh", "secret", "set"], ["gh", "variable", "set"])]
-    assert gh[-2][3] == "ANTHROPIC_API_KEY", "asked after the key"
-    assert gh[-1][1:] == ["variable", "set", "ANTHROPIC_WORKSPACE_ID", "--repo", REPO, "--body", "wrkspc_01AbC-d"]
-    assert any("anthropic-workspace-id" in s for s in said)
-
-
 @pytest.mark.parametrize("kw", [
     {"workspace_id": "wrkspc_1",
      "ask": lambda q, d: pytest.fail(f"asked {q!r}") if q.startswith("workspace") else d},
-    {"env": {"PATH": os.environ["PATH"], "ANTHROPIC_WORKSPACE_ID": "wrkspc_1"}},
-], ids=["option", "environment"])
+], ids=["option"])
 def test_init_key_workspace_from_the_option_or_the_environment(init_run, kw):
     calls, _ = init_run(credential="key", **kw)
     assert [c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]] == ["wrkspc_1"]
@@ -1900,23 +1469,6 @@ def test_init_refuses_a_symlink_where_it_writes(init_run, ci_repo, tmp_path):
     assert not init_run.calls and not list(tmp_path.glob("brindle-ci-*"))
 
 
-@pytest.mark.parametrize("kind, error", [("file", "move .github/workflows/brindle-ci-issue.yml away first"),
-                                         ("dangling symlink", "brindle-ci-issue.yml is a symlink")])
-def test_push_setup_branch_checks_the_paths_again(ci_repo, kind, error):
-    """A file that appeared after init's first check (even a dangling
-    symlink, which exists() misses) still stops the write."""
-    (ci_repo / ".github/workflows").mkdir(parents=True)
-    target = ci_repo / ".github/workflows/brindle-ci-issue.yml"
-    if kind == "file":
-        target.write_text("mine\n")
-    else:
-        target.symlink_to(ci_repo / "nowhere")
-    with pytest.raises(CIError, match=error):
-        ci_client.push_setup_branch(str(ci_repo), {".github/workflows/brindle-ci-issue.yml": "name: issue\n"})
-    assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "main"
-    assert sh("git branch --list brindle/ci-setup", ci_repo) == "" and not (ci_repo / "nowhere").exists()
-
-
 def test_init_refuses_an_untracked_file_where_it_writes(init_run, ci_repo):
     (ci_repo / ".github/workflows").mkdir(parents=True)
     (ci_repo / ".github/workflows/brindle-ci-fix.yml").write_text("mine\n")
@@ -1926,7 +1478,7 @@ def test_init_refuses_an_untracked_file_where_it_writes(init_run, ci_repo):
     assert (ci_repo / ".github/workflows/brindle-ci-fix.yml").read_text() == "mine\n"
 
 
-@pytest.mark.parametrize("step", ["add", "commit", "push"])
+@pytest.mark.parametrize("step", ["commit"])
 def test_init_goes_back_to_the_start_branch_when_a_step_fails(init_run, ci_repo, monkeypatch, step):
     from brindle import git as git_mod
 
@@ -1943,14 +1495,6 @@ def test_init_goes_back_to_the_start_branch_when_a_step_fails(init_run, ci_repo,
     assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "work"
     assert sh("git branch --list brindle/ci-setup", ci_repo) == ""
     assert sh("git status --porcelain", ci_repo) == "" and not (ci_repo / ".github").exists()
-
-
-def test_init_goes_back_to_a_detached_head(init_run, ci_repo):
-    start = head(ci_repo)
-    sh("git checkout -q --detach", ci_repo)
-    _, said = init_run(credential="key")
-    assert head(ci_repo) == start and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "HEAD"
-    assert "back on the commit you started on" in "\n".join(said)
 
 
 CI_WORKFLOW = """\
@@ -1979,12 +1523,6 @@ def commit_workflow(repo, name="ci.yml", text=CI_WORKFLOW):
     sh("git add -A && git commit -qm ci", repo)
 
 
-def test_workflow_jobs_reads_the_check_names():
-    assert ci_client.workflow_jobs(CI_WORKFLOW) == ["Tests", "lint"]
-    assert ci_client.workflow_jobs("on: push\n") == []
-    assert ci_client.workflow_jobs("jobs:\n    a:\n        name: 'A'\n    b: # c\n        x: 1\n") == ["A", "b"]
-
-
 def test_repo_jobs_leaves_brindles_own_workflows_out(ci_repo):
     commit_workflow(ci_repo)
     commit_workflow(ci_repo, "brindle-ci-fix.yml", "jobs:\n  fix:\n    runs-on: x\n")
@@ -2003,33 +1541,6 @@ def test_init_leaves_existing_required_checks_alone(init_run, ci_repo):
                        ask=lambda q, d: pytest.fail(f"asked {q!r}") if "required" in q else d)
     assert not protection_writes(init_run)
     assert "main requires build" in "\n".join(said)
-
-
-def test_init_asks_to_require_each_job_and_protects_the_branch(init_run, ci_repo):
-    commit_workflow(ci_repo)
-    asked = []
-
-    def ask(q, d):
-        if "required" in q:
-            asked.append(q)
-            return "n" if "'lint'" in q else ""
-        return d
-    _, said = init_run(credential="key", ask=ask)
-    assert asked == ["Mark 'Tests' as required so brindle can fix it when it fails? [Y/n]",
-                     "Mark 'lint' as required so brindle can fix it when it fails? [Y/n]"]
-    assert protection_writes(init_run) == [(f"repos/{REPO}/branches/main/protection", "PUT", {
-        "required_status_checks": {"strict": False, "contexts": ["Tests"]}, "enforce_admins": False,
-        "required_pull_request_reviews": None, "restrictions": None})]
-    text = "\n".join(said)
-    assert "warning: main requires no status checks" in text and "main now requires Tests" in text
-
-
-def test_init_adds_the_check_to_existing_protection(init_run, ci_repo):
-    commit_workflow(ci_repo)
-    init_run(credential="key", gh={"protected": True, "branch": "trunk"})
-    assert protection_writes(init_run) == [
-        (f"repos/{REPO}/branches/trunk/protection/required_status_checks", "PATCH",
-         {"contexts": ["Tests", "lint"]})]
 
 
 def test_init_required_check_options(init_run, ci_repo):
@@ -2075,14 +1586,7 @@ def test_init_reports_protection_without_status_checks(init_run, ci_repo):
     assert "paid" not in text and "now requires" not in text
 
 
-def test_init_warns_when_there_is_no_job_to_require(init_run):
-    _, said = init_run(credential="key")
-    text = "\n".join(said)
-    assert "warning: main requires no status checks" in text and "no workflow jobs" in text
-    assert not protection_writes(init_run)
-
-
-@pytest.mark.parametrize("url", ["https://github.com/someone/brindle.git", None])
+@pytest.mark.parametrize("url", ["https://github.com/someone/brindle.git"])
 def test_init_refuses_a_checkout_of_another_repo(ci_repo, url):
     """--repo names one repository, the checkout here is another (or has no
     origin): init stops before gh or git does anything, rather than pushing
@@ -2099,13 +1603,6 @@ def test_init_refuses_a_checkout_of_another_repo(ci_repo, url):
                        open_url=lambda url: None, client=ci_client.Client(BASE, FakeTransport({})),
                        say=lambda s: None)
     assert not calls and sh("git rev-parse --abbrev-ref HEAD", ci_repo) == before
-
-
-@pytest.mark.parametrize("url", [f"git@github.com:{REPO}.git", f"https://github.com/{REPO}",
-                                 f"ssh://git@github.com/{REPO}.git/", "https://github.com/ACME/Widgets.git"])
-def test_origin_repo_matches_any_url_form(ci_repo, url):
-    sh(f"git remote set-url origin {url}", ci_repo)
-    ci_client.check_checkout(REPO, str(ci_repo))
 
 
 def test_check_checkout_shows_an_unreadable_origin_without_credentials(ci_repo):

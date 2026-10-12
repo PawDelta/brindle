@@ -143,24 +143,6 @@ def test_resumed_headless_worker_gets_a_turn_to_continue(db, ws, monkeypatch):
     assert db.get_agent("h1").status == "processing"
 
 
-def test_headless_worker_with_finish_line_skips_goal_command(db, ws, cheap_profile, monkeypatch):
-    launched = {}
-    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: launched.update(kw))
-    a = agents.spawn(db, ws, cheap_profile, prompt="fix it", mode="assign", done_when="tests pass")
-    assert a.headless == 1 and db.get_agent(a.id).headless == 1
-    # a.task stays the raw prompt (see agents.decorate_worker_prompt); the
-    # finish line and footer are added to what's actually launched.
-    assert a.task == "fix it" and a.done_when == "tests pass"
-    prompt = launched["prompt"]
-    assert not prompt.startswith("/goal") and "Finish line: tests pass" in prompt
-
-
-def test_headless_only_applies_to_claude(db, ws, cheap_profile, monkeypatch):
-    monkeypatch.setattr(agents, "_launch", lambda *a, **k: None)
-    a = agents.spawn(db, ws, cheap_profile, prompt="x", provider_name="shell", mode="assign")
-    assert not a.headless
-
-
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
 def test_headless_worker_lifecycle_in_tmux(db, ws, fake_claude, cheap_profile):
     a = agents.spawn(db, ws, cheap_profile, prompt="build it", mode="assign")

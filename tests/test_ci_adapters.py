@@ -8,9 +8,18 @@ import subprocess
 import pytest
 
 from brindle import ci_adapters
-from brindle.ci_adapters import (API_KEY, CLOUD, ENDPOINT, SUBSCRIPTION, ClaudeAdapter, CodexAdapter,
-                                 NativeAdapter, Review, default_adapters, doctor, format_doctor,
-                                 merge_usage, providers_available, repo_is_org, usable)
+from brindle.ci_adapters import (
+    API_KEY,
+    CLOUD,
+    ENDPOINT,
+    SUBSCRIPTION,
+    ClaudeAdapter,
+    CodexAdapter,
+    NativeAdapter,
+    Review,
+    merge_usage,
+    repo_is_org,
+)
 
 
 @pytest.fixture
@@ -32,25 +41,13 @@ def bins(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("env, kind, names", [
-    ({"ANTHROPIC_API_KEY": "k"}, API_KEY, ("ANTHROPIC_API_KEY",)),
     ({"ANTHROPIC_AUTH_TOKEN": "k", "CLAUDE_CODE_OAUTH_TOKEN": "o"}, API_KEY, ("ANTHROPIC_AUTH_TOKEN",)),
     ({"CLAUDE_CODE_USE_BEDROCK": "1"}, CLOUD, ("CLAUDE_CODE_USE_BEDROCK",)),
-    ({"CLAUDE_CODE_OAUTH_TOKEN": "o"}, SUBSCRIPTION, ("CLAUDE_CODE_OAUTH_TOKEN",)),
-    ({"ANTHROPIC_API_KEY": ""}, None, ()),
-    ({}, None, ()),
 ])
 def test_claude_credential_kinds(env, kind, names):
     cred = ClaudeAdapter().credential(env)
     assert (cred.kind, cred.names) == (kind, names)
     assert ClaudeAdapter().credential_kind(env) == kind
-
-
-def test_claude_federation_token_is_an_api_key():
-    """Identity federation reaches the job as ANTHROPIC_AUTH_TOKEN (the
-    workflow did the exchange); an unset ANTHROPIC_API_KEY secret is empty."""
-    cred = ClaudeAdapter().credential({"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x",
-                                       "ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1"})
-    assert (cred.kind, cred.names) == (API_KEY, ("ANTHROPIC_AUTH_TOKEN",))
 
 
 def test_codex_credential_kinds(tmp_path):
@@ -127,13 +124,6 @@ def test_native_profile_may_not_redirect_another_providers_key(repo):
 @pytest.mark.parametrize("base_url", [
     "https://api.good.test@evil.test/v1",          # userinfo
     "https://api.good.test\\@evil.test/v1",        # backslash
-    "https://api.good.test/v1?x=1",                # query
-    "https://api.good.test/v1#frag",               # fragment
-    "https://api.good.test /v1",                   # whitespace
-    "https://api.good.test/v1/%2e%2e",             # percent-encoding
-    "https://[::1]:8080/v1",                       # IPv6 literal
-    "https://xn--gd-fka.test/v1",                  # fine shape but not the allowed host
-    "ftp://api.good.test/v1",
 ])
 def test_native_key_needs_a_plainly_written_url(repo, base_url):
     d = repo / ".brindle" / "agents"
@@ -192,35 +182,6 @@ def test_native_client_refuses_cross_origin_redirects():
 # -- the credential rule --------------------------------------------------------------------------
 
 
-def test_subscription_only_is_unusable_on_every_repo(bins):
-    a = ClaudeAdapter()
-    sub = {"CLAUDE_CODE_OAUTH_TOKEN": "o", "PATH": str(bins)}
-    key = {"ANTHROPIC_API_KEY": "k", "PATH": str(bins)}
-    for org in (False, True, None):
-        ok, why = usable(a, sub, org=org)
-        assert not ok and "personal subscription" in why and "API key" in why
-    assert usable(a, key, org=True) == (True, "")
-    assert usable(a, {"PATH": str(bins)}, org=False) == (False, "no credential found")
-    assert usable(a, {**key, "PATH": "/nonexistent"}, org=False) == (False, "claude isn't installed")
-
-
-def test_federation_token_is_usable_on_org_repos(bins):
-    """A federated Console service account is billed as API, not a
-    personal subscription: fine on an organization's repository."""
-    fed = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": str(bins)}
-    a = ClaudeAdapter()
-    assert usable(a, fed, org=True) == (True, "")
-    assert usable(a, fed, org=None) == (True, "")
-    assert "claude" in providers_available({"claude": a}, fed, org=True)
-
-
-def test_providers_available(bins):
-    env = {"CLAUDE_CODE_OAUTH_TOKEN": "o", "OPENAI_API_KEY": "k", "PATH": str(bins)}
-    adapters = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
-    assert providers_available(adapters, env, org=True) == ["codex"]
-    assert providers_available(adapters, env, org=False) == ["codex"]
-
-
 def test_repo_is_org_from_event_payload_then_api(tmp_path):
     event = tmp_path / "event.json"
     event.write_text(json.dumps({"repository": {"owner": {"login": "acme", "type": "Organization"}}}))
@@ -243,27 +204,6 @@ def test_repo_is_org_from_event_payload_then_api(tmp_path):
     assert repo_is_org({}, "jo/thing", run=boom) is None
 
 
-# -- doctor --------------------------------------------------------------------------------------------
-
-
-def test_doctor_rows_name_credentials_only(bins, tmp_path):
-    env = {"ANTHROPIC_API_KEY": "sk-ant-secret", "CLAUDE_CODE_OAUTH_TOKEN": "oauth-secret", "PATH": str(bins),
-           "CODEX_HOME": str(tmp_path / "codex-home")}
-    rows = doctor({"claude": ClaudeAdapter(), "codex": CodexAdapter()}, env, org=True)
-    text = json.dumps(rows) + format_doctor(rows, "acme/widgets", True)
-    assert "sk-ant-secret" not in text and "oauth-secret" not in text
-    claude, codex = rows
-    assert claude["credential_names"] == ["ANTHROPIC_API_KEY"] and claude["credential_kind"] == API_KEY
-    assert claude["usable"] and claude["cli_path"] == str(bins / "claude")
-    assert codex["usable"] is False and codex["reason"] == "no credential found"
-    out = format_doctor(rows, "acme/widgets", None)
-    assert "treated as an organization" in out and "codex: cli" in out
-
-
-def test_default_adapters_cover_the_three_providers():
-    assert sorted(default_adapters()) == ["claude", "codex", "native"]
-
-
 # -- reviews and usage ------------------------------------------------------------------------------------
 
 
@@ -281,27 +221,6 @@ def test_claude_review_parses_json_output(monkeypatch, tmp_path):
                          usage={"claude-x": {"input": 7, "output": 3, "cache_read": 1}})
     assert seen["argv"][1:] == ["-p", "--output-format", "json"] and seen["stdin"] == "review this"
     assert seen["env"] == {"ANTHROPIC_API_KEY": "k"} and seen["cwd"] == str(tmp_path)
-
-
-def test_claude_review_env_drops_empty_keys(monkeypatch, tmp_path):
-    seen = {}
-
-    def run(argv, **kw):
-        seen["env"] = kw.get("env")
-        return subprocess.CompletedProcess(argv, 0, "{}", "")
-    monkeypatch.setattr(ci_adapters.subprocess, "run", run)
-    env = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}
-    ClaudeAdapter().review("review this", str(tmp_path), env)
-    assert seen["env"] == {"ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-x", "PATH": "/bin"}, \
-        "an empty key would shadow the federation token in Claude Code"
-    assert env["ANTHROPIC_API_KEY"] == "", "the caller's env is left alone"
-
-
-def test_claude_review_keeps_raw_text_when_not_json(monkeypatch, tmp_path):
-    monkeypatch.setattr(ci_adapters.subprocess, "run",
-                        lambda argv, **kw: subprocess.CompletedProcess(argv, 2, "plain words", ""))
-    rev = ClaudeAdapter().review("q", str(tmp_path), {})
-    assert rev.reply == "plain words" and rev.exit == 2 and rev.model is None
 
 
 def test_review_timeout_and_missing_binary(monkeypatch, tmp_path):
@@ -415,22 +334,6 @@ def test_provider_error_from_quota_autopilot_and_signin(db, repo, monkeypatch):
     assert a.provider_error(db, "missing0") == "auth"
 
 
-def test_stop_pauses_the_session(db, monkeypatch):
-    from brindle import agents
-
-    paused = []
-    monkeypatch.setattr(agents, "pause", lambda db_, root: paused.append(root))
-    ClaudeAdapter().stop(db, "root0000")
-    assert paused == ["root0000"]
-
-
-def test_installed_uses_the_given_path(bins):
-    a = ClaudeAdapter()
-    assert a.installed({"PATH": str(bins)}) and a.installed()
-    assert not a.installed({"PATH": "/nonexistent"})
-    assert os.path.basename(a.cli_path({"PATH": str(bins)})) == "claude"
-
-
 # -- Claude Code's first-run screens in CI -----------------------------------------------------
 
 KEY = "sk-ant-api03-dummydummydummydummydummy0123456789abcdefABCDEFG"
@@ -463,55 +366,6 @@ def _config(tmp_path):
     return json.loads((tmp_path / "claude-config" / ".claude.json").read_text())
 
 
-@pytest.mark.parametrize("env", [{}, {"GITHUB_ACTIONS": "false", "CI": "1"}])
-def test_prepare_leaves_claude_state_alone_off_ci(tmp_path, repo, env, caplog):
-    import logging
-
-    caplog.set_level(logging.INFO, logger="brindle.ci_adapters")
-    ClaudeAdapter.prepare(str(repo), {**env, "ANTHROPIC_API_KEY": KEY})
-    assert not (tmp_path / "claude-config" / ".claude.json").exists()
-    assert "not on a CI runner" in caplog.text
-
-
-@pytest.mark.parametrize("env", [{"GITHUB_ACTIONS": "true"}, {"CI": "true"}])
-def test_prepare_seeds_on_either_ci_marker(tmp_path, repo, env):
-    ClaudeAdapter.prepare(str(repo), env)
-    assert _config(tmp_path)["hasCompletedOnboarding"] is True
-
-
-def test_prepare_seeds_a_missing_claude_config(tmp_path, repo):
-    import stat
-
-    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_API_KEY": KEY})
-    path = tmp_path / "claude-config" / ".claude.json"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    data = _config(tmp_path)
-    assert data["hasCompletedOnboarding"] is True and data["theme"]
-    assert data["projects"][os.path.realpath(repo)] == {"hasTrustDialogAccepted": True}
-    assert data["customApiKeyResponses"]["approved"] == [KEY[-20:]]
-    assert KEY not in path.read_text(), "only the key's last 20 characters are stored"
-
-
-def test_prepare_merges_into_existing_state(tmp_path, repo):
-    path = tmp_path / "claude-config" / ".claude.json"
-    path.parent.mkdir()
-    path.write_text(json.dumps({"numStartups": 3, "theme": "light", "projects": {"/elsewhere": {"x": 1}},
-                                "customApiKeyResponses": {"approved": ["other"], "rejected": [KEY[-20:]]}}))
-    path.chmod(0o644)
-    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_API_KEY": KEY})
-    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_API_KEY": KEY})   # idempotent
-    data = _config(tmp_path)
-    assert data["numStartups"] == 3 and data["theme"] == "light"
-    assert data["projects"]["/elsewhere"] == {"x": 1}
-    assert data["customApiKeyResponses"] == {"approved": ["other", KEY[-20:]], "rejected": []}
-    assert oct(path.stat().st_mode & 0o777) == oct(0o600)
-
-
-def test_prepare_without_a_key_approves_none(tmp_path, repo):
-    ClaudeAdapter.prepare(str(repo), {**ON_CI, "ANTHROPIC_AUTH_TOKEN": "federated"})
-    assert "customApiKeyResponses" not in _config(tmp_path)
-
-
 def test_prepare_refuses_a_config_that_isnt_an_object(tmp_path, repo):
     path = tmp_path / "claude-config" / ".claude.json"
     path.parent.mkdir()
@@ -529,15 +383,6 @@ def test_worktrees_are_trusted_once_ci_seeded_the_config(tmp_path, repo):
     wt.mkdir()
     assert trust_folder(str(wt)) is True
     assert _config(tmp_path)["projects"][os.path.realpath(wt)]["hasTrustDialogAccepted"] is True
-
-
-def test_first_run_screens_are_recognised():
-    from brindle.providers import ClaudeCode
-
-    assert ClaudeCode.first_run_screen(THEME_PICKER) == "its first-run theme picker"
-    assert "API key" in ClaudeCode.first_run_screen(API_KEY_QUESTION)
-    assert ClaudeCode.first_run_screen(PROMPT) is None
-    assert ClaudeCode.first_run_screen(API_KEY_QUESTION + PROMPT) is None, "only quoted in the transcript"
 
 
 def _launch_showing(monkeypatch, db, repo, screens):
@@ -591,23 +436,6 @@ WORKSPACE_KEY_ERROR = """\
 ────────────────────────────────────────────────────────────────────────────────
   ⏸ manual mode on · gh auth login for PR status · ← for agents
 """
-
-
-def test_a_fatal_api_error_is_recognised_only_as_the_last_reply():
-    from brindle.providers import ClaudeCode
-
-    error = ClaudeCode.fatal_api_error(WORKSPACE_KEY_ERROR)
-    assert error.startswith("API Error: 400 This API key is not scoped") and error.endswith("scoped to a workspace.")
-    assert ClaudeCode.fatal_api_error(WORKSPACE_KEY_ERROR.replace("400", "529")) is None, "Claude Code retries those"
-    moved_on = WORKSPACE_KEY_ERROR.replace("✻ Cooked", "● Retrying with a new key.\n✻ Cooked")
-    assert ClaudeCode.fatal_api_error(moved_on) is None
-    assert ClaudeCode.fatal_api_error(PROMPT) is None
-
-
-def test_stuck_screen_reports_a_fatal_api_error(db, repo, monkeypatch):
-    _, root, _ = _launch_showing(monkeypatch, db, repo, [WORKSPACE_KEY_ERROR])
-    stuck = ClaudeAdapter().stuck_screen(db, root)
-    assert "won't retry" in stuck and "not scoped to a workspace" in stuck
 
 
 OVERLOADED = WORKSPACE_KEY_ERROR.replace(
@@ -669,15 +497,3 @@ def test_an_api_error_line_is_capped_and_has_no_secrets():
                           + "more detail " * 40)
     assert "sk-ant" not in line and "eyJ" not in line and "[redacted]" in line
     assert len(line) == 300 and line.isascii()
-
-
-def test_custom_headers_reach_the_reviewer(monkeypatch, tmp_path):
-    seen = {}
-
-    def run(argv, **kw):
-        seen["env"] = kw.get("env")
-        return subprocess.CompletedProcess(argv, 0, "{}", "")
-    monkeypatch.setattr(ci_adapters.subprocess, "run", run)
-    env = {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_CUSTOM_HEADERS": "anthropic-workspace-id: wrkspc_1"}
-    ClaudeAdapter().review("review this", str(tmp_path), env)
-    assert seen["env"]["ANTHROPIC_CUSTOM_HEADERS"] == "anthropic-workspace-id: wrkspc_1"

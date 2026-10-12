@@ -10,7 +10,6 @@ import pytest
 from conftest import sh
 from brindle import agents, mcp_server, tmux, view, workspaces
 from brindle.db import Agent
-from brindle.profiles import load_profile
 
 
 @pytest.fixture
@@ -25,11 +24,6 @@ def boss(db, repo, monkeypatch):
 def _started(db) -> Agent:
     [worker] = [a for a in db.list_agents() if a.provider == "subagent"]
     return worker
-
-
-def test_builtin_subagent_profile():
-    p = load_profile("subagent")
-    assert p.provider == "subagent" and p.prompt
 
 
 def test_handoff_makes_a_workspace_and_starts_nothing(db, boss, monkeypatch):

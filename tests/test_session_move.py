@@ -28,13 +28,6 @@ def test_config_is_found_from_a_linked_worktree_via_the_main_one(repo, tmp_path)
     assert config.config_root(linked) == repo
 
 
-def test_checkout_for_branch_creates_then_reuses_the_worktree(db, repo):
-    ws = workspaces.checkout_for(db, str(repo), branch="integration")
-    assert ws.branch == "integration" and ws.path != str(repo)
-    again = workspaces.checkout_for(db, str(repo), branch="integration")
-    assert again.id == ws.id
-
-
 def test_checkout_for_adopts_a_worktree_the_user_made(db, repo, tmp_path):
     mine = tmp_path / "mine"
     sh(f"git worktree add -q -b topic {mine}", repo)

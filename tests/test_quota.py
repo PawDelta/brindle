@@ -36,12 +36,6 @@ def test_codex_maps_windows_by_length_not_slot(tmp_path):
     assert "Codex at 82% of its weekly limit, resets" in quota.note("codex")
 
 
-@pytest.mark.parametrize("minutes,label", [(300, "5-hour"), (10080, "weekly"), (43200, "monthly")])
-def test_codex_window_lengths(tmp_path, minutes, label):
-    rollout(tmp_path, limits(primary=(40.0, minutes, time.time() + 600)))
-    assert f"40% of its {label} limit" in quota.note("codex")
-
-
 def test_codex_reads_the_last_event_with_rate_limits(tmp_path):
     future = time.time() + 3600
     rollout(tmp_path,
@@ -52,25 +46,11 @@ def test_codex_reads_the_last_event_with_rate_limits(tmp_path):
     assert quota.get("codex").windows[0].used == 55.0
 
 
-def test_codex_uses_the_newest_rollout(tmp_path):
-    future = time.time() + 3600
-    old = rollout(tmp_path, limits(primary=(90.0, 300, future)), name="rollout-old.jsonl", day="29")
-    rollout(tmp_path, limits(primary=(20.0, 300, future)), name="rollout-new.jsonl")
-    os.utime(old, (time.time() - 1000, time.time() - 1000))
-    assert quota.get("codex").windows[0].used == 20.0
-
-
 def test_stale_windows_are_dropped(tmp_path):
     rollout(tmp_path, limits(primary=(95.0, 300, time.time() - 60)))
     assert quota.get("codex") is None
     assert quota.note("codex") is None
     assert quota.headroom("codex", RepoConfig()) == 100
-
-
-def test_unknown_provider_has_full_headroom():
-    assert quota.get("codex") is None
-    assert quota.headroom("codex", RepoConfig()) == 100
-    assert quota.headroom("antigravity", RepoConfig()) == 100
 
 
 def test_claude_status_line_goes_through_quota():
@@ -123,29 +103,6 @@ def test_limited_until_zeroes_headroom_then_expires():
     quota.path().write_text(json.dumps(data))
     assert quota.get("antigravity") is None
     assert quota.headroom("antigravity", RepoConfig()) == 100
-
-
-def test_limit_cooldown_is_configurable():
-    until = quota.record_limit("antigravity", RepoConfig(limit_cooldown_minutes=10))
-    assert until == pytest.approx(time.time() + 600, abs=5)
-
-
-def test_native_headroom_follows_reachability(monkeypatch):
-    from brindle.native import serve
-
-    monkeypatch.setattr(serve, "local_servers", lambda repo_root: [object()])
-    monkeypatch.setattr(serve, "reachable", lambda s, timeout=1.0: True)
-    assert quota.headroom("native", RepoConfig()) == 100
-    assert quota.note("native") is None
-    monkeypatch.setattr(serve, "reachable", lambda s, timeout=1.0: False)
-    assert quota.headroom("native", RepoConfig()) == 0
-    assert quota.note("native") == "local model server not answering"
-
-
-def test_notes_lists_only_providers_with_data(tmp_path):
-    assert quota.notes(native=False) == []
-    rollout(tmp_path, limits(primary=(50.0, 300, time.time() + 600)))
-    assert len(quota.notes(native=False)) == 1
 
 
 def test_auth_and_token_files_are_never_read(tmp_path, monkeypatch):

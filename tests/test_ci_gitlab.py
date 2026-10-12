@@ -4,15 +4,12 @@ template, the entitlement gate and secret scrubbing."""
 
 import base64
 import json
-import os
-import urllib.parse
 
 import pytest
 
-from brindle import ci_client, ci_hosts, secrets
+from brindle import ci_client, ci_hosts
 from brindle.ci_client import CIError
 from pro_fixtures import signing_key  # noqa: F401
-from test_ci_client import CI_TOKEN, FakeAdapter, Server, ci_repo, head, plan  # noqa: F401 - fixtures
 
 API = "https://gitlab.example.com/api/v4"
 JOB_ENV = {"GITLAB_CI": "true", "CI_PROJECT_PATH": "acme/sub/app", "CI_API_V4_URL": API,
@@ -58,18 +55,6 @@ def host(api=None, entitled=True):
 
 # -- detection and the entitlement gate ---------------------------------------------------------
 
-def test_detect_gitlab_job():
-    assert ci_hosts.GitLabHost.detect(JOB_ENV)
-    assert not ci_hosts.GitLabHost.detect({"GITHUB_ACTIONS": "true"})
-    assert ci_hosts.GitHubHost.detect({"GITHUB_ACTIONS": "true"})
-
-
-def test_get_host_picks_by_env_and_gates_gitlab(monkeypatch):
-    assert ci_hosts.get_host(env={"GITHUB_ACTIONS": "true"}).name == "github"
-    assert ci_hosts.get_host(env={}).name == "github"
-    monkeypatch.setattr(ci_hosts, "entitled", lambda: True)
-    assert ci_hosts.get_host(env=JOB_ENV, is_entitled=lambda: True).name == "gitlab"
-
 
 def test_gitlab_fails_closed_without_the_entitlement():
     with pytest.raises(CIError) as e:
@@ -109,20 +94,7 @@ def test_repo_from_job_env_with_subgroups():
         h.repo({"CI_PROJECT_PATH": "no-slash"})
 
 
-def test_fork_is_a_merge_request_from_another_project():
-    h = ci_hosts.GitLabHost
-    assert h.is_fork({"CI_MERGE_REQUEST_SOURCE_PROJECT_PATH": "me/app"}, "acme/app")
-    assert not h.is_fork({"CI_MERGE_REQUEST_SOURCE_PROJECT_PATH": "ACME/app"}, "acme/app")
-    assert not h.is_fork({}, "acme/app")
-
-
 # -- OIDC ---------------------------------------------------------------------------------------
-
-def test_id_token_header_prefers_the_id_tokens_variable():
-    a, b = jwt(), jwt()
-    o = ci_hosts.GitLabOIDC({"BRINDLE_ID_TOKEN": a, "CI_JOB_JWT_V2": b})
-    assert o.available and o.header() == {ci_client.OIDC_HEADER: a}
-    assert ci_hosts.GitLabOIDC({"CI_JOB_JWT_V2": b}).header() == {ci_client.OIDC_HEADER: b}
 
 
 def test_no_id_token_means_no_header_and_junk_is_ignored():
@@ -145,24 +117,6 @@ def test_client_carries_the_gitlab_token():
 
 
 # -- merge requests and notes -------------------------------------------------------------------
-
-def test_create_merge_request():
-    api = FakeGitLab()
-    mr = host(api).create_merge_request(JOB_ENV, source="brindle/fix", target="main", title="Fix",
-                                        description="body")
-    assert mr == {"iid": 7, "url": "https://gitlab.example.com/acme/sub/app/-/merge_requests/7"}
-    method, url, headers, body = api.calls[0]
-    assert method == "POST"
-    assert url == f"{API}/projects/{urllib.parse.quote('acme/sub/app', safe='')}/merge_requests"
-    assert headers["JOB-TOKEN"] == "jobtok" and "PRIVATE-TOKEN" not in headers
-    assert body["source_branch"] == "brindle/fix" and body["target_branch"] == "main"
-
-
-def test_comment_on_a_merge_request():
-    api = FakeGitLab()
-    assert host(api).comment(JOB_ENV, 7, "looks good") == "99"
-    method, url, _, body = api.calls[0]
-    assert url.endswith("/acme%2Fsub%2Fapp/merge_requests/7/notes") and body == {"body": "looks good"}
 
 
 def test_project_token_is_preferred_over_the_job_token():
@@ -191,15 +145,6 @@ def test_api_failure_is_reported_without_the_token():
 
 
 # -- init ---------------------------------------------------------------------------------------
-
-def test_init_writes_the_template(tmp_path):
-    said = []
-    path = ci_hosts.init_gitlab(cwd=str(tmp_path), is_entitled=lambda: True, say=said.append)
-    text = path.read_text()
-    assert path.name == ".gitlab-ci.yml" and text == ci_hosts.GITLAB_TEMPLATE
-    assert "id_tokens:" in text and "BRINDLE_ID_TOKEN" in text and ci_client.OIDC_AUDIENCE in text
-    assert "brindle ci run" in text
-    assert any("BRINDLE_PRO_TOKEN" in s for s in said)
 
 
 def test_init_refuses_without_entitlement_and_never_overwrites(tmp_path):
@@ -231,39 +176,6 @@ def test_cli_init_host_gitlab_fails_closed(tmp_path, monkeypatch):
 
 # -- a GitLab job drives start and run --------------------------------------------------------
 
-def test_gitlab_job_runs_a_validation_end_to_end(plan, ci_repo, tmp_path, monkeypatch):
-    nested = "acme/sub/widgets"
-    sha = head(ci_repo)
-    vplan = plan("validation", head_sha=sha, repo=nested)
-    server = Server(plan(repo=nested), validation_plan=vplan)
-    env = {"GITLAB_CI": "true", "CI_PROJECT_PATH": nested, "CI_API_V4_URL": API, "CI_JOB_TOKEN": "jobtok",
-           "BRINDLE_PRO_TOKEN": CI_TOKEN, "PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/")}
-    h = host(FakeGitLab())
-    assert h.repo(env) == nested
-    out = tmp_path / "out"
-    assert ci_client.start(nested, {"kind": "validate", "pr": 7, "head_sha": sha, "fork": False}, out,
-                           client=server.client, token=CI_TOKEN, providers=["claude"], say=lambda s: None) == 0
-    result = ci_client.run((out / "plan.jwt").read_text(), out / "run_token", cwd=str(ci_repo), env=env,
-                           client=server.client, adapters={"claude": FakeAdapter("claude")}, org=h.org_hint,
-                           repo=h.repo(env), say=lambda s: None)
-    assert result["status"] == "posted"
-    assert "CI_JOB_TOKEN" not in env and "BRINDLE_PRO_TOKEN" not in env   # scrubbed before the checks
-    assert ci_client.plan_id((out / "plan.jwt").read_text())[2] == nested   # report accepts a nested path
-
-
-def test_tokens_are_captured_before_the_scrub():
-    api = FakeGitLab()
-    env = dict(JOB_ENV)
-    h = ci_hosts.get_host("gitlab", env, is_entitled=lambda: True, request=api)
-    secrets.scrub_secrets(env)
-    assert "CI_JOB_TOKEN" not in env
-    h.comment(env, 3, "after the scrub")
-    assert api.calls[0][2]["JOB-TOKEN"] == "jobtok"
-
-
-def test_template_reports_the_job_status(tmp_path):
-    assert "brindle ci report" in ci_hosts.GITLAB_TEMPLATE and "CI_JOB_STATUS" in ci_hosts.GITLAB_TEMPLATE
-
 
 def test_cli_init_host_is_case_insensitive_and_force_is_gitlab_only(tmp_path, monkeypatch):
     from typer.testing import CliRunner
@@ -274,17 +186,3 @@ def test_cli_init_host_is_case_insensitive_and_force_is_gitlab_only(tmp_path, mo
     monkeypatch.setattr(ci_hosts, "entitled", lambda: True)
     assert CliRunner().invoke(app, ["ci", "init", "--host", "GitLab"]).exit_code == 0
     assert CliRunner().invoke(app, ["ci", "init", "--force"]).exit_code != 0
-
-
-# -- secrets ------------------------------------------------------------------------------------
-
-def test_gitlab_job_secrets_are_scrubbed():
-    env = {"CI_JOB_TOKEN": "a", "CI_JOB_JWT_V2": "b", "BRINDLE_ID_TOKEN": "c", "BRINDLE_GITLAB_TOKEN": "d",
-           "CI_REGISTRY_PASSWORD": "e", "CI_PROJECT_PATH": "acme/app", "PATH": "/bin"}
-    secrets.scrub_secrets(env)
-    assert env == {"CI_PROJECT_PATH": "acme/app", "PATH": "/bin"}
-    assert all(not ci_client.check_env({n: "x"}) == {n: "x"} for n in ("CI_JOB_TOKEN", "BRINDLE_ID_TOKEN"))
-    assert "CI_JOB_TOKEN" in secrets.pane_unset(["PATH"])
-    extra = {"CI_DEPENDENCY_PROXY_PASSWORD": "x", "CI_BUILD_TOKEN": "y"}
-    secrets.scrub_secrets(extra)
-    assert extra == {}

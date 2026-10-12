@@ -3,14 +3,12 @@ commands in a throwaway git repo. No agent runs (``--agent none``), no network."
 
 import json
 import os
-import subprocess
 
 import pytest
 from typer.testing import CliRunner
 
-from brindle import git, history, scratch
+from brindle import cull, git, history, scratch, tmux
 from brindle.cli import app
-from brindle.db import DB
 
 from conftest import sh
 
@@ -55,13 +53,20 @@ def test_init_outside_a_repo_fails(tmp_path, monkeypatch):
 
 
 def test_doctor_runs_in_and_out_of_a_repo(proj, tmp_path, monkeypatch):
-    res = run("doctor", ok=False)
-    assert res.exit_code in (0, 1) and res.output.strip()
+    def doctor():
+        # Whether tools like claude are installed varies by machine; the exit
+        # code must match what the report says either way.
+        res = run("doctor", ok=False)
+        assert res.exit_code == (1 if "problem(s) will stop brindle" in res.output else 0), res.output
+        assert "python" in res.output and "brindle home" in res.output
+        return res.output
+
+    in_repo = doctor()
+    assert "repo config" in in_repo and "routing light" in in_repo
     plain = tmp_path / "plain"
     plain.mkdir()
     monkeypatch.chdir(plain)
-    res = run("doctor", ok=False)
-    assert res.exit_code in (0, 1) and res.output.strip()
+    assert "repo config" not in doctor()
 
 
 def test_new_ls_status_diff_commit(proj, ws_path):
@@ -80,7 +85,7 @@ def test_new_ls_status_diff_commit(proj, ws_path):
     assert run("diff", ws.name).output.strip() == "(no changes)"
     (open(os.path.join(ws.path, "new.txt"), "w")).write("hello\n")
     st = run("status", ws.name).output
-    assert "M new.txt" in st or "new.txt" in st
+    assert "new.txt" in st
     assert "new.txt" in run("diff", ws.name, "--stat").output
 
     assert run("commit", ws.name, "-m", "add new").output.startswith("✓")
@@ -96,11 +101,13 @@ def test_commands_resolve_the_workspace_from_inside_it(proj, ws_path, monkeypatc
     assert ws_path.id in run("status").output
 
 
-def test_unknown_workspace_is_a_clean_error(proj):
+def test_unknown_workspaces_and_bad_arguments_are_clean_errors(proj):
     res = run("status", "nope", ok=False)
     assert res.exit_code == 1 and "Traceback" not in res.output
-    res = run("rm", "nope", ok=False)
-    assert res.exit_code == 1
+    assert run("rm", "nope", ok=False).exit_code == 1
+    assert run("new", ok=False).exit_code == 1
+    res = run("new", "x", "--pr", "1", ok=False)
+    assert res.exit_code == 1 and "not both" in res.output
 
 
 def test_sync_picks_up_new_base_commits(proj, ws_path):
@@ -157,12 +164,6 @@ def test_rm_keeps_an_unmerged_branch_and_needs_force_for_dirty(proj, ws_path):
     assert "feat/e2e" in sh("git branch --list", proj)  # unmerged: kept
 
 
-def test_new_rejects_bad_arguments(proj):
-    assert run("new", ok=False).exit_code == 1
-    res = run("new", "x", "--pr", "1", ok=False)
-    assert res.exit_code == 1 and "not both" in res.output
-
-
 def test_new_reports_when_the_branch_is_taken(proj, ws_path):
     res = run("new", "feat/e2e", "--agent", "none", "--no-setup", ok=False)
     assert res.exit_code == 1 and "Traceback" not in res.output
@@ -191,8 +192,20 @@ def test_prune_removes_a_finished_merged_worktree(proj, ws_path):
     open(os.path.join(ws.path, "m.txt"), "w").write("m")
     run("commit", ws.name, "-m", "m")
     run("merge", ws.name)
-    out = run("prune").output
-    assert "dropped" in out
+    # Another live test run's private tmux server is not prune's to stop, nor
+    # its socket to remove while that run lives (even once nothing listens).
+    other = f"brindle-test-{os.getpid()}-other"
+    tmux._on(other, "new-session", "-d", "-s", "x")
+    try:
+        out = run("prune").output
+        assert "dropped" in out
+        assert tmux.server_homes(other) == [None]
+        tmux._on(other, "kill-server")
+        assert not any(other in done for done in cull.orphan_servers())
+        assert other in tmux.other_servers()
+    finally:
+        tmux._on(other, "kill-server")
+        tmux.remove_socket(other)
     # prune never loses unmerged work and never crashes on a leftover worktree
     assert run("ls").exit_code == 0
 

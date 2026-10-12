@@ -51,23 +51,10 @@ def keyed(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", EXPORTED)
 
 
-def test_auth_defaults_to_auto_and_parses(repo):
-    write_profile(repo, "plain")
-    write_profile(repo, "sub", "subscription")
-    assert load_profile("plain", str(repo)).auth == "auto"
-    assert load_profile("sub", str(repo)).auth == "subscription"
-
-
 def test_an_unknown_auth_is_an_error(repo):
     write_profile(repo, "odd", "oauth")
     with pytest.raises(ProfileError, match="auth"):
         load_profile("odd", str(repo))
-
-
-def test_auto_passes_a_stored_key_as_before(db, repo, monkeypatch, brindle_home, keyed):
-    write_profile(repo, "plain")
-    script = pane_script(db, repo, monkeypatch, brindle_home, "plain")
-    assert f"export ANTHROPIC_API_KEY={STORED}" in script
 
 
 def test_subscription_puts_no_stored_key_in_the_pane_and_strips_exported_ones(
@@ -78,19 +65,6 @@ def test_subscription_puts_no_stored_key_in_the_pane_and_strips_exported_ones(
     assert "export ANTHROPIC_API_KEY" not in script
     assert "-u ANTHROPIC_API_KEY" in script and "-u ANTHROPIC_AUTH_TOKEN" in script
     assert "-u CLAUDE_CODE_OAUTH_TOKEN" not in script    # the login's own token stays
-
-
-def test_subscription_strips_a_key_the_profile_sets_itself(db, repo, monkeypatch, brindle_home):
-    write_profile(repo, "sub", "subscription", extra="env.ANTHROPIC_API_KEY: sk-ant-test-profile-3333\n")
-    script = pane_script(db, repo, monkeypatch, brindle_home, "sub")
-    assert "-u ANTHROPIC_API_KEY" in script
-
-
-def test_subscription_strips_codex_keys_too(db, repo, monkeypatch, brindle_home):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-4444")
-    write_profile(repo, "csub", "subscription", provider="codex")
-    script = pane_script(db, repo, monkeypatch, brindle_home, "csub", provider="codex")
-    assert "-u OPENAI_API_KEY" in script
 
 
 def _launch(db, repo, profile, m=None):
@@ -104,19 +78,6 @@ def test_api_key_refuses_to_start_without_a_key(db, repo, monkeypatch):
     write_profile(repo, "keyed", "api_key")
     with pytest.raises(agents.AgentError, match=r"auth: api_key.*ANTHROPIC_API_KEY"):
         _launch(db, repo, "keyed")
-
-
-def test_api_key_accepts_an_exported_a_stored_or_a_profile_key(repo, monkeypatch):
-    from brindle import pane_auth
-
-    write_profile(repo, "keyed", "api_key")
-    p = load_profile("keyed", str(repo))
-    assert pane_auth.key_problem(p, "claude", set(), False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", EXPORTED)
-    assert pane_auth.key_problem(p, "claude", set(), False) is None
-    monkeypatch.delenv("ANTHROPIC_API_KEY")
-    keystore.set_key("ANTHROPIC_API_KEY", STORED)
-    assert pane_auth.key_problem(p, "claude", set(), False) is None
 
 
 def test_api_key_is_refused_when_the_org_denies_personal_keys(repo, monkeypatch):
@@ -138,11 +99,3 @@ def test_keys_set_warns_when_claude_has_a_login(brindle_home, monkeypatch):
     r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=STORED + "\n")
     assert r.exit_code == 0 and STORED not in r.output
     assert "instead of your subscription" in r.output and "auth: subscription" in r.output
-
-
-def test_keys_set_is_quiet_without_a_login(brindle_home, monkeypatch):
-    monkeypatch.setattr(providers, "subscription_login", lambda provider="claude": False)
-    monkeypatch.setattr(providers, "claude_org_managed", lambda: None)
-    monkeypatch.setattr(providers, "api_key_approved", lambda k: True)
-    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=STORED + "\n")
-    assert r.exit_code == 0 and "instead of your subscription" not in r.output

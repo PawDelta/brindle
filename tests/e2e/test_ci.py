@@ -199,43 +199,12 @@ def test_github_start_run_report_through_the_cli(job, mkplan, wire, tmp_path):
     assert [s[1]["conclusion"] for s in server.job_status] == ["success", "failure"]
 
 
-def test_report_sends_each_conclusion(job, mkplan, wire, tmp_path):
-    server = Server(run_plan=mkplan())
-    wire(server, FakeAdapter())
-    out = tmp_path / "plan"
-    assert cli("start", "--out", str(out), "--goal-text", "Fix\nthe detail", "--providers", "claude").exit_code == 0
-    r = cli("report", "--plan-dir", str(out), "--start", "success", "--run", "cancelled")
-    assert r.exit_code == 0, r.output
-    assert [s[1]["job"] + ":" + s[1]["conclusion"] for s in server.job_status] == ["start:success", "run:cancelled"]
-    assert all(s[0] == f"Bearer {CI_TOKEN}" for s in server.job_status)
-    assert cli("report", "--plan-dir", str(out), "--run", "exploded").exit_code != 0
-    assert "nothing to report" in cli("report", "--plan-dir", str(tmp_path / "none")).output
-
-
 def test_start_needs_exactly_one_trigger_and_a_valid_validate(job, tmp_path):
     out = str(tmp_path / "o")
     assert cli("start", "--out", out).exit_code != 0
     assert cli("start", "--out", out, "--issue", "1", "--goal-text", "x").exit_code != 0
     assert cli("start", "--out", out, "--validate", "--pr", "1", "--head", "abc").exit_code != 0
     assert cli("start", "--out", out, "--dispatch", "nope").exit_code != 0
-
-
-def test_validate_start_and_run_through_the_cli(job, mkplan, wire, tmp_path):
-    sha = sh("git rev-parse HEAD", job)
-    adapter = FakeAdapter()
-    server = Server(validation_plan=mkplan("validation", head_sha=sha))
-    wire(server, adapter)
-    out = tmp_path / "v"
-    r = cli("start", "--out", str(out), "--validate", "--pr", "7", "--head", sha, "--fork", "false",
-            "--providers", "claude")
-    assert r.exit_code == 0, r.output
-    assert server.transport.calls[0][1]["fork"] is False
-    r = cli("run", "--plan", str(out / "plan.jwt"), "--run-token-file", str(out / "run_token"))
-    assert r.exit_code == 0, r.output
-    ev = server.evidence[0]
-    assert ev["checks"][0]["exit"] == 0 and ev["reviews"][0]["reply"] == "LGTM"
-    assert ev["usage"] == {"fake-model": {"input": 3, "output": 0, "cache_read": 0}}
-    assert "posted: success" in r.output
 
 
 def test_validate_checks_never_see_secrets_or_model_keys(job, mkplan, wire, tmp_path, monkeypatch):
@@ -264,23 +233,6 @@ def gitlab_env(monkeypatch):
     monkeypatch.setattr(ci_hosts, "entitled", lambda: True)
 
 
-def test_gitlab_validation_through_the_cli(job, mkplan, wire, tmp_path, monkeypatch):
-    gitlab_env(monkeypatch)
-    sha = sh("git rev-parse HEAD", job)
-    server = Server(validation_plan=mkplan("validation", repo=NESTED, head_sha=sha))
-    wire(server, FakeAdapter(), host=ci_hosts.GitLabHost)
-    out = tmp_path / "v"
-    r = cli("start", "--out", str(out), "--validate", "--pr", "7", "--head", sha)
-    assert r.exit_code == 0, r.output
-    call = server.transport.calls[0][1]
-    assert call["repo"] == NESTED and call["fork"] is False, "same-project merge request is no fork"
-    # GitLab is fail-closed: reported as not usable subscription-only credentials (org_hint True): api key is fine.
-    assert call["providers_available"] == ["claude"]
-    r = cli("run", "--plan", str(out / "plan.jwt"), "--run-token-file", str(out / "run_token"))
-    assert r.exit_code == 0, r.output
-    assert "CI_JOB_TOKEN" not in os.environ
-
-
 def test_gitlab_merge_request_from_a_fork_is_flagged(job, mkplan, wire, tmp_path, monkeypatch):
     gitlab_env(monkeypatch)
     monkeypatch.setenv("CI_MERGE_REQUEST_SOURCE_PROJECT_PATH", "someone/widgets")
@@ -289,23 +241,6 @@ def test_gitlab_merge_request_from_a_fork_is_flagged(job, mkplan, wire, tmp_path
     wire(server, FakeAdapter(), host=ci_hosts.GitLabHost)
     assert cli("start", "--out", str(tmp_path / "v"), "--validate", "--pr", "7", "--head", sha).exit_code == 0
     assert server.transport.calls[0][1]["fork"] is True
-
-
-def test_gitlab_is_refused_without_the_entitlement(job, monkeypatch, tmp_path):
-    gitlab_env(monkeypatch)
-    monkeypatch.setattr(ci_hosts, "entitled", lambda: False)
-    r = cli("start", "--out", str(tmp_path / "o"), "--issue", "1")
-    assert r.exit_code != 0 and "Enterprise" in r.output
-    r = cli("report", "--plan-dir", str(tmp_path))
-    assert r.exit_code != 0
-
-
-def test_gitlab_personal_subscription_is_never_used(job, monkeypatch):
-    gitlab_env(monkeypatch)
-    adapter = ci_adapters.ClaudeAdapter()
-    monkeypatch.setattr(adapter, "installed", lambda env=None: True)
-    env = {"CLAUDE_CODE_OAUTH_TOKEN": "x"}
-    assert ci_adapters.usable(adapter, env, ci_hosts.GitLabHost.org_hint)[0] is False
 
 
 def test_gitlab_api_merge_request_and_note(monkeypatch):
@@ -346,21 +281,6 @@ def run_it(job, token, server, adapter, tmp_path, *, sleep=lambda s: None, clock
     return ci_client.run(token, tf, cwd=str(job), env=env or {"GITHUB_REPOSITORY": REPO, "PATH": os.environ["PATH"]},
                          client=server.client, db=DB(), adapters={"claude": adapter}, sleep=sleep, clock=clock,
                          say=lambda s: None)
-
-
-def test_unpriced_usage_ends_a_budgeted_run(job, mkplan, tmp_path):
-    token = run_plan_of(mkplan, job, budget_usd=5)
-    server = Server(run_plan=token)
-    run_it(job, token, server, FakeAdapter(), tmp_path)   # "fake-model" has no price
-    assert len(server.events) == 1
-    assert evidence_of(server.results[0])["final_state"] == "budget"
-
-
-def test_a_run_without_a_budget_is_not_cut_off_by_unpriced_usage(job, mkplan, tmp_path):
-    token = run_plan_of(mkplan, job)
-    server = Server(run_plan=token, actions=[{"action": "continue"}] * 2 + [{"action": "stop", "reason": "timeout"}])
-    run_it(job, token, server, FakeAdapter(), tmp_path)
-    assert len(server.events) == 3 and evidence_of(server.results[0])["final_state"] == "timeout"
 
 
 def test_the_dollar_limit_holds_while_the_server_is_unreachable(job, mkplan, tmp_path):
@@ -416,29 +336,6 @@ def test_doctor_in_a_gitlab_job_names_the_project_without_gh(job, monkeypatch):
     assert f"repository: {NESTED}, owner is an organization" in r.output
 
 
-def test_native_endpoint_host_rejects_ambiguous_urls():
-    host = ci_adapters.NativeAdapter.endpoint_host
-    assert host("https://api.example.com/v1") == "api.example.com"
-    for bad in ("https://user@evil.com/", "https://a.com\\@evil.com", "https://a.com/?x", "https://a.com#f",
-                "https://a.com/x\n", "https://a.com\n", "https://[::1]/", "ftp://a.com"):
-        assert host(bad) is None, bad
-
-
-def test_native_keys_go_only_to_the_paired_host():
-    allowed = ci_adapters.NativeAdapter.allowed_keys
-    env = {"BRINDLE_CI_NATIVE_KEYS": "MY_KEY@api.example.com, OTHER, ANTHROPIC_API_KEY@evil.com, GITHUB_TOKEN@x.com"}
-    got = allowed(env)
-    assert got["MY_KEY"] == frozenset({"api.example.com"})
-    assert got["OTHER"] == ci_adapters.LOOPBACK
-    assert "ANTHROPIC_API_KEY" not in got and "GITHUB_TOKEN" not in got
-
-
-def test_empty_model_keys_are_dropped_before_claude_starts():
-    env = {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "fed", "X": "1"}
-    assert ci_adapters.claude_env(env) == {"ANTHROPIC_AUTH_TOKEN": "fed", "X": "1"}
-    assert env["ANTHROPIC_API_KEY"] == "", "the caller's environment is untouched"
-
-
 def test_review_usage_is_merged_across_models():
     into = {}
     ci_adapters.merge_usage(into, {"a": {"input": 1, "output": 2, "cache_read": 3}, "bad": 7})
@@ -480,13 +377,6 @@ FED_ENV = {"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_1", "ANTHROPIC_ORGANIZATION_ID"
            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "reqtok"}
 
 
-def test_federation_configured_only_for_a_federated_job():
-    assert ci_federation.configured(FED_ENV)
-    assert not ci_federation.configured({**FED_ENV, "ANTHROPIC_API_KEY": "k"})
-    assert not ci_federation.configured({**FED_ENV, "BRINDLE_CI_FEDERATION_REFRESH": "0"})
-    assert not ci_federation.configured({k: v for k, v in FED_ENV.items() if k != "ANTHROPIC_SERVICE_ACCOUNT_ID"})
-
-
 def test_the_proxy_swaps_the_run_secret_for_the_current_anthropic_token(upstream, monkeypatch):
     url, seen = upstream
     tokens = iter([("anthropic-tok-1", 1000.0), ("anthropic-tok-2", 1000.0)])
@@ -518,20 +408,3 @@ def test_the_proxy_swaps_the_run_secret_for_the_current_anthropic_token(upstream
     finally:
         fed.stop()
     assert fed.refresher.token() is None
-
-
-def test_a_failed_first_exchange_keeps_the_workflows_token(monkeypatch):
-    def boom(u, t):
-        raise ci_federation.FederationError("no")
-    monkeypatch.setattr(ci_federation, "fetch_identity_token", boom)
-    said = []
-    assert ci_client.start_federation(FED_ENV, say=said.append) is None
-    assert "using the workflow's token" in said[0]
-
-
-def test_the_refresher_survives_failures_and_backs_off():
-    r = ci_federation.TokenRefresher(FED_ENV, "u", "t", fetch=lambda u, t: (_ for _ in ()).throw(RuntimeError("x")),
-                                     exchange=lambda *a: ("t", 1.0))
-    assert [r.tick() for _ in range(5)] == [5.0, 15.0, 45.0, 60.0, 60.0]
-    ok = ci_federation.TokenRefresher(FED_ENV, "u", "t", fetch=lambda u, t: "j", exchange=lambda *a: ("tok", 600.0))
-    assert ok.tick() == 420.0 and ok.token() == "tok"

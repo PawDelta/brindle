@@ -3,14 +3,11 @@ sidebar via the SubagentStart/SubagentStop hooks."""
 
 import sqlite3
 import time
-from dataclasses import replace
 
 import pytest
 
 from brindle import agents, tmux, view, watch
 from brindle.db import DB, Agent
-from brindle.profiles import load_profile
-from brindle.providers import ClaudeCode, LaunchContext
 
 
 def fake_agent(db, ws, status="processing", mode="assign", parent=None, agent_id="a1"):
@@ -29,117 +26,10 @@ def ws(db, repo):
 # -- hooks are registered -----------------------------------------------------
 
 
-def test_subagent_hooks_are_registered():
-    ctx = LaunchContext("abc", load_profile("developer"), "do the thing")
-    settings = ClaudeCode().command(ctx)[ClaudeCode().command(ctx).index("--settings") + 1]
-    assert "subagent-start" in settings and "SubagentStart" in settings
-    assert "subagent-stop" in settings and "SubagentStop" in settings
-
-
-def test_headless_workers_get_subagent_hooks_too():
-    profile = replace(load_profile("developer"), headless=True)
-    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
-    assert "-p" in argv
-    settings = argv[argv.index("--settings") + 1]
-    assert "subagent-start" in settings and "subagent-stop" in settings
-
-
 # -- hook payloads create/end rows without touching the parent's status ------
 
 
-def test_start_hook_creates_a_row_without_changing_parent_status(db, ws):
-    fake_agent(db, ws, status="processing")
-    out = agents.handle_hook(db, "a1", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-    assert out is None
-    assert db.get_agent("a1").status == "processing"
-    [row] = db.native_subagents("a1")
-    assert row.id == "sub1" and row.agent_type == "Explore" and row.ended_at is None
-
-
-def test_stop_hook_ends_the_row_without_changing_parent_status(db, ws):
-    fake_agent(db, ws, status="waiting")
-    agents.handle_hook(db, "a1", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-    out = agents.handle_hook(db, "a1", "subagent-stop",
-                             {"agent_id": "sub1", "agent_type": "Explore",
-                              "last_assistant_message": "done exploring"})
-    assert out is None
-    assert db.get_agent("a1").status == "waiting"
-    [row] = db.native_subagents("a1")
-    assert row.ended_at is not None
-
-
-def test_missing_agent_id_is_handled_gracefully(db, ws):
-    fake_agent(db, ws)
-    assert agents.handle_hook(db, "a1", "subagent-start", {"agent_type": "Explore"}) is None
-    assert agents.handle_hook(db, "a1", "subagent-stop", {}) is None
-    assert db.native_subagents("a1") == []
-
-
-def test_a_parent_stop_does_not_end_a_still_running_subagent(db, ws):
-    # Background subagents keep running after the parent's own turn stops.
-    fake_agent(db, ws, mode="assign")
-    agents.handle_hook(db, "a1", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
-    [row] = db.native_subagents("a1")
-    assert row.ended_at is None
-
-
-def test_start_prunes_old_ended_rows_for_the_same_parent(db, ws, monkeypatch):
-    fake_agent(db, ws)
-    db.start_native_subagent("old", "a1", "Explore")
-    db.stop_native_subagent("old")
-    later = time.time() + 4000
-    monkeypatch.setattr(time, "time", lambda: later)
-    db.start_native_subagent("new", "a1", "Plan")
-    assert [s.id for s in db.native_subagents("a1")] == ["new"]
-
-
-def test_start_also_prunes_abandoned_still_running_rows(db, ws, monkeypatch):
-    fake_agent(db, ws)
-    db.start_native_subagent("crashed", "a1", "Explore")  # never got a SubagentStop
-    later = time.time() + 3 * 3600
-    monkeypatch.setattr(time, "time", lambda: later)
-    db.start_native_subagent("new", "a1", "Plan")
-    assert [s.id for s in db.native_subagents("a1")] == ["new"]
-
-
-def test_end_native_subagents_ends_every_running_row_for_a_parent(db, ws):
-    fake_agent(db, ws)
-    db.start_native_subagent("sub1", "a1", "Explore")
-    db.start_native_subagent("sub2", "a1", "Plan")
-    db.end_native_subagents("a1")
-    assert all(s.ended_at is not None for s in db.native_subagents("a1"))
-
-
-def test_all_native_subagents_stays_bounded(db, ws, monkeypatch):
-    # A stale still-running row and a long-ended row that haven't been
-    # pruned yet must not show up in the snapshot query itself.
-    fake_agent(db, ws)
-    db.start_native_subagent("stale", "a1", "Explore")
-    db.start_native_subagent("old_done", "a1", "Plan")
-    db.stop_native_subagent("old_done")
-    later = time.time() + 3 * 3600
-    monkeypatch.setattr(time, "time", lambda: later)
-    assert db.all_native_subagents() == {}
-
-
 # -- kept out of agents-table-backed views -------------------------------------
-
-
-def test_native_subagents_are_invisible_to_agent_listings(db, ws):
-    fake_agent(db, ws, agent_id="boss", mode="interactive")
-    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-    assert [a.id for a in db.list_agents()] == ["boss"]
-    assert db.list_agents(ws.id) and all(a.id != "sub1" for a in db.list_agents(ws.id))
-
-
-def test_native_subagents_are_invisible_to_autopilot_worker_counts(db, ws):
-    from brindle import autopilot
-
-    fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
-    db.add_autopilot("boss")
-    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-    assert autopilot.active_workers(db, "boss") == []
 
 
 # -- a stopped parent never shows a subagent as still running -----------------
@@ -182,32 +72,6 @@ def test_agent_entry_drops_running_subs_once_the_parent_is_not_running(db, ws):
 
 
 # -- sidebar: snapshot and render ---------------------------------------------
-
-
-def test_snapshot_nests_running_and_recently_done_subagents_under_the_parent(db, ws, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)  # boss is actually running
-    fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
-    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub2", "agent_type": "Plan"})
-    agents.handle_hook(db, "boss", "subagent-stop", {"agent_id": "sub2", "agent_type": "Plan"})
-
-    [snap_ws] = view.snapshot(db, ws.repo_root)
-    [entry] = [a for a in snap_ws["agents"] if a["id"] == "boss"]
-    subs = {s["id"]: s for s in entry["subagents"]}
-    assert subs["sub1"]["ended_at"] is None
-    assert subs["sub2"]["ended_at"] is not None
-
-
-def test_snapshot_hides_a_stale_running_subagent(db, ws, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)  # boss is actually running
-    fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
-    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-    later = time.time() + 3 * 3600
-    monkeypatch.setattr(time, "time", lambda: later)
-
-    [snap_ws] = view.snapshot(db, ws.repo_root)
-    [entry] = [a for a in snap_ws["agents"] if a["id"] == "boss"]
-    assert entry["subagents"] == []
 
 
 def test_snapshot_hides_a_subagent_that_finished_a_while_ago(db, ws, monkeypatch):

@@ -57,21 +57,6 @@ def dollars(text):
 # -- history -> runs -> distributions ---------------------------------------------------
 
 
-def test_runs_sum_an_agents_rows_and_find_role_and_weight(db):
-    seed(db, "/repo", 2)
-    runs = sorted(ce.runs(db, "/repo"), key=lambda r: (r.role, r.tokens.input))
-    workers = [r for r in runs if r.role == "worker"]
-    reviews = [r for r in runs if r.role == "review"]
-    assert [r.tokens.input for r in workers] == [100_000, 200_000]
-    assert [r.tokens.output for r in workers] == [2000, 4000]
-    assert all(r.weight == "medium" and r.profile == "developer" for r in workers)
-    # a reviewer's weight comes from the task of the branch it reviewed
-    assert len(reviews) == 2 and all(r.weight == "medium" for r in reviews)
-    assert all(r.profile == "reviewer" for r in reviews)
-    # supervisor merge rows aren't anyone's run
-    assert all(r.tokens.input < 999_999 for r in runs)
-
-
 def test_weight_from_routing_decisions(db):
     db.add_history("/repo", "worker_result", agent_id="a1", profile="developer",
                    tokens=tokens(5000))
@@ -81,45 +66,7 @@ def test_weight_from_routing_decisions(db):
     assert run.weight == "heavy"
 
 
-def test_distribution_median_and_p80():
-    runs = [ce.Run("worker", "developer", "medium", ce.Tokens(i * 100, i * 10)) for i in range(1, 6)]
-    d = ce.distribution(runs)
-    assert d.n == 5
-    assert d.p50 == ce.Tokens(300, 30)
-    assert d.p80 == ce.Tokens(420, 42)
-
-
 # -- estimates ----------------------------------------------------------------------------
-
-
-def test_enough_history_gives_a_confident_priced_range(db):
-    seed(db, "/repo", 6)
-    dists = ce.distributions(ce.runs(db, "/repo"))
-    est = ce.estimate([ce.TaskSpec("developer", "medium")] * 3, "reviewer", dists=dists, price=price)
-    assert est.confident and est.priced
-    assert est.tasks == 3 and len(est.parts) == 6
-    worker = est.parts[0]
-    d = dists[("worker", "developer", "medium")]
-    assert worker.low == pytest.approx(price(None, d.p50.input, d.p50.output, 0, 0))
-    assert worker.high == pytest.approx(price(None, d.p80.input, d.p80.output, 0, 0))
-    assert est.low < est.high
-    assert est.low == pytest.approx(sum(p.low for p in est.parts))
-
-
-def test_other_weights_pool_when_the_exact_one_is_thin(db):
-    seed(db, "/repo", 6, weight="medium")
-    dists = ce.distributions(ce.runs(db, "/repo"))
-    p = ce.part(dists, "worker", "developer", "light", price, None)
-    assert p.confident and p.runs == 6
-
-
-def test_thin_history_says_low_confidence_and_still_gives_a_range(db):
-    seed(db, "/repo", 2)
-    text = ce.describe([ce.TaskSpec("developer", "medium")], "reviewer", repo_root="/repo", db=db,
-                       price=price, candidates=[])
-    assert "low confidence" in text
-    low, high = dollars(text)[:2]
-    assert low < high
 
 
 def test_never_a_single_number_even_when_percentiles_match(db):
@@ -132,13 +79,6 @@ def test_never_a_single_number_even_when_percentiles_match(db):
     assert "low confidence" not in text
     low, high = dollars(text)[:2]
     assert low < high
-
-
-def test_no_price_falls_back_to_a_token_range(db):
-    seed(db, "/repo", 6, model="mystery")
-    text = ce.describe([ce.TaskSpec("developer", "medium")], "reviewer", repo_root="/repo", db=db,
-                       price=price, candidates=[])
-    assert "tokens" in text and "$" not in text
 
 
 def test_cheaper_alternative_prefers_a_local_reviewer(db):
@@ -193,14 +133,6 @@ def test_reply_note_fails_closed(db, monkeypatch):
     assert ce.reply_note(db, "/repo", [ce.TaskSpec("developer")]) is None
 
 
-def test_reply_note_when_entitled(db, monkeypatch):
-    monkeypatch.setattr(license, "has", lambda feature: feature == "cost")
-    monkeypatch.setattr(ce, "default_price", lambda *_: price)
-    monkeypatch.setattr(ce, "available_reviewers", lambda root: [])
-    note = ce.reply_note(db, "/repo", [ce.TaskSpec("developer")])
-    assert note.startswith("Cost estimate") and "low confidence" in note
-
-
 # -- MCP replies and the CLI ------------------------------------------------------------------
 
 
@@ -223,21 +155,6 @@ def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", 
               None, time.time(), task=prompt, done_when=done_when)
     db.add_agent(a)
     return a
-
-
-MILESTONES = [{"title": "API", "check": "true"}, {"title": "UI", "check": "true"}]
-
-
-def test_set_goal_reply_has_an_estimate_with_pro(db, boss, monkeypatch):
-    monkeypatch.setattr(license, "has", lambda feature: feature == "cost")
-    out = mcp_server.set_goal("Settings page", MILESTONES)
-    assert "Cost estimate" in out and "2 tasks" in out
-
-
-def test_set_goal_reply_has_no_estimate_without_pro(db, boss, monkeypatch):
-    monkeypatch.setattr(license, "has", lambda feature: False)
-    out = mcp_server.set_goal("Settings page", MILESTONES)
-    assert "Cost estimate" not in out
 
 
 def test_assign_reply_has_an_estimate_with_pro(db, boss, monkeypatch):

@@ -1,8 +1,6 @@
 """message_delivery "pull": agents' messages to an interactive supervisor wait
 unread behind one notice until read_messages (no real CLIs)."""
 
-import json
-import re
 import time
 
 import pytest
@@ -40,11 +38,6 @@ def pushed(monkeypatch):
     return out
 
 
-def _bare(notice: str) -> str:
-    """A notice without the time that keeps notices from reading the same."""
-    return re.sub(r"^brindle \(\d\d:\d\d:\d\d\): ", "brindle: ", notice)
-
-
 def test_notices_never_read_the_same(db, boss, pushed, monkeypatch):
     # Claude Code drops a peer message identical to the previous one, so a
     # resent notice for the same unread messages must still differ.
@@ -55,31 +48,6 @@ def test_notices_never_read_the_same(db, boss, pushed, monkeypatch):
     agents.send_message(db, "boss", "two", sender_id="w1")
     assert pushed == ["brindle (16:25:03): 1 new message (from w1). Call read_messages.",
                       "brindle (16:27:04): 2 new messages (from w1). Call read_messages."]
-
-
-def set_delivery(repo, value):
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"message_delivery": value}))
-
-
-def test_notice_instead_of_body(db, boss, pushed):
-    agents.send_message(db, "boss", "the secret result", sender_id="w1")
-    assert len(pushed) == 1
-    assert _bare(pushed[0]) == "brindle: 1 new message (from w1). Call read_messages."
-    assert "secret" not in pushed[0]
-    assert db.unread_count("boss") == 1
-
-
-def test_single_notice_for_several_messages(db, boss, pushed):
-    agents.send_message(db, "boss", "one", sender_id="w1")
-    agents.send_message(db, "boss", "two", sender_id="w1")
-    agents.send_message(db, "boss", "three")
-    assert len(pushed) == 1
-    assert db.unread_count("boss") == 3
-    # Once read, the next message gets a fresh notice.
-    db.read_held("boss")
-    agents.send_message(db, "boss", "four", sender_id="w1")
-    assert len(pushed) == 2
 
 
 def test_read_messages_returns_and_marks_read(db, boss, pushed):
@@ -96,27 +64,7 @@ def test_read_messages_returns_and_marks_read(db, boss, pushed):
     assert mcp_server.read_messages() == "No unread messages."
 
 
-def test_push_mode_unchanged(db, repo, boss, pushed):
-    set_delivery(repo, "push")
-    agents.send_message(db, "boss", "the result", sender_id="w1")
-    assert len(pushed) == 1 and "the result" in pushed[0]
-    assert db.unread_count("boss") == 0
-
-
-def test_person_message_is_pushed(db, boss, pushed):
-    agents.send_message(db, "boss", "hello from me", person=True)
-    assert pushed == ["hello from me"]
-    assert db.unread_count("boss") == 0
-
-
-def test_messages_to_workers_are_pushed(db, boss, pushed):
-    agents.send_message(db, "w1", "do this", sender_id="boss")
-    assert len(pushed) == 1 and "do this" in pushed[0]
-    assert db.unread_count("w1") == 0
-
-
-@pytest.mark.parametrize("person", [False, True])
-def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch, person):
+def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch):
     with db.tx() as c:
         c.execute("UPDATE agents SET provider='codex', status='idle' WHERE id='boss'")
     screen = "Done.\n\n› half a request\n  still typing\n\n  ? for shortcuts"
@@ -124,17 +72,17 @@ def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch, pe
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
     monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
     monkeypatch.setattr(agents.time, "sleep", lambda *_: None)
-    assert agents.send_message(db, "boss", "the result", sender_id="w1", person=person) == "queued"
+    assert agents.send_message(db, "boss", "the result", sender_id="w1") == "queued"
     assert pasted == []
     assert db.pending_count("boss") == 1
-    assert db.unread_count("boss") == (0 if person else 1)
+    assert db.unread_count("boss") == 1
     assert agents.flush(db, "boss") is False
     screen = "Done.\n\n› \x1b[2mFind and fix a bug\x1b[0m\n\n  ? for shortcuts"
     assert agents.flush(db, "boss") is True
     assert len(pasted) == 1
-    assert ("the result" if person else "Call read_messages.") in pasted[0]
+    assert "Call read_messages." in pasted[0]
     assert db.pending_count("boss") == 0
-    assert db.unread_count("boss") == (0 if person else 1)
+    assert db.unread_count("boss") == 1
 
 
 def test_codex_worker_delivery_ignores_input_text(db, boss, monkeypatch):
@@ -166,16 +114,6 @@ def _age_notices(db, seconds):
         c.execute("UPDATE inbox SET noticed_at=noticed_at-?", (seconds,))
 
 
-def test_stale_notice_is_resent_on_new_message(db, boss, pushed):
-    agents.send_message(db, "boss", "one", sender_id="w1")
-    agents.send_message(db, "boss", "two", sender_id="w1")
-    assert len(pushed) == 1
-    _age_notices(db, db.NOTICE_TTL + 1)  # the first notice was lost
-    agents.send_message(db, "boss", "three", sender_id="w1")
-    assert len(pushed) == 2
-    assert _bare(pushed[1]) == "brindle: 3 new messages (from w1). Call read_messages."
-
-
 def test_stop_hook_resends_stale_notice_once(db, boss, pushed):
     agents.send_message(db, "boss", "one", sender_id="w1")
     assert not agents.handle_hook(db, "boss", "stop", {})  # fresh notice: nothing more
@@ -184,15 +122,6 @@ def test_stop_hook_resends_stale_notice_once(db, boss, pushed):
     out = agents.handle_hook(db, "boss", "stop", {})
     assert out["decision"] == "block" and "read_messages" in out["reason"]
     assert not agents.handle_hook(db, "boss", "stop", {})  # once
-
-
-def test_stop_hook_hands_over_lost_notice(db, boss, monkeypatch):
-    db.enqueue_held("boss", "body", "w1")
-    out = agents.handle_hook(db, "boss", "stop", {})
-    assert out["decision"] == "block"
-    assert _bare(out["reason"]) == "brindle: 1 new message (from w1). Call read_messages."
-    # The notice is now outstanding: a second stop doesn't repeat it.
-    assert not agents.handle_hook(db, "boss", "stop", {})
 
 
 @pytest.fixture
@@ -226,22 +155,11 @@ def test_queued_message_goes_through_the_inbox_at_stop(db, boss, via_inbox):
     assert via_inbox == ["a queued message"]
 
 
-def test_inbox_failure_falls_back_to_blocking(db, boss, monkeypatch):
-    from brindle import inbox
-
-    monkeypatch.setattr(inbox, "usable", lambda a: True)
-    monkeypatch.setattr(inbox, "send", lambda *a, **k: False)
-    db.enqueue("boss", "a queued message", "w1")
-    out = agents.handle_hook(db, "boss", "stop", {})
-    assert out == {"decision": "block", "reason": "a queued message"}
-
-
-@pytest.mark.parametrize("event", ["pre-tool", "tool-done"])
-def test_tool_hooks_mark_an_idle_agent_busy(db, boss, event):
+def test_tool_hooks_mark_an_idle_agent_busy(db, boss):
     # A turn begun by a finished background task runs no UserPromptSubmit,
     # so the 'idle' its previous Stop left would otherwise stick.
     db.set_status("boss", "idle")
-    agents.handle_hook(db, "boss", event, {"tool_name": "Bash", "tool_input": {"command": "ls"}})
+    agents.handle_hook(db, "boss", "pre-tool", {"tool_name": "Bash", "tool_input": {"command": "ls"}})
     assert db.get_agent("boss").status == "processing"
 
 

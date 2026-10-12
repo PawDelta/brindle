@@ -7,7 +7,10 @@ agents. Only the CLIs' status output is read (``claude auth status``,
 ``aws sts get-caller-identity``, ``gcloud config get-value project``,
 ``az account show``, ``codex login status``), never a token. A CLI that is
 missing, times out or answers nothing leaves the identity *undetermined*: that
-is a warning, never a block.
+is a warning, never a block. A route that leaves the cloud sign-in to the
+person (Bedrock without the SSO group, Foundry without a subscription) is
+only checked to be signed in: no account is matched, and that cloud's env-var
+family stays in the pane (``own_signin``).
 
 Commands are argv lists with a timeout, through ``company_login.run_cmd`` and
 ``company_login.which`` (which tests replace); each answer is kept briefly so
@@ -86,15 +89,28 @@ KNOWN_PICKERS = frozenset({
     "AZURE_CONFIG_DIR"})
 
 
-def enforced_deny(route: dict[str, str], *names) -> list[str]:
+def enforced_deny(route: dict[str, str], *names, own: tuple[str, ...] = ()) -> list[str]:
     """The names a Claude pane starts without under an enforced company
     identity: every known account picker, plus every picker among ``names``
     (what the pane would inherit from this process and the tmux server, and
-    the keys stored for it), less what the checked ``route`` sets."""
+    the keys stored for it), less what the checked ``route`` sets and the
+    families (``own``, see :func:`own_signin`) the route leaves to the person."""
     out = set(KNOWN_PICKERS)
     for group in names:
         out |= {n for n in group if picks_account(n)}
-    return sorted(out - set(route))
+    return sorted(n for n in out - set(route) if not (own and n.upper().startswith(own)))
+
+
+def own_signin(claude) -> tuple[str, ...]:
+    """The env-var families a pane keeps under enforcement because the
+    route leaves that cloud's sign-in to the person: Bedrock without the SSO
+    group (``AWS_``), Foundry without a subscription (``AZURE_``). What
+    brindle's own probe saw is what the pane gets."""
+    if claude.route == "bedrock" and not claude.aws.sso:
+        return ("AWS_",)
+    if claude.route == "foundry" and not claude.azure.subscription_id:
+        return ("AZURE_",)
+    return ()
 
 _cache: dict[tuple[str, ...], tuple[float, tuple[int, str]]] = {}
 
@@ -176,11 +192,12 @@ def _launch_key(org_id: str, claude) -> str | None:
     probe, and the Claude login (subscription, console) is probed on every
     launch because a switched login must never be missed."""
     if claude.route == "bedrock":
-        base = f"claude|bedrock|{company_login.profile_name(org_id)}"
+        base = f"claude|bedrock|{company_login.profile_name(org_id) if claude.aws.sso else 'own'}"
     elif claude.route == "vertex":
         base = f"claude|vertex|{claude.gcp.project}"
     elif claude.route == "foundry":
-        base = f"claude|foundry|{claude.azure.subscription_id.lower()}"
+        z = claude.azure
+        base = f"claude|foundry|{(z.subscription_id or z.base_url or z.resource).lower()}"
     else:
         return None
     return f"{base}|{_fingerprint(claude.route)}"
@@ -321,21 +338,31 @@ def _claude_login_cmd(route) -> str:
 
 
 def _aws(org_id: str, claude, cache) -> Identity:
-    profile = company_login.profile_name(org_id)
-    got = _probe(["aws", "sts", "get-caller-identity", "--profile", profile, "--output", "json"], cache)
+    """Bedrock: the SSO profile brindle wrote, or, when the policy names no
+    SSO group, the machine's own AWS sign-in: then only that STS answers is
+    checked, no account is matched."""
+    own = not claude.aws.sso
+    if own:
+        argv = ["aws", "sts", "get-caller-identity", "--region", claude.aws.region, "--output", "json"]
+        who, fix = "AWS", "sign in to AWS the way you usually do (`aws sso login`, `aws configure`, ...)"
+    else:
+        profile = company_login.profile_name(org_id)
+        argv = ["aws", "sts", "get-caller-identity", "--profile", profile, "--output", "json"]
+        who, fix = f"AWS profile {profile}", f"{FIX} or run `aws sso login --profile {profile}`"
+    got = _probe(argv, cache)
     if got is None:
         return _unknown("claude", "aws")
-    fix = f"{FIX} or run `aws sso login --profile {profile}`"
     ident = _json(got[1]) if got[0] == 0 else None
     if ident is None:
-        return Identity("claude", f"AWS profile {profile}: not signed in", signed_out=True,
-                        problem=f"AWS profile {profile} isn't signed in; {fix}")
+        return Identity("claude", f"{who}: not signed in", signed_out=True,
+                        problem=f"{who} isn't signed in; {fix}")
     account, arn = str(ident.get("Account", "")), str(ident.get("Arn", ""))
     parts = arn.split("/")
     role = parts[1] if len(parts) > 1 else "unknown"
-    line = f"AWS account {account}, role {role}, region {claude.aws.region}"
+    line = f"AWS account {account}, role {role}, region {claude.aws.region}" + (
+        " (your own AWS sign-in)" if own else "")
     problem = None
-    if account != claude.aws.account_id:
+    if not own and account != claude.aws.account_id:
         problem = f"AWS account is {account}, not the policy's {claude.aws.account_id}; {fix}"
     return Identity("claude", line, problem, billed=f"Bedrock: AWS account {account[:4]}…",
                     ident=f"AWS account {account}, role {role}")
@@ -361,14 +388,14 @@ def _az(claude, cache) -> Identity:
     got = _probe(["az", "account", "show", "--output", "json"], cache)
     if got is None:
         return _unknown("claude", "az")
-    want = claude.azure.subscription_id
-    fix = f"{FIX} or run `az login` and `az account set --subscription {want}`"
+    want = claude.azure.subscription_id      # None: only that az is signed in is checked
+    fix = f"{FIX} or run `az login`" + (f" and `az account set --subscription {want}`" if want else "")
     acct = _json(got[1]) if got[0] == 0 else None
     if acct is None:
         return Identity("claude", "Azure: not signed in", signed_out=True, problem=f"Azure isn't signed in; {fix}")
     sub = str(acct.get("id", ""))
     line = f"Azure subscription {acct.get('name') or sub} ({sub})"
-    problem = None if sub.lower() == want.lower() else \
+    problem = None if want is None or sub.lower() == want.lower() else \
         f"Azure subscription is {sub}, not the policy's {want}; {fix}"
     return Identity("claude", line, problem, billed=f"Foundry: Azure subscription {acct.get('name') or sub}",
                     ident=f"Azure subscription {sub}")
@@ -408,11 +435,12 @@ def expected_ident(claude) -> str | None:
     if claude.route == "gateway":
         return f"gateway:{claude.gateway.base_url}" if claude.gateway else None
     if claude.route == "bedrock" and claude.aws:
-        return f"AWS account {claude.aws.account_id}, role {claude.aws.role_name}"
+        # Without the SSO group the policy names no account: nothing to match.
+        return f"AWS account {claude.aws.account_id}, role {claude.aws.role_name}" if claude.aws.sso else None
     if claude.route == "vertex" and claude.gcp:
         return f"GCP project {claude.gcp.project}"
     if claude.route == "foundry" and claude.azure:
-        return f"Azure subscription {claude.azure.subscription_id}"
+        return f"Azure subscription {claude.azure.subscription_id}" if claude.azure.subscription_id else None
     if claude.org_id:
         return f"org:{claude.org_id}"
     return None
@@ -436,17 +464,24 @@ def _org_of(ident: str) -> str | None:
     return (m.group(1) or m.group(2)) if m else None
 
 
-def enforced_route_env() -> dict[str, str] | None:
-    """The Claude Code variables of the org's route when its policy enforces
-    the company identity (Enterprise), the ones ``launch_problem`` checks;
-    None when it doesn't enforce or can't be read (as the launch check)."""
+def enforced_route() -> tuple[dict[str, str], tuple[str, ...]] | None:
+    """(the Claude Code variables of the org's route, the env-var families it
+    leaves to the person) when its policy enforces the company identity
+    (Enterprise), the route ``launch_problem`` checks; None when it doesn't
+    enforce or can't be read (as the launch check)."""
     try:
         got = _setup()
         if got is None or not got[1].enforce or got[1].claude is None:
             return None
-        return company_login.claude_env(got[0], got[1].claude)
+        return company_login.claude_env(got[0], got[1].claude), own_signin(got[1].claude)
     except Exception:  # noqa: BLE001 - as launch_problem: unreadable never blocks
         return None
+
+
+def enforced_route_env() -> dict[str, str] | None:
+    """The variables of :func:`enforced_route`, or None."""
+    got = enforced_route()
+    return got[0] if got else None
 
 
 def _local_setup():

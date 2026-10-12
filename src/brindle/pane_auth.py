@@ -36,9 +36,9 @@ def deny_names(provider: str, auth: str, m, org_managed: bool = False) -> tuple[
         # An enforced company identity: nothing but the checked route picks the account.
         from brindle import company_identity
 
-        route = company_identity.enforced_route_env()
-        if route is not None:
-            extra += tuple(company_identity.enforced_deny(route, os.environ))
+        got = company_identity.enforced_route()
+        if got is not None:
+            extra += tuple(company_identity.enforced_deny(got[0], os.environ, own=got[1]))
     return tuple(deny + [n for n in dict.fromkeys(extra) if n not in deny])
 
 
