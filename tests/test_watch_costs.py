@@ -290,9 +290,7 @@ def test_provider_capacity_in_sidebar():
 def test_provider_capacity_collapsed_title():
     lines = section(Local(providers=[("claude", 85), ("codex", 100)]), collapsed=True)
     assert lines[0].text == "▸ Costs (claude 85%)"
-
-
-def test_collapsed_title_names_the_tightest_provider():
+    # the provider with the least headroom, not the first by name
     local_ = Local(providers=[("claude", 100), ("codex", 97), ("native", 0)])
     assert watch_costs.title(True, 40, local_) == "▸ Costs (native 0%)"
 
