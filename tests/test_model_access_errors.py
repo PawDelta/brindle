@@ -10,6 +10,7 @@ import pytest
 
 from brindle import agents, autopilot, ci_adapters, ci_client, cull, model_access, quota, tmux, workspaces
 from brindle.ci_adapters import ClaudeAdapter
+from brindle.config import load_repo_config
 from brindle.db import Agent, Task
 
 from test_ci_adapters import PROMPT, _launch_showing
@@ -68,16 +69,16 @@ def test_a_refused_profile_is_skipped_for_the_next_in_its_tier(db, repo, monkeyp
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
     monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
     why = []
-    assert autopilot.choose_profile(db, "boss", str(repo), weight="heavy", why=why)[0] == "developer"
-    swap = model_access.swap({"heavy": ["developer", "developer-heavy"]}, "heavy", "developer", ERRORS[3][0])
-    assert swap[0].key == "vertex_quota" and swap[1] == "developer-heavy"
+    assert autopilot.choose_profile(db, "boss", str(repo), weight="heavy", why=why)[0] == "developer-heavy"
+    swap = model_access.swap(load_repo_config(repo).routing, "heavy", "developer-heavy", ERRORS[3][0])
+    assert swap[0].key == "vertex_quota" and swap[1] == "developer-gemini"
     why = []
     name, _ = autopilot.choose_profile(db, "boss", str(repo), weight="heavy", why=why)
-    assert name == "developer-heavy"
-    assert "model refused for this account" in why[0] and "skipped developer" in why[0]
+    assert name == "developer-gemini"
+    assert "model refused for this account" in why[0] and "skipped developer-heavy" in why[0]
     # and the swap is in the run notes, with its fix
     note = model_access.notes()[0]
-    assert "developer" in note and "tasks moved to developer-heavy" in note and "Fix:" in note
+    assert "developer-heavy" in note and "tasks moved to developer-gemini" in note and "Fix:" in note
 
 
 def test_the_refusal_lapses_after_an_hour(monkeypatch):
@@ -185,10 +186,10 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "idle", "@1", None, time.time()))
-    db.add_agent(Agent("w2", ws.id, "developer-heavy", "claude", "boss", "assign", "idle", "@2", None,
+    db.add_agent(Agent("w1", ws.id, "developer-heavy", "claude", "boss", "assign", "idle", "@1", None, time.time()))
+    db.add_agent(Agent("w2", ws.id, "developer", "claude", "boss", "assign", "idle", "@2", None,
                        time.time()))
-    db.add_task(Task("t1", str(repo), "w1", "boss", ws.id, "developer", "do it", "assign", 1, None, None,
+    db.add_task(Task("t1", str(repo), "w1", "boss", ws.id, "developer-heavy", "do it", "assign", 1, None, None,
                      None, None, "started", time.time(), weight="heavy"))
     screens = {"@1": screen(ERRORS[2][0]),
                "@2": "⚠ Opus 5.5 not available — using Opus 4.6 for this session\n" + PROMPT}
@@ -202,9 +203,9 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     assert len(done) == 2
     refused_msg = next(b for _t, b in sent if "w1" in b)
     assert "can't call its model" in refused_msg and "use the `us.`" in refused_msg
-    assert "developer-heavy" in refused_msg    # the next profile in its tier
+    assert "developer-gemini" in refused_msg    # the next profile in its tier
     assert "fell back to Opus 4.6" in next(b for _t, b in sent if "w2" in b)
-    assert model_access.refused("developer").key == "bedrock_endpoint"
+    assert model_access.refused("developer-heavy").key == "bedrock_endpoint"
     sent.clear()
     assert cull.note_model_refused(db, time.time(), {}) == [] and sent == []   # told once
 

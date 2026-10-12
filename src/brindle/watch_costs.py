@@ -40,6 +40,34 @@ class Local:
     month: float = 0.0            # dollars this month, for the budget line
     models: list[tuple[str, int]] = field(default_factory=list)   # (model label, tokens) this month
     workers: dict[str, float | str] = field(default_factory=dict)   # agent id -> dollars ("Free" if free)
+    providers: list[tuple[str, int]] = field(default_factory=list) # (provider name, capacity pct) this month
+
+
+def provider_label(p, db: DB | None = None, repo_root: str | None = None) -> str:
+    """Provider name for a history row: claude, codex, antigravity, etc."""
+    if db and getattr(p, "row", None) and getattr(p.row, "agent_id", None):
+        try:
+            a = db.get_agent(p.row.agent_id)
+            if a and a.provider:
+                return a.provider
+        except Exception:
+            pass
+    if getattr(p, "row", None) and getattr(p.row, "profile", None):
+        try:
+            from brindle.profiles import load_profile
+            prof = load_profile(p.row.profile, repo_root)
+            if prof and prof.provider:
+                return prof.provider
+        except Exception:
+            pass
+    model = (getattr(p, "model", None) or "").lower()
+    if "claude" in model:
+        return "claude"
+    if "gpt" in model or "codex" in model or model.startswith("o1") or model.startswith("o3"):
+        return "codex"
+    if "gemini" in model or "antigravity" in model:
+        return "antigravity"
+    return "other"
 
 
 @dataclass
@@ -62,18 +90,54 @@ class Remote:
 
 def local(db: DB, repo_root: str | None, snap: list[dict], now: float | None = None) -> Local:
     """This month's tokens per model and dollars, and dollars per running
-    worker. Never raises: a figure that can't be had is left out."""
+    worker, and provider capacity percentages. Never raises: a figure that
+    can't be had is left out."""
     from brindle import cost
 
     now = time.time() if now is None else now
     out = Local()
     try:
+        from brindle import quota
+        from brindle.config import load_repo_config
+
+        cfg = None
+        if repo_root:
+            try:
+                cfg = load_repo_config(repo_root)
+            except Exception:
+                pass
+
+        providers_seen: set[str] = set()
         tokens: dict[str, int] = {}
         for p in cost.priced_rows(db, repo_root, budget._month_start(now)):
             out.month += p.dollars or 0.0
             label = cost.model_label(p)
             tokens[label] = tokens.get(label, 0) + p.tokens
+            prov = provider_label(p, db, repo_root)
+            if prov and prov != "other":
+                providers_seen.add(prov)
         out.models = sorted(tokens.items(), key=lambda m: (-m[1], m[0]))
+
+        if repo_root:
+            for ws in snap:
+                for a in ws.get("agents", []):
+                    if a.get("provider"):
+                        providers_seen.add(a["provider"])
+
+        # Include providers that have recorded quota data
+        for prov_name in quota.PROVIDERS:
+            if quota.get(prov_name) is not None:
+                providers_seen.add(prov_name)
+
+        if not providers_seen:
+            providers_seen = {"claude"}
+
+        provider_list = []
+        for prov in sorted(providers_seen):
+            cap = int(round(quota.headroom(prov, cfg, repo_root)))
+            provider_list.append((prov, cap))
+
+        out.providers = provider_list
     except Exception:  # noqa: BLE001 - the dashboard outlives a bad history row
         log.exception("brindle watch: couldn't total the spend")
     if repo_root:
@@ -261,33 +325,46 @@ def short(label: str) -> str:
 
 def share_rows(models: list[tuple[str, int]], width: int) -> list[str]:
     rows = [(short(n), p) for n, p in shares(models)]
-    name_w = min(max((len(n) for n, _ in rows), default=0), max(width - BAR_WIDTH - 6, 4))
+    name_w = min(max((len(n) for n, _ in rows), default=0), max(width - 6, 4))
     out = []
     for name, p in rows:
-        room = width - name_w - 6
-        b = bar(p, 100, min(BAR_WIDTH, room)) + " " if room >= 3 else ""
-        out.append(f"{name[:name_w]:<{name_w}} {b}{p}%")
+        out.append(f"{name[:name_w]:<{name_w}} {p}%")
+    return out
+
+
+def provider_rows(providers: list[tuple[str, int]], width: int) -> list[str]:
+    """A row per provider showing its capacity percent: 'claude  85%'."""
+    name_w = min(max((len(n) for n, _ in providers), default=0), max(width - 6, 4))
+    out = []
+    for name, p in providers:
+        out.append(f"{name[:name_w]:<{name_w}} {p}%")
     return out
 
 
 def title(collapsed: bool, width: int, local_: Local | None) -> str:
     arrow = "▸ " if collapsed else "▾ "
-    top = shares(local_.models)[:1] if collapsed and local_ else []
+    top = (local_.providers[:1] if (local_ and local_.providers)
+           else (shares(local_.models)[:1] if local_ else []))
     tail = f" ({short(top[0][0])} {top[0][1]}%)" if top else ""
     if len(arrow) + len("Costs") + len(tail) > width:
-        tail = ""    # the title stays whole; the top model shows when unfolded
+        tail = ""    # the title stays whole; the top model/provider shows when unfolded
     return arrow + "Costs"[:max(width - len(arrow) - len(tail), 1)] + tail
 
 
 def render(local_: Local, remote: Remote | None, now: float, width: int,
            collapsed: bool) -> list:
-    """The section: a header and, unless folded, a row per model and the budget line."""
+    """The section: a header and, unless folded, a row per provider capacity % and the budget line."""
     from brindle.watch import Line, fit
 
     lines = [Line(fit(title(collapsed, width, local_), width), "bold", group=GROUP)]
     if collapsed:
         return lines
-    body = [(t, "normal") for t in share_rows(local_.models, width - 2)]
+    if local_.providers:
+        body = [(t, "normal") for t in provider_rows(local_.providers, width - 2)]
+    elif local_.models:
+        body = [(t, "normal") for t in share_rows(local_.models, width - 2)]
+    else:
+        body = []
     if not body:
         body.append(("no usage this month", "dim"))
     lim = remote.limits if remote else None

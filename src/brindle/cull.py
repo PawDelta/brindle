@@ -143,6 +143,17 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     done.extend(signin_pause.sweep(db, now))
 
+    # 1g. Periodic cost events (Team org_budgets): report delta spend for supervisor and workers.
+    from brindle import events
+
+    roots = {ws.repo_root for ws in db.find_workspaces() if ws.repo_root}
+    for r in roots:
+        try:
+            cfg = load_repo_config(r)
+            done.extend(events.emit_periodic_cost(cfg, r))
+        except Exception:
+            pass
+
     # 2. Workers nobody needs any more.
     limits: dict[str, float] = {}
     for a in db.list_agents():

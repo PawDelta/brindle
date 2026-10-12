@@ -2052,6 +2052,24 @@ def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig)
             f"reviewer profile {profile!r} can't run: {why}. "
             "Fix that, or set review_profile (or pass profile) to a different reviewer"
         )
+    try:
+        from brindle import policy as pol
+        d = pol.check_assign(cfg, ws.repo_root, profile, "code review", "review")
+        if not d.allowed:
+            for fallback in (cfg.reviewer, "reviewer", "reviewer-gemini", "reviewer-local"):
+                if fallback != profile:
+                    try:
+                        load_profile(fallback, ws.repo_root)
+                        fb_d = pol.check_assign(cfg, ws.repo_root, fallback, "code review", "review")
+                        if fb_d.allowed:
+                            return fallback
+                    except Exception:
+                        continue
+            raise AgentError(f"reviewer profile {profile!r} refused by policy: {d.reason}")
+    except AgentError:
+        raise
+    except Exception:
+        pass
     return profile
 
 

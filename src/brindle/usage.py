@@ -188,6 +188,12 @@ def agent_usage(db: DB, agent) -> Usage | None:
         except Exception:  # noqa: BLE001 - usage is an extra: unknown rather than a failure
             log.warning("brindle: couldn't read Codex usage for %s", agent.id, exc_info=True)
             return None
+    if agent.provider == "antigravity":
+        try:
+            return antigravity_agent_usage(db, agent)
+        except Exception:
+            log.warning("brindle: couldn't read Antigravity usage for %s", agent.id, exc_info=True)
+            return None
     if not agent.transcript_path:
         return None
     return transcript_usage(db, agent.transcript_path)
@@ -345,6 +351,62 @@ def usage_cost(u: Usage | None, extra=None, fallback=None) -> float | None:
     if price is None:
         return None
     return price.cost(u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens)
+
+
+def antigravity_agent_usage(db: DB, agent) -> Usage | None:
+    path = None
+    if getattr(agent, "transcript_path", None):
+        path = Path(agent.transcript_path)
+    if path is None or not path.is_file():
+        brain = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+        if getattr(agent, "session_ref", None):
+            candidate = brain / agent.session_ref / ".system_generated" / "logs" / "transcript.jsonl"
+            if candidate.is_file():
+                path = candidate
+        if (path is None or not path.is_file()) and brain.is_dir():
+            matches = list(brain.glob("*/.system_generated/logs/transcript.jsonl"))
+            if matches:
+                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                path = matches[0]
+    if path is None or not path.is_file():
+        return None
+
+    st = path.stat()
+    cached = db.get_usage_cache(str(path))
+    offset = 0
+    inp, out, read, write = 0, 0, 0, 0
+    model = "gemini-2.5-pro"
+    if cached and getattr(cached, "inode", None) == st.st_ino and cached["size"] <= st.st_size:
+        offset = cached["size"]
+        inp = cached["input_tokens"]
+        out = cached["output_tokens"]
+        read = cached["cache_read_tokens"]
+        write = cached["cache_write_tokens"]
+        if cached["model"]:
+            model = cached["model"]
+
+    if offset < st.st_size:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            f.seek(offset)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if ev.get("type") == "PLANNER_RESPONSE":
+                    inp += ev.get("input_tokens", 0)
+                    out += ev.get("output_tokens", 0)
+                    read += ev.get("cache_read_tokens", 0)
+                    if ev.get("model"):
+                        model = ev["model"]
+            db.set_usage_cache(str(path), st.st_size, inp, out, read, write, model, inode=st.st_ino)
+
+    if inp == 0 and out == 0:
+        return None
+    return Usage(inp, out, read, write, model)
 
 
 def format_tokens(n: int) -> str:

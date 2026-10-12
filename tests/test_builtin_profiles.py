@@ -7,14 +7,18 @@ from brindle.profiles import load_profile
 
 def test_developer_variants_extend_developer():
     base = load_profile("developer")
-    for name in ("developer-heavy", "developer-codex"):
+    for name in ("developer-heavy", "developer-codex", "developer-fable", "developer-gemini"):
         p = load_profile(name)
         assert p.extends == "developer"
         assert p.prompt == base.prompt
         assert p.allowed_tools == base.allowed_tools
     assert load_profile("developer-codex").provider == "codex"
+    gem = load_profile("developer-gemini")
+    assert (gem.provider, gem.effort) == ("antigravity", "high")
     heavy = load_profile("developer-heavy")
-    assert (heavy.provider, heavy.model, heavy.effort) == ("claude", "claude-fable-5-1", "high")
+    assert (heavy.provider, heavy.model, heavy.effort) == ("claude", "opus", "high")
+    fable = load_profile("developer-fable")
+    assert (fable.provider, fable.model, fable.effort) == ("claude", "fable", "high")
 
 
 def test_developer_preapproves_lint_and_type_checks():

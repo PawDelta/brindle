@@ -51,12 +51,15 @@ def test_builtin_profiles_keep_their_defaults():
             assert not p.strict_mcp and not p.headless
             assert p.setting_sources is None and p.add_dirs is None
             if p.name == "developer-heavy":
-                assert p.model == "claude-fable-5-1" and p.effort == "high"
+                assert p.model == "opus" and p.effort == "high"
+            elif p.name == "developer-fable":
+                assert p.model == "fable" and p.effort == "high"
             elif p.name == "developer-light":
                 assert p.model == "haiku" and p.effort == "low"
             else:
                 assert p.effort is None
     assert load_profile("developer").permission_mode == "auto"
+    assert load_profile("developer-gemini").effort == "high"
 
 
 def test_repo_add_dirs_apply_to_every_profile_and_a_profile_adds_to_them(tmp_path, capsys):

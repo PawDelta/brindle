@@ -374,6 +374,11 @@ CREATE TABLE IF NOT EXISTS launch_health (
     baseline TEXT NOT NULL DEFAULT '',
     outcome TEXT
 );
+CREATE TABLE IF NOT EXISTS agent_reported_spend (
+    agent_id TEXT PRIMARY KEY,
+    reported_usd REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -1677,3 +1682,15 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             c.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), task_id))
+
+    def get_reported_spend(self, agent_id: str) -> float:
+        row = self.conn.execute("SELECT reported_usd FROM agent_reported_spend WHERE agent_id=?", (agent_id,)).fetchone()
+        return float(row[0]) if row else 0.0
+
+    def set_reported_spend(self, agent_id: str, reported_usd: float) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO agent_reported_spend (agent_id, reported_usd, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(agent_id) DO UPDATE SET reported_usd=excluded.reported_usd, updated_at=excluded.updated_at",
+                (agent_id, reported_usd, time.time())
+            )

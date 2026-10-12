@@ -127,7 +127,21 @@ def _profile_fields(profile: str | None, repo_root: str) -> tuple[str | None, st
         from brindle.profiles import load_profile
 
         p = load_profile(profile, repo_root)
-        return p.provider, p.model
+        model = p.model
+        if not model:
+            try:
+                from brindle.autopilot import effective_profile_model
+                model = effective_profile_model(p, repo_root) or None
+            except Exception:
+                pass
+        if not model:
+            if p.provider == "codex":
+                model = "gpt-5.3-codex"
+            elif p.provider == "antigravity":
+                model = "gemini-2.5-pro"
+            elif p.provider == "claude":
+                model = "claude-sonnet-4-6"
+        return p.provider, model
     except Exception:
         return None, None
 
