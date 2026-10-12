@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import threading
 import time
 
 import pytest
@@ -273,9 +274,12 @@ def test_full_queue_spills_to_the_spool(team, monkeypatch):
     assert len(Spool().entries()) == 5
 
 
-def test_background_sender_delivers(team):
+def test_background_sender_delivers(team, monkeypatch):
+    # The send is held until flush is polling, so flush's wait loop always runs.
+    polling = threading.Event()
     send = team.routes[f"POST /orgs/{ORG}/events"]
-    team.routes[f"POST /orgs/{ORG}/events"] = lambda f, h: (time.sleep(0.05), send(f, h))[1]  # flush waits
+    team.routes[f"POST /orgs/{ORG}/events"] = lambda f, h: (polling.wait(5), send(f, h))[1]
+    monkeypatch.setattr(team_events.time, "sleep", lambda _: polling.set())
     p = events_plugin(team, start_thread=True)
     p.emit(ev())
     assert p.flush(5)

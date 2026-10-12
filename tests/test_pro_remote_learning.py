@@ -1,6 +1,7 @@
 """The cloud learner: what it sends, what it never sends, and how it falls
 back (to no suggestion: the learner only ever runs on the server)."""
 import json
+import threading
 import time
 
 import pytest
@@ -131,9 +132,12 @@ def test_unsafe_profile_names_are_never_sent(parts, remote):
     assert remote.suggests == []
 
 
-def test_records_are_sent_by_the_background_thread(parts, remote):
+def test_records_are_sent_by_the_background_thread(parts, remote, monkeypatch):
+    # The send is held until flush is polling, so flush's wait loop always runs.
+    polling = threading.Event()
     send = remote.routes["POST /learning/record"]
-    remote.routes["POST /learning/record"] = lambda f, h: (time.sleep(0.05), send(f, h))[1]   # flush waits
+    remote.routes["POST /learning/record"] = lambda f, h: (polling.wait(5), send(f, h))[1]
+    monkeypatch.setattr(cloud.time, "sleep", lambda _: polling.set())
     lr = make(parts, remote, start_thread=True)
     lr.record(task(), Outcome("merged"))
     assert lr.flush(5)
