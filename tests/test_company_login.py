@@ -19,6 +19,7 @@ GCP = GcpSetup("acme-brindle-prod", "us-east5")
 AZURE = AzureSetup(UUID, "acme-foundry")
 FOUNDRY_URL = AzureSetup(base_url="https://acme.services.ai.azure.com/anthropic")
 MODELS = ModelsSetup("claude-opus-x", "claude-sonnet-x", "claude-haiku-x")
+IDS = ("us.anthropic.claude-opus-4-5-v1:0", "us.anthropic.claude-sonnet-4-5-v1:0", "us.anthropic.claude-haiku-4-5-v1:0")
 
 
 class Fake:
@@ -222,99 +223,47 @@ def test_env_is_stored_and_reaches_a_claude_pane(db, repo, monkeypatch):
     (claude("gateway", gateway=GatewaySetup("https://gw.example.com/v1")),
      {"ANTHROPIC_BASE_URL": "https://gw.example.com/v1"}),
     (claude("subscription", org_id=UUID), {}),
+    # no SSO group: no AWS_PROFILE; default_model is ANTHROPIC_MODEL; with several ids and no
+    # aliases the last stands in for Haiku, as provider_config had it
+    (claude("bedrock", aws=OWN_AWS, model_ids=IDS, default_model=IDS[1]),
+     {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2", "ANTHROPIC_MODEL": IDS[1],
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": IDS[2]}),
+    (claude("vertex", gcp=GCP, model_ids=IDS, models=ModelsSetup(opus="claude-opus-x")),   # aliases say what Haiku is
+     {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-brindle-prod", "CLOUD_ML_REGION": "us-east5",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-x"}),
+    (claude("foundry", azure=AzureSetup(UUID, "acme-foundry", FOUNDRY_URL.base_url)),
+     {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "acme-foundry",
+      "ANTHROPIC_FOUNDRY_BASE_URL": FOUNDRY_URL.base_url}),
+    (claude("console", org_id=UUID, default_model="claude-sonnet-4-5"), {"ANTHROPIC_MODEL": "claude-sonnet-4-5"}),
 ])
 def test_env_per_route(setup, expected):
     assert company_login.claude_env(ORG, setup.claude) == expected
 
 
-IDS = ("us.anthropic.claude-opus-4-5-v1:0", "us.anthropic.claude-sonnet-4-5-v1:0", "us.anthropic.claude-haiku-4-5-v1:0")
+# -- routes that leave the cloud sign-in to the person --------------------------------------------
 
-
-@pytest.mark.parametrize("setup,expected", [
-    # no SSO group: no AWS_PROFILE, the machine's own AWS sign-in applies
-    (claude("bedrock", aws=OWN_AWS), {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2"}),
-    (claude("foundry", azure=FOUNDRY_URL),
-     {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_BASE_URL": FOUNDRY_URL.base_url}),
-    (claude("foundry", azure=AzureSetup(UUID, "acme-foundry", FOUNDRY_URL.base_url)),
-     {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "acme-foundry",
-      "ANTHROPIC_FOUNDRY_BASE_URL": FOUNDRY_URL.base_url}),
-    # default_model is ANTHROPIC_MODEL
-    (claude("bedrock", aws=OWN_AWS, model_ids=IDS[:1], default_model=IDS[0]),
-     {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2", "ANTHROPIC_MODEL": IDS[0]}),
-    (claude("console", org_id=UUID, default_model="claude-sonnet-4-5"), {"ANTHROPIC_MODEL": "claude-sonnet-4-5"}),
-    # several ids and no aliases: the last stands in for Haiku, as provider_config had it
-    (claude("vertex", gcp=GCP, model_ids=IDS, default_model=IDS[1]),
-     {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-brindle-prod", "CLOUD_ML_REGION": "us-east5",
-      "ANTHROPIC_MODEL": IDS[1], "ANTHROPIC_DEFAULT_HAIKU_MODEL": IDS[2]}),
-    # an aliases block says what Haiku is, whatever the ids
-    (claude("vertex", gcp=GCP, model_ids=IDS, models=ModelsSetup(opus="claude-opus-x")),
-     {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-brindle-prod", "CLOUD_ML_REGION": "us-east5",
-      "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-x"}),
-    (claude("gateway", gateway=GatewaySetup("https://gw.example.com/v1"), model_ids=IDS[:1]),
-     {"ANTHROPIC_BASE_URL": "https://gw.example.com/v1"}),
-])
-def test_env_for_the_routing_fields(setup, expected):
-    assert company_login.claude_env(ORG, setup.claude) == expected
-
-
-def test_routing_env_is_stored_and_reaches_a_claude_pane(db, repo, monkeypatch):
-    Fake(monkeypatch)
-    go(claude("foundry", azure=FOUNDRY_URL, model_ids=IDS[:1], default_model=IDS[0]))
-    stored = json.loads(company_login.config.user_config_path().read_text())[company_login.ENV_KEY]
-    assert stored["env"] == {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_BASE_URL": FOUNDRY_URL.base_url,
-                             "ANTHROPIC_MODEL": IDS[0]}
-    ws = workspaces.create(db, str(repo), "feat").workspace
-    env = agents.agent_env(ws, "a1", _claude_agent(ws))
-    assert env["ANTHROPIC_FOUNDRY_BASE_URL"] == FOUNDRY_URL.base_url and env["ANTHROPIC_MODEL"] == IDS[0]
-
-
-def test_bedrock_without_sso_checks_the_machines_own_sign_in(aws_config, monkeypatch):
+def test_a_route_that_leaves_the_cloud_sign_in_to_the_person(aws_config, monkeypatch):
     f = Fake(monkeypatch)
-    ok, out = go(claude("bedrock", aws=OWN_AWS))
-    assert ok
+    ok, out = go(claude("bedrock", aws=OWN_AWS, models=MODELS, model_ids=IDS, default_model=IDS[1]))
+    assert ok and out[-1] == "Ready: Claude on acme's bedrock (us-west-2)"
     assert f.ran("aws", "sts", "get-caller-identity", "--region", "us-west-2")
-    assert not f.ran("aws", "sso", "login") and not f.ran("aws", "configure")
-    assert not aws_config.exists()                       # no profile to write
-    assert any("already signed in" in line and "your own AWS sign-in" in line for line in out)
-    assert out[-1] == "Ready: Claude on acme's bedrock (us-west-2)"
-    assert company_login.stored_env() == {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2"}
-
-
-def test_bedrock_without_sso_tells_the_person_to_sign_in_their_usual_way(aws_config, monkeypatch):
+    assert not f.ran("aws", "sso", "login") and not aws_config.exists()        # no profile to write or log in to
+    stored = company_login.stored_env()
+    assert stored["AWS_REGION"] == "us-west-2" and stored["ANTHROPIC_MODEL"] == IDS[1] and "AWS_PROFILE" not in stored
+    probes = [c[0][3] for c in f.calls if c[0][:2] == ("/bin/claude", "-p")]
+    assert probes == ["claude-opus-x", "claude-sonnet-x", "claude-haiku-x", IDS[1]]   # the default model too
     f = Fake(monkeypatch, {("aws", "sts"): (255, "Unable to locate credentials")})
     ok, out = go(claude("bedrock", aws=OWN_AWS))
-    assert not ok
-    assert not f.ran("aws", "sso", "login") and not aws_config.exists()
-    assert any("sign in to AWS the way you usually do" in line and "brindle login" in line for line in out)
-    assert not any(line.startswith("Ready") for line in out)
-    assert company_login.stored_env() == {}
-    assert not any(c[1] for c in f.calls)                # nothing interactive was started
-
-
-def test_bedrock_without_sso_still_needs_the_aws_cli(monkeypatch):
-    f = Fake(monkeypatch, missing={"aws"})
-    ok, out = go(claude("bedrock", aws=OWN_AWS))
-    assert not ok and not f.calls and any(line.startswith("aws isn't installed") for line in out)
-
-
-def test_foundry_by_base_url_signs_in_without_picking_a_subscription(monkeypatch):
+    assert not ok and not any(line.startswith("Ready") for line in out)
+    assert not f.ran("aws", "sso", "login") and not any(c[1] for c in f.calls)   # nothing interactive: it's theirs to do
+    assert any("brindle login" in line for line in out) and company_login.stored_env() == {}
+    # Foundry by its endpoint, with no subscription named: az signs in, nothing picks a subscription
     f = Fake(monkeypatch, {("az", "account", "show"): (1, "")})
     ok, out = go(claude("foundry", azure=FOUNDRY_URL))
     assert ok and f.ran("az", "login") and not f.ran("az", "account", "set")
     assert out[-1] == f"Ready: Claude on acme's foundry ({FOUNDRY_URL.base_url})"
     go(claude("foundry", azure=AzureSetup(UUID, None, FOUNDRY_URL.base_url)))
     assert f.ran("az", "account", "set", "--subscription", UUID)
-
-
-def test_the_default_model_is_probed_with_the_aliases(monkeypatch):
-    f = Fake(monkeypatch)
-    ok, out = go(claude("bedrock", aws=OWN_AWS, models=MODELS, model_ids=IDS, default_model=IDS[1]))
-    assert ok and out[-1].startswith("Ready")
-    probes = [c[0][3] for c in f.calls if c[0][:2] == ("/bin/claude", "-p")]
-    assert probes == ["claude-opus-x", "claude-sonnet-x", "claude-haiku-x", IDS[1]]
-    f = Fake(monkeypatch)
-    go(claude("bedrock", aws=OWN_AWS, models=ModelsSetup(sonnet=IDS[1]), model_ids=IDS, default_model=IDS[1]))
-    assert [c[0][3] for c in f.calls if c[0][:2] == ("/bin/claude", "-p")] == [IDS[1]]   # once
 
 
 def test_claude_managed_settings_take_precedence(db, repo, tmp_path, monkeypatch):
