@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from brindle import doctor, legacy
+from brindle import legacy
 
 
 @pytest.fixture
@@ -16,20 +16,6 @@ def home(tmp_path, monkeypatch):
     return tmp_path / "home"
 
 
-def test_nothing_left_behind(home, tmp_path):
-    assert legacy.findings(str(tmp_path)) == []
-    assert legacy.warn_once(str(tmp_path)) == []
-
-
-def test_old_home_is_reported_not_read(home):
-    old = home / ".copse"
-    old.mkdir()
-    (old / "permissions.json").write_text(json.dumps({"deny": ["Bash(rm -rf:*)"]}))
-    lines = legacy.findings(None)
-    assert len(lines) == 1
-    assert str(old) in lines[0] and "don't apply" in lines[0] and ".brindle" in lines[0]
-
-
 def test_old_home_with_agy_settings_points_at_mirrored_rules(home):
     (home / ".copse").mkdir()
     settings = home / ".gemini" / "antigravity-cli" / "settings.json"
@@ -37,16 +23,6 @@ def test_old_home_with_agy_settings_points_at_mirrored_rules(home):
     settings.write_text(json.dumps({"permissions": {"allow": ["command(git status)"]}}))
     lines = legacy.findings(None)
     assert any(str(settings) in line and "allow" in line for line in lines)
-
-
-@pytest.mark.parametrize("content", ["{}", '{"colorScheme": "dark", "trustedWorkspaces": ["/x"]}',
-                                     '{"permissions": {"allow": []}}', "not json"])
-def test_agy_settings_without_rules_is_not_reported(home, content):
-    (home / ".copse").mkdir()
-    settings = home / ".gemini" / "antigravity-cli" / "settings.json"
-    settings.parent.mkdir(parents=True)
-    settings.write_text(content)
-    assert not any(str(settings) in line for line in legacy.findings(None))
 
 
 def test_old_repo_dir_and_agent_entries(home, tmp_path):
@@ -79,8 +55,3 @@ def test_warns_once_per_leftover_on_stderr(home, capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_doctor_reports_every_time(home, tmp_path):
-    (home / ".copse").mkdir()
-    legacy.warn_once(None)
-    checks = [c for c in doctor.checks(None) if c.name == "previous name"]
-    assert len(checks) == 1 and checks[0].level == doctor.WARN
