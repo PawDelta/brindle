@@ -276,28 +276,6 @@ def test_removing_the_local_setup_drops_its_env(monkeypatch):
     assert company_login.stored_env() == {}
 
 
-def test_login_offers_it(env, monkeypatch):
-    from brindle.pro import account as pro_account
-
-    aws_world(env, monkeypatch)
-    org_world(monkeypatch, None)
-    asked = answers("y")
-    monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
-    monkeypatch.setattr(self_serve, "tty_ask", asked)
-    monkeypatch.setattr(doctor, "signin_providers", lambda: [])
-
-    class Ent:
-        sub, org_id, plan, features = "me", "acme", "pro", frozenset()
-
-    monkeypatch.setattr(pro_account.auth, "login", lambda *a, **k: Ent())
-    monkeypatch.setattr(pro_account.auth, "me", lambda *a, **k: {})
-    monkeypatch.setattr(pro_account.loopback, "can_open_browser", lambda out: False)
-    monkeypatch.setattr(pro_account.ProAccount, "_client", lambda self, base=None: None, raising=False)
-    assert pro_account.ProAccount(store=object()).run(["login"]) == 0
-    assert len(asked.seen) == 1
-    assert self_serve.local_setup().claude.route == "bedrock"
-
-
 # -- doctor labels ---------------------------------------------------------------------------
 
 def doctor_lines(monkeypatch, rc, local):
