@@ -81,9 +81,9 @@ to be asked each step.
   task's work must merge before another starts; brindle queues it until then.
 - Unless you need a specific profile, pass `weight` on every `assign`:
   "light" (small, well-specified, mechanical: docs, renames, simple tests),
-  "medium" (normal feature work, refactors, cross-cutting edits, or bugfixes) or
-  "heavy" (reserved for exceptionally complex algorithmic work, subtle bugs that
-  failed earlier fix rounds, or deep reasoning). brindle picks an available
+  "medium" (normal feature work or bugfixes in one area),
+  "heavy" (architecture design, broad cross-cutting refactors, or subtle bugs that failed earlier fix rounds), or
+  "advanced" (complex, long-running system-design and implementation tasks). brindle picks an available
   profile for that tier.
 - Keep task briefs short: the goal in a sentence or two, the files, and the
   test that proves it done. Workers read the tests and code themselves;

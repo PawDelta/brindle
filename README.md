@@ -559,8 +559,8 @@ The supervisor sizes a task and passes `weight` (`"light"`, `"medium"`,
 `assign`/`handoff`; brindle picks an available profile for that tier.
 Light is small, well-specified, mechanical work (docs, renames, simple tests);
 medium is a normal feature or bugfix in one area; heavy is architecture design,
-broad cross-cutting refactors, or subtle bugs; advanced is deep frontier
-reasoning, hard algorithmic constraints, or deadlock resolution. The `routing`
+broad cross-cutting refactors, or subtle bugs; advanced is complex, long-running
+system-design and implementation tasks. The `routing`
 config maps each tier to profile names: the first is the tier's baseline, the
 rest are candidates hosted learning may pick instead (defaults shown; set one
 tier and the others keep theirs):
