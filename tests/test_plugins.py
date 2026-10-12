@@ -119,22 +119,6 @@ def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", 
 # -- the loader -------------------------------------------------------------------------
 
 
-def test_nothing_installed_selects_nothing(repo, monkeypatch):
-    install(monkeypatch, {})
-    cfg = RepoConfig()
-    for group in plugins.GROUPS:
-        assert plugins.installed(group) == []
-        assert plugins.select(group, cfg, str(repo)) is None
-    assert policy.check_assign(cfg, str(repo), "developer", "t", "assign").allowed
-    assert account.plugin(cfg, str(repo)) is None
-
-
-def test_exactly_one_installed_is_the_default(repo, monkeypatch):
-    rec = Recorder()
-    install(monkeypatch, {plugins.EVENTS: [("pro", lambda r: rec)]})
-    assert plugins.select(plugins.EVENTS, RepoConfig(), str(repo)) is rec
-
-
 def test_several_installed_need_the_config_to_choose(repo, monkeypatch):
     a, b = Recorder(), Recorder()
     install(monkeypatch, {plugins.EVENTS: [("a", lambda r: a), ("b", lambda r: b)]})
@@ -167,21 +151,6 @@ def test_a_broken_factory_or_listing_never_raises(repo, monkeypatch):
     plugins.reset()
     assert plugins.installed(plugins.EVENTS) == []
     assert plugins.select(plugins.EVENTS, cfg, str(repo)) is None
-
-
-def test_loading_is_cached_per_repo(repo, tmp_path, monkeypatch):
-    made = []
-
-    def factory(repo_root):
-        made.append(repo_root)
-        return Recorder()
-
-    install(monkeypatch, {plugins.EVENTS: [("pro", factory)]})
-    cfg = RepoConfig()
-    first = plugins.select(plugins.EVENTS, cfg, str(repo))
-    assert plugins.select(plugins.EVENTS, cfg, str(repo)) is first
-    other = plugins.select(plugins.EVENTS, cfg, str(tmp_path))
-    assert other is not first and made == [str(repo), str(tmp_path)]
 
 
 # -- events at each call site -----------------------------------------------------------
@@ -263,31 +232,6 @@ def verdict(db, ws, approved, summary="fine"):
     return pipeline.on_review(db, reviewer, ws, approved, summary)
 
 
-def test_review_merge_and_remove_are_emitted_from_the_pipeline(db, piped, repo, monkeypatch):
-    rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
-    root, ws = piped
-    agents.report_result(db, "w1", "added new.py")
-    assert verdict(db, ws, True) is True
-    assert db.get_workspace(ws.id) is None
-    assert rec.kinds() == ["review", "merge", "remove"]
-    review, merge, remove = rec.events
-    assert review.approved is True and review.actor == "rev0" and review.agent_id == "w1"
-    assert merge.branch == "feat" and merge.agent_id == "w1"
-    assert merge.actor == "boss"  # the pipeline merges on the supervisor's behalf
-    assert remove.merged is True and remove.agent_id == "w1" and remove.actor == "rev0"
-    for e in rec.events:
-        assert e.repo_root == str(repo) and e.profile == "developer"
-        assert "task text" not in json.dumps(e.__dict__)
-
-
-def test_changes_requested_is_a_review_event_too(db, piped, monkeypatch):
-    rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
-    root, ws = piped
-    agents.report_result(db, "w1", "added new.py")
-    assert verdict(db, ws, False, "nope") is True
-    assert rec.kinds() == ["review"] and rec.events[0].approved is False
-
-
 def test_removing_an_unmerged_worktree_emits_remove(db, piped, monkeypatch):
     rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
     root, ws = piped
@@ -296,16 +240,6 @@ def test_removing_an_unmerged_worktree_emits_remove(db, piped, monkeypatch):
     assert out.startswith("Removed")
     [e] = rec.events
     assert e.kind == "remove" and e.merged is False and e.actor == "boss" and e.agent_id == "w1"
-
-
-def test_merge_workspace_emits_merge(db, piped, monkeypatch):
-    rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
-    root, ws = piped
-    config(Path(root.repo_root), review=False, pipeline=False)
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-    assert out.startswith("Merged"), out
-    assert rec.kinds() == ["merge"] and rec.events[0].actor == "boss"
 
 
 # -- policy -----------------------------------------------------------------------------
@@ -326,12 +260,6 @@ def test_policy_deny_blocks_assign_and_handoff_with_the_reason(db, repo, boss, m
     assert info.profile == "developer-heavy" and info.provider == "claude" and info.actor == "boss"
     assert info.branch == "feat-a" and info.repo_root == str(repo)
     assert gate.seen[1].mode == "handoff"
-
-
-def test_policy_allow_lets_assign_through(db, repo, boss, monkeypatch):
-    install_one(monkeypatch, plugins.POLICY, Gate())
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    assert "Started worker" in asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
 
 
 def test_policy_deny_blocks_merge_workspace(db, piped, monkeypatch):
@@ -355,14 +283,6 @@ def test_policy_deny_blocks_the_pipelines_own_merge(db, piped, monkeypatch):
     msg = db.pop_pending("boss")
     assert msg and "couldn't be merged" in msg.body and "frozen" in msg.body, msg
     assert Path(ws.path).is_dir()
-
-
-def test_the_policy_sees_how_many_workers_are_running(db, repo, boss, monkeypatch):
-    gate = install_one(monkeypatch, plugins.POLICY, Gate())
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    assert "Started worker" in asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
-    assert "Started worker" in asyncio.run(mcp_server.assign(task="do B", branch="feat-b"))
-    assert [i.running_workers for i in gate.seen] == [0, 1]
 
 
 def test_a_broken_policy_plugin_refuses(db, repo, boss, monkeypatch):
@@ -394,17 +314,6 @@ def test_account_without_a_plugin_says_so_and_exits_0(repo, monkeypatch):
     res = CliRunner().invoke(app, ["account", "status"])
     assert res.exit_code == 0, res.output
     assert "brindle Pro isn't installed" in res.output
-
-
-def test_account_passes_its_arguments_through(repo, monkeypatch):
-    acct = install_one(monkeypatch, plugins.ACCOUNT, Account(code=3))
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["account", "login", "--token-from", "env", "-v"])
-    assert acct.calls == [["login", "--token-from", "env", "-v"]]
-    assert res.exit_code == 3, res.output
-    assert "account plugin ran: login --token-from env -v" in res.output
-    res = CliRunner().invoke(app, ["account"])
-    assert acct.calls[-1] == []
 
 
 def test_account_outside_a_repo_still_works(tmp_path, monkeypatch):

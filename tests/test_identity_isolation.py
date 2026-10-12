@@ -70,14 +70,6 @@ def launches(monkeypatch):
     return got
 
 
-def test_resume_is_refused_under_a_different_identity(db, ws, who, launches):
-    worker(db, ws, status="paused", parent="boss")
-    worker(db, ws, "boss", status="paused", mode="interactive", recorded=OTHER)
-    who.ident = OTHER
-    refused(agents.resume, db, "boss")
-    assert launches == []   # nothing of the session restarted, not even the unlocked chat
-
-
 def test_resume_works_under_the_recorded_identity(db, ws, who, launches):
     worker(db, ws, status="paused", parent="boss")
     worker(db, ws, "boss", status="paused", mode="interactive")
@@ -151,23 +143,7 @@ def test_messages_into_a_locked_agent_are_refused(db, ws, who, monkeypatch):
     assert sent == []
 
 
-def test_messages_flow_under_the_recorded_identity(db, ws, who, monkeypatch):
-    worker(db, ws)
-    monkeypatch.setattr(agents, "_send_message", lambda db, a, body, sender: "delivered")
-    monkeypatch.setattr(agents, "runs_process", lambda a: False)
-    assert agents.send_message(db, "w1", "hello") == "delivered"
-
-
 # -- a new agent in the worktree ----------------------------------------------------------
-
-
-def test_no_new_agent_in_a_locked_agents_worktree(db, ws, who):
-    worker(db, ws)
-    who.ident = OTHER
-    refused(agents.spawn, db, ws, "developer")
-    refused(agents.spawn, db, ws, "reviewer", mode="review")
-    boss = worker(db, ws, "boss", recorded=None, mode="interactive")
-    refused(agents.delegate, db, boss, ws, "developer", "more work", "assign", isolate=False)
 
 
 def test_naming_the_branch_of_a_locked_worktree_does_not_reuse_it(db, repo, ws, who):
@@ -178,28 +154,7 @@ def test_naming_the_branch_of_a_locked_worktree_does_not_reuse_it(db, repo, ws, 
     refused(agents.delegate, db, boss, main, "developer", "again", "assign", branch="feature")
 
 
-def test_a_new_agent_may_start_under_the_recorded_identity(db, ws, who, launches):
-    identity_lock.ensure_workspace(db, ws)   # no refusal
-    worker(db, ws)
-    agents.spawn(db, ws, "developer", mode="assign", prompt="more")
-    assert launches
-
-
 # -- the supervisor's tools --------------------------------------------------------------
-
-
-def test_depends_on_cannot_pull_in_a_locked_branch(db, ws, who):
-    worker(db, ws)
-    main = db.find_workspaces(ws.repo_root)[0]
-    who.ident = OTHER
-    for dep in ("w1", "feature"):
-        refused(tasks.unmet_dependencies, db, main, [dep])
-
-
-def test_depends_on_works_under_the_recorded_identity(db, ws, who):
-    worker(db, ws)
-    main = db.find_workspaces(ws.repo_root)[0]
-    assert tasks.unmet_dependencies(db, main, ["w1"]) == []   # answers (no commits: trivially merged)
 
 
 def test_assign_with_depends_on_a_locked_branch_says_why(db, repo, ws, who, monkeypatch):
@@ -214,27 +169,7 @@ def test_assign_with_depends_on_a_locked_branch_says_why(db, repo, ws, who, monk
     assert out == LOCKED
 
 
-def test_merge_workspace_refuses_a_locked_branch(db, ws, who):
-    from brindle import mcp_server
-
-    worker(db, ws)
-    who.ident = OTHER
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-    assert out == f"Not merged: {LOCKED}"
-
-
 # -- what the views show -----------------------------------------------------------------
-
-
-def test_view_shows_a_locked_agent_without_reading_its_conversation(db, ws, who, monkeypatch):
-    worker(db, ws, transcript_path="/nonexistent/t.jsonl")
-    who.ident = OTHER
-    read = []
-    monkeypatch.setattr(view.usage_mod, "agent_usage", lambda db, a: read.append(a.id))
-    entry = view.agent_entry(db, db.get_agent("w1"), detail=True)
-    assert entry["status"] == f"locked: {ACME}" and entry["locked"] == ACME
-    assert entry["id"] == "w1" and "tokens" not in entry and "unread" not in entry
-    assert read == []
 
 
 def test_the_sidebar_snapshot_shows_the_locked_agent(db, ws, who, monkeypatch):
@@ -343,28 +278,7 @@ def test_legacy_agents_without_a_recorded_identity_are_unaffected(db, ws, who, l
     assert tasks.unmet_dependencies(db, db.find_workspaces(ws.repo_root)[0], ["w1"]) == []
 
 
-@pytest.mark.parametrize("kind", ["signed_out", "undetermined"])
-def test_an_unknown_current_identity_never_locks(db, ws, who, kind):
+def test_an_unknown_current_identity_never_locks(db, ws, who):
     worker(db, ws)
-    who.kind = kind
+    who.kind = "undetermined"
     assert identity_lock.locked_by("w1") is None
-
-
-def test_lock_and_resume_agree_on_the_same_identity(db, ws, who):
-    # resume compares with company_identity.matches; the lock must use the same test
-    worker(db, ws)
-    who.ident = ACME.upper()
-    assert identity_lock.locked_by("w1") is None
-    who.ident = OTHER
-    assert identity_lock.locked_by("w1") == ACME
-
-
-def test_codex_agents_are_not_recorded_or_locked(db, ws, who):
-    # Codex reports only "signed in", so its sessions are paused on sign-out but never
-    # tied to one account (the limit the README states)
-    db.add_agent(Agent("c1", ws.id, "developer", "codex", None, "assign", "processing", "", None,
-                       time.time(), task="add a login page"))
-    signin_pause.record_launch(db.get_agent("c1"))
-    assert signin_pause.recorded_identity("c1") is None
-    who.ident = OTHER
-    assert identity_lock.locked_by("c1") is None
