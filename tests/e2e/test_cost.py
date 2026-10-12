@@ -495,10 +495,10 @@ def test_costs_section_from_real_history(db, repo, root, pro):
     lines = watch_costs.render(local, watch_costs.Remote(limits=budget.Limits(month_usd=8.0), at=now),
                                now, 70, False)
     assert lines[0].text.startswith("▾ Costs")
-    assert any("claude" in ln.text and "100%" in ln.text for ln in lines[1:])
+    assert local.providers == []     # no provider has reported its usage: none is shown
     assert any("$6.00 of $8.00" in ln.text and ln.style == "ok" for ln in lines[1:])
     folded = watch_costs.render(local, None, now, 70, True)
-    assert len(folded) == 1 and "(claude 100%)" in folded[0].text
+    assert len(folded) == 1 and "75%)" in folded[0].text
 
 
 def test_costs_section_shows_a_running_workers_dollars(db, repo, root, pro):

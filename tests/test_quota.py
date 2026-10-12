@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import time
 
 import pytest
@@ -31,6 +32,7 @@ def test_codex_maps_windows_by_length_not_slot(tmp_path):
     by = {w.minutes: w.used for w in q.windows}
     assert by == {10080: 82.0, 300: 10.0}
     assert quota.headroom("codex", RepoConfig()) == pytest.approx(18)
+    assert quota.left_by_window("codex") == [("5h", 90), ("wk", 18)]
     assert "Codex at 82% of its weekly limit, resets" in quota.note("codex")
 
 
@@ -81,6 +83,27 @@ def test_claude_status_line_goes_through_quota():
     assert not quota.record_claude({"nothing": 1})
 
 
+def test_claude_usage_command_feeds_quota_and_keeps_model_caps(monkeypatch):
+    out = ("You are currently using your subscription to power your Claude Code usage\n\n"
+           "Current session: 36% used · resets Oct 12 at 6:10pm (America/New_York)\n"
+           "Current week (all models): 9% used · resets Oct 19 at 1pm (America/New_York)\n"
+           "Current week (Fable): 95% used · resets 1pm\n")
+    now = 1791832099.0   # Oct 12 2026, 1:48pm New York
+    windows = quota.parse_claude_usage(out, now)
+    assert [(w.used, w.minutes, w.name) for w in windows] == [
+        (36.0, 300, None), (9.0, 10080, None), (95.0, 10080, "Fable")]
+    assert windows[0].resets_at == 1791843000.0 and windows[1].resets_at == 1792429200.0
+    assert 0 < windows[2].resets_at - now < 86400
+    monkeypatch.setattr(time, "time", lambda: now)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    monkeypatch.setattr(quota, "_key_billed", lambda p: False)
+    assert quota.refresh_claude_usage(force=True)
+    # a one-model cap shows, but doesn't hold up the plan's other models
+    assert quota.headroom("claude", RepoConfig()) == pytest.approx(64)
+    quota.record_claude({"rate_limits": {"five_hour": {"used_percentage": 40, "resets_at": now + 60}}})
+    assert quota.left_by_window("claude") == [("5h", 60), ("Fable", 5)]
+
+
 def test_claude_data_goes_stale():
     quota.record_claude({"rate_limits": {"five_hour": {"used_percentage": 93, "resets_at": time.time() + 3600}}})
     data = json.loads(quota.path().read_text())
@@ -93,6 +116,7 @@ def test_limited_until_zeroes_headroom_then_expires():
     until = quota.record_limit("antigravity", RepoConfig())
     assert until == pytest.approx(time.time() + 300 * 60, abs=5)
     assert quota.headroom("antigravity", RepoConfig()) == 0
+    assert quota.left_by_window("antigravity") == []
     assert "limit reached" in quota.note("antigravity")
     data = json.loads(quota.path().read_text())
     data["antigravity"]["limited_until"] = time.time() - 1

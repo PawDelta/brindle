@@ -279,18 +279,22 @@ def test_a_narrow_folded_header_drops_the_model_rather_than_cut_the_title():
 
 
 def test_provider_capacity_in_sidebar():
-    lines = section(Local(providers=[("claude", 85), ("codex", 100)]))
+    lines = section(Local(providers=[("agy", 0), ("claude", 64), ("codex", 97)],
+                          windows={"claude": [("5h", 64), ("wk", 91), ("Fable", 19)],
+                                   "codex": [("wk", 20)]}))
     body = [t.strip() for t in texts(lines)[1:]]
-    assert any("claude" in t and "85%" in t for t in body)
-    assert any("codex" in t and "100%" in t for t in body)
+    assert body[0] == "agy    limit reached"
+    assert body[1] == "claude 5h 64% · wk 91% · Fable 19% left"
+    # past 80% used of any window, the row is bold in the warning colour
+    assert [ln.style for ln in lines[1:4]] == ["alert", "alert", "normal"]
     assert "$" not in "".join(body)
     assert "█" not in "".join(body) and "░" not in "".join(body)
 
 
 def test_provider_capacity_collapsed_title():
     lines = section(Local(providers=[("claude", 85), ("codex", 100)]), collapsed=True)
-    assert lines[0].text == "▸ Costs (claude 85%)"
+    assert lines[0].text == "▸ Costs (claude 85% left)"
     # the provider with the least headroom, not the first by name
-    local_ = Local(providers=[("claude", 100), ("codex", 97), ("native", 0)])
-    assert watch_costs.title(True, 40, local_) == "▸ Costs (native 0%)"
+    local_ = Local(providers=[("claude", 100), ("codex", 97), ("antigravity", 0)])
+    assert watch_costs.title(True, 40, local_) == "▸ Costs (antigravity 0% left)"
 

@@ -1,9 +1,9 @@
 """How close each provider is to its subscription limit.
 
-Everything here comes from files and hook data the CLIs write locally: the
-status line data Claude Code hands brindle, Codex's session rollouts, and the
-limit errors Antigravity reports. brindle never reads a CLI's OAuth token or
-auth files and never calls a provider's backend.
+Everything here comes from what the CLIs themselves report: the status line
+data Claude Code hands brindle and its ``/usage`` command, Codex's session
+rollouts, and the limit errors Antigravity reports. brindle never reads a
+CLI's OAuth token or auth files and never calls a provider's backend.
 
 State lives in ``~/.brindle/quota.json``, one entry per provider.
 """
@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from brindle.config import RepoConfig, brindle_home
 
@@ -34,6 +37,7 @@ class Window:
     used: float                # percent of the window's allowance
     resets_at: float | None    # epoch seconds
     minutes: int | None = None
+    name: str | None = None    # a cap on one model ("Fable"); None for the plan's own window
 
 
 @dataclass
@@ -78,7 +82,8 @@ def record(provider: str, windows: list[Window] | None = None, *,
     old = data.get(provider) if isinstance(data.get(provider), dict) else {}
     entry = {
         "windows": old.get("windows", []) if windows is None else
-                   [{"used": w.used, "resets_at": w.resets_at, "minutes": w.minutes} for w in windows],
+                   [{"used": w.used, "resets_at": w.resets_at, "minutes": w.minutes, "name": w.name}
+                    for w in windows],
         "limited_until": limited_until,
         "updated_at": time.time(),
         "source": source or old.get("source", ""),
@@ -100,7 +105,8 @@ def record_limit(provider: str, cfg: RepoConfig | None = None, *, now: float | N
 
 
 def _from_entry(provider: str, e: dict) -> Quota:
-    windows = [Window(float(w["used"]), _number(w.get("resets_at")), w.get("minutes"))
+    windows = [Window(float(w["used"]), _number(w.get("resets_at")), w.get("minutes"),
+                      w.get("name") if isinstance(w.get("name"), str) else None)
                for w in e.get("windows", []) if isinstance(w, dict) and _number(w.get("used")) is not None]
     return Quota(provider, windows, _number(e.get("limited_until")),
                  _number(e.get("updated_at")) or 0.0, str(e.get("source") or ""))
@@ -160,17 +166,35 @@ def headroom(provider: str, cfg: RepoConfig | None = None, repo_root: str | None
         return 100.0
     if q.limited_until and q.limited_until > time.time():
         return 0.0
-    if not q.windows:
-        return 100.0
-    return max(0.0, 100.0 - max(w.used for w in q.windows))
+    w = fullest(q)
+    return 100.0 if w is None else max(0.0, 100.0 - w.used)
 
 
 def window_name(minutes: int | None) -> str:
     return {300: "5-hour", 10080: "weekly", 43200: "monthly"}.get(minutes or 0, f"{minutes}-minute" if minutes else "usage")
 
 
+def window_short(minutes: int | None) -> str:
+    return {300: "5h", 10080: "wk", 43200: "mo"}.get(minutes or 0, f"{minutes}m" if minutes else "use")
+
+
+def left_by_window(provider: str) -> list[tuple[str, int]]:
+    """``(window, percent left)`` for each live window, shortest first and
+    one-model caps last: ``[("5h", 64), ("wk", 91), ("Fable", 89)]``. Empty
+    while limited, billed per token, or when nothing current is known."""
+    if provider == "native" or _key_billed(provider):
+        return []
+    q = get(provider)
+    if q is None or q.limited_until:
+        return []
+    ordered = sorted(q.windows, key=lambda w: (w.name is not None, w.minutes or 0, w.name or ""))
+    return [(w.name or window_short(w.minutes), int(round(max(0.0, 100.0 - w.used)))) for w in ordered]
+
+
 def fullest(q: Quota) -> Window | None:
-    return max(q.windows, key=lambda w: w.used, default=None)
+    """The plan window nearest its limit; a one-model cap (``name``) doesn't
+    hold up the plan's other models."""
+    return max((w for w in q.windows if w.name is None), key=lambda w: w.used, default=None)
 
 
 def _when(ts: float) -> str:
@@ -221,7 +245,91 @@ def record_claude(status: dict) -> bool:
             windows.append(Window(float(w["used_percentage"]), _number(w.get("resets_at")), minutes))
     if not windows:
         return False
+    # The status line has no one-model caps; keep the ones ``claude /usage`` gave.
+    old = get("claude")
+    windows += [w for w in (old.windows if old else []) if w.name]
     record("claude", windows, source="status line", keep_limit=True)
+    return True
+
+
+# -- Claude: ``claude -p /usage`` -------------------------------------------------------
+
+CLAUDE_USAGE_REFRESH_SECONDS = 5 * 60
+CLAUDE_USAGE_TIMEOUT = 30
+_USAGE_LINE = re.compile(r"^\s*Current (session|week)(?: \(([^)]+)\))?:\s*(\d+(?:\.\d+)?)% used"
+                         r"(?:\s*·\s*resets (.+?))?\s*(?:\(([^)]+)\))?\s*$")
+_claude_usage_at = 0.0
+
+
+def _reset_time(text: str, zone: str | None, now: float) -> float | None:
+    """"Oct 12 at 6:10pm" / "6:10pm" in ``zone`` (else local time) as epoch seconds."""
+    try:
+        tz = ZoneInfo(zone) if zone else None
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = None
+    today = datetime.fromtimestamp(now, tz)
+    text = text.strip().replace(" at ", " ").upper()
+    for fmt in ("%b %d %I:%M%p", "%b %d %I%p", "%I:%M%p", "%I%p"):
+        try:
+            t = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if "%b" in fmt:
+            t = t.replace(year=today.year, tzinfo=tz)
+            if t.timestamp() < now - 86400:      # "Jan 2" read in late December
+                t = t.replace(year=today.year + 1)
+        else:
+            t = today.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+            if t.timestamp() < now:
+                t += timedelta(days=1)
+        return t.timestamp()
+    return None
+
+
+def parse_claude_usage(text: str, now: float | None = None) -> list[Window]:
+    """The windows in ``claude /usage``'s answer::
+
+        Current session: 36% used · resets Oct 12 at 6:10pm (America/New_York)
+        Current week (all models): 9% used · resets Oct 19 at 1pm (America/New_York)
+        Current week (Fable): 11% used · resets Oct 19 at 1pm (America/New_York)
+    """
+    now = time.time() if now is None else now
+    windows = []
+    for line in text.splitlines():
+        m = _USAGE_LINE.match(line)
+        if not m:
+            continue
+        span, model, used, resets, zone = m.groups()
+        windows.append(Window(float(used), _reset_time(resets, zone, now) if resets else None,
+                              CLAUDE_WINDOWS["five_hour" if span == "session" else "seven_day"],
+                              None if model in (None, "all models") else model))
+    return windows
+
+
+def refresh_claude_usage(*, force: bool = False) -> bool:
+    """Ask ``claude -p /usage`` (Claude Code reads the plan's usage itself;
+    brindle never touches its credentials) at most every
+    ``CLAUDE_USAGE_REFRESH_SECONDS``. True when it recorded windows."""
+    global _claude_usage_at
+    import subprocess
+
+    from brindle.providers import claude_binary
+
+    if not force and time.time() - _claude_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
+        return False
+    _claude_usage_at = time.time()
+    if _key_billed("claude"):
+        return False
+    try:
+        proc = subprocess.run([claude_binary(), "-p", "/usage"], capture_output=True, text=True,
+                              timeout=CLAUDE_USAGE_TIMEOUT, cwd=str(brindle_home()),
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    windows = parse_claude_usage(proc.stdout) if proc.returncode == 0 else []
+    if not windows:
+        return False
+    record("claude", windows, source="claude /usage", keep_limit=True)
     return True
 
 
