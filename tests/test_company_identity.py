@@ -216,6 +216,7 @@ def test_undetermined_identity_never_blocks(monkeypatch):
     assert company_identity.launch_problem("claude") is None
 
 
+@pytest.mark.variant("enforcement: a wrong identity must block the launch")
 def test_enforce_blocks_with_the_enterprise_entitlement(monkeypatch):
     from brindle.pro import license, team_policy
 

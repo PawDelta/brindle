@@ -76,6 +76,7 @@ def test_an_unknown_version_cannot_meet_a_floor(entitled, library, monkeypatch):
     assert not serve(monkeypatch, min_version="1.0").check_assign(assign()).allowed
 
 
+@pytest.mark.variant("enforcement: the org kill switch must refuse new work")
 def test_the_kill_switch_refuses_an_assign(entitled, library, monkeypatch, db, repo):
     from brindle import mcp_server, policy
 

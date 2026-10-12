@@ -115,6 +115,7 @@ def _thumbprint(raw_hex: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(jwk.encode()).digest()).rstrip(b"=").decode()
 
 
+@pytest.mark.variant("integrity: a mispinned kid rejects every real token")
 def test_every_pinned_kid_is_its_keys_thumbprint():
     """As the backend derives it (RFC 7638), or every token it signs is rejected."""
     assert keys.PINNED_KEYS, "no production key pinned"
