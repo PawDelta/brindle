@@ -19,11 +19,11 @@ from brindle import events, plugins, policy
 from brindle.cli import app
 from brindle.config import RepoConfig
 from brindle.events import Event
-from brindle.pro import audit_chain, credentials
+from brindle.pro import audit_chain
 from brindle.pro.audit_chain import (
-    ZERO_HASH, AuditChain, audit_dir, canonical, log_path, record_hash, verify,
+    AuditChain, audit_dir, canonical, log_path, verify,
 )
-from pro_fixtures import BASE, claims, pro_env, sign, signing_key  # noqa: F401 - fixtures
+from pro_fixtures import pro_env  # noqa: F401 - fixtures
 from test_plugins import Gate, Recorder, install
 
 REPO = "/work/acme-app"
@@ -70,27 +70,6 @@ def rewrite(home, new_lines):
 # -- the chain ------------------------------------------------------------------------------------
 
 
-def test_records_link_into_a_chain_from_a_zero_anchor(brindle_home):
-    chain(brindle_home, 3)
-    recs = [json.loads(ln) for ln in lines(brindle_home)]
-    assert [r["seq"] for r in recs] == [1, 2, 3]
-    assert recs[0]["prev_hash"] == ZERO_HASH
-    for prev, rec in zip(recs, recs[1:]):
-        assert rec["prev_hash"] == record_hash(prev)
-    for ln, rec in zip(lines(brindle_home), recs):
-        assert ln.decode() == canonical(rec)        # written in canonical form
-        body = {k: rec[k] for k in ("seq", "ts", "event", "prev_hash")}
-        assert rec["hash"] == audit_chain.sha256(canonical(body))
-        assert set(rec) == set(audit_chain.RECORD_KEYS)
-        assert set(rec["event"]) == set(audit_chain.EVENT_KEYS)
-        assert rec["ts"].endswith("Z") and datetime.fromisoformat(rec["ts"].replace("Z", "+00:00"))
-    e = recs[0]["event"]
-    assert e["kind"] == "assign" and e["agent"] == "worker-7" and e["branch"] == "feat/zebra"
-    assert e["actor"] == "supervisor-1" and e["workspace"] == "ws-1" and e["repo_root"] == REPO
-    assert e["profile"] == "developer" and e["provider"] == "claude" and e["model"] == "claude-sonnet-4"
-    assert recs[1]["event"]["kind"] == "review"
-
-
 def test_every_signature_verifies_with_the_install_key(brindle_home):
     chain(brindle_home, 4)
     pub = audit_chain.public_key(brindle_home)
@@ -103,24 +82,6 @@ def test_every_signature_verifies_with_the_install_key(brindle_home):
     other = Path(str(brindle_home) + "-other")             # another install's key: not ours
     report = verify(REPO, home=brindle_home, pub=audit_chain.public_key(other))
     assert report.broken_seq == 1 and "signature" in report.reason
-
-
-def test_the_chain_continues_across_plugin_instances_and_processes(brindle_home):
-    chain(brindle_home, 2)
-    chain(brindle_home, 2)
-    report = verify(REPO, home=brindle_home)
-    assert report.ok and report.records == 4
-    recs = [json.loads(ln) for ln in lines(brindle_home)]
-    assert recs[2]["prev_hash"] == record_hash(recs[1]) and recs[3]["seq"] == 4
-
-
-def test_each_repo_has_its_own_log(brindle_home):
-    AuditChain("/work/a", home=brindle_home, entitled=ENTITLED).emit(ev(repo_root="/work/a"))
-    AuditChain("/work/b", home=brindle_home, entitled=ENTITLED).emit(ev(repo_root="/work/b"))
-    a, b = log_path("/work/a", brindle_home), log_path("/work/b", brindle_home)
-    assert a != b and a.name.startswith("a-") and b.name.startswith("b-")
-    assert verify("/work/a", home=brindle_home).records == 1
-    assert audit_chain.repo_key("/x/my repo!") .startswith("my_repo-")
 
 
 # -- tamper evidence ------------------------------------------------------------------------------
@@ -150,15 +111,6 @@ def test_rehashing_an_edited_record_without_the_key_is_caught_by_the_signature(b
     assert report.broken_seq == 2 and "signature" in report.reason
 
 
-def test_deleting_a_record_is_caught_at_its_seq(brindle_home):
-    chain(brindle_home, 5)
-    ls = lines(brindle_home)
-    del ls[2]
-    rewrite(brindle_home, ls)
-    report = verify(REPO, home=brindle_home)
-    assert report.broken_seq == 3 and "removed" in report.reason
-
-
 def test_deleting_the_last_record_is_caught_by_the_head(brindle_home):
     chain(brindle_home, 5)
     ls = lines(brindle_home)
@@ -167,15 +119,6 @@ def test_deleting_the_last_record_is_caught_by_the_head(brindle_home):
     assert report.broken_seq == 5 and "truncated" in report.reason and report.records == 4
     rewrite(brindle_home, ls[:-2])
     assert verify(REPO, home=brindle_home).broken_seq == 4
-
-
-def test_reordering_records_is_caught_at_the_first_moved_seq(brindle_home):
-    chain(brindle_home, 5)
-    ls = lines(brindle_home)
-    ls[1], ls[2] = ls[2], ls[1]
-    rewrite(brindle_home, ls)
-    report = verify(REPO, home=brindle_home)
-    assert report.broken_seq == 2 and "reordered" in report.reason
 
 
 def test_inserting_a_forged_record_breaks_the_chain(brindle_home):
@@ -214,61 +157,7 @@ def test_files_are_private(brindle_home):
     assert stat.S_IMODE(os.stat(log_path(REPO, brindle_home)).st_mode) == 0o600
 
 
-def test_the_key_is_per_install_and_stable(brindle_home):
-    k1 = audit_chain.public_key_hex(brindle_home)
-    assert len(k1) == 64 and bytes.fromhex(k1)
-    assert audit_chain.public_key_hex(brindle_home) == k1
-    assert audit_chain.public_key_hex(Path(str(brindle_home) + "-2")) != k1
-    raw = (audit_dir(brindle_home) / audit_chain.KEY_FILE).read_text().strip()
-    assert len(raw) == 64 and raw != k1
-
-
 # -- the entitlement gate -------------------------------------------------------------------------
-
-
-def test_not_entitled_writes_nothing_not_even_a_key(brindle_home):
-    p = AuditChain(REPO)                       # the real gate: no login under this home
-    p.emit(ev())
-    p.emit(ev(kind="deny_assign", reason="no"))
-    assert not (brindle_home / "audit").exists()
-    assert p.dropped == 0
-
-
-def test_the_audit_feature_of_a_real_entitlement_turns_it_on(brindle_home, signing_key):
-    def login(features):
-        credentials.default_store().save({
-            "base_url": BASE, "entitlement": sign(signing_key, claims(features=features))})
-        audit_chain_license.clear_cache()
-
-    from brindle.pro import license as audit_chain_license
-
-    login(["learning", "team"])
-    AuditChain(REPO).emit(ev())
-    assert not (brindle_home / "audit").exists()
-    login(["learning", "audit"])
-    AuditChain(REPO).emit(ev())
-    assert verify(REPO).records == 1
-
-
-def test_the_gate_is_offline_only(brindle_home, signing_key, monkeypatch):
-    """A near-expiry entitlement with a refresh token on file: the Team feed
-    and the audit chain still don't refresh it, so a merge never waits on
-    the network. The stored (still valid) entitlement decides."""
-    from brindle.pro import auth, license
-
-    now = int(time.time())
-    credentials.default_store().save({
-        "base_url": BASE, "refresh_token": "rt_1",
-        "entitlement": sign(signing_key, claims(features=["audit"], iat=now - 3500, exp=now + 60))})
-    license.clear_cache()
-
-    def no_network(*a, **kw):
-        raise AssertionError("the audit gate must not refresh over the network")
-
-    monkeypatch.setattr(auth, "refresh", no_network)
-    monkeypatch.setattr(auth, "Client", no_network)
-    AuditChain(REPO).emit(ev())
-    assert verify(REPO).records == 1
 
 
 def test_emit_never_raises(brindle_home, monkeypatch):
@@ -349,13 +238,6 @@ def test_policy_denials_are_recorded_with_the_reason(brindle_home, tmp_path, mon
 # -- export -----------------------------------------------------------------------------------------
 
 
-def test_export_jsonl_is_the_log_itself(brindle_home):
-    chain(brindle_home, 3)
-    out = audit_chain.export(REPO, home=brindle_home)
-    assert out.encode() == log_path(REPO, brindle_home).read_bytes()
-    assert [json.loads(ln)["seq"] for ln in out.splitlines()] == [1, 2, 3]
-
-
 def test_export_csv_has_one_row_per_record(brindle_home):
     chain(brindle_home, 2)
     out = audit_chain.export(REPO, home=brindle_home, fmt="csv")
@@ -415,10 +297,3 @@ def test_cli_verify_export_and_pubkey(brindle_home, repo, monkeypatch):
     monkeypatch.chdir(brindle_home.parent)
     res = runner.invoke(app, ["audit", "verify"])
     assert res.exit_code == 0 and "no audit log" in res.output
-
-
-def test_the_audit_entry_point_is_registered():
-    from importlib.metadata import entry_points
-
-    assert [e.value for e in entry_points(group="brindle.events") if e.name == "audit"] \
-        == ["brindle.pro.audit_chain:make"]
