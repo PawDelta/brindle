@@ -39,7 +39,7 @@ import threading
 import time
 from contextlib import contextmanager
 
-from brindle.events import Event, EventsPlugin
+from brindle.events import ROUTE_HEALTH, Event, EventsPlugin
 
 from brindle.pro.orgkey import OrgKey, OrgKeys, repo_identity
 from brindle.pro._files import private_dir, read_private, write_private
@@ -313,25 +313,39 @@ class ProEvents(EventsPlugin):
             return None
         return ent.org_id if FEATURE in ent.features and ORG_RE.match(ent.org_id) else None
 
+    def health_org(self) -> str | None:
+        """The org a ``route_health`` event goes to: a Team or Enterprise org,
+        by plan rather than by feature (see ``route_health.org_for``)."""
+        from brindle.pro import license, route_health
+
+        try:
+            ent = (self._entitlement() if self._entitlement
+                   else license.current(refresh=False, store=self._store))
+        except Exception:  # noqa: BLE001
+            return None
+        return route_health.org_for(ent)
+
     def emit(self, event: Event) -> None:
         from brindle import airgap
 
         if airgap.enabled():
             return                     # air-gap mode: nothing is recorded, spooled or sent
         try:
-            org = self.team_org()
-            if org is None or event.kind not in KINDS:
+            if event.kind == ROUTE_HEALTH:
+                org = self.health_org()
+            else:
+                org = self.team_org()
+                if event.kind not in KINDS:
+                    return
+            if org is None:
                 return
             self._ensure_sender()
             try:
                 self.queue.put_nowait((org, event))    # refs are computed by the sender
             except queue.Full:
-                key = self.keys.cached(org)            # never lose an audit event to a full queue
-                if key is None:
-                    self.dropped_no_key += 1
-                else:
-                    self.spool.append(org, [event_payload(key, self._identity(event.repo_root), event,
-                                                          self._slug(event.repo_root))])
+                body = self._body(org, event, self.keys.cached(org))   # never lose an event to a full queue
+                if body is not None:
+                    self.spool.append(org, [body])
             self._wake.set()
         except Exception:  # noqa: BLE001 - never fail the operation being reported
             log.warning("brindle Pro: couldn't record an audit event", exc_info=True)
@@ -357,6 +371,18 @@ class ProEvents(EventsPlugin):
         except Exception:  # noqa: BLE001
             return None
 
+    def _body(self, org: str, event: Event, key: OrgKey | None) -> dict | None:
+        """``event``'s wire form: a route-health count needs no org key (it
+        carries no ref); an audit event without one is dropped, never sent raw."""
+        from brindle.pro import route_health
+
+        if event.kind == ROUTE_HEALTH:
+            return route_health.payload(event)
+        if key is None:
+            self.dropped_no_key += 1
+            return None
+        return event_payload(key, self._identity(event.repo_root), event, self._slug(event.repo_root))
+
     def _drain_queue(self) -> None:
         pending: dict[str, list[dict]] = {}
         order: list[str] = []
@@ -366,9 +392,8 @@ class ProEvents(EventsPlugin):
             except queue.Empty:
                 break
             try:
-                key = self.keys.get(org)
-                body = event_payload(key, self._identity(event.repo_root), event,
-                                     self._slug(event.repo_root))
+                key = None if event.kind == ROUTE_HEALTH else self.keys.get(org)
+                body = self._body(org, event, key)
             except Exception as e:  # noqa: BLE001 - no org key: send nothing
                 log.info("brindle Pro: no org key (%s); audit event dropped", type(e).__name__)
                 self.dropped_no_key += 1
@@ -415,10 +440,19 @@ class ProEvents(EventsPlugin):
                     return True
                 org, batch = head
                 status = self._post(org, batch)
-                if status == 422 and any("by_model" in e for e in batch):
+                health = [e.get("kind") == ROUTE_HEALTH for e in batch]
+                sent = batch
+                if status == 422 and any(health):
+                    # A backend older than route health refuses the kind: the audit events still go.
+                    sent = [e for e, h in zip(batch, health) if not h]
+                    status = self._post(org, sent) if sent else 200
+                if status == 422 and any("by_model" in e for e in sent):
                     # A backend older than by_model refuses the key: keep the rest of the event.
                     status = self._post(org, [{k: v for k, v in e.items() if k != "by_model"}
-                                              for e in batch])
+                                              for e in sent])
+                if status in (403, 404) and all(health):
+                    # Route health from an org the backend doesn't take it for (a personal plan).
+                    status = 400
                 if status in (200, 201, 202):
                     self.spool.pop(org, len(batch))
                     self._delay = 0.0

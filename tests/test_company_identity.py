@@ -170,6 +170,8 @@ def test_bedrock_without_sso_checks_only_that_sts_answers(monkeypatch, launch_ca
     assert company_identity.expected_ident(claude_setup("bedrock", aws=OWN_AWS)) is None
     assert company_identity.launch_problem("claude") is None
     assert company_identity.launch_problem("claude") is None and fake.count("aws", "sts") == 2   # doctor, one launch
+    assert company_identity.launch_check("claude") == (None, "identity_match", "bedrock")        # remembered
+    assert fake.count("aws", "sts") == 2
     assert next(iter(json.loads(path.read_text()))).startswith("claude|bedrock|own|")
     # the person's own AWS sign-in reaches the pane: what was checked is what runs
     monkeypatch.setenv("AWS_PROFILE", "mine")
@@ -211,7 +213,7 @@ WRONG_AWS = {("aws", "sts"): (0, json.dumps({"Account": "999999999999", "Arn": "
 def test_undetermined_identity_never_blocks(monkeypatch):
     Fake(monkeypatch, missing={"aws"})
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    assert company_identity.launch_problem("claude") is None
+    assert company_identity.launch_check("claude") == (None, "identity_undetermined", "bedrock")
     Fake(monkeypatch, {("aws", "sts"): (124, "timed out")})
     assert company_identity.launch_problem("claude") is None
 
@@ -238,7 +240,7 @@ def test_a_mismatch_is_never_cached_and_is_probed_again(monkeypatch, launch_cach
     fake = Fake(monkeypatch, WRONG_AWS)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
     assert company_identity.launch_problem("claude")
-    assert company_identity.launch_problem("claude")
+    assert company_identity.launch_check("claude")[1:] == ("identity_mismatch", "bedrock")
     assert fake.count("aws", "sts") == 2
     assert not path.exists()
 

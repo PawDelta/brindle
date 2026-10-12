@@ -55,6 +55,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     root = workspaces.adopt_root(db, str(repo))
     dest = workspaces.checkout_for(db, str(repo), branch="integration")
     add(db, root, "old")
+    db.update_agent("old", profile="developer")   # launched before launches were supervisor-only
     worker = workspaces.create(db, str(repo), "w-branch").workspace
     add(db, worker, "w1", mode="assign", parent="old")
     db.add_autopilot("old")
@@ -67,7 +68,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     spawned = {}
 
     def fake_spawn(db_, ws, profile, **kw):
-        spawned.update(kw, ws=ws)
+        spawned.update(kw, ws=ws, profile=profile)
         a = add(db_, ws, "new")
         if kw["autopilot"]:
             db_.add_autopilot("new")
@@ -80,6 +81,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     new = sessions.handover(db, "old", dest, "rule: never push to main")
 
     assert new.id == "new" and spawned["ws"].id == dest.id and paused == ["old"]
+    assert spawned["profile"] == "supervisor"
     assert "rule: never push to main" in spawned["prompt"] and "w1" in spawned["prompt"]
     ap = db.get_autopilot("new")
     assert ap.goal == "ship it" and ap.detail == "why"

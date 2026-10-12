@@ -577,6 +577,10 @@ class AuditChain(EventsPlugin):
             return False
 
     def emit(self, event: Event) -> None:
+        from brindle import events
+
+        if event.kind == events.ROUTE_HEALTH:
+            return                      # a count for the Team feed, not something that happened here
         try:
             if not self.entitled():
                 return

@@ -89,7 +89,7 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     monkeypatch.setattr(cli, "_cull_detached", lambda *a: None)
     monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)
     monkeypatch.setattr(cli, "_settings_sync_detached", lambda *a: None)
-    cli.start(agent="supervisor", prompt=None, provider="antigravity", attach=False,
+    cli.start(prompt=None, provider="antigravity", attach=False,
               watch=False, autopilot=True, branch=None, worktree=None)
     a, = db.list_agents(ws.id)
     assert a.mode == "interactive" and a.task is None

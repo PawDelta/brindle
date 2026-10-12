@@ -231,7 +231,7 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     old = agents.spawn(db, ws, "supervisor", provider_name="shell")
     try:
         t0 = time.monotonic()
-        cli.start(agent="supervisor", prompt=None, provider="shell", attach=False,
+        cli.start(prompt=None, provider="shell", attach=False,
                   watch=False, autopilot=False, branch=None, worktree=None)
         elapsed = time.monotonic() - t0
     finally:
@@ -333,17 +333,22 @@ def health(db, root, monkeypatch):
     return lh, a, now, sleeps, started, reports
 
 
-@pytest.mark.parametrize("screen,cause", [
-    ("Error: model not found secret-token", "launch_model"),
-    ("● API Error: model use case details have not been submitted secret-token", "bedrock_use_case"),
+@pytest.mark.parametrize("screen,cause,refused", [
+    ("■ unexpected status 403 Forbidden: secret-token https://private", "launch_auth", "provider_403"),
+    ("Error: model not found secret-token", "launch_model", None),
+    ("● API Error: model use case details have not been submitted secret-token", "bedrock_use_case", None),
 ])
-def test_current_failures_report_safe_actions_and_effective_cooldown(db, health, monkeypatch, screen, cause):
+def test_current_failures_report_safe_actions_and_effective_cooldown(db, health, monkeypatch, screen, cause, refused):
     from brindle import model_access
+    from brindle.pro import route_health
     lh, a, _, _, _, reports = health
     # Only the actual provider's response marker can attest a current failure.
     provider = "claude" if screen.startswith("●") else "native" if screen.startswith("──") else "codex"
     db.update_agent(a.id, provider=provider)
     monkeypatch.setattr(lh, "capture", lambda a: screen)
+    monkeypatch.setattr(agents, "route_context", lambda db_, agent, ws: ("bedrock", "claude-opus-5-5"))
+    monkeypatch.setattr(route_health, "reporting", lambda: True)
+    route_health.reset()
     lh.delivered(db, a)
     assert lh.inspect(db, a.id) == "failed"
     assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "failed"
@@ -352,6 +357,10 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     assert "Fix:" in body and "secret-token" not in body and "https://private" not in body
     denied = model_access.refused(a.profile, fp="effective-account")
     assert denied.key == cause
+    ws = db.get_workspace(a.workspace_id)
+    assert route_health.pending() == ({(ws.repo_root, provider, "bedrock", "claude-opus-5-5", refused): 1}
+                                      if refused else {})
+    route_health.reset()
     assert model_access.refused(a.profile, fp="another-account") is None
     assert lh.inspect(db, a.id) is None and len(reports) == 1
 

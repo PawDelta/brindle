@@ -32,6 +32,7 @@ GROUP = "@costs"                  # the section's id, for folding (a workspace i
 ADMIN_ROLES = ("owner", "admin")
 BAR_WIDTH = 10
 TOP_MODELS = 3
+USAGE_WARN_USED = 80              # a provider row turns "alert" past this percent of a window used
 RUNNING = ("processing", "starting", "waiting", "idle")
 
 
@@ -41,33 +42,7 @@ class Local:
     models: list[tuple[str, int]] = field(default_factory=list)   # (model label, tokens) this month
     workers: dict[str, float | str] = field(default_factory=dict)   # agent id -> dollars ("Free" if free)
     providers: list[tuple[str, int]] = field(default_factory=list) # (provider name, capacity pct) this month
-
-
-def provider_label(p, db: DB | None = None, repo_root: str | None = None) -> str:
-    """Provider name for a history row: claude, codex, antigravity, etc."""
-    if db and getattr(p, "row", None) and getattr(p.row, "agent_id", None):
-        try:
-            a = db.get_agent(p.row.agent_id)
-            if a and a.provider:
-                return a.provider
-        except Exception:
-            pass
-    if getattr(p, "row", None) and getattr(p.row, "profile", None):
-        try:
-            from brindle.profiles import load_profile
-            prof = load_profile(p.row.profile, repo_root)
-            if prof and prof.provider:
-                return prof.provider
-        except Exception:
-            pass
-    model = (getattr(p, "model", None) or "").lower()
-    if "claude" in model:
-        return "claude"
-    if "gpt" in model or "codex" in model or model.startswith("o1") or model.startswith("o3"):
-        return "codex"
-    if "gemini" in model or "antigravity" in model:
-        return "antigravity"
-    return "other"
+    windows: dict[str, list[tuple[str, int]]] = field(default_factory=dict)  # provider -> [(window, pct left)]
 
 
 @dataclass
@@ -107,37 +82,25 @@ def local(db: DB, repo_root: str | None, snap: list[dict], now: float | None = N
             except Exception:
                 pass
 
-        providers_seen: set[str] = set()
         tokens: dict[str, int] = {}
         for p in cost.priced_rows(db, repo_root, budget._month_start(now)):
             out.month += p.dollars or 0.0
             label = cost.model_label(p)
             tokens[label] = tokens.get(label, 0) + p.tokens
-            prov = provider_label(p, db, repo_root)
-            if prov and prov != "other":
-                providers_seen.add(prov)
         out.models = sorted(tokens.items(), key=lambda m: (-m[1], m[0]))
 
-        if repo_root:
-            for ws in snap:
-                for a in ws.get("agents", []):
-                    if a.get("provider"):
-                        providers_seen.add(a["provider"])
-
-        # Include providers that have recorded quota data
-        for prov_name in quota.PROVIDERS:
-            if quota.get(prov_name) is not None:
-                providers_seen.add(prov_name)
-
-        if not providers_seen:
-            providers_seen = {"claude"}
-
-        provider_list = []
-        for prov in sorted(providers_seen):
+        # Only providers that have reported their usage (a limit hit counts):
+        # one that hasn't would read a made-up 100%.
+        for prov in sorted(quota.PROVIDERS):
+            if prov == "native" or quota.get(prov) is None:
+                continue
+            left = quota.left_by_window(prov)
             cap = int(round(quota.headroom(prov, cfg, repo_root)))
-            provider_list.append((prov, cap))
-
-        out.providers = provider_list
+            if not left and cap:      # billed per token: no window to show
+                continue
+            out.providers.append((prov, cap))
+            if left:
+                out.windows[prov] = left
     except Exception:  # noqa: BLE001 - the dashboard outlives a bad history row
         log.exception("brindle watch: couldn't total the spend")
     if repo_root:
@@ -233,6 +196,12 @@ def _org(repo_root: str | None, lim: budget.Limits | None) -> Org | None:
 def collect(repo_root: str | None) -> Remote:
     """Everything that may touch the network. Each part fails on its own."""
     out = Remote(at=time.time())
+    try:
+        from brindle import quota
+
+        quota.refresh_claude_usage()     # throttled; slow, so only ever on this thread
+    except Exception:  # noqa: BLE001
+        log.debug("brindle watch: no claude /usage", exc_info=True)
     if repo_root:
         try:
             from brindle.config import load_repo_config
@@ -332,12 +301,21 @@ def share_rows(models: list[tuple[str, int]], width: int) -> list[str]:
     return out
 
 
-def provider_rows(providers: list[tuple[str, int]], width: int) -> list[str]:
-    """A row per provider showing its capacity percent: 'claude  85%'."""
+def provider_rows(providers: list[tuple[str, int]], width: int,
+                  windows: dict[str, list[tuple[str, int]]] | None = None) -> list[tuple[str, str]]:
+    """``(text, style)`` per provider with the percent left in each usage
+    window, 'claude 5h 64% · wk 91% left', or 'antigravity limit reached';
+    "alert" once any window is past ``USAGE_WARN_USED`` percent used."""
+    windows = windows or {}
     name_w = min(max((len(n) for n, _ in providers), default=0), max(width - 6, 4))
     out = []
     for name, p in providers:
-        out.append(f"{name[:name_w]:<{name_w}} {p}%")
+        wins = windows.get(name, [])
+        left = " · ".join(f"{w} {pct}%" for w, pct in wins)
+        lowest = min([pct for _, pct in wins] or [p])
+        style = "alert" if 100 - lowest > USAGE_WARN_USED else "normal"
+        out.append((f"{name[:name_w]:<{name_w}} "
+                    f"{f'{left} left' if left else 'limit reached' if not p else f'{p}% left'}", style))
     return out
 
 
@@ -346,7 +324,8 @@ def title(collapsed: bool, width: int, local_: Local | None) -> str:
     # The provider with the least headroom left: the one that holds work up.
     top = ([min(local_.providers, key=lambda p: (p[1], p[0]))] if (local_ and local_.providers)
            else (shares(local_.models)[:1] if local_ else []))
-    tail = f" ({short(top[0][0])} {top[0][1]}%)" if top else ""
+    left = " left" if local_ and local_.providers else ""
+    tail = f" ({short(top[0][0])} {top[0][1]}%{left})" if top else ""
     if len(arrow) + len("Costs") + len(tail) > width:
         tail = ""    # the title stays whole; the top model/provider shows when unfolded
     return arrow + "Costs"[:max(width - len(arrow) - len(tail), 1)] + tail
@@ -361,7 +340,7 @@ def render(local_: Local, remote: Remote | None, now: float, width: int,
     if collapsed:
         return lines
     if local_.providers:
-        body = [(t, "normal") for t in provider_rows(local_.providers, width - 2)]
+        body = provider_rows(local_.providers, width - 2, local_.windows)
     elif local_.models:
         body = [(t, "normal") for t in share_rows(local_.models, width - 2)]
     else:
