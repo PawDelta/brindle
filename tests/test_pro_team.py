@@ -214,13 +214,11 @@ def test_failed_sends_back_off_exponentially(team):
     assert len(Spool().entries()) == 1
 
 
-def test_route_health_rides_the_feed_for_a_pro_org_as_codes_without_provider_text(team):
-    login(team, claims(org_id=ORG, plan="pro", features=["learning"]))     # paid, but not a team org
+def test_route_health_rides_the_feed_as_codes_without_provider_text(team):
     p = events_plugin(team)
     error = "API Error: 401 {'type':'authentication_error','message':'invalid x-api-key sk-ant-api03-zebra'}"
     p.emit(Event(kind="route_health", repo_root=REPO, provider="claude", model="claude-opus-5-5",
                  route="console", outcome=route_health.provider_outcome(error), count=3, at=1_800_000_000.5))
-    p.emit(ev())                                                           # an audit event needs a team org
     assert p.flush()
     assert team.events == [{"kind": "route_health", "agent": "claude", "route": "console",
                             "model": "claude-opus-5-5", "outcome": "provider_401", "count": 3,

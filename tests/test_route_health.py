@@ -1,6 +1,6 @@
 """Route health: what a launch or a run found out about an agent's model route
 is counted per route and model and sent as one ``route_health`` event per
-window, by signed-in paid users only (the Team feed carries it; see
+window, by signed-in Team and Enterprise members only (the Team feed carries it; see
 test_pro_team for the wire form and that no provider text ever rides along)."""
 
 import pytest
@@ -29,8 +29,8 @@ def entitlement(plan):
     return Entitlement("user_1", "org_1", plan, "active", frozenset(), 1, 0, 10_000_000_000, "k")
 
 
-@pytest.mark.parametrize("plan,sent", [("pro", 2), ("free", 0)])
-def test_repeats_are_one_event_with_a_count_for_a_paid_plan(plan, sent, monkeypatch):
+@pytest.mark.parametrize("plan,sent", [("team", 2), ("pro", 0)])   # the backend takes events from team orgs only
+def test_repeats_are_one_event_with_a_count_for_a_team_org(plan, sent, monkeypatch):
     monkeypatch.setattr(license, "current", lambda **kw: entitlement(plan))
     recorder = Recorder()
     monkeypatch.setattr(events, "plugins_for", lambda cfg, root: [recorder])

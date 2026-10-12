@@ -314,8 +314,8 @@ class ProEvents(EventsPlugin):
         return ent.org_id if FEATURE in ent.features and ORG_RE.match(ent.org_id) else None
 
     def health_org(self) -> str | None:
-        """The org a ``route_health`` event goes to: any paid plan (Pro, Team,
-        Enterprise), not only a team org (see ``route_health.org_for``)."""
+        """The org a ``route_health`` event goes to: a Team or Enterprise org,
+        by plan rather than by feature (see ``route_health.org_for``)."""
         from brindle.pro import license, route_health
 
         try:
@@ -441,14 +441,15 @@ class ProEvents(EventsPlugin):
                 org, batch = head
                 status = self._post(org, batch)
                 health = [e.get("kind") == ROUTE_HEALTH for e in batch]
+                sent = batch
                 if status == 422 and any(health):
                     # A backend older than route health refuses the kind: the audit events still go.
-                    rest = [e for e, h in zip(batch, health) if not h]
-                    status = self._post(org, rest) if rest else 200
-                if status == 422 and any("by_model" in e for e in batch):
+                    sent = [e for e, h in zip(batch, health) if not h]
+                    status = self._post(org, sent) if sent else 200
+                if status == 422 and any("by_model" in e for e in sent):
                     # A backend older than by_model refuses the key: keep the rest of the event.
                     status = self._post(org, [{k: v for k, v in e.items() if k != "by_model"}
-                                              for e in batch])
+                                              for e in sent])
                 if status in (403, 404) and all(health):
                     # Route health from an org the backend doesn't take it for (a personal plan).
                     status = 400

@@ -16,8 +16,9 @@ never a provider's error text, a key, an account or a URL. The outcomes:
 * ``provider_401`` / ``provider_403`` / ``provider_404``: the provider refused a
   run's calls with that status (``provider_outcome`` reads only the code).
 
-Only a signed-in Pro, Team or Enterprise user reports (an entitlement on a paid
-plan with an org; a free account, no login or air-gap mode reports nothing).
+Only a signed-in member of a Team or Enterprise org reports (the backend takes
+events from team orgs only; a personal plan, no login or air-gap mode reports
+nothing, so nothing is sent just to be refused).
 
 Batching: ``record`` counts in memory per (repo, agent, route, model, outcome)
 and one event per key goes out when the window closes: ``FLUSH_SECONDS`` after
@@ -43,13 +44,14 @@ KIND = events.ROUTE_HEALTH
 AGENTS = ("claude", "codex", "ollama")             # what the backend's RouteHealthAgent accepts
 OUTCOMES = ("identity_match", "identity_mismatch", "identity_undetermined", "model_unavailable",
             "policy_refused", "provider_401", "provider_403", "provider_404")
-PAID_PLANS = ("pro", "team", "enterprise")
+TEAM_PLANS = ("team", "enterprise")                # the backend's TEAM_PLANS: who may post events
 DEFAULT_MODEL = "default"                          # a profile that leaves the model to the CLI
 FLUSH_SECONDS = 60.0
 MAX_KEYS = 64
 MAX_COUNT = 10_000                                 # the backend refuses more
 ROUTE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+# A model is sent only as the Team feed sends one (team_events.MODEL_RE, within the backend's
+# pattern): a plain identifier with at most one slash, so a model that is a file path never leaves.
 _STATUS = re.compile(r"\b(401|403|404)\b")
 
 _lock = threading.Lock()
@@ -102,19 +104,20 @@ def route_of(provider: str, env, managed=None) -> str:
 
 def org_for(ent) -> str | None:
     """The org ``ent`` (a ``license.Entitlement``) reports route health to, or
-    None: a free plan or an org id the backend wouldn't take."""
+    None: a personal plan (the backend refuses its events) or an org id the
+    backend wouldn't take."""
     from brindle.pro.team_events import ORG_RE
 
     try:
         org = ent.org_id
-        return org if ent.plan in PAID_PLANS and ORG_RE.match(org) else None
+        return org if ent.plan in TEAM_PLANS and ORG_RE.match(org) else None
     except Exception:  # noqa: BLE001 - not an entitlement
         return None
 
 
 def reporting() -> bool:
-    """Whether this brindle reports route health at all: signed in on a paid
-    plan, not in air-gap mode. Fails closed."""
+    """Whether this brindle reports route health at all: signed in to a Team
+    or Enterprise org, not in air-gap mode. Fails closed."""
     try:
         from brindle import airgap
         from brindle.pro import license
@@ -130,6 +133,8 @@ def payload(ev: Event) -> dict | None:
     """The wire form of a ``route_health`` event (exactly the backend's
     fields), or None when the event isn't one the backend would take (an
     unknown agent or outcome, a model name that isn't a plain identifier)."""
+    from brindle.pro.team_events import MODEL_RE
+
     if ev.kind != KIND or ev.provider not in AGENTS or ev.outcome not in OUTCOMES:
         return None
     route = ev.route if isinstance(ev.route, str) and ROUTE_RE.match(ev.route) else None
@@ -240,5 +245,5 @@ def reset() -> None:
     _take()
 
 
-__all__ = ["AGENTS", "FLUSH_SECONDS", "KIND", "MAX_KEYS", "OUTCOMES", "PAID_PLANS", "flush", "org_for",
+__all__ = ["AGENTS", "FLUSH_SECONDS", "KIND", "MAX_KEYS", "OUTCOMES", "TEAM_PLANS", "flush", "org_for",
            "payload", "pending", "provider_outcome", "record", "reporting", "reset", "route_of"]
