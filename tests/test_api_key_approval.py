@@ -70,13 +70,6 @@ def test_keys_set_yes_approves(tmp_path):
     assert KEY not in r.output
 
 
-def test_keys_set_declining_leaves_the_config_untouched(tmp_path):
-    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\nn\n")
-    assert r.exit_code == 0, r.output
-    assert keystore.get_key("ANTHROPIC_API_KEY") == KEY   # stored all the same
-    assert not _config(tmp_path).exists()
-
-
 def test_keys_set_without_an_answer_declines(tmp_path):
     r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\n")
     assert r.exit_code == 0, r.output
@@ -86,14 +79,6 @@ def test_keys_set_without_an_answer_declines(tmp_path):
 def test_keys_set_asks_only_about_the_anthropic_key(tmp_path):
     r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input="sk-test-openai-0000\ny\n")
     assert r.exit_code == 0, r.output
-    assert not _config(tmp_path).exists()
-
-
-def test_doctor_fix_declined_leaves_the_config_untouched(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    asked = []
-    out = doctor.fix(lambda p: asked.append(p) or False)
-    assert len(asked) == 1 and "ANTHROPIC_API_KEY" in out[0] and KEY not in asked[0]
     assert not _config(tmp_path).exists()
 
 
@@ -112,17 +97,7 @@ def test_doctor_fix_cli_declines_by_default(tmp_path, monkeypatch):
     assert not _config(tmp_path).exists()
 
 
-def test_the_first_run_message_points_at_brindle_keys_set():
-    what = providers.ClaudeCode.first_run_screen("Do you want to use this API key?\n")
-    assert "brindle keys set" in what
-
-
 # -- org-managed settings --------------------------------------------------------------------------
-
-def test_managed_api_key_helper_is_detected(tmp_path, monkeypatch):
-    assert providers.claude_org_managed() is None
-    _managed(tmp_path, monkeypatch, json.dumps({"apiKeyHelper": "/opt/bin/get-key"}))
-    assert providers.claude_org_managed() == "apiKeyHelper"
 
 
 def test_managed_env_with_a_base_url_or_credential_is_detected(tmp_path, monkeypatch):

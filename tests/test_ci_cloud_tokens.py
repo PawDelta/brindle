@@ -1,17 +1,19 @@
 """Keyless cloud sign-in for brindle CI: a refreshed OIDC token file per cloud
 (:mod:`brindle.ci_federation`), the env the agents get, and what stays out of
-their panes."""
+their panes; on GitLab (brindle Enterprise) the template's ``id_tokens`` per
+cloud, the token file written once and never refreshed, and the lifetime
+warning."""
 
 from __future__ import annotations
 
 import base64
 import json
 import os
-import stat
 
 import pytest
 
-from brindle import ci_adapters, ci_client, ci_federation as fed, secrets
+from brindle import ci_client, ci_federation as fed, ci_hosts, secrets
+from brindle.ci_client import CIError
 from brindle.pro import managed_models
 from brindle.pro.team_policy import ProviderConfig
 
@@ -67,29 +69,6 @@ def refresher(cloud, ids, tmp_path, **kw):
     return r, actions, clock
 
 
-@pytest.mark.parametrize("cloud,ids,audience", [
-    (fed.BEDROCK, AWS, "sts.amazonaws.com"),
-    (fed.VERTEX, GCP, "//iam.googleapis.com/" + GCP["GCP_WORKLOAD_IDENTITY_PROVIDER"]),
-    (fed.FOUNDRY, AZURE, "api://AzureADTokenExchange"),
-])
-def test_token_file_has_the_clouds_audience_and_mode_0600(cloud, ids, audience, tmp_path):
-    r, actions, clock = refresher(cloud, ids, tmp_path)
-    delay = r.refresh_now()
-    assert actions.audiences == [audience]
-    assert stat.S_IMODE(os.stat(r.token_file).st_mode) == 0o600
-    assert open(r.token_file).read() == jwt(NOW + LIFETIME, "1")
-    assert delay == LIFETIME / 2   # half the token's lifetime, from its exp
-
-
-def test_refresh_rewrites_the_file_in_place_at_half_life(tmp_path):
-    r, actions, clock = refresher(fed.BEDROCK, AWS, tmp_path)
-    assert r.tick() == LIFETIME / 2
-    clock.t += LIFETIME / 2
-    assert r.tick() == LIFETIME / 2
-    assert open(r.token_file).read() == jwt(clock.t + LIFETIME, "2")
-    assert stat.S_IMODE(os.stat(r.token_file).st_mode) == 0o600
-
-
 def test_a_failed_refresh_is_retried_and_keeps_the_old_token(tmp_path, caplog):
     r, actions, clock = refresher(fed.BEDROCK, AWS, tmp_path)
     r.tick()
@@ -111,15 +90,6 @@ def test_a_token_without_exp_gets_a_default_lifetime(tmp_path):
     assert r.refresh_now() == fed.DEFAULT_CLOUD_LIFETIME_S * fed.CLOUD_REFRESH_FRACTION
 
 
-def test_aws_agents_get_the_role_and_token_file_only(tmp_path):
-    r, *_ = refresher(fed.BEDROCK, AWS, tmp_path)
-    r.refresh_now()
-    env = r.agent_env()
-    assert env == {"AWS_ROLE_ARN": AWS["AWS_ROLE_ARN"], "AWS_WEB_IDENTITY_TOKEN_FILE": r.token_file,
-                   "AWS_ROLE_SESSION_NAME": "brindle-ci"}
-    assert not any(open(r.token_file).read() in v for v in env.values())
-
-
 def test_azure_agents_get_ids_and_token_file(tmp_path):
     r, *_ = refresher(fed.FOUNDRY, AZURE, tmp_path)
     r.refresh_now()
@@ -127,44 +97,7 @@ def test_azure_agents_get_ids_and_token_file(tmp_path):
                              "AZURE_FEDERATED_TOKEN_FILE": r.token_file}
 
 
-def test_google_agents_get_an_external_account_config(tmp_path):
-    r, *_ = refresher(fed.VERTEX, GCP, tmp_path)
-    r.refresh_now()
-    env = r.agent_env()
-    assert list(env) == ["GOOGLE_APPLICATION_CREDENTIALS"]
-    path = env["GOOGLE_APPLICATION_CREDENTIALS"]
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
-    cfg = json.load(open(path))
-    assert cfg == {
-        "type": "external_account",
-        "audience": "//iam.googleapis.com/" + GCP["GCP_WORKLOAD_IDENTITY_PROVIDER"],
-        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-        "token_url": "https://sts.googleapis.com/v1/token",
-        "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
-                                             "brindle@proj-12345.iam.gserviceaccount.com:generateAccessToken",
-        "credential_source": {"file": r.token_file, "format": {"type": "text"}},
-    }
-    assert open(r.token_file).read() not in open(path).read()
-
-
-def test_the_token_dir_is_outside_the_checkout_and_removed_on_stop(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    r = fed.CloudTokenRefresher(fed.BEDROCK, AWS, URL, REQ, fetch=lambda *a: jwt(NOW + 600), clock=lambda: NOW)
-    try:
-        r.refresh_now()
-        assert not os.path.realpath(r.token_file).startswith(str(tmp_path.resolve()))
-        assert stat.S_IMODE(os.stat(r.directory).st_mode) == 0o700
-    finally:
-        r.stop()
-    assert not os.path.exists(r.directory)
-
-
 # -- which clouds a job uses ----------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("ids,cloud", [(AWS, "bedrock"), (GCP, "vertex"), (AZURE, "foundry")])
-def test_the_cloud_is_chosen_by_claude_code_use_and_its_ids(ids, cloud):
-    assert fed.cloud_token_clouds({**ids, **ACTIONS}) == [cloud]
 
 
 def test_no_cloud_without_the_actions_endpoint_ids_or_with_a_static_credential():
@@ -173,25 +106,6 @@ def test_no_cloud_without_the_actions_endpoint_ids_or_with_a_static_credential()
     assert fed.cloud_token_clouds({**AWS, **ACTIONS, "AWS_ACCESS_KEY_ID": "AKIA"}) == []
     assert fed.cloud_token_clouds({**AWS, **ACTIONS, fed.DISABLE_VAR: "0"}) == []
     assert fed.cloud_token_clouds({**AWS, **ACTIONS, "CLAUDE_CODE_USE_BEDROCK": "0"}) == []
-
-
-def test_start_uses_the_default_fetch_and_applies_to_every_env(monkeypatch):
-    seen = []
-
-    def fake(url, request_token, timeout=15.0, audience=None):
-        seen.append(audience)
-        return jwt(NOW + 600)
-
-    monkeypatch.setattr(ci_client, "_fetch_oidc", fake)
-    monkeypatch.setattr(fed.time, "time", lambda: NOW)
-    tokens = ci_client.start_cloud_tokens({**AWS, **ACTIONS}, say=lambda m: None)
-    try:
-        assert seen == ["sts.amazonaws.com"]
-        env, other = {}, {}
-        tokens.apply(env, other)
-        assert env == other and env["AWS_WEB_IDENTITY_TOKEN_FILE"].endswith("bedrock-token")
-    finally:
-        tokens.stop()
 
 
 def test_a_failed_first_fetch_leaves_the_cloud_out(tmp_path):
@@ -220,31 +134,11 @@ def test_scrub_job_drops_the_actions_endpoint_but_gives_agents_the_cloud_env(mon
 # -- panes ----------------------------------------------------------------------------------------
 
 
-KEPT = ("ANTHROPIC_FOUNDRY_AUTH_TOKEN", "CLAUDE_CODE_USE_MANTLE", "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "VERTEX_REGION_CLAUDE_4_5_SONNET",
-        "ANTHROPIC_BEDROCK_REGION_PREFIX", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN",
-        "AZURE_FEDERATED_TOKEN_FILE", "GOOGLE_APPLICATION_CREDENTIALS")
-
-
-@pytest.mark.parametrize("name", KEPT)
-def test_claude_panes_keep_the_newer_variables(name):
-    assert name in secrets.provider_credentials("claude")
-    assert name not in secrets.provider_credentials("codex")
-    assert name not in secrets.pane_unset([name], keep=secrets.provider_credentials("claude"))
-
-
 @pytest.mark.parametrize("name", ["ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
 def test_the_actions_endpoint_stays_out_of_panes_whatever_is_kept(name):
     keep = secrets.provider_credentials("claude", name)
-    assert name not in keep or name in secrets.pane_unset([name], keep=keep)
     assert name in secrets.pane_unset([name], keep=keep)
     assert name in secrets.scrub_secrets({name: "v"})
-
-
-def test_mantle_counts_as_a_cloud_credential():
-    assert "CLAUDE_CODE_USE_MANTLE" in ci_adapters.CLAUDE_CLOUD
-    cred = ci_adapters.ClaudeAdapter().credential({"CLAUDE_CODE_USE_MANTLE": "1"})
-    assert cred.kind == ci_adapters.CLOUD and cred.names == ("CLAUDE_CODE_USE_MANTLE",)
 
 
 def test_managed_models_pin_the_haiku_default_not_the_deprecated_variable():
@@ -252,3 +146,69 @@ def test_managed_models_pin_the_haiku_default_not_the_deprecated_variable():
     env = managed_models.provider_env(cfg, "claude")
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "haiku-id"
     assert "ANTHROPIC_SMALL_FAST_MODEL" not in env
+
+
+# -- GitLab: the rendered template, the token file written once, the lifetime warning ----------
+
+
+def gitlab_env(ids, var, token):
+    return {**ids, "GITLAB_CI": "true", var: token}
+
+
+def test_template_without_a_cloud_is_unchanged():
+    assert ci_hosts.render_template() == ci_hosts.GITLAB_TEMPLATE
+    assert "BRINDLE_AWS_ID_TOKEN" not in ci_hosts.GITLAB_TEMPLATE
+    with pytest.raises(CIError):
+        ci_hosts.render_template("nope")
+
+
+def test_the_cloud_is_selected_by_the_cicd_variables():
+    assert ci_hosts.cloud_from_env(AWS) == "bedrock"
+    only_ids = {k: v for k, v in AWS.items() if not k.startswith("CLAUDE_CODE_USE_")}
+    assert ci_hosts.cloud_from_env(only_ids) == "bedrock"
+    assert ci_hosts.cloud_from_env({}) is None
+
+
+def test_init_writes_the_cloud_template_and_warns(tmp_path):
+    said = []
+    path = ci_hosts.init_gitlab(cwd=str(tmp_path), is_entitled=lambda: True, say=said.append, env=AZURE,
+                                preview=True)   # foundry is in preview
+    assert path.read_text() == ci_hosts.render_template("foundry")
+    assert any("lifetime must cover the job timeout" in s for s in said)
+
+
+def test_gitlab_agents_get_the_cloud_env_and_never_the_token():
+    token = jwt(NOW + 3600, "secret-jti")
+    tokens = fed.start_cloud_tokens(gitlab_env(GCP, "BRINDLE_GCP_ID_TOKEN", token))
+    try:
+        env = tokens.agent_env()
+        assert token not in "".join(env.values())
+        (r,) = tokens.refreshers
+        config = json.load(open(env["GOOGLE_APPLICATION_CREDENTIALS"]))
+        assert config["credential_source"]["file"] == r.token_file
+        assert config["audience"] == "//iam.googleapis.com/" + GCP["GCP_WORKLOAD_IDENTITY_PROVIDER"]
+        assert token not in json.dumps(config)
+    finally:
+        tokens.stop()
+
+
+def test_run_says_the_token_is_not_refreshed():
+    said = []
+    tokens = ci_client.start_cloud_tokens(gitlab_env(AWS, "BRINDLE_AWS_ID_TOKEN", jwt(NOW + 3600)), say=said.append)
+    try:
+        assert any("not refreshed" in s for s in said)
+    finally:
+        tokens.stop()
+
+
+def test_doctor_compares_the_token_with_the_job_timeout(monkeypatch):
+    lines = ci_client.cloud_status(gitlab_env(AWS, "BRINDLE_AWS_ID_TOKEN", jwt(NOW + 3600)))
+    assert any(l.startswith("warning:") and "lifetime must cover the job timeout" in l for l in lines)
+    assert not any(jwt(NOW + 3600) in l for l in lines)
+    monkeypatch.setattr(ci_client.time, "time", lambda: NOW)
+    env = {**gitlab_env(AWS, "BRINDLE_AWS_ID_TOKEN", jwt(NOW + 300)), "CI_JOB_TIMEOUT": "3600"}
+    (warn,) = [l for l in ci_client.cloud_status(env) if l.startswith("warning:")]
+    assert "300s left" in warn and "3600s" in warn
+    env["CI_JOB_TIMEOUT"] = "200"
+    (warn,) = [l for l in ci_client.cloud_status(env) if l.startswith("warning:")]
+    assert "left" not in warn

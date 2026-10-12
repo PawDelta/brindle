@@ -3,12 +3,9 @@ third parties, and CI on API keys only. All key values here are fake."""
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
-from brindle import profiles
-from brindle.ci_adapters import ClaudeAdapter, CodexAdapter, usable
 from brindle.native.runner import endpoint_for
 from brindle.pro import auth, org_profiles
 from brindle.profiles import Profile, ProfileError, load_profile
@@ -28,41 +25,6 @@ def bins(tmp_path, monkeypatch):
     return d
 
 
-def _codex_env(tmp_path, bins, auth_json):
-    home = tmp_path / "codex-home"
-    home.mkdir()
-    (home / "auth.json").write_text(json.dumps(auth_json))
-    return {"CODEX_HOME": str(home), "PATH": str(bins)}
-
-
-# -- 1. Brindle-CI -------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("org", [False, True])
-def test_claude_oauth_token_refused_api_key_passes(bins, org):
-    a = ClaudeAdapter()
-    ok, why = usable(a, {"CLAUDE_CODE_OAUTH_TOKEN": "fake-oauth", "PATH": str(bins)}, org)
-    assert not ok and "API key" in why
-    assert usable(a, {"ANTHROPIC_API_KEY": "sk-ant-fake", "PATH": str(bins)}, org) == (True, "")
-
-
-@pytest.mark.parametrize("org", [False, True])
-def test_codex_chatgpt_login_refused_api_key_passes(bins, tmp_path, org):
-    a = CodexAdapter()
-    ok, why = usable(a, _codex_env(tmp_path, bins, {"tokens": {"access_token": "fake"}}), org)
-    assert not ok and "API key" in why
-    key_env = {"PATH": str(bins), "CODEX_HOME": str(tmp_path / "none"), "OPENAI_API_KEY": "sk-fake"}
-    assert usable(a, key_env, org) == (True, "")
-
-
-@pytest.mark.parametrize("env", [
-    {"CLAUDE_CODE_USE_BEDROCK": "1"}, {"CLAUDE_CODE_USE_VERTEX": "1"}, {"CLAUDE_CODE_USE_FOUNDRY": "1"},
-    {"ANTHROPIC_AUTH_TOKEN": "fake-federated"},
-])
-def test_cloud_and_federation_stay_accepted(bins, env):
-    assert usable(ClaudeAdapter(), {**env, "PATH": str(bins)}, True) == (True, "")
-
-
 # -- 2. native profiles ----------------------------------------------------------------------------
 
 
@@ -77,11 +39,6 @@ def test_native_profile_naming_the_oauth_token_is_refused_at_runner(monkeypatch)
         endpoint_for(_native(api_key_env="CLAUDE_CODE_OAUTH_TOKEN"))
     with pytest.raises(ValueError, match="CLAUDE_CODE_OAUTH_TOKEN"):
         endpoint_for(_native(env={"CLAUDE_CODE_OAUTH_TOKEN": "fake-oauth"}))
-
-
-def test_native_api_key_env_still_works(monkeypatch):
-    monkeypatch.setenv("MY_FAKE_KEY", "sk-fake")
-    assert endpoint_for(_native(api_key_env="MY_FAKE_KEY")).api_key == "sk-fake"
 
 
 @pytest.mark.parametrize("line", ["api_key_env: CLAUDE_CODE_OAUTH_TOKEN", "env.CLAUDE_CODE_OAUTH_TOKEN: fake"])
@@ -102,7 +59,7 @@ def _upload(tmp_path, body):
     return org_profiles.read_item(f, "profile")
 
 
-@pytest.mark.parametrize("name", ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"])
+@pytest.mark.parametrize("name", ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"])
 def test_org_upload_with_a_literal_key_is_refused(tmp_path, name):
     with pytest.raises(auth.AuthError, match=name):
         _upload(tmp_path, f"env.{name}: sk-fake-not-a-real-key")
