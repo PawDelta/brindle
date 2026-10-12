@@ -144,6 +144,15 @@ def no_signed_in_providers(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_claude_usage_command(monkeypatch):
+    """The sidebar never runs the real `claude -p /usage`: it reads as just
+    asked (a test calls refresh_claude_usage(force=True) and fakes the run)."""
+    from brindle import quota
+
+    monkeypatch.setattr(quota, "_claude_usage_at", float("inf"))
+
+
+@pytest.fixture(autouse=True)
 def no_signin_pause(monkeypatch):
     """The cull sweep and agent launches don't ask the real CLIs who is signed
     in: every provider reads as unverifiable (tests/test_signin_pause.py
