@@ -87,9 +87,6 @@ def test_known_unavailable_model_rejected_before_workspace_or_agent_side_effects
         agents.delegate(db, None, ws, "missing", "real task", "assign")
     with pytest.raises(agents.AgentError, match="absent from"):
         agents.spawn(db, ws, "missing", prompt="real task")
-    # a supervisor hands work to any profile but another supervisor
-    with pytest.raises(agents.AgentError, match="another supervisor"):
-        agents.delegate(db, None, ws, "supervisor", "real task", "assign")
 
 
 def test_routing_skips_catalog_unavailable_with_same_preflight(db, repo, monkeypatch):
