@@ -13,9 +13,11 @@ from brindle.pro.team_policy import (AgentSetup, AwsSetup, AzureSetup, ClaudeSet
 ORG = "acme"
 CLAUDE_ORG = "11111111-2222-3333-4444-555555555555"
 SUB = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c"
-AWS = AwsSetup("https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker", "us-west-2")
+AWS = AwsSetup("us-west-2", "https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker")
+OWN_AWS = AwsSetup("us-west-2")          # no SSO group: the machine's own AWS sign-in
 GCP = GcpSetup("acme-brindle-prod", "us-east5")
 AZURE = AzureSetup(SUB, "acme-foundry")
+FOUNDRY_URL = AzureSetup(base_url="https://acme.services.ai.azure.com/anthropic")
 
 CLAUDE_OK = (0, json.dumps({"loggedIn": True, "orgId": CLAUDE_ORG, "orgName": "Acme",
                             "subscriptionType": "enterprise"}))
@@ -210,6 +212,56 @@ def test_missing_cli_warns_without_a_mismatch(monkeypatch):
     policy(monkeypatch, claude_setup("bedrock", aws=AWS))
     c = by_name()["claude identity"]
     assert c.level == doctor.WARN and "isn't installed" in c.detail
+
+
+# -- a route that leaves the cloud sign-in to the person ---------------------------------
+
+OTHER_AWS = (0, json.dumps({"Account": "999999999999", "Arn": "arn:aws:sts::999999999999:assumed-role/Mine/me"}))
+
+
+def test_bedrock_without_sso_checks_only_that_sts_answers(monkeypatch, launch_cache):
+    from brindle import pane_auth
+
+    clock, path = launch_cache
+    fake = Fake(monkeypatch, {("aws", "sts"): OTHER_AWS})
+    policy(monkeypatch, claude_setup("bedrock", aws=OWN_AWS), enforce=True)
+    assert by_name()["claude identity"].level == doctor.OK            # any account: no match to make
+    argv = next(a for a, _, _ in fake.calls if a[0] == "aws")
+    assert "--profile" not in argv and argv[argv.index("--region") + 1] == "us-west-2"
+    assert company_identity.expected_ident(claude_setup("bedrock", aws=OWN_AWS)) is None
+    assert company_identity.launch_problem("claude") is None
+    assert company_identity.launch_problem("claude") is None and fake.count("aws", "sts") == 2   # doctor, one launch
+    assert next(iter(json.loads(path.read_text()))).startswith("claude|bedrock|own|")
+    # the person's own AWS sign-in reaches the pane: what was checked is what runs
+    monkeypatch.setenv("AWS_PROFILE", "mine")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAMINE")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    deny = set(pane_auth.deny_names("claude", "auto", None))
+    assert not {"AWS_PROFILE", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK"} & deny
+    assert {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_BASE_URL"} <= deny
+    clock[0] += 301                                                    # past the launch cache
+    Fake(monkeypatch, {("aws", "sts"): (255, "Unable to locate credentials")})
+    assert by_name()["claude identity"].level == doctor.WARN
+    assert company_identity.launch_problem("claude")                   # signed out is still a refusal
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
+    assert "AWS_ACCESS_KEY_ID" in pane_auth.deny_names("claude", "auto", None)    # with the SSO group: as before
+
+
+def test_foundry_by_base_url_checks_only_that_az_answers(monkeypatch, launch_cache):
+    from brindle import pane_auth
+
+    clock, _ = launch_cache
+    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
+    policy(monkeypatch, claude_setup("foundry", azure=FOUNDRY_URL), enforce=True)
+    assert by_name()["claude identity"].level == doctor.OK            # any subscription
+    assert company_identity.launch_problem("claude") is None
+    assert company_identity.expected_ident(claude_setup("foundry", azure=FOUNDRY_URL)) is None
+    monkeypatch.setenv("AZURE_CLIENT_ID", "mine")
+    assert "AZURE_CLIENT_ID" not in pane_auth.deny_names("claude", "auto", None)   # the Azure sign-in is theirs
+    clock[0] += 301
+    Fake(monkeypatch, {("az", "account"): (1, "Please run 'az login'")})
+    assert by_name()["claude identity"].level == doctor.WARN
+    assert company_identity.launch_problem("claude")
 
 
 # -- enforce at launch ---------------------------------------------------------------------

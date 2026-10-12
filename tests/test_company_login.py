@@ -13,10 +13,13 @@ from brindle.pro.team_policy import (AgentSetup, AwsSetup, AzureSetup, ClaudeSet
 
 ORG = "acme"
 UUID = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c"
-AWS = AwsSetup("https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker", "us-west-2")
+AWS = AwsSetup("us-west-2", "https://acme.awsapps.com/start", "us-east-1", "123456789012", "BrindleWorker")
+OWN_AWS = AwsSetup("us-west-2")          # no SSO group: the machine's own AWS sign-in
 GCP = GcpSetup("acme-brindle-prod", "us-east5")
 AZURE = AzureSetup(UUID, "acme-foundry")
+FOUNDRY_URL = AzureSetup(base_url="https://acme.services.ai.azure.com/anthropic")
 MODELS = ModelsSetup("claude-opus-x", "claude-sonnet-x", "claude-haiku-x")
+IDS = ("us.anthropic.claude-opus-4-5-v1:0", "us.anthropic.claude-sonnet-4-5-v1:0", "us.anthropic.claude-haiku-4-5-v1:0")
 
 
 class Fake:
@@ -220,9 +223,47 @@ def test_env_is_stored_and_reaches_a_claude_pane(db, repo, monkeypatch):
     (claude("gateway", gateway=GatewaySetup("https://gw.example.com/v1")),
      {"ANTHROPIC_BASE_URL": "https://gw.example.com/v1"}),
     (claude("subscription", org_id=UUID), {}),
+    # no SSO group: no AWS_PROFILE; default_model is ANTHROPIC_MODEL; with several ids and no
+    # aliases the last stands in for Haiku, as provider_config had it
+    (claude("bedrock", aws=OWN_AWS, model_ids=IDS, default_model=IDS[1]),
+     {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-west-2", "ANTHROPIC_MODEL": IDS[1],
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": IDS[2]}),
+    (claude("vertex", gcp=GCP, model_ids=IDS, models=ModelsSetup(opus="claude-opus-x")),   # aliases say what Haiku is
+     {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-brindle-prod", "CLOUD_ML_REGION": "us-east5",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-x"}),
+    (claude("foundry", azure=AzureSetup(UUID, "acme-foundry", FOUNDRY_URL.base_url)),
+     {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "acme-foundry",
+      "ANTHROPIC_FOUNDRY_BASE_URL": FOUNDRY_URL.base_url}),
+    (claude("console", org_id=UUID, default_model="claude-sonnet-4-5"), {"ANTHROPIC_MODEL": "claude-sonnet-4-5"}),
 ])
 def test_env_per_route(setup, expected):
     assert company_login.claude_env(ORG, setup.claude) == expected
+
+
+# -- routes that leave the cloud sign-in to the person --------------------------------------------
+
+def test_a_route_that_leaves_the_cloud_sign_in_to_the_person(aws_config, monkeypatch):
+    f = Fake(monkeypatch)
+    ok, out = go(claude("bedrock", aws=OWN_AWS, models=MODELS, model_ids=IDS, default_model=IDS[1]))
+    assert ok and out[-1] == "Ready: Claude on acme's bedrock (us-west-2)"
+    assert f.ran("aws", "sts", "get-caller-identity", "--region", "us-west-2")
+    assert not f.ran("aws", "sso", "login") and not aws_config.exists()        # no profile to write or log in to
+    stored = company_login.stored_env()
+    assert stored["AWS_REGION"] == "us-west-2" and stored["ANTHROPIC_MODEL"] == IDS[1] and "AWS_PROFILE" not in stored
+    probes = [c[0][3] for c in f.calls if c[0][:2] == ("/bin/claude", "-p")]
+    assert probes == ["claude-opus-x", "claude-sonnet-x", "claude-haiku-x", IDS[1]]   # the default model too
+    f = Fake(monkeypatch, {("aws", "sts"): (255, "Unable to locate credentials")})
+    ok, out = go(claude("bedrock", aws=OWN_AWS))
+    assert not ok and not any(line.startswith("Ready") for line in out)
+    assert not f.ran("aws", "sso", "login") and not any(c[1] for c in f.calls)   # nothing interactive: it's theirs to do
+    assert any("brindle login" in line for line in out) and company_login.stored_env() == {}
+    # Foundry by its endpoint, with no subscription named: az signs in, nothing picks a subscription
+    f = Fake(monkeypatch, {("az", "account", "show"): (1, "")})
+    ok, out = go(claude("foundry", azure=FOUNDRY_URL))
+    assert ok and f.ran("az", "login") and not f.ran("az", "account", "set")
+    assert out[-1] == f"Ready: Claude on acme's foundry ({FOUNDRY_URL.base_url})"
+    go(claude("foundry", azure=AzureSetup(UUID, None, FOUNDRY_URL.base_url)))
+    assert f.ran("az", "account", "set", "--subscription", UUID)
 
 
 def test_claude_managed_settings_take_precedence(db, repo, tmp_path, monkeypatch):

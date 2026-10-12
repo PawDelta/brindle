@@ -131,23 +131,39 @@ def write_aws_profile(path: Path, name: str, aws) -> None:
 # -- the Claude Code environment for panes -------------------------------------------------
 
 def claude_env(org_id: str, claude) -> dict[str, str]:
-    """The variables a Claude Code pane needs for the org's route."""
+    """The variables a Claude Code pane needs for the org's route (a
+    ``ClaudeSetup``): the one env builder, for ``brindle login``'s stored env
+    and for an enforced route (brindle.pro.managed_models). Bedrock without
+    the SSO group sets no ``AWS_PROFILE``: the machine's own AWS sign-in
+    applies. ``default_model`` is ``ANTHROPIC_MODEL``; with no ``models``
+    aliases and several ``model_ids``, the last id stands in for Haiku, as
+    the ``provider_config`` it replaces had it."""
     env: dict[str, str] = {}
     if claude.route == "bedrock":
-        env.update(CLAUDE_CODE_USE_BEDROCK="1", AWS_PROFILE=profile_name(org_id),
-                   AWS_REGION=claude.aws.region)
+        env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+        if claude.aws.sso:
+            env["AWS_PROFILE"] = profile_name(org_id)
+        env["AWS_REGION"] = claude.aws.region
     elif claude.route == "vertex":
         env.update(CLAUDE_CODE_USE_VERTEX="1", ANTHROPIC_VERTEX_PROJECT_ID=claude.gcp.project,
                    CLOUD_ML_REGION=claude.gcp.region)
     elif claude.route == "foundry":
-        env.update(CLAUDE_CODE_USE_FOUNDRY="1", ANTHROPIC_FOUNDRY_RESOURCE=claude.azure.resource)
+        env["CLAUDE_CODE_USE_FOUNDRY"] = "1"
+        if claude.azure.resource:
+            env["ANTHROPIC_FOUNDRY_RESOURCE"] = claude.azure.resource
+        if claude.azure.base_url:
+            env["ANTHROPIC_FOUNDRY_BASE_URL"] = claude.azure.base_url
     elif claude.route == "gateway":
         env["ANTHROPIC_BASE_URL"] = claude.gateway.base_url
+    if claude.default_model:
+        env["ANTHROPIC_MODEL"] = claude.default_model
     m = claude.models
     if m is not None:
         for tier, model in (("OPUS", m.opus), ("SONNET", m.sonnet), ("HAIKU", m.haiku)):
             if model:
                 env[f"ANTHROPIC_DEFAULT_{tier}_MODEL"] = model
+    elif len(claude.model_ids) > 1:
+        env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = claude.model_ids[-1]
     return env
 
 
@@ -156,8 +172,9 @@ def claude_env(org_id: str, claude) -> dict[str, str]:
 ENV_NAMES = frozenset({
     "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
     "AWS_PROFILE", "AWS_REGION", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION",
-    "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"})
+    "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL"})
 
 
 def store_env(org_id: str, env: dict[str, str], self_serve: bool = False) -> None:
@@ -261,6 +278,15 @@ class Login:
         if r == "bedrock":
             if not self._need("aws"):
                 return False
+            if not c.aws.sso:
+                # No SSO group: the org leaves the AWS sign-in to the person, so
+                # there is no profile to write or log in to; only check it answers.
+                if run_cmd(["aws", "sts", "get-caller-identity", "--region", c.aws.region])[0] == 0:
+                    self.say("AWS: already signed in (your own AWS sign-in applies)")
+                    return True
+                self.say("AWS: not signed in; sign in to AWS the way you usually do (for example "
+                         "`aws sso login` or `aws configure`), then run `brindle login` again")
+                return False
             name = profile_name(self.org_id)
             try:
                 write_aws_profile(self.aws_config or aws_config_path(), name, c.aws)
@@ -280,7 +306,7 @@ class Login:
             if not self._need("az"):
                 return False
             ok = self._ensure("az", ["az", "account", "show"], ["az", "login"], "Azure")
-            if ok:
+            if ok and c.azure.subscription_id:
                 run_cmd(["az", "account", "set", "--subscription", c.azure.subscription_id])
             return ok
         if r in ("subscription", "console"):
@@ -305,16 +331,17 @@ class Login:
             return self._ensure("codex", ["codex", "login", "status"], ["codex", "login"], "Codex")
         if c.route == "api_key":
             self.say("Codex: sign in with your key: run `codex login --with-api-key`")
-        return True     # azure: the existing openai-compatible provider handling
+        return True     # azure, gateway: panes get the endpoint (OPENAI_BASE_URL); no sign-in here
 
     def _where(self, c) -> str:
         region = {"bedrock": c.aws.region if c.aws else None,
                   "vertex": c.gcp.region if c.gcp else None,
-                  "foundry": c.azure.resource if c.azure else None}.get(c.route)
+                  "foundry": (c.azure.resource or c.azure.base_url) if c.azure else None}.get(c.route)
         return f"{c.route} ({region})" if region else c.route
 
     def _model_check(self, c) -> bool:
-        models = [m for m in ((c.models.opus, c.models.sonnet, c.models.haiku) if c.models else ()) if m]
+        pinned = (c.models.opus, c.models.sonnet, c.models.haiku) if c.models else ()
+        models = list(dict.fromkeys(m for m in (*pinned, c.default_model) if m))
         binary = which("claude")
         env = {**os.environ, **claude_env(self.org_id, c)}
         if models and not binary:
