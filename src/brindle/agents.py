@@ -185,11 +185,12 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         if m is _UNREAD:
             m = managed(ws.repo_root)
         # Claude Code's own managed settings (apiKeyHelper, a managed env) pick
-        # the credential and backend: brindle adds no provider_config env there.
+        # the credential and backend: brindle adds no managed route env there.
         org = agent.provider == "claude" and providers.claude_org_managed()
-        # The company's Claude Code env (`brindle login`): the lowest layer, so a
-        # profile's env lines and the org's managed provider both beat it; none
-        # at all under Claude Code's managed settings (stored_env).
+        # The company's Claude Code env (`brindle login`, the org's agent_setup
+        # without `enforce`): the lowest layer, so a profile's env lines and the
+        # org's managed route (an enforced agent_setup, or provider_config) both
+        # beat it; none at all under Claude Code's managed settings (stored_env).
         company = {} if agent.provider != "claude" else company_login.stored_env()
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
@@ -239,7 +240,8 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             env = {**company, **recovery_keys, **profile_env, **managed_env, **env}
         else:
             # An enforced company identity (Enterprise): the pane runs on the route
-            # launch_problem checked, whatever a profile's env lines say.
+            # launch_problem checked, whatever a profile's env lines say. The route
+            # env is the top layer (managed_env is the same route's, from managed_models).
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
             env = {**recovery_keys, **profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
@@ -531,9 +533,10 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
         raise AgentError(f"managed models: {e}") from None
     # An enforced company identity: also every account picker the tmux server
     # would hand the pane or `brindle keys` holds for it (pane_auth covers this process's).
-    route = None if agent.provider != "claude" or org_managed else company_identity.enforced_route_env()
+    route = None if agent.provider != "claude" or org_managed else company_identity.enforced_route()
     if route is not None:
-        extra = company_identity.enforced_deny(route, tmux.inherited_names(ws.tmux_session), credentials)
+        extra = company_identity.enforced_deny(route[0], tmux.inherited_names(ws.tmux_session), credentials,
+                                               own=route[1])
         deny = (*deny, *(n for n in extra if n not in deny))
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())

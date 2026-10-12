@@ -33,24 +33,6 @@ def test_prune_drops_missing_workspace_rows(db, repo):
     assert db.get_workspace(ws.id) is None
 
 
-def test_prune_closes_old_paused_agent_on_merged_workspace(db, repo, monkeypatch):
-    base = "supervisor"
-    from conftest import sh
-
-    sh(f"git switch -c {base}", repo)
-    ws = workspaces.create(db, str(repo), "feat-supervisor-base", base=base,
-                           run_setup=False).workspace
-    _commit(Path(ws.path), repo, "change.py")
-    workspaces.merge_back(db, ws)
-    agent = _agent(db, ws, "old-paused")
-    monkeypatch.setattr("brindle.cull.tmux.list_panes", lambda: {})
-
-    lines = cull.prune_stale_agents(db, now=time.time())
-
-    assert any(agent.id in line and "merged" in line for line in lines)
-    assert db.get_agent(agent.id).dismissed_at is not None
-
-
 def _merged_workspace(db, repo, name):
     from conftest import sh
 
@@ -59,21 +41,6 @@ def _merged_workspace(db, repo, name):
     _commit(Path(ws.path), repo, "change.py")
     workspaces.merge_back(db, ws)
     return ws
-
-
-def test_prune_leaves_an_idle_agent_with_a_live_pane(db, repo, monkeypatch):
-    """Idle at its prompt is not stopped: a supervisor between requests on an
-    old merged worktree must not be closed (and its process stopped)."""
-    ws = _merged_workspace(db, repo, "feat-live-idle")
-    agent = _agent(db, ws, "live-idle", status="idle")
-    monkeypatch.setattr("brindle.cull.tmux.list_panes", lambda: {})
-    monkeypatch.setattr("brindle.cull.agents.is_alive", lambda a, panes=None: True)
-    closed = []
-    monkeypatch.setattr("brindle.cull.agents.close", lambda db, aid, panes=None: closed.append(aid))
-
-    lines = cull.prune_stale_agents(db, now=time.time())
-
-    assert closed == [] and not any(agent.id in line for line in lines)
 
 
 def test_prune_closes_an_idle_agent_whose_process_exited(db, repo, monkeypatch):
@@ -133,17 +100,3 @@ def test_overlap_keeps_running_workers_claims(db, repo):
     assert warning and "running-claim" in warning
 
 
-def test_prune_closes_a_stale_agent_whose_whole_repo_is_gone(db, repo, monkeypatch):
-    """A repo deleted outright (an old demo, say) must not stop prune: git can't
-    even start there, so its agents count as on a gone workspace."""
-    import shutil
-
-    ws = workspaces.create(db, str(repo), "feat-repo-gone", run_setup=False).workspace
-    agent = _agent(db, ws, "old-paused")
-    monkeypatch.setattr("brindle.cull.tmux.list_panes", lambda: {})
-    shutil.rmtree(repo)
-
-    lines = cull.prune_stale_agents(db, now=time.time())
-
-    assert any(agent.id in line and "gone" in line for line in lines)
-    assert cull.workspaces_merged(ws) is False

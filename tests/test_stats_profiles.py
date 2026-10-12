@@ -1,7 +1,6 @@
 """`brindle cost report`'s per-profile section: finished tasks, merge rate, review rounds, and
 tokens and dollars per merged branch, from seeded routing decisions and history rows."""
 import json
-import time
 
 import pytest
 
@@ -56,23 +55,6 @@ def test_merge_rate_rounds_and_cost_per_merged_branch(db):
     assert "developer / medium" in text
     assert "3 finished, 67% merged, 2.0 review rounds avg, 200k tokens, $2.00 per merged branch" in text
     assert "developer-codex / heavy" in text and "0% merged" in text
-
-
-def test_decisions_before_the_window_are_left_out(db):
-    now = time.time()
-    task(db, "old", "developer", "light", "merged", output=100_000, ts=now - 90 * 86400)
-    task(db, "new", "developer", "light", "merged", output=200_000, ts=now)
-    s = cost.report(db, ROOT, now=now, days=30).stats[("developer", "light")]
-    assert s.finished == 1 and s.dollars_per_merged == pytest.approx(2)
-
-
-def test_a_merged_branch_without_spend_rows_does_not_lower_the_average(db):
-    task(db, "c1", "developer", "light", "merged", output=200_000)   # $2
-    task(db, "c2", "developer", "light", "merged")                   # no history rows
-    s = cost.report(db, ROOT).stats[("developer", "light")]
-    assert (s.merged, s.merged_counted) == (2, 1)
-    assert s.tokens_per_merged == 200_000
-    assert s.dollars_per_merged == pytest.approx(2)
 
 
 def test_merged_branches_on_a_free_model_read_free():

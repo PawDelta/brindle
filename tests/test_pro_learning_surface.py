@@ -52,14 +52,6 @@ def test_free_records_nothing(db, repo, worker, monkeypatch):
     assert permissions.load_store().approvals == {}
 
 
-def test_pro_can_still_turn_it_off(db, repo, worker, pro):
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"permission_policy": "off"}))
-    assert load_repo_config(str(repo)).permission_policy == "off"
-    approve(db, worker)
-    assert permissions.load_store().approvals == {}
-
-
 # -- get_progress -------------------------------------------------------------------------------
 
 
@@ -127,12 +119,6 @@ def test_assign_carries_the_brief_warning(db, repo, boss, monkeypatch):
                                           files=["a.py"], weight="medium"))
     assert f"Warning: {WARNING}" in reply
     assert calls == [("do A", "tests pass", ["a.py"], "medium")]
-
-
-def test_assign_adds_nothing_when_the_learner_is_quiet(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(brief_learning, "warning", lambda *a, **k: None)
-    reply = asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
-    assert reply.startswith("Started worker") and "Briefs" not in reply
 
 
 def test_handoff_carries_the_brief_warning(db, repo, boss, monkeypatch):

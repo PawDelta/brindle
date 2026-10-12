@@ -1,12 +1,24 @@
-"""Enterprise ``managed_models``: run the org's workers on the provider the
-org chose, and keep personal API keys out of their panes.
+"""Enterprise ``managed_models``: run the org's workers on the route the org
+chose, and keep personal API keys out of their panes.
 
-The org policy (``brindle.pro.team_policy``) carries two fields, enforced only
-with the ``managed_models`` feature (``license.has``, fail closed: no verified
-entitlement, nothing is managed):
+Enforced only with the ``managed_models`` feature (``license.has``, fail
+closed: no verified entitlement, nothing is managed). The route comes from
+the org policy (``brindle.pro.team_policy``) in one of two forms:
 
-* ``provider_config``: Bedrock or Vertex (with a region and model ids), or an
-  Azure / OpenAI-compatible endpoint. Every launched agent gets that provider:
+* ``agent_setup`` with ``enforce`` (the one source of truth): per agent, the
+  Claude route (bedrock, vertex, foundry, gateway) with its ``model_ids`` and
+  ``default_model``, and the Codex route (azure, gateway) with its
+  ``base_url``. An agent whose route points at a cloud or an endpoint of the
+  org's is managed exactly as ``provider_config`` always managed every agent:
+  its env is the top layer of the pane's (``agents.agent_env``), a profile
+  pointing elsewhere is refused, and the identity is checked at launch
+  (``company_identity``). An agent with no such route (a Claude org login,
+  Codex on ChatGPT, nothing set) isn't managed here; ``allowed_providers``
+  is the way to keep it out. Without ``enforce`` the same block is login
+  help only (``company_login``) and the lowest env layer.
+* ``provider_config`` (servers older than ``agent_setup`` routing, which keep
+  sending it as a mirror): one route for the whole org. Bedrock or Vertex
+  (with a region and model ids), or an Azure / OpenAI-compatible endpoint.
 
   =================  =======================================================
   Claude Code        bedrock: ``CLAUDE_CODE_USE_BEDROCK`` + ``AWS_REGION``;
@@ -20,15 +32,15 @@ entitlement, nothing is managed):
   native             azure / openai-compatible: the profile's ``base_url``
   =================  =======================================================
 
-  A profile that points elsewhere (another endpoint, another cloud, a
-  provider the managed one can't serve) is refused with a message saying why.
-* ``deny_personal_keys``: the person's own model keys (``secrets.
-  PERSONAL_KEYS``) are taken out of every agent pane, and a profile that
-  brings its own is refused. This can't stop a Claude subscription/keychain
-  login unless ``provider_config`` routes Claude Code to Bedrock, Vertex or
-  Foundry, so pair the two.
+The Claude env of an ``agent_setup`` route is ``company_login.claude_env``,
+the same builder ``brindle login`` stores, so an old ``provider_config`` and
+its ``agent_setup`` form give a pane the same variables.
 
-Without the feature both fields are ignored.
+``deny_personal_keys`` (in ``agent_setup``, else the policy's top-level
+field): the person's own model keys (``secrets.PERSONAL_KEYS``) are taken
+out of every agent pane, and a profile that brings its own is refused. This
+can't stop a Claude subscription/keychain login unless the route takes
+Claude Code to Bedrock, Vertex or Foundry, so pair the two.
 """
 
 from __future__ import annotations
@@ -37,7 +49,8 @@ import logging
 from dataclasses import dataclass, replace
 
 from brindle import secrets
-from brindle.pro.team_policy import OrgPolicy, ProviderConfig
+from brindle.pro.team_policy import (CLAUDE_CLOUD_ROUTES, CODEX_ENDPOINT_ROUTES, AgentSetup,
+                                     OrgPolicy, ProviderConfig)
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +63,10 @@ ROUTING_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VE
 
 NAMES = {"bedrock": "AWS Bedrock", "vertex": "Google Vertex AI", "azure": "Azure",
          "openai-compatible": "an OpenAI-compatible endpoint", "anthropic": "the Anthropic API"}
+# The same, by agent_setup route: what a refusal names.
+CLAUDE_ROUTE_NAMES = {"bedrock": NAMES["bedrock"], "vertex": NAMES["vertex"], "foundry": NAMES["azure"],
+                      "gateway": "an Anthropic-compatible gateway"}
+CODEX_ROUTE_NAMES = {"azure": NAMES["azure"], "gateway": NAMES["openai-compatible"]}
 
 # The variable the org's key (``key_env`` / ``key_helper``) is set as in a pane,
 # by the agent's provider, for the managed provider that carries a key.
@@ -64,13 +81,30 @@ class ManagedUnavailable(Exception):
 
 @dataclass(frozen=True)
 class Managed:
+    """What applies: the routes of an enforced ``agent_setup`` (``setup``), or
+    an older server's ``provider_config`` (``config``); never both."""
     org_id: str
     config: ProviderConfig | None
     deny_personal_keys: bool
+    setup: AgentSetup | None = None
 
     @property
     def denied_keys(self) -> tuple[str, ...]:
         return secrets.PERSONAL_KEYS if self.deny_personal_keys else ()
+
+    @property
+    def claude(self):
+        """The managed Claude route (a ``ClaudeSetup``), or None."""
+        s = self.setup
+        return s.claude if s is not None and s.claude is not None and s.claude.route in CLAUDE_CLOUD_ROUTES \
+            else None
+
+    @property
+    def codex(self):
+        """The managed Codex route (a ``CodexSetup`` with a ``base_url``), or None."""
+        s = self.setup
+        return s.codex if s is not None and s.codex is not None and s.codex.route in CODEX_ENDPOINT_ROUTES \
+            and s.codex.base_url else None
 
     def describe(self) -> str:
         parts = []
@@ -86,15 +120,51 @@ class Managed:
             if c.key_env or c.key_helper:
                 bits.append("org-owned key")
             parts.append(bits[0] + (f" ({', '.join(bits[1:])})" if bits[1:] else ""))
+        if self.claude is not None:
+            parts.append("Claude on " + _describe_claude(self.claude))
+        if self.codex is not None:
+            parts.append(f"Codex on {CODEX_ROUTE_NAMES[self.codex.route]} ({self.codex.base_url})")
+        if self.exclusive:
+            parts.append("agents without a route refused")
         if self.deny_personal_keys:
             parts.append("personal API keys denied")
         return f"org {self.org_id}: " + "; ".join(parts)
 
+    @property
+    def exclusive(self) -> bool:
+        """Whether an agent the org's routing gives no route is refused."""
+        return bool(self.setup is not None and self.setup.exclusive)
+
+
+def _describe_claude(c) -> str:
+    bits = [CLAUDE_ROUTE_NAMES[c.route]]
+    if c.route == "bedrock":
+        bits.append(f"region {c.aws.region}" + ("" if c.aws.sso else ", your own AWS sign-in"))
+    elif c.route == "vertex":
+        bits.append(f"project {c.gcp.project}, region {c.gcp.region}")
+    elif c.route == "foundry":
+        bits.append(c.azure.base_url or f"resource {c.azure.resource}")
+    elif c.route == "gateway":
+        bits.append(c.gateway.base_url)
+    if c.model_ids:
+        bits.append("models " + ", ".join(c.model_ids))
+    if c.default_model:
+        bits.append(f"default {c.default_model}")
+    return bits[0] + (f" ({', '.join(bits[1:])})" if bits[1:] else "")
+
 
 def current(repo_root: str | None) -> Managed | None:
     """The managed-models settings that apply, None when there are none (the
-    feature isn't entitled, no team org, or the org set neither field).
-    Raises :class:`ManagedUnavailable` when they apply but can't be read."""
+    feature isn't entitled, no team org, or the org set nothing managed).
+    From ``agent_setup`` when it is the org's routing (``AgentSetup.routing``:
+    the block carries ``exclusive``, as a phase-1 server always sends it) and
+    is enforced and either routes an agent somewhere (``routed``) or is
+    exclusive; else from ``provider_config``, exactly as before: a server
+    older than that can hold both, and its ``provider_config`` wins while
+    its ``agent_setup`` is login help and the identity check only.
+    ``deny_personal_keys`` from ``agent_setup`` when set there, else the
+    policy's top-level field. Raises :class:`ManagedUnavailable` when they
+    apply but can't be read."""
     from brindle.pro import team_policy
 
     try:
@@ -105,9 +175,13 @@ def current(repo_root: str | None) -> Managed | None:
         return None
     if not isinstance(p, OrgPolicy):
         raise ManagedUnavailable(p.reason)
-    if p.provider_config is None and not p.deny_personal_keys:
+    s = p.agent_setup
+    deny = p.deny_personal_keys if s is None or s.deny_personal_keys is None else s.deny_personal_keys
+    if s is not None and s.routing and s.enforce and (s.routed or s.exclusive):
+        return Managed(p.org_id, None, deny, setup=s)
+    if p.provider_config is None and not deny:
         return None
-    return Managed(p.org_id, p.provider_config, p.deny_personal_keys)
+    return Managed(p.org_id, p.provider_config, deny)
 
 
 def provider_env(cfg: ProviderConfig, provider: str) -> dict[str, str]:
@@ -158,6 +232,8 @@ def refusal(m: Managed, profile) -> str | None:
                     f"{m.org_id} doesn't allow; remove it from the profile (brindle strips "
                     "OPENAI_API_KEY and the other personal keys from agent panes, so a profile "
                     "that needs a key should name a non-personal one in api_key_env)")
+    if m.setup is not None:
+        return _route_refusal(m, profile, who)
     c = m.config
     if c is None:
         return None
@@ -193,12 +269,76 @@ def refusal(m: Managed, profile) -> str | None:
     return None
 
 
+def _route_refusal(m: Managed, profile, who: str) -> str | None:
+    """:func:`refusal` under an enforced ``agent_setup``: an agent whose route
+    the org set may not be pointed elsewhere by its profile. One the block
+    gives no route is refused when the routing is ``exclusive`` (as
+    ``provider_config`` refused every agent it couldn't serve), else it isn't
+    the org's to manage here."""
+    provider = profile.provider
+    if provider == "claude" and m.claude is not None:
+        where = CLAUDE_ROUTE_NAMES[m.claude.route]
+    elif provider in ("codex", "native") and m.codex is not None:
+        where = CODEX_ROUTE_NAMES[m.codex.route]
+    else:
+        return _exclusive_refusal(m, profile, who) if m.exclusive else None
+    if provider == "native":
+        # brindle's own OpenAI-compatible loop follows the Codex endpoint, as
+        # it followed an azure / openai-compatible provider_config.
+        want = m.codex.base_url
+        if profile.base_url and profile.base_url.rstrip("/") != want.rstrip("/"):
+            return (f"{who} points at {profile.base_url}, not {want}, the endpoint org "
+                    f"{m.org_id} manages; remove its base_url")
+        return None
+    elsewhere = sorted(k for k in profile.env if k in ROUTING_ENV)
+    if elsewhere:
+        return (f"{who} sets {', '.join(elsewhere)}, pointing it away from {where}, the "
+                f"provider org {m.org_id} manages; remove it from the profile")
+    return None
+
+
+def _exclusive_refusal(m: Managed, profile, who: str) -> str | None:
+    """Under exclusive routing, why an agent the org gave no route may not
+    run: the messages ``provider_config`` gives for an agent it can't serve.
+    An agent with a login route (a Claude org, Codex on ChatGPT or a key)
+    has its route and runs on it."""
+    s = m.setup
+    provider = profile.provider
+    if provider == "claude" and s.claude is not None:
+        return None
+    if provider == "codex" and s.codex is not None:
+        return None
+    where = (CLAUDE_ROUTE_NAMES[m.claude.route] if m.claude is not None
+             else CODEX_ROUTE_NAMES[m.codex.route] if m.codex is not None
+             else "the routes")
+    if provider == "claude":
+        return (f"{who} runs Claude Code, which can't use {where}, the provider org {m.org_id} "
+                "manages; use a native or Codex profile")
+    if provider == "codex":
+        return (f"{who} runs Codex, which can't use {where}, the provider org {m.org_id} "
+                "manages; use a Claude Code profile")
+    if provider == "native":
+        return (f"{who} uses its own endpoint, which isn't {where}, the provider org "
+                f"{m.org_id} manages; use a Claude Code profile")
+    return (f"{who} uses {provider}, which can't run on {where}, the provider org "
+            f"{m.org_id} manages")
+
+
 def apply_profile(m: Managed | None, profile):
     """``profile`` as launched under ``m``: a native profile gets the managed
-    endpoint, and a Claude profile a model the managed provider serves."""
-    if m is None or m.config is None:
+    endpoint, and a Claude profile a model the managed route serves."""
+    if m is None:
+        return profile
+    if m.setup is not None:
+        c = m.claude
+        if profile.provider == "native" and m.codex is not None:
+            return replace(profile, base_url=m.codex.base_url)
+        if profile.provider == "claude" and c is not None and c.model_ids and profile.model not in c.model_ids:
+            return replace(profile, model=c.default_model or c.model_ids[0])
         return profile
     c = m.config
+    if c is None:
+        return profile
     if profile.provider == "native" and c.endpoint:
         profile = replace(profile, base_url=c.endpoint)
         if c.model_ids and profile.model not in c.model_ids:
@@ -208,11 +348,29 @@ def apply_profile(m: Managed | None, profile):
     return profile
 
 
+def route_env(m: Managed, provider: str) -> dict[str, str]:
+    """The environment of ``provider``'s managed ``agent_setup`` route: for
+    Claude, ``company_login.claude_env`` (the one builder); for Codex, the
+    endpoint. Empty for an agent with no managed route (native reads the
+    profile's base_url, see :func:`apply_profile`)."""
+    from brindle import company_login
+
+    if provider == "claude" and m.claude is not None:
+        return company_login.claude_env(m.org_id, m.claude)
+    if provider == "codex" and m.codex is not None:
+        return {"OPENAI_BASE_URL": m.codex.base_url}
+    return {}
+
+
 def agent_env(m: Managed | None, provider: str) -> dict[str, str]:
     """What ``agents.agent_env`` adds for ``provider`` under ``m``: the
-    managed provider's variables (the personal keys are taken out of the pane
+    managed route's variables (the personal keys are taken out of the pane
     by ``tmux.new_window``'s ``deny``, not set here)."""
-    if m is None or m.config is None:
+    if m is None:
+        return {}
+    if getattr(m, "setup", None) is not None:
+        return route_env(m, provider)
+    if m.config is None:
         return {}
     return provider_env(m.config, provider)
 

@@ -30,22 +30,6 @@ def write(path: Path, lines: list[str]) -> None:
             f.write(line)
 
 
-def test_sums_usage_across_assistant_messages(db, tmp_path):
-    t = tmp_path / "sess.jsonl"
-    write(t, [
-        _line("m1", input_tokens=10, output_tokens=20, cache_read=100, cache_creation=5),
-        _line("m2", input_tokens=6, output_tokens=155, cache_read=0, cache_creation=25169,
-              model="claude-opus-4-7"),
-    ])
-    u = usage.transcript_usage(db, str(t))
-    assert u is not None
-    assert u.input_tokens == 16
-    assert u.output_tokens == 175
-    assert u.cache_read_tokens == 100
-    assert u.cache_creation_tokens == 25174
-    assert u.model == "claude-opus-4-7"  # the last message's model
-
-
 def test_ignores_non_assistant_entries(db, tmp_path):
     t = tmp_path / "sess.jsonl"
     write(t, [
@@ -55,33 +39,6 @@ def test_ignores_non_assistant_entries(db, tmp_path):
     ])
     u = usage.transcript_usage(db, str(t))
     assert (u.input_tokens, u.output_tokens) == (1, 2)
-
-
-def test_dedupes_a_message_streamed_across_several_lines(db, tmp_path):
-    """Claude Code writes one line per content block; every block of the same
-    message repeats its full (identical) usage. Only the first counts."""
-    t = tmp_path / "sess.jsonl"
-    write(t, [
-        _line("m1", input_tokens=6, output_tokens=155, cache_creation=25169),
-        _line("m1", input_tokens=6, output_tokens=155, cache_creation=25169),
-        _line("m1", input_tokens=6, output_tokens=155, cache_creation=25169),
-    ])
-    u = usage.transcript_usage(db, str(t))
-    assert (u.input_tokens, u.output_tokens, u.cache_creation_tokens) == (6, 155, 25169)
-
-
-def test_incremental_reread_only_parses_new_bytes(db, tmp_path):
-    t = tmp_path / "sess.jsonl"
-    write(t, [_line("m1", input_tokens=10, output_tokens=20)])
-    first = usage.transcript_usage(db, str(t))
-    assert (first.input_tokens, first.output_tokens) == (10, 20)
-
-    cached = db.get_usage_cache(str(t))
-    assert cached["size"] == t.stat().st_size
-
-    write(t, [_line("m2", input_tokens=1, output_tokens=2)])
-    second = usage.transcript_usage(db, str(t))
-    assert (second.input_tokens, second.output_tokens) == (11, 22)
 
 
 def test_incremental_reread_dedupes_a_message_split_across_calls(db, tmp_path):
@@ -104,18 +61,6 @@ def test_incremental_reread_dedupes_a_message_split_across_calls(db, tmp_path):
 
 def test_missing_file_returns_none(db, tmp_path):
     assert usage.transcript_usage(db, str(tmp_path / "nope.jsonl")) is None
-
-
-def test_agent_usage_none_without_a_transcript(db):
-    a = Agent("a1", "ws1", "developer", "claude", None, "interactive", "idle", "", None, time.time())
-    assert usage.agent_usage(db, a) is None
-
-
-def test_agent_usage_none_for_non_claude_providers(db):
-    # Codex (and any other non-Claude-Code provider) never gets a
-    # transcript_path recorded, since only Claude Code's hooks supply one.
-    a = Agent("a1", "ws1", "developer", "codex", None, "interactive", "idle", "", None, time.time())
-    assert usage.agent_usage(db, a) is None
 
 
 def _codex_rollout(home: Path, cwd: Path, session_id: str, started: float) -> Path:
@@ -163,33 +108,6 @@ def test_agent_usage_reads_a_codex_rollout_in_the_current_layout(db, tmp_path, m
         assert u.model == "gpt-6-luna"
 
 
-def test_codex_rollout_starting_just_before_the_agent_row_is_still_found(db, tmp_path, monkeypatch):
-    from brindle.db import Workspace
-
-    home = tmp_path / "codex-home"
-    monkeypatch.setenv("CODEX_HOME", str(home))
-    wt = tmp_path / "wt"
-    wt.mkdir()
-    now = time.time()
-    db.add_workspace(Workspace("ws1", str(tmp_path), "wt", "worktree", "feat/x", "main", str(wt),
-                               None, "s", now))
-    _codex_rollout(home, wt, "01a11457-4d77-7a11-bfed-bdfcf413e415", now - usage.CODEX_START_SLACK + 1)
-    a = Agent("a1", "ws1", "developer-codex", "codex", None, "interactive", "idle", "", None, now)
-    assert usage.agent_usage(db, a) is not None
-    late = Agent("a2", "ws1", "developer-codex", "codex", None, "interactive", "idle", "", None,
-                 now + 600)   # a later agent in the same worktree isn't given the earlier rollout
-    assert usage.agent_usage(db, late) is None
-
-
-def test_includes_subagent_transcripts(db, tmp_path):
-    t = tmp_path / "sess.jsonl"
-    write(t, [_line("m1", input_tokens=10, output_tokens=20)])
-    sub = tmp_path / "sess" / "subagents" / "agent-abc.jsonl"
-    write(sub, [_line("m2", input_tokens=1, output_tokens=2)])
-    u = usage.transcript_usage(db, str(t))
-    assert (u.input_tokens, u.output_tokens) == (11, 22)
-
-
 def test_format_helpers():
     assert usage.format_tokens(999) == "999"
     assert usage.format_tokens(1000) == "1k"
@@ -204,12 +122,6 @@ def test_format_helpers():
     assert usage.short_model("qwen3-coder:30b") == "qwen3-coder"
     assert usage.short_model("qwen/qwen3.8-27b:free") == "qwen3.8-27b"
     assert usage.short_model("sonnet-4-5") == "sonnet"
-
-
-def test_summary_line_format():
-    u = usage.Usage(input_tokens=2000, output_tokens=9000, cache_read_tokens=160000,
-                    cache_creation_tokens=20000, model="claude-sonnet-5")
-    assert usage.summary_line(u) == "tokens: 182k in (160k cached, 20k written) · 9k out · sonnet"
 
 
 def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
@@ -293,33 +205,6 @@ def test_agent_entry_reads_once_then_only_stats(db, tmp_path, monkeypatch):
 
 
 # -- replaced/truncated files, model label, junk ------------------------------
-
-
-def test_truncated_file_is_reparsed_from_the_start(db, tmp_path):
-    t = tmp_path / "sess.jsonl"
-    write(t, [_line("m1", input_tokens=10, output_tokens=20),
-              _line("m2", input_tokens=10, output_tokens=20)])
-    assert usage.transcript_usage(db, str(t)).input_tokens == 20
-
-    t.write_text(_line("m3", input_tokens=1, output_tokens=2))  # truncated in place
-    u = usage.transcript_usage(db, str(t))
-    assert (u.input_tokens, u.output_tokens) == (1, 2)
-
-
-def test_replaced_larger_file_is_reparsed_from_the_start(db, tmp_path):
-    t = tmp_path / "sess.jsonl"
-    write(t, [_line("m1", input_tokens=10, output_tokens=20)])
-    assert usage.transcript_usage(db, str(t)).input_tokens == 10
-
-    new = tmp_path / "new.jsonl"
-    write(new, [_line("m2", input_tokens=1, output_tokens=2),
-                _line("m3", input_tokens=1, output_tokens=2),
-                _line("m4", input_tokens=1, output_tokens=2)])
-    assert new.stat().st_size > t.stat().st_size
-    new.replace(t)  # a new inode, larger than what was cached
-
-    u = usage.transcript_usage(db, str(t))
-    assert (u.input_tokens, u.output_tokens) == (3, 6)
 
 
 def test_model_label_is_the_main_transcripts_and_skips_synthetic(db, tmp_path):

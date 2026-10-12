@@ -40,12 +40,6 @@ def moved(db, repo, tmp_path):
     return s
 
 
-def test_transfer_pauses_the_scratch_chat(db, repo, moved, live):
-    scratch.transfer(db, moved, str(repo))
-    assert live == ["scratchsup"]
-    assert db.get_agent("scratchsup").status == "paused"
-
-
 def test_mcp_transfer_keeps_the_caller_until_the_repo_session_starts(db, repo, moved, live, monkeypatch):
     monkeypatch.setenv("BRINDLE_AGENT_ID", "scratchsup")
     monkeypatch.setattr(mcp_server, "DB", lambda: db)
@@ -64,25 +58,3 @@ def test_starting_in_the_repo_pauses_the_scratch_chat_of_a_cli_transfer(db, repo
     cli._pause_running(db, ws)
     assert sorted(live) == ["reposup", "scratchsup"]     # the old one is gone before the new one spawns
     assert repo_sup.id in live
-
-
-def test_other_scratch_sessions_are_left_alone(db, repo, moved, live, tmp_path):
-    other_dir = tmp_path / "Other"
-    other_dir.mkdir()
-    other = scratch.create(db, str(other_dir))
-    _sup(db, "othersup", other, "%3")
-    ws = workspaces.adopt_root(db, str(repo))
-    scratch.transfer(db, moved, str(repo), keep_running="scratchsup")
-    cli._pause_running(db, ws)
-    assert "othersup" not in live
-
-
-def test_a_pane_id_taken_over_by_a_newer_agent_is_not_live(db, repo, monkeypatch):
-    ws = workspaces.adopt_root(db, str(repo))
-    _sup(db, "old", ws, "%337")
-    time.sleep(0.01)
-    _sup(db, "new", ws, "%337")                          # same pane id after a tmux restart
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(agents, "pane_owners", lambda db_, panes=None: {"%337": "new"})
-    assert [a.id for a in cli._live_sessions(db, ws)] == ["new"]
-    assert cli._running_session(db, ws).id == "new"

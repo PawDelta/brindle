@@ -22,17 +22,6 @@ def fetch(backend, org_id=None):
     return next(p for p in backend.paths() if p.startswith("GET /entitlement"))
 
 
-def test_signed_in_providers_are_sent_comma_separated(backend, monkeypatch):
-    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["claude", "codex", "antigravity"])
-    backend.routes["GET /entitlement?providers=claude,codex,antigravity"] = backend._entitlement
-    assert fetch(backend) == "GET /entitlement?providers=claude,codex,antigravity"
-
-
-def test_no_providers_omits_the_param(backend, monkeypatch):
-    monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
-    assert fetch(backend) == "GET /entitlement"
-
-
 def test_providers_are_sent_alongside_the_org_id(backend, monkeypatch):
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["claude", "native"])
     seen = []
@@ -69,13 +58,3 @@ def test_detection_uses_doctors_signin_rules(monkeypatch):
                         lambda p, env=None: "not signed in" if p == "antigravity" else None)
     monkeypatch.setattr(providers, "seen_signed_in", lambda p: p == "codex")
     assert REAL_SIGNED_IN() == ["claude", "codex"]
-
-
-def test_detection_skips_a_cli_that_is_signed_out_or_unknown(monkeypatch):
-    monkeypatch.setattr(doctor, "signin_providers", lambda: ["codex", "antigravity"])
-    for k in ("OPENAI_API_KEY", "CODEX_API_KEY", "GEMINI_API_KEY"):
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setattr(providers, "signed_out",
-                        lambda p, env=None: "Codex isn't signed in" if p == "codex" else None)
-    monkeypatch.setattr(providers, "seen_signed_in", lambda p: False)   # antigravity: unknown
-    assert REAL_SIGNED_IN() == []

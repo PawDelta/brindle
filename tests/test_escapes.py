@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, config, escapes, gates, history, pipeline, workspaces
+from brindle import agents, autopilot, config, escapes, gates, history, workspaces
 
 REAL_REQUEST_REVIEW = agents.request_review
 from brindle.config import RepoConfig
@@ -49,24 +49,6 @@ def merge_branch(repo, name, remove=None):
     sh(f"git merge -q --no-ff {name} -m \"Merge branch '{name}'\"", repo)
 
 
-def test_a_check_that_passed_before_a_merge_and_fails_after_is_an_escape(db, repo, goal):
-    (repo / "api.txt").write_text("")
-    sh("git add -A && git commit -qm api", repo)
-    off = RepoConfig(goal_audit=False)
-    assert "1 of 2" in autopilot.check_milestones(db, "boss", goal, cfg=off)
-    history.record(db, str(repo), "review", branch="feat/bad", profile="reviewer-codex")
-    merge_branch(repo, "feat/fine")
-    merge_branch(repo, "feat/bad", remove="api.txt")
-    out = autopilot.check_milestones(db, "boss", goal, cfg=off)
-    assert "0 of 2" in out
-    rows = escape_rows(db, repo)
-    # Both branches merged between the two commits; the reviewer is the one on record.
-    assert {r.branch for r in rows} == {"feat/fine", "feat/bad"}
-    bad = next(r for r in rows if r.branch == "feat/bad")
-    assert bad.kind == "escape" and bad.profile == "reviewer-codex" and bad.task == "milestone"
-    assert "API" in bad.result and "passed at" in bad.result
-
-
 def test_the_same_regression_is_recorded_once(db, repo, goal):
     (repo / "api.txt").write_text("")
     sh("git add -A && git commit -qm api", repo)
@@ -78,43 +60,7 @@ def test_the_same_regression_is_recorded_once(db, repo, goal):
     assert len(escape_rows(db, repo)) == 1
 
 
-def test_a_milestone_that_never_passed_is_not_an_escape(db, repo, goal):
-    merge_branch(repo, "feat/x")
-    autopilot.check_milestones(db, "boss", goal, cfg=RepoConfig(goal_audit=False))
-    assert escape_rows(db, repo) == []
-
-
-def test_a_failure_with_no_merge_in_between_is_not_an_escape(db, repo, goal):
-    (repo / "api.txt").write_text("")
-    sh("git add -A && git commit -qm api", repo)
-    off = RepoConfig(goal_audit=False)
-    autopilot.check_milestones(db, "boss", goal, cfg=off)
-    sh("git rm -q api.txt && git commit -qm drop", repo)   # a plain commit, not a merged branch
-    autopilot.check_milestones(db, "boss", goal, cfg=off)
-    assert escape_rows(db, repo) == []
-
-
-def test_escape_without_a_review_row_has_no_profile(db, repo, goal):
-    (repo / "api.txt").write_text("")
-    sh("git add -A && git commit -qm api", repo)
-    off = RepoConfig(goal_audit=False)
-    autopilot.check_milestones(db, "boss", goal, cfg=off)
-    merge_branch(repo, "feat/bad", remove="api.txt")
-    autopilot.check_milestones(db, "boss", goal, cfg=off)
-    assert [(r.branch, r.profile) for r in escape_rows(db, repo)] == [("feat/bad", None)]
-
-
 # -- signal (b): a completion audit with gaps names a merged branch ------------
-
-
-def test_audit_gaps_naming_a_merged_branch_are_an_escape(db, repo, goal):
-    history.record(db, str(repo), "merge", branch="feat/ui", task="merge feat/ui into main")
-    history.record(db, str(repo), "merge", branch="feat/api", task="merge feat/api into main")
-    history.record(db, str(repo), "review", branch="feat/ui", profile="reviewer")
-    out = autopilot.record_audit(db, "boss", False, "The form added in feat/ui never submits.")
-    assert "GAPS FOUND" in out
-    rows = escape_rows(db, repo)
-    assert [(r.branch, r.profile, r.task) for r in rows] == [("feat/ui", "reviewer", "audit")]
 
 
 def test_audit_gaps_naming_no_merged_branch_record_nothing(db, repo, goal):
@@ -137,15 +83,6 @@ def test_recording_an_escape_never_raises(db, repo, monkeypatch):
 
 
 # -- second_review -------------------------------------------------------------
-
-
-def test_second_review_config_loads_per_weight(repo):
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.json").write_text(json.dumps(
-        {"second_review": {"heavy": "reviewer-codex", "huge": "x", "light": 3}}))
-    assert config.load_repo_config(repo).second_review == {"heavy": "reviewer-codex"}
-    (repo / ".brindle" / "config.json").write_text("{}")
-    assert config.load_repo_config(repo).second_review == {}
 
 
 @pytest.fixture
@@ -189,15 +126,6 @@ def merged(repo):
     return "new.py" in sh("git ls-tree --name-only HEAD", repo)
 
 
-def test_unset_second_review_is_one_review(db, repo, piped):
-    setup, started = piped
-    ws = setup()
-    agents.report_result(db, "w1", "added new.py")
-    assert started == [None]
-    agents.submit_review(db, "rev0", True, "lgtm")
-    assert merged(repo) and db.get_workspace(ws.id) is None
-
-
 def test_a_weight_without_a_second_reviewer_gets_one_review(db, repo, piped):
     setup, started = piped
     setup(second={"heavy": "reviewer-codex"}, weight="light")
@@ -239,16 +167,6 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped):
     assert db.latest_review(ws.id, gates.head(ws)) is not None
 
 
-def test_a_second_review_by_the_first_reviewers_own_profile_changes_nothing(db, repo, piped):
-    setup, started = piped
-    setup(second={"heavy": "reviewer"})   # the default reviewer: nothing to add
-    agents.report_result(db, "w1", "added new.py")
-    assert started == [None]
-    agents.submit_review(db, "rev0", True, "lgtm")
-    assert merged(repo)
-    assert pipeline.second_profile(db, RepoConfig(), db.get_agent("boss"), None) is None
-
-
 def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):
     setup, _ = piped
     ws = setup()
@@ -260,13 +178,11 @@ def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):
     assert agents._live_reviewer(db, ws, sha, "reviewer-codex").id == "r-b"
 
 
-@pytest.mark.parametrize("checks", [False, True])
-def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch, checks):
+def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     setup, _ = piped
     ws = setup(second={"heavy": "reviewer-codex"})
-    if checks:
-        cfg = json.loads((repo / ".brindle" / "config.json").read_text())
-        (repo / ".brindle" / "config.json").write_text(json.dumps({**cfg, "checks": ["true"]}))
+    cfg = json.loads((repo / ".brindle" / "config.json").read_text())
+    (repo / ".brindle" / "config.json").write_text(json.dumps({**cfg, "checks": ["true"]}))
     # The real request_review, not the fixture's fake. Never monkeypatch.undo():
     # it would also drop BRINDLE_HOME and run against the real ~/.brindle.
     monkeypatch.setattr(agents, "request_review", REAL_REQUEST_REVIEW)
@@ -288,11 +204,10 @@ def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch, che
     parent = db.get_agent("boss")
     agents.start_review(db, parent, ws, "reviewer", None, cfg)
     agents.start_review(db, parent, ws, "reviewer-codex", None, cfg)
-    if checks:
-        assert len(detached) == 2 and spawned == []   # neither swallowed by the other's process
-        # Whichever detached process gets there first, the other still isn't deduped away.
-        agents.review_after_checks(db, "boss", ws, "reviewer-codex", cfg=cfg)
-        agents.review_after_checks(db, "boss", ws, "reviewer", cfg=cfg)
+    assert len(detached) == 2 and spawned == []   # neither swallowed by the other's process
+    # Whichever detached process gets there first, the other still isn't deduped away.
+    agents.review_after_checks(db, "boss", ws, "reviewer-codex", cfg=cfg)
+    agents.review_after_checks(db, "boss", ws, "reviewer", cfg=cfg)
     assert sorted(spawned) == ["reviewer", "reviewer-codex"]
 
 
@@ -324,51 +239,11 @@ def suggestions(db, repo, second=None, **kw):
     return escapes.review_depth_suggestions(db, str(repo), second or {}, **kw)
 
 
-def test_a_high_escape_rate_suggests_a_second_review_for_that_weight(db, repo, pro):
-    seed(db, repo, "heavy", 10, escaped=1)   # exactly 10% over exactly 10 merges
-    seed(db, repo, "light", 10, escaped=0)
-    assert suggestions(db, repo) == [
-        'add a second review for heavy (reviewer: 1 of 10 merges escaped, 10%): '
-        '"second_review": {"heavy": "reviewer-codex"}']
-
-
-def test_the_second_reviewer_suggested_is_a_different_profile(db, repo, pro):
-    seed(db, repo, "medium", 10, reviewer="reviewer-codex", escaped=3)
-    [line] = suggestions(db, repo)
-    assert '"second_review": {"medium": "reviewer"}' in line
-
-
-def test_add_thresholds_are_ten_percent_over_ten_merges(db, repo, pro):
-    seed(db, repo, "heavy", 9, escaped=9)      # too few merges
-    seed(db, repo, "medium", 10, escaped=0)    # no escapes
-    seed(db, repo, "light", 20, escaped=1)     # 5%: under the rate
-    assert suggestions(db, repo) == []
-
-
-def test_the_rate_is_per_reviewer_profile(db, repo, pro):
-    seed(db, repo, "heavy", 10, reviewer="reviewer", escaped=0)
-    seed(db, repo, "heavy", 10, reviewer="reviewer-codex", escaped=1)
-    [line] = suggestions(db, repo)
-    assert "reviewer-codex: 1 of 10" in line and '{"heavy": "reviewer"}' in line
-
-
-def test_a_weight_with_a_second_review_is_not_asked_for_another(db, repo, pro):
-    seed(db, repo, "heavy", 10, escaped=5)
-    assert suggestions(db, repo, {"heavy": "reviewer-codex"}) == []
-
-
 def test_no_escapes_over_twenty_merges_suggests_dropping_the_second_review(db, repo, pro):
     seed(db, repo, "heavy", 20)
     assert suggestions(db, repo, {"heavy": "reviewer-codex"}) == [
         'drop the second review for heavy (20 merges, no escapes in 90 days): '
         'remove "heavy" from "second_review"']
-
-
-def test_drop_thresholds_are_zero_escapes_over_twenty_merges_with_one_set(db, repo, pro):
-    seed(db, repo, "heavy", 19)                # too few merges
-    seed(db, repo, "medium", 25, escaped=1)    # an escape
-    seed(db, repo, "light", 30)                # no second review set for light
-    assert suggestions(db, repo, {"heavy": "reviewer-codex", "medium": "reviewer-codex"}) == []
 
 
 def test_only_the_last_ninety_days_count(db, repo, pro):

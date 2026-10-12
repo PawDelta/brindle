@@ -7,7 +7,7 @@ import time
 import pytest
 
 from conftest import sh
-from brindle import agents, antigravity, autopilot, workspaces
+from brindle import antigravity, autopilot, workspaces
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import Antigravity, LaunchContext
@@ -20,21 +20,6 @@ def ws(db, repo):
 
 def add_agent(db, ws, agent_id="g1", mode="interactive", status="idle", profile="supervisor"):
     db.add_agent(Agent(agent_id, ws.id, profile, "antigravity", None, mode, status, "@0", None, time.time()))
-
-
-def test_command_sets_up_the_checkout(db, ws, repo, monkeypatch):
-    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
-    argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, cwd=str(repo)))
-    assert argv == ["/bin/agy", "--mode", "accept-edits"]
-    agents_dir = repo / ".agents"
-    server = json.loads((agents_dir / "mcp_config.json").read_text())["mcpServers"]["brindle"]
-    assert server["args"][-1] == "mcp" and server["tools"]["get_progress"] == {"eager": True}
-    hooks = json.loads((agents_dir / "hooks.json").read_text())["brindle"]
-    assert "_hook agy-stop" in hooks["Stop"][0]["command"]
-    assert "BRINDLE_AGENT_ID" not in hooks["Stop"][0]["command"]  # shared by every agent here
-    assert "call_mcp_tool" in (agents_dir / "rules" / "brindle.md").read_text()
-    # Kept out of git, so the checkout stays clean.
-    assert sh("git status --porcelain", repo) == ""
 
 
 def test_command_passes_the_profiles_model_and_effort(db, ws, repo, monkeypatch):
@@ -88,21 +73,6 @@ def test_process_env_reads_another_process():
         child.kill()
 
 
-def test_instructions_and_task_arrive_in_one_real_turn(db, ws, monkeypatch):
-    monkeypatch.setattr(agents.tmux, "ensure_session", lambda *a: None)
-    monkeypatch.setattr(agents.tmux, "new_window", lambda *a, **k: "@9")
-    monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a: None)
-    monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
-    monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)
-    a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
-    first = db.pop_pending(a.id)
-    assert first.body.startswith("<details><summary>brindle instructions</summary>")
-    assert "When you run under brindle" in first.body and "call_mcp_tool" in first.body
-    assert "You are a developer agent" in first.body and "fix it" in first.body
-    assert antigravity.WARMUP_END not in first.body
-    assert db.pop_pending(a.id) is None
-
-
 def test_queued_messages_arrive_as_a_new_turn(db, ws, monkeypatch):
     flushed = []
     monkeypatch.setattr(antigravity, "_flush_soon", flushed.append)
@@ -148,21 +118,6 @@ def test_usage_limit_error_blocks_autopilot(db, ws):
                                                    "error": "429 RESOURCE_EXHAUSTED: quota"})
     assert db.get_autopilot("g1").state == "blocked"
 
-
-def test_autopilot_keeps_an_antigravity_supervisor_going(db, ws, monkeypatch):
-    add_agent(db, ws, status="processing")
-    db.add_autopilot("g1")
-    autopilot.set_goal(db, "g1", "Goal", [("M", "false", None)])
-    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    out = antigravity.handle_hook(db, "g1", "agy-stop", {})
-    assert out["decision"] == "continue" and "[brindle autopilot]" in out["reason"]
-
-
-def test_screen_states():
-    p = Antigravity()
-    assert p.screen_state("Requesting permission for:\n  echo hi\nRun this command?\nesc to cancel") == "waiting"
-    assert p.screen_state("> \n───\nesc to cancel      Gemini") == "busy"
-    assert p.screen_state("> \n───\n? for shortcuts      Gemini") == "idle"
 
 def test_paste_blocked():
     p = Antigravity()

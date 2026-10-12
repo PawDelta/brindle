@@ -1,7 +1,6 @@
-"""request_review's reviewer-profile selection: an explicit `profile` param,
-else the repo's `review_profile` config, else the built-in `reviewer-codex`
-profile when Codex is installed and the worker being reviewed ran on Claude,
-else `reviewer`."""
+"""Which reviewer profile request_review uses: an explicit `profile` param,
+else the repo's `review_profile` config, else the baseline reviewer unless
+brindle Pro's learner picks another reviewer that can run here."""
 
 import asyncio
 import time
@@ -10,10 +9,11 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, mcp_server, workspaces
-from brindle.config import RepoConfig, load_repo_config
+from brindle import agents, learning, mcp_server, workspaces
+from brindle.config import RepoConfig
 from brindle.db import Agent
-from brindle.profiles import Profile, load_profile
+from brindle.native import runner
+from brindle.profiles import Profile
 
 
 @pytest.fixture
@@ -21,191 +21,90 @@ def worker_ws(db, repo):
     ws = workspaces.create(db, str(repo), "feat").workspace
     (Path(ws.path) / "new.py").write_text("x = 1\n")
     sh("git add -A && git commit -qm work", Path(ws.path))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "handoff", "done", "@0", "did stuff", time.time()))
     return ws
 
 
-def add_worker(db, ws, agent_id, provider="claude", mode="handoff", status="done", result="did stuff"):
-    a = Agent(agent_id, ws.id, "developer", provider, None, mode, status, "@0", result, time.time())
-    db.add_agent(a)
-    return a
+def worker():
+    return Agent("w1", "ws1", "developer", "claude", None, "assign", "idle", "@0", None, time.time())
 
 
 def capture_profile(monkeypatch):
-    """Replace agents.spawn to record the profile request_review chose,
-    without launching a real reviewer process. Also stubs load_profile to
-    resolve any name (these tests use fake profile names like
-    "team-reviewer" purely to check which one was picked, not that it's a
-    real, loadable profile) to a harmless claude profile, so request_review's
-    own profile-existence check doesn't get in the way of that."""
+    """Record the profile request_review chose instead of starting a reviewer;
+    any profile name loads, so fake names only check which one was picked."""
     captured = {}
 
     def fake_spawn(db_, ws_, profile, *, prompt=None, parent_id=None, mode="review", **kw):
         captured["profile"] = profile
-        return Agent("rev1", ws_.id, profile, "claude", parent_id, mode, "starting", "@0",
-                     None, time.time())
+        return Agent("rev1", ws_.id, profile, "claude", parent_id, mode, "starting", "@0", None, time.time())
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(agents, "load_profile",
-                        lambda name, repo_root=None: Profile(name, "", "claude", ""))
+    monkeypatch.setattr(agents, "load_profile", lambda name, repo_root=None: Profile(name, "", "claude", ""))
     return captured
 
 
-def codex_present(monkeypatch, present: bool):
-    # Like a PATH with claude, and codex when ``present``: a name or the
-    # path it resolved to both count.
+@pytest.fixture
+def env(monkeypatch):
+    """A PATH with claude, and codex when ``env["codex"]``; the local
+    reviewer's endpoint answers, and its probes are counted."""
+    state = {"codex": False, "probes": 0, "learner": None}
+
     def which(name):
         base = name.rsplit("/", 1)[-1]
-        return f"/usr/bin/{base}" if base == "claude" or (present and base == "codex") else None
+        return f"/usr/bin/{base}" if base == "claude" or (state["codex"] and base == "codex") else None
+
+    def probe(endpoint, timeout=3.0):
+        state["probes"] += 1
+        return True, "model qwen3-coder:30b is available"
+
     monkeypatch.setattr(agents.shutil, "which", which)
-    monkeypatch.setattr(agents, "_local_reviewer_available", lambda: False)  # never probe a live endpoint
+    monkeypatch.setattr(runner, "probe", probe)
+    monkeypatch.setattr(learning, "plugin", lambda cfg, repo_root: state["learner"])
+    return state
 
 
-# -- default_review_profile: pure selection logic -----------------------------
+class FakeLearner:
+    def __init__(self, pick):
+        self.pick, self.seen, self.last_reason = pick, None, None
+
+    def suggest(self, info, names, default):
+        self.seen = (list(names), default)
+        return self.pick or default
 
 
-def test_default_profile_never_forces_another_model(monkeypatch):
-    # Codex installed and a Claude worker: still the baseline reviewer. Only
-    # brindle Pro's learner may pick another model (see test_review_profile).
-    codex_present(monkeypatch, True)
-    worker = Agent("w1", "ws1", "developer", "claude", None, "handoff", "done", "@0", "ok", time.time())
-    assert agents.default_review_profile(RepoConfig(), worker) == "reviewer"
-
-
-def test_default_profile_falls_back_to_reviewer_without_codex(monkeypatch):
-    codex_present(monkeypatch, False)
-    worker = Agent("w1", "ws1", "developer", "claude", None, "handoff", "done", "@0", "ok", time.time())
-    assert agents.default_review_profile(RepoConfig(), worker) == "reviewer"
-
-
-def test_default_profile_falls_back_when_worker_itself_ran_on_codex(monkeypatch):
-    # Codex is installed, but the worker already used it: no cross-model gain.
-    codex_present(monkeypatch, True)
-    worker = Agent("w1", "ws1", "developer", "codex", None, "handoff", "done", "@0", "ok", time.time())
-    assert agents.default_review_profile(RepoConfig(), worker) == "reviewer"
-
-
-def test_default_profile_with_no_worker_falls_back_to_reviewer(monkeypatch):
-    codex_present(monkeypatch, True)
-    assert agents.default_review_profile(RepoConfig(), None) == "reviewer"
-
-
-def test_default_profile_config_override_beats_codex_autopick(monkeypatch):
-    codex_present(monkeypatch, True)
-    worker = Agent("w1", "ws1", "developer", "claude", None, "handoff", "done", "@0", "ok", time.time())
-    cfg = RepoConfig(review_profile="team-reviewer")
-    assert agents.default_review_profile(cfg, worker) == "team-reviewer"
-
-
-def test_default_profile_respects_a_custom_reviewer_default_without_codex(monkeypatch):
-    codex_present(monkeypatch, False)
-    worker = Agent("w1", "ws1", "developer", "claude", None, "handoff", "done", "@0", "ok", time.time())
-    cfg = RepoConfig(reviewer="my-house-reviewer")
-    assert agents.default_review_profile(cfg, worker) == "my-house-reviewer"
-
-
-# -- agents.request_review: wiring the selection in -----------------------------
-
-
-def test_request_review_explicit_profile_param_wins(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "w1")
-    codex_present(monkeypatch, True)
-    captured = capture_profile(monkeypatch)
-    agents.request_review(db, None, worker_ws, "explicit-profile")
-    assert captured["profile"] == "explicit-profile"
-
-
-def test_request_review_uses_config_review_profile_override(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "w1")
-    codex_present(monkeypatch, False)
+def test_request_review_uses_config_review_profile_override(db, worker_ws, env, monkeypatch):
     captured = capture_profile(monkeypatch)
     agents.request_review(db, None, worker_ws, cfg=RepoConfig(review_profile="team-reviewer"))
     assert captured["profile"] == "team-reviewer"
 
 
-def test_request_review_keeps_the_baseline_reviewer_for_a_claude_worker(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "w1", provider="claude")
-    codex_present(monkeypatch, True)
+def test_request_review_keeps_the_baseline_reviewer_for_a_claude_worker(db, worker_ws, env, monkeypatch):
+    env["codex"] = True
     captured = capture_profile(monkeypatch)
     agents.request_review(db, None, worker_ws)
     assert captured["profile"] == "reviewer"
-
-
-def test_request_review_defaults_to_reviewer_when_codex_is_absent(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "w1", provider="claude")
-    codex_present(monkeypatch, False)
-    captured = capture_profile(monkeypatch)
-    agents.request_review(db, None, worker_ws)
-    assert captured["profile"] == "reviewer"
-
-
-def test_request_review_skips_reviewer_codex_when_worker_already_used_codex(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "w1", provider="codex")
-    codex_present(monkeypatch, True)
-    captured = capture_profile(monkeypatch)
-    agents.request_review(db, None, worker_ws)
-    assert captured["profile"] == "reviewer"
-
-
-# -- agents.request_review: clear errors instead of a dead reviewer -------------
-
-
-def test_request_review_raises_clearly_for_an_unknown_profile(db, worker_ws):
-    add_worker(db, worker_ws, "w1")
-    with pytest.raises(agents.AgentError, match="bogus-profile"):
-        agents.request_review(db, None, worker_ws, "bogus-profile")
-    assert db.list_agents(worker_ws.id) == [db.get_agent("w1")]  # no reviewer was spawned
 
 
 def test_request_review_raises_clearly_for_an_unknown_configured_review_profile(db, worker_ws):
-    add_worker(db, worker_ws, "w1")
     with pytest.raises(agents.AgentError, match="bogus-profile"):
         agents.request_review(db, None, worker_ws, cfg=RepoConfig(review_profile="bogus-profile"))
 
 
-def test_request_review_raises_clearly_when_codex_profile_but_codex_missing(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "w1")
-    codex_present(monkeypatch, False)
-    with pytest.raises(agents.AgentError, match="codex"):
-        agents.request_review(db, None, worker_ws, "reviewer-codex")
-    assert db.list_agents(worker_ws.id) == [db.get_agent("w1")]  # no dead reviewer pane
-
-
-def test_mcp_request_review_returns_a_message_instead_of_raising_for_bad_profile(db, worker_ws):
-    add_worker(db, worker_ws, "w1")
-    out = asyncio.run(mcp_server.request_review(worker_ws.id, profile="bogus-profile"))
-    assert "bogus-profile" in out
-
-
-def test_mcp_request_review_returns_a_message_instead_of_raising_when_codex_missing(
-    db, worker_ws, monkeypatch,
-):
-    add_worker(db, worker_ws, "w1")
-    codex_present(monkeypatch, False)
+def test_mcp_request_review_returns_a_message_instead_of_raising_when_codex_missing(db, worker_ws, env):
     out = asyncio.run(mcp_server.request_review(worker_ws.id, profile="reviewer-codex"))
     assert "codex" in out.lower()
 
 
-# -- config.py: review_profile -----------------------------------------------------
+def test_without_a_learner_it_is_the_baseline_and_nothing_is_probed(env, db):
+    env["codex"] = True
+    assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo") == "reviewer"
+    assert agents.default_review_profile(RepoConfig(reviewer="rev"), worker(), db, "/repo") == "rev"
+    assert agents.default_review_profile(RepoConfig(), worker()) == "reviewer"  # no db: same
+    assert env["probes"] == 0
 
 
-def test_repo_config_reads_review_profile(tmp_path):
-    cfg_dir = tmp_path / ".brindle"
-    cfg_dir.mkdir()
-    (cfg_dir / "config.json").write_text('{"review_profile": "custom-reviewer"}')
-    cfg = load_repo_config(tmp_path)
-    assert cfg.review_profile == "custom-reviewer"
-
-
-def test_repo_config_review_profile_defaults_to_none(tmp_path):
-    assert load_repo_config(tmp_path).review_profile is None
-
-
-# -- the reviewer-codex builtin profile ------------------------------------------
-
-
-def test_reviewer_codex_profile_loads_with_codex_provider():
-    p = load_profile("reviewer-codex")
-    assert p.provider == "codex"
-    assert p.name == "reviewer-codex"
-    assert "Don't edit files" in p.prompt
-    assert "workspace_diff" in p.prompt
+def test_learner_chooses_among_the_reviewers_that_can_run(env, db):
+    env["codex"] = True
+    env["learner"] = fake = FakeLearner("reviewer-codex")
+    assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo", "task") == "reviewer-codex"
+    assert fake.seen == (["reviewer", "reviewer-codex", "reviewer-local"], "reviewer")

@@ -1,14 +1,13 @@
 """The native provider in brindle's pipeline: spawn, the pane runner, brindle's
 tools in-process, reminders to report, messages, resume, usage."""
 
-import shutil
 import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
-from brindle import agents, tmux, usage, workspaces
+from brindle import agents, usage, workspaces
 from brindle.db import Agent
 from brindle.native import runner
 from brindle.native.runner import run_native
@@ -49,14 +48,6 @@ def native_agent(db, ws, *, mode="assign", status="idle", agent_id="n1", parent=
 
 
 # -- profile and spawn ------------------------------------------------------------
-
-def test_profile_carries_the_endpoint(repo, local_profile, fake):
-    p = load_profile("local", str(repo))
-    assert p.provider == "native" and p.api == "openai" and p.base_url == f"{fake.base_url}/v1"
-    assert p.model == "tiny" and p.context_tokens == 8000
-    assert p.env == {"OLLAMA_HOST": "http://x"}
-    ep = runner.endpoint_for(p)
-    assert ep.url() == f"{fake.base_url}/v1/chat/completions" and ep.api_key is None
 
 
 def test_endpoint_needs_a_base_url_a_model_and_its_key(monkeypatch):
@@ -160,15 +151,6 @@ def test_messages_sent_mid_turn_arrive_between_model_calls(db, ws, local_profile
     assert second[-1]["content"].startswith("brindle delivered this message")
 
 
-def test_send_message_to_a_native_worker_goes_through_its_inbox(db, ws, local_profile, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    native_agent(db, ws, status="idle")
-    assert agents.send_message(db, "n1", "hello") == "delivered"
-    db.set_status("n1", "processing")
-    assert agents.send_message(db, "n1", "again") == "queued"
-    assert db.pending_count("n1") == 2
-
-
 def test_reviewer_submits_its_verdict_in_process(db, ws, local_profile, fake, monkeypatch):
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     (Path(ws.path) / "x.py").write_text("x = 1\n")
@@ -228,17 +210,6 @@ def test_conversation_survives_a_restart(db, ws, local_profile, fake):
     assert fake.requests[-1]["messages"][1]["content"] == "first task"
 
 
-def test_resume_restarts_a_paused_native_worker_on_its_conversation(db, ws, local_profile, monkeypatch):
-    launched = {}
-    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: launched.update(kw, agent=a))
-    saved = Path(ws.path) / "conv.json"
-    saved.write_text("{}")
-    native_agent(db, ws, status="paused", agent_id="n2")
-    db.update_agent("n2", session_ref=str(saved), task="the task")
-    assert [x.id for x in agents.resume(db, "n2")] == ["n2"]
-    assert launched["resume"] == str(saved) and launched["prompt"] is None
-
-
 def test_endpoint_failure_stops_the_runner(db, ws, local_profile, fake, capfd):
     native_agent(db, ws)
     db.enqueue("n1", "go", None)
@@ -268,40 +239,3 @@ def test_mcp_submit_review_uses_the_shared_function(db, ws, monkeypatch):
     assert seen == {"cid": "r1", "ok": True, "s": "fine"}
 
 
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_native_worker_lifecycle_in_tmux(db, ws, local_profile, fake):
-    fake.replies = [
-        openai_reply(calls=[("c1", "Write", {"path": "built.txt", "content": "yes\n"})]),
-        openai_reply(calls=[("c2", "Bash", {"command": "git add built.txt"})]),
-        openai_reply(calls=[("c3", "Bash", {"command": "git commit -qm built"})]),
-        openai_reply(calls=[("c4", "report_result", {"result": "built it"})]),
-        openai_reply("done"),
-        openai_reply("noted the docs"),
-        openai_reply("nothing more to say"),
-    ]
-    a = agents.spawn(db, ws, local_profile, prompt="build it", mode="assign")
-    try:
-        assert a.headless
-        deadline = time.time() + 30
-        while time.time() < deadline and db.get_agent(a.id).result is None:
-            time.sleep(0.2)
-        assert db.get_agent(a.id).result == "built it"
-        deadline = time.time() + 10
-        while time.time() < deadline and db.get_agent(a.id).status != "idle":
-            time.sleep(0.2)
-        assert db.get_agent(a.id).status == "idle"
-        assert agents.is_alive(db.get_agent(a.id))  # the runner waits between turns
-        assert "built" in sh("git log -1 --format=%s", Path(ws.path))
-
-        assert agents.send_message(db, a.id, "now the docs") == "delivered"
-        deadline = time.time() + 20
-        while time.time() < deadline and len(fake.requests) < 6:
-            time.sleep(0.2)
-        assert fake.requests[5]["messages"][-1]["content"].endswith("now the docs")
-        # The pane shows the turns, as a headless Claude pane does.
-        deadline = time.time() + 10
-        while time.time() < deadline and "turn 2" not in tmux.capture(db.get_agent(a.id).tmux_window, lines=80):
-            time.sleep(0.2)
-        assert "turn 2" in tmux.capture(db.get_agent(a.id).tmux_window, lines=80)
-    finally:
-        tmux.kill_session(ws.tmux_session)

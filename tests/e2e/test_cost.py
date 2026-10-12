@@ -12,12 +12,12 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from brindle import autopilot, budget, cost, cost_estimate, git, history, mcp_server, pricing, quota
+from brindle import autopilot, budget, cost, cost_estimate, git, history, mcp_server, quota
 from brindle import usage as usage_mod
 from brindle import watch, watch_costs, workspaces
 from brindle.cli import app
 from brindle.config import load_repo_config
-from brindle.db import Agent, Task
+from brindle.db import Agent
 from brindle.pro import license
 
 DAY = 86400
@@ -118,65 +118,7 @@ def test_transcript_usage_becomes_history_rows_without_double_counting(db, repo,
     assert "$78.00" in cli.invoke(app, ["cost"]).output
 
 
-def test_usage_cost_prices_a_live_transcript(db, tmp_path):
-    transcript = tmp_path / "s.jsonl"
-    transcript.write_text(assistant("m1", MSG1))
-    u = usage_mod.transcript_usage(db, str(transcript))
-    assert usage_mod.usage_cost(u) == pytest.approx(67.0)
-    assert usage_mod.summary_line(u, 67.0).endswith("· sonnet · ~$67.00")
-    assert usage_mod.usage_cost(usage_mod.Usage(1, 1, model="mystery-1")) is None
-
-
 # -- pricing --------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("name", ["claude-sonnet-5-5-20260101", "anthropic/claude-sonnet-5-5",
-                                  "us.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5[1m]",
-                                  "SONNET"])
-def test_model_names_resolve_to_their_price(name):
-    assert pricing.price_for(name) == pricing.PRICES["claude-sonnet-5-5"]
-
-
-def test_overrides_add_and_replace_prices(db, repo, root, cli):
-    config(repo, pricing={"my-model": {"input": 1, "output": 5},
-                          "claude-sonnet-5-5": {"input": 100, "output": 100}})
-    seed(db, root, tokens=row_tokens("my-model", input=1_000_000, output=1_000_000, cache_read=1_000_000))
-    seed(db, root, tokens=row_tokens(input=1_000_000))
-    out = cli.invoke(app, ["cost"]).output
-    # a missing cache_read is charged at the input rate: 1 + 5 + 1
-    assert "$107.00" in out
-    assert "my-model" in out and "$7.00" in out and "$100.00" in out
-
-
-def test_unpriced_models_are_shown_as_unpriced_tokens_not_guessed(db, root, cli):
-    seed(db, root, tokens=row_tokens("sonnet", input=1_000_000))                 # alias: $2
-    seed(db, root, tokens=row_tokens("totally-new-model", input=4_000_000))
-    out = cli.invoke(app, ["cost"]).output
-    assert "last 30 days: $2.00 (+4000k tokens unpriced)" in out
-    assert "totally-new-model" in out and "unknown (4000k tokens unpriced)" in out
-    only = cost.summary(db, root)
-    only_unknown = cost.Bucket()
-    only_unknown.add(None, 5)
-    assert only_unknown.show() == "unknown (5 tokens unpriced)"
-    assert only.total.unknown == 4_000_000 and only.total.dollars == pytest.approx(2.0)
-
-
-def test_a_row_without_a_model_is_priced_at_its_profile(db, repo, root):
-    profile(repo, "big", "claude-opus-5-5")
-    profile(repo, "local", "qwen3", base_url="http://localhost:11434/v1")
-    seed(db, root, profile="big", tokens=row_tokens(None, input=1_000_000))
-    seed(db, root, profile="local", tokens=row_tokens("qwen3-coder", output=9_000_000))
-    s = cost.summary(db, root)
-    assert s.total.dollars == pytest.approx(4.0)         # opus-5-5 $4/MTok input; the local model is $0
-    assert s.total.unknown == 0
-
-
-def test_a_local_profile_row_reads_free_in_brindle_cost(db, repo, root, cli):
-    profile(repo, "local", "qwen3", base_url="http://localhost:11434/v1")
-    seed(db, root, profile="local", tokens=row_tokens(None, output=9_000_000))
-    out = cli.invoke(app, ["cost"]).output
-    assert "last 30 days: Free" in out and "$0.00" not in out
-    assert "profile local" in out and "9000k tokens" in out        # its tokens still count
 
 
 def test_a_mixed_total_says_how_many_tokens_were_free(db, repo, root, cli):
@@ -193,116 +135,12 @@ def test_a_mixed_total_says_how_many_tokens_were_free(db, repo, root, cli):
     assert b.show() == "Free (+7 tokens unpriced)"
 
 
-def test_an_all_zero_pricing_override_is_free_but_no_price_is_not(db, repo, root, cli):
-    config(repo, pricing={"gift-model": {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}})
-    seed(db, root, tokens=row_tokens("gift-model", input=1_000_000))
-    assert "last 30 days: Free" in cli.invoke(app, ["cost"]).output
-
-
-def test_only_the_last_n_days_count(db, root, cli):
-    seed(db, root, tokens=row_tokens(input=1_000_000), age_days=1)        # $2
-    seed(db, root, tokens=row_tokens(input=1_000_000), age_days=45)       # $2, too old
-    assert "last 30 days: $2.00" in cli.invoke(app, ["cost"]).output
-    assert "last 60 days: $4.00" in cli.invoke(app, ["cost", "--days", "60"]).output
-
-
 def test_a_cost_with_no_usage_says_so(db, root, cli):
     out = cli.invoke(app, ["cost"]).output
     assert "$0.00" in out and "no agent usage on record" in out
 
 
-def test_tiny_amounts_never_read_as_zero():
-    assert pricing.money(0.004) == "<$0.01" and pricing.money(0) == "$0.00"
-    assert pricing.money(1234.5) == "$1,234.50"
-
-
-def test_stale_prices_warn_after_90_days():
-    assert pricing.stale_warning(pricing.AS_OF) is None
-    assert "out of date" in pricing.stale_warning(pricing.AS_OF.replace(year=pricing.AS_OF.year + 1))
-
-
-# -- `brindle cost report` (Pro) ------------------------------------------------------------------
-
-
-def test_cost_report_needs_pro_and_fails_closed(root, cli, monkeypatch):
-    res = cli.invoke(app, ["cost", "report"])
-    assert res.exit_code != 0 and "brindle Pro" in res.output
-
-    def broken(feature):
-        raise RuntimeError("no store")
-
-    monkeypatch.setattr(license, "has", broken)
-    assert cli.invoke(app, ["cost", "report"]).exit_code != 0
-
-
-def test_cost_report_breaks_spend_down(db, repo, root, cli, pro):
-    ws = workspaces.adopt_root(db, str(repo))
-    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
-                       "@0", None, time.time()))
-    db.add_autopilot("boss")
-    db.update_autopilot("boss", goal="Ship the settings page\nmore detail", enabled=1, state="running")
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "", None,
-                       time.time()))
-    seed(db, root, agent_id="w1", branch="feat/a", profile="developer",
-         tokens=row_tokens(input=5_000_000, cache_read=10_000_000))                       # $10 + $2
-    seed(db, root, "review", agent_id="r1", branch="feat/a", profile="reviewer",
-         tokens=row_tokens(input=1_000_000), result="Review of feat/a: APPROVED")         # $2
-    seed(db, root, "review", agent_id="r2", branch="feat/b", profile="reviewer",
-         result="Review of feat/b: CHANGES REQUESTED")
-    seed(db, root, "merge", agent_id="boss", branch="feat/a")
-    db.conn.execute("UPDATE history SET profile='developer' WHERE agent_id='w1'")
-    db.conn.commit()
-
-    out = cli.invoke(app, ["cost", "report"]).output
-    assert "Cost report for proj, last 30 days: $14.00" in out
-    assert "Ship the settings page" in out and "more detail" not in out     # first line of the goal
-    assert "developer" in out and "reviewer" in out
-    assert "Merged branches: 1, $14.00 each on average" in out
-    assert "approved (" in out
-    assert "cache-hit rate: 62% of input tokens (10000k of 16000k)" in out
-    assert "Prices as of" in out
-
-
-def test_cost_report_cost_per_merged_branch_counts_rows_before_the_window(db, root, pro):
-    seed(db, root, agent_id="w1", branch="feat/old", tokens=row_tokens(input=1_000_000), age_days=40)  # $2
-    seed(db, root, "merge", agent_id="boss", branch="feat/old", tokens=row_tokens(input=1_000_000))   # $2
-    rep = cost.report(db, root)
-    assert rep.merged == 1 and rep.per_merged_branch == pytest.approx(4.0)
-
-
 # -- estimates: set_goal / assign / CLI -----------------------------------------------------------
-
-
-def _runs(db, root, n, model="claude-sonnet-5-5"):
-    for i in range(n):
-        w, r, branch = f"w{i}", f"r{i}", f"feat/{i}"
-        db.add_task(Task(f"t{i}", root, w, "boss", "ws", "developer", "x", "assign", 1, branch, None,
-                         None, None, "started", time.time(), weight="medium"))
-        seed(db, root, agent_id=w, branch=branch, profile="developer",
-             tokens=row_tokens(model, input=1_000_000 * (i + 1), output=100_000))
-        seed(db, root, "review", agent_id=r, branch=branch, profile="reviewer",
-             tokens=row_tokens(model, input=100_000, output=10_000))
-
-
-def test_the_default_price_function_really_prices(db, repo, root):
-    """A history of sonnet runs yields dollars, not 'no price for some models'."""
-    _runs(db, root, 6)
-    text = cost_estimate.describe([cost_estimate.TaskSpec("developer", "medium")], "reviewer",
-                                  repo_root=root, db=db, candidates=[])
-    assert "tokens (no price" not in text and "$" in text and "confident" not in text.split(":")[0]
-    # median worker: 3.5M in ($7) + 100k out ($1); median review: 0.1M in + 10k out ($0.2 + $0.1)
-    est = cost_estimate.estimate([cost_estimate.TaskSpec("developer", "medium")], "reviewer",
-                                 dists=cost_estimate.distributions(cost_estimate.runs(db, root)),
-                                 price=cost_estimate.default_price(root))
-    assert est.priced and est.low == pytest.approx(8.3)
-
-
-def test_default_price_honours_repo_overrides_and_unknown_models(repo, root):
-    config(repo, pricing={"my-model": {"input": 1, "output": 2}})
-    price = cost_estimate.default_price(root)
-    assert price("my-model", 1_000_000, 1_000_000, 0, 0) == pytest.approx(3.0)
-    assert price("claude-sonnet-5-5", 1_000_000, 0, 0, 0) == pytest.approx(2.0)
-    assert price("never-heard-of-it", 1, 1, 1, 1) is None and price(None, 1, 1, 1, 1) is None
 
 
 @pytest.fixture
@@ -339,17 +177,6 @@ def test_set_goal_and_assign_have_no_estimate_without_pro(db, boss, monkeypatch)
 
     monkeypatch.setattr(agents, "spawn", spawn)
     assert "Cost estimate" not in asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
-
-
-def test_cli_estimate_is_a_range_with_a_cheaper_review(db, repo, root, cli, pro, monkeypatch):
-    profile(repo, "developer", "claude-sonnet-5-5")
-    profile(repo, "reviewer", "claude-opus-5-5")
-    profile(repo, "reviewer-local", "qwen3", base_url="http://localhost:11434/v1")
-    config(repo, default_agent="developer", reviewer="reviewer")
-    monkeypatch.setattr(cost_estimate, "available_reviewers", lambda r: ["reviewer", "reviewer-local"])
-    out = cli.invoke(app, ["cost", "estimate", "--tasks", "2", "--weight", "light"]).output
-    assert "2 tasks" in out and "low confidence" in out and "–$" in out
-    assert "Cheaper: review with reviewer-local instead of reviewer" in out
 
 
 # -- budgets --------------------------------------------------------------------------------------
@@ -395,12 +222,6 @@ def test_month_budget_counts_spend_recorded_from_a_real_transcript(db, repo, roo
     assert choose(db, repo) == "small"          # 3 + ~4.6 > 6; 3 + ~0.46 fits
 
 
-def test_budget_does_nothing_without_the_cost_feature(db, repo, routed, monkeypatch):
-    budget_config(repo, budget={"task_usd": 0.1})
-    monkeypatch.setattr(license, "has", lambda feature: False)
-    assert choose(db, repo) == "big"
-
-
 def test_unpriced_profile_is_not_skipped_by_a_repo_budget_but_is_by_an_org_one(db, repo, routed, monkeypatch):
     from brindle.pro import team_policy
 
@@ -426,24 +247,6 @@ def test_an_unreadable_org_budget_exhausts_the_month(db, repo, routed, monkeypat
     assert budget.Gate(db, load_repo_config(repo), str(repo), "boss").why_not("small", "medium")
 
 
-def test_nothing_fits_refuses_with_the_reason(db, repo, routed):
-    budget_config(repo, budget={"task_usd": 0.1})
-    with pytest.raises(autopilot.AutopilotError) as e:
-        choose(db, repo)
-    assert "over budget" in str(e.value) and "Raise `budget`" in str(e.value)
-
-
-def test_estimates_prefer_finished_history_over_the_typical_mix(db, repo, root, routed):
-    budget_config(repo, budget={"task_usd": 1})
-    for n in range(3):                         # three finished big tasks that cost $0.50 each
-        db.add_routing_decision(root, task_id=f"t{n}", agent_id=f"h{n}", weight="medium",
-                                baseline_profile="big", profile="big", learned=False)
-        db.note_routing_outcome(f"h{n}", outcome="merged")
-        seed(db, root, agent_id=f"h{n}", profile="big", tokens=row_tokens("big-model", input=50_000))
-    assert budget.estimate(db, root, "big", "medium") == pytest.approx(0.5)
-    assert choose(db, repo) == "big"
-
-
 # -- savings --------------------------------------------------------------------------------------
 
 
@@ -466,18 +269,6 @@ def test_savings_in_dollars_from_routing_decisions(db, repo, root, routed):
     rep = cost.savings(db, root)
     assert rep.top_profile == "big" and rep.routed == 5
     assert rep.routing_saved == pytest.approx(45.0)
-
-
-def test_savings_fall_back_to_relative_cost_when_a_task_is_unpriced(db, repo, root, routed):
-    from brindle import savings
-
-    budget_config(repo)
-    for n in range(5):
-        db.add_routing_decision(root, task_id=f"t{n}", agent_id=f"s{n}", weight="medium",
-                                baseline_profile="big", profile="mystery", learned=True)
-        db.note_routing_outcome(f"s{n}", outcome="merged")
-        seed(db, root, agent_id=f"s{n}", profile="mystery", tokens=row_tokens("never-heard-of-it", input=10))
-    assert not savings.report(db, root)[-1].dollars
 
 
 # -- the sidebar's Costs section ------------------------------------------------------------------

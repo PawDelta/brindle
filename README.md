@@ -59,7 +59,7 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.3.6`). A session started before an upgrade keeps
+session shows it too (`brindle 0.3.7`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -841,7 +841,7 @@ how to use them, and the next step to get the rest:
 | per-member budgets, pause, and admin messages (sidebar "Messages", the bottom bar, `brindle org messages`) | Team | `brindle org messages [--keep]` lists and marks read the notices your admins sent you; a pause refuses new workers and stops running ones |
 | audit log, air-gap | Enterprise | `brindle audit verify`, `"airgap": true` |
 | audit export | Enterprise | `"audit_export"` in `~/.brindle/config.json`, `brindle audit ship` |
-| managed models | Enterprise | `provider_config`, `deny_personal_keys` in your org policy (see "Managed models" below) |
+| managed models | Enterprise | `agent_setup` routes with `enforce`, and `deny_personal_keys`, in your org policy (see "Managed models" below) |
 | wider CI, cost centers, managed rollout | Enterprise | `brindle ci init --host gitlab`, `brindle cost request`, and `min_version`, required packs and the kill switch in your org policy; admins can also shut down or throttle a member, role or org remotely (it arrives within about a minute) |
 
 `brindle ci init` checks your plan before it changes anything: it refuses
@@ -951,20 +951,40 @@ file names, paths or branch names. See `src/brindle/pro/learning.py` and
 
 ### Managed models (brindle Enterprise)
 
-An org policy can pick the provider its workers run on and keep people's own
-model keys out of their panes. Both fields are ignored without the Enterprise
+An org policy can pick the route its workers run on and keep people's own
+model keys out of their panes. All of this is ignored without the Enterprise
 entitlement.
 
-* `provider_config`: `provider` (`bedrock`, `vertex`, `azure` or
-  `openai-compatible`), plus `region`, `model_ids` and `endpoint` as the
-  provider needs them. For `vertex` set `project` to the GCP project id
-  (brindle passes it to Claude Code as `ANTHROPIC_VERTEX_PROJECT_ID`; an older
-  policy that put the project id in `endpoint` still works). Every agent is
-  launched on that provider, and a profile that points somewhere else is
-  refused with a message saying why.
-* `deny_personal_keys`: the personal model keys (`ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, ...) are taken out of every agent pane, and a profile that
-  sets one is refused.
+* The routes live in the policy's `agent_setup` block (the same one `brindle
+  login` applies, see "Using your company's access"), one per agent. With
+  `enforce` on, an agent whose route points at a cloud or an endpoint of the
+  org's is managed: Claude Code on `bedrock` (`aws.region`; the SSO group
+  `sso_start_url`, `sso_region`, `account_id` and `role_name` is optional, all
+  four or none, and without it your own AWS sign-in applies), `vertex`
+  (`gcp.project`, `gcp.region`), `foundry` (`azure.resource` with its
+  `subscription_id`, or `azure.base_url`, the endpoint) or `gateway`
+  (`gateway.base_url`), with `model_ids` (the ids the route serves) and
+  `default_model` (what panes start on, `ANTHROPIC_MODEL`); Codex on `azure`
+  or `gateway` with `codex.base_url` (`OPENAI_BASE_URL`). The route's
+  variables are the top layer of every pane's environment, a profile that
+  points somewhere else is refused with a message saying why, and the
+  identity is checked at launch. With `exclusive` on as well, an agent the
+  block gives no route at all is refused (Claude Code or Codex with no entry,
+  and always native and Antigravity); without it such an agent runs
+  unmanaged (use `allowed_providers` to keep it out). Without `enforce` the
+  same block is sign-in help only.
+* `provider_config` is the older, org-wide form of the same thing: `provider`
+  (`bedrock`, `vertex`, `azure` or `openai-compatible`), plus `region`,
+  `model_ids` and `endpoint` as the provider needs them (for `vertex`,
+  `project`; an older policy that put the project id in `endpoint` still
+  works). The server now converts it into `agent_setup` routes (with
+  `exclusive` on) and keeps deriving it for older clients; this client reads
+  it whenever `agent_setup` has no `exclusive` field (a server older than
+  routing in `agent_setup`) or routes nothing. An old
+  `provider_config` and its `agent_setup` form give panes the same variables.
+* `deny_personal_keys` (in `agent_setup`, or the policy's top-level field):
+  the personal model keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) are
+  taken out of every agent pane, and a profile that sets one is refused.
 * An org-owned key: with `provider` `anthropic` (or `openai-compatible`), set
   `key_env` to the name of a variable that holds the org's key (not a personal
   one like `ANTHROPIC_API_KEY`), or `key_helper` to a command, as a list of
@@ -983,10 +1003,9 @@ Two things to know when you turn on `deny_personal_keys`:
   `api_key_env` to the name of a variable that holds the org's key (not
   `OPENAI_API_KEY`).
 * It can't block a Claude subscription or keychain login by itself: Claude
-  Code signs in on its own, outside the variables brindle removes. Only a
-  `provider_config` that routes Claude Code to Bedrock, Vertex or Foundry
-  (`azure`) keeps it off that login. Always pair `deny_personal_keys` with a
-  `provider_config`.
+  Code signs in on its own, outside the variables brindle removes. Only an
+  enforced route that takes Claude Code to Bedrock, Vertex or Foundry keeps
+  it off that login. Always pair `deny_personal_keys` with one.
 
 ### Air-gapped mode (brindle Enterprise)
 

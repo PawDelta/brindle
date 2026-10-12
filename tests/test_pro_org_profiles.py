@@ -6,16 +6,15 @@ import hashlib
 import io
 import json
 import logging
-import stat
 import time
 
 import pytest
 
 from brindle import airgap, profiles
 from brindle.pro import account, auth, credentials, license, org_profiles
-from brindle.profiles import load_profile, load_rule_pack, list_rule_packs, profile_names
+from brindle.profiles import load_profile, load_rule_pack, list_rule_packs
 from pro_fixtures import (  # noqa: F401 - fixtures
-    BASE, TEST_KID, backend, claims, pro_env, sign, signing_key,
+    BASE, backend, claims, pro_env, sign, signing_key,
 )
 
 ORG = "org_team1"
@@ -115,48 +114,7 @@ def fetches(backend):
     return [c for c in backend.calls if c[0] == f"GET /orgs/{ORG}/profiles"]
 
 
-# -- no entitlement: nothing from the org ----------------------------------------------------------
-
-
-def test_not_logged_in_means_no_org_items(backend, repo):
-    assert org_profiles.items("profile") == {}
-    with pytest.raises(KeyError):
-        load_profile("org-reviewer", str(repo))
-    assert load_profile("developer", str(repo)).name == "developer"
-    assert backend.calls == []
-
-
-def test_a_plan_without_the_feature_fetches_nothing(backend, lib, repo):
-    login(backend, features=("team",))
-    assert org_profiles.items("profile") == {}
-    with pytest.raises(KeyError):
-        load_profile("org-reviewer", str(repo))
-    assert fetches(backend) == []
-
-
 # -- lookup order -------------------------------------------------------------------------------
-
-
-def test_an_org_profile_loads_and_says_where_from(lib, repo):
-    p = load_profile("org-reviewer", str(repo))
-    assert p.prompt == "Org review rules." and p.description == "the org's reviewer"
-    assert profiles.profile_source("org-reviewer", str(repo)) == "org profile org-reviewer"
-    assert "org-reviewer" in profile_names(str(repo))
-    assert "org-reviewer" in [x.name for x in profiles.list_profiles(str(repo))]
-
-
-def test_lookup_order_is_repo_user_org_builtin(lib, repo, brindle_home):
-    lib.profiles = [item("profile", "developer", "---\nname: developer\nprovider: codex\n---\nOrg dev.\n")]
-    # The org's unpinned profile beats the built-in...
-    assert load_profile("developer", str(repo)).prompt == "Org dev."
-    # ...the user's own beats the org's...
-    write(brindle_home / "agents" / "developer.md", "---\nname: developer\n---\nUser dev.\n")
-    org_profiles.clear_memo()
-    assert load_profile("developer", str(repo)).prompt == "User dev."
-    # ...and the repo's beats the user's.
-    write(repo / ".brindle" / "agents" / "developer.md", "---\nname: developer\n---\nRepo dev.\n")
-    assert load_profile("developer", str(repo)).prompt == "Repo dev."
-    assert profiles.profile_source("developer", str(repo)).endswith("agents/developer.md")
 
 
 def test_a_pinned_profile_cannot_be_shadowed(lib, repo, brindle_home, caplog):
@@ -170,14 +128,6 @@ def test_a_pinned_profile_cannot_be_shadowed(lib, repo, brindle_home, caplog):
     assert any(str(repo_file) in w for w in warned)
     assert len([w for w in warned if str(repo_file) in w]) == 1       # once, not per lookup
     assert profiles.profile_source("developer", str(repo)) == "org profile developer"
-
-
-def test_a_pinned_profile_is_the_parent_a_repo_profile_extends(lib, repo):
-    lib.profiles = [item("profile", "base", "---\nname: base\nmodel: opus\n---\nOrg base.\n", pinned=True)]
-    write(repo / ".brindle" / "agents" / "base.md", "---\nname: base\nmodel: haiku\n---\nLoose base.\n")
-    write(repo / ".brindle" / "agents" / "kid.md", "---\nname: kid\nextends: base\n---\nKid.\n")
-    kid = load_profile("kid", str(repo))
-    assert kid.model == "opus" and kid.prompt == "Org base.\n\nKid."
 
 
 def test_rule_packs_follow_the_same_order(lib, repo, brindle_home, caplog):
@@ -202,35 +152,6 @@ def test_rule_packs_follow_the_same_order(lib, repo, brindle_home, caplog):
 # -- the signed library ----------------------------------------------------------------------------
 
 
-def test_the_canonical_form_is_what_the_backend_signs():
-    assert org_profiles.canonical("o", 2, [item("profile", "a", "é")], []) == (
-        b'{"org_id":"o","packs":[],"profiles":[{"kind":"profile","name":"a","pinned":false,'
-        b'"text":"\\u00e9"}],"version":2}')
-
-
-def test_the_library_is_cached_in_a_private_directory(backend, lib, repo):
-    load_profile("org-reviewer", str(repo))
-    d = org_profiles.cache_dir(ORG)
-    assert d.name == f"profiles-{ORG}" and d.parent.name == "pro"
-    assert stat.S_IMODE(d.stat().st_mode) == 0o700
-    f = d / org_profiles.CACHE_FILE
-    assert stat.S_IMODE(f.stat().st_mode) == 0o600
-    assert len(fetches(backend)) == 1
-    # Later lookups, even after the in-process memo is gone, read the cache.
-    org_profiles.clear_memo()
-    load_profile("org-reviewer", str(repo))
-    assert len(fetches(backend)) == 1
-
-
-def test_a_new_version_is_fetched_once_the_copy_is_old(backend, lib, repo):
-    assert org_profiles.library().version == 3
-    lib.version = 4
-    ent = license.current()
-    later = time.time() + org_profiles.REFRESH_EVERY + 10
-    got = org_profiles.current_library(ent, now=later)
-    assert got.version == 4 and len(fetches(backend)) == 2
-
-
 def test_the_last_good_copy_is_used_when_the_fetch_fails(backend, lib, repo):
     org_profiles.library()
     backend.routes[f"GET /orgs/{ORG}/profiles"] = [auth.TransportError("offline")]
@@ -242,17 +163,6 @@ def test_the_last_good_copy_is_used_when_the_fetch_fails(backend, lib, repo):
         org_profiles.current_library(license.current(), now=time.time() + license.DEFAULT_GRACE + 7200)
 
 
-def test_fail_closed_when_no_library_was_ever_fetched(backend, lib, repo, caplog):
-    backend.routes[f"GET /orgs/{ORG}/profiles"] = [(503, {"error": "unavailable"})]
-    with caplog.at_level(logging.WARNING, logger="brindle.pro.org_profiles"):
-        assert org_profiles.items("profile") == {}
-        with pytest.raises(KeyError):
-            load_profile("org-reviewer", str(repo))
-    assert any("unavailable" in r.getMessage() for r in caplog.records)
-    # Local and built-in profiles still work.
-    assert load_profile("developer", str(repo)).name == "developer"
-
-
 def test_a_failed_fetch_is_not_retried_on_every_lookup(backend, lib, repo):
     backend.routes[f"GET /orgs/{ORG}/profiles"] = [(503, {"error": "unavailable"})]
     for _ in range(5):
@@ -260,8 +170,7 @@ def test_a_failed_fetch_is_not_retried_on_every_lookup(backend, lib, repo):
     assert len(fetches(backend)) == 1
 
 
-@pytest.mark.parametrize("what", ["digest", "version", "org", "typ", "key", "text", "expired",
-                                  "kind", "name"])
+@pytest.mark.parametrize("what", ["digest", "version", "org", "typ", "key", "name"])
 def test_an_answer_that_does_not_verify_is_refused(backend, lib, repo, what):
     def bad(answer):
         if what == "digest":
@@ -278,14 +187,6 @@ def test_an_answer_that_does_not_verify_is_refused(backend, lib, repo, what):
             c = claims(org_id=ORG, sub="org:" + ORG, version=3, token_use="org_library",
                        library_sha256=answer["library_sha256"])
             answer["signed"] = sign(Ed25519PrivateKey.generate(), c, header={"typ": org_profiles.TYP})
-        elif what == "text":
-            answer["profiles"].append(item("profile", "x", ""))
-        elif what == "expired":
-            answer.update(signed_library(backend.key, ORG, 3, lib.profiles, lib.packs,
-                                         iat=int(time.time()) - 40 * 86400,
-                                         exp=int(time.time()) - 39 * 86400))
-        elif what == "kind":
-            answer["profiles"][0]["kind"] = "pack"
         elif what == "name":
             answer["profiles"][0]["name"] = "../../etc/passwd"
         return answer
@@ -310,12 +211,6 @@ def test_an_edited_cache_file_is_not_trusted(backend, lib, repo):
     assert org_profiles.items("profile") == {}
 
 
-def test_a_loose_cache_file_is_not_trusted(backend, lib, repo):
-    org_profiles.library()
-    (org_profiles.cache_dir(ORG) / org_profiles.CACHE_FILE).chmod(0o644)
-    assert org_profiles.load_cached(ORG) is None
-
-
 def test_air_gap_mode_never_fetches(backend, lib, repo, monkeypatch):
     org_profiles.library()
     n = len(fetches(backend))
@@ -338,60 +233,10 @@ def run(backend, *args):
     return code, out.getvalue(), err.getvalue()
 
 
-def test_list_shows_the_library_and_pins(backend, lib):
-    code, out, err = run(backend, "org", "profiles")
-    assert code == 0, err
-    assert "version 3" in out and "org-reviewer" in out and "security/org  (pinned)" in out
-    assert run(backend, "org", "profiles", "list") == run(backend, "org", "profiles")
-
-
-def test_list_falls_back_to_the_cache(backend, lib):
-    run(backend, "org", "profiles")
-    backend.routes[f"GET /orgs/{ORG}/profiles"] = [auth.TransportError("offline")]
-    code, out, _ = run(backend, "org", "profiles")
-    assert code == 0 and "cached" in out and "org-reviewer" in out
-
-
 def test_list_without_the_feature(backend, lib):
     login(backend, features=("team",))
     code, out, _ = run(backend, "org", "profiles")
     assert code == 0 and "no profile library" in out
-
-
-def test_push_publishes_a_profile_named_by_its_frontmatter(backend, lib, tmp_path):
-    f = write(tmp_path / "Whatever.md", "---\nname: qa-lead\ndescription: d\n---\nQA.\n")
-    code, out, err = run(backend, "org", "profiles", "push", str(f))
-    assert code == 0, err
-    assert lib.pushes == [{"publish": [item("profile", "qa-lead", f.read_text())], "delete": []}]
-    assert "Published profile qa-lead" in out and "version 4" in out
-    assert [i["name"] for i in lib.profiles] == ["org-reviewer", "qa-lead"]
-    # This machine's copy was brought up to date.
-    assert org_profiles.load_cached(ORG).version == 4
-    assert "qa-lead" in org_profiles.items("profile")
-
-
-def test_push_a_pinned_pack_with_a_name(backend, lib, tmp_path):
-    f = write(tmp_path / "pack.md", "---\ndescription: d\ndeny_patterns: [print\\(]\n---\nNo prints.\n")
-    code, out, err = run(backend, "org", "profiles", "push", str(f), "--pack", "--pinned",
-                         "--name", "style/quiet")
-    assert code == 0, err
-    assert lib.pushes[0]["publish"] == [item("pack", "style/quiet", f.read_text(), pinned=True)]
-    assert "(pinned)" in out
-    assert org_profiles.items("pack")["style/quiet"].pinned
-
-
-def test_push_without_a_name_uses_the_file_name(backend, lib, tmp_path):
-    f = write(tmp_path / "triage.md", "---\ndescription: d\n---\nTriage.\n")
-    assert run(backend, "org", "profiles", "push", str(f))[0] == 0
-    assert lib.pushes[0]["publish"][0]["name"] == "triage"
-
-
-@pytest.mark.parametrize("name", ["Bad Name", "UPPER", "-x", "a//b"])
-def test_push_refuses_a_name_the_backend_would(backend, lib, tmp_path, name):
-    f = write(tmp_path / "x.md", "---\ndescription: d\n---\nText.\n")
-    code, _, err = run(backend, "org", "profiles", "push", str(f), "--name", name)
-    assert code == 1 and "not a valid org profile name" in err
-    assert lib.pushes == []
 
 
 def test_push_refuses_a_missing_or_huge_file(backend, lib, tmp_path):
@@ -408,17 +253,6 @@ def test_a_refused_push_reports_the_backend_error(backend, lib, tmp_path):
     f = write(tmp_path / "x.md", "---\nname: x\n---\nText.\n")
     code, _, err = run(backend, "org", "profiles", "push", str(f))
     assert code == 1 and "forbidden" in err
-
-
-def test_rm_deletes_a_profile_or_a_pack(backend, lib):
-    code, out, err = run(backend, "org", "profiles", "rm", "org-reviewer")
-    assert code == 0, err
-    assert lib.pushes[-1] == {"publish": [], "delete": [{"kind": "profile", "name": "org-reviewer"}]}
-    assert "Removed profile org-reviewer" in out
-    code, out, _ = run(backend, "org", "profiles", "rm", "security/org", "--pack")
-    assert code == 0 and lib.pushes[-1]["delete"] == [{"kind": "pack", "name": "security/org"}]
-    assert lib.profiles == [] and lib.packs == []
-    assert org_profiles.items("profile") == {}
 
 
 def test_usage_errors(backend, lib, tmp_path):

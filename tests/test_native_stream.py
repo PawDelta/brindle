@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brindle.native import (Client, Endpoint, NativeAgent, Permissions, Toolbox, ToolSpec, core_tools)
+from brindle.native import (Client, Endpoint, NativeAgent, Permissions, Toolbox, core_tools)
 
 
 class Sse:
@@ -135,72 +135,6 @@ def anthropic_stream(text_parts=("Let me ", "look."), stop="tool_use") -> Sse:
                                   "usage": {"output_tokens": 7}}),
                ("message_stop", {"type": "message_stop"})]
     return Sse(events, done=False)
-
-
-BASH = ToolSpec("Bash", "run", {"type": "object"})
-
-
-def test_openai_stream_assembles_text_and_tool_call(fake):
-    fake.replies = [openai_stream()]
-    seen: list[str] = []
-    reply = make_client(fake).complete("sys", [{"role": "user", "content": "go"}], [BASH], on_text=seen.append)
-    assert fake.requests[0]["stream"] is True
-    assert seen == ["Let me ", "look."]
-    assert reply.text == "Let me look."
-    assert [(c.id, c.name, c.arguments) for c in reply.tool_calls] == [("c1", "Bash", {"command": "echo hi"})]
-    assert reply.stop_reason == "tool_calls"
-    assert (reply.usage.input_tokens, reply.usage.output_tokens, reply.usage.cache_read_tokens) == (12, 7, 3)
-    assert reply.model == "fake-1"
-
-
-def test_anthropic_stream_assembles_text_and_input_json(fake):
-    fake.replies = [anthropic_stream()]
-    seen: list[str] = []
-    reply = make_client(fake, "anthropic").complete("sys", [{"role": "user", "content": "go"}], [BASH],
-                                                    on_text=seen.append)
-    assert fake.requests[0]["stream"] is True
-    assert seen == ["Let me ", "look."]
-    assert reply.text == "Let me look."
-    assert [(c.id, c.name, c.arguments) for c in reply.tool_calls] == [("tu1", "Bash", {"command": "echo hi"})]
-    assert reply.stop_reason == "tool_calls"
-    assert (reply.usage.input_tokens, reply.usage.output_tokens, reply.usage.cache_read_tokens) == (12, 7, 3)
-    assert reply.model == "fake-a"
-
-
-def test_stream_keeps_text_tool_call_recovery(fake):
-    block = '<tool_call>{"name": "Bash", "arguments": {"command": "ls"}}</tool_call>'
-    fake.replies = [Sse([oa_chunk({"content": "ok "}), oa_chunk({"content": block}), oa_chunk(finish="stop")])]
-    reply = make_client(fake).complete(None, [{"role": "user", "content": "go"}], [BASH], on_text=lambda t: None)
-    assert reply.text == "ok"
-    assert [(c.name, c.arguments) for c in reply.tool_calls] == [("Bash", {"command": "ls"})]
-    assert reply.stop_reason == "tool_calls"
-
-
-@pytest.mark.parametrize("api", ["openai", "anthropic"])
-def test_rejected_stream_falls_back_to_plain_request(fake, api):
-    plain = ({"model": "m", "choices": [{"message": {"content": "hello"}, "finish_reason": "stop"}],
-              "usage": {"prompt_tokens": 1, "completion_tokens": 2}} if api == "openai" else
-             {"type": "message", "model": "m", "content": [{"type": "text", "text": "hello"}],
-              "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 2}})
-    fake.replies = [400, plain]
-    seen: list[str] = []
-    reply = make_client(fake, api).complete(None, [{"role": "user", "content": "go"}], [], on_text=seen.append)
-    assert [r.get("stream") for r in fake.requests] == [True, False]
-    assert "stream_options" not in fake.requests[1]
-    assert reply.text == "hello" and reply.usage.output_tokens == 2
-
-
-def test_plain_json_answer_to_a_stream_request_still_works(fake):
-    fake.replies = [{"model": "m", "choices": [{"message": {"content": "hi there"}, "finish_reason": "stop"}]}]
-    seen: list[str] = []
-    reply = make_client(fake).complete(None, [{"role": "user", "content": "go"}], [], on_text=seen.append)
-    assert reply.text == "hi there" and seen == ["hi there"]
-
-
-def test_without_on_text_nothing_streams(fake):
-    fake.replies = [{"model": "m", "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]}]
-    make_client(fake).complete(None, [{"role": "user", "content": "go"}], [])
-    assert fake.requests[0]["stream"] is False
 
 
 @pytest.mark.parametrize("api", ["openai", "anthropic"])

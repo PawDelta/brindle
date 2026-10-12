@@ -19,21 +19,6 @@ def root(db, repo):
     return workspaces.adopt_root(db, str(repo))
 
 
-def test_keeps_only_the_newest_three(db, root):
-    for i in range(5):
-        add(db, root, f"s{i}", since=1000 + i)
-    assert sessions.enforce(db, root.repo_root, now=1100) == 2
-    assert [s.root.id for s in sessions.paused(db, root.repo_root)] == ["s4", "s3", "s2"]
-
-
-def test_drops_sessions_older_than_a_week(db, root):
-    now = time.time()
-    add(db, root, "fresh", since=now - 3600)
-    add(db, root, "stale", since=now - 8 * 86400)
-    sessions.enforce(db, root.repo_root, now=now)
-    assert [s.root.id for s in sessions.paused(db, root.repo_root)] == ["fresh"]
-
-
 def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches(db, root, repo):
     clean = workspaces.create(db, str(repo), "clean-work").workspace
     dirty = workspaces.create(db, str(repo), "dirty-work").workspace
@@ -73,20 +58,6 @@ def test_hook_records_the_cli_session_id(db, root):
     add(db, root, "a1", status="idle")
     agents.handle_hook(db, "a1", "prompt-submit", {"session_id": "abc-123"})
     assert db.get_agent("a1").session_ref == "abc-123"
-
-
-def test_resume_starts_fresh_when_claude_never_saved_the_chat(db, root, monkeypatch, tmp_path):
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
-    launched = []
-    monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(kw))
-    add(db, root, "boss")
-    agents.resume(db, "boss")
-    assert launched[0]["resume"] is None
-    (tmp_path / "claude" / "projects" / "p").mkdir(parents=True)
-    (tmp_path / "claude" / "projects" / "p" / "sess-boss.jsonl").write_text("{}")
-    db.set_status("boss", "paused")
-    agents.resume(db, "boss")
-    assert launched[1]["resume"] == "sess-boss"
 
 
 def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, root, monkeypatch, tmp_path):

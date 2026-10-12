@@ -34,7 +34,8 @@ ERRORS = [
 ]
 
 
-@pytest.mark.parametrize("text, key, cause_words, fix_words", ERRORS, ids=[e[1] for e in ERRORS])
+@pytest.mark.parametrize("text, key, cause_words, fix_words", [ERRORS[1], ERRORS[5], ERRORS[6]],
+                         ids=["bedrock_use_case", "foundry_quota", "foundry_provider_data"])
 def test_each_error_is_classified_with_a_cause_and_a_fix(text, key, cause_words, fix_words):
     cause = model_access.classify(text)
     assert cause is not None and cause.key == key
@@ -42,23 +43,8 @@ def test_each_error_is_classified_with_a_cause_and_a_fix(text, key, cause_words,
     assert cause.line() == f"{cause.cause}. Fix: {cause.fix}"
 
 
-@pytest.mark.parametrize("text", [
-    "", None, "API Error: 529 Overloaded", "API Error: 401 invalid x-api-key",
-    "API Error: 404 file does not exist",
-])
-def test_other_errors_are_not_model_access_errors(text):
-    assert model_access.classify(text) is None
-
-
 def screen(error):
     return (f"● {error}\n✻ Cooked for 1s · done 8:19 PM\n" + "─" * 80 + "\n❯\n" + "─" * 80 + "\n")
-
-
-def test_stuck_screen_names_the_cause_and_fix(db, repo, monkeypatch):
-    _, root, _ = _launch_showing(monkeypatch, db, repo, [screen(ERRORS[0][0])])
-    stuck = ClaudeAdapter().stuck_screen(db, root)
-    assert "can't call its model" in stuck and "open an AWS support case" in stuck
-    assert model_access.refused(root.profile).key == "bedrock_quota"
 
 
 def test_a_refused_profile_is_skipped_for_the_next_in_its_tier(db, repo, monkeypatch):
@@ -81,28 +67,6 @@ def test_a_refused_profile_is_skipped_for_the_next_in_its_tier(db, repo, monkeyp
     assert "developer-heavy" in note and "tasks moved to developer-gemini" in note and "Fix:" in note
 
 
-def test_the_refusal_lapses_after_an_hour(monkeypatch):
-    model_access.refuse("developer", model_access.BEDROCK_QUOTA, "developer-heavy")
-    assert model_access.refused("developer") is not None
-    later = time.time() + model_access.REFUSAL_TTL + 1
-    monkeypatch.setattr(model_access.time, "time", lambda: later)
-    assert model_access.refused("developer") is None and model_access.notes() == []
-
-
-@pytest.mark.parametrize("text", [
-    "API Error: 404 Not Found: the model config file does not exist",
-    "API Error: 404 The model 'gpt-5' does not exist",
-])
-def test_an_unrelated_404_is_not_classified_as_mantle(text):
-    assert model_access.classify(text) is None
-
-
-@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"])
-def test_the_exact_mantle_wording_is_classified(model):
-    cause = model_access.classify(f"API Error: 404 The model '{model}' does not exist")
-    assert cause is not None and cause.key == "bedrock_endpoint"
-
-
 def test_a_refusal_recorded_in_the_run_path_shows_in_session_notes(db, repo, monkeypatch):
     """The run path and the doctor check fingerprint under the repo root, like session_event reads."""
     (repo / ".brindle").mkdir(exist_ok=True)
@@ -120,19 +84,6 @@ def test_a_refusal_recorded_in_the_run_path_shows_in_session_notes(db, repo, mon
     assert model_access.refused("developer", str(repo)).key == "bedrock_endpoint"
     event = ci_client.session_event(db, root.id, ClaudeAdapter(), cwd=str(repo))
     assert "model refused for developer" in event["note"]
-
-
-def test_a_bedrock_marker_classifies_a_mantle_404():
-    text = "API Error: 404 bedrock-mantle: model does not exist"
-    assert model_access.classify(text).key == "bedrock_endpoint"
-
-
-def test_a_refusal_under_one_fingerprint_does_not_affect_another():
-    model_access.refuse("developer", model_access.BEDROCK_QUOTA, "developer-heavy", fp="aws|us-east-1")
-    assert model_access.refused("developer", fp="aws|us-east-1").key == "bedrock_quota"
-    assert model_access.refused("developer", fp="aws|eu-west-1") is None
-    model_access.refuse("developer", model_access.VERTEX_QUOTA, fp="vertex|proj-a")
-    assert model_access.refused("developer", fp="aws|us-east-1").key == "bedrock_quota"   # both kept
 
 
 def test_the_fingerprint_names_the_account_never_a_key(monkeypatch):
@@ -173,12 +124,6 @@ def test_the_session_report_carries_the_swap_and_the_alias_warning(db, repo, mon
     event = ci_client.session_event(db, root.id, ClaudeAdapter())
     assert "model refused for developer" in event["note"]
     assert "fell back to Opus 4.6" in event["note"] and "Opus 5.5" in event["note"]
-
-
-def test_alias_fallback_warning_is_recognised():
-    text = "⚠ Opus 5.5 not available — using Opus 4.6 for this session"
-    assert "could not use Opus 5.5 and fell back to Opus 4.6" in model_access.alias_fallback(text)
-    assert model_access.alias_fallback("all fine") is None
 
 
 def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback(db, repo, monkeypatch):

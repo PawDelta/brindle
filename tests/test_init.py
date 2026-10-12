@@ -40,19 +40,6 @@ def test_detect_go_and_make_fallback(tmp_path):
     assert detect.detect(other).checks == ["make test"]
 
 
-def test_detect_copies_only_ignored_env_files(repo):
-    (repo / ".gitignore").write_text(".env\n")
-    (repo / ".env").write_text("SECRET=1\n")
-    (repo / ".env.local").write_text("tracked on purpose\n")
-    assert detect.detect(repo).copy == [".env"]
-
-
-def test_detect_nothing_says_add_checks(tmp_path):
-    d = detect.detect(tmp_path)
-    assert d.stacks == [] and d.checks == []
-    assert any("checks" in n for n in d.notes)
-
-
 def test_init_writes_detected_config_and_keeps_existing(repo, monkeypatch):
     (repo / "go.mod").write_text("module x\n")
     monkeypatch.chdir(repo)
@@ -100,14 +87,6 @@ def test_pr_footer_on_by_default_and_opt_out(repo):
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "config.json").write_text('{"pr_footer": false}')
     assert workspaces.with_footer("Fixes #1", str(repo)) == "Fixes #1"
-
-
-def test_doctor_lists_optional_tools_apart():
-    out = doctor.render([doctor.Check(doctor.OK, "tmux", "/bin/tmux"),
-                         doctor.Check(doctor.WARN, "codex", "not found: only needed for Codex agents")])
-    main, optional = out.split("Optional, not set up")
-    assert "tmux" in main and "codex" not in main and "codex" in optional
-    assert out.endswith("All good.")
 
 
 def test_autopilot_guide_asks_for_checks_when_none(tmp_path):

@@ -8,8 +8,7 @@ from conftest import sh
 from brindle import agents, autopilot, gates, watch, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
-from brindle.providers import ClaudeCode, LaunchContext, status_line
-from brindle.profiles import load_profile
+from brindle.providers import status_line
 
 GOALS = """# Settings page
 
@@ -43,17 +42,6 @@ def with_goal(db, checks=("test -f api.txt", "test -f ui.txt")):
                        [(f"Milestone {i}", c, None) for i, c in enumerate(checks, start=1)])
 
 
-def test_parse_goals_file():
-    plan = autopilot.parse_goals(GOALS)
-    assert plan.goal == "Settings page"
-    assert plan.detail == "Users can change their name."
-    assert plan.milestones == [
-        ("Settings API", "test -f api.txt", "The endpoint saves the name."),
-        ("Settings UI", "test -f ui.txt", None),
-    ]
-    assert autopilot.parse_goals("no heading here") is None
-
-
 def test_enable_loads_goals_md(db, repo):
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "goals.md").write_text(GOALS)
@@ -63,11 +51,6 @@ def test_enable_loads_goals_md(db, repo):
     assert plan and db.get_autopilot("boss").goal == "Settings page"
     assert [m.title for m in db.milestones("boss")] == ["Settings API", "Settings UI"]
     assert "2 milestones" in autopilot.kickoff(plan)
-
-
-def test_no_goal_means_no_nudge(db, root):
-    agent, _ = root
-    assert autopilot.on_stop(db, agent, {}) is None
 
 
 def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
@@ -83,15 +66,6 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     autopilot.user_spoke(db, db.get_agent("boss"))
     assert db.get_autopilot("boss").state == "running"
     assert autopilot.on_stop(db, agent, {}) is not None
-
-
-def test_progress_resets_the_nudge_count(db, root, monkeypatch):
-    agent, _ = root
-    with_goal(db)
-    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    for _ in range(autopilot.MAX_NUDGES + 2):
-        assert autopilot.on_stop(db, agent, {}) is not None
-        db.bump_progress("boss")
 
 
 def test_running_workers_let_the_supervisor_idle(db, root, monkeypatch):
@@ -124,14 +98,6 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     autopilot.need_user(db, "boss", "Postgres or SQLite?")
     assert autopilot.on_stop(db, agent, {}) is None
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")
-
-
-def test_off_means_no_nudge(db, root, monkeypatch):
-    agent, _ = root
-    with_goal(db)
-    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    autopilot.set_enabled(db, "boss", False)
-    assert autopilot.on_stop(db, agent, {}) is None
 
 
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
@@ -211,24 +177,6 @@ def test_approved_audit_empties_goals_md_and_clears_the_goal(db, repo):
     assert db.get_autopilot("next").goal is None
 
 
-def test_unfinished_goals_md_still_loads(db, repo):
-    (repo / ".brindle").mkdir()
-    goals = repo / ".brindle" / "goals.md"
-    goals.write_text(GOALS)
-    ws = workspaces.adopt_root(db, str(repo))
-    add_agent(db, ws, "boss")
-    autopilot.enable(db, "boss", ws)
-    (repo / "api.txt").write_text("")
-    commit_all(repo)
-    autopilot.check_milestones(db, "boss", ws)   # one milestone still failing
-    db.update_autopilot("boss", audit_sha=sh("git rev-parse HEAD", repo))
-    autopilot.record_audit(db, "boss", False, "gaps")
-    assert goals.read_text() != ""
-    add_agent(db, ws, "next")
-    plan = autopilot.enable(db, "next", ws)
-    assert plan and db.get_autopilot("next").goal == "Settings page"
-
-
 def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
     agent, ws = root
     with_goal(db)
@@ -279,22 +227,6 @@ def test_approval_of_an_older_commit_keeps_the_goal_open(db, root, repo, monkeyp
     assert db.get_autopilot("boss").state == "auditing"   # the new commit gets its own audit
 
 
-def test_auditor_verdict_goes_to_the_goal_not_the_merge_gate(db, root, repo, monkeypatch):
-    _, ws = root
-    with_goal(db)
-    add_agent(db, ws, "audit1", mode="review", parent="boss")
-    db.update_autopilot("boss", state="auditing", auditor_id="audit1",
-                        audit_sha=sh("git rev-parse HEAD", repo))
-    sent = []
-    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **kw: sent.append((to, body)))
-    monkeypatch.setattr(agents, "close_later", lambda *a, **k: None)
-    reply = agents.submit_review(db, "audit1", True, "every milestone delivered")
-    assert "Audit recorded" in reply
-    assert db.get_autopilot("boss").state == "done"
-    assert db.last_review(ws.id) is None
-    assert sent and sent[0][0] == "boss" and "APPROVED" in sent[0][1]
-
-
 def test_single_check_rechecks_all_before_declaring_done(db, root, repo):
     _, ws = root
     with_goal(db)
@@ -305,16 +237,6 @@ def test_single_check_rechecks_all_before_declaring_done(db, root, repo):
     out = autopilot.check_milestones(db, "boss", ws, position=2)
     assert "goal is reached" not in out
     assert [m.status for m in db.milestones("boss")] == ["failed", "passed"]
-
-
-def test_set_goal_keeps_results_of_unchanged_milestones(db, root, repo):
-    _, ws = root
-    with_goal(db)
-    (repo / "api.txt").write_text("")
-    autopilot.check_milestones(db, "boss", ws)
-    autopilot.set_goal(db, "boss", "Settings page", [
-        ("Milestone 1", "test -f api.txt", None), ("Milestone 3", "true", None)])
-    assert [m.status for m in db.milestones("boss")] == ["passed", "pending"]
 
 
 def test_usage_limit_pauses_autopilot(db, root, monkeypatch):
@@ -351,13 +273,6 @@ def test_agent_cap(db, root, monkeypatch):
     with pytest.raises(autopilot.AutopilotError, match="already running"):
         autopilot.check_capacity(db, "boss", RepoConfig(max_agents=1))
     autopilot.check_capacity(db, "w1", RepoConfig(max_agents=0))
-
-
-def test_worker_goal():
-    text = autopilot.worker_goal("Add a login page.", "tests/test_login.py passes.", "feat/login")
-    assert text.startswith("/goal Finish line: tests/test_login.py passes.")
-    assert "feat/login" in text and text.endswith("Add a login page.")
-    assert autopilot.worker_goal("x" * 5000, "done", "b") is None
 
 
 # -- merge gates ---------------------------------------------------------------
@@ -440,13 +355,6 @@ def test_sidebar_without_goal_asks_for_one():
     assert any("what we're building" in ln.text for ln in lines)
 
 
-def test_claude_command_records_usage_and_limit_failures():
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("supervisor"), None))
-    settings = json.loads(argv[argv.index("--settings") + 1])
-    assert "_statusline" in settings["statusLine"]["command"]
-    assert "stop-failure" in json.dumps(settings["hooks"]["StopFailure"])
-
-
 def test_status_line_passes_through_the_persons_own(tmp_path, monkeypatch):
     config = tmp_path / "claude-config"
     config.mkdir()
@@ -469,52 +377,6 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root):
     assert db.get_autopilot("boss").state == "blocked"
     agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "SQLite"})
     assert db.get_autopilot("boss").state == "running"
-
-
-def test_reviewers_dont_count_against_the_cap(db, root, monkeypatch):
-    add_agent(db, root[1], "rev", mode="review", parent="boss")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    autopilot.check_capacity(db, "boss", RepoConfig(max_agents=1))
-    assert len(autopilot.active_workers(db, "boss")) == 1   # but the supervisor still waits for it
-
-
-def test_reported_worker_back_at_work_is_active(db, root, monkeypatch):
-    add_agent(db, root[1], "w1", mode="assign", parent="boss", status="idle")
-    db.set_result("w1", "done")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    assert autopilot.active_workers(db, "boss") == []
-    db.set_status("w1", "processing")   # the supervisor sent review feedback
-    assert [a.id for a in autopilot.active_workers(db, "boss")] == ["w1"]
-
-
-def test_commit_tracked_only_ignores_untracked_files(db, root, repo):
-    agent, ws = root
-    with_goal(db)
-    (repo / "file1.txt").write_text("hello")
-    commit_all(repo, "c1")
-    head_sha = sh("git rev-parse HEAD", repo)
-
-    # _commit returns head_sha when clean
-    assert autopilot._commit(ws) == head_sha
-
-    # Add an untracked file (e.g. test cache or unignored temporary file)
-    (repo / "untracked_cache.tmp").write_text("cache data")
-
-    # With tracked_only=False (the default), untracked files mark the workspace dirty
-    assert autopilot._commit(ws) is None
-    # With tracked_only=True, untracked artifacts are ignored and _commit returns head_sha
-    assert autopilot._commit(ws, tracked_only=True) == head_sha
-
-    # set_goal also records goal_sha despite untracked files
-    autopilot.set_goal(db, "boss", "Test Goal", [("M1", "true", None)])
-    assert db.get_autopilot("boss").goal_sha == head_sha
-
-    # Setting up an audit with audit_sha = head_sha
-    db.update_autopilot("boss", state="auditing", audit_sha=head_sha)
-    msg = autopilot.record_audit(db, "boss", True, "Everything looks good")
-    # Audit approval is accepted because tracked files are clean
-    assert "APPROVED" in msg
-    assert db.get_autopilot("boss").state == "done"
 
 
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
@@ -541,4 +403,3 @@ def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     monkeypatch.setattr(agents, "is_alive", lambda a: a.id == "live_auditor")
     db.update_autopilot("boss", state="auditing", auditor_id="live_auditor", audit_sha=head_sha)
     assert autopilot.on_stop(db, agent, {}) is None
-

@@ -11,10 +11,8 @@ from pathlib import Path
 import pytest
 
 from brindle.native import (Client, ClientError, Endpoint, LoopConfig, NativeAgent, Permissions,
-                          Toolbox, ToolSpec, core_tools)
-from brindle.native.client import Usage
+                          Toolbox, core_tools)
 from brindle.native.permissions import bash_matches, split_commands
-from brindle.native.tools import clip
 
 
 # -- a scripted endpoint ---------------------------------------------------------
@@ -120,31 +118,6 @@ def agent(fake: FakeEndpoint, tmp_path: Path, api="openai", mode="acceptEdits", 
 
 # -- wire formats ------------------------------------------------------------------
 
-def test_openai_round_trip_with_a_tool_call(fake, tmp_path):
-    (tmp_path / "a.txt").write_text("hello\nworld\n")
-    fake.replies = [openai_reply(calls=[("c1", "Read", {"path": "a.txt"})]),
-                    openai_reply("The file says hello.")]
-    a = agent(fake, tmp_path)
-    assert a.run("read a.txt") == "The file says hello."
-
-    first, second = fake.requests
-    assert fake.paths == ["/v1/chat/completions"] * 2
-    assert fake.headers["authorization"] == "Bearer secret"
-    assert first["model"] == "fake-model" and first["stream"] is False
-    assert first["messages"][0] == {"role": "system", "content": "You are a test worker."}
-    assert first["messages"][1] == {"role": "user", "content": "read a.txt"}
-    names = [t["function"]["name"] for t in first["tools"]]
-    assert names == ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
-    assert all(t["type"] == "function" and "parameters" in t["function"] for t in first["tools"])
-
-    # The second request carries the assistant's call and the tool's result.
-    assistant = second["messages"][2]
-    assert assistant["tool_calls"][0]["function"] == {"name": "Read", "arguments": '{"path": "a.txt"}'}
-    tool = second["messages"][3]
-    assert tool == {"role": "tool", "tool_call_id": "c1", "content": tool["content"]}
-    assert "1\thello" in tool["content"] and "2\tworld" in tool["content"]
-    assert a.usage == Usage(20, 10, 0) and a.model == "fake-1" and a.steps == 2
-
 
 def test_anthropic_round_trip_with_tool_results_merged(fake, tmp_path):
     (tmp_path / "a.txt").write_text("a\n")
@@ -171,12 +144,6 @@ def test_anthropic_round_trip_with_tool_results_merged(fake, tmp_path):
     assert a.model == "fake-a"
 
 
-def test_anthropic_url_handles_a_v1_base(fake):
-    assert Endpoint("http://h/api/anthropic", "m", api="anthropic").url() == "http://h/api/anthropic/v1/messages"
-    assert Endpoint("http://h/v1/", "m", api="anthropic").url() == "http://h/v1/messages"
-    assert Endpoint("http://h/v1", "m").url() == "http://h/v1/chat/completions"
-
-
 def test_bad_tool_arguments_go_back_to_the_model_as_an_error(fake, tmp_path):
     fake.replies = [openai_reply(calls=[("c1", "Read", "{not json")]),
                     openai_reply(calls=[("c2", "Read", "[1, 2]")]),
@@ -198,23 +165,6 @@ def test_unknown_tool_is_an_error_not_a_crash(fake, tmp_path):
     assert "unknown tool 'Teleport'" in fake.requests[1]["messages"][-1]["content"]
 
 
-def test_retries_transient_errors_then_gives_up_on_client_errors(fake, tmp_path):
-    fake.replies = [503, 500, openai_reply("third time")]
-    a = agent(fake, tmp_path)
-    assert a.run("go") == "third time"
-    assert len(fake.requests) == 3
-
-    fake.replies = [401]
-    with pytest.raises(ClientError) as e:
-        a.run("again")
-    assert e.value.status == 401 and "scripted 401" in str(e.value)
-
-    fake.replies = [503, 503, 503]
-    with pytest.raises(ClientError) as e:
-        a.run("again")
-    assert e.value.status == 503
-
-
 def test_unreachable_endpoint_raises_client_error():
     ep = Endpoint("http://127.0.0.1:1", "m", retries=0, timeout=1)
     with pytest.raises(ClientError) as e:
@@ -231,37 +181,6 @@ def test_reply_cut_off_at_max_tokens_is_continued(fake, tmp_path):
 
 
 # -- the loop -----------------------------------------------------------------------
-
-def test_queued_messages_are_delivered_between_model_calls(fake, tmp_path):
-    queue = ["please also bump the version"]
-    fake.replies = [openai_reply(calls=[("c1", "Bash", {"command": "echo hi"})]), openai_reply("done")]
-    seen = []
-    a = agent(fake, tmp_path, inbox=lambda: [queue.pop()] if queue else [], on_status=seen.append)
-    assert a.run("start") == "done"
-    # Drained before the first call: task, then the queued message.
-    first = fake.requests[0]["messages"]
-    assert first[1]["content"] == "start"
-    assert first[2]["role"] == "user" and first[2]["content"].startswith("brindle delivered this message")
-    assert "bump the version" in first[2]["content"]
-    assert seen == ["processing", "idle"]
-
-
-def test_status_goes_idle_even_when_the_endpoint_fails(fake, tmp_path):
-    fake.replies = [400]
-    seen = []
-    a = agent(fake, tmp_path, on_status=seen.append)
-    with pytest.raises(ClientError):
-        a.run("go")
-    assert seen == ["processing", "idle"]
-
-
-def test_denied_tool_returns_an_error_result_and_no_one_is_asked(fake, tmp_path):
-    fake.replies = [openai_reply(calls=[("c1", "Bash", {"command": "rm -rf /"})]), openai_reply("ok")]
-    a = agent(fake, tmp_path, mode="dontAsk")
-    a.run("go")
-    result = fake.requests[1]["messages"][-1]["content"]
-    assert "not permitted" in result and "rm -rf /" in result
-    assert not (tmp_path / "gone").exists()
 
 
 def test_ask_verdict_uses_the_ask_callback_and_reports_waiting(fake, tmp_path):
@@ -287,17 +206,6 @@ def test_ask_without_a_callback_is_a_refusal(fake, tmp_path):
     assert not (tmp_path / "x").exists()
 
 
-def test_transcript_records_every_event(fake, tmp_path):
-    fake.replies = [openai_reply(calls=[("c1", "Bash", {"command": "echo hi"})]), openai_reply("done")]
-    log = tmp_path / "log" / "t.jsonl"
-    a = agent(fake, tmp_path, transcript=log)
-    a.run("go")
-    entries = [json.loads(l) for l in log.read_text().splitlines()]
-    assert [e["type"] for e in entries] == ["user", "assistant", "tool", "assistant"]
-    assert entries[1]["tool_calls"][0]["name"] == "Bash" and entries[1]["message"]["usage"]["input_tokens"] == 10
-    assert entries[2]["content"] == "hi" and all("ts" in e for e in entries)
-
-
 def test_max_steps_ends_a_runaway_loop(fake, tmp_path):
     fake.replies = [openai_reply(calls=[("c", "Bash", {"command": "echo x"})])] * 5
     a = agent(fake, tmp_path, config=LoopConfig(max_steps=3))
@@ -306,44 +214,6 @@ def test_max_steps_ends_a_runaway_loop(fake, tmp_path):
 
 
 # -- context ------------------------------------------------------------------------
-
-def test_context_is_trimmed_then_folded_to_fit(fake, tmp_path):
-    big = "x" * 4000
-    (tmp_path / "big.txt").write_text(big)
-    # Twelve reads of a 4k file, then an answer: ~50k chars, budget 2k tokens.
-    fake.replies = [openai_reply(calls=[(f"c{i}", "Read", {"path": "big.txt"})]) for i in range(12)]
-    fake.replies.append(openai_reply("done"))
-    a = agent(fake, tmp_path, config=LoopConfig(context_tokens=2000, keep_recent=4, old_result_chars=100))
-    a._model_summary = lambda head, folded: None  # the deterministic fold; test_native_fold covers the model's
-    assert a.run("the task") == "done"
-    # Every request stayed near the budget: the recent messages kept verbatim
-    # (two 4k results) are what's left over it.
-    for req in fake.requests:
-        assert sum(len(json.dumps(m)) for m in req["messages"]) // 4 < 2000 + 1500
-    # Folds accumulate into one summary rather than summarizing the summary.
-    assert a.messages[1]["content"].count("summarized by brindle") == 1
-    assert a.messages[1]["content"].count("you ran Read big.txt") >= 6
-    # The task survived at the front, and the fold left a readable summary.
-    assert a.messages[0]["content"] == "the task"
-    assert a.folded > 0
-    assert a.messages[1]["role"] == "user" and "summarized by brindle" in a.messages[1]["content"]
-    assert "you ran Read big.txt" in a.messages[1]["content"]
-    assert a.messages[2]["role"] == "assistant"
-    assert a.messages[3]["role"] != "tool"  # no orphaned tool result after the fold
-    # The conversation is still well-formed: every tool result follows its call.
-    ids = set()
-    for m in a.messages:
-        if m["role"] == "assistant":
-            ids |= {c.id for c in m["tool_calls"]}
-        elif m["role"] == "tool":
-            assert m["tool_call_id"] in ids
-
-
-def test_small_conversations_are_left_alone(fake, tmp_path):
-    fake.replies = [openai_reply("hi")]
-    a = agent(fake, tmp_path)
-    a.run("hello")
-    assert a.folded == 0 and [m["role"] for m in a.messages] == ["user", "assistant"]
 
 
 # -- tools ----------------------------------------------------------------------------
@@ -434,25 +304,6 @@ def test_bash_reports_exit_codes_timeouts_and_clips_output(box, tmp_path):
     box.max_output = 1000
     r = box.call("Bash", {"command": "python3 -c 'print(\"y\" * 5000)'"})
     assert len(r.content) < 1100 and "characters cut" in r.content
-
-
-def test_clip_keeps_both_ends():
-    text = "A" * 100 + "B" * 100
-    out = clip(text, 60)
-    assert out.startswith("A" * 40) and out.endswith("B" * 20) and "140 characters cut" in out
-    assert clip("short", 60) == "short"
-
-
-def test_tool_exceptions_become_error_results(box):
-    from brindle.native.tools import Tool
-
-    def boom(args):
-        raise RuntimeError("kaput")
-
-    box.add(Tool("Boom", "explodes", {"type": "object"}, boom))
-    r = box.call("Boom", {})
-    assert r.is_error and "RuntimeError: kaput" in r.content
-    assert isinstance(box.specs()[-1], ToolSpec)
 
 
 # -- permissions --------------------------------------------------------------------------

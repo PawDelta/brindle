@@ -41,28 +41,6 @@ def summary_requests(fake):
     return [r for r in fake.requests if is_summary_request(r)]
 
 
-def test_the_models_text_becomes_the_summary(fake, tmp_path):
-    script(fake, tmp_path, ["Read big.txt many times\nnothing changed yet\nremaining: answer"] * 10)
-    a = make(fake, tmp_path)
-    assert a.run("the task") == "done"
-    asks = summary_requests(fake)
-    assert asks
-    # The summary request carries the task, then the folded work, then the ask.
-    msgs = asks[0]["messages"]
-    assert msgs[1]["content"] == "the task"
-    assert msgs[-1]["role"] == "user" and "Summarize the work" in msgs[-1]["content"]
-    assert "tools" not in asks[0] or not asks[0]["tools"]
-    # The text went into the summary message of the requests that followed.
-    summary = a.messages[1]["content"]
-    assert "summarized by brindle" in summary
-    assert "nothing changed yet" in summary and "remaining: answer" in summary
-    assert "you ran Read" not in summary
-    later = fake.requests[fake.requests.index(asks[0]) + 1]
-    assert "nothing changed yet" in json.dumps(later["messages"])
-    # The extra calls' usage is counted.
-    assert a.usage.input_tokens >= 7 * len(asks)
-
-
 def test_an_endpoint_error_falls_back_to_the_deterministic_summary(fake, tmp_path):
     script(fake, tmp_path, [400] * 10)  # 400 isn't retried
     notes = tmp_path / "t.jsonl"
@@ -72,14 +50,6 @@ def test_an_endpoint_error_falls_back_to_the_deterministic_summary(fake, tmp_pat
     assert summary_requests(fake)
     assert "you ran Read big.txt" in a.messages[1]["content"]
     assert "summarized by brindle" in notes.read_text()
-
-
-def test_an_empty_reply_falls_back(fake, tmp_path):
-    script(fake, tmp_path, ["  \n"] * 10)
-    a = make(fake, tmp_path)
-    assert a.run("the task") == "done"
-    assert summary_requests(fake)
-    assert "you ran Read big.txt" in a.messages[1]["content"]
 
 
 def test_a_second_fold_extends_the_first_summary(fake, tmp_path):

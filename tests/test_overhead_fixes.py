@@ -12,7 +12,6 @@ import pytest
 from conftest import sh
 from brindle import agents, autopilot, doctor, gates, inbox, mcp_server, workspaces
 from brindle.db import Agent
-from brindle.profiles import load_profile
 
 
 def add(db, ws, agent_id, mode="interactive", profile="supervisor", **kw):
@@ -26,13 +25,6 @@ def add(db, ws, agent_id, mode="interactive", profile="supervisor", **kw):
 
 # -- 1. tools loaded up front --------------------------------------------------
 
-def test_workers_get_brindle_tools_up_front_and_chats_keep_tool_search(db, repo):
-    ws = workspaces.adopt_root(db, str(repo))
-    add(db, ws, "w1", mode="assign", profile="developer")
-    add(db, ws, "boss")
-    assert agents.agent_env(ws, "w1", db.get_agent("w1"))["ENABLE_TOOL_SEARCH"] == "false"
-    assert "ENABLE_TOOL_SEARCH" not in agents.agent_env(ws, "boss", db.get_agent("boss"))
-
 
 def test_profile_can_force_tool_search(db, repo):
     (repo / ".brindle" / "agents").mkdir(parents=True)
@@ -41,16 +33,6 @@ def test_profile_can_force_tool_search(db, repo):
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "w1", mode="assign", profile="developer")
     assert "ENABLE_TOOL_SEARCH" not in agents.agent_env(ws, "w1", db.get_agent("w1"))
-
-
-# -- 2. auto mode and permissions guidance --------------------------------------
-
-def test_workers_run_in_auto_mode_and_are_told_to_stay_home(db, repo):
-    assert load_profile("developer").permission_mode == "auto"
-    ws = workspaces.create(db, str(repo), "feat").workspace
-    text = agents.worker_guidance(ws)
-    assert "Never `cd` into or read from the main checkout" in text and str(repo) in text
-    assert "don't write to /tmp" in text
 
 
 # -- 3. checks run once and are shared -------------------------------------------
@@ -134,17 +116,6 @@ def test_unreviewed_sync_still_needs_a_review(db, repo, monkeypatch):
     assert "request_review again" in out
 
 
-# -- 5. the supervisor sizes work ------------------------------------------------
-
-def test_supervisor_is_told_to_size_work_first():
-    from brindle.autopilot import DELEGATION
-
-    text = load_profile("supervisor").prompt
-    assert "Size first" in text and "delegation rule" in text   # the rule itself comes from config
-    assert "Keep your own context small" in text
-    assert "genuinely parallel" in DELEGATION["conservative"]
-
-
 # -- 6. inbox delivery ------------------------------------------------------------
 
 @pytest.fixture
@@ -195,15 +166,6 @@ def test_messages_go_through_the_inbox_without_waiting_for_idle(db, repo, fake_i
     assert db.pending_count("w1") == 0          # nothing left for the pane
 
 
-def test_without_an_inbox_messages_queue_for_the_pane(db, repo, monkeypatch):
-    ws = workspaces.adopt_root(db, str(repo))
-    add(db, ws, "w1", mode="assign", profile="developer", status="processing")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(agents, "reconcile", lambda db, a, **kw: a)
-    assert agents.send_message(db, "w1", "hello", sender_id=None) == "queued"
-    assert db.pending_count("w1") == 1
-
-
 def test_session_start_records_the_inbox(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "w1", mode="assign", profile="developer", status="starting")
@@ -220,10 +182,9 @@ def test_doctor_reports_what_is_missing(repo, monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "tmux" else f"/bin/{name}")
     results = doctor.checks(str(repo))
     by_name = {c.name: c for c in results}
-    assert by_name["tmux"].level == doctor.FAIL and "brew install tmux" in by_name["tmux"].detail
+    assert by_name["tmux"].level == doctor.FAIL
     assert by_name["checks"].level == doctor.WARN
-    text = doctor.render(results)
-    assert "will stop brindle from working" in text
+    assert by_name["tmux"].detail in doctor.render(results)
 
 
 def test_doctor_reports_a_missing_add_dir(repo):

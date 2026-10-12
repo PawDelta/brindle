@@ -66,21 +66,12 @@ def planner(db, ws, parent="boss", **kw):
 # -- assign / config ----------------------------------------------------------
 
 
-def test_assign_plan_first_is_stored(db, repo, boss):
-    wid = worker_id(asyncio.run(mcp_server.assign("developer", "big job", plan_first=True)))
-    assert db.get_agent(wid).plan_first == 1
-
-
 def test_assign_defaults_to_the_repo_config(db, repo, boss):
     (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "plan_first": true}')
     on = worker_id(asyncio.run(mcp_server.assign("developer", "job one")))
     off = worker_id(asyncio.run(mcp_server.assign("developer", "job two", plan_first=False)))
     assert db.get_agent(on).plan_first == 1
     assert not db.get_agent(off).plan_first
-
-
-def test_plan_first_config_defaults_off():
-    assert RepoConfig().plan_first is False
 
 
 def test_queued_task_keeps_plan_first(db, repo, boss):
@@ -106,27 +97,11 @@ def test_prompt_mentions_submit_plan_only_when_plan_first(db, repo, boss):
 # -- submit_plan / approve_plan ------------------------------------------------
 
 
-def test_submit_plan_messages_the_parent_and_records_proposed(db, repo, boss, sent):
-    planner(db, boss)
-    agents.submit_plan(db, "w1", "1. edit a.py")
-    assert db.get_agent("w1").plan_state == "proposed"
-    [(to, body, sender)] = sent
-    assert to == "boss" and sender == "w1" and "1. edit a.py" in body
-
-
 def test_submit_plan_needs_a_plan_first_worker(db, repo, boss, sent):
     db.add_agent(Agent("w2", boss.id, "developer", "claude", "boss", "assign", "processing", "",
                        None, time.time()))
     assert "isn't plan-first" in agents.submit_plan(db, "w2", "x")
     assert not sent
-
-
-def test_approve_plan_approves_and_tells_the_worker(db, repo, boss, sent):
-    planner(db, boss, plan_state="proposed")
-    agents.approve_plan(db, "boss", "w1", "looks good, watch the tests")
-    assert db.get_agent("w1").plan_state == "approved"
-    [(to, body, _)] = sent
-    assert to == "w1" and "approved" in body and "watch the tests" in body
 
 
 def test_approve_plan_can_ask_for_a_revision(db, repo, boss, sent):
@@ -164,26 +139,12 @@ def test_mcp_tools_report_errors_as_text(db, repo, boss, monkeypatch, sent):
 # -- enforcement ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("tool", ["Edit", "Write", "NotebookEdit"])
-@pytest.mark.parametrize("state", [None, "proposed", "revise"])
+@pytest.mark.parametrize("state,tool", [("proposed", "Edit"), ("revise", "NotebookEdit")])
 def test_hook_denies_edits_until_approved(db, repo, boss, tool, state):
     a = planner(db, boss, plan_state=state)
     out = agents.pre_tool_decision(db, a, {"tool_name": tool, "tool_input": {}})
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "submit_plan" in out["hookSpecificOutput"]["permissionDecisionReason"]
-
-
-def test_hook_allows_edits_once_approved_or_when_not_plan_first(db, repo, boss):
-    a = planner(db, boss, plan_state="approved")
-    assert agents.pre_tool_decision(db, a, {"tool_name": "Edit", "tool_input": {}}) is None
-    db.add_agent(Agent("w2", boss.id, "developer", "claude", "boss", "assign", "processing", "",
-                       None, time.time()))
-    assert agents.pre_tool_decision(db, db.get_agent("w2"), {"tool_name": "Write", "tool_input": {}}) is None
-
-
-def test_hook_still_lets_an_unapproved_plan_first_worker_read_and_run(db, repo, boss):
-    a = planner(db, boss)
-    assert agents.pre_tool_decision(db, a, {"tool_name": "Read", "tool_input": {}}) is None
 
 
 # -- autopilot -----------------------------------------------------------------

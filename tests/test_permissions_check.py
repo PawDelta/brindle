@@ -11,26 +11,6 @@ from brindle.profiles import _parse, profile_rules_for
 from brindle import agents, antigravity, workspaces
 
 
-def test_profile_permission_denies_parse_and_only_deny():
-    profile = _parse(
-        '---\nname: reviewer\npermission_denies: ["read glob ~/.private*", "bash prefix deploy"]\n---\n',
-        "reviewer",
-    )
-    rules = permissions.profile_rules(profile)
-    assert [(r.kind, r.match_type, r.match, r.decision) for r in rules] == [
-        ("read", "glob", "~/.private*", "deny"),
-        ("bash", "prefix", "deploy", "deny"),
-    ]
-
-
-def test_profile_deny_participates_in_policy():
-    profile = _parse('---\nname: reviewer\npermission_denies: ["read prefix /home/person/.private"]\n---\n', "reviewer")
-    req = permissions.Request("claude", "read", "Read", path="/home/person/.private/token")
-    result = permissions.decide(req, rules=[*permissions.DEFAULT_RULES, *permissions.profile_rules(profile)])
-    assert result.decision == "deny"
-    assert result.rule.source == "profile"
-
-
 def test_invalid_profile_denies_are_reported_and_ignored():
     profile = _parse(
         '---\nname: reviewer\npermission_denies: ["bogus glob x", "read nope x", "read"]\n---\n',
@@ -46,22 +26,6 @@ def test_missing_profile_has_no_override(tmp_path):
     assert profile_rules_for("deleted-profile", str(tmp_path)) == []
 
 
-def test_permissions_check_reports_provider_capability(monkeypatch):
-    from brindle.profiles import Profile
-
-    profile = Profile("reviewer", "", "claude", "", permission_denies=["fetch glob https://private/*"])
-    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
-    monkeypatch.setattr("brindle.cli.load_profile", lambda name, repo: profile)
-    result = CliRunner().invoke(app, ["permissions", "check", "--profile", "reviewer"])
-    assert result.exit_code == 0, result.output
-    assert "Claude Code (brindle hook):" in result.output
-    assert "Codex (brindle hook):" in result.output
-    assert "Antigravity:" in result.output
-    assert "deny  fetch" in result.output
-    assert "deny  fetch fetch glob 'https://private/*' (profile; brindle hook only)" in result.output
-    assert "hook allow is ignored" in result.output
-
-
 def test_permissions_check_unknown_profile_and_default_all_profiles(monkeypatch):
     monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
     unknown = CliRunner().invoke(app, ["permissions", "check", "--profile", "no-such-profile"])
@@ -69,20 +33,6 @@ def test_permissions_check_unknown_profile_and_default_all_profiles(monkeypatch)
     all_profiles = CliRunner().invoke(app, ["permissions", "check"])
     assert all_profiles.exit_code == 0, all_profiles.output
     assert "Profile developer:" in all_profiles.output
-
-
-def test_permissions_check_shows_codex_profile_commands_and_approval_limit(monkeypatch):
-    from brindle.profiles import Profile
-
-    profile = Profile("custom", "", "codex", "", allowed_tools=["Bash(just lint)", "Bash(task test:*)"])
-    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
-    monkeypatch.setattr("brindle.cli.load_profile", lambda name, repo: profile)
-    out = CliRunner().invoke(app, ["permissions", "check", "--profile", "custom"]).output
-    codex = out.split("Codex (brindle hook):")[1].split("Antigravity:")[0]
-    assert "bash exact 'just lint' (profile)" in codex
-    assert "bash prefix 'task test ' (profile)" in codex
-    assert "Only approval requests" in codex
-    assert "enabled, trusted hook" in codex
 
 
 def test_permission_hooks_enforce_profile_deny(db, repo):

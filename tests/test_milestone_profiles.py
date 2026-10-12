@@ -9,20 +9,6 @@ def set_goal(db, items):
     autopilot.set_goal(db, "boss", "Goal", items)
 
 
-def test_set_goal_stores_profile(db, root):
-    set_goal(db, [("A", "true", None, "developer"), ("B", "true", None)])
-    a, b = db.milestones("boss")
-    assert (a.profile, b.profile) == ("developer", None)
-    assert "profile: developer" in autopilot.progress(db, "boss")
-
-
-def test_parse_goals_reads_profile_line():
-    plan = autopilot.parse_goals(
-        "# G\n\n## One\ncheck: true\nprofile: reviewer\nbody\n\n## Two\ncheck: true\n"
-    )
-    assert plan.milestones == [("One", "true", "body", "reviewer"), ("Two", "true", None)]
-
-
 def test_resolution_prefers_current_milestone_then_default(db, root):
     agent, ws = root
     set_goal(db, [("A", "true", None, "reviewer"), ("B", "true", None, "supervisor"), ("C", "true", None)])

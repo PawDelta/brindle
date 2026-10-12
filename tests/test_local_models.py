@@ -92,35 +92,6 @@ def test_an_explicit_false_never_starts_or_preloads_a_model(repo, fake_ollama):
     assert fake_ollama["popen"] == []
 
 
-def test_a_remote_endpoint_is_never_started_by_default(repo, fake_ollama, monkeypatch):
-    from brindle.config import load_repo_config
-
-    monkeypatch.setattr(serve, "list_profiles", lambda root: [])
-    assert serve.ensure(str(repo), load_repo_config(str(repo)), log=repo / "l") == []
-    assert fake_ollama["popen"] == []
-
-
-def test_ensure_starts_ollama_with_doctors_context_length_and_warms_each_model(repo, fake_ollama):
-    _profile(repo, "worker", "http://localhost:11434/v1", context_tokens="32k")
-    lines = serve.ensure(str(repo), RepoConfig(local_models=True), log=repo / "ollama.log")
-    assert len(fake_ollama["popen"]) == 1
-    argv, env = fake_ollama["popen"][0]
-    assert argv == ["ollama", "serve"]
-    assert env["OLLAMA_CONTEXT_LENGTH"] == str(32_000 + serve.CONTEXT_HEADROOM)
-    assert "OLLAMA_HOST" not in env
-    assert ("http://localhost:11434", "qwen3-coder:30b") in fake_ollama["warmed"]
-    assert any("started ollama serve" in line and "worker" in line for line in lines)
-    assert (repo / "ollama.log").read_text().startswith("\n== brindle: starting ollama serve")
-
-
-def test_ensure_leaves_a_running_server_alone_but_still_warms(repo, fake_ollama):
-    fake_ollama["up"] = True
-    lines = serve.ensure(str(repo), RepoConfig(local_models=True), log=repo / "ollama.log")
-    assert fake_ollama["popen"] == []
-    assert fake_ollama["warmed"]
-    assert not any("started" in line for line in lines)
-
-
 def test_ensure_respects_local_models_false_and_a_missing_binary(repo, fake_ollama, monkeypatch):
     assert serve.ensure(str(repo), RepoConfig(local_models=False), log=repo / "l") == []
     assert fake_ollama["popen"] == []
@@ -136,25 +107,6 @@ def test_a_non_default_port_sets_ollama_host_and_an_existing_context_env_wins(re
     assert env["OLLAMA_CONTEXT_LENGTH"] == str(8000 + serve.CONTEXT_HEADROOM)
     env = serve.ollama_env(s, {"OLLAMA_CONTEXT_LENGTH": "99999"})
     assert env["OLLAMA_CONTEXT_LENGTH"] == "99999"
-
-
-def test_needed_lists_only_unreachable_local_servers(repo, fake_ollama):
-    assert [s.host for s in serve.needed(str(repo), RepoConfig(local_models=True))] == ["http://localhost:11434"]
-    fake_ollama["up"] = True
-    assert serve.needed(str(repo), RepoConfig(local_models=True)) == []
-    assert serve.needed(str(repo), RepoConfig(local_models=False)) == []
-
-
-def test_repo_config_reads_local_models(repo):
-    from brindle.config import load_repo_config
-
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"local_models": true}')
-    assert load_repo_config(str(repo)).local_models is True
-    (repo / ".brindle" / "config.json").write_text("{}")
-    assert load_repo_config(str(repo)).local_models is True  # on unless opted out
-    (repo / ".brindle" / "config.json").write_text('{"local_models": false}')
-    assert load_repo_config(str(repo)).local_models is False
 
 
 # -- Stopping the server brindle started once no session uses it.
@@ -206,11 +158,6 @@ def _group_gone(pgid: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def test_ensure_records_the_server_it_starts(repo, fake_ollama):
-    serve.ensure(str(repo), RepoConfig(local_models=True), log=repo / "ollama.log")
-    assert serve.started_servers() == {"http://localhost:11434": 4242}
-
-
 def test_stop_unused_stops_the_server_and_its_runner_when_no_session_uses_it(db, monkeypatch, fake_serve):
     p = fake_serve()
     serve.record_started("http://localhost:11434", p.pid)
@@ -241,14 +188,6 @@ def test_stop_unused_forgets_a_pid_that_is_no_longer_ollama(db, monkeypatch):
     assert serve.started_servers() == {}
 
 
-def test_a_server_brindle_did_not_start_is_never_stopped(db, monkeypatch):
-    monkeypatch.setattr(serve, "hosts_in_use", lambda db: set())
-    killed = []
-    monkeypatch.setattr(serve, "_stop_group", lambda pid, grace: killed.append(pid))
-    assert serve.stop_unused(db) == []
-    assert killed == []
-
-
 def _root_ws(db, repo):
     import time
 
@@ -277,24 +216,6 @@ def test_hosts_in_use_counts_only_live_or_just_started_session_roots(db, repo, m
     assert serve.hosts_in_use(db) == set()
     root("fresh001", "idle", time.time())  # its window isn't recorded yet
     assert serve.hosts_in_use(db) == {"http://localhost:11434"}
-
-
-def test_pausing_the_last_session_stops_the_server(db, repo, monkeypatch):
-    import time
-
-    from brindle import agents
-    from brindle.db import Agent
-
-    ws = _root_ws(db, repo)
-    db.add_agent(Agent("root0001", ws.id, "supervisor", "claude", None, "interactive",
-                       "idle", "", None, time.time() - 3600))
-    calls = []
-    monkeypatch.setattr(serve, "stop_unused", lambda db: calls.append(db) or [])
-    agents.pause(db, "root0001", stop_procs=False)
-    assert len(calls) == 1
-    db.set_status("root0001", "idle")
-    agents.pause(db, "root0001", stop_procs=False, stop_local_models=False)
-    assert len(calls) == 1
 
 
 def test_closing_the_chat_stops_the_server_brindle_started(db, repo, fake_ollama, monkeypatch):

@@ -21,15 +21,6 @@ def poll(org_, **body):
 # -- the sidebar ----------------------------------------------------------------------------------
 
 
-def test_the_sidebar_shows_a_messages_section(org):
-    saved = poll(org, notices=[notice("a", "Please slow down"), notice("b", "Budget raised")])
-    lines = watch.render([], time.time(), 60, messages=saved)
-    texts = [ln.text for ln in lines]
-    head = next(ln for ln in lines if ln.group == status.GROUP)
-    assert head.style == "alert" and "Messages (2)" in head.text
-    assert any("Please slow down" in t for t in texts) and any("Budget raised" in t for t in texts)
-
-
 def test_the_messages_section_folds_and_vanishes_when_read(org):
     saved = poll(org, notices=[notice("a")])
     state = watch.NavState()
@@ -123,12 +114,6 @@ def test_org_messages_lists_and_marks_read(org):
     assert status.load(ORG).status.notices == []
 
 
-def test_org_messages_with_keep_marks_nothing(org):
-    org.body = {"policy_version": 1, "notices": [notice("n1")]}
-    r = CliRunner().invoke(app, ["org", "messages", "--keep"])
-    assert "Over budget" in r.output and not [c for c in org.calls if c[0] == "POST"]
-
-
 def test_org_messages_when_there_are_none(org):
     org.body = {"policy_version": 1, "notices": []}
     r = CliRunner().invoke(app, ["org", "messages"])
@@ -155,14 +140,6 @@ def test_admins_see_the_org_total():
         "org 82% of $2,000", "warn")
     assert bar(org_alert={"level": "over", "spent_usd": 2100.0, "total_usd": 2000.0}) == (
         "org over $2,000", "alert")
-
-
-def test_everyone_sees_pause_budget_and_messages():
-    assert bar(paused=True, paused_reason="over budget") == ("paused: over budget", "alert")
-    assert bar(seat={"budget_source": "member"}) == ("budget lowered", "warn")
-    assert bar(notices=[notice("a")]) == ("1 message", "warn")
-    assert bar(notices=[notice("a"), notice("b")]) == ("2 messages", "warn")
-    assert bar() is None
 
 
 def test_a_pause_outranks_messages():

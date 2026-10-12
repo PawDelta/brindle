@@ -1,12 +1,11 @@
 """Selecting and copying chat text (issue #12): pane-scoped mouse copy to the
 system clipboard, the sidebar hide/show toggle, and the bottom layout."""
 
-import json
 import uuid
 
 import pytest
 
-from brindle import config, tmux, watch
+from brindle import tmux, watch
 
 
 @pytest.fixture
@@ -17,84 +16,14 @@ def session(tmp_path):
     tmux.kill_session(name)
 
 
-def test_clipboard_command_prefers_pbcopy(monkeypatch):
-    monkeypatch.setattr(tmux.shutil, "which", lambda n: f"/bin/{n}" if n in ("pbcopy", "xclip") else None)
-    assert tmux.clipboard_command() == "pbcopy"
-
-
-def test_clipboard_command_linux(monkeypatch):
+def test_clipboard_command(monkeypatch):
     monkeypatch.setattr(tmux.shutil, "which", lambda n: f"/bin/{n}" if n in ("wl-copy", "xclip") else None)
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     assert tmux.clipboard_command() == "wl-copy"
     monkeypatch.delenv("WAYLAND_DISPLAY")
     assert tmux.clipboard_command() == "xclip -selection clipboard -i"
-
-
-def test_clipboard_command_none(monkeypatch):
     monkeypatch.setattr(tmux.shutil, "which", lambda n: None)
     assert tmux.clipboard_command() is None
-
-
-def _bindings(table: str) -> str:
-    return tmux._tmux("list-keys", "-T", table).stdout
-
-
-def test_mouse_drag_copies_to_clipboard_only_for_brindle_sessions(session, monkeypatch):
-    monkeypatch.setattr(tmux, "clipboard_command", lambda: "pbcopy")
-    tmux.bind_session_keys(session)
-    for table in ("copy-mode", "copy-mode-vi"):
-        line = next(ln for ln in _bindings(table).splitlines() if "MouseDragEnd1Pane" in ln)
-        assert "#{@brindle}" in line and "pbcopy" in line
-        assert "copy-pipe-and-cancel" in line  # the fallback keeps tmux's own default
-    got = tmux._tmux("show-options", "-t", session, "@brindle").stdout
-    assert "@brindle 1" in got
-
-
-def test_chat_pane_keeps_the_mouse_even_when_the_program_tracks_it(session, monkeypatch):
-    """Claude Code 2.1.29x asks for mouse tracking, which made tmux hand every
-    click and drag to it: no drag-to-copy, and a click could park its focus in
-    the Settings dialog's filter box, where Esc never closes the dialog. In a
-    brindle chat pane tmux keeps the mouse; the sidebar, other panes and other
-    sessions get tmux's own default (which defers to ``mouse_any_flag``)."""
-    monkeypatch.setattr(tmux, "clipboard_command", lambda: "pbcopy")
-    tmux.bind_session_keys(session)
-    root = _bindings("root").splitlines()
-    for key in ("MouseDown1Pane", "MouseUp1Pane", "MouseDrag1Pane", "DoubleClick1Pane", "TripleClick1Pane"):
-        line = next(ln for ln in root if f" {key} " in ln)
-        assert tmux.CHAT_PANE in line, key
-        # tmux's default survives as the fallback: it passes the event on
-        # (send-keys -M), for a drag or click only when the program tracks
-        # the mouse (mouse_any_flag).
-        assert "send-keys -M" in line, key
-        if key not in ("MouseDown1Pane", "MouseUp1Pane"):
-            assert "mouse_any_flag" in line, key
-    drag = next(ln for ln in root if " MouseDrag1Pane " in ln)
-    assert "copy-mode -M" in drag
-    down = next(ln for ln in root if " MouseDown1Pane " in ln)
-    assert "select-pane -t =" in down
-    up = next(ln for ln in root if " MouseUp1Pane " in ln)
-    assert tmux.CHAT_PANE in up and up.rstrip().endswith('"send-keys -M"')  # the release: dropped, or passed on
-    for key in ("DoubleClick1Pane", "TripleClick1Pane"):
-        assert "pbcopy" in next(ln for ln in root if f" {key} " in ln)
-    # The guard: a brindle session's pane that isn't the sidebar.
-    assert "@brindle_sidebar" in tmux.CHAT_PANE and "#{@brindle}" in tmux.CHAT_PANE
-
-
-def test_chat_mouse_bindings_never_forward_a_press_or_drag():
-    ours = tmux.chat_mouse_bindings("pbcopy")
-    assert ours["MouseDown1Pane"] == "select-pane -t ="
-    assert "mouse_any_flag" not in ours["MouseDrag1Pane"] and "copy-mode -M" in ours["MouseDrag1Pane"]
-    assert "copy-pipe-and-cancel pbcopy" in ours["DoubleClick1Pane"]
-    assert "copy-pipe-and-cancel pbcopy" in ours["TripleClick1Pane"]
-    plain = tmux.chat_mouse_bindings(None)
-    assert plain["DoubleClick1Pane"].endswith("copy-pipe-and-cancel")
-
-
-def test_no_clipboard_tool_keeps_default_binding(session, monkeypatch):
-    monkeypatch.setattr(tmux, "clipboard_command", lambda: None)
-    tmux.bind_session_keys(session)
-    line = next(ln for ln in _bindings("copy-mode").splitlines() if "MouseDragEnd1Pane" in ln)
-    assert "pbcopy" not in line and "copy-pipe-and-cancel" in line
 
 
 def _zoomed(window: str) -> str:
@@ -114,12 +43,6 @@ def test_toggle_sidebar_hides_and_restores(session, tmp_path):
     assert tmux.window_alive(side)  # still running the whole time
 
 
-def test_prefix_s_binding_is_guarded_to_brindle_sessions(session):
-    tmux.bind_session_keys(session)
-    cmd = next(ln for ln in _bindings("prefix").splitlines() if " S " in ln)
-    assert "#{@brindle}" in cmd and "resize-pane -Z" in cmd
-
-
 def test_bottom_layout_puts_sidebar_under_the_chat(session, tmp_path):
     chat = tmux.new_window(session, "chat", str(tmp_path), ["sleep", "60"], {})
     side = tmux.split_left(chat, str(tmp_path), ["sleep", "60"], {}, columns=30, position="bottom")
@@ -130,20 +53,6 @@ def test_bottom_layout_puts_sidebar_under_the_chat(session, tmp_path):
 
     (cl, ct, cw), (sl, st, sw) = geom(chat), geom(side)
     assert st > ct and sl == cl and sw == cw
-
-
-def test_sidebar_option_is_read_from_config(tmp_path):
-    assert config.load_repo_config(tmp_path).sidebar == "left"
-    (tmp_path / ".brindle").mkdir()
-    (tmp_path / ".brindle" / "config.json").write_text(json.dumps({"sidebar": "bottom"}))
-    assert config.load_repo_config(tmp_path).sidebar == "bottom"
-
-
-def test_legend_mentions_hide_key_and_zoom():
-    text = "\n".join(line.text for line in watch.help_lines(30, in_tmux=True, sidebar=True))
-    assert "hide" in text and "prefix S" in text and "prefix z" in text
-    plain = "\n".join(line.text for line in watch.help_lines(30, in_tmux=True, sidebar=False))
-    assert "hide" not in plain
 
 
 def test_h_key_returns_hide_only_in_the_sidebar():

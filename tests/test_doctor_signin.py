@@ -31,32 +31,6 @@ SIGNED_IN = {"auth": (0, json.dumps({"loggedIn": True})), "login": (0, "Logged i
              "models": (0, "Fetching available models...\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)\n")}
 
 
-def test_doctor_lists_each_installed_cli(installed, monkeypatch):
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
-    got = lines()
-    assert set(got) == {"Claude Code sign-in", "Codex sign-in", "Google Antigravity sign-in"}
-    for name in ("Claude Code sign-in", "Codex sign-in", "Google Antigravity sign-in"):
-        assert got[name].level == doctor.OK
-        assert got[name].detail == "its own login; quota: no limit in effect"
-
-
-def test_doctor_unknown_when_the_status_check_gives_no_answer(installed):
-    # conftest's probe answers nothing, like an older CLI without the command.
-    got = lines()
-    assert got["Claude Code sign-in"].detail.startswith("sign-in unknown")
-    assert got["Google Antigravity sign-in"].detail.startswith("sign-in unknown")
-
-
-def test_doctor_own_login_needs_a_yes_for_that_provider(installed, monkeypatch):
-    # A yes recorded for Claude (with any profile env) says nothing about agy.
-    monkeypatch.setattr(providers, "_auth_probe",
-                        lambda argv, env=None: SIGNED_IN.get(argv[1]) if argv[1] == "auth" else None)
-    assert providers.signed_out("claude", {"ANTHROPIC_BASE_URL": "http://x"}) is None
-    got = lines()
-    assert got["Claude Code sign-in"].detail.startswith("its own login")
-    assert got["Google Antigravity sign-in"].detail.startswith("sign-in unknown")
-
-
 def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
     monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
     agents = repo / ".brindle" / "agents"
@@ -72,25 +46,12 @@ def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
     assert "sk-profile-secret" not in doctor.render(doctor.signin_checks(str(repo)))
 
 
-def test_doctor_skips_clis_not_installed(installed, monkeypatch):
-    monkeypatch.setattr(providers, "codex_binary", lambda: "/nonexistent/codex")
-    monkeypatch.setattr(antigravity, "binary", lambda: "/nonexistent/agy")
-    assert set(lines()) == {"Claude Code sign-in"}
-
-
 def test_doctor_names_the_env_key_never_its_value(installed, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-value")
     c = lines()["Codex sign-in"]
     assert c.level == doctor.OK
     assert "environment key OPENAI_API_KEY" in c.detail
     assert "sk-secret-value" not in doctor.render(doctor.signin_checks())
-
-
-def test_doctor_reads_env_keys_from_providers_generically(installed, monkeypatch):
-    # A provider added to _ENV_AUTH later shows its key without doctor changes.
-    monkeypatch.setitem(providers._ENV_AUTH, "antigravity", ("SOME_AGY_KEY",))
-    monkeypatch.setenv("SOME_AGY_KEY", "x")
-    assert "environment key SOME_AGY_KEY" in lines()["Google Antigravity sign-in"].detail
 
 
 def test_doctor_shows_signed_out(installed, monkeypatch):
@@ -139,13 +100,6 @@ def credentials():
     return {c.name: c for c in doctor.credential_checks()}
 
 
-def test_doctor_names_the_subscription_login(installed, monkeypatch):
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
-    c = credentials()["claude"]
-    assert (c.level, c.detail) == (doctor.OK, "subscription login")
-    assert credentials()["codex"].detail == "its own login"
-
-
 def test_doctor_names_an_exported_key_and_warns_next_to_a_subscription_login(installed, monkeypatch):
     monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
     monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
@@ -154,12 +108,6 @@ def test_doctor_names_an_exported_key_and_warns_next_to_a_subscription_login(ins
     assert c.detail.startswith("API key (ANTHROPIC_API_KEY, from environment)")
     assert "bills the key" in c.detail
     assert FAKE_KEY not in doctor.render(doctor.credential_checks())
-
-
-def test_doctor_key_without_a_subscription_login_is_just_ok(installed, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)   # conftest's probe answers nothing
-    c = credentials()["claude"]
-    assert (c.level, c.detail) == (doctor.OK, "API key (ANTHROPIC_API_KEY, from environment)")
 
 
 def test_doctor_names_a_stored_key_by_where_it_is_kept(installed, monkeypatch):

@@ -33,7 +33,7 @@ FEATURES = (
     ("audit", "enterprise", "tamper-evident local audit log", "`brindle audit verify`"),
     ("airgap", "enterprise", "air-gapped mode, local models only",
      '"airgap": true in .brindle/config.json'),
-    ("managed_models", "enterprise", "org-managed provider config (Bedrock, Vertex...)", "`provider_config`, `deny_personal_keys` in your org policy (`brindle account org policy`); `brindle doctor` shows the provider"),
+    ("managed_models", "enterprise", "org-managed routes (Bedrock, Vertex...)", "`agent_setup` routes with `enforce`, and `deny_personal_keys`, in your org policy (`brindle account org policy`); `brindle doctor` shows the route"),
     ("audit_export", "enterprise", "audit export to webhook, Splunk, Datadog, S3", "`brindle audit ship`"),
     ("ci_enterprise", "enterprise", "wider CI: no cap, your runners, beyond GitHub", "`brindle ci init --host gitlab`"),
     ("cost_centers", "enterprise", "spend by cost center, admin-approved overruns",

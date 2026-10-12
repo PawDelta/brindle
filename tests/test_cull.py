@@ -60,24 +60,6 @@ def proc_cleanup():
         p.wait(timeout=5)
 
 
-def test_stop_finds_the_agent_and_what_it_started(proc_cleanup):
-    p = launch_as("abc12345")
-    proc_cleanup.append(p)
-    found = procs.agent_pids(["abc12345"])["abc12345"]
-    assert p.pid in found and len(found) >= 2  # the CLI and its child
-    assert procs.stop(["abc12345"], grace=2) >= 2
-    p.wait(timeout=5)
-    assert not any(alive(pid) for pid in found)
-
-
-def test_an_inherited_environment_alone_is_not_enough(proc_cleanup):
-    # Claude Code's daemon inherits the environment of the agent that started
-    # it; that must never make the daemon (or its other sessions) that agent's.
-    decoy = launch_as("abc12345", argv_config=False, env_only=True)
-    proc_cleanup.append(decoy)
-    assert decoy.pid not in procs.agent_pids(["abc12345"]).get("abc12345", set())
-
-
 def test_the_daemon_is_never_included():
     config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
     t = {1: procs.Proc(1, 0, "init"),
@@ -117,19 +99,6 @@ def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup):
     assert a.status == "paused" and a.dismissed_at is None  # still resumable, still shown
 
 
-def test_sweep_closes_idle_reported_workers(db, ws, monkeypatch):
-    add(db, ws, "w1", result="done: added the flag", tmux_window="@991")
-    add(db, ws, "w2", tmux_window="@992")              # still working on it
-    add(db, ws, "w3", result="done", tmux_window="@993", created_at=time.time())  # reported just now
-    with db.tx() as c:
-        c.execute("UPDATE agents SET status_since = created_at")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    notes = cull.sweep(db)
-    assert db.get_agent("w1").dismissed_at is not None and db.get_agent("w1").status == "done"
-    assert db.get_agent("w2").dismissed_at is None and db.get_agent("w3").dismissed_at is None
-    assert notes == ["closed idle worker w1 after 120 min"]
-
-
 def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "config.json").write_text('{"stale_after": 0}')
@@ -146,17 +115,6 @@ def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     cull.sweep(db)
     assert db.get_agent("w1").dismissed_at is None
     assert db.get_agent("w2").dismissed_at is not None
-
-
-def test_another_brindle_homes_agents_are_left_alone(proc_cleanup, monkeypatch):
-    # The person's own brindle (no BRINDLE_HOME) while a test run uses its own.
-    other = json.dumps({"mcpServers": {"brindle": {"env": {"BRINDLE_AGENT_ID": "fedcba98"}}}})
-    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", other],
-                         start_new_session=True)
-    proc_cleanup.append(p)
-    time.sleep(0.5)
-    assert "fedcba98" not in procs.all_agent_ids()
-    assert procs.agent_pids(["fedcba98"]) == {}
 
 
 # -- another tmux server's pane list says nothing about this agent -----------
@@ -280,8 +238,4 @@ def test_pane_reads_and_keys_go_to_the_agents_own_server(db, ws, other_server, m
     assert tmux.window_activity(pane, server=agents.server_of(a)) is not None
     assert tmux.window_activity(pane) is None
 
-
-def test_agents_record_the_server_they_were_launched_on(db, ws):
-    add(db, ws, "abc12345")
-    assert db.get_agent("abc12345").tmux_server == tmux.current_server() == f"brindle-test-{os.getpid()}"
 

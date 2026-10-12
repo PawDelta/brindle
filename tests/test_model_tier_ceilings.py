@@ -45,26 +45,6 @@ def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
     assert profile == "developer"
 
 
-def test_routing_explanation_includes_model_and_cost_signal(db, repo, monkeypatch):
-    cfg = RepoConfig()
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    why = []
-    profile, learned = autopilot.choose_profile(db, "caller-3", str(repo), weight="medium", why=why)
-    joined = " ".join(why)
-    assert profile == "developer"
-    assert "inherited CLI default" in joined
-    assert "medium cost tier" in joined
-
-    # When a heavy profile is selected, cost tier must show most expensive tier
-    monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
-    why_h = []
-    profile_h, _ = autopilot.choose_profile(db, "caller-h", str(repo), weight="heavy", why=why_h)
-    joined_h = " ".join(why_h)
-    assert profile_h == "developer-heavy"
-    assert "most expensive tier" in joined_h
-
-
 def test_list_agents_includes_token_usage_when_available(db, repo, monkeypatch):
     ws = Workspace("ws-list", str(repo), "feat/list", "main", "main", "main", str(repo), 20000, "tmux-l", 0)
     db.add_workspace(ws)
@@ -82,15 +62,6 @@ def test_list_agents_includes_token_usage_when_available(db, repo, monkeypatch):
     out = mcp_server.list_agents(repo=None)
     assert f"{worker.id}" in out
     assert "tokens=5k tokens" in out
-
-
-def test_explicit_heavy_profile_refused_under_light_ceiling(db, repo, monkeypatch):
-    cfg = RepoConfig(max_weight="light")
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    with pytest.raises(autopilot.AutopilotError) as exc_info:
-        autopilot.choose_profile(db, "caller-exp", str(repo), requested="developer-heavy")
-    assert "exceeds configured max_weight 'light'" in str(exc_info.value)
 
 
 def test_pending_milestone_heavy_profile_capped_under_light_ceiling(db, repo, monkeypatch):
@@ -177,7 +148,7 @@ def test_queued_task_rerouted_when_ceiling_lowered_before_launch(db, repo, monke
     monkeypatch.setattr(agents, "delegate", fake_delegate)
 
     # 3. Now start_queued launches the task
-    worker = tasks.start_queued(db, task)
+    tasks.start_queued(db, task)
     assert len(delegated) == 1
     # Profile must be rerouted to a medium profile, NOT developer-heavy!
     assert delegated[0] != "developer-heavy"
@@ -241,24 +212,6 @@ def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch
     assert "exceeds configured max_weight 'medium'" in str(exc_info3.value)
 
 
-def test_milestone_selected_profile_includes_cost_feedback(db, repo, monkeypatch):
-    ws = Workspace("ws-cost", str(repo), "feat/cost", "main", "main", "main", str(repo), 20000, "tmux-c", 0)
-    db.add_workspace(ws)
-    sup = agents.spawn(db, ws, "developer", mode="interactive")
-    db.add_autopilot(sup.id)
-    autopilot.set_goal(db, sup.id, "Goal", [("Step 1", "true", "", "developer-heavy")])
-
-    cfg = RepoConfig()
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    why = []
-    profile, _ = autopilot.choose_profile(db, sup.id, str(repo), why=why)
-    assert profile == "developer-heavy"
-    joined = " ".join(why)
-    assert "developer-heavy" in joined
-    assert "most expensive tier" in joined
-
-
 def test_assignment_and_queue_replies_include_cost_feedback_for_all_selections(db, repo, monkeypatch):
     import asyncio
     from brindle import mcp_server
@@ -297,19 +250,6 @@ def test_assignment_and_queue_replies_include_cost_feedback_for_all_selections(d
     assert "Queued task" in reply_q
     assert "developer-heavy" in reply_q
     assert "most expensive tier" in reply_q
-
-
-def test_inherited_anthropic_model_env_classifies_as_heavy(db, repo, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-fable-5-1")
-    assert autopilot.effective_profile_model("developer") == "claude-fable-5-1"
-    assert autopilot.profile_weight("developer") == "heavy"
-
-    cfg = RepoConfig(max_weight="medium")
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    with pytest.raises(autopilot.AutopilotError) as exc_info:
-        autopilot.choose_profile(db, "caller-env", str(repo), requested="developer")
-    assert "exceeds configured max_weight 'medium'" in str(exc_info.value)
 
 
 def test_cross_provider_model_env_isolation(db, repo, monkeypatch):

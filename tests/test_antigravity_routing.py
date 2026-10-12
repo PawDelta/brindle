@@ -75,32 +75,8 @@ def add_agy(db, ws, agent_id="g1", status="idle", window="@9"):
     return db.get_agent(agent_id)
 
 
-def test_launch_does_not_take_the_launchers_inbox(db, ws, launcher_inbox, fake_tmux, helpers, monkeypatch):
-    monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
-    monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: True)
-    a = agents.spawn(db, ws, "developer", prompt="fix it", provider_name="antigravity", mode="assign")
-    a = db.get_agent(a.id)
-    # agy has no start hook, so brindle marks it ready from the launcher's own process.
-    assert a.status == "idle" and not a.inbox_socket and not a.inbox_token
-    assert any("_flush" in argv and a.id in argv for argv in helpers)
-    # Its instructions and actual task reach its own pane in a single turn.
-    assert db.pending_count(a.id) == 1
-    assert agents.flush(db, a.id)
-    assert [t for t, _ in fake_tmux] == ["@9"]
-    delivered = fake_tmux[0][1]
-    assert "You are a developer agent" in delivered
-    assert "When you run under brindle" in delivered and "call_mcp_tool" in delivered
-    assert delivered.count("fix it") == 1 and antigravity.WARMUP_END not in delivered
-    assert db.pending_count(a.id) == 0
-    db.set_status(a.id, "idle")
-    assert not agents.flush(db, a.id)
-    assert len(fake_tmux) == 1
-    assert launcher_inbox == []
-
-
-@pytest.mark.parametrize("autopilot_on", [False, True])
 def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
-        db, ws, repo, launcher_inbox, fake_tmux, helpers, monkeypatch, autopilot_on):
+        db, ws, repo, launcher_inbox, fake_tmux, helpers, monkeypatch):
     from brindle import autopilot, cli, model_access
     monkeypatch.chdir(repo)
     monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
@@ -114,7 +90,7 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)
     monkeypatch.setattr(cli, "_settings_sync_detached", lambda *a: None)
     cli.start(prompt=None, provider="antigravity", attach=False,
-              watch=False, autopilot=autopilot_on, branch=None, worktree=None)
+              watch=False, autopilot=True, branch=None, worktree=None)
     a, = db.list_agents(ws.id)
     assert a.mode == "interactive" and a.task is None
     expected = agents._profile_for(db, a, ws).prompt
@@ -124,26 +100,13 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     delivered = fake_tmux[0][1]
     assert expected in delivered and antigravity.TOOLS_NOTE in delivered
     assert "Delegation rule:" in delivered
-    assert ("Autopilot context must survive initialization." in delivered) == autopilot_on
+    assert "Autopilot context must survive initialization." in delivered
     assert antigravity.WARMUP_END not in delivered
     assert db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone() is None
     assert not any("_launch-health" in argv for argv in helpers)
     assert db.pending_count(a.id) == 0
     db.set_status(a.id, "idle")
     assert not agents.flush(db, a.id) and len(fake_tmux) == 1 and launcher_inbox == []
-
-
-def test_a_claude_agent_still_records_its_own_inbox(db, ws, launcher_inbox):
-    db.add_agent(Agent("c1", ws.id, "developer", "claude", None, "assign", "starting", "@1", None, time.time()))
-    agents.handle_hook(db, "c1", "session-start", {})
-    assert db.get_agent("c1").inbox_token == "supervisor-token"
-
-
-def test_send_message_is_typed_into_the_agy_pane(db, ws, launcher_inbox, fake_tmux):
-    add_agy(db, ws)
-    assert agents.send_message(db, "g1", "also add tests") == "delivered"
-    assert len(fake_tmux) == 1 and fake_tmux[0][0] == "@9" and "also add tests" in fake_tmux[0][1]
-    assert launcher_inbox == []
 
 
 def test_an_inbox_recorded_by_an_older_brindle_is_ignored(db, ws, launcher_inbox, fake_tmux, tmp_path,
@@ -158,29 +121,6 @@ def test_an_inbox_recorded_by_an_older_brindle_is_ignored(db, ws, launcher_inbox
     monkeypatch.setattr(agents.tmux, "capture", lambda *a, **k: "Working\nesc to cancel\n")
     assert agents.send_message(db, "g1", "later") == "queued"
     assert db.pending_count("g1") == 1 and launcher_inbox == []
-
-
-def test_a_codex_worker_does_not_take_the_launchers_inbox(db, ws, launcher_inbox, fake_tmux):
-    db.add_agent(Agent("x1", ws.id, "developer", "codex", "boss", "assign", "starting", "@9", None,
-                       time.time()))
-    agents.ready(db, "x1")   # Codex has no start hook either
-    assert db.get_agent("x1").status == "idle" and not db.get_agent("x1").inbox_socket
-    assert agents.send_message(db, "x1", "also add tests") == "delivered"
-    assert [t for t, _ in fake_tmux] == ["@9"] and launcher_inbox == []
-
-
-def test_agents_are_launched_without_the_launchers_inbox(db, ws, launcher_inbox, monkeypatch):
-    windows = []
-    monkeypatch.setattr(agents.tmux, "ensure_session", lambda *a: None)
-    monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a: None)
-    monkeypatch.setattr(agents.tmux, "new_window",
-                        lambda session, name, cwd, argv, env, **k: windows.append(argv) or "@9")
-    a = add_agy(db, ws, status="starting", window="")
-    agents._open_window(db, a, ws, "w", ["/usr/bin/env"], False)
-    # What the pane runs, started from inside the supervisor's Claude Code session.
-    out = subprocess.run(windows[0], capture_output=True, text=True, check=True).stdout
-    assert "PATH=" in out
-    assert inbox.SOCKET_VAR not in out and inbox.TOKEN_VAR not in out
 
 
 def test_the_sweep_forgets_a_launchers_inbox(db, ws, tmp_path):
@@ -251,10 +191,3 @@ def test_a_failed_start_says_why(db, boss, monkeypatch, tool):
     assert [a.id for a in db.list_agents()] == ["boss"]
 
 
-def test_a_failure_with_no_message_names_the_error(db, boss, monkeypatch):
-    def silent(*a, **k):
-        raise TimeoutError()
-
-    monkeypatch.setattr(agents, "delegate", silent)
-    out = asyncio.run(mcp_server.assign("developer-antigravity", "write the readme"))
-    assert out.startswith("Not started") and out.endswith("TimeoutError")

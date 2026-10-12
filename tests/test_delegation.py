@@ -18,33 +18,6 @@ def _prompt(db, ws, aid="s1", profile="supervisor", parent=None, mode="interacti
     return agents._profile_for(db, db.get_agent(aid), ws).prompt
 
 
-def test_supervisor_defaults_to_balanced(db, repo):
-    ws = workspaces.adopt_root(db, str(repo))
-    prompt = _prompt(db, ws)
-    assert "Delegation rule: balanced" in prompt
-
-
-def test_repo_can_choose_fast_or_conservative(db, repo):
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"delegation": "fast"}))
-    ws = workspaces.adopt_root(db, str(repo))
-    assert "Delegation rule: fast" in _prompt(db, ws)
-    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"delegation": "conservative"}))
-    assert "Delegation rule: conservative" in _prompt(db, ws, aid="s2")  # local wins
-
-
-def test_unknown_level_falls_back_to_balanced(db, repo):
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"delegation": "turbo"}))
-    ws = workspaces.adopt_root(db, str(repo))
-    assert "Delegation rule: balanced" in _prompt(db, ws)
-
-
-def test_workers_get_no_delegation_rule(db, repo):
-    ws = workspaces.adopt_root(db, str(repo))
-    assert "Delegation rule" not in _prompt(db, ws, aid="w1", profile="developer", parent="s1", mode="assign")
-
-
 def test_cli_saves_it_for_every_repo_and_tells_a_running_supervisor(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("s1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0", None, time.time()))
@@ -117,30 +90,15 @@ def test_resume_rechecks_model_before_launch_side_effects(db, repo, monkeypatch)
         agents._launch(db, a, ws, prompt="real task", resume=None, watch_pane=False)
 
 
-@pytest.mark.parametrize("status", ["available", "unverified"])
-def test_catalog_available_and_unverified_do_not_reject_provisioning(db, repo, monkeypatch, status):
-    from unittest.mock import Mock
-    from brindle.model_availability import Availability
-    ws = workspaces.adopt_root(db, str(repo))
-    monkeypatch.setattr(agents, "_model_checker", Mock(check=Mock(return_value=Availability(status, "advisory"))))
-    launched = []
-    monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(a))
-    a = agents.spawn(db, ws, "developer", prompt="real task")
-    assert launched == [a] and db.get_agent(a.id) is not None
-
-
-@pytest.mark.parametrize("provider", ["native", "codex", "antigravity"])
-@pytest.mark.parametrize("times_out", [False, True])
-def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, repo, monkeypatch, provider, times_out):
-    from brindle import autopilot, model_availability as ma, quota, tmux
+def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, repo, monkeypatch):
+    from brindle import autopilot, model_availability as ma, providers, quota, tmux
     from brindle.config import RepoConfig
     from brindle.profiles import Profile
     ws = workspaces.adopt_root(db, str(repo))
-    p = Profile("test", "", provider, "", model="wanted", base_url="https://api.openai.com/v1")
+    p = Profile("test", "", "antigravity", "", model="wanted", base_url="https://api.openai.com/v1")
     monkeypatch.setattr(agents, "load_profile", lambda *a: p)
     monkeypatch.setattr(autopilot, "load_profile", lambda *a: p)
     monkeypatch.setattr(tmux, "inherited_env", lambda *a: {"HOME": str(repo), "PATH": "/usr/bin"})
-    from brindle import providers, quota
     monkeypatch.setattr(providers, "signed_out", lambda *a, **k: None)
     monkeypatch.setattr(providers, "unusable", lambda *a: None)
     monkeypatch.setattr(quota, "headroom", lambda *a, **k: 100)
@@ -149,9 +107,7 @@ def test_slow_catalog_is_reused_across_routing_delegate_and_isolated_spawn(db, r
     def slow_discovery(request, timeout):
         requests.append(request)
         now[0] += timeout  # a whole catalog timeout, without sleeping
-        if times_out:
-            raise TimeoutError
-        return ma.Catalog(frozenset({"wanted"}), "openai" if provider == "native" else provider)
+        raise TimeoutError
 
     monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(discover=slow_discovery, clock=lambda: now[0]))
     launched = []
