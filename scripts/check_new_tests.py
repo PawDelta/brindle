@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hold the tests a pull request adds to two rules.
 
-1. Each new test function must cover a line or branch of src/brindle that no
-   other test covers, or say why it doesn't need to with
+1. Each new test function must cover a line or branch (of src/brindle or
+   scripts/) that no other test covers, or say why it doesn't need to with
    ``@pytest.mark.variant("reason")`` (an input variant: a bypass attempt, a
    race, an input taken from a real incident).
 2. A pull request may add at most MAX_NEW_TESTS test functions, and grow the
@@ -12,7 +12,7 @@
 Both rules are waived when a maintainer in APPROVERS has labelled the pull
 request ``tests-approved``; CI works out who added the label and passes it as
 ``--approved-by``. Coverage comes from the suite's own CI run with per-test
-contexts (``pytest --cov=brindle --cov-branch --cov-context=test``).
+contexts (``pytest --cov=brindle --cov=scripts --cov-branch --cov-context=test``).
 
     uv run python scripts/check_new_tests.py --base <sha> [--coverage .coverage]
 """
