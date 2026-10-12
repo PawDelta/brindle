@@ -1006,4 +1006,24 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # Esc clears the filter; don't make it wait curses' default second to
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
+    _log_to_file()
     curses.wrapper(_loop, repo_root, sidebar)
+
+
+def _log_to_file() -> None:
+    """Send warnings and errors to ``watch.log``: without a handler, logging
+    falls back to stderr, which prints tracebacks over the curses screen."""
+    import logging
+
+    from brindle.config import brindle_home
+
+    try:
+        brindle_home().mkdir(parents=True, exist_ok=True)
+        handler: logging.Handler = logging.FileHandler(brindle_home() / "watch.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    except OSError:
+        handler = logging.NullHandler()
+    root = logging.getLogger()
+    root.addHandler(handler)
+    if root.level == logging.NOTSET or root.level > logging.WARNING:
+        root.setLevel(logging.WARNING)

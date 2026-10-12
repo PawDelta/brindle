@@ -253,3 +253,24 @@ def test_logo_fits_narrow_panes():
     for w in range(3, 30):
         watch._draw_logo(_Screen(w), w, STYLES)
         watch._draw_compact_logo(_Screen(w), w, STYLES)
+
+
+def test_errors_go_to_a_log_file_not_over_the_screen(brindle_home, capsys):
+    import logging
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    try:
+        watch._log_to_file()
+        try:
+            raise TypeError("boom")
+        except TypeError:
+            logging.getLogger("brindle.view").exception("brindle: couldn't read usage")
+        for h in root.handlers:
+            h.flush()
+    finally:
+        for h in root.handlers[len(handlers):]:
+            h.close()
+        root.handlers[:], root.level = handlers, level
+    assert "TypeError: boom" in (brindle_home / "watch.log").read_text()
+    assert "boom" not in capsys.readouterr().err

@@ -376,12 +376,12 @@ def antigravity_agent_usage(db: DB, agent) -> Usage | None:
     offset = 0
     inp, out, read, write = 0, 0, 0, 0
     model = "gemini-2.5-pro"
-    if cached and getattr(cached, "inode", None) == st.st_ino and cached["size"] <= st.st_size:
+    if cached and cached["inode"] == st.st_ino and cached["size"] <= st.st_size:
         offset = cached["size"]
         inp = cached["input_tokens"]
         out = cached["output_tokens"]
         read = cached["cache_read_tokens"]
-        write = cached["cache_write_tokens"]
+        write = cached["cache_creation_tokens"]
         if cached["model"]:
             model = cached["model"]
 
@@ -402,7 +402,7 @@ def antigravity_agent_usage(db: DB, agent) -> Usage | None:
                     read += ev.get("cache_read_tokens", 0)
                     if ev.get("model"):
                         model = ev["model"]
-            db.set_usage_cache(str(path), st.st_size, inp, out, read, write, model, inode=st.st_ino)
+            db.set_usage_cache(str(path), st.st_size, inp, out, read, write, model, None, st.st_ino)
 
     if inp == 0 and out == 0:
         return None

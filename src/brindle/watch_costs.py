@@ -343,7 +343,8 @@ def provider_rows(providers: list[tuple[str, int]], width: int) -> list[str]:
 
 def title(collapsed: bool, width: int, local_: Local | None) -> str:
     arrow = "▸ " if collapsed else "▾ "
-    top = (local_.providers[:1] if (local_ and local_.providers)
+    # The provider with the least headroom left: the one that holds work up.
+    top = ([min(local_.providers, key=lambda p: (p[1], p[0]))] if (local_ and local_.providers)
            else (shares(local_.models)[:1] if local_ else []))
     tail = f" ({short(top[0][0])} {top[0][1]}%)" if top else ""
     if len(arrow) + len("Costs") + len(tail) > width:

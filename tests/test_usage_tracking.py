@@ -397,3 +397,24 @@ def test_hook_ignores_transcript_path_for_non_claude_providers(db, repo):
                        time.time()))
     agents.handle_hook(db, "a1", "prompt-submit", {"transcript_path": "/tmp/x/a1.jsonl"})
     assert db.get_agent("a1").transcript_path is None
+
+
+def _planner(input_tokens, output_tokens, cache_read=0):
+    return json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": input_tokens,
+                       "output_tokens": output_tokens, "cache_read_tokens": cache_read,
+                       "model": "gemini-3-pro"}) + "\n"
+
+
+def test_antigravity_usage_is_cached_and_read_incrementally(db, tmp_path):
+    t = tmp_path / "transcript.jsonl"
+    write(t, [_planner(10, 20, 5)])
+    agent = Agent("a1", "ws", "developer", "antigravity", None, "assign", "idle", "", None,
+                  time.time(), transcript_path=str(t))
+
+    u = usage.antigravity_agent_usage(db, agent)
+    assert (u.input_tokens, u.output_tokens, u.cache_read_tokens) == (10, 20, 5)
+    assert db.get_usage_cache(str(t))["size"] == t.stat().st_size
+
+    write(t, [_planner(1, 2)])
+    u = usage.antigravity_agent_usage(db, agent)
+    assert (u.input_tokens, u.output_tokens, u.cache_read_tokens, u.model) == (11, 22, 5, "gemini-3-pro")
