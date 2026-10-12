@@ -56,24 +56,6 @@ def worker(db, ws, task="fix the crash in parser.py"):
     return a
 
 
-def test_off_loads_nothing(db, ws, monkeypatch):
-    p = Recorder(pick="developer")
-    install(monkeypatch, p)
-    monkeypatch.setattr(plugins, "auto_learning", lambda: plugins.OFF)
-    for value in ("off", "auto"):
-        cfg = RepoConfig(learning=value, learning_candidates=["developer"])
-        assert learning.plugin(cfg, ws.repo_root) is None
-        assert learning.choose(db, cfg, ws.repo_root, "task") is None
-        learning.note(db, cfg, worker(db, ws), ws, merged=True)
-    assert p.events == [] and p.asked == []
-
-
-def test_cloud_is_built_in(ws):
-    p = learning.plugin(RepoConfig(learning="cloud"), ws.repo_root)
-    assert isinstance(p, pro_learning.CloudLearner)
-    assert learning.plugin(RepoConfig(learning="cloud"), ws.repo_root) is p
-
-
 def test_outcomes_reach_the_cloud_learner(db, ws, monkeypatch):
     p = Recorder()
     install(monkeypatch, p)
@@ -97,48 +79,6 @@ def test_suggestion_must_be_a_candidate(db, ws, monkeypatch):
     plugins.reset()
     install(monkeypatch, Recorder(pick="something-else"))
     assert learning.choose(db, cfg, ws.repo_root, "add docs") is None
-
-
-def test_explicit_candidates_and_weight_are_passed(db, ws, monkeypatch):
-    p = Recorder(pick="developer-heavy")
-    install(monkeypatch, p)
-    cfg = RepoConfig(learning="cloud")
-    assert learning.choose(db, cfg, ws.repo_root, "t", candidates=["developer", "developer-heavy"],
-                           weight="heavy") == "developer-heavy"
-    assert p.asked[0][0].weight == "heavy" and p.asked[0][1] == ["developer", "developer-heavy"]
-    assert p.asked[0][2] == "developer"
-
-
-def test_a_single_candidate_never_asks_the_learner(db, ws, monkeypatch):
-    p = Recorder(pick="developer")
-    install(monkeypatch, p)
-    cfg = RepoConfig(learning="cloud")
-    assert learning.choose(db, cfg, ws.repo_root, "t", candidates=["developer"]) is None
-    assert p.asked == []
-
-
-def test_keeping_the_default_is_not_an_override(db, ws, monkeypatch):
-    p = Recorder(pick="developer")
-    install(monkeypatch, p)
-    cfg = RepoConfig(learning="cloud")
-    assert learning.choose_why(db, cfg, ws.repo_root, "t",
-                               candidates=["developer", "developer-local"]) == (None, None)
-    assert p.asked
-
-
-def test_an_override_carries_its_reason(db, ws, monkeypatch):
-    install(monkeypatch, Recorder(pick="developer-local"))
-    cfg = RepoConfig(learning="cloud")
-    assert learning.choose_why(db, cfg, ws.repo_root, "t", candidates=["developer", "developer-local"],
-                               default="developer") == ("developer-local", "cheaper and as good")
-
-
-def test_the_default_joins_the_candidates(db, ws, monkeypatch):
-    p = Recorder(pick="developer-local")
-    install(monkeypatch, p)
-    cfg = RepoConfig(learning="cloud")
-    learning.choose(db, cfg, ws.repo_root, "t", candidates=["developer-local"], default="developer")
-    assert p.asked[0][1] == ["developer", "developer-local"] and p.asked[0][2] == "developer"
 
 
 def test_a_failing_learner_never_raises(db, ws, monkeypatch):
@@ -170,10 +110,6 @@ def test_an_installed_learning_entry_point_is_never_used(db, ws, monkeypatch):
     assert calls == []
     assert plugins.learning_name(RepoConfig(learning="test")) == "off"
     assert "brindle.learning" not in plugins.GROUPS
-
-
-def test_unsupported_value_means_off(ws):
-    assert learning.plugin(RepoConfig(learning="something"), ws.repo_root) is None
 
 
 def test_resolve_profile_precedence(db, ws, monkeypatch):

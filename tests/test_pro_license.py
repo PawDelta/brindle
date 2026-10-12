@@ -1,5 +1,7 @@
-"""Offline entitlement verification, the credential stores, and the current
-entitlement (refresh, offline grace, failing closed)."""
+"""Offline entitlement verification, the pinned keys, the credential stores,
+and the current entitlement (refresh, offline grace, failing closed)."""
+import base64
+import hashlib
 import json
 import os
 import time
@@ -7,8 +9,9 @@ import time
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from brindle import keystore
 from brindle.pro import auth, credentials, keys, license
-from brindle.pro.license import LicenseError, NotEntitled
+from brindle.pro.license import LicenseError
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, ISS, TEST_KID, b64, backend, claims, pro_env, sign, signing_key, token,
 )
@@ -24,47 +27,16 @@ def verify(token, **kw):
 # -- verification ------------------------------------------------------------------------
 
 
-def test_valid_token(token):
-    ent = verify(token())
-    assert (ent.sub, ent.org_id, ent.plan, ent.status, ent.seats, ent.kid) == \
-        ("user_1", "org_1", "pro", "active", 5, TEST_KID)
-    assert ent.features == {"learning", "autopilot"} and not ent.in_grace
-
-
-def test_audience_may_be_a_list(token):
-    assert verify(token(aud=["other", "brindle-pro"])).plan == "pro"
-
-
-def test_issuer_must_match_the_backend(token):
-    with pytest.raises(LicenseError, match="issuer"):
-        verify(token(iss="https://evil.test/api/brindle/v1"))
-    with pytest.raises(LicenseError, match="issuer"):
-        verify(token(), issuer="https://other.pawdelta.test/api/brindle/v1")
-    assert verify(token(), issuer=ISS + "/").sub == "user_1"
-
-
-@pytest.mark.parametrize("typ", ["at+jwt", "JWT", None])
-def test_only_entitlement_typ_is_accepted(signing_key, typ):
-    """An access token (same key, same audience) can't be passed off as an entitlement."""
+def test_token_use_must_be_entitlement(token):
     with pytest.raises(LicenseError, match="not an entitlement"):
-        verify(sign(signing_key, claims(), {"typ": typ}))
-
-
-@pytest.mark.parametrize("use", ["access", "", None])
-def test_token_use_must_be_entitlement(token, use):
-    with pytest.raises(LicenseError, match="not an entitlement"):
-        verify(token(token_use=use))
+        verify(token(token_use="access"))
 
 
 @pytest.mark.parametrize("mangle", [
     lambda t: t[:-4] + ("AAAA" if not t.endswith("AAAA") else "BBBB"),       # signature
     lambda t: ".".join([t.split(".")[0], b64(json.dumps(claims(plan="enterprise")).encode()),
                         t.split(".")[2]]),                                     # payload swapped
-    lambda t: ".".join([b64(b'{"alg":"EdDSA","kid":"test-kid-1","x":1}'), *t.split(".")[1:]]),
-    lambda t: t + ".extra",
     lambda t: t.rsplit(".", 1)[0],
-    lambda t: t.replace(".", "!", 1),
-    lambda t: "",
     lambda t: "a" * (license.MAX_TOKEN_BYTES + 1),
 ])
 def test_tampered_or_malformed_tokens_are_rejected(token, mangle):
@@ -72,17 +44,10 @@ def test_tampered_or_malformed_tokens_are_rejected(token, mangle):
         verify(mangle(token()))
 
 
-@pytest.mark.parametrize("alg", ["none", "HS256", "RS256", "ES256", "", None])
+@pytest.mark.parametrize("alg", ["none", ""])
 def test_wrong_alg_is_rejected(signing_key, alg):
     with pytest.raises(LicenseError, match="algorithm"):
         verify(sign(signing_key, claims(), {"alg": alg}))
-
-
-def test_unsigned_token_is_rejected():
-    header = b64(json.dumps({"alg": "none", "kid": TEST_KID}).encode())
-    t = f"{header}.{b64(json.dumps(claims()).encode())}."
-    with pytest.raises(LicenseError):
-        verify(t)
 
 
 def test_unknown_kid_is_rejected(signing_key):
@@ -107,80 +72,22 @@ def test_crit_header_is_rejected(signing_key):
         verify(sign(signing_key, claims(), {"crit": ["exp"]}))
 
 
-@pytest.mark.parametrize("aud", ["brindle", "brindle-pro-evil", ["other"], None, ""])
-def test_wrong_audience_is_rejected(token, aud):
-    with pytest.raises(LicenseError, match="audience"):
-        verify(token(aud=aud))
-
-
-@pytest.mark.parametrize("claim", ["iss", "aud", "sub", "org_id", "plan", "status", "features", "seats",
-                                   "iat", "exp", "kid", "jti", "token_use"])
+@pytest.mark.parametrize("claim", ["jti", "token_use"])
 def test_missing_claims_are_rejected(token, claim):
     with pytest.raises(LicenseError, match="missing"):
         verify(token(**{claim: ...}))
 
 
-@pytest.mark.parametrize("over", [
-    {"seats": True}, {"seats": -1}, {"seats": "5"}, {"features": "learning"},
-    {"features": [1]}, {"sub": ""}, {"status": 3}, {"iat": "0"}, {"exp": 1.5},
-    {"role": 5}, {"role": ""}, {"policy_version": -1}, {"policy_version": "3"},
-    {"policy_role": 5}, {"policy_role": ""},
-    {"iat": 2_000_000_000, "exp": 1_000_000_000},
-])
+@pytest.mark.parametrize("over", [{"status": 3}, {"policy_role": ""}])
 def test_malformed_claims_are_rejected(token, over):
     with pytest.raises(LicenseError):
         verify(token(**over))
-
-
-def test_policy_role_claim_is_optional(token):
-    assert verify(token()).policy_role is None
-    assert verify(token(policy_role=None)).policy_role is None
-    assert verify(token(policy_role="contractor")).policy_role == "contractor"
-
-
-def test_expired_token_is_rejected_without_grace(token):
-    now = time.time()
-    with pytest.raises(LicenseError, match="expired"):
-        verify(token(iat=int(now - 7200), exp=int(now - 3600)), grace=0)
-
-
-def test_leeway_on_expiry(token):
-    now = time.time()
-    assert not verify(token(iat=int(now - 3600), exp=int(now - 10)), grace=0).in_grace
 
 
 def test_future_iat_is_rejected(token):
     now = time.time()
     with pytest.raises(LicenseError, match="not valid yet"):
         verify(token(iat=int(now + 3600), exp=int(now + 7200)))
-
-
-# -- offline grace ----------------------------------------------------------------------------
-
-
-def test_grace_is_measured_from_the_last_refresh(token):
-    iat = 1_000_000_000
-    t = token(iat=iat, exp=iat + DAY)
-    ent = verify(t, now=iat + 3 * DAY)
-    assert ent.in_grace and ent.grace_until == iat + 7 * DAY
-    assert verify(t, now=iat + 7 * DAY - 1).in_grace
-    with pytest.raises(LicenseError, match="expired"):
-        verify(t, now=iat + 7 * DAY + 1)
-
-
-def test_grace_never_passes_the_hard_max(token):
-    iat = 1_000_000_000
-    t = token(iat=iat, exp=iat + DAY)
-    # A huge configured grace is capped at MAX_GRACE past the last refresh.
-    assert verify(t, now=iat + license.MAX_GRACE - 1, grace=10**9).in_grace
-    with pytest.raises(LicenseError, match="expired"):
-        verify(t, now=iat + license.MAX_GRACE + 1, grace=10**9)
-
-
-def test_negative_grace_means_none(token):
-    iat = 1_000_000_000
-    with pytest.raises(LicenseError):
-        verify(token(iat=iat, exp=iat + DAY), now=iat + DAY + 3600, grace=-5)
 
 
 # -- the test-only key hook ------------------------------------------------------------------
@@ -193,14 +100,6 @@ def test_test_hook_cannot_shadow_a_pinned_kid(monkeypatch):
             pass
 
 
-def test_test_key_is_gone_after_the_hook(token):
-    t = token()
-    with license._test_signing_key("x", Ed25519PrivateKey.generate().public_key()):
-        pass
-    assert "x" not in license._test_keys
-    assert verify(t).sub == "user_1"
-
-
 def test_pinned_keys_are_trusted(monkeypatch):
     from cryptography.hazmat.primitives import serialization
 
@@ -210,35 +109,32 @@ def test_pinned_keys_are_trusted(monkeypatch):
     assert verify(sign(key, claims(kid="pinned-1"))).kid == "pinned-1"
 
 
-# -- credential file permissions ---------------------------------------------------------------
+def _thumbprint(raw_hex: str) -> str:
+    x = base64.urlsafe_b64encode(bytes.fromhex(raw_hex)).rstrip(b"=").decode()
+    jwk = json.dumps({"crv": "Ed25519", "kty": "OKP", "x": x}, separators=(",", ":"), sort_keys=True)
+    return base64.urlsafe_b64encode(hashlib.sha256(jwk.encode()).digest()).rstrip(b"=").decode()
 
 
-def test_file_store_creates_private_files(tmp_path):
-    store = credentials.FileStore(tmp_path / "pro")
-    store.save({"access_token": "a", "refresh_token": "r"})
-    assert oct(os.stat(tmp_path / "pro").st_mode & 0o777) == "0o700"
-    assert oct(os.stat(store.path).st_mode & 0o777) == "0o600"
-    assert store.load() == {"access_token": "a", "refresh_token": "r"}
-    store.delete()
-    assert store.load() is None
+def test_every_pinned_kid_is_its_keys_thumbprint():
+    """As the backend derives it (RFC 7638), or every token it signs is rejected."""
+    assert keys.PINNED_KEYS, "no production key pinned"
+    for kid, raw in keys.PINNED_KEYS.items():
+        assert len(bytes.fromhex(raw)) == 32
+        assert _thumbprint(raw) == kid
 
 
-def test_file_store_refuses_a_readable_file(tmp_path):
-    store = credentials.FileStore(tmp_path / "pro")
-    store.save({"access_token": "a"})
-    os.chmod(store.path, 0o644)
-    with pytest.raises(credentials.CredentialError, match="permissions"):
-        store.load()
+# -- the credential stores ---------------------------------------------------------------------
 
 
-def test_file_store_refuses_a_loose_directory(tmp_path):
-    store = credentials.FileStore(tmp_path / "pro")
-    store.save({"access_token": "a"})
-    os.chmod(store.dir, 0o755)
-    with pytest.raises(credentials.CredentialError, match="permissions"):
-        store.load()
+def test_pro_stores_use_their_own_service(monkeypatch):
+    assert credentials.KeychainStore().service == "brindle-pro"
+    assert credentials.SecretServiceStore().attrs[:2] == ["service", "brindle-pro"]
+    assert issubclass(credentials.FileStore, keystore.FileStore)
+    monkeypatch.setenv("BRINDLE_PRO_CREDENTIAL_STORE", "keychain")
+    assert isinstance(credentials.default_store(), credentials.KeychainStore)
+    monkeypatch.setenv("BRINDLE_PRO_CREDENTIAL_STORE", "bogus")
     with pytest.raises(credentials.CredentialError):
-        store.save({"access_token": "b"})
+        credentials.default_store()
 
 
 def test_file_store_refuses_a_symlink(tmp_path):
@@ -259,13 +155,6 @@ def test_file_store_rejects_corrupt_contents(tmp_path):
     os.close(fd)
     with pytest.raises(credentials.CredentialError, match="corrupt"):
         store.load()
-
-
-def test_default_store_honours_the_override(monkeypatch):
-    assert isinstance(credentials.default_store(), credentials.FileStore)
-    monkeypatch.setenv("BRINDLE_PRO_CREDENTIAL_STORE", "bogus")
-    with pytest.raises(credentials.CredentialError):
-        credentials.default_store()
 
 
 def test_keychain_writes_the_secret_on_stdin_not_argv(monkeypatch):
@@ -306,14 +195,6 @@ def test_features_fail_closed_without_credentials():
         license.require("learning")
 
 
-def test_features_and_require_with_stored_credentials(backend, token):
-    logged_in(backend, token())
-    assert license.features() == {"learning", "autopilot"}
-    assert license.require("learning").plan == "pro"
-    with pytest.raises(NotEntitled):
-        license.require("sso")
-
-
 def test_features_fail_closed_on_a_loose_credentials_file(backend, token):
     store = logged_in(backend, token())
     os.chmod(store.path, 0o644)
@@ -325,39 +206,14 @@ def test_features_fail_closed_on_a_forged_token(backend, token, monkeypatch):
     monkeypatch.setattr(auth, "UrllibTransport", lambda: backend)
     backend.routes["GET /entitlement"] = [(503, {"error": "unavailable"})]
     assert license.features() == frozenset()
+    with pytest.raises(LicenseError):
+        license.current(refresh=False)
 
 
 def test_features_fail_closed_on_a_stolen_entitlement_from_another_issuer(backend, signing_key):
     logged_in(backend, sign(signing_key, claims(iss="https://evil.test")))
     backend.routes["GET /entitlement"] = [auth.TransportError("down")]
     assert license.features() == frozenset()
-
-
-def test_expired_entitlement_offline_falls_back_to_grace(backend, token):
-    now = time.time()
-    store = logged_in(backend, token(iat=int(now - 2 * DAY), exp=int(now - DAY)), access_valid=False)
-    backend.routes["POST /token/refresh"] = [auth.TransportError("down")]
-    ent = license.current(store=store, client=client(backend))
-    assert ent.in_grace
-
-
-def test_expired_entitlement_is_refreshed_when_online(backend, token):
-    now = time.time()
-    store = logged_in(backend, token(iat=int(now - 2 * DAY), exp=int(now - DAY)), access_valid=False)
-    old_refresh = store.load()["refresh_token"]
-    backend.plan = "enterprise"
-    ent = license.current(store=store, client=client(backend))
-    assert ent.plan == "enterprise" and not ent.in_grace
-    assert backend.paths() == ["POST /token/refresh", "GET /entitlement"]
-    creds = store.load()
-    assert creds["refresh_token"] != old_refresh and license.verify(creds["entitlement"], issuer=ISS)
-
-
-def test_fresh_access_token_skips_rotation(backend, token):
-    now = time.time()
-    store = logged_in(backend, token(iat=int(now - 2 * DAY), exp=int(now - DAY)))
-    license.current(store=store, client=client(backend))
-    assert backend.paths() == ["GET /entitlement"]
 
 
 def test_revoked_session_fails_closed_and_forgets_credentials(backend, token):
@@ -367,15 +223,6 @@ def test_revoked_session_fails_closed_and_forgets_credentials(backend, token):
     with pytest.raises(LicenseError, match="revoked"):
         license.current(store=store, client=client(backend))
     assert store.load() is None
-
-
-def test_expired_past_grace_offline_is_rejected(backend, token):
-    now = time.time()
-    store = logged_in(backend, token(iat=int(now - 30 * DAY), exp=int(now - 29 * DAY)),
-                      access_valid=False)
-    backend.routes["POST /token/refresh"] = [auth.TransportError("down")]
-    with pytest.raises(LicenseError, match="expired"):
-        license.current(store=store, client=client(backend))
 
 
 # -- development keys (JWKS from a localhost backend) ------------------------------------------

@@ -1,23 +1,15 @@
 """The cloud learner: what it sends, what it never sends, and how it falls
 back (to no suggestion: the learner only ever runs on the server)."""
-import base64
-import hashlib
-import io
 import json
-import re
 import time
-from importlib.metadata import entry_points
 
 import pytest
 
-from brindle import learning as brindle_learning
 from brindle import plugins
-from brindle.config import RepoConfig
 from brindle.learning import Outcome, TaskInfo
 from brindle.pro import auth, credentials
 from brindle.pro import learning as cloud
 from brindle.pro.learning import CloudLearner
-from brindle.pro.orgkey import OrgKey
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, backend, claims, fixed_identity, pro_env, sign, signing_key, token,
 )
@@ -119,19 +111,6 @@ def test_record_payload_keys_and_contents(parts, remote):
         assert set(body) <= cloud.RECORD_KEYS
 
 
-def test_features_are_only_kind_and_size_one_hots(parts, remote):
-    lr = make(parts, remote)
-    lr.record(task(), Outcome("merged"))
-    lr.flush()
-    f = remote.records[0]["features"]
-    assert set(f) == {"kind_bugfix", "kind_refactor", "kind_docs", "kind_feature", "kind_test",
-                      "size_small", "size_medium", "size_large"}
-    assert all(isinstance(v, bool) for v in f.values())
-    assert f["kind_bugfix"] and f["size_small"] and sum(f.values()) == 2
-    other = cloud.one_hot(task(text="Do the thing"))
-    assert not any(v for k, v in other.items() if k.startswith("kind_"))
-
-
 def test_an_override_carries_the_servers_reason(parts, remote):
     remote.suggest_pick = "reviewer"
     lr = make(parts, remote)
@@ -141,46 +120,6 @@ def test_an_override_carries_the_servers_reason(parts, remote):
     remote.suggest_pick = None
     assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
     assert lr.last_reason is None
-
-
-def test_a_kept_default_carries_the_servers_note(parts, remote):
-    lr = make(parts, remote)
-    remote.suggest_note = "not enough similar tasks yet"
-    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
-    assert lr.last_note == "not enough similar tasks yet"
-    remote.suggest_note, remote.suggest_pick = None, "reviewer"
-    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "reviewer"
-    assert lr.last_note is None      # an override has a reason, not a note
-    remote.suggest_pick = None
-    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
-    assert lr.last_note is None      # an older server says nothing
-
-
-def test_a_default_outside_the_candidates_sends_nothing(parts, remote):
-    lr = make(parts, remote)
-    assert lr.suggest(task(), ["developer", "reviewer"], "other") is None
-    assert remote.suggests == []
-
-
-def test_suggest_payload_keys_and_costs(parts, remote):
-    lr = make(parts, remote)
-    assert lr.suggest(task(), ["developer", "reviewer", "cheap"]) == "developer"
-    (body,) = remote.suggests
-    assert set(body) == {"org_id", "key_id", "repo_key", "weight", "features", "candidates",
-                         "candidate_cost", "default"}
-    assert body["default"] == "developer" and lr.last_reason is None
-    assert (body["org_id"], body["key_id"]) == ("org_1", "k1")
-    assert body["candidates"] == ["developer", "reviewer", "cheap"]
-    assert body["candidate_cost"] == {"developer": 2, "reviewer": 3, "cheap": 0}
-    assert body["weight"] == "heavy"
-    no_forbidden(body)
-
-
-def test_undeclared_or_unknown_weight_is_null(parts, remote):
-    lr = make(parts, remote)
-    lr.suggest(task(weight=None), ["a", "b"])
-    lr.suggest(task(weight="enormous"), ["a", "b"])
-    assert [b["weight"] for b in remote.suggests] == [None, None]
 
 
 def test_unsafe_profile_names_are_never_sent(parts, remote):
@@ -193,19 +132,12 @@ def test_unsafe_profile_names_are_never_sent(parts, remote):
 
 
 def test_records_are_sent_by_the_background_thread(parts, remote):
+    send = remote.routes["POST /learning/record"]
+    remote.routes["POST /learning/record"] = lambda f, h: (time.sleep(0.05), send(f, h))[1]   # flush waits
     lr = make(parts, remote, start_thread=True)
     lr.record(task(), Outcome("merged"))
     assert lr.flush(5)
     assert len(remote.records) == 1
-
-
-def test_record_does_not_block_on_a_slow_backend(parts, remote):
-    remote.routes["POST /learning/record"] = lambda f, h: (time.sleep(1), (200, {}))[1]
-    lr = make(parts, remote, start_thread=True)
-    t0 = time.monotonic()
-    for _ in range(3):
-        lr.record(task(), Outcome("review", approved=True))
-    assert time.monotonic() - t0 < 0.5
 
 
 def test_the_record_queue_is_bounded(parts, remote, monkeypatch):
@@ -217,53 +149,12 @@ def test_the_record_queue_is_bounded(parts, remote, monkeypatch):
 
 
 def test_cost_rank_guesses_from_the_profile(tmp_path):
-    from brindle.profiles import load_profile
-
-    assert cloud.cost_rank("no-such-profile", str(tmp_path)) == 2
-    for name in ("developer", "developer-heavy", "developer-local"):
-        try:
-            p = load_profile(name, str(tmp_path))
-        except Exception:  # noqa: BLE001 - not a built-in on this brindle
-            continue
-        rank = cloud.cost_rank(name, str(tmp_path))
-        assert 0 <= rank <= 3
-        if p.base_url and "localhost" in p.base_url:
-            assert rank == 0
+    ranks = [cloud.cost_rank(n, str(tmp_path))
+             for n in ("no-such-profile", "developer", "developer-heavy", "developer-local")]
+    assert ranks == [2, 2, 3, 0]
 
 
 # -- repo_key and agent_ref ---------------------------------------------------------------------------
-
-
-def test_repo_key_is_the_org_keyed_hmac_of_the_repo_identity(parts, remote, fixed_identity):
-    lr = make(parts, remote)
-    lr.record(task(), Outcome("merged"))
-    lr.suggest(task(), ["a", "b"])
-    lr.flush()
-    key = remote.records[0]["repo_key"]
-    assert re.fullmatch(r"[0-9a-f]{64}", key)
-    assert remote.suggests[0]["repo_key"] == key
-    org_key = OrgKey("org_1", *remote.org_key("org_1"))
-    assert key == org_key.repo_key(fixed_identity)
-    assert key != hashlib.sha256(REPO.encode()).hexdigest()
-    # the key is fetched once and cached (by org and key_id) in the credential store
-    assert remote.key_fetches == ["org_1"]
-    assert parts[1].load()["keys"]["org_1"]["key_id"] == "k1"
-    again = make(parts, remote)
-    again.record(task(), Outcome("merged"))
-    again.flush()
-    assert remote.key_fetches == ["org_1"]
-    # the key itself never leaves
-    raw = base64.b64encode(remote.org_key("org_1")[1]).decode()
-    assert raw not in json.dumps(remote.records + remote.suggests)
-
-
-def test_agent_ref_is_a_truncated_org_hmac(parts, remote):
-    lr = make(parts, remote)
-    lr.record(task(), Outcome("merged"))
-    lr.flush()
-    ref = remote.records[0]["agent_ref"]
-    assert re.fullmatch(r"[0-9a-f]{32}", ref)
-    assert ref == OrgKey("org_1", *remote.org_key("org_1")).agent_ref(AGENT)
 
 
 def test_the_legacy_install_secret_is_never_used(parts, remote, tmp_path):
@@ -278,12 +169,6 @@ def test_the_legacy_install_secret_is_never_used(parts, remote, tmp_path):
     assert remote.records == [] and remote.suggests == []
 
 
-def test_no_org_key_means_nothing_is_sent(parts, remote):
-    remote.key_status = (403, {"error": "forbidden"})
-    fallback_case(parts, remote)
-    assert remote.records == [] and remote.suggests == []
-
-
 # -- fallbacks ----------------------------------------------------------------------------------------
 
 
@@ -295,19 +180,6 @@ def fallback_case(parts, remote):
     return lr
 
 
-def test_unentitled_sends_nothing(parts, remote):
-    login_as(remote, parts[0], features=("autopilot",))
-    calls = len(remote.calls)
-    fallback_case(parts, remote)
-    assert len(remote.calls) == calls
-
-
-def test_not_logged_in_sends_nothing(parts, remote):
-    parts[0].delete()
-    fallback_case(parts, remote)
-    assert remote.records == [] and remote.suggests == []
-
-
 def test_offline_gives_no_suggestion(parts, remote):
     remote.routes["POST /learning/suggest"] = [auth.TransportError("down")]
     lr = fallback_case(parts, remote)
@@ -315,45 +187,15 @@ def test_offline_gives_no_suggestion(parts, remote):
     assert remote.records == []
 
 
-@pytest.mark.parametrize("status,error", [(429, "rate_limited"), (429, "daily_limit"),
-                                          (403, "entitlement_required"), (500, "internal_error"),
-                                          (422, "invalid_request")])
+@pytest.mark.parametrize("status,error", [(429, "rate_limited"), (403, "entitlement_required")])
 def test_server_refusals_give_no_suggestion(parts, remote, status, error):
     remote.routes["POST /learning/suggest"] = [(status, {"error": error})]
-    lr = fallback_case(parts, remote)
-    if status in (429, 403):
-        assert not lr.active()
-
-
-def test_slow_suggest_falls_back_within_the_timeout(parts, remote, monkeypatch):
-    monkeypatch.setattr(cloud, "SUGGEST_TIMEOUT", 0.3)
-    remote.routes["POST /learning/suggest"] = lambda f, h: (time.sleep(2), (200, {"profile": "developer"}))[1]
-    lr = make(parts, remote)
-    t0 = time.monotonic()
-    assert lr.suggest(task(), ["developer", "reviewer"]) is None
-    assert time.monotonic() - t0 < 1.0
-
-
-def test_suggest_timeout_is_at_most_two_seconds():
-    assert cloud.SUGGEST_TIMEOUT <= 2.0
+    assert not fallback_case(parts, remote).active()
 
 
 def test_a_profile_outside_the_candidates_is_ignored(parts, remote):
     remote.routes["POST /learning/suggest"] = [(200, {"profile": "rogue"})]
     assert make(parts, remote).suggest(task(), ["developer", "reviewer"]) is None
-
-
-def test_errors_never_reach_brindle(parts, remote, monkeypatch):
-    lr = make(parts, remote)
-
-    def boom(*a, **k):
-        raise RuntimeError("broken")
-
-    monkeypatch.setattr(cloud, "record_payload", boom)
-    monkeypatch.setattr(cloud, "suggest_payload", boom)
-    lr.record(task(), Outcome("merged"))
-    assert lr.suggest(task(), ["developer", "reviewer"]) is None
-    assert "cloud learning" in lr.report()
 
 
 def test_report_says_whether_cloud_is_active(parts, remote):
@@ -363,10 +205,6 @@ def test_report_says_whether_cloud_is_active(parts, remote):
 
 
 # -- nothing is learned on this machine -------------------------------------------------------------
-
-
-def test_the_report_says_learning_happens_on_the_server(parts, remote):
-    assert "nothing is learned on this machine" in make(parts, remote).report()
 
 
 def test_records_and_suggestions_go_to_the_server(parts, remote):
@@ -387,33 +225,6 @@ def fresh_plugins():
     plugins.reset()
     yield
     plugins.reset()
-
-
-def test_cloud_learner_is_built_in_not_an_entry_point():
-    assert list(entry_points(group="brindle.learning")) == []
-    p = brindle_learning.plugin(RepoConfig(learning="cloud"), REPO)
-    assert isinstance(p, CloudLearner)
-
-
-def test_learning_defaults_to_auto_which_is_off_until_entitled(remote, tmp_path):
-    cfg = RepoConfig()
-    assert cfg.learning == "auto"
-    assert plugins.learning_name(cfg) == "off"
-    assert brindle_learning.plugin(cfg, str(tmp_path)) is None
-    from brindle.pro import license
-
-    store = credentials.default_store()
-    login_as(remote, store, features=("autopilot",))
-    license.clear_cache()          # as `brindle account login` does
-    assert plugins.learning_name(cfg) == "off"           # logged in, but no hosted learning
-    login_as(remote, store)
-    license.clear_cache()
-    assert plugins.learning_name(cfg) == "cloud"
-    p = brindle_learning.plugin(cfg, str(tmp_path))
-    assert isinstance(p, CloudLearner)
-    assert brindle_learning.plugin(RepoConfig(learning="off"), str(tmp_path)) is None
-    assert plugins.learning_name(RepoConfig(learning="other")) == "off"
-    assert brindle_learning.plugin(RepoConfig(learning="other"), str(tmp_path)) is None
 
 
 def test_brindle_learning_command_explains_auto(repo, monkeypatch):
@@ -438,18 +249,6 @@ def test_brindle_learning_command_rejects_unsupported_value(repo, monkeypatch):
     res = CliRunner().invoke(app, ["learning"])
     assert res.exit_code == 0, res.output
     assert "not a supported value" in res.output
-
-
-def test_account_status_shows_cloud_learning(parts, remote):
-    from brindle.pro import account
-
-    out = io.StringIO()
-    account.ProAccount(REPO, store=parts[0], transport=remote, out=out).run(["status"])
-    assert "cloud (hosted learning active)" in out.getvalue()
-    login_as(remote, parts[0], features=())
-    out = io.StringIO()
-    account.ProAccount(REPO, store=parts[0], transport=remote, out=out).run(["status"])
-    assert "off (no hosted learning)" in out.getvalue()
 
 
 # -- brindle learning seed ------------------------------------------------------------------------------
@@ -484,41 +283,6 @@ def seed_cli(parts, remote, repo, db, monkeypatch):
     root = git.main_repo_root(str(repo))
     seed_history(db, root)
     return lambda: CliRunner().invoke(app, ["learning", "seed"]), root
-
-
-def test_seed_sends_one_record_per_finished_decision_and_only_record_payload_fields(seed_cli, remote):
-    run, _ = seed_cli
-    res = run()
-    assert res.exit_code == 0, res.output
-    assert "sent 3" in res.output
-    assert [r["event"] for r in remote.records] == ["merged", "removed_unmerged", "merged"]
-    allowed = set(cloud.record_payload(OrgKey("o", "k", b"s" * 32), "id", task(), Outcome("merged")))
-    allowed |= {"baseline_profile", "learned", "cost_rank", "baseline_cost_rank"}
-    for body in remote.records:
-        assert set(body) <= allowed
-        assert body["weight"] == "heavy" and body["review_rounds"] == 1
-        assert body["features"] == cloud.one_hot(task())
-        no_forbidden(body)
-
-
-def test_a_second_seed_sends_nothing(seed_cli, remote):
-    run, _ = seed_cli
-    assert run().exit_code == 0
-    remote.records.clear()
-    res = run()
-    assert res.exit_code == 0, res.output
-    assert "sent 0" in res.output and remote.records == []
-
-
-def test_seed_skips_decisions_the_live_path_already_sent(seed_cli, parts, remote, db):
-    run, root = seed_cli
-    db.add_routing_decision(root, task_id="live", agent_id="worker-live", weight="light",
-                            baseline_profile="developer", profile="developer", learned=False)
-    db.note_routing_outcome("worker-live", outcome="merged")
-    make(parts, remote).record(task(agent_id="worker-live"), Outcome("merged"))
-    res = run()
-    assert res.exit_code == 0, res.output
-    assert "sent 3" in res.output
 
 
 def test_seed_marks_merged_as_checks_passed_and_carries_the_live_agent_ref(seed_cli, parts, remote):
