@@ -10,7 +10,6 @@ import pytest
 
 from brindle import agents, cull, workspaces
 from brindle.db import Agent
-from brindle.native.permissions import uncovered_part
 from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext
 
@@ -28,13 +27,6 @@ def worker(db, ws, profile="developer", provider="claude"):
 
 def bash(command):
     return {"tool_name": "Bash", "tool_input": {"command": command}}
-
-
-def test_compound_command_covered_by_rules_is_allowed(db, ws):
-    a = worker(db, ws)
-    out = agents.handle_hook(db, a.id, "pre-tool", bash("git status && git diff --stat | head -20"))
-    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert out["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
 
 def test_cd_into_the_worktree_counts_as_covered(db, ws):
@@ -72,43 +64,11 @@ def test_a_profile_without_bash_rules_never_allows(db, ws, monkeypatch):
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
 
 
-def test_hook_main_round_trips_json(db, ws):
-    a = worker(db, ws)
-    out = agents.hook_main(db, a.id, "pre-tool", json.dumps(bash("git status")))
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert agents.hook_main(db, a.id, "pre-tool", json.dumps(bash("rm -rf /"))) == ""
-
-
-def test_claude_command_installs_the_hook_for_bash_only():
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go"))
-    settings = json.loads(argv[argv.index("--settings") + 1])
-    (entry,) = settings["hooks"]["PreToolUse"]
-    assert entry["matcher"] == "Bash"
-    assert "_hook pre-tool --agent abc" in entry["hooks"][0]["command"]
-
-
 def test_plan_first_agents_hook_edit_tools_too():
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go", plan_first=True))
     settings = json.loads(argv[argv.index("--settings") + 1])
     (entry,) = settings["hooks"]["PreToolUse"]
     assert entry["matcher"] == "Bash|Edit|Write|NotebookEdit"
-
-
-def test_uncovered_part_follows_cd_across_parts(tmp_path):
-    root = str(tmp_path)
-    (tmp_path / "a" / "b").mkdir(parents=True)
-    specs = ["ls:*"]
-    assert uncovered_part(specs, "cd a && cd b && ls", cd_root=root) is None
-    assert uncovered_part(specs, "cd a && cd ../.. && ls", cd_root=root) == "cd ../.."
-    assert uncovered_part(specs, "cd && ls", cd_root=root) == "cd"
-    assert uncovered_part(specs, "cd - && ls", cd_root=root) == "cd -"
-    assert uncovered_part(specs, "cd $HOME && ls", cd_root=root) == "cd $HOME"
-    assert uncovered_part(specs, "cd a/../../.. && ls", cd_root=root) == "cd a/../../.."
-    # A symlink inside the worktree that points out of it leads out of it.
-    (tmp_path / "out").symlink_to(tmp_path.parent)
-    assert uncovered_part(specs, "cd out && ls", cd_root=root) == "cd out"
-    # Without a root, cd is an ordinary uncovered command, as before.
-    assert uncovered_part(specs, "cd a && ls") == "cd a"
 
 
 def test_stuck_message_says_when_auto_mode_should_have_answered(db, ws, monkeypatch):

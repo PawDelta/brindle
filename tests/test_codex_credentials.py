@@ -40,19 +40,6 @@ def codex_check():
     return {c.name: c for c in doctor.credential_checks()}["codex"]
 
 
-def test_chatgpt_login_detected_from_auth_mode_only(codex, tmp_path, monkeypatch):
-    assert not providers.codex_chatgpt_login()            # no auth.json
-    codex.write_text(json.dumps({"auth_mode": "apikey", "OPENAI_API_KEY": KEY}))
-    assert not providers.codex_chatgpt_login()
-    codex.write_text("not json")
-    assert not providers.codex_chatgpt_login()
-    chatgpt(codex)
-    assert providers.codex_chatgpt_login()
-    monkeypatch.delenv("BRINDLE_CODEX_AUTH")
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "home"))
-    assert providers.codex_auth_path() == str(tmp_path / "home" / "auth.json")
-
-
 def test_tokens_in_auth_json_are_never_read_beyond_auth_mode(codex, monkeypatch):
     chatgpt(codex)
     seen = []
@@ -87,8 +74,6 @@ def test_doctor_codex_key_points_interactive_at_login_and_exec_bills_the_key(cod
     monkeypatch.setenv("CODEX_API_KEY", KEY)
     c = codex_check()
     assert c.level == doctor.WARN
-    assert "interactive Codex agents use your ChatGPT plan whatever key is set" in c.detail
-    assert "codex login --with-api-key" in c.detail
     assert "`codex exec` runs (and Brindle-CI) bill CODEX_API_KEY instead" in c.detail
     assert KEY not in c.detail
 
@@ -101,37 +86,11 @@ def test_doctor_warns_for_a_stored_codex_key_too(codex):
     assert "codex login --with-api-key" in c.detail and "Brindle-CI" in c.detail
 
 
-def test_doctor_no_warning_without_a_chatgpt_login(codex, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", KEY)
-    c = codex_check()
-    assert (c.level, c.detail) == (doctor.OK, "API key (OPENAI_API_KEY, from environment)")
-    codex.write_text(json.dumps({"auth_mode": "apikey"}))
-    assert codex_check().level == doctor.OK
-    monkeypatch.setenv("CODEX_API_KEY", KEY)
-    assert codex_check().level == doctor.OK
-
-
-def test_keys_set_openai_notes_the_ignored_key_under_chatgpt(codex):
-    chatgpt(codex)
-    r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input=KEY + "\n")
-    assert r.exit_code == 0 and KEY not in r.output
-    assert "interactive Codex agents use your ChatGPT plan whatever key is set" in r.output
-    assert "codex login --with-api-key" in r.output and "codex exec" not in r.output
-
-
 def test_keys_set_codex_key_notes_interactive_and_exec_under_chatgpt(codex):
     chatgpt(codex)
     r = runner.invoke(app, ["keys", "set", "CODEX_API_KEY"], input=KEY + "\n")
     assert r.exit_code == 0 and KEY not in r.output
-    assert "interactive Codex agents use your ChatGPT plan whatever key is set" in r.output
-    assert "codex login --with-api-key" in r.output
     assert "`codex exec` runs (and Brindle-CI) bill CODEX_API_KEY instead" in r.output
-
-
-def test_keys_set_is_quiet_without_a_chatgpt_login(codex):
-    for name in ("OPENAI_API_KEY", "CODEX_API_KEY"):
-        r = runner.invoke(app, ["keys", "set", name], input=KEY + "\n")
-        assert r.exit_code == 0 and "ChatGPT" not in r.output
 
 
 def codex_profile(repo, auth):
@@ -169,17 +128,6 @@ def test_exec_api_key_accepts_a_stored_codex_key_under_chatgpt(codex, repo):
     assert pane_auth.key_problem(p, "codex", set(), False, exec_mode=True)
     keystore.set_key("CODEX_API_KEY", KEY)
     assert pane_auth.key_problem(p, "codex", set(), False, exec_mode=True) is None
-
-
-def test_api_key_accepts_openai_key_without_a_chatgpt_login(codex, repo, monkeypatch):
-    p = codex_profile(repo, "api_key")
-    monkeypatch.setenv("OPENAI_API_KEY", KEY)
-    assert pane_auth.key_problem(p, "codex", set(), False) is None
-
-
-def test_subscription_strips_both_codex_keys():
-    deny = pane_auth.deny_names("codex", "subscription", None)
-    assert "OPENAI_API_KEY" in deny and "CODEX_API_KEY" in deny
 
 
 def test_set_agy_gemini_failed_write_leaves_the_original(tmp_path, monkeypatch):

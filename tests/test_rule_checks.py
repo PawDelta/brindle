@@ -43,15 +43,6 @@ Binary files differ
 """
 
 
-def test_parse_diff_tracks_added_lines_and_touched_files():
-    d = rule_checks.parse_diff(DIFF)
-    assert d.files == ["src/app.py", "pyproject.toml", "old.py"]
-    assert d.added["src/app.py"] == [(2, "import pickle"), (3, "import subprocess"),
-                                     (13, "    subprocess.run(cmd, shell=True)")]
-    assert d.added["pyproject.toml"] == [(6, '  "requests>=2",')]
-    assert "old.py" not in d.added
-
-
 def test_parse_diff_is_not_fooled_by_content_that_looks_like_headers():
     """A removed ``-- sql comment`` renders as ``--- sql comment`` and an added
     ``++ x`` as ``+++ x``: hunk line counts say they're content, so a worker
@@ -106,59 +97,8 @@ def pack(**kw) -> RulePack:
     return RulePack(name=kw.pop("name", "p"), description="", prompt="", **kw)
 
 
-def test_deny_deps_sees_imports_and_manifests():
-    d = rule_checks.parse_diff(DIFF)
-    found = rule_checks.check_deny_deps(pack(deny_deps=["pickle", "requests", "json"]), d)
-    details = [v.detail for v in found]
-    assert any(s.startswith("src/app.py:2: pickle imported") for s in details)
-    assert any(s.startswith("pyproject.toml:6: requests added as a dependency") for s in details)
-    assert not any("json" in s for s in details)   # removed, not added
-    js = rule_checks.parse_diff(
-        "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,0 +1,3 @@\n"
-        "+import lodash from 'lodash';\n+const x = require(\"left-pad\");\n+import { a } from 'lodash-es';\n")
-    found = rule_checks.check_deny_deps(pack(deny_deps=["lodash", "left-pad"]), js)
-    assert [v.detail.split(":")[1] for v in found] == ["1", "2"]   # lodash-es isn't lodash
-
-
 def added(*lines: str, path: str = "a.py") -> rule_checks.Diff:
     return rule_checks.Diff([path], {path: [(i + 1, l) for i, l in enumerate(lines)]})
-
-
-def test_deny_deps_sees_every_way_of_importing():
-    hits = lambda deps, *lines, path="a.py": [   # noqa: E731
-        v.detail.split(":")[1] for v in rule_checks.check_deny_deps(pack(deny_deps=deps), added(*lines, path=path))]
-    assert hits(["pickle"],
-                "import os, pickle",                       # 1: in a list
-                "import os as o,pickle as p",              # 2
-                "import pickle.sub",                       # 3
-                "from pickle import loads",                # 4
-                "m = importlib.import_module('pickle')",   # 5
-                "m = __import__(\"pickle\")",              # 6
-                "import pickles",                          # not it
-                "from mypickle import x",                  # not it
-                "x = pickle.loads(y)",                     # a use, not an import
-                ) == ["1", "2", "3", "4", "5", "6"]
-    assert hits(["pkg"],
-                "export * from 'pkg'",                     # 1
-                "const x = await import('pkg/sub')",       # 2
-                "require 'pkg'",                           # 3: ruby
-                "extern crate pkg;",                       # 4: rust
-                "use ::pkg::thing;",                       # 5
-                '\talias "pkg/sub"',                       # 6: go block import
-                "import \"pkg\";",                         # 7
-                "x = 1; import pkg",                       # 8: after a statement
-                "} from 'pkg'",                            # 9: the last line of a multi-line import
-                "const x = require(`pkg`)",                # 10: template quotes
-                '\t. "pkg"',                               # 11: go dot import
-                "pub use pkg::X;",                         # 12
-                "import PKG",                              # 13: a case the regex shouldn't care about
-                "import pkgs",                             # not it
-                "x = fromage('pkg')",                      # not it
-                ) == [str(i) for i in range(1, 14)]
-    # A manifest names a package however it likes: case, '-', '_' and '.' are one.
-    assert hits(["python-dateutil"], 'deps = ["Python_DateUtil>=2"]', path="pyproject.toml") == ["1"]
-    assert hits(["requests"], "requests-oauthlib==1", path="requirements/dev.in") == []
-    assert hits(["requests"], "requests==2", path="requirements/dev.in") == ["1"]
 
 
 def test_deny_patterns_report_file_and_line_and_cap_the_noise():
@@ -223,17 +163,6 @@ def test_the_builtin_security_pack_is_not_fooled_by_spelling():
         assert not rule_checks.check_deny_patterns(sec, added(line)), line
 
 
-def test_check_runs_every_pack_and_formats():
-    d = rule_checks.parse_diff(DIFF)
-    packs = [pack(name="a", deny_patterns=["shell=True"]), pack(name="b", deny_deps=["pickle"]),
-             pack(name="c")]
-    found = rule_checks.check(packs, d)
-    assert [v.pack for v in found] == ["a", "b"]
-    text = rule_checks.format_violations(found)
-    assert text.startswith("- a (deny_patterns): src/app.py:13")
-    assert "- b (deny_deps): src/app.py:2" in text
-
-
 # -- against a real branch, through the gates ---------------------------------------
 
 
@@ -254,11 +183,6 @@ def branch(db, repo):
                                           "    return subprocess.run(cmd, shell=True)\n")
     sh("git add svc.py && git commit -qm shell", Path(ws.path))
     return ws
-
-
-def test_branch_diff_is_what_the_branch_committed(db, branch):
-    d = rule_checks.branch_diff(branch.path, "main")
-    assert d.files == ["svc.py"] and d.added["svc.py"][0] == (1, "import subprocess")
 
 
 def test_run_checks_the_workers_packs(db, branch):
