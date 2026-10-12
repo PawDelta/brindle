@@ -968,15 +968,19 @@ entitlement.
   or `gateway` with `codex.base_url` (`OPENAI_BASE_URL`). The route's
   variables are the top layer of every pane's environment, a profile that
   points somewhere else is refused with a message saying why, and the
-  identity is checked at launch. An agent with no such route isn't managed
-  here (use `allowed_providers` to keep it out). Without `enforce` the same
-  block is sign-in help only.
+  identity is checked at launch. With `exclusive` on as well, an agent the
+  block gives no route at all is refused (Claude Code or Codex with no entry,
+  and always native and Antigravity); without it such an agent runs
+  unmanaged (use `allowed_providers` to keep it out). Without `enforce` the
+  same block is sign-in help only.
 * `provider_config` is the older, org-wide form of the same thing: `provider`
   (`bedrock`, `vertex`, `azure` or `openai-compatible`), plus `region`,
   `model_ids` and `endpoint` as the provider needs them (for `vertex`,
   `project`; an older policy that put the project id in `endpoint` still
-  works). The server now derives it from `agent_setup` for older clients, and
-  this client reads it only when `agent_setup` routes nothing. An old
+  works). The server now converts it into `agent_setup` routes (with
+  `exclusive` on) and keeps deriving it for older clients; this client reads
+  it whenever `agent_setup` has no `exclusive` field (a server older than
+  routing in `agent_setup`) or routes nothing. An old
   `provider_config` and its `agent_setup` form give panes the same variables.
 * `deny_personal_keys` (in `agent_setup`, or the policy's top-level field):
   the personal model keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) are

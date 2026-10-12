@@ -171,11 +171,24 @@ class AgentSetup:
     Codex. Names only, never a secret. ``enforce`` is False unless the org has
     the Enterprise entitlement. ``deny_personal_keys`` (Enterprise too) is
     None when the block doesn't set it (an older server): the policy's
-    top-level field applies then (see brindle.pro.managed_models)."""
+    top-level field applies then (see brindle.pro.managed_models).
+    ``exclusive`` (with ``enforce``): an agent the block gives no route is
+    refused, as ``provider_config`` refused every agent it couldn't serve;
+    the server sets it when it converts a ``provider_config``. None when the
+    block doesn't carry the key at all: a server older than routing in
+    ``agent_setup``, whose ``provider_config`` stays the managed source."""
     claude: ClaudeSetup | None = None
     codex: CodexSetup | None = None
     enforce: bool = False
     deny_personal_keys: bool | None = None
+    exclusive: bool | None = None
+
+    @property
+    def routing(self) -> bool:
+        """Whether this block is the org's routing (a phase-1 server, which
+        always sends ``exclusive``), rather than login help next to a
+        ``provider_config`` that is still the managed source."""
+        return self.exclusive is not None
 
     @property
     def routed(self) -> bool:
@@ -433,7 +446,7 @@ MODEL_KEYS = ("opus", "sonnet", "haiku")
 CLAUDE_KEYS = ("route", "org_id", "aws", "gcp", "azure", "gateway", "models", "model_ids",
                "default_model")
 CODEX_KEYS = ("route", "base_url")
-AGENT_KEYS = ("claude", "codex", "enforce", "deny_personal_keys")
+AGENT_KEYS = ("claude", "codex", "enforce", "deny_personal_keys", "exclusive")
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 AWS_ACCOUNT_RE = re.compile(r"\d{12}")
 IAM_ROLE_RE = re.compile(r"[A-Za-z0-9+=,.@_-]{1,64}")
@@ -616,10 +629,15 @@ def _parse_agent_setup(raw) -> AgentSetup:
     deny = a.get("deny_personal_keys")
     if not (deny is None or isinstance(deny, bool)):
         raise _Malformed("invalid deny_personal_keys")
+    # Carried (a phase-1 server stores its default explicitly) or absent (an
+    # older server): the difference decides what the managed source is.
+    exclusive = a.get("exclusive")
+    if not (exclusive is None or isinstance(exclusive, bool)):
+        raise _Malformed("invalid exclusive")
     claude = _claude(a["claude"]) if a.get("claude") is not None else None
     codex = _codex(a["codex"]) if a.get("codex") is not None else None
     return AgentSetup(claude=claude, codex=codex, enforce=enforce and _enforce_entitled(),
-                      deny_personal_keys=deny)
+                      deny_personal_keys=deny, exclusive=exclusive)
 
 
 def _agent_setup(p: dict) -> AgentSetup | None:

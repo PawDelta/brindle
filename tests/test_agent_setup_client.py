@@ -239,6 +239,26 @@ def test_deny_personal_keys_in_the_block(no_enterprise):
     assert parse({"codex": {"route": "chatgpt"}, "deny_personal_keys": "yes"}) is None
 
 
+def test_exclusive_is_a_strict_bool_and_absent_means_an_older_server(no_enterprise):
+    s = parse({"codex": {"route": "chatgpt"}})
+    assert s.exclusive is None and s.routing is False
+    s = parse({"codex": {"route": "chatgpt"}, "exclusive": False})
+    assert s.exclusive is False and s.routing is True
+    s = parse({"codex": {"route": "chatgpt"}, "exclusive": True})
+    assert s.exclusive is True and s.routing is True
+    assert parse({"codex": {"route": "chatgpt"}, "exclusive": "yes"}) is None
+    assert parse({"codex": {"route": "chatgpt"}, "exclusive": 1}) is None
+
+
+def test_exclusive_round_trips_through_the_cache(enterprise):
+    for value in (None, False, True):
+        raw = {"enforce": True, "claude": {"route": "bedrock", "aws": OWN_AWS},
+               **({"exclusive": value} if value is not None else {})}
+        p = parse_policy(ORG, body(raw))
+        assert p.agent_setup.exclusive is value
+        assert parse_policy(ORG, json.loads(json.dumps(p.to_json()))).agent_setup == p.agent_setup
+
+
 def test_routed_names_the_routes_an_enforced_policy_manages(no_enterprise):
     assert parse({"claude": {"route": "bedrock", "aws": OWN_AWS}}).routed is True
     assert parse({"claude": {"route": "gateway", "gateway": GATEWAY}}).routed is True

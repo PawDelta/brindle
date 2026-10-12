@@ -422,14 +422,17 @@ def test_real_panes_keep_the_federation_proxys_token_under_deny(tmp_path, monkey
 
 # -- the routes of an enforced agent_setup (model-routing phase 1) ------------------------------
 #
-# The server now writes routing to ``agent_setup`` and keeps ``provider_config``
-# as a mirror for older clients. This client prefers ``agent_setup`` when it is
-# enforced and routes an agent somewhere; else ``provider_config`` as before.
+# A phase-1 server writes routing to ``agent_setup`` (always with ``exclusive``,
+# true when it converted a ``provider_config``) and keeps ``provider_config`` as
+# a mirror for older clients. This client takes ``agent_setup`` as the managed
+# source when it carries ``exclusive`` and is enforced and routes an agent
+# somewhere (or is exclusive); else ``provider_config``, exactly as before.
 
 FOUNDRY_URL = "https://acme.services.ai.azure.com/anthropic"
 GATEWAY_URL = "https://llm.acme.internal/v1"
-ROUTED = {"enforce": True, "claude": {"route": "bedrock", "aws": {"region": "us-east-1"},
-                                      "model_ids": BEDROCK["model_ids"], "default_model": BEDROCK["model_ids"][0]},
+ROUTED = {"enforce": True, "exclusive": False,
+          "claude": {"route": "bedrock", "aws": {"region": "us-east-1"},
+                     "model_ids": BEDROCK["model_ids"], "default_model": BEDROCK["model_ids"][0]},
           "codex": {"route": "gateway", "base_url": GATEWAY_URL}}
 
 
@@ -455,11 +458,51 @@ def test_without_enforce_the_block_is_login_help_and_provider_config_applies(mon
 
 
 def test_enforce_without_a_cloud_route_manages_nothing_by_itself(monkeypatch):
-    setup = {"enforce": True, "claude": {"route": "subscription", "org_id": "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c"},
+    setup = {"enforce": True, "exclusive": False,
+             "claude": {"route": "subscription", "org_id": "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c"},
              "codex": {"route": "chatgpt"}}
     assert from_policy(monkeypatch, agent_setup=setup) is None
     m = from_policy(monkeypatch, agent_setup=setup, provider_config=BEDROCK)
     assert m.setup is None and m.config == cfg(BEDROCK)
+    # exclusive: the login routes are the routes, and every other agent is refused
+    m = from_policy(monkeypatch, agent_setup={**setup, "exclusive": True}, provider_config=BEDROCK)
+    assert m.setup is not None and m.config is None and m.exclusive
+    assert managed_models.refusal(m, profile()) is None and managed_models.refusal(m, profile("codex")) is None
+    assert "native" in managed_models.refusal(m, profile("native"))
+    assert "antigravity" in managed_models.refusal(m, profile("antigravity"))
+
+
+OLD_SERVER = {"enforce": True, "claude": {"route": "bedrock", "aws": {"region": "eu-west-1"}}}   # no "exclusive"
+
+
+def test_without_the_exclusive_key_provider_config_stays_the_managed_source(db, ws, monkeypatch):
+    """Today's production server can hold an enforced agent_setup next to an
+    independently chosen provider_config, and provider_config wins; the
+    agent_setup is login help plus the identity check. Unchanged until the
+    server migration ships (a phase-1 server always sends ``exclusive``)."""
+    m = from_policy(monkeypatch, agent_setup=OLD_SERVER, provider_config=VERTEX, deny_personal_keys=True)
+    assert m.setup is None and m.config == cfg(VERTEX) and m.deny_personal_keys
+    setup = team_policy._parse_agent_setup(OLD_SERVER)
+    assert setup.enforce and setup.routing is False
+    # refusals are provider_config's
+    why = managed_models.refusal(m, profile("codex"))
+    assert why == managed_models.refusal(managed(VERTEX, deny=True), profile("codex"))
+    assert "Codex, which can't use Google Vertex AI" in why
+    assert "away from Google Vertex AI" in managed_models.refusal(m, profile(env={"ANTHROPIC_BASE_URL": "https://x"}))
+    assert "isn't Google Vertex AI" in managed_models.refusal(m, profile("native", base_url="http://localhost:11434/v1"))
+    assert managed_models.apply_profile(m, profile(model="sonnet")).model == VERTEX["model_ids"][0]
+    # the pane env is today's layering: provider_config's, then the enforced route on top
+    monkeypatch.setattr(company_identity, "_setup", lambda: (ORG, setup))
+    monkeypatch.setattr(company_login, "stored_env", lambda: {})
+    a = Agent("w1", ws.id, "developer", "claude", None, "assign", "idle", "@0", None, time.time())
+    db.add_agent(a)
+    env = {k: v for k, v in agents.agent_env(ws, "w1", a, m).items()
+           if not k.startswith("BRINDLE_") and k != "ENABLE_TOOL_SEARCH"}
+    assert env == {**managed_models.provider_env(cfg(VERTEX), "claude"), **company_login.claude_env(ORG, setup.claude)}
+    # with no provider_config, an old-server block manages nothing by itself (as today)
+    assert from_policy(monkeypatch, agent_setup=OLD_SERVER) is None
+    m = from_policy(monkeypatch, agent_setup=OLD_SERVER, deny_personal_keys=True)
+    assert m.setup is None and m.config is None and m.deny_personal_keys
 
 
 def test_enforce_needs_the_entitlement(monkeypatch):
@@ -502,17 +545,55 @@ def test_route_env_delegates_to_the_one_env_builder():
     assert managed_models.agent_env(m, "antigravity") == {}
 
 
-def test_an_agent_with_no_managed_route_gets_no_env_and_no_refusal():
-    m = setup_managed({"enforce": True, "claude": {"route": "vertex", "gcp": {"project": "acme-project",
-                                                                             "region": "europe-west1"}}})
+VERTEX_ONLY = {"enforce": True, "exclusive": False,
+               "claude": {"route": "vertex", "gcp": {"project": "acme-project", "region": "europe-west1"}}}
+CODEX_ONLY = {"enforce": True, "exclusive": False, "codex": {"route": "azure", "base_url": AZURE["endpoint"]}}
+
+
+def test_without_exclusive_an_agent_with_no_route_runs_unmanaged():
+    """An org that set up Company agents directly keeps running Codex."""
+    m = setup_managed(VERTEX_ONLY)
+    assert not m.exclusive
     assert managed_models.agent_env(m, "codex") == {} and m.codex is None
+    assert managed_models.refusal(m, profile("codex")) is None
     assert managed_models.refusal(m, profile("codex", env={"OPENAI_BASE_URL": "https://x"})) is None
     assert managed_models.refusal(m, profile("native", base_url="http://localhost:11434/v1")) is None
     assert managed_models.refusal(m, profile("antigravity")) is None
-    m = setup_managed({"enforce": True, "codex": {"route": "azure", "base_url": AZURE["endpoint"]}})
+    m = setup_managed(CODEX_ONLY)
     assert m.claude is None and managed_models.agent_env(m, "claude") == {}
     assert managed_models.refusal(m, profile(env={"ANTHROPIC_BASE_URL": "https://proxy"})) is None
     assert managed_models.refusal(m, profile("codex", env={"OPENAI_BASE_URL": "https://x"}))
+
+
+@pytest.mark.parametrize("raw, p, words", [
+    (VERTEX_ONLY, profile("codex"), "runs Codex, which can't use Google Vertex AI"),
+    (VERTEX_ONLY, profile("codex", env={"OPENAI_BASE_URL": "https://x"}), "runs Codex, which can't use"),
+    (VERTEX_ONLY, profile("native"), "uses its own endpoint, which isn't Google Vertex AI"),
+    (VERTEX_ONLY, profile("native", base_url="http://localhost:11434/v1"), "uses its own endpoint"),
+    (VERTEX_ONLY, profile("antigravity"), "uses antigravity, which can't run on Google Vertex AI"),
+    (CODEX_ONLY, profile(), "runs Claude Code, which can't use Azure"),
+    (CODEX_ONLY, profile(env={"EDITOR": "vim"}), "runs Claude Code, which can't use Azure"),
+    (CODEX_ONLY, profile("antigravity"), "can't run on Azure"),
+    ({"enforce": True, "exclusive": True}, profile(), "can't use the routes"),
+])
+def test_with_exclusive_an_agent_with_no_route_is_refused_as_provider_config_refused_it(raw, p, words):
+    why = managed_models.refusal(setup_managed({**raw, "exclusive": True}), p)
+    assert why and words in why and f"org {ORG} manages" in why
+
+
+@pytest.mark.parametrize("raw, p", [
+    (VERTEX_ONLY, profile()), (VERTEX_ONLY, profile("shell")), (VERTEX_ONLY, profile("subagent")),
+    (CODEX_ONLY, profile("codex")), (CODEX_ONLY, profile("native")),
+    ({**VERTEX_ONLY, "codex": {"route": "chatgpt"}}, profile("codex")),    # a login route is a route
+    ({**CODEX_ONLY, "claude": {"route": "subscription", "org_id": "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c"}}, profile()),
+])
+def test_with_exclusive_an_agent_with_a_route_runs(raw, p):
+    assert managed_models.refusal(setup_managed({**raw, "exclusive": True}), p) is None
+
+
+def test_exclusive_shows_in_doctor():
+    assert "agents without a route refused" in setup_managed({**VERTEX_ONLY, "exclusive": True}).describe()
+    assert "refused" not in setup_managed(VERTEX_ONLY).describe()
 
 
 @pytest.mark.parametrize("p, words", [
@@ -545,7 +626,8 @@ def test_routed_profiles_get_the_default_model_and_the_codex_endpoint():
     assert managed_models.apply_profile(m, profile(model="anthropic.claude-haiku-4")).model == "anthropic.claude-haiku-4"
     n = managed_models.apply_profile(m, profile("native", base_url="http://localhost:11434/v1", model="llama3"))
     assert (n.base_url, n.model) == (GATEWAY_URL, "llama3")
-    unrouted = setup_managed({"enforce": True, "claude": {"route": "gateway", "gateway": {"base_url": GATEWAY_URL}}})
+    unrouted = setup_managed({"enforce": True, "exclusive": False,
+                              "claude": {"route": "gateway", "gateway": {"base_url": GATEWAY_URL}}})
     assert managed_models.apply_profile(unrouted, profile(model="sonnet")).model == "sonnet"    # no model_ids
     p = profile("native", base_url="http://localhost:11434/v1")
     assert managed_models.apply_profile(unrouted, p) is p
@@ -575,9 +657,9 @@ def migrated(pc: dict, deny: bool) -> dict:
         setup = {"claude": {"route": "foundry", "azure": {"base_url": pc["endpoint"]}, **models},
                  "codex": {"route": "azure", "base_url": pc["endpoint"]}}
     else:
-        setup = {"claude": {"route": "gateway", "gateway": {"base_url": pc["endpoint"]}, **models},
-                 "codex": {"route": "gateway", "base_url": pc["endpoint"]}}
-    return {**setup, "enforce": True, "deny_personal_keys": deny}
+        # openai-compatible: a Codex route only; Claude Code gets no route (refused, as today)
+        setup = {"codex": {"route": "gateway", "base_url": pc["endpoint"]}}
+    return {**setup, "enforce": True, "exclusive": True, "deny_personal_keys": deny}
 
 
 PROFILES = {
@@ -589,15 +671,6 @@ PROFILES = {
     "native-key": profile("native", api_key_env="OPENAI_API_KEY"),
     "shell": profile("shell"), "antigravity": profile("antigravity"),
 }
-# Where the per-agent model differs, on purpose, from one provider for every agent:
-# an agent the migrated policy gives no route isn't managed (allowed_providers keeps
-# it out), and Claude Code on a gateway is routed rather than refused.
-NATIVE = {"native-elsewhere", "native", "native-key"}
-DIVERGES = {"bedrock": {"codex", "codex-elsewhere", "antigravity", *NATIVE},
-            "vertex": {"codex", "codex-elsewhere", "antigravity", *NATIVE},
-            "azure": {"antigravity"},
-            "openai-compatible": {"claude", "claude-proxy", "claude-vertex", "claude-editor", "claude-key",
-                                  "antigravity"}}
 _ids = itertools.count()
 
 
@@ -616,37 +689,37 @@ def pane_env(db, ws, monkeypatch, m, provider):
 def test_an_old_policy_and_its_migrated_form_are_equivalent(db, ws, monkeypatch, pc, deny):
     old = from_policy(monkeypatch, provider_config=pc, deny_personal_keys=deny)
     new = from_policy(monkeypatch, agent_setup=migrated(pc, deny), provider_config=pc, deny_personal_keys=deny)
-    assert old.setup is None and new.setup is not None
+    assert old.setup is None and new.setup is not None and new.exclusive
     assert old.denied_keys == new.denied_keys
-    skip = DIVERGES[pc["provider"]]
     for provider in ("claude", "codex", "native"):
-        if provider not in skip:
-            assert pane_env(db, ws, monkeypatch, old, provider) == pane_env(db, ws, monkeypatch, new, provider), provider
+        assert pane_env(db, ws, monkeypatch, old, provider) == pane_env(db, ws, monkeypatch, new, provider), provider
     for name, p in PROFILES.items():
-        if name in skip:
-            continue
         before, after = managed_models.refusal(old, p), managed_models.refusal(new, p)
         assert (before is None) == (after is None), (name, before, after)
+        if before is not None:
+            assert before == after, name
         launched = managed_models.apply_profile(new, p)
         if p.provider == "claude" and pc["model_ids"]:
             assert launched.model == managed_models.apply_profile(old, p).model == pc["model_ids"][0]
-        if p.provider == "native" and name not in skip:
+        if p.provider == "native" and before is None:
             assert launched.base_url == managed_models.apply_profile(old, p).base_url
 
 
-def test_where_the_migrated_form_diverges_it_is_the_per_agent_model(db, ws, monkeypatch):
-    old = from_policy(monkeypatch, provider_config=BEDROCK)
-    new = from_policy(monkeypatch, agent_setup=migrated(BEDROCK, False), provider_config=BEDROCK)
-    assert managed_models.refusal(old, PROFILES["codex"]) and managed_models.refusal(new, PROFILES["codex"]) is None
-    assert managed_models.refusal(old, PROFILES["antigravity"]) and managed_models.refusal(new, PROFILES["antigravity"]) is None
-    assert pane_env(db, ws, monkeypatch, new, "codex") == pane_env(db, ws, monkeypatch, old, "codex") == {}
-    assert managed_models.refusal(old, PROFILES["native"]) and managed_models.refusal(new, PROFILES["native"]) is None
+def test_the_migrated_openai_compatible_policy_still_refuses_claude_code(db, ws, monkeypatch):
     old = from_policy(monkeypatch, provider_config=COMPAT)
     new = from_policy(monkeypatch, agent_setup=migrated(COMPAT, False), provider_config=COMPAT)
-    assert managed_models.refusal(old, PROFILES["claude"]) and managed_models.refusal(new, PROFILES["claude"]) is None
-    assert pane_env(db, ws, monkeypatch, new, "claude")["ANTHROPIC_BASE_URL"] == COMPAT["endpoint"]
-    assert "ANTHROPIC_BASE_URL" not in pane_env(db, ws, monkeypatch, old, "claude")
-    # a native profile follows the Codex endpoint but keeps its own model (Codex has no model ids)
+    assert new.setup.claude is None and new.codex.route == "gateway"
+    why = managed_models.refusal(new, PROFILES["claude"])
+    assert why == managed_models.refusal(old, PROFILES["claude"])
+    assert "runs Claude Code, which can't use an OpenAI-compatible endpoint" in why
+    assert pane_env(db, ws, monkeypatch, new, "claude") == pane_env(db, ws, monkeypatch, old, "claude")
+    assert "ANTHROPIC_BASE_URL" not in pane_env(db, ws, monkeypatch, new, "claude")
+    assert pane_env(db, ws, monkeypatch, new, "codex") == {"OPENAI_BASE_URL": COMPAT["endpoint"]}
+
+
+def test_a_native_profile_keeps_its_model_under_the_migrated_form(monkeypatch):
+    """The one known difference: Codex routes carry no model ids, so a native
+    profile follows the endpoint but isn't moved onto provider_config's first id."""
     old = from_policy(monkeypatch, provider_config=AZURE)
     new = from_policy(monkeypatch, agent_setup=migrated(AZURE, False), provider_config=AZURE)
     before, after = (managed_models.apply_profile(m, profile("native", model="llama3")) for m in (old, new))
@@ -657,7 +730,7 @@ def test_where_the_migrated_form_diverges_it_is_the_per_agent_model(db, ws, monk
 def test_the_enforced_route_is_the_top_env_layer_and_login_help_the_lowest(db, ws, monkeypatch):
     from types import SimpleNamespace
 
-    raw = {"claude": {"route": "bedrock", "aws": {"region": "eu-west-1"}}}
+    raw = {"exclusive": False, "claude": {"route": "bedrock", "aws": {"region": "eu-west-1"}}}
     monkeypatch.setattr(agents, "load_profile",
                         lambda name, root=None: SimpleNamespace(env={"AWS_REGION": "us-east-1", "EDITOR": "vi"},
                                                                 tool_search=None))

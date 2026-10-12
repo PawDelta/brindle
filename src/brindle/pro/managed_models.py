@@ -124,9 +124,16 @@ class Managed:
             parts.append("Claude on " + _describe_claude(self.claude))
         if self.codex is not None:
             parts.append(f"Codex on {CODEX_ROUTE_NAMES[self.codex.route]} ({self.codex.base_url})")
+        if self.exclusive:
+            parts.append("agents without a route refused")
         if self.deny_personal_keys:
             parts.append("personal API keys denied")
         return f"org {self.org_id}: " + "; ".join(parts)
+
+    @property
+    def exclusive(self) -> bool:
+        """Whether an agent the org's routing gives no route is refused."""
+        return bool(self.setup is not None and self.setup.exclusive)
 
 
 def _describe_claude(c) -> str:
@@ -149,8 +156,12 @@ def _describe_claude(c) -> str:
 def current(repo_root: str | None) -> Managed | None:
     """The managed-models settings that apply, None when there are none (the
     feature isn't entitled, no team org, or the org set nothing managed).
-    From ``agent_setup`` when it is enforced and routes an agent somewhere
-    (``AgentSetup.routed``), else from ``provider_config`` (older servers).
+    From ``agent_setup`` when it is the org's routing (``AgentSetup.routing``:
+    the block carries ``exclusive``, as a phase-1 server always sends it) and
+    is enforced and either routes an agent somewhere (``routed``) or is
+    exclusive; else from ``provider_config``, exactly as before: a server
+    older than that can hold both, and its ``provider_config`` wins while
+    its ``agent_setup`` is login help and the identity check only.
     ``deny_personal_keys`` from ``agent_setup`` when set there, else the
     policy's top-level field. Raises :class:`ManagedUnavailable` when they
     apply but can't be read."""
@@ -166,7 +177,7 @@ def current(repo_root: str | None) -> Managed | None:
         raise ManagedUnavailable(p.reason)
     s = p.agent_setup
     deny = p.deny_personal_keys if s is None or s.deny_personal_keys is None else s.deny_personal_keys
-    if s is not None and s.enforce and s.routed:
+    if s is not None and s.routing and s.enforce and (s.routed or s.exclusive):
         return Managed(p.org_id, None, deny, setup=s)
     if p.provider_config is None and not deny:
         return None
@@ -260,15 +271,17 @@ def refusal(m: Managed, profile) -> str | None:
 
 def _route_refusal(m: Managed, profile, who: str) -> str | None:
     """:func:`refusal` under an enforced ``agent_setup``: an agent whose route
-    the org set may not be pointed elsewhere by its profile; one with no
-    managed route isn't the org's to manage here."""
+    the org set may not be pointed elsewhere by its profile. One the block
+    gives no route is refused when the routing is ``exclusive`` (as
+    ``provider_config`` refused every agent it couldn't serve), else it isn't
+    the org's to manage here."""
     provider = profile.provider
     if provider == "claude" and m.claude is not None:
         where = CLAUDE_ROUTE_NAMES[m.claude.route]
     elif provider in ("codex", "native") and m.codex is not None:
         where = CODEX_ROUTE_NAMES[m.codex.route]
     else:
-        return None
+        return _exclusive_refusal(m, profile, who) if m.exclusive else None
     if provider == "native":
         # brindle's own OpenAI-compatible loop follows the Codex endpoint, as
         # it followed an azure / openai-compatible provider_config.
@@ -282,6 +295,33 @@ def _route_refusal(m: Managed, profile, who: str) -> str | None:
         return (f"{who} sets {', '.join(elsewhere)}, pointing it away from {where}, the "
                 f"provider org {m.org_id} manages; remove it from the profile")
     return None
+
+
+def _exclusive_refusal(m: Managed, profile, who: str) -> str | None:
+    """Under exclusive routing, why an agent the org gave no route may not
+    run: the messages ``provider_config`` gives for an agent it can't serve.
+    An agent with a login route (a Claude org, Codex on ChatGPT or a key)
+    has its route and runs on it."""
+    s = m.setup
+    provider = profile.provider
+    if provider == "claude" and s.claude is not None:
+        return None
+    if provider == "codex" and s.codex is not None:
+        return None
+    where = (CLAUDE_ROUTE_NAMES[m.claude.route] if m.claude is not None
+             else CODEX_ROUTE_NAMES[m.codex.route] if m.codex is not None
+             else "the routes")
+    if provider == "claude":
+        return (f"{who} runs Claude Code, which can't use {where}, the provider org {m.org_id} "
+                "manages; use a native or Codex profile")
+    if provider == "codex":
+        return (f"{who} runs Codex, which can't use {where}, the provider org {m.org_id} "
+                "manages; use a Claude Code profile")
+    if provider == "native":
+        return (f"{who} uses its own endpoint, which isn't {where}, the provider org "
+                f"{m.org_id} manages; use a Claude Code profile")
+    return (f"{who} uses {provider}, which can't run on {where}, the provider org "
+            f"{m.org_id} manages")
 
 
 def apply_profile(m: Managed | None, profile):
