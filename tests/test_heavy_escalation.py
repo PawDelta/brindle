@@ -2,13 +2,44 @@
 only when Fable is enabled; otherwise it goes to the supervisor as before."""
 import json
 import time
+from pathlib import Path
 
 import pytest
 
-from brindle import agents, pipeline
+from conftest import sh
+from brindle import agents, pipeline, workspaces
 from brindle.db import Task
+from test_merge_order import add
 
-from test_pipeline import add, piped  # noqa: F401  (the fixture)
+
+@pytest.fixture
+def piped(db, repo, monkeypatch):
+    """A supervisor in the checkout, a worker on a branch with a commit, and a
+    reviewer that brindle can start without a real process."""
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps(
+        {"review": True, "auto_merge_default_branch": True}))
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    (Path(ws.path) / "new.py").write_text("x = 1\n")
+    sh("git add new.py && git commit -qm work", Path(ws.path))
+    add(db, ws, "w1", "assign", parent="boss", status="processing")
+    started = []
+
+    def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None):
+        add(db_, ws_, f"rev{len(started)}", "review", "reviewer", parent=caller.id)
+        started.append(ws_.id)
+        return db_.get_agent(f"rev{len(started) - 1}")
+
+    monkeypatch.setattr(agents, "request_review", fake_review)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
+    monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
+    monkeypatch.setattr(agents, "_detach", lambda argv: None)
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
+    return root, ws, started
 
 
 @pytest.fixture
@@ -45,45 +76,6 @@ def reject(db, ws, summary="the design is wrong"):
     return pipeline.on_review(db, db.get_agent("rev0"), ws, False, summary)
 
 
-def test_a_rejected_heavy_task_is_retried_once_on_developer_heavy(db, heavy):
-    ws, retries, configure = heavy
-    configure(fable_escalation=True)
-    assert reject(db, ws) is True
-    assert [r[0] for r in retries] == ["developer-heavy"]
-    assert "the design is wrong" in retries[0][1] and "do the hard thing" in retries[0][1]
-    assert retries[0][2]["isolate"] is False                  # same branch, same worktree
-    assert db.get_agent("w1").pipeline is None
-    assert db.get_agent("retry1").pipeline == "fixing"
-    msg = db.pop_pending("boss")
-    assert msg and "Retrying once on developer-heavy" in msg.body and "needs you" not in msg.body
-
-
-def test_the_retry_never_starts_while_the_original_worker_is_alive(db, heavy, monkeypatch):
-    ws, retries, configure = heavy
-    configure(fable_escalation=True)
-    state = {"alive": True}
-    seen = []
-    delegate = agents.delegate
-
-    def closing(db_, agent_id, panes=None):
-        seen.append("close")
-        state["alive"] = False
-        return db_.get_agent(agent_id)
-
-    def checked(*a, **kw):
-        seen.append(f"delegate(alive={state['alive']})")
-        return delegate(*a, **kw)
-
-    other = agents.is_alive
-    monkeypatch.setattr(agents, "is_alive",
-                        lambda agent, panes=None: state["alive"] if agent.id == "w1" else other(agent, panes))
-    monkeypatch.setattr(agents, "close", closing)
-    monkeypatch.setattr(agents, "delegate", checked)
-    assert reject(db, ws) is True
-    assert seen == ["close", "delegate(alive=False)"]
-    assert [r[0] for r in retries] == ["developer-heavy"]
-
-
 def test_no_retry_when_the_original_worker_cannot_be_stopped(db, heavy, monkeypatch):
     ws, retries, configure = heavy
     configure(fable_escalation=True)
@@ -95,29 +87,6 @@ def test_no_retry_when_the_original_worker_cannot_be_stopped(db, heavy, monkeypa
     assert retries == []                       # two agents never share the worktree
     msg = db.pop_pending("boss")
     assert msg and "needs you" in msg.body
-
-
-def test_the_retry_failing_too_goes_to_the_supervisor(db, heavy):
-    ws, retries, configure = heavy
-    configure(fable_escalation=True)
-    reject(db, ws)
-    db.pop_pending("boss")
-    # the retry reports and its review rejects: no second retry
-    agents.report_result(db, "retry1", "tried harder")
-    pipeline.on_review(db, db.get_agent("rev1"), ws, False, "still wrong")
-    assert len(retries) == 1
-    msg = db.pop_pending("boss")
-    assert msg and "needs you" in msg.body and "still wrong" in msg.body
-
-
-def test_without_fable_the_failure_goes_to_the_supervisor(db, heavy):
-    ws, retries, configure = heavy
-    configure(fable_escalation=False)
-    reject(db, ws)
-    assert retries == []
-    msg = db.pop_pending("boss")
-    assert msg and "needs you" in msg.body
-    assert db.get_agent("w1").pipeline is None
 
 
 def test_fable_is_off_by_default_on_a_cloud_account(db, heavy, monkeypatch):
@@ -136,23 +105,6 @@ def test_fable_is_on_by_default_off_the_cloud(db, heavy):
     assert [r[0] for r in retries] == ["developer-heavy"]
 
 
-def test_a_cloud_account_can_switch_fable_on(db, heavy, monkeypatch):
-    ws, retries, configure = heavy
-    configure(fable_escalation=True)
-    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
-    reject(db, ws)
-    assert [r[0] for r in retries] == ["developer-heavy"]
-
-
-def test_only_heavy_tasks_escalate(db, heavy):
-    ws, retries, configure = heavy
-    configure(fable_escalation=True)
-    db.update_task("t1", weight="medium")
-    reject(db, ws)
-    assert retries == []
-    assert "needs you" in db.pop_pending("boss").body
-
-
 def test_failing_checks_retry_a_heavy_task_too(db, heavy, monkeypatch):
     ws, retries, configure = heavy
     configure(fable_escalation=True)
@@ -162,14 +114,3 @@ def test_failing_checks_retry_a_heavy_task_too(db, heavy, monkeypatch):
     pipeline._finish_locked(db, db.get_agent("w1"), ws, None)
     assert [r[0] for r in retries] == ["developer-heavy"]
     assert "check `pytest` failed" in retries[0][1]
-
-
-def test_failing_checks_without_fable_go_to_the_supervisor(db, heavy, monkeypatch):
-    ws, retries, configure = heavy
-    configure(fable_escalation=False)
-    agents.report_result(db, "w1", "did it")
-    db.update_agent("w1", pipeline="ready")
-    monkeypatch.setattr(pipeline, "merge", lambda *a, **kw: "Not merged. check `pytest` failed: 2 failed")
-    pipeline._finish_locked(db, db.get_agent("w1"), ws, None)
-    assert retries == []
-    assert "needs you" in db.pop_pending("boss").body

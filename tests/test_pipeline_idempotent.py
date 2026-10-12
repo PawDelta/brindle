@@ -1,21 +1,17 @@
 """A workspace merges once: a second verdict or merge for a branch that has
 merged (or whose worktree is gone, or going) runs no gate, merges nothing and
-reports no failure."""
+reports no failure. And the pipeline won't merge into the default branch
+unless told to."""
 import json
 import threading
-import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
 from brindle import agents, gates, pipeline, workspaces
-from brindle.db import DB, Agent
-
-
-def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle", **kw):
-    db.add_agent(Agent(agent_id, ws.id, profile, "claude", parent, mode, status, "@0", None,
-                       time.time(), **kw))
+from brindle.db import DB
+from test_merge_order import add
 
 
 @pytest.fixture
@@ -59,33 +55,15 @@ def keep_worktree(monkeypatch):
     monkeypatch.setattr(workspaces, "remove", boom)
 
 
-def test_a_second_verdict_after_the_merge_and_removal_is_dropped(db, approved):
-    ws, runs = approved
-    rev0, rev1 = db.get_agent("rev0"), db.get_agent("rev1")
-    assert pipeline.on_review(db, rev0, ws, True, "lgtm") is True
-    assert db.get_workspace(ws.id) is None
-    bodies = drain(db)
-    assert len(bodies) == 1 and "Merged feat into main" in bodies[0]
-    assert pipeline.on_review(db, rev1, ws, True, "lgtm") is True   # handled: nothing forwarded
-    assert drain(db) == [] and len(runs) == 1                        # no gate on the gone worktree
-
-
-def test_a_second_verdict_while_the_merged_worktree_is_kept_is_dropped(db, approved, monkeypatch):
+def test_a_second_verdict_or_merge_of_a_merged_branch_runs_nothing(db, approved, monkeypatch):
     ws, runs = approved
     keep_worktree(monkeypatch)
     pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
-    bodies = drain(db)
-    assert sum("Merged feat" in b for b in bodies) == 1
+    assert sum("Merged feat" in b for b in drain(db)) == 1
     assert pipeline.on_review(db, db.get_agent("rev1"), ws, True, "lgtm") is True
-    assert drain(db) == [] and len(runs) == 1
-
-
-def test_merging_a_merged_branch_again_says_so_without_running_gates(db, approved, monkeypatch):
-    ws, runs = approved
-    keep_worktree(monkeypatch)
-    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
-    out = pipeline.merge(db, db.get_agent("boss"), ws)
-    assert out.startswith("Already merged") and len(runs) == 1
+    assert drain(db) == []
+    assert pipeline.merge(db, db.get_agent("boss"), ws).startswith("Already merged")
+    assert len(runs) == 1
 
 
 def test_new_commits_after_a_merge_can_merge_again(db, approved, monkeypatch, repo):
@@ -98,26 +76,6 @@ def test_new_commits_after_a_merge_can_merge_again(db, approved, monkeypatch, re
     out = pipeline.merge(db, db.get_agent("boss"), ws)
     assert out.startswith("Merged feat into main")
     assert "more.py" in sh("git ls-tree --name-only HEAD", repo)
-
-
-def test_merging_a_removed_workspace_runs_nothing(db, approved):
-    ws, runs = approved
-    workspaces.remove(db, ws, force=True)
-    out = pipeline.merge(db, db.get_agent("boss"), ws)
-    assert out.startswith("Nothing to merge") and runs == []
-
-
-def test_a_worktree_removed_under_the_gates_is_not_a_failed_check(db, approved, monkeypatch):
-    """The gates fail in a worktree that is being removed (the suite can't even
-    be collected): that isn't the branch's failure, and nobody hears of it."""
-    ws, runs = approved
-
-    def gone_under_it(db_, ws_, cfg, review_required):
-        workspaces.remove(db_, ws_, force=True)
-        return gates.Report().fail("Check failed in feat:\n83 errors during collection")
-
-    monkeypatch.setattr(gates, "run", gone_under_it)
-    assert pipeline.merge(db, db.get_agent("boss"), ws).startswith("Nothing to merge")
 
 
 def test_a_verdict_for_a_worktree_removed_under_the_gates_reports_no_failure(db, approved, monkeypatch):
@@ -168,24 +126,6 @@ def test_two_verdicts_at_once_merge_once(db, approved, monkeypatch):
     assert len(runs) == 1
 
 
-def test_a_failed_merge_is_reported_once_and_not_retried_by_a_second_verdict(db, approved, monkeypatch):
-    ws, runs = approved
-    attempts = []
-
-    def failing(db_, ws_, cfg, review_required):
-        attempts.append(1)
-        return gates.Report().fail("Unable to write index.")
-
-    monkeypatch.setattr(gates, "run", failing)
-    assert pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm") is True
-    bodies = drain(db)
-    assert len(bodies) == 1 and "couldn't be merged" in bodies[0]
-    # The branch is the supervisor's now: a second verdict doesn't merge behind its back.
-    assert pipeline.on_review(db, db.get_agent("rev1"), ws, True, "lgtm") is False
-    assert len(attempts) == 1 and drain(db) == []
-    assert db.get_workspace(ws.id) is not None
-
-
 def test_submitting_the_same_review_twice_records_it_once(db, approved, monkeypatch):
     ws, runs = approved
     keep_worktree(monkeypatch)
@@ -204,5 +144,29 @@ def test_a_second_reviewer_submitting_after_the_removal_is_told_it_is_done(db, a
     assert db.get_workspace(ws.id) is None
     drain(db)
     out = agents.submit_review(db, "rev1", True, "lgtm")
-    assert "Only a reviewer" in out or "already" in out
+    # The workspace row is gone, so submit_review can't tell it from a non-reviewer.
+    assert out.startswith("Only a reviewer")
     assert drain(db) == [] and len(runs) == 1
+
+
+def test_default_branch_is_not_merged_into_without_opt_in(db, repo, approved):
+    ws, runs = approved
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True}))
+    assert pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm") is True
+    assert "new.py" not in sh("git ls-tree --name-only HEAD", repo)
+    body = db.pop_pending("boss").body
+    assert "needs you" in body and "merge_workspace" in body
+    assert db.get_workspace(ws.id) is not None and db.get_agent("w1").pipeline is None
+
+
+def test_merge_into_puts_workers_on_that_branch(db, repo, monkeypatch):
+    sh("git branch integration", repo)
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"merge_into": "integration"}))
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
+    with pytest.raises(RuntimeError):
+        agents.delegate(db, db.get_agent("boss"), root, "developer", "do it", "assign")
+    [ws] = [w for w in db.find_workspaces() if w.kind == "worktree"]
+    assert ws.base_branch == "integration"

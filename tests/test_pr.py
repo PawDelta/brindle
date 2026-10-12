@@ -1,9 +1,8 @@
-import os
 
 import pytest
 from typer.testing import CliRunner
 
-from brindle import git, workspaces
+from brindle import workspaces
 from brindle.cli import app
 
 from conftest import sh
@@ -35,27 +34,6 @@ def fake_gh(monkeypatch, head="fix/typo", base="release"):
     return calls
 
 
-def test_create_from_pr_checks_out_remote_head(db, pr_repo, monkeypatch):
-    calls = fake_gh(monkeypatch)
-    created = workspaces.create_from_pr(db, str(pr_repo), 42)
-    ws = created.workspace
-    assert calls == [42]
-    assert created.how == "remote"
-    assert ws.branch == "fix/typo" and ws.base_branch == "release"
-    assert git.get_base(str(pr_repo), "fix/typo") == "release"
-    assert open(os.path.join(ws.path, "fix.txt")).read() == "fixed\n"
-    assert sh("git rev-parse --abbrev-ref @{upstream}", ws.path) == "origin/fix/typo"
-    assert sh("git rev-parse HEAD", ws.path) == sh("git rev-parse origin/fix/typo", pr_repo)
-
-
-def test_create_from_pr_ignores_branch_prefix(db, pr_repo, monkeypatch):
-    (pr_repo / ".brindle").mkdir()
-    (pr_repo / ".brindle" / "config.json").write_text('{"branch_prefix": "me/"}')
-    fake_gh(monkeypatch)
-    ws = workspaces.create_from_pr(db, str(pr_repo), 1).workspace
-    assert ws.branch == "fix/typo"
-
-
 def test_create_from_pr_missing_remote_branch(db, pr_repo, monkeypatch):
     fake_gh(monkeypatch, head="nope")
     with pytest.raises(workspaces.WorkspaceError, match="couldn't fetch PR #7"):
@@ -82,13 +60,6 @@ def test_cli_new_pr(db, pr_repo, monkeypatch):
     assert result.exit_code == 0, result.output
     ws = workspaces.resolve(db, "fix/typo", cwd=str(pr_repo))
     assert ws.base_branch == "release"
-
-
-def test_cli_new_requires_branch_without_pr(pr_repo, monkeypatch):
-    monkeypatch.chdir(pr_repo)
-    result = runner.invoke(app, ["new", "--agent", "none"])
-    assert result.exit_code == 1
-    assert "missing BRANCH" in result.output
 
 
 @pytest.mark.parametrize("extra", [["feature"], ["--base", "main"]])

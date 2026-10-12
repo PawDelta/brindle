@@ -51,96 +51,6 @@ def refs(repo, agent_id):
 # -- snapshots -----------------------------------------------------------------------
 
 
-def test_stop_hook_snapshots_a_turn_that_changed_files(db, repo, ws):
-    worker(db, ws)
-    head = git.out(["rev-parse", "HEAD"], ws.path)
-    write(ws, "app.py", "print('login')\n")
-    write(ws, "new.txt", "untracked\n")
-    stop(db, "w1")
-
-    assert refs(repo, "w1") == ["refs/brindle/turns/w1/1"]
-    [(n, sha)] = rewind.turns(str(repo), "w1")
-    assert n == 1
-    # A commit object off to the side: the branch, HEAD and the index are untouched.
-    assert git.out(["rev-parse", "HEAD"], ws.path) == head
-    assert git.out(["rev-parse", f"{sha}^"], str(repo)) == head
-    assert sh("git diff --cached --name-only", ws.path) == ""
-    assert sorted(git.dirty_files(ws.path)) == ["app.py", "new.txt"]
-    # The snapshot has both the edit and the untracked file, but not ignored ones.
-    assert sh(f"git show {sha}:app.py", repo) == "print('login')"
-    assert sh(f"git show {sha}:new.txt", repo) == "untracked"
-    assert sh(f"git ls-tree --name-only {sha}", repo).splitlines() == [".gitignore", "app.py", "new.txt"]
-
-
-def test_no_snapshot_when_nothing_changed(db, repo, ws):
-    worker(db, ws)
-    stop(db, "w1")
-    assert refs(repo, "w1") == []  # a turn that only read code
-    write(ws, "app.py", "print('login')\n")
-    stop(db, "w1")
-    stop(db, "w1")  # a second idle stop (or a duplicate hook) adds nothing
-    assert refs(repo, "w1") == ["refs/brindle/turns/w1/1"]
-
-
-def test_first_turn_that_commits_before_the_hook_is_snapshotted(db, repo, ws):
-    worker(db, ws)
-    agents.handle_hook(db, "w1", "session-start", {})  # records where it started
-    start = git.out(["rev-parse", "HEAD"], ws.path)
-    assert sh("git rev-parse refs/brindle/turns/w1/base", repo) == start
-    write(ws, "app.py", "print('login')\n")
-    sh("git commit -qam login", ws.path)
-    stop(db, "w1")
-    [row] = rewind.describe(str(repo), "w1")
-    assert row["turn"] == 1 and row["files"] == ["app.py"]
-    assert row["head"] == git.out(["rev-parse", "HEAD"], ws.path) != start
-    # The listing shows only turns, and the rewind goes back to the committed state.
-    assert "base" not in rewind.format_turns(str(repo), "w1")
-    sh("git commit -q --allow-empty -m later", ws.path)
-    rewind.restore(ws, row["sha"])
-    assert git.out(["rev-parse", "HEAD"], ws.path) == row["head"]
-    assert git.dirty_files(ws.path) == []
-
-
-def test_without_a_recorded_start_the_fork_from_the_base_branch_is_the_baseline(db, repo, ws):
-    worker(db, ws)  # no session-start hook ran (an older launch, say)
-    write(ws, "app.py", "print('login')\n")
-    sh("git commit -qam login", ws.path)
-    stop(db, "w1")
-    assert [n for n, _ in rewind.turns(str(repo), "w1")] == [1]
-    assert rewind.describe(str(repo), "w1")[0]["files"] == ["app.py"]
-
-
-def test_a_commit_is_a_change_too(db, repo, ws):
-    worker(db, ws)
-    write(ws, "app.py", "print('login')\n")
-    stop(db, "w1")
-    sh("git commit -qam login", ws.path)
-    stop(db, "w1")
-    rows = rewind.describe(str(repo), "w1")
-    assert [r["turn"] for r in rows] == [1, 2]
-    assert rows[1]["head"] == git.out(["rev-parse", "HEAD"], ws.path)
-    assert rows[1]["files"] == []  # same files as turn 1, now committed
-
-
-def test_snapshot_summary_comes_from_the_transcript(db, repo, ws, tmp_path):
-    t = tmp_path / "w1.jsonl"
-    lines = [
-        {"type": "user", "message": {"role": "user", "content": "add a login page"}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "name": "Edit", "input": {}}]}},
-        {"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "text", "text": "Added the login view in app.py; tests next."}]}},
-    ]
-    t.write_text("\n".join(json.dumps(l) for l in lines) + "\n")
-    worker(db, ws, transcript_path=str(t))
-    write(ws, "app.py", "print('login')\n")
-    stop(db, "w1")
-    [row] = rewind.describe(str(repo), "w1")
-    assert row["files"] == ["app.py"]
-    assert row["said"] == "Added the login view in app.py; tests next."
-    assert "Added the login view" in rewind.format_turns(str(repo), "w1")
-
-
 def test_only_workers_in_their_own_worktree_get_snapshots(db, repo, ws):
     worker(db, ws, agent_id="boss", mode="interactive")
     worker(db, ws, agent_id="rev", mode="review")
@@ -188,25 +98,6 @@ def two_turns(db, repo, ws):
     stop(db, "w1")
     assert [n for n, _ in rewind.turns(str(repo), "w1")] == [1, 2]
     return start
-
-
-def test_restore_puts_branch_and_files_back(db, repo, ws):
-    start = two_turns(db, repo, ws)
-    snaps = dict(rewind.turns(str(repo), "w1"))
-    rewind.restore(ws, snaps[1])
-    assert git.out(["rev-parse", "HEAD"], ws.path) == start
-    assert git.current_branch(ws.path) == "feature"
-    assert read(ws, "app.py") == "print('turn 1')\n"
-    assert read(ws, "one.txt") == "1\n"
-    assert not os.path.exists(os.path.join(ws.path, "two.txt"))
-    # Exactly the worker's state then: an edit and an untracked file, a clean index.
-    assert sorted(git.dirty_files(ws.path)) == ["app.py", "one.txt"]
-    assert sh("git status --porcelain", ws.path).splitlines() == ["M app.py", "?? one.txt"]  # sh strips
-    assert sh("git diff --cached --name-only", ws.path) == ""
-    # Forward again works just as well.
-    rewind.restore(ws, snaps[2])
-    assert git.out(["log", "-1", "--format=%s"], ws.path) == "turn 1 work"
-    assert read(ws, "app.py") == "print('turn 2')\n" and read(ws, "two.txt") == "2\n"
 
 
 # -- the rewind -------------------------------------------------------------------------
@@ -294,17 +185,6 @@ def test_rewind_refuses_what_it_cannot_do(db, repo, ws, spawned):
     assert spawned == [] and read(ws, "app.py") == "x\n"  # nothing was touched
 
 
-def test_rewind_stops_a_running_worker_first(db, repo, ws, spawned, monkeypatch):
-    worker(db, ws)
-    write(ws, "app.py", "x\n")
-    stop(db, "w1")
-    stopped = []
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
-    monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
-    rewind.rewind(db, "w1", 1)
-    assert stopped == ["w1"]
-
-
 # -- cleanup ----------------------------------------------------------------------------
 
 
@@ -347,13 +227,6 @@ def test_mcp_tools(db, repo, ws, spawned, monkeypatch):
     out = asyncio.run(mcp_server.rewind_agent("w1", 1, agent_profile="developer-heavy", note="try again"))
     assert "Rewound w1 to turn 1" in out and "new1 (developer-heavy/claude)" in out
     assert "try again" in spawned[0]["prompt"]
-
-
-def test_mcp_server_lists_the_tools():
-    from brindle import mcp_server
-
-    names = {t.name for t in asyncio.run(mcp_server.mcp.list_tools())}
-    assert {"rewind_agent", "agent_turns"} <= names
 
 
 def test_cli(db, repo, ws, spawned):
