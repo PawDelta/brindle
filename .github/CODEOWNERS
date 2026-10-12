@@ -9,3 +9,8 @@
 /SCHEDULE-A              @hmlerner
 /CLA.md                  @hmlerner
 /src/brindle/pro/        @hmlerner
+# The test-suite gates: raising the test budget, grandfathering a finding or
+# changing who can waive the new-test check is a decision for a person.
+/scripts/check_test_quality.py      @hmlerner
+/scripts/check_new_tests.py         @hmlerner
+/scripts/test_quality_baseline.json @hmlerner
