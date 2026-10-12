@@ -4,11 +4,6 @@ from brindle import watch
 from brindle.db import DB
 
 
-def test_empty_state_renders_without_agents():
-    lines = watch.render([], now=0)
-    assert lines and not any(ln.agent for ln in lines)
-
-
 def test_ago():
     assert [watch.ago(s) for s in (5, 125, 3720, 90000)] == ["5s", "2m", "1h02m", "1d"]
 

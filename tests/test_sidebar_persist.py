@@ -309,6 +309,7 @@ def test_second_supervisor_in_the_same_repo_gets_its_own_sidebar(db, tmp_path):
 
 
 @pytest.mark.serial
+@pytest.mark.variant("incident: a reused pane id must never be killed as the sidebar")
 def test_pause_never_kills_an_untagged_pane_it_mistakes_for_the_sidebar(db, tmp_path):
     """A stale DB row can point at a pane id tmux has since reused for
     something else entirely (a tmux server restart starts pane ids over).
@@ -355,6 +356,7 @@ def test_follow_skips_a_paused_root(db, tmp_path, session):
 
 
 @pytest.mark.serial
+@pytest.mark.variant("incident: tmux 3.7 answers nothing for a bare =name target")
 def test_session_attached_reads_a_real_tmux_session(tmp_path, monkeypatch):
     """session_attached's own tmux call answers "0" for a detached session,
     not nothing: tmux 3.7 prints nothing for display-message on a bare
