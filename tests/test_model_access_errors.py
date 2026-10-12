@@ -144,6 +144,10 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
         monkeypatch.setattr(agents, name, lambda *a, **kw: True)
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, sender_id=None: sent.append((to, body)))
+    from brindle.pro import route_health
+    monkeypatch.setattr(agents, "route_context", lambda db_, a, ws_: ("bedrock", "claude-opus-5-5"))
+    monkeypatch.setattr(route_health, "reporting", lambda: True)
+    route_health.reset()
     done = cull.note_model_refused(db, time.time(), {})
     assert len(done) == 2
     refused_msg = next(b for _t, b in sent if "w1" in b)
@@ -153,6 +157,9 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     assert model_access.refused("developer-heavy").key == "bedrock_endpoint"
     sent.clear()
     assert cull.note_model_refused(db, time.time(), {}) == [] and sent == []   # told once
+    # ... and the 404 counts toward route health once, as a code, not the error line
+    assert route_health.pending() == {(ws.repo_root, "claude", "bedrock", "claude-opus-5-5", "provider_404"): 1}
+    route_health.reset()
 
 
 def test_the_ci_doctor_model_check_names_each_refusal(repo, monkeypatch):

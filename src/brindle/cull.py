@@ -45,6 +45,7 @@ import time
 from brindle import agents, git, procs, tmux
 from brindle.config import brindle_home, load_repo_config, worktrees_dir
 from brindle.db import DB, Agent, Workspace
+from brindle.pro import route_health
 
 # An agent this new may not have its window recorded yet.
 LAUNCH_GRACE = 60.0
@@ -324,6 +325,10 @@ def note_model_refused(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             routing = load_repo_config(ws.repo_root).routing if ws else {}
         except ValueError:
             routing = {}
+        refused = route_health.provider_outcome(error)     # the status code only, never the text
+        if refused and ws and model_access.first_time(f"route:{a.id}:{refused}"):
+            route, model = agents.route_context(db, a, ws)
+            route_health.record(ws.repo_root, agent=a.provider, route=route, model=model, outcome=refused)
         if model_access.classify(error) and model_access.first_time(f"refused:{a.id}"):
             swapped = model_access.swap(routing, _task_weight(db, a, ws), a.profile, error,
                                       repo_root=ws.repo_root if ws else None)

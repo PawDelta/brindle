@@ -543,24 +543,38 @@ def checks() -> list:
     return out
 
 
-def launch_problem(provider: str) -> str | None:
-    """Why ``provider``'s agents must not start: the org policy enforces its
-    company identity (Enterprise) and this machine's differs. None when it
-    doesn't enforce, the identity matches, or it can't be determined."""
+def launch_check(provider: str) -> tuple[str | None, str | None, str | None]:
+    """The launch identity check for ``provider``: (why its agents must not
+    start, the outcome, the policy's route). The problem is set when the org
+    policy enforces its company identity (Enterprise) and this machine's
+    differs. The outcome is ``identity_match``, ``identity_mismatch`` or
+    ``identity_undetermined`` (what route health reports); None, with no
+    route, when nothing was checked: the policy doesn't enforce, is missing
+    or can't be read."""
     if provider != "claude":
-        return None
+        return None, None, None
     try:
         got = _setup()
         if got is None or not got[1].enforce or got[1].claude is None:
-            return None
+            return None, None, None
+        route = got[1].claude.route
         key = _launch_key(got[0], got[1].claude)
         if key and _launch_cache_hit(key):
-            return None
+            return None, "identity_match", route
         ident = claude_identity(got[0], got[1].claude, cache=False)
         if key and ident.problem is None and ident.determined:
             _remember_launch(key)
     except Exception:  # noqa: BLE001 - an unreadable identity never blocks a launch
-        return None
-    if ident.problem is None or not ident.determined:
-        return None
-    return f"the org policy requires the company sign-in: {ident.problem}"
+        return None, None, None
+    if not ident.determined:
+        return None, "identity_undetermined", route
+    if ident.problem is None:
+        return None, "identity_match", route
+    return f"the org policy requires the company sign-in: {ident.problem}", "identity_mismatch", route
+
+
+def launch_problem(provider: str) -> str | None:
+    """Why ``provider``'s agents must not start: the org policy enforces its
+    company identity (Enterprise) and this machine's differs. None when it
+    doesn't enforce, the identity matches, or it can't be determined."""
+    return launch_check(provider)[0]

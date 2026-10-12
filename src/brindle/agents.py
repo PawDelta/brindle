@@ -24,6 +24,7 @@ from brindle import company_identity, company_login, git, keystore, pane_auth, p
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
+from brindle.pro import route_health
 from brindle.profiles import load_profile, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, signed_out, unusable
 from brindle.sidebar_follow import (
@@ -572,6 +573,9 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         profile = guardrails.effective(load_profile(profile_name, ws.repo_root))
         why = managed_models.refusal(m, profile) if m is not None else None
         if why:
+            route_health.record(ws.repo_root, agent=profile.provider,
+                                route=route_health.route_of(profile.provider, managed_models.agent_env(m, profile.provider), m),
+                                model=profile.model, outcome="policy_refused")
             return f"managed models: {why}"
         if m is not None:
             profile = managed_models.apply_profile(m, profile)
@@ -589,7 +593,24 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
                                   account_identity=account_revision(profile.provider, effective),
                                   catalog_context=provisioning_context(profile.provider, ws.path, effective),
                                   timeout=PROVISIONING_TIMEOUT)
-    return result.explanation if result.status == "unavailable" else None
+    if result.status != "unavailable":
+        return None
+    route_health.record(ws.repo_root, agent=profile.provider,
+                        route=route_health.route_of(profile.provider, effective, m),
+                        model=profile.model, outcome="model_unavailable")
+    return result.explanation
+
+
+def route_context(db: DB, agent: Agent, ws: Workspace) -> tuple[str, str | None]:
+    """(the route ``agent``'s calls take, its model) for a route-health event
+    about a run; (``"unknown"``, None) when they can't be read."""
+    try:
+        m = managed(ws.repo_root)
+        profile = _profile_for(db, agent, ws, m)
+        env = _effective_window_env(agent, ws, m)
+        return route_health.route_of(agent.provider, env, m), profile.model
+    except Exception:  # noqa: BLE001 - a report about a run never fails over its context
+        return "unknown", None
 
 
 _model_checker = ModelAvailabilityChecker()
@@ -747,7 +768,10 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         return
     # An org that enforces its company sign-in (Enterprise) refuses a
     # different identity; one that can't be told never blocks.
-    why = company_identity.launch_problem(provider.name)
+    why, outcome, route = company_identity.launch_check(provider.name)
+    if outcome:
+        route_health.record(ws.repo_root, agent=provider.name, route=route, model=profile.model,
+                            outcome=outcome)
     if why:
         raise AgentError(why)
     from brindle import signin_pause

@@ -35,13 +35,17 @@ log = logging.getLogger(__name__)
 GROUP = plugins.EVENTS
 KINDS = ("assign", "handoff", "review", "escalated", "merge", "remove", "deny_assign",
          "deny_merge", "cost")
+# Not an audit event: a count of how a model route did (see brindle.pro.route_health).
+# Only the Team feed reports it; the audit chain and export leave it out.
+ROUTE_HEALTH = "route_health"
 
 
 @dataclass(frozen=True)
 class Event:
     """One thing that happened. ``approved`` is set for a ``review``;
     ``merged`` for a ``remove`` (whether the branch had been merged);
-    ``reason`` for a ``deny_*`` (what the policy said)."""
+    ``reason`` for a ``deny_*`` (what the policy said); ``route``,
+    ``outcome`` and ``count`` for a ``route_health`` (``provider`` is the agent)."""
     kind: str
     repo_root: str
     agent_id: str | None = None
@@ -57,6 +61,9 @@ class Event:
     reason: str | None = None
     cost_usd: float | None = None   # what the worker's task cost (a ``remove`` of a Team org member)
     by_model: dict | None = None    # that cost split by model: {model: {"tokens", "usd"}}
+    route: str | None = None        # route_health: the route the agent's calls took
+    outcome: str | None = None      # route_health: one of brindle.pro.route_health.OUTCOMES
+    count: int | None = None        # route_health: how many times, in the batch window
 
 
 class EventsPlugin(ABC):
@@ -259,5 +266,17 @@ def emit_denial(cfg: RepoConfig, repo_root: str, what: str, reason: str, *,
         log.exception("brindle: the events plugin failed on a deny_%s event", what)
 
 
-__all__ = ["GROUP", "KINDS", "Event", "EventsPlugin", "emit", "emit_denial", "emit_periodic_cost", "plugin",
-           "plugins_for"]
+def emit_route_health(cfg: RepoConfig, repo_root: str, *, agent: str | None, route: str | None,
+                      model: str | None, outcome: str, count: int) -> None:
+    """Tell the repo's events plugins that ``agent``'s calls over ``route`` to
+    ``model`` ended in ``outcome`` ``count`` times (see
+    ``brindle.pro.route_health``). Never raises."""
+    try:
+        _dispatch(cfg, Event(kind=ROUTE_HEALTH, repo_root=repo_root, provider=agent, model=model,
+                             route=route, outcome=outcome, count=count))
+    except Exception:
+        log.exception("brindle: the events plugin failed on a route_health event")
+
+
+__all__ = ["GROUP", "KINDS", "ROUTE_HEALTH", "Event", "EventsPlugin", "emit", "emit_denial",
+           "emit_periodic_cost", "emit_route_health", "plugin", "plugins_for"]
