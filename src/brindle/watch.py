@@ -341,7 +341,7 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
         lines += watch_costs.render(costs[0], costs[1], now, width, watch_costs.GROUP in state.collapsed)
         lines.append(Line(""))
     if not snap:
-        for t in _wrap("Nothing running yet. Start an agent with `brindle new <branch>`.", width, ""):
+        for t in _wrap("Nothing running yet. Start a supervisor with `brindle`.", width, ""):
             lines.append(Line(t, "dim"))
         return lines
     shown = [(ws, ags) for ws in snap if (ags := matching_agents(ws, state.filter)) is not None]

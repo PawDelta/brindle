@@ -88,11 +88,11 @@ a writable home) and, in a repo, what's set up for it, and says what to do about
 anything missing. Bare `brindle` runs the essential ones (tmux, the chat's CLI)
 before it launches anything.
 
-That's it. Bare `brindle` opens a fresh interactive developer chat (Claude Code)
-in your repo (with autopilot off), with a narrow sidebar on the left showing every
-agent: who's working, who's idle, and who's waiting for your approval. To launch an
-autopilot supervisor that splits work between parallel workers, reviews, and merges
-their branches toward verified milestones, run `brindle supervisor`. It starts in under a second.
+That's it. `brindle` opens a supervisor chat (Claude Code) in your repo, with a
+narrow sidebar on the left showing every agent: who's working, who's idle, and
+who's waiting for your approval. Tell the supervisor what you want. It splits the
+work between workers, each on its own branch, then reviews and merges their
+branches. It starts in under a second.
 
 **The sidebar follows you.** There's one sidebar pane per session root, not
 one per window: switch to any other brindle window or session (⏎ in the
@@ -170,7 +170,7 @@ it from. When the work belongs in a real repository, run `brindle transfer ~/pat
 merge. Running `brindle` in a repo also offers to bring in any scratch work that hasn't
 been moved yet.
 
-Or drive a single workspace yourself:
+Or give a supervisor its own workspace:
 
 ```sh
 brindle new fix-login -p "Fix the login redirect bug; add a test"
@@ -212,7 +212,7 @@ for mechanical edits and a Codex reviewer for a second model's opinion.
 
 ## Autopilot
 
-`brindle supervisor` starts the supervisor with autopilot on (or `brindle start -a supervisor`). Tell it what we're building,
+`brindle` starts the supervisor with autopilot on. Tell it what we're building,
 or put the goal in `.brindle/goals.md`, and it works like a project manager:
 
 1. **Goal and milestones.** The goal is split into milestones, and each one has
@@ -307,14 +307,14 @@ your own status line prints, so what you see doesn't change.
 
 | | |
 |---|---|
-| `brindle` | a fresh developer chat here (autopilot off), dashboard alongside |
-| `brindle supervisor` | start an explicit autopilot supervisor chat to coordinate parallel workers and milestones |
+| `brindle` | a fresh supervisor chat here, dashboard alongside |
+| `brindle supervisor` | the same, with `--branch`/`--worktree` to run it in another worktree |
 | `brindle init` | detect setup and test commands, write `.brindle/config.json`, check tools |
 | `brindle demo [--local]` | watch brindle finish a tiny practice repo: parallel workers, reviews, gated merges |
-| `brindle new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
+| `brindle new BRANCH [-b BASE] [-p PROMPT] [--no-agent]` | worktree + branch + a supervisor in it |
 | `brindle continue [ID]` / `brindle -c` | resume a paused session (default: the most recent) |
 | `brindle sessions` / `brindle prune` | list paused sessions / apply retention rules, remove merged or missing worktrees, close stale stopped agents whose work is merged or gone, and remove leftover tmux sessions |
-| `brindle start [-a PROFILE] [-p PROMPT] [--no-watch] [--no-autopilot] [-b BRANCH] [-w PATH]` | the same, with options; `-b`/`-w` run it in that branch's worktree (created if needed, or the one you already made), which gets the repo's `.brindle` config |
+| `brindle start [-p PROMPT] [--no-watch] [--no-autopilot] [-b BRANCH] [-w PATH]` | the same, with options; `-b`/`-w` run it in that branch's worktree (created if needed, or the one you already made), which gets the repo's `.brindle` config |
 | `brindle handover --to BRANCH\|PATH [-n NOTE]` | hand the session to a new supervisor there: goal and milestones, workers, queued tasks and your note move across; the old one is paused |
 | `brindle autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
 | `brindle audit-decision FINDING [-r RATIONALE]` | record acceptance of an audit finding with rationale so subsequent audits respect it |
@@ -348,7 +348,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle doctor` | check that brindle has what it needs (tmux, the agent CLIs, native profiles' model endpoints, a writable home) and, in a repo, its config, checks and code map |
 | `brindle close AGENT` / `brindle close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `brindle send AGENT MSG` | message an agent; waits in its inbox until it's idle |
-| `brindle agent spawn/kill/peek/profiles` | manage agents |
+| `brindle agent kill/peek/profiles` | manage agents (only a supervisor starts them) |
 | `brindle profile new/lint/show` | write a profile file, check every profile (extends chains, rule packs, patterns), or print one as brindle resolves it |
 | `brindle rules suggest/accept/reject` | (brindle Pro) rules suggested from review findings that keep recurring; accept one into `.brindle/rules/learned.md`, or reject it for good |
 | `brindle agent turns AGENT` / `brindle agent rewind AGENT --to N [--profile P] [--note "..."]` | a worker's worktree is snapshotted after every turn that changed files; rewind puts it back as it was after turn N and starts a fresh session there, briefed on the task, turns 1..N and your note (any provider, Codex included). Supervisors have the `agent_turns` and `rewind_agent` tools |

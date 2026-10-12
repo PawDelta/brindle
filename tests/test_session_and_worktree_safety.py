@@ -194,7 +194,7 @@ def test_start_on_merged_branch_switches_to_default_when_clean(db, repo, monkeyp
     monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
     monkeypatch.chdir(repo)
 
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
+    cli.start(prompt=None, provider=None, attach=False, watch=False, autopilot=False, branch=None, worktree=None)
     assert git.current_branch(str(repo)) == "main"
     assert spawned_branches == ["main"]
 
@@ -228,7 +228,7 @@ def test_start_on_merged_branch_does_not_switch_when_dirty(db, repo, monkeypatch
     monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
     monkeypatch.chdir(repo)
 
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
+    cli.start(prompt=None, provider=None, attach=False, watch=False, autopilot=False, branch=None, worktree=None)
     assert git.current_branch(str(repo)) == "feat/merged-dirty"
     assert spawned_branches == ["feat/merged-dirty"]
 
@@ -298,9 +298,12 @@ def test_squash_merged_branch_detected_after_main_advances(tmp_path):
     assert git.merged_into_default(str(repo), "feature") is True
 
 
-def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatch):
+def test_bare_brindle_always_starts_a_supervisor(db, repo, monkeypatch):
+    from types import SimpleNamespace
+
     from brindle import cli, agents
-    # When starting in an existing repo without specifying --agent, it must use default_agent (developer)
+    # `brindle` with no arguments launches the supervisor (autopilot on by
+    # default), never a developer: default_agent is for workers.
     spawned_profiles = []
     def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
         spawned_profiles.append((agent_arg, kwargs.get("autopilot")))
@@ -319,43 +322,12 @@ def test_interactive_session_does_not_default_to_supervisor(db, repo, monkeypatc
     monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
     monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
     monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
+    monkeypatch.setattr(cli, "_say_autopilot", lambda db, agent_id: None)
     monkeypatch.chdir(repo)
 
-    # Calling start with agent=None (default behavior)
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
-    assert len(spawned_profiles) == 1
-    profile, autopilot = spawned_profiles[0]
-    assert profile == "developer"
-    assert autopilot is False
-def test_scratch_implicit_start_defaults_to_developer(db, tmp_path, monkeypatch):
-    from brindle import cli, agents
-    # When starting outside a git repo (scratch directory) without --agent,
-    # it must use default_agent (developer) and autopilot=False
-    spawned_profiles = []
-    def fake_spawn(db_arg, ws_arg, agent_arg, **kwargs):
-        spawned_profiles.append((agent_arg, kwargs.get("autopilot")))
-        from unittest.mock import MagicMock
-        m = MagicMock()
-        m.id = "agent-scratch-123"
-        m.profile = agent_arg
-        m.tmux_window = "w1"
-        return m
-
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(cli, "_attach", lambda ws, win: None)
-    monkeypatch.setattr(cli, "_cull_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_local_models_detached", lambda root: None)
-    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
-    monkeypatch.setattr(cli, "_pause_running", lambda db, ws, stop_procs=False: None)
-    monkeypatch.setattr(cli, "_preflight", lambda agent, provider, root: None)
-    monkeypatch.setattr(cli, "_trust_codex_hook", lambda root: None)
-    monkeypatch.chdir(tmp_path)
-
-    cli.start(agent=None, prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None, worktree=None)
-    assert len(spawned_profiles) == 1
-    profile, autopilot = spawned_profiles[0]
-    assert profile == "developer"
-    assert autopilot is False
+    cli.default(SimpleNamespace(invoked_subcommand=None), cont=False, autopilot=None,
+                provider=None, show_version=False)
+    assert spawned_profiles == [("supervisor", True)]
 
 
 def test_supervisor_command_starts_explicit_supervisor_with_autopilot(db, repo, monkeypatch):

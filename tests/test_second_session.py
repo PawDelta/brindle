@@ -24,7 +24,7 @@ def running(db, repo, monkeypatch):
 
 
 def _start(**kw):
-    cli.start(agent="supervisor", prompt=None, provider=None, attach=True, watch=True,
+    cli.start(prompt=None, provider=None, attach=True, watch=True,
               autopilot=False, branch=None, worktree=None, **kw)
 
 

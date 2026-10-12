@@ -92,6 +92,9 @@ When you have finished:
 """
 
 
+SUPERVISOR = "supervisor"   # the only profile a launch starts, and the one profile a supervisor can't
+
+
 class AgentError(RuntimeError):
     pass
 
@@ -1895,6 +1898,9 @@ def delegate(
     from brindle import repos
     from brindle.config import load_repo_config
 
+    if profile == SUPERVISOR:
+        raise AgentError("a supervisor can't start another supervisor; hand the work to any "
+                         "other profile (developer, reviewer, qa, ...)")
     # The workers-at-once cap is the session's (its own repo's max_agents),
     # whichever repo of the session this worker goes to.
     cap_root = (repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None) or caller_ws.repo_root
