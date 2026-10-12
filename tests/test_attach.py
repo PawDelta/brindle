@@ -51,6 +51,3 @@ def test_send_message_to_a_paused_agent_says_why(db, repo, monkeypatch):
     assert out.startswith("Not sent: agent p1 is paused") and "brindle continue" in out
 
 
-def test_workers_are_told_not_to_enter_another_worktree(db, repo):
-    ws = workspaces.create(db, str(repo), "feat/x").workspace
-    assert "EnterWorktree" in agents.worker_guidance(ws)

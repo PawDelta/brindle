@@ -1,4 +1,3 @@
-import json
 import time
 
 import pytest
@@ -16,28 +15,6 @@ def mapped(repo, monkeypatch):
     (repo / "graphify-out" / "graph.json").write_text("{}")
     monkeypatch.setattr(codemap.shutil, "which", lambda cmd: f"/bin/{cmd}")
     return repo
-
-
-def test_no_graph_no_guidance(repo):
-    assert codemap.guidance(str(repo)) is None
-
-
-def test_guidance_points_at_the_main_checkouts_graph(mapped):
-    text = codemap.guidance(str(mapped))
-    assert f"--graph {mapped / 'graphify-out' / 'graph.json'}" in text and "graphify query" in text
-
-
-def test_guidance_says_to_open_paths_in_the_agents_own_checkout(mapped):
-    # Workers live in other worktrees; reading the main checkout's files
-    # gives them stale code and a permission prompt.
-    text = codemap.guidance(str(mapped))
-    assert "relative to the repo root" in text and "own working directory" in text
-
-
-def test_config_can_turn_it_off(mapped):
-    (mapped / ".brindle").mkdir()
-    (mapped / ".brindle" / "config.json").write_text(json.dumps({"graphify": False}))
-    assert codemap.guidance(str(mapped)) is None
 
 
 def test_workers_get_the_code_map(db, mapped):

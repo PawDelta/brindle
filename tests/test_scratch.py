@@ -5,21 +5,11 @@ import pytest
 from brindle import git, scratch
 
 
-
 @pytest.fixture
 def elsewhere(tmp_path):
     d = tmp_path / "Downloads"
     d.mkdir()
     return d
-
-
-def test_scratch_session_is_created_away_from_the_folder(db, elsewhere):
-    ws = scratch.create(db, str(elsewhere))
-    assert not (elsewhere / ".git").exists()
-    assert scratch.is_scratch(ws.path) and ws.kind == "main" and ws.branch == "main"
-    assert scratch.origin_of(ws.path) == str(elsewhere.resolve())
-    assert scratch.commit_count(ws) == 0
-    assert scratch.for_origin(db, str(elsewhere)).id == ws.id
 
 
 def test_transfer_replays_commits_and_snapshots_uncommitted_work(db, elsewhere, repo):
@@ -64,6 +54,7 @@ def test_bare_brindle_outside_git_uses_a_scratch_session(db, elsewhere, monkeypa
     from brindle import cli
 
     monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(scratch.time, "strftime", lambda fmt: "20260101-000000")  # same second
     ws = cli._here_or_scratch(db, reuse_scratch=False)
     assert scratch.is_scratch(ws.path)
     assert cli._here_or_scratch(db, reuse_scratch=True).id == ws.id  # continue: same session

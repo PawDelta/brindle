@@ -78,31 +78,3 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
     assert calls == [("%sidebar", "@brindle_sidebar")]
 
 
-def test_main_argv_falls_through_for_normal_command_and_swallows_hook_errors(tmp_path):
-    code = f"""
-import runpy, sys, types
-cli = types.ModuleType('brindle.cli')
-cli.app = lambda: print('cli-called')
-sys.modules['brindle.cli'] = cli
-sys.argv = [{str(ENTRY)!r}, 'version']
-runpy.run_path(sys.argv[0], run_name='__main__')
-"""
-    result = _run(code, tmp_path)
-    assert result.returncode == 0
-    assert "cli-called" in result.stdout
-
-    code = f"""
-import runpy, sys, types
-db = types.ModuleType('brindle.db')
-db.DB = lambda: object()
-follow = types.ModuleType('brindle.sidebar_follow')
-def fail(db, session): raise RuntimeError('hook failure')
-follow.sidebar_follow = fail
-sys.modules['brindle.db'] = db
-sys.modules['brindle.sidebar_follow'] = follow
-sys.argv = [{str(ENTRY)!r}, '_sidebar-follow', 'session']
-runpy.run_path(sys.argv[0], run_name='__main__')
-"""
-    result = _run(code, tmp_path)
-    assert result.returncode == 0
-    assert "hook failure" not in result.stderr

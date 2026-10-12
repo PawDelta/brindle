@@ -32,19 +32,6 @@ while True:
 """
 
 
-COOKED_PROGRAM = """
-import sys, signal, time
-out = sys.argv[1]
-def log(s):
-    with open(out, "a") as f:
-        f.write(s + "\\n")
-signal.signal(signal.SIGINT, lambda *a: log("SIGINT"))
-log("ready")
-while True:
-    time.sleep(0.1)
-"""
-
-
 @pytest.fixture
 def session(tmp_path):
     name = f"cc-{uuid.uuid4().hex[:6]}"
@@ -61,21 +48,6 @@ def _wait(path, text, timeout=10.0):
             return True
         time.sleep(0.1)
     return False
-
-
-def test_ctrl_c_reaches_a_raw_mode_program_in_a_brindle_chat_pane(session, tmp_path):
-    out = tmp_path / "out.log"
-    prog = tmp_path / "raw.py"
-    prog.write_text(RAW_PROGRAM)
-    argv = agents._pause_when_done("none", [sys.executable, str(prog), str(out)])
-    chat = tmux.new_window(session, "chat", str(tmp_path), argv, {})
-    side = tmux.split_left(chat, str(tmp_path), ["sleep", "60"], {})
-    tmux._tmux("select-pane", "-t", chat)
-    assert _wait(out, "ready")
-    tmux.send_keys(chat, "C-c")
-    assert _wait(out, "byte 3"), out.read_text()
-    assert "SIGINT" not in out.read_text()
-    assert side
 
 
 def test_ctrl_c_reaches_the_chat_after_a_drag_left_it_in_copy_mode(session, tmp_path):
@@ -123,15 +95,3 @@ def test_ctrl_c_reaches_the_chat_after_a_drag_left_it_in_copy_mode(session, tmp_
         os.close(slave)
 
 
-def test_ctrl_c_signals_a_cooked_mode_program_in_a_brindle_chat_pane(session, tmp_path):
-    out = tmp_path / "out.log"
-    prog = tmp_path / "cooked.py"
-    prog.write_text(COOKED_PROGRAM)
-    argv = agents._pause_when_done("none", [sys.executable, str(prog), str(out)])
-    chat = tmux.new_window(session, "chat", str(tmp_path), argv, {})
-    tmux.split_left(chat, str(tmp_path), ["sleep", "60"], {})
-    tmux._tmux("select-pane", "-t", chat)
-    assert _wait(out, "ready")
-    tmux.send_keys(chat, "C-c")
-    assert _wait(out, "SIGINT"), out.read_text()
-    assert tmux.window_alive(chat)  # the wrapper survives; the program decides

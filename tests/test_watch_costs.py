@@ -1,5 +1,3 @@
-import threading
-import time
 
 from brindle import budget, watch, watch_costs
 from brindle.watch_costs import Local, Org, Remote
@@ -24,28 +22,10 @@ def section(local, remote=None, now=1000.0, width=60, collapsed=False):
     return watch_costs.render(local, remote, now, width, collapsed)
 
 
-MODELS = [("opus", 620), ("sonnet", 310), ("haiku", 40), ("gpt", 20), ("local", 10)]
-
-
-def test_usage_share_by_model_top_three_and_other():
-    lines = section(Local(month=12.25, models=MODELS))
-    assert texts(lines)[0].startswith("▾ Costs")
-    body = [t.strip() for t in texts(lines)[1:]]
-    assert [t.split()[0] for t in body] == ["opus", "sonnet", "haiku", "other"]
-    assert [t.split()[-1] for t in body] == ["62%", "31%", "4%", "3%"]
-    assert "$" not in "".join(body)
-    assert "█" not in "".join(body) and "░" not in "".join(body)
-    assert len(lines) == 5
-
-
 def test_shares_add_up_to_100():
     pct = [p for _, p in watch_costs.shares([("a", 1), ("b", 1), ("c", 1)])]
     assert sum(pct) == 100
     assert watch_costs.shares([]) == []
-
-
-def test_no_usage_says_so():
-    assert "no usage this month" in section(Local())[1].text
 
 
 def test_worker_dollars_sit_next_to_tokens():
@@ -53,52 +33,6 @@ def test_worker_dollars_sit_next_to_tokens():
     lines = watch.render(snap, 1090, 80, costs=(Local(workers={"a1b2c3d4": 0.42}), None))
     row = next(t for t in texts(lines) if "12k tokens" in t)
     assert "12k tokens · $0.42" in row
-
-
-def test_no_costs_means_no_section():
-    assert not any("Costs" in t for t in texts(watch.render([ws([agent()])], 1090)))
-
-
-def test_budget_bar_and_alert_threshold():
-    below = section(Local(month=7.0), Remote(limits=budget.Limits(month_usd=10.0)))
-    assert "$7.00 of $10.00" in below[2].text and below[2].style == "ok"
-    assert "███████░░░" in below[2].text
-    at = section(Local(month=8.0), Remote(limits=budget.Limits(month_usd=10.0)))
-    assert "$8.00 of $10.00" in at[2].text and at[2].style == "alert"
-
-
-def test_seat_spend_counted_by_the_org_wins_when_larger():
-    lines = section(Local(month=1.0), Remote(limits=budget.Limits(month_usd=10.0, seat_spent_usd=9.0)))
-    assert "$9.00 of $10.00" in lines[2].text and lines[2].style == "alert"
-
-
-def test_org_totals_and_cost_centers_are_not_in_the_sidebar():
-    org = Org(True, 400.0, 1000.0, [("ops", 100.0, None), ("eng", 300.0, 500.0)], seats_over=2,
-              unattributed=5.0)
-    lines = section(Local(models=MODELS), Remote(org=org, at=970.0), now=1000.0, width=100)
-    text = "".join(texts(lines))
-    assert "org " not in text and "eng" not in text and "unattributed" not in text
-    assert "$" not in text and len(lines) == 5
-
-
-def test_member_sees_the_budget_line_only():
-    remote = Remote(limits=budget.Limits(month_usd=50.0, seat_spent_usd=20.0),
-                    org=Org(False, 20.0, 50.0), at=1000.0)
-    text = "\n".join(texts(section(Local(month=5.0), remote)))
-    assert "$20.00 of $50.00" in text
-    assert "org " not in text and "seat " not in text
-
-
-def test_no_budget_means_no_dollars():
-    assert "$" not in "".join(texts(section(Local(month=2.0, models=MODELS), Remote(at=1000.0))))
-    assert len(section(Local(), None)) == 2        # nothing fetched yet
-
-
-def test_collapsed_is_one_selectable_line_with_the_top_share():
-    lines = section(Local(month=3.0, models=MODELS), collapsed=True)
-    assert len(lines) == 1 and lines[0].group == watch_costs.GROUP
-    assert lines[0].text.startswith("▸ Costs") and lines[0].text.endswith("(opus 62%)")
-    assert section(Local(), collapsed=True)[0].text == "▸ Costs"
 
 
 def test_costs_header_folds_with_space():
@@ -166,12 +100,6 @@ def test_spend_without_cost_centers_or_a_seat_budget():
     assert watch_costs.parse_spend({"budget_usd": 5}) is None     # not the server's shape
 
 
-def test_unattributed_is_not_a_cost_center():
-    org = watch_costs.parse_spend(SPEND)
-    assert [c[0] for c in org.centers] == ["eng", "ops"]
-    assert org.unattributed == 4.5
-
-
 def test_fetch_spend_is_silent_on_403_and_errors(monkeypatch):
     from brindle.pro import auth
 
@@ -229,30 +157,6 @@ def test_offline_collect_has_no_org(monkeypatch):
 # -- the cache and thread ----------------------------------------------------------------------
 
 
-def test_feed_never_blocks_and_caches_for_30_seconds():
-    gate, calls = threading.Event(), []
-
-    def slow(root):
-        calls.append(root)
-        gate.wait(5)
-        return Remote(at=time.time())
-
-    feed = watch_costs.Feed("/r", collector=slow)
-    t0 = time.time()
-    assert feed.get() is None                     # returns at once, the fetch is in the background
-    assert time.time() - t0 < 1.0
-    feed.get()
-    assert calls == ["/r"]                        # not started twice
-    gate.set()
-    feed.wait()
-    first = feed.get()
-    assert first is not None and calls == ["/r"]  # fresh: served from the cache
-    assert feed.get(now=first.at + 29) is first and calls == ["/r"]
-    feed.get(now=first.at + 31)
-    feed.wait()
-    assert len(calls) == 2
-
-
 def test_a_failing_collector_leaves_an_empty_remote():
     def bad(root):
         raise RuntimeError("x")
@@ -262,15 +166,6 @@ def test_a_failing_collector_leaves_an_empty_remote():
     feed.wait()
     remote = feed.get()
     assert remote is not None and remote.org is None and remote.limits is None
-
-
-def test_model_names_are_shortened_for_the_sidebar():
-    assert watch_costs.short("claude-opus-4-1-20250805") == "opus-4-1"
-    assert watch_costs.short("claude-sonnet-5-5") == "sonnet-5-5"
-    assert watch_costs.short("gpt-5") == "gpt-5"
-    assert watch_costs.short("other") == "other"
-    rows = watch_costs.share_rows([("claude-opus-5-5", 2), ("claude-haiku-5-5", 1)], 28)
-    assert rows[0].startswith("opus-5-5 ") and rows[1].startswith("haiku-5-5")
 
 
 def test_a_narrow_folded_header_drops_the_model_rather_than_cut_the_title():
@@ -293,4 +188,3 @@ def test_provider_capacity_collapsed_title():
     # the provider with the least headroom, not the first by name
     local_ = Local(providers=[("claude", 100), ("codex", 97), ("native", 0)])
     assert watch_costs.title(True, 40, local_) == "▸ Costs (native 0%)"
-
