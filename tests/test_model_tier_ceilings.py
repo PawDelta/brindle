@@ -57,6 +57,7 @@ def test_routing_explanation_includes_model_and_cost_signal(db, repo, monkeypatc
     assert "medium cost tier" in joined
 
     # When a heavy profile is selected, cost tier must show most expensive tier
+    monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
     why_h = []
     profile_h, _ = autopilot.choose_profile(db, "caller-h", str(repo), weight="heavy", why=why_h)
     joined_h = " ".join(why_h)
