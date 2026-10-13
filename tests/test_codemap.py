@@ -92,6 +92,25 @@ def test_merges_refresh_the_graph(mapped, monkeypatch):
     assert started == [["graphify", "update", str(mapped), "--force"]]
 
 
+def test_prune_stores_removes_old_graph_store_and_keeps_fresh_one(tmp_path, monkeypatch):
+    home = tmp_path / "brindle"
+    monkeypatch.setattr("brindle.config.brindle_home", lambda: home)
+    old_store = home / "graphs" / "old-repo-a1b2"
+    fresh_store = home / "graphs" / "fresh-repo-c3d4"
+    old_store.mkdir(parents=True)
+    fresh_store.mkdir(parents=True)
+    (old_store / "graph.json").write_text("{}")
+    (fresh_store / "graph.json").write_text("{}")
+    now = time.time()
+    old = now - 31 * 24 * 60 * 60
+    os.utime(old_store / "graph.json", (old, old))
+    os.utime(old_store, (old, old))
+
+    assert codemap.prune_stores(now) == 1
+    assert not old_store.exists()
+    assert (fresh_store / "graph.json").is_file()
+
+
 def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     from brindle.config import brindle_home
 
