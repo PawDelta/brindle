@@ -687,6 +687,7 @@ class ProAccount(_OrgCommands):
         from brindle import company_login
 
         company_login.clear_env()
+        company_login.clear_federation()
         self._say("Logged out of brindle Pro.")
         return 0
 

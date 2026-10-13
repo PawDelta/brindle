@@ -258,7 +258,7 @@ def _error(status: int, body: dict) -> AuthError:
     code = re.sub(r"[^a-z0-9_]", "", code.lower())[:64] or f"http_{status}"
     desc = body.get("error_description")
     msg = f"{code}: {_sanitize(desc)}" if isinstance(desc, str) and desc else code
-    return AuthError(msg, code=code, revoked=code == "invalid_grant")
+    return AuthError(msg, code=code, revoked=code in ("invalid_grant", "reauth_required"))
 
 
 # -- device flow ----------------------------------------------------------------------------------
@@ -614,9 +614,9 @@ def switch_org(client: Client, store, org_id: str | None, *,
 
 
 def authed(client: Client, store, method: str, path: str, form: dict | None = None,
-           *, now: float | None = None) -> tuple[int, dict]:
-    """Call a Bearer endpoint, refreshing the access token first if it is
-    about to expire and once more if the backend answers 401."""
+           *, now: float | None = None, headers: dict | None = None) -> tuple[int, dict]:
+    """Call a Bearer endpoint (with extra ``headers``), refreshing the access
+    token first if it is about to expire and once more if the backend answers 401."""
     now = time.time() if now is None else now
     cur = store.load() or {}
     if not cur.get("refresh_token"):
@@ -625,11 +625,11 @@ def authed(client: Client, store, method: str, path: str, form: dict | None = No
     if float(cur.get("access_expires_at") or 0) <= now + ACCESS_SLACK:
         refresh(client, store, cur, now=now)
         cur = store.load() or {}
-    status, body = client.call(method, path, form, token=cur.get("access_token"))
+    status, body = client.call(method, path, form, token=cur.get("access_token"), headers=headers)
     if status == 401:
         refresh(client, store, cur, now=now, force=True)
         cur = store.load() or {}
-        status, body = client.call(method, path, form, token=cur.get("access_token"))
+        status, body = client.call(method, path, form, token=cur.get("access_token"), headers=headers)
     return status, body
 
 

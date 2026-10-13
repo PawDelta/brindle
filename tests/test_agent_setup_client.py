@@ -20,6 +20,11 @@ MODELS = {"opus": "claude-opus-4-5", "sonnet": "claude-sonnet-4-5", "haiku": "cl
 OWN_AWS = {"region": "us-west-2"}           # no SSO group: the machine's own AWS sign-in applies
 FOUNDRY_URL = "https://acme.services.ai.azure.com/anthropic"
 IDS = ["us.anthropic.claude-opus-4-5-v1:0", "us.anthropic.claude-sonnet-4-5-v1:0"]
+FED_AWS = {"role_arn": "arn:aws:iam::123456789012:role/brindle-members-acme"}
+FED_GCP = {"project_number": "123456789", "pool_id": "brindle-members", "provider_id": "pawdelta",
+           "service_account": "brindle-members@acme-brindle-prod.iam.gserviceaccount.com",
+           "max_session_age": 7200}
+FED_AZURE = {"tenant_id": UUID, "client_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7"}
 
 
 def body(agent_setup=None, **policy):
@@ -179,6 +184,17 @@ BAD_CASES = [
     ("codex login route with a bad base_url", {"codex": {"route": "chatgpt", "base_url": "nope"}}),
     ("deny_personal_keys not a bool", {"codex": {"route": "chatgpt"}, "deny_personal_keys": "yes"}),
     ("exclusive not a bool", {"codex": {"route": "chatgpt"}, "exclusive": 1}),
+    ("federated without its federation block", {"claude": {"route": "vertex", "auth": "federated", "gcp": GCP}}),
+    ("auth is not a known mode", {"claude": {"route": "vertex", "auth": "magic", "gcp": GCP}}),
+    ("federation role in another account than account_id", {"claude": {
+        "route": "bedrock", "auth": "federated",
+        "aws": {"region": "us-west-2", "account_id": "999999999999", "federation": FED_AWS}}}),
+    ("federation max_session_age under an hour", {"claude": {
+        "route": "bedrock", "auth": "federated",
+        "aws": {"region": "us-west-2", "federation": {**FED_AWS, "max_session_age": 60}}}}),
+    ("federation value shaped like a secret", {"claude": {
+        "route": "foundry", "auth": "federated",
+        "azure": {"resource": "acme-foundry", "federation": {**FED_AZURE, "client_id": "AKIAIOSFODNN7EXAMPLE"}}}}),
 ]
 
 
@@ -263,6 +279,28 @@ def test_malformed_block_in_cache_is_ignored_on_reload(no_enterprise):
     again = parse_policy(ORG, copy.deepcopy(p.to_json()))
     assert again.agent_setup is None
     assert again.max_parallel_workers == 5
+
+
+@pytest.mark.parametrize("route,block,fed,field,want", [
+    ("bedrock", "aws", FED_AWS, "role_arn", FED_AWS["role_arn"]),
+    ("vertex", "gcp", FED_GCP, "service_account", FED_GCP["service_account"]),
+    ("foundry", "azure", FED_AZURE, "client_id", FED_AZURE["client_id"]),
+])
+def test_federated_auth_parses_the_federation_block(route, block, fed, field, want, no_enterprise):
+    base = {"bedrock": {"region": "us-west-2"}, "vertex": GCP, "foundry": {"resource": "acme-foundry"}}[route]
+    raw = {"claude": {"route": route, "auth": "federated", block: {**base, "federation": fed}}}
+    p = parse_policy(ORG, body(raw))
+    c = p.agent_setup.claude
+    f = getattr(c, block).federation
+    assert c.federated and getattr(f, field) == want
+    assert f.max_session_age == fed.get("max_session_age", 86400)
+    if route == "bedrock":      # no SSO group: the account and role come from the ARN
+        assert c.aws.account_id == "123456789012" and c.aws.role_name == "brindle-members-acme"
+    assert parse_policy(ORG, p.to_json()).agent_setup == p.agent_setup
+    own = {"bedrock": AWS, "vertex": GCP, "foundry": AZURE}[route]
+    without = parse({"claude": {"route": route, block: {**own, "federation": fed}}}).claude
+    assert without.auth == "own_login" and not without.federated    # absent auth: today's behaviour
+    assert getattr(without, block).federation is None
 
 
 def test_block_round_trips_through_the_cache(enterprise):

@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle import company_login, config
+from brindle import cloud_credential, company_login, config
 
 CACHE_SECONDS = 30.0
 LAUNCH_CACHE_SECONDS = 300.0
@@ -86,7 +86,7 @@ KNOWN_PICKERS = frozenset({
     "CLOUDSDK_CONFIG", "CLOUDSDK_CORE_PROJECT", "CLOUDSDK_ACTIVE_CONFIG_NAME",
     "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_BASE_URL",
     "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE",
-    "AZURE_CONFIG_DIR"})
+    "AZURE_CONFIG_DIR", "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"})
 
 
 def enforced_deny(route: dict[str, str], *names, own: tuple[str, ...] = ()) -> list[str]:
@@ -106,6 +106,8 @@ def own_signin(claude) -> tuple[str, ...]:
     route leaves that cloud's sign-in to the person: Bedrock without the SSO
     group (``AWS_``), Foundry without a subscription (``AZURE_``). What
     brindle's own probe saw is what the pane gets."""
+    if claude.federated:
+        return ()       # brindle's own exchange is the sign-in: nothing of the person's stays
     if claude.route == "bedrock" and not claude.aws.sso:
         return ("AWS_",)
     if claude.route == "foundry" and not claude.azure.subscription_id:
@@ -156,12 +158,15 @@ def _present(*names: str) -> list[str]:
     return [f"{n}={'set' if os.environ.get(n) else ''}" for n in names]
 
 
-def _fingerprint(route: str) -> str:
+def _fingerprint(route: str, federated_cache: Path | None = None) -> str:
     """A digest of the cloud CLI's sign-in state for ``route``: the path,
     mtime and size of its credential files (never their contents) and the env
-    vars that pick the account. Any change means the cached probe is stale."""
+    vars that pick the account. Any change means the cached probe is stale.
+    A federated AWS route also counts brindle's own credential cache file."""
     home = Path.home()
     parts: list[str] = [route]
+    if federated_cache is not None:
+        parts += _stat_files([federated_cache])
     if route == "bedrock":
         aws = home / ".aws"
         parts += _stat_files([aws / "config", aws / "credentials"]
@@ -192,7 +197,7 @@ def _launch_key(org_id: str, claude) -> str | None:
     probe, and the Claude login (subscription, console) is probed on every
     launch because a switched login must never be missed."""
     if claude.route == "bedrock":
-        base = f"claude|bedrock|{company_login.profile_name(org_id) if claude.aws.sso else 'own'}"
+        base = f"claude|bedrock|{company_login.profile_name(org_id) if claude.aws.sso or claude.federated else 'own'}"
     elif claude.route == "vertex":
         base = f"claude|vertex|{claude.gcp.project}"
     elif claude.route == "foundry":
@@ -200,7 +205,8 @@ def _launch_key(org_id: str, claude) -> str | None:
         base = f"claude|foundry|{(z.subscription_id or z.base_url or z.resource).lower()}"
     else:
         return None
-    return f"{base}|{_fingerprint(claude.route)}"
+    cache = cloud_credential.aws_cache_path(org_id) if claude.federated and claude.route == "bedrock" else None
+    return f"{base}|{_fingerprint(claude.route, cache)}"
 
 
 def _read_launch_cache() -> dict:
@@ -337,10 +343,35 @@ def _claude_login_cmd(route) -> str:
     return "claude auth login " + ("--console" if route == "console" else "--sso")
 
 
+def _federated_aws(org_id: str, claude) -> Identity:
+    """The role brindle's own exchange assumed (from its cache: no AWS CLI)."""
+    got = cloud_credential.aws_identity(org_id)
+    if got is None:
+        return Identity("claude", "AWS federated role: no credential fetched yet", determined=False)
+    account, role = got
+    problem = None
+    if account != claude.aws.account_id:
+        problem = f"AWS account is {account}, not the policy's {claude.aws.account_id}; {FIX}"
+    return Identity("claude", f"AWS account {account}, role {role}, region {claude.aws.region}", problem,
+                    billed=f"Bedrock: AWS account {account[:4]}…", ident=f"AWS account {account}, role {role}")
+
+
+def _federated_ident(claude) -> str | None:
+    """The identity a federated GCP or Azure route runs as, which the policy
+    itself names (the cloud answers only to the hook's exchange)."""
+    if claude.route == "vertex":
+        return f"GCP project {claude.gcp.project}, service account {claude.gcp.federation.service_account}"
+    if claude.route == "foundry":
+        return f"Azure app {claude.azure.federation.client_id}, tenant {claude.azure.federation.tenant_id}"
+    return None
+
+
 def _aws(org_id: str, claude, cache) -> Identity:
     """Bedrock: the SSO profile brindle wrote, or, when the policy names no
     SSO group, the machine's own AWS sign-in: then only that STS answers is
     checked, no account is matched."""
+    if claude.federated:
+        return _federated_aws(org_id, claude)
     own = not claude.aws.sso
     if own:
         argv = ["aws", "sts", "get-caller-identity", "--region", claude.aws.region, "--output", "json"]
@@ -369,6 +400,9 @@ def _aws(org_id: str, claude, cache) -> Identity:
 
 
 def _gcloud(claude, cache) -> Identity:
+    if claude.federated:
+        who = _federated_ident(claude)
+        return Identity("claude", who, billed=f"Vertex: Google Cloud project {claude.gcp.project}", ident=who)
     got = _probe(["gcloud", "config", "get-value", "project"], cache)
     if got is None:
         return _unknown("claude", "gcloud")
@@ -385,6 +419,9 @@ def _gcloud(claude, cache) -> Identity:
 
 
 def _az(claude, cache) -> Identity:
+    if claude.federated:
+        who = _federated_ident(claude)
+        return Identity("claude", who, billed=f"Foundry: Azure app {claude.azure.federation.client_id}", ident=who)
     got = _probe(["az", "account", "show", "--output", "json"], cache)
     if got is None:
         return _unknown("claude", "az")
@@ -436,7 +473,9 @@ def expected_ident(claude) -> str | None:
         return f"gateway:{claude.gateway.base_url}" if claude.gateway else None
     if claude.route == "bedrock" and claude.aws:
         # Without the SSO group the policy names no account: nothing to match.
-        return f"AWS account {claude.aws.account_id}, role {claude.aws.role_name}" if claude.aws.sso else None
+        return f"AWS account {claude.aws.account_id}, role {claude.aws.role_name}" if claude.aws.sso or claude.federated else None
+    if claude.federated and claude.route in ("vertex", "foundry"):
+        return _federated_ident(claude)
     if claude.route == "vertex" and claude.gcp:
         return f"GCP project {claude.gcp.project}"
     if claude.route == "foundry" and claude.azure:

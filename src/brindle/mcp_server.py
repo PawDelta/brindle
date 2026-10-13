@@ -1137,5 +1137,23 @@ def transfer_to_repo(target_path: str, branch: str | None = None) -> str:
             f"`brindle` in that repo, then review with `brindle diff {t.workspace.name}`.")
 
 
+def start_azure_refresher():
+    """The refresher of a federated Azure org's token file, for as long as
+    this session runs; None when the stored setup has no such file."""
+    from brindle import cloud_credential, company_login
+
+    token_file = company_login.stored_env().get("AZURE_FEDERATED_TOKEN_FILE")
+    if not token_file:
+        return None
+    refresher = cloud_credential.AzureRefresher(token_file)
+    refresher.start()
+    return refresher
+
+
 def main() -> None:
-    mcp.run()
+    refresher = start_azure_refresher()
+    try:
+        mcp.run()
+    finally:
+        if refresher is not None:
+            refresher.stop()

@@ -2,16 +2,17 @@
 
 import json
 import os
+import shlex
 import sys
 
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, cli, company_login, workspaces
+from brindle import agents, cli, cloud_credential, company_login, workspaces
 from brindle.db import Agent
 from brindle.pro import account as pro_account
-from brindle.pro.team_policy import (AgentSetup, AwsSetup, AzureSetup, ClaudeSetup, CodexSetup,
-                                     GatewaySetup, GcpSetup, ModelsSetup)
+from brindle.pro.team_policy import (AgentSetup, AwsFederation, AwsSetup, AzureFederation, AzureSetup,
+                                     ClaudeSetup, CodexSetup, GatewaySetup, GcpFederation, GcpSetup, ModelsSetup)
 
 ORG = "acme"
 UUID = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c"
@@ -302,6 +303,27 @@ def test_stale_env_is_cleared_when_the_org_has_no_setup_or_on_logout(db, repo, m
     assert company_login.stored_env() == {}
 
 
+def test_clear_federation_on_removed_setup(monkeypatch):
+    Fake(monkeypatch)
+    d = cloud_credential.org_dir(ORG, create=True)
+    (d / cloud_credential.AZURE_TOKEN).write_text("tok")
+    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: None)
+    company_login.apply_current(print)
+    assert not d.exists()
+
+
+def test_azure_refresh_at_launch(db, repo, monkeypatch):
+    token_file = str(cloud_credential.azure_token_path(ORG))
+    company_login.config.set_user(company_login.ENV_KEY, {"org": ORG, "env": {
+        "AZURE_FEDERATED_TOKEN_FILE": token_file}})
+    freshened = []
+    monkeypatch.setattr(cloud_credential, "freshen_azure", freshened.append)
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    agents.agent_env(ws, "a1", _claude_agent(ws))
+    agents.agent_env(ws, "a1", _claude_agent(ws, "codex"))      # only Claude Code reads the file
+    assert freshened == [token_file]
+
+
 def test_failed_sign_in_leaves_no_env(monkeypatch):
     Fake(monkeypatch)
     go(claude("bedrock", aws=AWS))
@@ -383,3 +405,92 @@ def test_run_cmd_never_hands_a_probe_the_terminal():
         os.dup2(saved, 0)
         for fd in (saved, read, write):
             os.close(fd)
+
+
+# -- federated orgs: the cloud's own hook, no cloud CLI, no cloud login --------------------------------
+
+FED_AWS = AwsSetup(region="us-west-2", account_id="123456789012", role_name="brindle-members-acme",
+                   federation=AwsFederation("arn:aws:iam::123456789012:role/brindle-members-acme"))
+FED_GCP = GcpSetup("acme-brindle-prod", "us-east5", GcpFederation(
+    "123456789", "brindle-members", "pawdelta", "bm@acme-brindle-prod.iam.gserviceaccount.com"))
+FED_AZURE = AzureSetup(resource="acme-foundry",
+                       federation=AzureFederation(UUID, "7c9e6679-7425-40de-944b-e07fc1f90ae7"))
+FEDERATED = {"bedrock": ("aws", FED_AWS), "vertex": ("gcp", FED_GCP), "foundry": ("azure", FED_AZURE)}
+
+
+@pytest.fixture
+def hook(tmp_path, monkeypatch):
+    """A brindle script to name in the hooks, and the exchange login proves them with."""
+    d = tmp_path / "bin"
+    d.mkdir()
+    exe = d / "brindle"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(sys, "argv", [str(exe)])
+    checked = []
+    monkeypatch.setattr(cloud_credential, "check", lambda cloud, org, **kw: checked.append(cloud))
+    return exe, checked
+
+
+def federated(route):
+    cloud, block = FEDERATED[route]
+    return claude(route, auth="federated", **{cloud: block})     # the cloud's name is its block's
+
+
+@pytest.mark.parametrize("route,expected", [
+    ("bedrock", {"AWS_PROFILE": "brindle-acme"}),
+    ("vertex", {"GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"}),
+    ("foundry", {"AZURE_CLIENT_ID": "7c9e6679-7425-40de-944b-e07fc1f90ae7", "AZURE_TENANT_ID": UUID}),
+])
+def test_federated_routes_set_their_hook_and_run_no_cloud_cli(route, expected, aws_config, hook, monkeypatch):
+    exe, checked = hook
+    f = Fake(monkeypatch, missing={"aws", "gcloud", "az"})
+    ok, _ = go(federated(route))
+    assert ok and checked == [FEDERATED[route][0]] and not f.calls
+    d = cloud_credential.org_dir(ORG)
+    if route == "bedrock":
+        text = aws_config.read_text()
+        assert "sso_" not in text and "region = us-west-2" in text
+        line = next(ln for ln in text.splitlines() if ln.startswith("credential_process = "))
+        argv = shlex.split(line.removeprefix("credential_process = "))
+        assert argv == [str(exe), "cloud-credential", "aws", "--org", ORG]
+        assert os.access(argv[0], os.X_OK)                   # names an executable that exists
+    else:
+        expected["GOOGLE_APPLICATION_CREDENTIALS" if route == "vertex" else "AZURE_FEDERATED_TOKEN_FILE"] = \
+            str(d / ("gcp-credentials.json" if route == "vertex" else "azure-token"))
+    stored = company_login.stored_env()
+    assert expected.items() <= stored.items()                # ENV_NAMES admits them
+    if route == "vertex":
+        source = json.loads((d / "gcp-credentials.json").read_text())["credential_source"]["executable"]
+        assert shlex.split(source["command"]) == [str(exe), "cloud-credential", "gcp", "--org", ORG]
+        assert source["output_file"] == str(d / "gcp-subject-token.json")
+
+
+def test_a_failed_exchange_is_not_ready_and_keeps_no_env(hook, monkeypatch):
+    Fake(monkeypatch)
+    monkeypatch.setattr(cloud_credential, "check", lambda *a, **k: "AWS refused the role (AccessDenied)")
+    ok, out = go(federated("bedrock"))
+    assert not ok and any("AccessDenied" in line for line in out)
+    assert company_login.stored_env() == {}
+
+
+def test_logout_and_a_signed_out_doctor_fix_remove_the_federation_directory(aws_config, hook, monkeypatch, tmp_path):
+    from brindle import doctor
+    from brindle.pro import credentials, license
+
+    Fake(monkeypatch)
+    aws_config.parent.mkdir(parents=True, exist_ok=True)
+    aws_config.write_text("[profile other]\nregion = x\n")
+
+    def sign_in():
+        go(federated("bedrock"))
+        go(federated("vertex"))
+        assert cloud_credential.org_ids() == [ORG] and "brindle-acme" in aws_config.read_text()
+
+    sign_in()
+    assert pro_account.ProAccount(store=credentials.FileStore(tmp_path / "pro")).run(["logout"]) == 0
+    assert cloud_credential.org_ids() == [] and aws_config.read_text() == "[profile other]\nregion = x\n"
+    sign_in()
+    monkeypatch.setattr(license, "current", lambda **k: (_ for _ in ()).throw(license.LicenseError("signed out")))
+    doctor.fix(lambda p: False)
+    assert cloud_credential.org_ids() == [] and "brindle-acme" not in aws_config.read_text()

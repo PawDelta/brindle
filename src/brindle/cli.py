@@ -2716,6 +2716,16 @@ def local_models_cmd(repo: Optional[str] = typer.Option(None, "--repo")) -> None
         pass
 
 
+@app.command("cloud-credential", hidden=True)
+def cloud_credential_cmd(cloud: str = typer.Argument(..., help="aws, gcp or azure"),
+                         org: Optional[str] = typer.Option(None, "--org", help="The org id")) -> None:
+    """The hook the clouds run for a federated org (`credential_process`, the GCP
+    executable source): prints the credential the cloud's contract asks for."""
+    from brindle import cloud_credential
+
+    raise typer.Exit(cloud_credential.run(cloud, org))
+
+
 @app.command("_sync-settings", hidden=True)
 def sync_settings_cmd() -> None:
     """Pull synced settings (brindle Pro); detached from `brindle`."""

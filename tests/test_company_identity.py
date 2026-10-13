@@ -7,8 +7,8 @@ import pytest
 
 from brindle import agents, antigravity, company_identity, company_login, doctor, providers, workspaces
 from brindle.db import Agent
-from brindle.pro.team_policy import (AgentSetup, AwsSetup, AzureSetup, ClaudeSetup, CodexSetup,
-                                     GatewaySetup, GcpSetup)
+from brindle.pro.team_policy import (AgentSetup, AwsFederation, AwsSetup, AzureFederation, AzureSetup,
+                                     ClaudeSetup, CodexSetup, GatewaySetup, GcpFederation, GcpSetup)
 
 ORG = "acme"
 CLAUDE_ORG = "11111111-2222-3333-4444-555555555555"
@@ -397,3 +397,60 @@ def test_enforced_route_takes_inherited_and_stored_credentials_out_of_the_pane(m
     assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("codex", "auto", None)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=False)
     assert "AWS_ACCESS_KEY_ID" not in pane_auth.deny_names("claude", "auto", None)
+
+    # a federated route keeps its own hook variables and still strips what a profile adds
+    route = company_login.claude_env(ORG, claude_setup("vertex", auth="federated", gcp=FED_GCP))
+    assert {"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"} <= set(route)
+    fed_deny = company_identity.enforced_deny(route, {"AWS_WEB_IDENTITY_TOKEN_FILE"})
+    assert "AWS_WEB_IDENTITY_TOKEN_FILE" in fed_deny and not set(route) & set(fed_deny)
+    own = company_identity.enforced_deny({"CLAUDE_CODE_USE_BEDROCK": "1"})
+    assert "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES" in own        # only a federated route may set it
+
+
+# -- federated routes: the identity is the one brindle's own exchange assumed ---------------------------
+
+FED_ROLE = "arn:aws:iam::123456789012:role/brindle-members-acme"
+FED_AWS = AwsSetup(region="us-west-2", account_id="123456789012", role_name="brindle-members-acme",
+                   federation=AwsFederation(FED_ROLE))
+FED_GCP = GcpSetup("acme-brindle-prod", "us-east5", GcpFederation(
+    "123456789", "brindle-members", "pawdelta", "bm@acme-brindle-prod.iam.gserviceaccount.com"))
+FED_AZURE = AzureSetup(resource="acme-foundry",
+                       federation=AzureFederation(SUB, "7c9e6679-7425-40de-944b-e07fc1f90ae7"))
+
+
+def assumed(account):
+    return {"arn": f"arn:aws:sts::{account}:assumed-role/brindle-members-acme/brindle-me",
+            "issued_at": 1, "expires_at": 2}
+
+
+@pytest.mark.parametrize("cached,level", [(assumed("123456789012"), doctor.OK),
+                                          (assumed("999999999999"), doctor.WARN),
+                                          (None, doctor.WARN)])
+def test_federated_aws_identity_is_read_from_the_exchange_cache_without_the_cli(cached, level, monkeypatch):
+    from brindle import cloud_credential
+
+    fake = Fake(monkeypatch, missing={"aws"})
+    claude = claude_setup("bedrock", auth="federated", aws=FED_AWS)
+    policy(monkeypatch, claude)
+    key = company_identity._launch_key(ORG, claude)
+    if cached:
+        cloud_credential._write(cloud_credential.org_dir(ORG, create=True) / cloud_credential.AWS_CACHE,
+                                json.dumps(cached))
+    assert (company_identity._launch_key(ORG, claude) != key) == bool(cached)   # the cache is fingerprinted
+    c = by_name()["claude identity"]
+    assert c.level == level and not fake.count("aws")
+    expected = company_identity.expected_ident(claude)
+    assert expected == "AWS account 123456789012, role brindle-members-acme"
+    ident = company_identity.claude_identity(ORG, claude).ident
+    assert company_identity.matches(expected, ident) == (level == doctor.OK)
+
+
+@pytest.mark.parametrize("route,kw", [("vertex", {"gcp": FED_GCP}), ("foundry", {"azure": FED_AZURE})])
+def test_federated_gcp_and_azure_identity_is_the_policys_and_matches_itself(route, kw, monkeypatch):
+    fake = Fake(monkeypatch, missing={"gcloud", "az"})
+    claude = claude_setup(route, auth="federated", **kw)
+    ident = company_identity.claude_identity(ORG, claude)
+    assert ident.determined and ident.problem is None and not fake.calls
+    assert company_identity.matches(company_identity.expected_ident(claude), ident.ident)
+
+
