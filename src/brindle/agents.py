@@ -831,6 +831,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle.providers import trust_folder
 
         trust_folder(ws.path)  # no trust dialog for nobody to answer
+    if provider.name == "antigravity" and m is not None and m.setup is not None and m.setup.antigravity is not None:
+        try:
+            providers.set_agy_gemini()
+        except (OSError, ValueError) as e:
+            raise AgentError(f"couldn't set Antigravity to the company Gemini route in its settings.json: {e}") from e
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first)))
     if prompt or db.pending_count(agent.id):

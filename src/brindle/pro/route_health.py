@@ -99,6 +99,11 @@ def route_of(provider: str, env, managed=None) -> str:
         if env.get("OPENAI_API_KEY"):
             return "api_key"
         return "chatgpt"
+    if provider == "antigravity":
+        if env.get("GOOGLE_GEMINI_BASE_URL"):
+            return "gateway"
+        if env.get("GEMINI_API_KEY"):
+            return "gemini"
     return "default"
 
 
