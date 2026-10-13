@@ -70,6 +70,9 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
 
     A process that waited on the lock while the holder failed or timed out
     reuses that outcome instead of re-running the whole command."""
+    # Taken before the git calls below, which can be slow on a loaded
+    # machine: a holder that finished after we arrived still counts.
+    waiting_since = time.time()
     sha = head(ws)
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
@@ -77,7 +80,6 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     # One run at a time per (workspace, commit, command): a check warmed when
     # the worker reported, a reviewer's summary and the merge gate can all
     # want the same result at once; the later ones wait, then reuse it.
-    waiting_since = time.time()
     with _check_lock(ws.id, sha, cmd, cancel) as result_file:
         cached = db.get_check(ws.id, sha, cmd)
         if cached is not None and cached.ok:

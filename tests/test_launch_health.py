@@ -19,6 +19,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -316,13 +317,15 @@ def health(db, root, monkeypatch):
     now = [100.0]
     sleeps, started, reports = [], [], []
     monkeypatch.setattr(lh.time, "time", lambda: now[0])
-    # time.sleep is patched process-wide, so other threads (e.g. Popen.wait's
-    # polling) get the real sleep and never show up in the recorded delays.
+    # time.sleep is patched process-wide, so other threads and Popen.wait's
+    # timeout polling (on this thread too) get the real sleep and never show
+    # up in the recorded delays.
     creator = threading.current_thread()
     real_sleep = time.sleep
 
     def sleep(delay):
-        if threading.current_thread() is not creator:
+        if (threading.current_thread() is not creator
+                or sys._getframe(1).f_globals.get("__name__") == "subprocess"):
             real_sleep(delay)
             return
         sleeps.append(delay)
