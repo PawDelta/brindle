@@ -1881,8 +1881,8 @@ list it under `routing` in `.brindle/config.json`.
   to it. Each Codex home keeps its own sign-in (`auth.json`).
 - **Google Antigravity.** `agy` can run on a Gemini API key: set
   `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
-  export `GEMINI_API_KEY` in your shell environment. Never put the key in a profile
-  or the repo, since profiles in `.brindle/agents/` are committed. For a
+  export `GEMINI_API_KEY` in your shell, or put it in a profile in your user
+  profiles folder; never in a profile under `.brindle/agents/`, which is committed. For a
   Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. `agy`
   ignores Vertex AI credentials, so use a Gemini API key or gateway.
   The full setup is in [Google Antigravity](#google-antigravity) below.
