@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from datetime import datetime, timezone
 
+from brindle import cloud_credential
 from brindle.pro import auth, credentials, license, loopback
+
+log = logging.getLogger(__name__)
 
 PRICING_URL = "https://pawdelta.com/brindle#pricing"
 ENTERPRISE_URL = "https://pawdelta.com/brindle/enterprise"
@@ -358,8 +362,10 @@ class _OrgCommands:
 
     def cmd_org_use(self, base: str | None, org_id: str) -> int:
         target = None if org_id == "personal" else org_id
-        ent = auth.switch_org(self._client(base), self.store, target)
+        client = self._client(base)
+        ent = auth.switch_org(client, self.store, target)
         self._say(f"Now using org {ent.org_id} as {ent.role or 'member'} (plan {ent.plan}).")
+        self._company_login(client)
         return 0
 
     def cmd_org_policy(self, base: str | None) -> int:
@@ -661,6 +667,13 @@ class ProAccount(_OrgCommands):
         client = auth.Client(base, transport=self.transport)
         browser = not device and loopback.can_open_browser(self.out)
         ent = auth.login(client, self.store, show=self._say, browser=browser)
+        back = cloud_credential.take_reauth()   # a federated org's sign-in expired: return to it
+        if back and back != ent.org_id:
+            try:
+                if back in auth.member_orgs(client, self.store):    # else stay in the default org
+                    ent = auth.switch_org(client, self.store, back)
+            except auth.AuthError:
+                log.debug("couldn't return to %s after login", back, exc_info=True)
         try:
             who = auth.me(client, self.store)
         except auth.AuthError:
@@ -688,6 +701,7 @@ class ProAccount(_OrgCommands):
 
         company_login.clear_env()
         company_login.clear_federation()
+        cloud_credential.take_reauth()      # a deliberate logout leaves no org to return to
         self._say("Logged out of brindle Pro.")
         return 0
 

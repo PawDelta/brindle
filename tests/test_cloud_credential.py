@@ -174,14 +174,20 @@ def test_azure_refresh_rewrites_the_file_only_below_30_percent(fed, backend, sto
 
 def test_reauth_required_deletes_the_store_and_prints_the_login_line(fed, backend, store):
     call(fed, backend, store, "aws")
+    revoked = []
+    backend.routes["POST /token/revoke"] = lambda form, headers: (
+        revoked.append(bool(store.load())) or (200, {}))
     fed.answer = (401, {"error": "reauth_required"})
     rc, out, err = call(fed, backend, store, "aws", now=time.time() + 800)
     assert rc == 1 and out == "" and "brindle account login" in err
-    assert not store.load()
+    assert not store.load() and revoked == [True]                      # signed out on the server while still stored
+    assert cc.take_reauth() == ORG                                      # and the next login returns here
     assert not (cc.org_dir(ORG) / cc.AWS_CACHE).exists()                # no credential outlives the sign-in
     mints = fed.mints
     rc, out, err = call(fed, backend, store, "aws")                     # signed out: asks nobody
     assert (rc, out) == (1, "") and "brindle account login" in err and fed.mints == mints
+
+
 
 
 def test_two_concurrent_invocations_make_one_mint(fed, backend, store):
