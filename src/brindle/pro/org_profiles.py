@@ -50,6 +50,7 @@ REFRESH_EVERY = 3600                  # fetch again after this long...
 REFRESH_WHEN_LEFT = 0.25              # ...or once less than this share of the signature's life is left
 MEMO_SECONDS = 60                     # how long one answer (even "none") is reused in this process
 CACHE_FILE = "library.json"
+CACHE_GRACE = 7 * 86400              # a cached library outlives its expiry this long offline
 ORG_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # The backend's rule for item names: "backend-auditor", "security/backend".
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63}){0,3}$")
@@ -180,7 +181,7 @@ def load_cached(org_id: str, *, now: float | None = None) -> Library | None:
             return None
         doc = json.loads(raw)
         return parse_library(org_id, doc["response"], now=now, fetched_at=doc.get("fetched_at"),
-                             grace=license.DEFAULT_GRACE)
+                             grace=CACHE_GRACE)
     except Exception as e:  # noqa: BLE001 - an unusable cache is no cache
         log.warning("ignoring the cached org library (%s)", e)
         return None

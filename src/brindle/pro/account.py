@@ -56,7 +56,7 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   login --device
             show a code to enter in a browser elsewhere instead (SSH, no browser here)
   logout    revoke this device's session and forget its credentials
-  status    show your account, plan, features and when the entitlement expires
+  status    show your account, plan and features
   savings   what hosted learning's picks gained in this repo, this month and last
             (estimates, from this machine's records only)
   upgrade   open the checkout for brindle Pro (your personal org); prints the URL too
@@ -736,7 +736,6 @@ class ProAccount(_OrgCommands):
         self._say(f"  learning  {'cloud (hosted learning active)' if cloud else 'off (no hosted learning)'}"
                   + ("" if cloud or 'learning' not in ent.features
                      else " -- offline; hosted learning resumes after a refresh"))
-        self._say(f"  expires   {_when(ent.exp)}")
         if ent.in_grace:
             left = max(0, int((ent.grace_until or now) - now)) // 3600
             self._say(f"  grace     until {_when(ent.grace_until)} (~{left} h); "

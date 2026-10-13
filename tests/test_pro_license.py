@@ -221,9 +221,31 @@ def test_revoked_session_fails_closed_and_forgets_credentials(backend, token):
     now = time.time()
     store = logged_in(backend, token(iat=int(now - 2 * DAY), exp=int(now - DAY)), access_valid=False)
     backend.revoked = True
-    with pytest.raises(LicenseError, match="revoked"):
+    with pytest.raises(LicenseError, match="brindle account login"):
         license.current(store=store, client=client(backend))
     assert store.load() is None
+
+
+@pytest.mark.variant("paid vs free is one conditional expression; coverage cannot tell its sides apart")
+@pytest.mark.parametrize("plan,says", [("pro", "brindle account login"),
+                                       ("free", "no active brindle Pro subscription")])
+def test_expired_past_grace_offline_asks_only_subscribers_to_log_in(backend, token, plan, says):
+    now = time.time()
+    store = logged_in(backend, token(plan=plan, iat=int(now - 30 * DAY), exp=int(now - 29 * DAY)),
+                      access_valid=False)
+    backend.routes["POST /token/refresh"] = [auth.TransportError("down")]
+    with pytest.raises(LicenseError, match=says):
+        license.current(store=store, client=client(backend))
+
+
+def test_a_cancelled_subscription_is_announced_once(backend, token):
+    now = time.time()
+    store = logged_in(backend, token(iat=int(now - 2 * DAY), exp=int(now - DAY)), access_valid=False)
+    backend.plan = "free"
+    assert license.current(store=store, client=client(backend)).plan == "free"
+    assert license.ended_notice(store) == license.ENDED_NOTICE
+    license.ended_notice_told(store)
+    assert license.ended_notice(store) is None
 
 
 # -- development keys (JWKS from a localhost backend) ------------------------------------------

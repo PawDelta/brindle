@@ -810,13 +810,14 @@ def quit_keys(sidebar: bool) -> tuple[int, ...]:
 
 def _start_status():
     """The org status poller for this sidebar, started; None when brindle isn't
-    signed in to a team (or in air-gap mode): the poll only runs while a brindle
-    session is open."""
+    signed in (or in air-gap mode). It keeps the entitlement renewed and, for a
+    team, polls the org status, only while a brindle session is open."""
     try:
         from brindle.pro import license, status
 
-        if airgap.enabled() or "team" not in license.current(refresh=False).features:
+        if airgap.enabled():
             return None
+        license.current(refresh=False)  # raises when not logged in: nothing to renew
         # Running workers touch() the activity clock from the loop, which keeps the pace at 60s.
         poller = status.Poller()
         return poller if poller.start() else None
@@ -851,6 +852,13 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
 
         bar = org_status.Bar(tmux.pane_session(os.environ["TMUX_PANE"]))
     while True:
+        if poller is not None and own_root and time.time() - delivered_at >= 5.0:
+            try:
+                from brindle.pro import status as org_status
+
+                org_status.deliver_ended(db, own_root)
+            except Exception:  # noqa: BLE001 - a notice never takes the sidebar down
+                pass
         if poller is not None and poller.saved is not None:
             if bar is not None:
                 bar.publish(poller.saved)      # sets the tmux option only on a change

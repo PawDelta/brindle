@@ -188,7 +188,7 @@ def test_an_expired_or_forged_entitlement_is_no_plan(run, acct):
     now = int(time.time())
     acct.login("enterprise", exp=now - 40 * 86400, iat=now - 41 * 86400)
     code, out = run("account")
-    assert code == 0 and "expired" in out
+    assert code == 0 and "brindle account login" in out
     assert all("✓" not in ln for ln in out.splitlines())
     acct.login("enterprise")
     store = credentials.default_store()
