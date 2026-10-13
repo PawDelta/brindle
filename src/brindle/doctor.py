@@ -275,7 +275,7 @@ def _fix_claude(confirm, done: list[str]) -> list[str]:
 
 
 def checks(repo_root: str | None) -> list[Check]:
-    from brindle import config, detect, procs, tmux
+    from brindle import config, detect, procs, tmux, updates
     from brindle.db import DB
 
     out: list[Check] = []
@@ -313,6 +313,9 @@ def checks(repo_root: str | None) -> list[Check]:
     out.extend(native_checks(repo_root))
     out.extend(quota_checks(repo_root))
     out.extend(airgap_checks(repo_root))
+    update = updates.notice(refresh=True)
+    if update:
+        out.append(Check(OK, "brindle update", update))
     out.extend(pro_checks())
     out.extend(managed_checks(repo_root))
 

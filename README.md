@@ -48,6 +48,10 @@ curl -fsSL pawdelta.com/brindle/install | sh
 
 The script ([scripts/install.sh](scripts/install.sh)) installs uv and tmux if
 they're missing, then brindle, then runs `brindle doctor`. Run it again to upgrade.
+Session starts check PyPI at most once a day and show available updates in the status
+bar and `brindle doctor`; set `"auto_update": true` in `~/.brindle/config.json` to
+upgrade in the background (restart to use it). Checks skip local and editable
+installs and can be disabled with `BRINDLE_NO_UPDATE_CHECK`.
 To do it by hand:
 
 ```sh
@@ -493,6 +497,7 @@ Autopilot, merge gates and cleanup:
 | Key | Default | |
 |---|---|---|
 | `autopilot` | `true` | start the supervisor with autopilot on |
+| `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
 | `checks` | `[]` | commands that must pass in a worker's branch before it merges |
 | `review` | only under autopilot | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |

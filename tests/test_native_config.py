@@ -66,6 +66,9 @@ def test_doctor_checks_each_native_endpoint_once(repo, fake, monkeypatch):
     assert local.level == doctor.WARN and "ollama pull qwen3-coder:30b" in local.detail
     assert "developer-local" in local.detail and "reviewer-local" in local.detail
     # And they're part of the full report.
+    monkeypatch.setattr("brindle.updates.notice", lambda **kw: "update-data")
     monkeypatch.setattr(doctor, "_tool", lambda *a, **k: doctor.Check(doctor.OK, a[0], "stub"))
-    names = [c.name for c in doctor.checks(str(repo))]
+    report = doctor.checks(str(repo))
+    assert any(c.detail == "update-data" and c.level == doctor.OK for c in report)
+    names = [c.name for c in report]
     assert "model tiny" in names and "profile bare" in names

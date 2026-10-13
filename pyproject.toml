@@ -22,6 +22,7 @@ classifiers = [
     "Topic :: Software Development :: Version Control :: Git",
 ]
 dependencies = [
+    "packaging>=24",
     "typer>=0.12",
     "mcp>=2.2,<3",
     "cryptography>=42",
