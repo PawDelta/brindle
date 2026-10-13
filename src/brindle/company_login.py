@@ -52,8 +52,11 @@ def run_cmd(argv: list[str], timeout: float = CHECK_TIMEOUT, interactive: bool =
         if interactive:
             proc = subprocess.run(argv, timeout=timeout, check=False)
             return proc.returncode, ""
+        # Never hand a probe the terminal: `claude` turns newline translation
+        # back on when it exits, which shifts the curses sidebar's drawing.
+        feed = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False,
-                              cwd=cwd, env=env, input=stdin)
+                              cwd=cwd, env=env, **feed)
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
         return 124, "timed out"
