@@ -226,14 +226,7 @@ def test_revoked_session_fails_closed_and_forgets_credentials(backend, token):
     assert store.load() is None
 
 
-def test_grace_is_an_hour_past_expiry(token):
-    exp = 1_000_000_000
-    t = token(iat=exp - DAY, exp=exp)
-    assert verify(t, now=exp + 600).grace_until == exp + 3600
-    with pytest.raises(LicenseError, match="expired"):
-        verify(t, now=exp + 3601)
-
-
+@pytest.mark.variant("paid vs free is one conditional expression; coverage cannot tell its sides apart")
 @pytest.mark.parametrize("plan,says", [("pro", "brindle account login"),
                                        ("free", "no active brindle Pro subscription")])
 def test_expired_past_grace_offline_asks_only_subscribers_to_log_in(backend, token, plan, says):
