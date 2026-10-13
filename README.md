@@ -1873,7 +1873,8 @@ list it under `routing` in `.brindle/config.json`.
 - **Google Antigravity.** `agy` can run on a Gemini API key: set
   `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
   put the key in the profile as `env.GEMINI_API_KEY: ...` (or in your
-  environment). Keep the key out of the repo. `agy` does not support Vertex AI.
+  environment). Keep the key out of the repo. For a Gemini-compatible gateway, set
+  `env.GOOGLE_GEMINI_BASE_URL` to its URL. `agy` does not support Vertex AI.
   The full setup is in [Google Antigravity](#google-antigravity) below.
 
 If your org runs brindle for a team, its admins set the route for everyone from
