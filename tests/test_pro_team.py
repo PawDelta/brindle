@@ -139,6 +139,7 @@ def test_a_loosened_cache_file_is_not_trusted(team):
     assert not plugin(team).check_assign(assign()).allowed
 
 
+@pytest.mark.variant("live incident: a pre-upgrade process rewrote the cache without a federated route's fields")
 def test_policy_cache_preserves_unknown_fields_and_ignores_legacy_writes(team):
     from brindle.pro import team_policy
     from brindle.pro._files import write_private
