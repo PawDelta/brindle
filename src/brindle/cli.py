@@ -458,8 +458,11 @@ def _session_worktree(db: DB, ws: Workspace) -> Workspace:
     n = 2
     while git.ok(["rev-parse", "--verify", "--quiet", f"refs/heads/brindle/session-{n}"], ws.repo_root):
         n += 1
-    return workspaces.create(db, ws.repo_root, f"brindle/session-{n}", base=ws.branch or None,
+    created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}", base=ws.branch or None,
                              start=git.out(["rev-parse", "HEAD"], ws.path), apply_prefix=False).workspace
+    from brindle import codemap
+    codemap.seed_session(created.path, created.repo_root)
+    return created
 
 
 def _pause_running(db: DB, ws: Workspace, stop_procs: bool = True) -> None:
