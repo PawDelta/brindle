@@ -58,9 +58,10 @@ def _fake_graph(path: Path, hub: str) -> None:
     path.write_text(json.dumps({"nodes": nodes, "links": links}))
 
 
-def test_supervisor_repo_map_is_in_the_supervisor_prompt_only(db, mapped):
+def test_supervisor_repo_map_is_in_the_supervisor_prompt_and_cached_per_graph_mtime(db, mapped):
     graph = mapped / "graphify-out" / "graph.json"
     _fake_graph(graph, "Hub")
+    stamp = graph.stat().st_mtime
     ws = workspaces.adopt_root(db, str(mapped))
     db.add_agent(Agent("s1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0", None, time.time()))
     prompt = agents._profile_for(db, db.get_agent("s1"), ws).prompt
@@ -68,12 +69,6 @@ def test_supervisor_repo_map_is_in_the_supervisor_prompt_only(db, mapped):
     assert "graphify affected" in prompt
     worker = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
     assert "Alpha (3)" not in worker
-
-
-def test_supervisor_repo_map_is_cached_per_graph_mtime(mapped):
-    graph = mapped / "graphify-out" / "graph.json"
-    _fake_graph(graph, "Hub")
-    stamp = graph.stat().st_mtime
     assert "Hub src" in codemap.supervisor_map(mapped)
     _fake_graph(graph, "Renamed")
     os.utime(graph, (stamp, stamp))
