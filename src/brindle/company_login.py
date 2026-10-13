@@ -204,7 +204,8 @@ ENV_NAMES = frozenset({
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     # a federated org's cloud hooks (cloud_credential)
     "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
-    "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"})
+    "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE",
+    "GOOGLE_GEMINI_BASE_URL"})
 
 
 def store_env(org_id: str, env: dict[str, str], self_serve: bool = False) -> None:

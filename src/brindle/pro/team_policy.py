@@ -86,6 +86,7 @@ class ProviderConfig:
 
 AGENT_CLAUDE_ROUTES = ("subscription", "console", "bedrock", "vertex", "foundry", "gateway")
 AGENT_CODEX_ROUTES = ("chatgpt", "api_key", "azure", "gateway")
+AGENT_ANTIGRAVITY_ROUTES = ("gemini", "gateway")
 # The sub-block a Claude route needs; the others are pruned from the parsed block.
 CLAUDE_ROUTE_BLOCK = {"bedrock": "aws", "vertex": "gcp", "foundry": "azure", "gateway": "gateway"}
 CLAUDE_ORG_ROUTES = ("subscription", "console")     # the routes that sign in to a Claude org
@@ -95,6 +96,7 @@ CLAUDE_ORG_ROUTES = ("subscription", "console")     # the routes that sign in to
 # ``provider_config`` always did (see brindle.pro.managed_models).
 CLAUDE_CLOUD_ROUTES = ("bedrock", "vertex", "foundry", "gateway")
 CODEX_ENDPOINT_ROUTES = ("azure", "gateway")
+ANTIGRAVITY_ENDPOINT_ROUTES = ("gateway",)
 CLAUDE_MODEL_ROUTES = ("console", "bedrock", "vertex", "foundry", "gateway")   # model_ids kept
 FEDERATED_ROUTES = ("bedrock", "vertex", "foundry")  # the routes ``auth: federated`` applies to
 DEFAULT_MAX_SESSION_AGE = 86400
@@ -200,6 +202,12 @@ class CodexSetup:
 
 
 @dataclass(frozen=True)
+class AntigravitySetup:
+    route: str
+    base_url: str | None = None     # gateway: the endpoint (``GOOGLE_GEMINI_BASE_URL``)
+
+
+@dataclass(frozen=True)
 class AgentSetup:
     """Org policy ``agent_setup``: how the org's workers sign in to Claude and
     Codex. Names only, never a secret. ``enforce`` is False unless the org has
@@ -213,6 +221,7 @@ class AgentSetup:
     ``agent_setup``, whose ``provider_config`` stays the managed source."""
     claude: ClaudeSetup | None = None
     codex: CodexSetup | None = None
+    antigravity: AntigravitySetup | None = None
     enforce: bool = False
     deny_personal_keys: bool | None = None
     exclusive: bool | None = None
@@ -230,7 +239,9 @@ class AgentSetup:
         org's: what ``enforce`` manages as ``provider_config`` always did."""
         return bool((self.claude is not None and self.claude.route in CLAUDE_CLOUD_ROUTES)
                     or (self.codex is not None and self.codex.route in CODEX_ENDPOINT_ROUTES
-                        and self.codex.base_url))
+                        and self.codex.base_url)
+                    or (self.antigravity is not None and self.antigravity.route in ANTIGRAVITY_ENDPOINT_ROUTES
+                        and self.antigravity.base_url))
 
 
 @dataclass(frozen=True)
@@ -493,7 +504,8 @@ GCP_NUMBER_RE = re.compile(r"\d{1,20}")
 GCP_POOL_RE = re.compile(r"[a-z0-9-]{4,32}")
 GCP_SA_RE = re.compile(r"[a-z][a-z0-9-]{5,29}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com")
 CODEX_KEYS = ("route", "base_url")
-AGENT_KEYS = ("claude", "codex", "enforce", "deny_personal_keys", "exclusive")
+ANTIGRAVITY_KEYS = ("route", "base_url")
+AGENT_KEYS = ("claude", "codex", "antigravity", "enforce", "deny_personal_keys", "exclusive")
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 AWS_ACCOUNT_RE = re.compile(r"\d{12}")
 IAM_ROLE_RE = re.compile(r"[A-Za-z0-9+=,.@_-]{1,64}")
@@ -710,6 +722,15 @@ def _codex(v) -> CodexSetup:
     return CodexSetup(route=route, base_url=base_url if route in CODEX_ENDPOINT_ROUTES else None)
 
 
+def _antigravity(v) -> AntigravitySetup:
+    a = _obj(v, ANTIGRAVITY_KEYS, "antigravity")
+    route = a.get("route")
+    if route not in AGENT_ANTIGRAVITY_ROUTES:
+        raise _Malformed("invalid antigravity route")
+    base_url = _https(a, "base_url") if (route == "gateway" or a.get("base_url") is not None) else None
+    return AntigravitySetup(route=route, base_url=base_url if route in ANTIGRAVITY_ENDPOINT_ROUTES else None)
+
+
 def _enforce_entitled() -> bool:
     from brindle.pro import license
 
@@ -736,7 +757,9 @@ def _parse_agent_setup(raw) -> AgentSetup:
         raise _Malformed("invalid exclusive")
     claude = _claude(a["claude"]) if a.get("claude") is not None else None
     codex = _codex(a["codex"]) if a.get("codex") is not None else None
-    return AgentSetup(claude=claude, codex=codex, enforce=enforce and _enforce_entitled(),
+    antigravity = _antigravity(a["antigravity"]) if a.get("antigravity") is not None else None
+    return AgentSetup(claude=claude, codex=codex, antigravity=antigravity,
+                      enforce=enforce and _enforce_entitled(),
                       deny_personal_keys=deny, exclusive=exclusive)
 
 

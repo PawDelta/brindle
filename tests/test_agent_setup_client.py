@@ -114,6 +114,15 @@ def test_codex_routes(route, base_url, kept, no_enterprise):
     assert s.claude is None
 
 
+@pytest.mark.parametrize("route,base_url,kept", [
+    ("gemini", None, None), ("gemini", "https://llm.acme.internal/v1", None),
+    ("gateway", "https://llm.acme.internal/v1", "https://llm.acme.internal/v1")])
+def test_antigravity_routes(route, base_url, kept, no_enterprise):
+    s = parse({"antigravity": {"route": route, **({"base_url": base_url} if base_url else {})}})
+    assert s.antigravity.route == route and s.antigravity.base_url == kept
+    assert s.claude is None and s.codex is None
+
+
 def test_models_kept_for_any_route(no_enterprise):
     c = parse({"claude": {"route": "bedrock", "aws": AWS, "models": MODELS}}).claude
     assert c.models.opus == "claude-opus-4-5"
@@ -180,6 +189,9 @@ BAD_CASES = [
     ("model id secret-shaped", {"claude": {"route": "bedrock", "aws": OWN_AWS, "model_ids": ["sk-ant-api03-abcdefghijklmnop"]}}),
     ("model_ids validated for subscription too", {"claude": {"route": "subscription", "org_id": UUID, "model_ids": ["a b"]}}),
     ("codex gateway without base_url", {"codex": {"route": "gateway"}}),
+    ("antigravity route", {"antigravity": {"route": "bing"}}),
+    ("antigravity gateway without base_url", {"antigravity": {"route": "gateway"}}),
+    ("antigravity base_url http", {"antigravity": {"route": "gateway", "base_url": "http://llm.acme.internal/v1"}}),
     ("codex base_url http", {"codex": {"route": "azure", "base_url": "http://acme.openai.azure.com/v1"}}),
     ("codex login route with a bad base_url", {"codex": {"route": "chatgpt", "base_url": "nope"}}),
     ("deny_personal_keys not a bool", {"codex": {"route": "chatgpt"}, "deny_personal_keys": "yes"}),
@@ -307,7 +319,8 @@ def test_block_round_trips_through_the_cache(enterprise):
     raw = {"enforce": True, "exclusive": True, "deny_personal_keys": True,
            "claude": {"route": "foundry", "azure": {"base_url": FOUNDRY_URL}, "models": MODELS,
                       "model_ids": IDS, "default_model": IDS[0]},
-           "codex": {"route": "gateway", "base_url": "https://llm.acme.internal/v1"}}
+           "codex": {"route": "gateway", "base_url": "https://llm.acme.internal/v1"},
+           "antigravity": {"route": "gateway", "base_url": "https://llm.acme.internal/v1"}}
     p = parse_policy(ORG, body(raw))
     again = parse_policy(ORG, p.to_json())                      # asdict: model_ids come back as a tuple
     assert again.agent_setup == p.agent_setup
