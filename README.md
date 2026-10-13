@@ -1877,9 +1877,8 @@ list it under `routing` in `.brindle/config.json`.
   `env.GOOGLE_GEMINI_BASE_URL` to its URL. `agy` does not support Vertex AI.
   The full setup is in [Google Antigravity](#google-antigravity) below.
 
-If your org runs brindle for a team, its admins set the route for everyone from
-the brindle dashboard. An enforced org route replaces a profile's `env.` lines, so
-a profile can't move a worker off the company's route. See
+If your org sets an enforced route for brindle, it replaces a profile's `env.`
+lines, so a profile can't move a worker off the company's route. See
 [Using your company's access](#using-your-companys-access).
 
 ### Using your company's access
