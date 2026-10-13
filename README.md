@@ -1834,6 +1834,9 @@ documents its own quirks (no prompt caching on most, smaller context windows),
 so prefer the native provider for open-weight models and keep this route for
 Claude itself behind a gateway.
 
+To run workers on your own Bedrock, Vertex, Codex or Antigravity account, see
+[Running workers on your own cloud](#running-workers-on-your-own-cloud) below.
+
 ### Running workers on your own cloud
 
 Any brindle user, free tier included, can run a worker's model on their own cloud
@@ -1877,8 +1880,9 @@ list it under `routing` in `.brindle/config.json`.
   `env.GOOGLE_GEMINI_BASE_URL` to its URL. `agy` does not support Vertex AI.
   The full setup is in [Google Antigravity](#google-antigravity) below.
 
-If your org sets an enforced route for brindle, it replaces a profile's `env.`
-lines, so a profile can't move a worker off the company's route. See
+If your org runs brindle for a team, its admins can set a route for everyone in
+the org's Routing settings on the brindle dashboard; an enforced org route replaces
+a profile's `env.` lines, so a profile can't move a worker off the company's route. See
 [Using your company's access](#using-your-companys-access).
 
 ### Using your company's access
