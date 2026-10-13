@@ -1,6 +1,8 @@
 """Company login: `brindle login` applies the org policy's agent_setup."""
 
 import json
+import os
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -367,3 +369,17 @@ def test_brindle_login_is_brindle_account_login(monkeypatch):
     assert runner.invoke(cli.app, ["login", "--device"]).exit_code == 0
     assert runner.invoke(cli.app, ["account", "login", "--device"]).exit_code == 0
     assert seen == [["login"], ["login"], ["login", "--device"], ["login", "--device"]]
+
+
+def test_run_cmd_never_hands_a_probe_the_terminal():
+    # A probe that inherits the tty (claude exits by resetting its modes) shifts the sidebar.
+    probe = "import os; s = os.fstat(0); print(s.st_rdev == os.stat(os.devnull).st_rdev)"
+    read, write = os.pipe()
+    saved = os.dup(0)
+    os.dup2(read, 0)  # a stdin the child would otherwise inherit
+    try:
+        assert company_login.run_cmd([sys.executable, "-c", probe]) == (0, "True\n")
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, read, write):
+            os.close(fd)
