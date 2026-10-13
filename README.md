@@ -1837,6 +1837,12 @@ Claude itself behind a gateway.
 To run workers on your own Bedrock, Vertex, Codex or Antigravity account, see
 [Running workers on your own cloud](#running-workers-on-your-own-cloud) below.
 
+Codex agents report status through Codex's `notify` hook (brindle passes
+`-c notify=[...]` at launch, leaving your own Codex config alone): a completed turn
+marks the agent idle and delivers any queued message. Codex has no Stop hook, so for
+an autopilot supervisor on Codex that turn end is also where brindle tells it to keep
+going, with the same limit on reminders as Claude Code.
+
 ### Running workers on your own cloud
 
 Any brindle user, free tier included, can run a worker's model on their own cloud
@@ -1875,23 +1881,16 @@ list it under `routing` in `.brindle/config.json`.
   to it. Each Codex home keeps its own sign-in (`auth.json`).
 - **Google Antigravity.** `agy` can run on a Gemini API key: set
   `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
-  put the key in the profile as `env.GEMINI_API_KEY: ...` (or in your
-  environment). Keep the key out of the repo. For a Gemini-compatible gateway, set
-  `env.GOOGLE_GEMINI_BASE_URL` to its URL. `agy` does not support Vertex AI.
+  export `GEMINI_API_KEY` in your shell environment. Never put the key in a profile
+  or the repo, since profiles in `.brindle/agents/` are committed. For a
+  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. `agy`
+  ignores Vertex AI credentials, so use a Gemini API key or gateway.
   The full setup is in [Google Antigravity](#google-antigravity) below.
 
 If your org runs brindle for a team, its admins can set a route for everyone in
 the org's Routing settings on the brindle dashboard; an enforced org route replaces
 a profile's `env.` lines, so a profile can't move a worker off the company's route. See
 [Using your company's access](#using-your-companys-access).
-
-### Using your company's access
-
-Codex agents report status through Codex's `notify` hook (brindle passes
-`-c notify=[...]` at launch, leaving your own Codex config alone): a completed turn
-marks the agent idle and delivers any queued message. Codex has no Stop hook, so for
-an autopilot supervisor on Codex that turn end is also where brindle tells it to keep
-going, with the same limit on reminders as Claude Code.
 
 ### Using your company's access
 
