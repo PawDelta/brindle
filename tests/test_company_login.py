@@ -57,6 +57,36 @@ def claude(route, **kw):
     return AgentSetup(claude=ClaudeSetup(route=route, **kw))
 
 
+@pytest.mark.parametrize("model, ids, expected", [
+    ("claude-sonnet-4-6", (IDS[-1],), IDS[-1]),
+    pytest.param("claude-haiku-5-5", (IDS[-1],), IDS[-1],
+                 marks=pytest.mark.variant("Haiku profile from the live Bedrock failure")),
+    (IDS[0], IDS, IDS[0]),
+    (None, ("claude-sonnet-4-6", IDS[-1]), IDS[-1]),
+    pytest.param("claude-sonnet-4-6", IDS, IDS[-1],
+                 marks=pytest.mark.variant("route default differs from its first served id")),
+])
+def test_route_model_is_used_by_launch_and_policy(repo, monkeypatch, model, ids, expected):
+    from brindle import policy, providers
+    from brindle.config import RepoConfig
+    from brindle.pro.team_policy import OrgPolicy, ProPolicy
+    from brindle.profiles import Profile
+
+    setup = claude("bedrock", aws=OWN_AWS, model_ids=ids, default_model=IDS[-1])
+    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, setup))
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    p = Profile("routed", "", "claude", "", model=model)
+    monkeypatch.setattr("brindle.profiles.load_profile", lambda *a: p)
+    org = OrgPolicy(org_id=ORG, version=1, allowed_models=(expected,))
+    plugin = ProPolicy(str(repo))
+    monkeypatch.setattr(plugin, "policy", lambda: org)
+    monkeypatch.setattr(policy, "plugin", lambda *a: plugin)
+    argv = providers.ClaudeCode().command(providers.LaunchContext("a1", p, None, cwd=str(repo)))
+    decision = policy.check_assign(RepoConfig(), str(repo), p.name, "task", "assign")
+    assert (argv[argv.index("--model") + 1], policy._profile_fields(p.name, str(repo)),
+            decision.allowed) == (expected, ("claude", expected), True)
+
+
 class _Ent:
     def __init__(self, org_id):
         self.org_id = org_id

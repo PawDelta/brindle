@@ -464,6 +464,28 @@ def apply(org_id: str, setup, say: Callable[[str], None], repo_root: str | None 
 UNAVAILABLE = object()      # org_setup: the entitlement or policy couldn't be had (offline, ...)
 
 
+def claude_model(model: str | None, repo_root: str | None = None) -> str | None:
+    """The model a Claude worker can use on the company's route.
+
+    A served profile model wins; otherwise the route's default wins over
+    the profile's CLI flag, just as it does in the company login env.
+    Launch and policy checks share this resolution without changing the
+    saved profile. Claude Code's own managed settings pick their own route.
+    An unavailable setup leaves the profile alone, as company login does.
+    """
+    from brindle import providers
+
+    if providers.claude_org_managed():
+        return model
+    got = org_setup(repo_root)
+    if got is None or got is UNAVAILABLE:
+        return model
+    c = got[1].claude
+    if c is None or not c.model_ids or model in c.model_ids:
+        return model
+    return c.default_model or c.model_ids[0]
+
+
 def org_setup(repo_root: str | None = None, store=None, client=None):
     """(org id, AgentSetup) for the signed-in team org; None when the policy
     was had and there is no ``agent_setup`` (or no team entitlement);

@@ -128,6 +128,10 @@ def _profile_fields(profile: str | None, repo_root: str) -> tuple[str | None, st
 
         p = load_profile(profile, repo_root)
         model = p.model
+        if p.provider == "claude":
+            from brindle import company_login
+
+            model = company_login.claude_model(model, repo_root)
         if not model:
             try:
                 from brindle.autopilot import effective_profile_model
