@@ -5,7 +5,7 @@ policy on delegations and merges.
   allowed; this plugin only enforces what an org has set.
 * With one, the org's policy is used at the entitlement's
   ``policy_version``: from the on-disk cache (``$BRINDLE_HOME/pro/
-  policy-<org>.json``, 0600) when it is that version or newer, else fetched
+  policy-v2-<org>.json``, 0600) when it is that version or newer, else fetched
   from ``GET /orgs/{org_id}/policy`` and cached. If the fetch fails, the last
   good copy is used; if there has never been one, everything is denied with
   a message saying how to fix it.
@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import time
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from urllib.parse import urlsplit
 
@@ -280,6 +281,10 @@ class OrgPolicy:
     deny_personal_keys: bool = False
     # The org's ``agent_setup`` block (None: absent, or malformed and ignored).
     agent_setup: AgentSetup | None = None
+    # Keep the server answer separate from the interpreted policy: newer
+    # servers may send fields this client cannot model yet. Do not serialize
+    # the interpreted policy back over those fields when caching it.
+    raw_body: dict | None = field(default=None, repr=False, compare=False)
 
     @property
     def enforced(self) -> OrgPolicy:
@@ -820,13 +825,15 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
                      role=_role_name(body.get("role")),
                      policy_role=_role_name(body.get("policy_role")),
                      cached_for=tuple(key) if ok_key else None,
-                     agent_setup=setup, **spend)
+                     agent_setup=setup, raw_body=deepcopy(body), **spend)
 
 
 def cache_path(org_id: str):
     if not ORG_RE.match(org_id):
         raise PolicyUnavailable("invalid org id")
-    return private_dir() / f"policy-{org_id}.json"
+    # Pre-fix processes keep writing the legacy name with a lossy serializer.
+    # Never read or migrate that cache: it may already have lost policy fields.
+    return private_dir() / f"policy-v2-{org_id}.json"
 
 
 def load_cached(org_id: str) -> OrgPolicy | None:
@@ -839,7 +846,17 @@ def load_cached(org_id: str) -> OrgPolicy | None:
 
 
 def save_cached(p: OrgPolicy) -> None:
-    write_private(cache_path(p.org_id), json.dumps(p.to_json()).encode())
+    """Cache the server answer, retaining fields unknown to this client.
+
+    Locally constructed policies have no server answer; those can still use
+    the model's JSON representation. Cache metadata always comes from ``p``
+    so the entitlement key and fetch time survive a save/load cycle.
+    """
+    body = dict(p.raw_body) if p.raw_body is not None else p.to_json()
+    body["org_id"] = p.org_id
+    body["fetched_at"] = p.fetched_at
+    body["cached_for"] = list(p.cached_for) if p.cached_for is not None else None
+    write_private(cache_path(p.org_id), json.dumps(body).encode())
 
 
 def fetch_policy(org_id: str, client=None, store=None, cached_for=None) -> OrgPolicy:

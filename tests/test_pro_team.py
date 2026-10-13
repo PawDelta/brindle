@@ -131,10 +131,28 @@ def test_malformed_policy_fails_closed(team, body):
 
 
 def test_a_loosened_cache_file_is_not_trusted(team):
+    from brindle.pro.team_policy import cache_path
+
     plugin(team).check_assign(assign())
-    os.chmod(private_dir() / f"policy-{ORG}.json", 0o644)
+    os.chmod(cache_path(ORG), 0o644)
     team.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
     assert not plugin(team).check_assign(assign()).allowed
+
+
+@pytest.mark.variant("live incident: a pre-upgrade process rewrote the cache without a federated route's fields")
+def test_policy_cache_preserves_unknown_fields_and_ignores_legacy_writes(team):
+    from brindle.pro import team_policy
+    from brindle.pro._files import write_private
+
+    team.policy_body["policy"]["future_route"] = {"auth": "federated"}
+    p = team_policy.fetch_policy(ORG, client(team), team.store, cached_for=("member", None))
+    path = team_policy.cache_path(ORG)
+    assert json.loads(path.read_bytes())["policy"] == team.policy_body["policy"]
+    write_private(private_dir() / f"policy-{ORG}.json", json.dumps({"version": 0}).encode())
+    cached = team_policy.load_cached(ORG)
+    assert (cached.version, cached.cached_for, cached.fetched_at) == (3, ("member", None), p.fetched_at)
+    team_policy.save_cached(cached)
+    assert json.loads(path.read_bytes())["policy"] == team.policy_body["policy"]
 
 
 # -- events -------------------------------------------------------------------------------------------
