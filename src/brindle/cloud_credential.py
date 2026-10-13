@@ -346,7 +346,7 @@ def assume_role(sts: Sts, region: str, role_arn: str, id_token: str, now: float)
     c = claims(id_token)
     status, raw = sts(f"https://sts.{region}.amazonaws.com/", {
         "Action": "AssumeRoleWithWebIdentity", "Version": "2011-06-15", "RoleArn": role_arn,
-        "RoleSessionName": session_name(str(c.get("member") or ""), str(c.get("fid") or "")),
+        "RoleSessionName": session_name(str(c.get("member") or c.get("sub") or ""),str(c.get("fid") or "")),
         "WebIdentityToken": id_token, "DurationSeconds": str(AWS_SESSION_SECONDS)})
     leaves = _xml(raw)
     if status != 200:
@@ -432,13 +432,27 @@ def device_headers() -> dict[str, str]:
     return {"X-Brindle-Version": brindle.__version__}
 
 
+def _personal(store, client, org_id: str) -> bool:
+    """Whether ``org_id`` is the signed-in user's own org (no team org is
+    selected and the stored entitlement is for it)."""
+    from brindle.pro import license
+
+    try:
+        if (store.load() or {}).get("org_id"):
+            return False
+        return license.current(refresh=False, store=store, client=client).org_id == org_id
+    except Exception:  # noqa: BLE001 - no usable entitlement: treat it as a team org
+        return False
+
+
 def _mint(client, store, org_id: str, cloud: str) -> str:
     """An ID token for ``cloud`` from PawDelta. A revoked or too-old sign-in
     signs the family out on the server, then deletes the stored credentials."""
     from brindle.pro import auth
 
+    path = "/me/federation/token" if _personal(store, client, org_id) else f"/orgs/{org_id}/federation/token"
     try:
-        status, body = auth.authed(client, store, "POST", f"/orgs/{org_id}/federation/token",
+        status, body = auth.authed(client, store, "POST", path,
                                    auth.JSONBody({"cloud": cloud}), headers=device_headers())
     except auth.AuthError as e:
         if isinstance(e, auth.TransportError):

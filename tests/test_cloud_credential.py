@@ -139,6 +139,19 @@ def test_each_cloud_gets_what_its_library_reads_and_the_mint_sends_device_header
     assert rc == 0 and fed.sts_calls == []                              # the library, not brindle, exchanges
 
 
+def test_a_personal_entitlement_mints_through_me_and_an_older_server_gets_a_readable_error(fed, backend, store, signing_key):
+    backend.routes[PATH] = lambda form, headers: pytest.fail("a personal org must not use the org route")
+    backend.routes["POST /me/federation/token"] = fed.mint
+    cur = store.load()
+    cur.pop("org_id")
+    store.save({**cur, "entitlement": sign(signing_key, claims(org_id=ORG))})
+    rc, out, err = call(fed, backend, store, "aws")
+    assert rc == 0 and fed.mints == 1 and json.loads(out)["AccessKeyId"] == "ASIAEXAMPLE"
+    fed.answer = (404, {"error": "not_found"})
+    rc, out, err = call(fed, backend, store, "aws", now=fed.at + 1000)
+    assert rc == 1 and "doesn't offer federated credentials yet" in err
+
+
 def test_azure_refresh_rewrites_the_file_only_below_30_percent(fed, backend, store, monkeypatch):
     fed.cloud = "azure"
     real = cc.credential
