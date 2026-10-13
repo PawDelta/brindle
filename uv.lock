@@ -54,6 +54,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "mcp" },
+    { name = "packaging" },
     { name = "typer" },
 ]
 
@@ -70,6 +71,7 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "mcp", specifier = ">=2.2,<3" },
+    { name = "packaging", specifier = ">=24" },
     { name = "typer", specifier = ">=0.12" },
 ]
 

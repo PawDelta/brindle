@@ -248,13 +248,17 @@ def set_alert(session: str, text: str, style: str = "warn") -> None:
 
 def apply_theme(session: str) -> None:
     """Style one brindle session (never the person's global tmux config)."""
+    from brindle import updates
+
+    update = updates.notice(compact=True)
     t = THEME
     opts = {
         "status-style": f"bg={t['bg2']},fg={t['muted2']}",
         # Which brindle runs this session: one started before an upgrade keeps
         # running the old code until it is restarted.
         "status-left": (f"#[bg={t['accent']},fg={t['text']},bold] brindle "
-                        f"#[bg={t['bg2']},fg={t['muted2']},nobold] {__version__} "
+                        f"#[bg={t['bg2']},fg={t['muted2']},nobold] {__version__} " +
+                        (f"{update} " if update else "") +
                         "#{@brindle_alert}"),   # org warning/messages, set by pro.status
         "status-left-length": "120",
         "status-right": f"#[fg={t['muted']}]#{{session_name}}  %H:%M ",

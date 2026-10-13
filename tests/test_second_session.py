@@ -38,6 +38,17 @@ def test_open_attaches_to_the_running_session(db, running, monkeypatch):
 
 
 def test_any_number_of_sessions_each_get_their_own_worktree(db, running, monkeypatch):
+    from types import SimpleNamespace
+
+    from brindle import updates
+    from brindle.config import user_config_path
+
+    user_config_path().write_text('{"auto_update": true}')
+    monkeypatch.setattr(updates, "newer_version", lambda: "0.4.0")
+    upgrades = []
+    monkeypatch.setattr(cli, "subprocess", SimpleNamespace(**{
+        **vars(cli.subprocess), "Popen": lambda argv, **kw: upgrades.append(argv)}))
+    monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
     spawned = []
     monkeypatch.setattr(cli, "_ask_about_running", lambda a: "n")
     monkeypatch.setattr(cli, "_attach", lambda *a, **k: None)
@@ -51,3 +62,4 @@ def test_any_number_of_sessions_each_get_their_own_worktree(db, running, monkeyp
     assert [ws.branch for ws in spawned] == ["brindle/session-2", "brindle/session-3", "brindle/session-4"]
     assert len({ws.path for ws in spawned}) == 3
     assert db.get_agent("sup1").status == "idle"            # the first keeps running
+    assert upgrades == [["uv", "tool", "upgrade", "brindle"]] * 3

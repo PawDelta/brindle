@@ -178,7 +178,11 @@ def test_set_alert_writes_a_session_option(monkeypatch):
     assert "a##b" in seen[2][4]
 
 
-def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch):
+@pytest.mark.parametrize("latest", [None, "0.4.0"])
+def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch, latest):
+    from brindle import updates
+
+    monkeypatch.setattr(updates, "newer_version", lambda **kw: latest)
     opts = {}
     monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: opts.__setitem__(a[3], a[4]) if (
         a[0] == "set-option" and len(a) == 5 and a[1] == "-t") else type(
@@ -187,5 +191,10 @@ def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch):
     monkeypatch.setattr(tmux, "bind_session_keys", lambda s: None)
     tmux.apply_theme("s1")
     left = opts["status-left"]
+    assert left.count(tmux.__version__) == 1
+    if latest:
+        assert latest in left
+    else:
+        assert left.endswith(f"{tmux.__version__} #{{@brindle_alert}}")
     assert left.index(tmux.__version__) < left.index("#{@brindle_alert}")
     assert "#(" not in left                  # no process per redraw

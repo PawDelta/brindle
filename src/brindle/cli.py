@@ -302,6 +302,7 @@ def start(
     # processes, old paused sessions' worktrees and the pool refill are all
     # handled by the detached cull.
     _pause_running(db, ws, stop_procs=False)
+    _check_updates(ws.repo_root)
     if autopilot is None:
         autopilot = _run(load_repo_config, ws.repo_root).autopilot
     a = _run(agents.spawn, db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
@@ -317,6 +318,23 @@ def start(
         _say_autopilot(db, a.id)
     if attach:
         _attach(ws, a.tmux_window)
+
+
+def _check_updates(repo_root: str) -> None:
+    from brindle import updates
+    from brindle.config import load_repo_config
+
+    cfg = load_repo_config(repo_root)
+    latest = updates.newer_version()
+    if not latest or cfg.auto_update is not True:
+        return
+    try:
+        subprocess.Popen(["uv", "tool", "upgrade", "brindle"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except OSError:
+        return
+    typer.echo(f"  updating brindle to {latest} in the background; the new version takes effect after a restart")
 
 
 def _preflight(agent: str, provider: Optional[str], repo_root: str) -> None:
@@ -509,6 +527,7 @@ def continue_cmd(
         ws = scratch.for_origin(db, cwd)
         if ws is None:
             _fail("no scratch session started from this folder to continue; run `brindle` to start one")
+    _check_updates(ws.repo_root)
     live = agents.find_running(db, ws, "supervisor") or next(
         (a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and (agents.is_alive(a) or a.status == "failed")),
         None,

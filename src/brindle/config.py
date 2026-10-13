@@ -81,6 +81,7 @@ class RepoConfig:
     branch_prefix: str = ""
     default_agent: str = "developer"
     fetch: bool = True
+    auto_update: bool = False          # upgrade the PyPI tool at session start
     # Autopilot and merge gates.
     autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
@@ -227,7 +228,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     for key in ("setup", "teardown", "copy", "checks", "add_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
-    for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
+    for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "auto_update", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
