@@ -284,10 +284,12 @@ def test_hook_ignores_transcript_path_for_non_claude_providers(db, repo):
     assert db.get_agent("a1").transcript_path is None
 
 
-def _planner(input_tokens, output_tokens, cache_read=0):
-    return json.dumps({"type": "PLANNER_RESPONSE", "input_tokens": input_tokens,
-                       "output_tokens": output_tokens, "cache_read_tokens": cache_read,
-                       "model": "gemini-3-pro"}) + "\n"
+def _planner(input_tokens, output_tokens, cache_read=0, model="gemini-3-pro"):
+    ev = {"type": "PLANNER_RESPONSE", "input_tokens": input_tokens,
+          "output_tokens": output_tokens, "cache_read_tokens": cache_read}
+    if model is not None:
+        ev["model"] = model
+    return json.dumps(ev) + "\n"
 
 
 def test_antigravity_usage_is_cached_and_read_incrementally(db, tmp_path):
@@ -303,3 +305,42 @@ def test_antigravity_usage_is_cached_and_read_incrementally(db, tmp_path):
     write(t, [_planner(1, 2)])
     u = usage.antigravity_agent_usage(db, agent)
     assert (u.input_tokens, u.output_tokens, u.cache_read_tokens, u.model) == (11, 22, 5, "gemini-3-pro")
+
+
+def test_antigravity_transcript_without_model_uses_worker_launch_model(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    now = time.time()
+    db.add_workspace(Workspace("ws1", str(tmp_path), "wt", "worktree", "feat/x", "main",
+                               str(tmp_path), None, "s", now))
+    prof_dir = tmp_path / ".brindle" / "agents"
+    prof_dir.mkdir(parents=True)
+    (prof_dir / "agy-low.md").write_text(
+        "---\nname: agy-low\ndescription: t\nprovider: antigravity\nmodel: gemini-3.1-pro-low\n---\nGo.\n"
+    )
+    own = tmp_path / ".gemini" / "antigravity-cli" / "brain" / "sess-1" / ".system_generated" / "logs" / "transcript.jsonl"
+    write(own, [_planner(12, 34, 5, model=None)])
+
+    worker = Agent("a1", "ws1", "agy-low", "antigravity", None, "assign", "idle", "", None,
+                   now, session_ref="sess-1")
+    u = usage.antigravity_agent_usage(db, worker)
+    assert (u.input_tokens, u.output_tokens, u.cache_read_tokens, u.model) == (12, 34, 5, "gemini-3.1-pro-low")
+
+    t2 = tmp_path / "no-profile-model.jsonl"
+    write(t2, [_planner(4, 6, model=None)])
+    no_model_worker = Agent("a2", "ws1", "developer", "antigravity", None, "assign", "idle", "", None,
+                            now, transcript_path=str(t2))
+    assert usage.antigravity_agent_usage(db, no_model_worker).model == "unknown"
+
+
+def test_antigravity_missing_own_transcript_does_not_fall_back_to_other_session(db, tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    other = tmp_path / ".gemini" / "antigravity-cli" / "brain" / "other-sess" / ".system_generated" / "logs" / "transcript.jsonl"
+    write(other, [_planner(100, 200)])
+
+    missing_ref = Agent("a1", "ws", "developer", "antigravity", None, "assign", "idle", "", None,
+                        time.time(), session_ref="my-sess")
+    no_ref = Agent("a2", "ws", "developer", "antigravity", None, "assign", "idle", "", None, time.time())
+    assert usage.antigravity_agent_usage(db, missing_ref) is None
+    assert usage.antigravity_agent_usage(db, no_ref) is None
