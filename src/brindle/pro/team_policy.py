@@ -95,8 +95,33 @@ CLAUDE_ORG_ROUTES = ("subscription", "console")     # the routes that sign in to
 CLAUDE_CLOUD_ROUTES = ("bedrock", "vertex", "foundry", "gateway")
 CODEX_ENDPOINT_ROUTES = ("azure", "gateway")
 CLAUDE_MODEL_ROUTES = ("console", "bedrock", "vertex", "foundry", "gateway")   # model_ids kept
+FEDERATED_ROUTES = ("bedrock", "vertex", "foundry")  # the routes ``auth: federated`` applies to
+DEFAULT_MAX_SESSION_AGE = 86400
 AGENT_ENFORCE_FEATURE = MANAGED_FEATURE             # ``enforce`` needs this Enterprise entitlement
 MAX_MODEL_IDS = 32
+
+
+@dataclass(frozen=True)
+class AwsFederation:
+    """``auth: federated`` on Bedrock: the role PawDelta's ID token assumes."""
+    role_arn: str
+    max_session_age: int = DEFAULT_MAX_SESSION_AGE
+
+
+@dataclass(frozen=True)
+class GcpFederation:
+    project_number: str
+    pool_id: str
+    provider_id: str
+    service_account: str
+    max_session_age: int = DEFAULT_MAX_SESSION_AGE
+
+
+@dataclass(frozen=True)
+class AzureFederation:
+    tenant_id: str
+    client_id: str
+    max_session_age: int = DEFAULT_MAX_SESSION_AGE
 
 
 @dataclass(frozen=True)
@@ -114,12 +139,14 @@ class AwsSetup:
     @property
     def sso(self) -> bool:
         return self.sso_start_url is not None
+    federation: AwsFederation | None = None     # no sso_* when federated
 
 
 @dataclass(frozen=True)
 class GcpSetup:
     project: str
     region: str
+    federation: GcpFederation | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +156,7 @@ class AzureSetup:
     subscription_id: str | None = None
     resource: str | None = None
     base_url: str | None = None
+    federation: AzureFederation | None = None
 
 
 @dataclass(frozen=True)
@@ -157,6 +185,11 @@ class ClaudeSetup:
     # those are set). Kept for every route but subscription.
     model_ids: tuple[str, ...] = ()
     default_model: str | None = None
+    auth: str = "own_login"         # "federated": short-lived cloud credentials through PawDelta
+
+    @property
+    def federated(self) -> bool:
+        return self.auth == "federated"
 
 
 @dataclass(frozen=True)
@@ -438,13 +471,22 @@ def _org_key(pc: dict) -> tuple[str | None, tuple[str, ...] | None]:
 
 
 AWS_SSO_KEYS = ("sso_start_url", "sso_region", "account_id", "role_name")
-AWS_KEYS = AWS_SSO_KEYS + ("region",)
-GCP_KEYS = ("project", "region")
-AZURE_KEYS = ("subscription_id", "resource", "base_url")
+AWS_KEYS = AWS_SSO_KEYS + ("region", "federation")
+GCP_KEYS = ("project", "region", "federation")
+AZURE_KEYS = ("subscription_id", "resource", "base_url", "federation")
+AWS_FEDERATION_KEYS = ("role_arn", "max_session_age")
+GCP_FEDERATION_KEYS = ("project_number", "pool_id", "provider_id", "service_account", "max_session_age")
+AZURE_FEDERATION_KEYS = ("tenant_id", "client_id", "max_session_age")
 GATEWAY_KEYS = ("base_url",)
 MODEL_KEYS = ("opus", "sonnet", "haiku")
 CLAUDE_KEYS = ("route", "org_id", "aws", "gcp", "azure", "gateway", "models", "model_ids",
-               "default_model")
+               "default_model", "auth")
+AUTH_MODES = ("own_login", "federated")
+MIN_SESSION_AGE, MAX_SESSION_AGE = 3600, 604800
+IAM_ROLE_ARN_RE = re.compile(r"arn:aws(?:-[a-z]+)?:iam::(\d{12}):role/[A-Za-z0-9+=,.@_/-]{1,512}")
+GCP_NUMBER_RE = re.compile(r"\d{1,20}")
+GCP_POOL_RE = re.compile(r"[a-z0-9-]{4,32}")
+GCP_SA_RE = re.compile(r"[a-z][a-z0-9-]{5,29}@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com")
 CODEX_KEYS = ("route", "base_url")
 AGENT_KEYS = ("claude", "codex", "enforce", "deny_personal_keys", "exclusive")
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -511,13 +553,52 @@ def _https(d: dict, key: str) -> str:
     return v
 
 
-def _aws(v) -> AwsSetup:
+def _session_age(d: dict) -> int:
+    age = d.get("max_session_age")
+    if age is None:
+        return DEFAULT_MAX_SESSION_AGE
+    if isinstance(age, bool) or not isinstance(age, int) or not MIN_SESSION_AGE <= age <= MAX_SESSION_AGE:
+        raise _Malformed("invalid max_session_age")
+    return age
+
+
+def _aws_federation(v) -> AwsFederation:
+    f = _obj(v, AWS_FEDERATION_KEYS, "aws federation")
+    return AwsFederation(role_arn=_field(f, "role_arn", IAM_ROLE_ARN_RE, max_len=640),
+                         max_session_age=_session_age(f))
+
+
+def _gcp_federation(v) -> GcpFederation:
+    f = _obj(v, GCP_FEDERATION_KEYS, "gcp federation")
+    return GcpFederation(project_number=_field(f, "project_number", GCP_NUMBER_RE, max_len=20),
+                         pool_id=_field(f, "pool_id", GCP_POOL_RE, max_len=32),
+                         provider_id=_field(f, "provider_id", GCP_POOL_RE, max_len=32),
+                         service_account=_field(f, "service_account", GCP_SA_RE, max_len=100),
+                         max_session_age=_session_age(f))
+
+
+def _azure_federation(v) -> AzureFederation:
+    f = _obj(v, AZURE_FEDERATION_KEYS, "azure federation")
+    return AzureFederation(tenant_id=_field(f, "tenant_id", UUID_RE), client_id=_field(f, "client_id", UUID_RE),
+                           max_session_age=_session_age(f))
+
+
+def _aws(v, federated: bool = False) -> AwsSetup:
     a = _obj(v, AWS_KEYS, "aws")
     url = a.get("sso_start_url")
     if isinstance(url, str) and url.endswith("#"):
         # AWS shows its start URL as ".../start/#"; the trailing # isn't part of it.
         a = {**a, "sso_start_url": url[:-1]}
     region = _field(a, "region", AWS_REGION_RE)
+    if federated:
+        # The SSO group is unused: only the region (STS endpoint) and the role matter.
+        fed = _aws_federation(a.get("federation"))
+        account = _field(a, "account_id", AWS_ACCOUNT_RE, required=False)
+        arn_account = IAM_ROLE_ARN_RE.fullmatch(fed.role_arn).group(1)
+        if account is not None and account != arn_account:
+            raise _Malformed("federation role_arn is in another account than account_id")
+        return AwsSetup(account_id=arn_account, role_name=fed.role_arn.rsplit("/", 1)[1],
+                        region=region, federation=fed)
     given = [k for k in AWS_SSO_KEYS if a.get(k) is not None]
     if not given:
         return AwsSetup(region=region)      # the machine's own AWS sign-in applies
@@ -530,22 +611,26 @@ def _aws(v) -> AwsSetup:
                     role_name=_field(a, "role_name", IAM_ROLE_RE, max_len=64))
 
 
-def _gcp(v) -> GcpSetup:
+def _gcp(v, federated: bool = False) -> GcpSetup:
     g = _obj(v, GCP_KEYS, "gcp")
     return GcpSetup(project=_field(g, "project", GCP_PROJECT_RE),
-                    region=_field(g, "region", GCP_REGION_RE))
+                    region=_field(g, "region", GCP_REGION_RE),
+                    federation=_gcp_federation(g.get("federation")) if federated else None)
 
 
-def _azure(v) -> AzureSetup:
+def _azure(v, federated: bool = False) -> AzureSetup:
     z = _obj(v, AZURE_KEYS, "azure")
+    if federated and z.get("subscription_id") == "":     # as the policy cache writes it back
+        z = {**z, "subscription_id": None}
     sub = _field(z, "subscription_id", UUID_RE, required=False)
     resource = _field(z, "resource", AZURE_RESOURCE_RE, required=False, max_len=64)
     base_url = _https(z, "base_url") if z.get("base_url") is not None else None
     if resource is None and base_url is None:
         raise _Malformed("azure needs a resource or a base_url")
-    if resource is not None and sub is None:
+    if resource is not None and sub is None and not federated:
         raise _Malformed("azure resource needs its subscription_id")
-    return AzureSetup(subscription_id=sub, resource=resource, base_url=base_url)
+    return AzureSetup(subscription_id=sub, resource=resource, base_url=base_url,
+                      federation=_azure_federation(z.get("federation")) if federated else None)
 
 
 def _model_ids(c: dict) -> tuple[tuple[str, ...], str | None]:
@@ -581,9 +666,19 @@ def _claude(v) -> ClaudeSetup:
     if route not in AGENT_CLAUDE_ROUTES:
         raise _Malformed("invalid claude route")
     org = _field(c, "org_id", UUID_RE, required=route in CLAUDE_ORG_ROUTES)
+    auth = c.get("auth")
+    if auth is None:
+        auth = "own_login"
+    if auth not in AUTH_MODES:
+        raise _Malformed("invalid claude auth")
+    # Only the cloud routes can be federated; elsewhere the setting means nothing.
+    federated = auth == "federated" and route in FEDERATED_ROUTES
+    auth = "federated" if federated else "own_login"
     # Every sub-block present is validated, then only the one the route needs is kept.
-    parsed = {"aws": _aws, "gcp": _gcp, "azure": _azure, "gateway": _gateway}
-    blocks = {k: fn(c[k]) if c.get(k) is not None else None for k, fn in parsed.items()}
+    parsed = {"aws": _aws, "gcp": _gcp, "azure": _azure}
+    blocks = {k: fn(c[k], federated and CLAUDE_ROUTE_BLOCK[route] == k) if c.get(k) is not None else None
+              for k, fn in parsed.items()}
+    blocks["gateway"] = _gateway(c["gateway"]) if c.get("gateway") is not None else None
     need = CLAUDE_ROUTE_BLOCK.get(route)
     if need and blocks[need] is None:
         raise _Malformed(f"claude route {route} needs {need}")
@@ -596,7 +691,7 @@ def _claude(v) -> ClaudeSetup:
                        gcp=blocks["gcp"] if need == "gcp" else None,
                        azure=blocks["azure"] if need == "azure" else None,
                        gateway=blocks["gateway"] if need == "gateway" else None,
-                       models=models, model_ids=ids, default_model=default)
+                       models=models, model_ids=ids, default_model=default, auth=auth)
 
 
 def _codex(v) -> CodexSetup:

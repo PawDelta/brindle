@@ -316,8 +316,15 @@ def health(db, root, monkeypatch):
     now = [100.0]
     sleeps, started, reports = [], [], []
     monkeypatch.setattr(lh.time, "time", lambda: now[0])
+    # time.sleep is patched process-wide, so other threads (e.g. Popen.wait's
+    # polling) get the real sleep and never show up in the recorded delays.
+    creator = threading.current_thread()
+    real_sleep = time.sleep
 
     def sleep(delay):
+        if threading.current_thread() is not creator:
+            real_sleep(delay)
+            return
         sleeps.append(delay)
         now[0] += delay
 

@@ -22,7 +22,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from brindle import config
+from brindle import cloud_credential, config
 
 log = logging.getLogger(__name__)
 
@@ -79,15 +79,29 @@ def _section_header(line: str) -> str | None:
     return " ".join(m.group(1).split()) if m else None
 
 
-def write_aws_profile(path: Path, name: str, aws) -> None:
+def write_aws_profile(path: Path, name: str, aws, credential_process: str | None = None) -> None:
     """Write (or refresh) ``[profile name]`` in the AWS config at ``path``,
-    leaving every other line as it was; atomically."""
-    body = [f"[profile {name}]",
-            f"sso_start_url = {aws.sso_start_url}",
-            f"sso_region = {aws.sso_region}",
-            f"sso_account_id = {aws.account_id}",
-            f"sso_role_name = {aws.role_name}",
-            f"region = {aws.region}"]
+    leaving every other line as it was; atomically. With ``credential_process``
+    (a federated org) the profile runs that command instead of using SSO."""
+    if credential_process is not None:
+        body = [f"[profile {name}]", f"credential_process = {credential_process}", f"region = {aws.region}"]
+    else:
+        body = [f"[profile {name}]",
+                f"sso_start_url = {aws.sso_start_url}",
+                f"sso_region = {aws.sso_region}",
+                f"sso_account_id = {aws.account_id}",
+                f"sso_role_name = {aws.role_name}",
+                f"region = {aws.region}"]
+    _edit_profile(path, name, body)
+
+
+def remove_aws_profile(path: Path, name: str) -> None:
+    """Remove ``[profile name]`` from the AWS config at ``path``, if it is there."""
+    if path.exists():
+        _edit_profile(path, name, None)
+
+
+def _edit_profile(path: Path, name: str, body: list[str] | None) -> None:
     try:
         text = path.read_text(encoding="utf-8")
         mode = path.stat().st_mode & 0o777
@@ -103,16 +117,19 @@ def write_aws_profile(path: Path, name: str, aws) -> None:
             j = i + 1
             while j < len(lines) and _section_header(lines[j]) is None:
                 j += 1
-            if not replaced:
+            if not replaced and body is not None:
                 out.extend(body)
                 if j < len(lines):
                     out.append("")
-                replaced = True
+            replaced = True
             i = j
             continue
         out.append(lines[i])
         i += 1
-    if not replaced:
+    if body is None:
+        while out and not out[-1].strip():
+            out.pop()
+    elif not replaced:
         if out and out[-1].strip():
             out.append("")
         out.extend(body)
@@ -144,18 +161,25 @@ def claude_env(org_id: str, claude) -> dict[str, str]:
     env: dict[str, str] = {}
     if claude.route == "bedrock":
         env["CLAUDE_CODE_USE_BEDROCK"] = "1"
-        if claude.aws.sso:
+        if claude.aws.sso or claude.federated:
             env["AWS_PROFILE"] = profile_name(org_id)
         env["AWS_REGION"] = claude.aws.region
     elif claude.route == "vertex":
         env.update(CLAUDE_CODE_USE_VERTEX="1", ANTHROPIC_VERTEX_PROJECT_ID=claude.gcp.project,
                    CLOUD_ML_REGION=claude.gcp.region)
+        if claude.federated:
+            env.update(GOOGLE_APPLICATION_CREDENTIALS=str(cloud_credential.gcp_config_path(org_id)),
+                       GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES="1")
     elif claude.route == "foundry":
         env["CLAUDE_CODE_USE_FOUNDRY"] = "1"
         if claude.azure.resource:
             env["ANTHROPIC_FOUNDRY_RESOURCE"] = claude.azure.resource
         if claude.azure.base_url:
             env["ANTHROPIC_FOUNDRY_BASE_URL"] = claude.azure.base_url
+        if claude.federated:
+            fed = claude.azure.federation
+            env.update(AZURE_CLIENT_ID=fed.client_id, AZURE_TENANT_ID=fed.tenant_id,
+                       AZURE_FEDERATED_TOKEN_FILE=str(cloud_credential.azure_token_path(org_id)))
     elif claude.route == "gateway":
         env["ANTHROPIC_BASE_URL"] = claude.gateway.base_url
     if claude.default_model:
@@ -177,7 +201,10 @@ ENV_NAMES = frozenset({
     "AWS_PROFILE", "AWS_REGION", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION",
     "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_BASE_URL",
     "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL"})
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # a federated org's cloud hooks (cloud_credential)
+    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+    "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"})
 
 
 def store_env(org_id: str, env: dict[str, str], self_serve: bool = False) -> None:
@@ -235,9 +262,11 @@ class Login:
     """One company login run: prints through ``say``."""
 
     def __init__(self, org_id: str, setup, say: Callable[[str], None], repo_root: str | None = None,
-                 aws_config: Path | None = None, self_serve: bool = False) -> None:
+                 aws_config: Path | None = None, self_serve: bool = False,
+                 store=None, client=None) -> None:
         self.org_id, self.setup, self.say = org_id, setup, say
         self.self_serve = self_serve
+        self.store, self.client = store, client
         self.repo_root = repo_root or os.getcwd()
         self.aws_config = aws_config
 
@@ -276,8 +305,32 @@ class Login:
         store_env(self.org_id, claude_env(self.org_id, c), self.self_serve)
         return self._model_check(c)
 
+    def _federated_signin(self, c) -> bool:
+        """Write the cloud's hook (no cloud CLI, no cloud login) and prove it
+        with one real exchange, which also warms the credential cache."""
+        r, cloud = c.route, {"bedrock": "aws", "vertex": "gcp", "foundry": "azure"}[c.route]
+        try:
+            if r == "bedrock":
+                name = profile_name(self.org_id)
+                write_aws_profile(self.aws_config or aws_config_path(), name, c.aws,
+                                  cloud_credential.hook_command("aws", self.org_id))
+            elif r == "vertex":
+                cloud_credential.write_gcp_config(self.org_id, c.gcp.federation,
+                                                  cloud_credential.hook_command("gcp", self.org_id))
+        except (OSError, cloud_credential.CredentialError) as e:
+            self.say(f"couldn't set up federated {cloud} credentials: {e}")
+            return False
+        why = cloud_credential.check(cloud, self.org_id, store=self.store, client=self.client)
+        if why:
+            self.say(f"federated {cloud} credentials: {why}")
+            return False
+        self.say(f"federated {cloud} credentials: ready (short-lived, through PawDelta)")
+        return True
+
     def _claude_signin(self, c) -> bool:
         r = c.route
+        if c.federated and r in ("bedrock", "vertex", "foundry"):
+            return self._federated_signin(c)
         if r == "bedrock":
             if not self._need("aws"):
                 return False
@@ -383,11 +436,25 @@ class Login:
         return failed
 
 
+def clear_federation(aws_config: Path | None = None) -> list[str]:
+    """Forget federated cloud credentials (logout, a signed-out ``doctor --fix``):
+    every ``federation/<org>/`` directory and the AWS profile that ran its hook.
+    Returns the org ids cleared."""
+    path = aws_config or aws_config_path()
+    orgs = cloud_credential.clear_all()
+    for org in orgs:
+        try:
+            remove_aws_profile(path, profile_name(org))
+        except OSError:
+            log.debug("couldn't remove the AWS profile for %s", org, exc_info=True)
+    return orgs
+
+
 def apply(org_id: str, setup, say: Callable[[str], None], repo_root: str | None = None,
-          self_serve: bool = False) -> bool:
+          self_serve: bool = False, store=None, client=None) -> bool:
     """Run company login for ``setup`` (an ``AgentSetup``); never raises."""
     try:
-        return Login(org_id, setup, say, repo_root, self_serve=self_serve).run()
+        return Login(org_id, setup, say, repo_root, self_serve=self_serve, store=store, client=client).run()
     except Exception as e:  # noqa: BLE001 - company login must not fail the login it follows
         log.debug("company login failed", exc_info=True)
         say(f"company login: {e}")
@@ -436,11 +503,13 @@ def apply_current(say: Callable[[str], None], repo_root: str | None = None, stor
     if got is UNAVAILABLE:
         if _logged_in(store, client):
             return None     # an org whose policy we couldn't read: leave everything as it is
+        clear_federation()  # signed out: no federated credential outlives the sign-in
         return self_serve.run(say, repo_root, ask, info)
     if got is None:
         clear_env()
+        clear_federation()  # the org dropped its agent_setup: no federation files outlive it
         return self_serve.run(say, repo_root, ask, info)
-    return apply(got[0], got[1], say, repo_root)
+    return apply(got[0], got[1], say, repo_root, store=store, client=client)
 
 
 __all__ = ["apply", "apply_current", "claude_env", "stored_env", "write_aws_profile"]

@@ -139,7 +139,7 @@ class Managed:
 def _describe_claude(c) -> str:
     bits = [CLAUDE_ROUTE_NAMES[c.route]]
     if c.route == "bedrock":
-        bits.append(f"region {c.aws.region}" + ("" if c.aws.sso else ", your own AWS sign-in"))
+        bits.append(f"region {c.aws.region}" + ("" if c.aws.sso or c.federated else ", your own AWS sign-in"))
     elif c.route == "vertex":
         bits.append(f"project {c.gcp.project}, region {c.gcp.region}")
     elif c.route == "foundry":

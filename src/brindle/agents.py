@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 
-from brindle import company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
+from brindle import cloud_credential, company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
@@ -193,6 +193,8 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # org's managed route (an enforced agent_setup, or provider_config) both
         # beat it; none at all under Claude Code's managed settings (stored_env).
         company = {} if agent.provider != "claude" else company_login.stored_env()
+        if "AZURE_FEDERATED_TOKEN_FILE" in company:     # Azure has no hook: a launch freshens the file
+            cloud_credential.freshen_azure(company["AZURE_FEDERATED_TOKEN_FILE"])
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
         session_creds = {}
