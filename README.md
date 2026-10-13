@@ -1855,7 +1855,7 @@ folder; `brindle profile new` writes one.
 ---
 name: developer-bedrock
 provider: claude
-model: us.anthropic.<model-id>   # a Bedrock model id your account can use
+model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # a Bedrock model id your account can use
 env.CLAUDE_CODE_USE_BEDROCK: 1
 env.AWS_REGION: us-east-1
 ---
@@ -1883,8 +1883,8 @@ list it under `routing` in `.brindle/config.json`.
   `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
   export `GEMINI_API_KEY` in your shell, or put it in a profile in your user
   profiles folder; never in a profile under `.brindle/agents/`, which is committed. For a
-  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. `agy`
-  ignores Vertex AI credentials, so use a Gemini API key or gateway.
+  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. As of
+  1.3.4, `agy` ignores Vertex AI credentials, so use a Gemini API key or gateway.
   The full setup is in [Google Antigravity](#google-antigravity) below.
 
 If your org runs brindle for a team, its admins can set a route for everyone in
@@ -1929,8 +1929,8 @@ agy        # sign in with your Google account, then quit
 To run unattended workers without a browser login, `agy` (1.1.13 or newer) can use
 a Gemini API key instead: put `"modelProvider": "gemini"` in
 `~/.gemini/antigravity-cli/settings.json` and set `GEMINI_API_KEY`, in your
-environment or in a profile's `env.GEMINI_API_KEY: ...` line (keep the key out of
-the repo). The key alone does nothing: without `modelProvider`, `agy` still asks
+environment or in a profile's `env.GEMINI_API_KEY: ...` line in your user
+profiles folder (never in `.brindle/agents/`, which is committed). The key alone does nothing: without `modelProvider`, `agy` still asks
 you to sign in. `agy` takes no other key or token from the environment; its
 Google Cloud, Workforce Identity and Application Default Credentials sign-ins are
 chosen on its sign-in screen.
