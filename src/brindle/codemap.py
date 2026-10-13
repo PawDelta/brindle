@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,7 @@ GRAPH = Path("graphify-out") / "graph.json"
 ALLOWED_TOOLS = ["Bash(graphify query:*)", "Bash(graphify explain:*)", "Bash(graphify path:*)",
                  "Bash(graphify affected:*)"]
 MAP_TOP = 10
+STORE_RETENTION_DAYS = 30
 _QUERY_RE = re.compile(r"^\s*graphify\s+(?:query|explain|path|affected)\b")
 _map_cache: dict[str, tuple[float, str]] = {}   # graph path -> (mtime, rendered map)
 
@@ -48,6 +50,30 @@ def store_path(repo_root: str | Path) -> Path:
 
     repo_name = Path(repo_root).name
     return brindle_home() / "graphs" / repo_name / "graph.json"
+
+
+def prune_stores(now: float | None = None) -> int:
+    """Remove graph stores whose graph (or store directory) is over 30 days old."""
+    from brindle.config import brindle_home
+
+    root = brindle_home() / "graphs"
+    if not root.is_dir():
+        return 0
+    cutoff = (time.time() if now is None else now) - STORE_RETENTION_DAYS * 24 * 60 * 60
+    removed = 0
+    for store in root.iterdir():
+        if not store.is_dir():
+            continue
+        graph = store / "graph.json"
+        try:
+            modified = (graph if graph.exists() else store).stat().st_mtime
+        except OSError:
+            continue
+        if modified < cutoff:
+            shutil.rmtree(store, ignore_errors=True)
+            if not store.exists():
+                removed += 1
+    return removed
 
 
 def base_checkout(target: Workspace | str | Path) -> str:
