@@ -406,6 +406,42 @@ def test_account_login_status_upgrade_portal_logout(store, backend, monkeypatch)
     assert code == 1 and "not logged in" in out
 
 
+
+
+def test_login_after_reauth_keeps_team_org_and_org_use_applies_setup(store, backend, monkeypatch):
+    from types import SimpleNamespace
+
+    from brindle import cloud_credential, company_login
+
+    monkeypatch.setattr(auth.time, "sleep", lambda s: None)
+    device_backend(backend, ["ISSUE"])
+    switched, applied = [], []
+    team = SimpleNamespace(org_id="acme", plan="team", features=[], sub="u1", role="member")
+    monkeypatch.setattr(auth, "switch_org", lambda client, st, org: switched.append(org) or team)
+    monkeypatch.setattr(company_login, "apply_current", lambda *a, **k: applied.append(1))
+    members = {"acme"}
+    monkeypatch.setattr(auth, "member_orgs", lambda client, st: members)
+    backend.routes["GET /me"] = lambda form, headers: (200, {"sub": "u1", "email": "dev@example.test",
+                                                              "name": None})
+    cloud_credential.note_reauth("acme")
+    code, out, _ = run(["login"], store=store, transport=backend)
+    assert code == 0 and switched == ["acme"] and "(acme)" in out and applied == [1]
+    assert "Logged in as dev@example.test" in out and "None" not in out  # a null name shows the email
+    assert cloud_credential.take_reauth() is None                       # the note is used up
+    assert run(["org", "use", "acme"], store=store, transport=backend)[0] == 0
+    assert switched == ["acme", "acme"] and applied == [1, 1]           # org use applies the org's setup
+
+    members.clear()                                                     # left the org since: stay put
+    cloud_credential.note_reauth("acme")
+    device_backend(backend, ["ISSUE"])
+    run(["login"], store=store, transport=backend)
+    assert switched == ["acme", "acme"] and cloud_credential.take_reauth() is None
+
+    cloud_credential.note_reauth("acme")                                # a deliberate logout drops the note
+    run(["logout"], store=store, transport=backend)
+    assert cloud_credential.take_reauth() is None
+
+
 def test_account_rejects_a_non_https_billing_url(store, backend):
     seed(store, backend, access_valid=True)
     backend.routes["POST /billing/checkout"] = [(200, {"url": "http://evil.test/pay", "id": "x"})]

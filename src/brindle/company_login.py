@@ -436,12 +436,12 @@ class Login:
         return failed
 
 
-def clear_federation(aws_config: Path | None = None) -> list[str]:
+def clear_federation(aws_config: Path | None = None, keep: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """Forget federated cloud credentials (logout, a signed-out ``doctor --fix``):
-    every ``federation/<org>/`` directory and the AWS profile that ran its hook.
-    Returns the org ids cleared."""
+    every ``federation/<org>/`` directory (but those of ``keep``) and the AWS
+    profile that ran its hook. Returns the org ids cleared."""
     path = aws_config or aws_config_path()
-    orgs = cloud_credential.clear_all()
+    orgs = cloud_credential.clear_all(keep)
     for org in orgs:
         try:
             remove_aws_profile(path, profile_name(org))
@@ -491,6 +491,21 @@ def _logged_in(store=None, client=None) -> bool:
         return False
 
 
+def _other_orgs(store=None, client=None) -> set[str]:
+    """Orgs besides the signed-in one whose membership still exists; when that
+    can't be read, every org with federation files (nothing else is cleared)."""
+    from brindle.pro import auth, credentials, license
+
+    store = store or credentials.default_store()
+    try:
+        current = license.current(refresh=False, store=store, client=client).org_id
+        orgs = auth.member_orgs(client or auth.Client(None), store)
+    except Exception:  # noqa: BLE001 - offline or logged out: clear nothing but the current org
+        log.debug("couldn't list the member orgs", exc_info=True)
+        return set(cloud_credential.org_ids()) - {_current_org() or ""}
+    return orgs - {current}
+
+
 def apply_current(say: Callable[[str], None], repo_root: str | None = None, store=None,
                   client=None, ask=None, info=None) -> bool | None:
     """Apply the signed-in org's agent setup, if it has one (None: it has none,
@@ -507,7 +522,8 @@ def apply_current(say: Callable[[str], None], repo_root: str | None = None, stor
         return self_serve.run(say, repo_root, ask, info)
     if got is None:
         clear_env()
-        clear_federation()  # the org dropped its agent_setup: no federation files outlive it
+        # the signed-in org has no agent_setup: its federation files go, other member orgs' stay
+        clear_federation(keep=_other_orgs(store, client))
         return self_serve.run(say, repo_root, ask, info)
     return apply(got[0], got[1], say, repo_root, store=store, client=client)
 

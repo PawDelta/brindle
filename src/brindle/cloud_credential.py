@@ -59,6 +59,7 @@ GCP_CONFIG = "gcp-credentials.json"
 GCP_TOKEN = "gcp-subject-token.json"
 AZURE_TOKEN = "azure-token"
 LOCK_FILE = "mint.lock"
+REAUTH_FILE = "reauth-org"
 CACHE_FILES = (AWS_CACHE, GCP_TOKEN, AZURE_TOKEN)
 
 LOGIN_LINE = "not logged in to brindle Pro; run `brindle account login`"
@@ -110,18 +111,44 @@ def azure_token_path(org_id: str) -> Path:
     return org_dir(org_id) / AZURE_TOKEN
 
 
-def clear_all() -> list[str]:
-    """Remove every ``federation/<org>/`` (logout, a signed-out ``doctor --fix``);
-    the org ids that were there."""
+def clear_all(keep=frozenset()) -> list[str]:
+    """Remove every ``federation/<org>/`` but those of ``keep`` (logout, a
+    signed-out ``doctor --fix``); the org ids that were removed."""
     done: list[str] = []
     try:
         children = sorted(federation_root().iterdir())
     except OSError:
         return done
     for d in children:
-        if ORG_RE.fullmatch(d.name) and _remove(d):
+        if d.name not in keep and ORG_RE.fullmatch(d.name) and _remove(d):
             done.append(d.name)
     return done
+
+
+def note_reauth(org_id: str) -> None:
+    """Remember the org that needed a fresh sign-in, so the next login returns to it."""
+    try:
+        org_dir(org_id)
+        root = federation_root()
+        old = os.umask(0o077)
+        try:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        finally:
+            os.umask(old)
+        _write(root / REAUTH_FILE, org_id)
+    except (OSError, CredentialError):
+        log.debug("couldn't note the org that needs reauth", exc_info=True)
+
+
+def take_reauth() -> str | None:
+    """The org ``note_reauth`` recorded (forgotten as it is read)."""
+    path = federation_root() / REAUTH_FILE
+    try:
+        org = path.read_text().strip()
+        path.unlink()
+    except OSError:
+        return None
+    return org if ORG_RE.fullmatch(org) else None
 
 
 def _remove(d: Path) -> bool:
@@ -407,8 +434,8 @@ def device_headers() -> dict[str, str]:
 
 def _mint(client, store, org_id: str, cloud: str) -> str:
     """An ID token for ``cloud`` from PawDelta. A revoked or too-old sign-in
-    deletes the stored credentials, exactly as a refresh would."""
-    from brindle.pro import auth, license
+    signs the family out on the server, then deletes the stored credentials."""
+    from brindle.pro import auth
 
     try:
         status, body = auth.authed(client, store, "POST", f"/orgs/{org_id}/federation/token",
@@ -417,6 +444,7 @@ def _mint(client, store, org_id: str, cloud: str) -> str:
         if isinstance(e, auth.TransportError):
             raise Offline(str(e)) from None
         if e.revoked or e.code == "not_logged_in":
+            note_reauth(org_id)
             raise CredentialError(LOGIN_LINE) from None
         raise CredentialError(str(e)) from None
     if status == 200:
@@ -428,8 +456,8 @@ def _mint(client, store, org_id: str, cloud: str) -> str:
         raise CredentialError(NOT_OFFERED)
     err = auth._error(status, body)
     if status == 401 and err.revoked:
-        store.delete()
-        license.clear_cache()
+        note_reauth(org_id)
+        auth.logout(client, store)  # revoke the family first, or it lingers in the Devices list
         raise CredentialError(LOGIN_LINE)
     raise CredentialError(f"brindle Pro refused the credential request ({err.code})")
 

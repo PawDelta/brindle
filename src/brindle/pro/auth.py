@@ -664,7 +664,16 @@ def me(client: Client, store) -> dict:
     if status != 200:
         raise _error(status, body)
     return {k: _sanitize(body[k]) for k in ("sub", "email", "name", "first_name", "last_name", "org_id", "plan", "status", "seats")
-            if k in body}
+            if body.get(k) is not None}
+
+
+def member_orgs(client: Client, store) -> set[str]:
+    """The ids of every org the signed-in person belongs to."""
+    status, body = authed(client, store, "GET", "/orgs")
+    if status != 200:
+        raise _error(status, body)
+    orgs = body.get("orgs") if isinstance(body.get("orgs"), list) else []
+    return {str(o["org_id"]) for o in orgs if isinstance(o, dict) and o.get("org_id")}
 
 
 def _billing_url(client: Client, store, path: str, body: dict | None = None) -> str:

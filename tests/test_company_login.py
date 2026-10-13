@@ -303,13 +303,30 @@ def test_stale_env_is_cleared_when_the_org_has_no_setup_or_on_logout(db, repo, m
     assert company_login.stored_env() == {}
 
 
-def test_clear_federation_on_removed_setup(monkeypatch):
+def test_clear_federation_on_removed_setup(current_org, monkeypatch, tmp_path):
+    from brindle.pro import auth
+
     Fake(monkeypatch)
     d = cloud_credential.org_dir(ORG, create=True)
     (d / cloud_credential.AZURE_TOKEN).write_text("tok")
     monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: None)
     company_login.apply_current(print)
     assert not d.exists()
+
+    # Signed in to the personal org (no setup) after a team org asked for re-authentication:
+    # the team org's files stay, an org the person has left goes.
+    team, gone = cloud_credential.org_dir(ORG, create=True), cloud_credential.org_dir("left", create=True)
+    (team / cloud_credential.AZURE_TOKEN).write_text("tok")
+    aws = tmp_path / "aws-config"
+    company_login.write_aws_profile(aws, company_login.profile_name(ORG), FED_AWS)
+    monkeypatch.setattr(company_login, "aws_config_path", lambda: aws)
+    current_org.org = "me-personal"
+    monkeypatch.setattr(auth, "member_orgs", lambda *a: {ORG, "me-personal"})
+    company_login.apply_current(print)
+    assert team.exists() and company_login.profile_name(ORG) in aws.read_text()
+    assert not gone.exists()
+
+
 
 
 def test_azure_refresh_at_launch(db, repo, monkeypatch):
