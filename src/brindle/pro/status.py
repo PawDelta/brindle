@@ -367,7 +367,8 @@ class Poller:
     def _ent(self):
         from brindle.pro import license
 
-        return self._entitlement() if self._entitlement else license.current(refresh=False)
+        # Renews the entitlement as it nears expiry, so it never lapses while brindle runs.
+        return self._entitlement() if self._entitlement else license.current()
 
     def _make_client(self):
         from brindle.pro import auth, credentials
@@ -479,6 +480,24 @@ def deliver_notices(db, to_id: str, saved: Saved | None = None) -> int:
                 break
             sent += 1
     return sent
+
+
+def deliver_ended(db, to_id: str, store=None) -> bool:
+    """Tell the person in the supervisor chat ``to_id``, once, that their paid
+    subscription ended. False when there was nothing to tell or no one to tell."""
+    from brindle import agents
+    from brindle.pro import license
+
+    text = license.ended_notice(store)
+    if text is None:
+        return False
+    try:
+        agents.send_message(db, to_id, "[brindle: a notice for the person to read; just mention it "
+                            f"to them.] {text}", sender_id=None)
+    except agents.AgentError:
+        return False            # no supervisor right now: try again later
+    license.ended_notice_told(store)
+    return True
 
 
 def fetch_messages(client=None, store=None) -> tuple[list[dict], bool]:

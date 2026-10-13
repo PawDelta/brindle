@@ -574,6 +574,8 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
             got = _fetch_entitlement(client, cur["access_token"], now, org)
         if got == 401:
             raise AuthError("backend refused a fresh access token", code="invalid_token")
+        if license.paid(cur.get("entitlement")) and not license.paid(got[0]):
+            cur["subscription_ended"] = True     # told once, by license.take_ended_notice
         cur["entitlement"] = got[0]
         store.save(cur)
     license.clear_cache()

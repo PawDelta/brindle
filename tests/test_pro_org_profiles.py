@@ -160,7 +160,7 @@ def test_the_last_good_copy_is_used_when_the_fetch_fails(backend, lib, repo):
     assert got.version == 3
     # ...but not forever: past the signature's grace it no longer verifies.
     with pytest.raises(org_profiles.LibraryUnavailable):
-        org_profiles.current_library(license.current(), now=time.time() + license.DEFAULT_GRACE + 7200)
+        org_profiles.current_library(license.current(), now=time.time() + org_profiles.CACHE_GRACE + 7200)
 
 
 def test_a_failed_fetch_is_not_retried_on_every_lookup(backend, lib, repo):

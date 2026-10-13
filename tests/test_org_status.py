@@ -55,6 +55,14 @@ def test_no_team_no_poll(org):
     assert not org.calls
 
 
+def test_a_session_poll_renews_the_entitlement(monkeypatch):
+    from brindle.pro import license
+
+    asked = []
+    monkeypatch.setattr(license, "current", lambda **kw: asked.append(kw) or ent(features=()))
+    assert status.Poller().poll_once() is None and asked == [{}]
+
+
 def test_a_failed_poll_keeps_the_last_known_pause(org):
     org.body = {"policy_version": 1, "paused": True, "paused_reason": "x"}
     p = poller()

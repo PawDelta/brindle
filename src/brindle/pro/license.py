@@ -18,10 +18,9 @@ bad signature, the wrong ``alg``/``typ``/``aud``/``iss``/``token_use``, an
 expired token outside its grace, unreadable credentials -- means no
 entitlement and no features.
 
-Offline grace: an entitlement is fetched after every successful refresh, so
-its signed ``iat`` is the time of the last successful refresh. An expired
-entitlement is still honoured (flagged ``in_grace``) until ``iat + grace``
-(default 7 days); ``grace`` is clamped to ``MAX_GRACE`` (14 days) however it
+Offline grace: an expired entitlement is still honoured (flagged
+``in_grace``) until ``exp + grace`` (default 1 hour), long enough to ride
+out a brief outage; ``grace`` is clamped to ``MAX_GRACE`` (14 days) however it
 is configured. The bound comes from a signed claim, so nothing a user can
 edit on disk extends it.
 
@@ -65,8 +64,11 @@ AUDIENCE = "brindle-pro"
 ALG = "EdDSA"
 TYP = "brindle-entitlement+jwt"
 TOKEN_USE = "entitlement"
-DEFAULT_GRACE = 7 * 86400
-MAX_GRACE = 14 * 86400        # hard cap on grace past the last refresh (signed iat)
+DEFAULT_GRACE = 3600
+MAX_GRACE = 14 * 86400        # hard cap on grace past the signed exp
+LOGIN_AGAIN = "log in to brindle Pro again: run `brindle account login`"
+NO_SUBSCRIPTION = "no active brindle Pro subscription"
+PAID_STATUSES = frozenset({"active", "trialing", "past_due"})
 LEEWAY = 60                   # clock skew tolerated on exp / iat
 MAX_TOKEN_BYTES = 8192
 REFRESH_WHEN_LEFT = 0.25      # refresh once less than this share of lifetime remains
@@ -77,6 +79,10 @@ LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 class LicenseError(Exception):
     """No valid entitlement. The message never contains a token."""
+
+
+class Expired(LicenseError):
+    """An entitlement past its expiry and its offline grace."""
 
 
 class NotEntitled(LicenseError):
@@ -250,15 +256,24 @@ def verify(token: str, *, issuer: str | None, now: float | None = None,
     in_grace, grace_until = False, None
     if now > exp + LEEWAY:
         grace = min(max(0.0, float(grace)), MAX_GRACE)
-        grace_until = int(iat + grace)
+        grace_until = int(exp + grace)
         if now > grace_until:
-            raise LicenseError("entitlement has expired")
+            raise Expired("entitlement has expired")
         in_grace = True
     return Entitlement(
         sub=claims["sub"], org_id=claims["org_id"], plan=claims["plan"], status=claims["status"],
         features=frozenset(feats), seats=claims["seats"], iat=iat, exp=exp, kid=kid,
         in_grace=in_grace, grace_until=grace_until, role=role, policy_version=policy_version,
         policy_role=policy_role)
+
+
+def paid(token: str | None) -> bool:
+    """Whether ``token`` (expired or not) was signed for a paid, active plan."""
+    try:
+        c = verify_signed(token or "", typ=TYP, token_use=TOKEN_USE)
+    except LicenseError:
+        return False
+    return c.get("plan") != "free" and c.get("status") in PAID_STATUSES
 
 
 def needs_refresh(ent: Entitlement, now: float | None = None) -> bool:
@@ -408,13 +423,51 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
             ent = auth.refresh(client or auth.Client(issuer), store, creds, now=now)
         except auth.AuthError as e:
             if e.revoked:
-                raise LicenseError("brindle Pro session was revoked; log in again") from e
+                raise LicenseError(_lapsed(creds)) from e
             log.info("entitlement refresh failed (%s); using the stored entitlement", e.code)
     if ent is None:
-        ent = verify(creds.get("entitlement") or "", issuer=issuer, now=now)   # raises with the reason
+        try:
+            ent = verify(creds.get("entitlement") or "", issuer=issuer, now=now)
+        except Expired as e:
+            if refresh and creds.get("refresh_token"):
+                raise LicenseError(_lapsed(creds)) from e   # couldn't renew it
+            raise
     if default:
         _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
     return ent
+
+
+def _lapsed(creds: dict) -> str:
+    """Why there's no entitlement after a failed renewal: a paid subscriber is
+    asked to log in; anyone else is just told there's no subscription."""
+    return LOGIN_AGAIN if paid(creds.get("entitlement")) else NO_SUBSCRIPTION
+
+
+ENDED_NOTICE = ("Your brindle Pro subscription has ended. brindle keeps working on the free plan; "
+                "`brindle account upgrade` resubscribes.")
+
+
+def ended_notice(store=None) -> str | None:
+    """The notice that a paid subscription ended, while a renewal that saw it
+    end hasn't been announced yet (see :func:`ended_notice_told`)."""
+    from brindle.pro import credentials
+
+    try:
+        creds = (store or credentials.default_store()).load() or {}
+    except Exception:  # noqa: BLE001 - a notice is never worth failing over
+        return None
+    return ENDED_NOTICE if creds.get("subscription_ended") else None
+
+
+def ended_notice_told(store=None) -> None:
+    """Never announce this ending again."""
+    from brindle.pro import auth, credentials
+
+    store = store or credentials.default_store()
+    with auth.refresh_lock():
+        creds = store.load() or {}
+        if creds.pop("subscription_ended", None) is not None:
+            store.save(creds)
 
 
 def features() -> frozenset[str]:
