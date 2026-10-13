@@ -141,12 +141,21 @@ def test_each_cloud_gets_what_its_library_reads_and_the_mint_sends_device_header
 
 def test_a_personal_entitlement_mints_through_me_and_an_older_server_gets_a_readable_error(fed, backend, store, signing_key):
     backend.routes[PATH] = lambda form, headers: pytest.fail("a personal org must not use the org route")
-    backend.routes["POST /me/federation/token"] = fed.mint
+    def mint(form, headers):
+        status, body = fed.mint(form, headers)
+        if status == 200:       # a personal token names the user, not an SSO member
+            payload = json.loads(base64.urlsafe_b64decode(body["id_token"].split(".")[1] + "=="))
+            payload.pop("member")
+            body["id_token"] = f"{b64({'alg': 'RS256'})}.{b64({**payload, 'sub': 'user_1'})}.sig"
+        return status, body
+
+    backend.routes["POST /me/federation/token"] = mint
     cur = store.load()
     cur.pop("org_id")
     store.save({**cur, "entitlement": sign(signing_key, claims(org_id=ORG))})
-    rc, out, err = call(fed, backend, store, "aws")
+    rc, out, err = call(fed, backend, store, "aws", org=None)     # the entitlement's own org
     assert rc == 0 and fed.mints == 1 and json.loads(out)["AccessKeyId"] == "ASIAEXAMPLE"
+    assert fed.sts_calls[-1][1]["RoleSessionName"].startswith("brindle-user_1-")
     fed.answer = (404, {"error": "not_found"})
     rc, out, err = call(fed, backend, store, "aws", now=fed.at + 1000)
     assert rc == 1 and "doesn't offer federated credentials yet" in err

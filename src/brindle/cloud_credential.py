@@ -440,9 +440,10 @@ def _personal(store, client, org_id: str) -> bool:
     try:
         if (store.load() or {}).get("org_id"):
             return False
-        return license.current(refresh=False, store=store, client=client).org_id == org_id
+        ent = license.current(store=store, client=client)
     except Exception:  # noqa: BLE001 - no usable entitlement: treat it as a team org
         return False
+    return ent.org_id == org_id and "team" not in ent.features and ent.plan not in ("team", "enterprise")
 
 
 def _mint(client, store, org_id: str, cloud: str) -> str:
@@ -529,7 +530,7 @@ def credential(cloud: str, org_id: str | None = None, *, client=None, store=None
                sts: Sts | None = None, now: float | None = None) -> str:
     """What ``cloud``'s hook prints (empty for Azure, which reads a file).
     Raises :class:`CredentialError` with the line to show."""
-    from brindle.pro import auth, credentials
+    from brindle.pro import auth, credentials, license
 
     if cloud not in CLOUDS:
         raise CredentialError(f"unknown cloud {cloud}")
@@ -541,6 +542,11 @@ def credential(cloud: str, org_id: str | None = None, *, client=None, store=None
     if not cur.get("refresh_token"):
         raise CredentialError(LOGIN_LINE)
     org_id = org_id or cur.get("org_id")
+    if not org_id:
+        try:  # a personal sign-in stores no org: use the entitlement's own
+            org_id = license.current(refresh=False, store=store).org_id
+        except Exception:  # noqa: BLE001 - no usable entitlement
+            pass
     if not org_id:
         raise CredentialError("no organization given; pass --org ID")
     d = org_dir(org_id, create=True)
