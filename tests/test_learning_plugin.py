@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from brindle import autopilot, learning, plugins, workspaces
+from brindle import agents, autopilot, learning, plugins, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.pro import learning as pro_learning
@@ -59,12 +59,16 @@ def worker(db, ws, task="fix the crash in parser.py"):
 def test_outcomes_reach_the_cloud_learner(db, ws, monkeypatch):
     p = Recorder()
     install(monkeypatch, p)
+    monkeypatch.setattr(plugins, "auto_learning", lambda: plugins.CLOUD)
     cfg = RepoConfig(learning="cloud")
     w = worker(db, ws)
+    agents.report_result(db, w.id, "first", forward=False)
+    agents.report_result(db, w.id, "second", forward=False)
     learning.note(db, cfg, w, ws, approved=False)
     learning.note(db, cfg, w, ws, escalated=True)
     learning.note(db, cfg, w, ws, merged=True, checks_passed=True)
-    assert [o.event for _, o in p.events] == ["review", "escalated", "merged"]
+    assert [o.event for _, o in p.events] == ["reported", "review", "escalated", "merged"]
+    assert p.events[0][1].wall_seconds >= 5
     task, last = p.events[-1]
     assert task.agent_id == "w1" and task.profile == "developer" and task.task.startswith("fix")
     assert last.checks_passed and last.wall_seconds >= 5
