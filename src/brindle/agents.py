@@ -2640,6 +2640,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     agent = db.get_agent(agent_id)
     if agent is None:
         return None
+    # A hook runs only once the session is going, so its launch is past any
+    # startup prompt: a menu on its pane from now on is the agent's own (a
+    # question for the user), which no sweep may answer.
+    from brindle import prompt_answer
+
+    prompt_answer.settled(db, agent)
     if event == "codex-permission-request":
         # Session/status writes are bookkeeping, never prerequisites for
         # returning a policy decision (especially a deny).

@@ -137,6 +137,16 @@ def test_sweep_answers_a_prompt_after_after_launch_gave_up(db, launch, provider,
     assert prompt_answer.pending(db) == []
 
 
+def test_a_menu_after_the_session_started_is_never_answered(db, launch):
+    # A hook ran, so the session is going: a menu now is the agent's own
+    # question, even though after_launch never saw the input box.
+    pane, asked = launch(TRUST, ["Not now", "Allow this folder"],
+                         {"kind": "trust", "option": "Allow this folder"}, status="processing")
+    agents.handle_hook(db, "w1", "prompt-submit", {})
+    sweeps(db, launch.clock)
+    assert pane.keys == [] and asked == []
+
+
 def test_model_calls_are_capped_per_launch_across_sweeps(db, launch):
     _, asked = launch("Loading {n}", ["step", "next"], {"kind": "not_a_prompt", "option": ""})
     prompt_answer.finish_launch(db, db.get_agent("w1"))
