@@ -479,8 +479,16 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
     monkeypatch.setattr(time, "time", lambda: now[0])
+    # time.sleep is patched process-wide: other threads and subprocess's
+    # timeout polling get the real sleep, and only this thread's health waits
+    # move the fake clock (same guard as the `health` fixture, #123).
+    creator, real_sleep = threading.current_thread(), time.sleep
+
     def sleep(delay):
-        if abs(delay - 5.0) < 0.01 or abs(delay - 3.0) < 0.01:
+        if (threading.current_thread() is not creator
+                or sys._getframe(1).f_globals.get("__name__") == "subprocess"):
+            real_sleep(delay)
+        elif abs(delay - 5.0) < 0.01 or abs(delay - 3.0) < 0.01:
             sleeps.append(delay)
             now[0] += delay
     monkeypatch.setattr(time, "sleep", sleep)
