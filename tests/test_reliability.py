@@ -99,6 +99,7 @@ def test_merged_branch_reviewer_is_not_stalled(db, root, monkeypatch):
     r = add_agent(db, ws, "r1", status="idle", status_since=LONG_AGO)
     db.update_agent("r1", mode="review")
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(agents, "close_later", lambda *a, **k: None)
     assert [a.id for a in autopilot.stalled_workers(db, "boss")] == ["r1"]
     db.set_merged(ws.id, gates.head(ws))
     assert autopilot.stalled_workers(db, "boss") == []
