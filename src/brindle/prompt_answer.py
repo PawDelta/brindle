@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 
 from brindle import tmux
@@ -34,7 +35,7 @@ from brindle.config import brindle_home
 KINDS = ("trust", "acknowledge", "setting_choice", "needs_user", "not_a_prompt")
 ANSWERABLE = ("trust", "acknowledge", "setting_choice")
 MODEL = "haiku"
-MAX_CALLS = 3     # model calls per launch
+MAX_CALLS = 3     # model calls per launch, across after_launch and sweeps
 MAX_MOVES = 12    # arrow keys per launch before giving up on finding the option
 CALL_TIMEOUT = 60.0
 
@@ -43,6 +44,9 @@ CURSOR = "❯›>▸→"
 # A menu line with the cursor on it: "❯ 1. Yes, proceed", "> Yes, I trust this folder".
 SELECTED = re.compile(rf"^(\s*)[{CURSOR}]\s*(?:\d+[.)]\s+)?(\S.*?)\s*$")
 OPTION = re.compile(rf"^(\s*)(?:[{CURSOR}]\s*)?(?:\d+[.)]\s+)?(\S.*?)\s*$")
+# Tool-permission prompts, the permission policy's (see Provider.tool_permission).
+TOOL_PERMISSION = re.compile(r"(?i)requesting permission for|run this command\?|would you like to run"
+                             r"|do you want to (?:proceed|make this edit|create|allow)")
 NUMBERED = re.compile(rf"^\s*(?:[{CURSOR}]\s*)?\d+[.)]\s+\S")
 HINT = re.compile(r"(?i)\benter to (?:confirm|continue|select|proceed)\b|\bpress enter\b")
 # A CLI's own input box and footer: the CLI is ready (or busy), not asking.
@@ -272,16 +276,89 @@ def take_blocked(target: str) -> str | None:
     return _BLOCKED.pop(target, None)
 
 
-class Startup:
-    """One launch's look at unrecognized startup prompts on pane ``target``.
-    ``ask`` sends a prompt to the model and returns its reply (or None)."""
+def cached_kind(screen: str) -> str | None:
+    """What a model call already said ``screen`` is, without making one."""
+    cached = _cached(_key(normalize(screen)))
+    return cached.kind if cached else None
 
-    def __init__(self, target: str, *, ask=None):
+
+# -- launches: which ones are still starting, and their call budget ----------
+#
+# A launch is pending from its window opening until after_launch sees the
+# CLI's input box, whatever the agent's status says, so a sweep can come back
+# to a startup prompt after_launch's 30 seconds missed (cull.settle_startups).
+# Its model calls are counted in the same row, across after_launch and every
+# sweep. A launcher binds its pane before after_launch so the Startup there
+# finds the row (after_launch itself only gets the pane).
+
+_BOUND: dict[str, tuple] = {}
+
+
+def launched(db, agent) -> None:
+    """``agent``'s CLI just opened in ``agent.tmux_window``."""
+    db.conn.execute("INSERT OR REPLACE INTO startup_prompts (agent_id, pane, launched_at, calls, pending) "
+                    "VALUES (?,?,?,0,1)", (agent.id, agent.tmux_window, time.time()))
+
+
+def pending(db) -> list[tuple[str, str, float]]:
+    """(agent id, pane, launched at) of each launch still starting."""
+    return [tuple(r) for r in db.conn.execute(
+        "SELECT agent_id, pane, launched_at FROM startup_prompts WHERE pending=1")]
+
+
+def bind(db, agent) -> None:
+    if agent.tmux_window:
+        _BOUND[agent.tmux_window] = (db, agent.id)
+
+
+def finish_launch(db, agent) -> bool:
+    """Run ``agent``'s after_launch (bound to its launch) and record what it
+    found: ready (the launch is over), or a prompt left for the person (its
+    supervisor is told). Returns whether the CLI was ready."""
+    from brindle import agents, launch_health
+
+    bind(db, agent)
+    if not agents.get_provider(agent.provider).after_launch(agent.tmux_window):
+        report_blocked(db, agent)
+        return False
+    settled(db, agent)
+    agents.ready(db, agent.id)
+    launch_health.accepted(db, agent)
+    return True
+
+
+def settled(db, agent) -> None:
+    """after_launch saw ``agent``'s input box: its launch is no longer pending."""
+    db.conn.execute("UPDATE startup_prompts SET pending=0 WHERE agent_id=? AND pane=?",
+                    (agent.id, agent.tmux_window))
+
+
+class Startup:
+    """One look, by after_launch, at unrecognized startup prompts on pane
+    ``target``. ``ask`` sends a prompt to the model and returns its reply (or
+    None); ``permission`` says whether a screen is a tool-permission prompt,
+    which is never answered here (the permission policy owns those)."""
+
+    def __init__(self, target: str, *, ask=None, permission=None):
         self.target = target
         self.ask = ask or _ask
-        self.calls = 0
+        self.permission = permission or (lambda screen: False)
+        self.calls = 0         # for a launch no launcher bound (see bind)
         self.moves = 0
         self.acted_on = None   # the screen the last key answered, until the CLI redraws
+
+    def _spend_call(self) -> bool:
+        """Count one model call against the launch's budget; False when it's spent."""
+        db, agent_id = _BOUND.get(self.target, (None, None))
+        if db is not None:
+            row = db.conn.execute("SELECT 1 FROM startup_prompts WHERE agent_id=? AND pane=?",
+                                  (agent_id, self.target)).fetchone()
+            if row:
+                return db.conn.execute("UPDATE startup_prompts SET calls=calls+1 "
+                                       "WHERE agent_id=? AND pane=? AND calls<?",
+                                       (agent_id, self.target, MAX_CALLS)).rowcount == 1
+        self.calls += 1
+        return self.calls <= MAX_CALLS
 
     def decide(self, screen: str) -> Decision:
         text = normalize(screen)
@@ -292,9 +369,8 @@ class Startup:
         cached = _cached(key)
         if cached:
             return cached
-        if self.calls >= MAX_CALLS:
+        if not self._spend_call():
             return Decision("needs_user")
-        self.calls += 1
         decision = parse(self.ask(PROMPT.replace("{screen}", text)))
         if decision is None:
             return Decision("needs_user")
@@ -305,13 +381,23 @@ class Startup:
         """Act on one capture of the pane: "answering" (a key went in),
         "blocked" (only the person can answer it; see take_blocked), or ""
         (nothing to answer)."""
-        if not looks_like_prompt(screen):
+        if self.permission(screen) or not looks_like_prompt(screen):
             return ""
         if _tail(screen) == self.acted_on:
             return "answering"   # the last key hasn't shown yet: don't press another
         decision = self.decide(screen)
         if decision.kind == "not_a_prompt":
             return ""
+        if decision.kind in ANSWERABLE:
+            # The model call can take a while: act only on the pane as it is
+            # now, and only if it still shows the same prompt.
+            asked = screen
+            try:
+                screen = tmux.capture(self.target, lines=60)
+            except tmux.TmuxError:
+                return ""
+            if _key(normalize(screen)) != _key(normalize(asked)):
+                return ""
         key = next_key(screen, decision) if _may_answer(screen, decision) else None
         if decision.kind == "setting_choice" and key != "Enter":
             key = None   # only the default, already selected; never one the model steers to

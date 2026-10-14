@@ -2608,17 +2608,19 @@ def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -
         return
     a = db.get_agent(agent_id)
     if a and a.tmux_window and a.status not in ("paused", "done") and a.result is None:
+        from brindle import prompt_answer
+
+        prompt_answer.bind(db, a)
         accepted = get_provider(a.provider).after_launch(a.tmux_window)
         if not launch_health.current(db, agent_id, token):
             return
         if accepted:
+            prompt_answer.settled(db, a)
             agents.ready(db, agent_id)
             # Carry the observed launch token into the delivery CAS.
             a._launch_health_token = token
             launch_health.accepted(db, a)
         else:
-            from brindle import prompt_answer
-
             prompt_answer.report_blocked(db, a)
         launch_health.inspect(db, agent_id, wait=False, token=token)
 

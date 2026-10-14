@@ -503,6 +503,10 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     server = tmux.current_server()
     db.update_agent(agent.id, tmux_window=target, tmux_server=server)
     agent.tmux_window, agent.tmux_server = target, server
+    if get_provider(agent.provider).startup_prompts and not agent.headless:
+        from brindle import prompt_answer
+
+        prompt_answer.launched(db, agent)
     if watch_pane:
         try:
             _ensure_sidebar(db, root_of(db, agent.id), ws, target)
@@ -883,15 +887,9 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             env={**base, **agent_env(ws, agent.id)},
         )
     else:
-        accepted = provider.after_launch(target)
-        if accepted:
-            ready(db, agent.id)
-            from brindle import launch_health
-            launch_health.accepted(db, agent)
-        else:
-            from brindle import prompt_answer
+        from brindle import prompt_answer
 
-            prompt_answer.report_blocked(db, agent)
+        prompt_answer.finish_launch(db, agent)
 
 
 def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,

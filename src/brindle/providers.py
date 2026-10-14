@@ -118,6 +118,18 @@ class Provider:
         None when unsure. Only used to correct a status hooks left stale."""
         return None
 
+    def tool_permission(self, screen: str) -> bool:
+        """Whether ``screen`` asks to approve a tool call: the permission
+        policy's to answer, never a startup prompt's."""
+        from brindle import prompt_answer
+
+        return bool(prompt_answer.TOOL_PERMISSION.search("\n".join(prompt_answer.plain(screen).splitlines()[-25:])))
+
+    def input_ready(self, screen: str) -> bool:
+        """Whether ``screen`` shows the CLI's own input box, so its launch is
+        past any startup prompt."""
+        return False
+
     def busy_in_footer(self, screen: str) -> bool:
         """Whether the busy marker is right by the input box (wherever the
         provider puts it), so it can't be a transcript quoting it elsewhere
@@ -430,6 +442,9 @@ class ClaudeCode(Provider):
         error = cls.api_error(screen)
         return error if error and cls.FATAL_API_ERROR.match(error) else None
 
+    def input_ready(self, screen: str) -> bool:
+        return bool(self.INPUT_FOOTER.search(screen))
+
     @classmethod
     def first_run_screen(cls, screen: str) -> str | None:
         """Which first-run screen ``screen`` shows, or None."""
@@ -734,7 +749,7 @@ class ClaudeCode(Provider):
         # cursor would pass for READY) is answered by what it asks.
         from brindle import prompt_answer
 
-        prompts = prompt_answer.Startup(target)
+        prompts = prompt_answer.Startup(target, permission=self.tool_permission)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -1261,6 +1276,12 @@ class Codex(Provider):
     TRUST_DIALOG = re.compile(r"Trust this folder\?", re.I)
     TRUST_SELECTED = re.compile(r"›\s*1\.\s*Trust and continue")
 
+    def tool_permission(self, screen: str) -> bool:
+        return super().tool_permission(screen) or bool(self.APPROVAL.search(self.ANSI_SGR.sub("", screen)))
+
+    def input_ready(self, screen: str) -> bool:
+        return self.launch_ready(screen)
+
     def launch_ready(self, screen: str) -> bool:
         plain = self.ANSI_SGR.sub("", screen)
         lines = plain.splitlines()
@@ -1280,7 +1301,7 @@ class Codex(Provider):
         # Codex saves this trust for the repository root in ~/.codex/config.toml.
         from brindle import prompt_answer
 
-        prompts = prompt_answer.Startup(target)
+        prompts = prompt_answer.Startup(target, permission=self.tool_permission)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -1396,7 +1417,7 @@ class Antigravity(Provider):
         # user's own repo, so trust it; never press Enter unless "Yes" is selected.
         from brindle import prompt_answer
 
-        prompts = prompt_answer.Startup(target)
+        prompts = prompt_answer.Startup(target, permission=self.tool_permission)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -1414,6 +1435,9 @@ class Antigravity(Provider):
             elif prompts.step(screen) == "blocked":
                 return False
         return False
+
+    def input_ready(self, screen: str) -> bool:
+        return bool(self.READY.search(screen))
 
     def screen_state(self, screen: str) -> str | None:
         tail = "\n".join(screen.rstrip().splitlines()[-25:])

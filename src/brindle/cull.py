@@ -190,7 +190,9 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
                         f"after {int(idle_for // 60)} min")
 
-    # 3. Workers stuck on a prompt nobody is answering, or gone silent.
+    # 3. Launches stopped on a startup prompt; workers stuck on a prompt
+    # nobody is answering, or gone silent.
+    done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
     done.extend(note_silent(db, now, panes))
@@ -212,33 +214,43 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 # How long a worker may sit on a permission or trust prompt before its
 # supervisor is told (once per spell of waiting).
 STUCK_AFTER = 90.0
-# How long a worker may stay 'starting' before a sweep looks for a startup
-# prompt on its pane: past the 30 seconds its own after_launch watches.
+# How long after a launch a sweep starts looking at a CLI that hasn't shown
+# its input box: past the 30 seconds its own after_launch watches.
 STARTUP_GRACE = 40.0
 
 
-def settle_startup(db: DB, a) -> None:
-    """``a`` is still starting after its after_launch gave up: if its pane
-    shows a startup prompt (an agy worker once sat on a reworded trust prompt
-    for 40 minutes), run after_launch again, which answers it by what it asks
-    or leaves it for the person and tells the supervisor."""
-    from brindle import launch_health, prompt_answer
+def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Every launch, worker or supervisor, whose CLI hasn't shown its input
+    box STARTUP_GRACE seconds on (brindle.prompt_answer keeps them, whatever
+    the agent's status says: an argv task starts 'processing', a startup
+    menu can read as 'waiting'). If its pane is ready now, or shows a
+    startup prompt (an agy worker once sat on a reworded trust prompt for 40
+    minutes), run after_launch again: it answers the prompt by what it asks,
+    or leaves it for the person and its supervisor is told."""
+    from brindle import prompt_answer
 
-    provider = agents.get_provider(a.provider)
-    if not provider.startup_prompts or a.headless:
-        return
-    try:
-        screen = tmux.capture(a.tmux_window, lines=60, server=agents.server_of(a))
-    except tmux.TmuxError:
-        return
-    if (not prompt_answer.looks_like_prompt(screen)
-            or prompt_answer.Startup(a.tmux_window).decide(screen).kind == "not_a_prompt"):
-        return
-    if provider.after_launch(a.tmux_window):
-        agents.ready(db, a.id)
-        launch_health.accepted(db, a)
-    else:
-        prompt_answer.report_blocked(db, a)
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for agent_id, pane, launched_at in prompt_answer.pending(db):
+        a = db.get_agent(agent_id)
+        if (not a or a.tmux_window != pane or now - launched_at < STARTUP_GRACE or a.result is not None
+                or a.dismissed_at is not None or a.status in ("paused", "done")
+                or not agents.same_server(a, panes) or not agents.is_alive(a, panes)
+                or not agents.owns_pane(db, a, owners)):
+            continue
+        provider = agents.get_provider(a.provider)
+        try:
+            screen = tmux.capture(pane, lines=60, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        if provider.tool_permission(screen):
+            continue  # the permission policy's, never a startup prompt
+        if not provider.input_ready(screen) and (not prompt_answer.looks_like_prompt(screen)
+                                                 or prompt_answer.cached_kind(screen) == "not_a_prompt"):
+            continue
+        if prompt_answer.finish_launch(db, a):
+            done.append(f"{a.id} past its startup prompts")
+    return done
 
 
 def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
@@ -257,9 +269,6 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         if a.status != "waiting":
             agents.screen_status(db, a, samples=1)
-            a = db.get_agent(a.id) or a
-        if a.status == "starting" and now - (a.status_since or a.created_at) >= STARTUP_GRACE:
-            settle_startup(db, a)
             a = db.get_agent(a.id) or a
         since = a.status_since or a.created_at
         if a.status != "waiting" or now - since < STUCK_AFTER or a.stuck_noted == since:
