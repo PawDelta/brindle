@@ -321,14 +321,34 @@ def swap(routing: Mapping[str, list[str]], weight: str | None, profile: str, err
 # -- probing a pinned model ---------------------------------------------------------------
 
 
+def _claude_p(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str],
+              run, timeout: float):
+    return run([binary, "-p", "--model", model, "--output-format", "json"], cwd=cwd,
+               env=dict(env), input=prompt, capture_output=True, text=True, timeout=timeout)
+
+
+def ask(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str], *,
+        run=subprocess.run, timeout: float = PROBE_TIMEOUT) -> str | None:
+    """One small call to ``model`` through the claude CLI: its reply, or None
+    when the call failed."""
+    try:
+        proc = _claude_p(binary, model, prompt, cwd, env, run, timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return str(json.loads(proc.stdout).get("result") or "")
+    except (ValueError, AttributeError):
+        return None
+
+
 def probe(binary: str, model: str, cwd: str, env: Mapping[str, str], *,
           run=subprocess.run, timeout: float = PROBE_TIMEOUT) -> tuple[bool, Cause | None, str]:
     """One tiny call to ``model`` through the claude CLI. (answered, the
     model-access cause when it was refused, the error text when it failed)."""
     try:
-        proc = run([binary, "-p", "--model", model, "--output-format", "json"], cwd=cwd,
-                   env=dict(env), input=PROBE_PROMPT, capture_output=True, text=True,
-                   timeout=timeout)
+        proc = _claude_p(binary, model, PROBE_PROMPT, cwd, env, run, timeout)
     except subprocess.TimeoutExpired:
         return False, None, "timed out"
     except OSError as e:

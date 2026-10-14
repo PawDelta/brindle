@@ -206,6 +206,33 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 # How long a worker may sit on a permission or trust prompt before its
 # supervisor is told (once per spell of waiting).
 STUCK_AFTER = 90.0
+# How long a worker may stay 'starting' before a sweep looks for a startup
+# prompt on its pane: past the 30 seconds its own after_launch watches.
+STARTUP_GRACE = 40.0
+
+
+def settle_startup(db: DB, a) -> None:
+    """``a`` is still starting after its after_launch gave up: if its pane
+    shows a startup prompt (an agy worker once sat on a reworded trust prompt
+    for 40 minutes), run after_launch again, which answers it by what it asks
+    or leaves it for the person and tells the supervisor."""
+    from brindle import launch_health, prompt_answer
+
+    provider = agents.get_provider(a.provider)
+    if not provider.startup_prompts or a.headless:
+        return
+    try:
+        screen = tmux.capture(a.tmux_window, lines=60, server=agents.server_of(a))
+    except tmux.TmuxError:
+        return
+    if (not prompt_answer.looks_like_prompt(screen)
+            or prompt_answer.Startup(a.tmux_window).decide(screen).kind == "not_a_prompt"):
+        return
+    if provider.after_launch(a.tmux_window):
+        agents.ready(db, a.id)
+        launch_health.accepted(db, a)
+    else:
+        prompt_answer.report_blocked(db, a)
 
 
 def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
@@ -224,6 +251,9 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         if a.status != "waiting":
             agents.screen_status(db, a, samples=1)
+            a = db.get_agent(a.id) or a
+        if a.status == "starting" and now - (a.status_since or a.created_at) >= STARTUP_GRACE:
+            settle_startup(db, a)
             a = db.get_agent(a.id) or a
         since = a.status_since or a.created_at
         if a.status != "waiting" or now - since < STUCK_AFTER or a.stuck_noted == since:

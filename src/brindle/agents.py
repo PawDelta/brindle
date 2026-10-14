@@ -886,6 +886,10 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             ready(db, agent.id)
             from brindle import launch_health
             launch_health.accepted(db, agent)
+        else:
+            from brindle import prompt_answer
+
+            prompt_answer.report_blocked(db, agent)
 
 
 def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
