@@ -551,8 +551,8 @@ class ClaudeCode(Provider):
             argv += ["--session-id", ctx.session_id]
         if ctx.resume:
             argv += ["--resume", ctx.resume]
-            if p.headless and ctx.initial_prompt:
-                argv.append(ctx.initial_prompt)  # -p needs the next turn's prompt
+            if ctx.initial_prompt:
+                argv.append(ctx.initial_prompt)
         elif ctx.initial_prompt:
             argv.append(ctx.initial_prompt)
         return argv
@@ -1196,6 +1196,16 @@ class Codex(Provider):
             return "typing"
         return None
 
+    @staticmethod
+    def can_resume(session_id: str) -> bool:
+        """Codex can resume a session by its own id when its rollout file
+        exists under ``$CODEX_HOME/sessions``."""
+        from brindle import usage
+
+        if not session_id:
+            return False
+        return usage.find_codex_rollout(session_id, None, 0) is not None
+
     def command(self, ctx: LaunchContext) -> list[str]:
         spec = mcp_server_spec(ctx.agent_id)
         # Codex appends the event's JSON as the last argument.
@@ -1222,6 +1232,11 @@ class Codex(Provider):
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
             argv += ["-c", f"model_reasoning_effort={json.dumps(ctx.profile.effort)}"]
+        if ctx.resume:
+            argv += ["resume", ctx.resume]
+            if ctx.initial_prompt:
+                argv.append(ctx.initial_prompt)
+            return argv
         # Codex has no system-prompt flag; lead the first message with the profile.
         first = "\n\n".join(p for p in (ctx.profile.prompt, ctx.initial_prompt) if p)
         if first:

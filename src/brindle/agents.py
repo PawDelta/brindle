@@ -2917,6 +2917,102 @@ def command_running(db: DB, agent: Agent) -> bool:
         return False
 
 
+TRANSCRIPT_ACTIVE_SECONDS = 45
+REOPEN_VERDICT_PROMPT = (
+    "Submit your verdict now: call the brindle `submit_review` tool with "
+    "`approved` and `summary` based on what you have already read."
+)
+
+
+def transcript_file(agent: Agent) -> str | None:
+    """The path to ``agent``'s own recorded transcript or rollout file, if one
+    exists on disk; None when the agent has no recorded session."""
+    if agent.transcript_path and os.path.isfile(agent.transcript_path):
+        return agent.transcript_path
+    ref = (agent.session_ref or "").strip()
+    if not ref:
+        return None
+    if agent.provider == "claude":
+        import glob
+
+        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        found = glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(ref)}.jsonl"))
+        return found[0] if found else None
+    if agent.provider == "codex":
+        from brindle import usage
+
+        rollout = usage.find_codex_rollout(ref, None, agent.created_at)
+        return str(rollout) if rollout and rollout.is_file() else None
+    if agent.provider == "antigravity":
+        candidate = os.path.expanduser(
+            f"~/.gemini/antigravity-cli/brain/{ref}/.system_generated/logs/transcript.jsonl"
+        )
+        return candidate if os.path.isfile(candidate) else None
+    if agent.provider == "native":
+        return ref if os.path.isfile(ref) else None
+    return None
+
+
+def transcript_active(agent: Agent, now: float | None = None) -> bool:
+    """Whether ``agent`` wrote to its transcript within
+    ``TRANSCRIPT_ACTIVE_SECONDS``. Never raises: when unsure, it says no."""
+    try:
+        path = transcript_file(agent)
+        if not path:
+            return False
+        now = time.time() if now is None else now
+        return now - os.stat(path).st_mtime < TRANSCRIPT_ACTIVE_SECONDS
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def recorded_session(agent: Agent) -> str | None:
+    """The CLI session id recorded for ``agent`` itself, if its provider can
+    resume that conversation; None when no resumable session was recorded.
+    Never guesses from the working directory (``--continue``, ``resume --last``),
+    since a reviewer shares its worker's worktree."""
+    provider = get_provider(agent.provider)
+    ref = (agent.session_ref or "").strip()
+    if not ref and agent.provider == "claude" and agent.transcript_path:
+        if os.path.isfile(agent.transcript_path):
+            return Path(agent.transcript_path).stem
+    if not ref:
+        return None
+    if agent.provider == "claude" and agent.transcript_path and os.path.isfile(agent.transcript_path):
+        return ref
+    return ref if provider.can_resume(ref) else None
+
+
+def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
+                    prompt: str = REOPEN_VERDICT_PROMPT) -> bool:
+    """Resume a stalled reviewer once with a short verdict prompt: send the
+    prompt as a message if the reviewer's process is still alive (or keep an
+    already-queued reminder in flight), or reopen its own recorded CLI session
+    if the process exited. Returns True if resumed or queued, False when it has
+    no live pane or recorded session of its own."""
+    if not os.path.isdir(ws.path):
+        return False
+    if is_alive(agent):
+        if db.pending_count(agent.id) > 0:
+            try:
+                flush(db, agent.id)
+            except tmux.TmuxError:
+                db.set_status(agent.id, "idle", only_if="processing")
+            return True
+        try:
+            return send_message(db, agent.id, prompt) in ("delivered", "queued")
+        except (AgentError, tmux.TmuxError):
+            db.set_status(agent.id, "idle", only_if="processing")
+            return False
+    ref = recorded_session(agent)
+    if not ref:
+        return False
+    if agent.dismissed_at is not None:
+        db.update_agent(agent.id, dismissed_at=None)
+    _launch(db, agent, ws, prompt=prompt, resume=ref, watch_pane=False, background_setup=True)
+    return True
+
+
 def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
@@ -2935,17 +3031,17 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
             return False  # its verdict for the current commit is already recorded
     if agent.unreported_noted:
         return False  # the supervisor was told about this stop; cleared once it resumes
-    if command_running(db, agent):
+    if command_running(db, agent) or (is_alive(agent) and transcript_active(agent)):
         # Its turn ended while a long or background command (a test run) is
-        # still going: it isn't stopped, and the command finishing wakes it.
-        # Not marked noted, so a real stop later still gets its one alert.
+        # still going, or it is still writing to its transcript: it isn't
+        # stopped. Not marked noted, so a real stop later still gets its alert.
         return False
     db.update_agent(agent.id, unreported_noted=int(time.time()))
     if agent.mode == "review" and ws is not None:
         from brindle import pipeline
 
         if pipeline.on_reviewer_unreported(db, get(db, agent.id), ws):
-            return True  # a fallback reviewer took over, or the supervisor was told
+            return True  # resumed, a fallback reviewer took over, or the supervisor was told
     where =f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
     tool = "submit_review" if agent.mode == "review" else "report_result"
     who = "Reviewer" if agent.mode == "review" else "Worker"
