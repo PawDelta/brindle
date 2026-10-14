@@ -1111,9 +1111,9 @@ CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "antigravity": "Google A
 
 @dataclass(frozen=True)
 class Access:
-    """The CLIs and models this person may use here: the org's
-    ``allowed_providers`` and ``allowed_models`` (the member's effective
-    policy, so narrowed by role and member), minus the CLIs an exclusive
+    """The CLIs, models and profiles this person may use here: the org's
+    ``allowed_providers``, ``allowed_models`` and ``allowed_profiles`` (the member's
+    effective policy, so narrowed by role and member), minus the CLIs an exclusive
     managed routing gives no route, and whether personal API keys are denied.
     ``error`` (the policy applies but can't be read) allows nothing. The
     supervisor picker, the workers screen and ``-s`` all ask this, and only
@@ -1121,6 +1121,7 @@ class Access:
     org_id: str | None = None
     allowed_providers: tuple[str, ...] | None = None    # None: any CLI
     allowed_models: tuple[str, ...] | None = None       # None: any model
+    allowed_profiles: tuple[str, ...] | None = None     # None: any profile
     deny_personal_keys: bool = False
     unrouted: dict = field(default_factory=dict)        # CLI -> why the managed routing refuses it
     error: str | None = None
@@ -1147,6 +1148,13 @@ class Access:
 
         return bool(model) and (model in self.allowed_models or pricing.normalize(model)
                                 in {pricing.normalize(m) for m in self.allowed_models})
+
+    def allows_profile(self, profile: str, provider: str | None, model: str | None) -> bool:
+        """Whether a worker on ``profile`` (which runs ``provider``'s ``model``,
+        as ``policy._profile_fields`` resolves them) may start: check_assign's
+        provider, model and profile tests."""
+        return (bool(provider) and self.allows(provider) and self.allows_model(model)
+                and (self.allowed_profiles is None or profile in self.allowed_profiles))
 
     def clis(self) -> list[str]:
         """The CLIs to offer: every supervisor CLI when nothing narrows the
@@ -1180,7 +1188,8 @@ def access(repo_root: str | None) -> Access:
                 unrouted[cli] = f"org {m.org_id} manages its agents' routes and gives {label} none"
     deny_keys = m.deny_personal_keys if m is not None else p.deny_personal_keys
     return Access(org_id=p.org_id, allowed_providers=p.allowed_providers,
-                  allowed_models=p.allowed_models, deny_personal_keys=deny_keys, unrouted=unrouted)
+                  allowed_models=p.allowed_models, allowed_profiles=p.allowed_profiles,
+                  deny_personal_keys=deny_keys, unrouted=unrouted)
 
 
 def make(repo_root: str) -> ProPolicy:

@@ -213,7 +213,7 @@ def workers_screen(acc=None, *, key: Callable[[], str] | None = None, is_ready=N
                 return
             continue
         tier = worker_models.TIERS[int(k) - 1]
-        models = worker_models.offered(acc, tier)
+        models = worker_models.offered(acc, tier, os.getcwd())
         echo(f"Models for {tier} tasks:")
         n = 0
         for how, title in worker_models.HOW.items():

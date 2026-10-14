@@ -166,16 +166,34 @@ def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     assert "api_key_env: OPENROUTER_API_KEY" in (user_profiles_dir() / "developer-or-qwen3-coder.md").read_text()
 
 
-@pytest.mark.parametrize("signed_in, allowed, light", [(["codex"], None, ["developer-codex"]), ([], None, None),
-                                                       (["codex"], ("claude",), None)])    # the org narrowed since the pick
-def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatch, capsys, signed_in, allowed, light):
-    from brindle import worker_models
+@pytest.mark.parametrize("pick, signed_in, access, light", [
+    ("codex", ["codex"], {}, ["developer-codex"]),
+    ("codex", [], {}, None),
+    ("codex", ["codex"], dict(allowed_providers=("claude",)), None),       # the org narrowed since the pick
+    ("codex", ["codex"], dict(allowed_models=("claude-sonnet-4-6",)), None),  # a CLI whose profile names no model
+    ("claude-haiku", ["claude"], dict(allowed_models=("claude-haiku-5-5",)), ["developer-light"]),  # the profile's haiku
+    ("claude-sonnet", ["claude"], dict(allowed_models=("claude-sonnet-4-5",)), None),   # developer runs 4-6
+    ("claude-sonnet", ["claude"], dict(allowed_profiles=("developer-light",)), None),
+    ("local-qwen3-coder", [], {}, ["developer-local"]),                    # Ollama is probed once per process
+])
+def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatch, capsys, pick, signed_in, access,
+                                                            light):
+    from brindle import local_setup, worker_models
     from brindle.config import DEFAULT_ROUTING, load_repo_config
+    from brindle.native import serve
 
+    for var in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "CODEX_MODEL", "OPENAI_MODEL", "MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    probes = []
+    monkeypatch.setattr(serve, "ollama_available", lambda: probes.append(1) or True)
+    monkeypatch.setattr(local_setup, "verify_tags", lambda host, model: True)
     monkeypatch.setattr(worker_models, "_warned", set())
-    monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(org_id=ORG, allowed_providers=allowed))
+    monkeypatch.setattr(worker_models, "_local_ready", {})
+    monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(org_id=ORG, **access))
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: signed_in)
-    set_user("routing_light", "codex")
+    set_user("routing_light", pick)
+    load_repo_config(str(repo))
     cfg = load_repo_config(str(repo))
     assert cfg.routing["light"] == (light or DEFAULT_ROUTING["light"])
     assert ("isn't ready for light tasks" in capsys.readouterr().err) is (light is None)
+    assert len(probes) == (pick == "local-qwen3-coder")
