@@ -101,7 +101,8 @@ CREATE TABLE IF NOT EXISTS autopilot (
     auditor_id TEXT,               -- the reviewer auditing the finished goal (state 'auditing')
     audit_sha TEXT,                -- the commit the last completion audit judged
     audit_ok INTEGER,              -- its verdict: 1 approved, 0 gaps found
-    audit_history TEXT             -- persistent audit notes and prior accepted decisions
+    audit_history TEXT,            -- persistent audit notes and prior accepted decisions
+    question TEXT                  -- the supervisor's open need_user question (held while note matches)
 );
 CREATE TABLE IF NOT EXISTS milestones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -482,6 +483,7 @@ class Autopilot:
     audit_sha: str | None = None       # the commit the last completion audit judged
     audit_ok: int | None = None        # its verdict
     audit_history: str | None = None   # persistent audit notes and accepted decisions
+    question: str | None = None        # the open need_user question the user hasn't answered
 
 
 @dataclass
@@ -720,7 +722,7 @@ class DB:
         if "usage_paused_ids" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_paused_ids TEXT")
         for col, kind in (("goal_sha", "TEXT"), ("auditor_id", "TEXT"), ("audit_sha", "TEXT"),
-                          ("audit_ok", "INTEGER"), ("audit_history", "TEXT")):
+                          ("audit_ok", "INTEGER"), ("audit_history", "TEXT"), ("question", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE autopilot ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}

@@ -384,7 +384,7 @@ knowing them helps when you tell the supervisor how to work.
 | `complete_subagent` | supervisor | record the result of a `subagent`-profile task |
 | `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
 | `record_audit_decision` | supervisor | record acceptance of an audit finding with rationale so subsequent audits respect it |
-| `need_user` | supervisor | stop autopilot and ask you a question |
+| `need_user` | supervisor | ask you a question (a decision, a denied action, a stalled external job such as a CI run no runner picks up); only the steps that depend on it wait, the rest keeps going; `answered=true` once you've replied |
 | `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
 | `handover` | supervisor | hand the session to a new supervisor on another branch or worktree, with a note |
 
