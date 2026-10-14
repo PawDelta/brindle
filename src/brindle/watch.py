@@ -468,10 +468,21 @@ def quit_request(armed: tuple[str, float] | None, now: float,
         return True, None, "quitting brindle: this session is paused"
     return False, ("quit", now), f"{key} again to quit brindle (brindle continue resumes)"
 
-# Wheel-down: ncurses only defines this when built with mouse version > 1
-# (not always true, e.g. some macOS builds); the bit value itself is stable
-# across ncurses versions, so fall back to it rather than dropping the key.
-BUTTON5_PRESSED = getattr(curses, "BUTTON5_PRESSED", 0x00200000)
+def wheel_down_mask() -> int:
+    """The bstate bit for wheel-down. ncurses only defines BUTTON5_PRESSED
+    when built with mouse version > 1; under version 1 (e.g. some macOS
+    builds) wheel-down arrives as REPORT_MOUSE_POSITION instead."""
+    return getattr(curses, "BUTTON5_PRESSED", curses.REPORT_MOUSE_POSITION)
+
+
+def wheel_step(bstate: int) -> int:
+    """Lines to scroll for a mouse event: -3 for wheel-up, 3 for wheel-down,
+    0 for anything else."""
+    if bstate & curses.BUTTON4_PRESSED:
+        return -3
+    if bstate & wheel_down_mask():
+        return 3
+    return 0
 
 
 def clamp_scroll(offset: int, total: int, visible: int) -> int:
@@ -839,7 +850,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
     styles = _styles()
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
     try:
-        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON4_PRESSED | BUTTON5_PRESSED)
+        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON4_PRESSED | wheel_down_mask())
     except curses.error:
         pass
     db = DB()
@@ -966,10 +977,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
                 _, mx, my, _, bstate = curses.getmouse()
             except curses.error:
                 bstate = 0
-            if bstate & curses.BUTTON4_PRESSED:
-                state.offset = clamp_scroll(offset - 3, len(lines), visible)
-            elif bstate & BUTTON5_PRESSED:
-                state.offset = clamp_scroll(offset + 3, len(lines), visible)
+            if step := wheel_step(bstate):
+                state.offset = clamp_scroll(offset + step, len(lines), visible)
             elif bstate & curses.BUTTON1_CLICKED and not state.help:
                 clicked = my - content_top + offset
                 if clicked in (rows := selectable(lines)):

@@ -179,16 +179,24 @@ def test_provider_capacity_in_sidebar():
                                    "codex": [("wk", 20)]}))
     body = [t.strip() for t in texts(lines)[1:]]
     assert body[0] == "agy    limit reached"
-    assert body[1] == "claude 5h 64% · wk 91% · Fable 19% left"
+    assert body[1] == "claude 5h 36% · wk 9% · Fable 81% used"
     # past 80% used of any window, the row is bold in the warning colour
     assert [ln.style for ln in lines[1:4]] == ["alert", "alert", "normal"]
     assert "$" not in "".join(body)
     assert "█" not in "".join(body) and "░" not in "".join(body)
 
 
+def test_provider_rows_fit_the_sidebar_by_dropping_windows():
+    lines = section(Local(providers=[("claude", 64)],
+                          windows={"claude": [("5h", 64), ("wk", 91)]}), width=24)
+    assert all(len(t) <= 24 for t in texts(lines))
+    # the window with the most headroom goes first, never half a number
+    assert texts(lines)[1].strip() == "claude 5h 36% used"
+
+
 def test_provider_capacity_collapsed_title():
     lines = section(Local(providers=[("claude", 85), ("codex", 100)]), collapsed=True)
-    assert lines[0].text == "▸ Costs (claude 85% left)"
+    assert lines[0].text == "▸ Costs (claude 15% used)"
     # the provider with the least headroom, not the first by name
     local_ = Local(providers=[("claude", 100), ("codex", 97), ("antigravity", 0)])
-    assert watch_costs.title(True, 40, local_) == "▸ Costs (antigravity 0% left)"
+    assert watch_costs.title(True, 40, local_) == "▸ Costs (antigravity 100% used)"

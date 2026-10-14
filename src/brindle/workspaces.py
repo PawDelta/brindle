@@ -22,10 +22,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-# rewind is imported here, not when it's needed: brindle may be running from
-# the very worktree ``remove`` deletes (a reviewer's `uv run` in it), and a
-# module first imported after that can't be found, which left the row behind.
-from brindle import git, rewind, services, tmux
+# rewind and history are imported here, not when they're needed: brindle may
+# be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
+# in it), and a module first imported after that can't be found, which left
+# the row behind.
+from brindle import git, history, rewind, services, tmux
 from brindle.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
@@ -559,6 +560,11 @@ class Removed:
     teardown: SetupResult | None
 
 
+# Records that couldn't be archived stay (see history.archive): the cull
+# sweep tries again, as for any workspace whose folder is gone.
+_UNARCHIVED = "its records were kept: they couldn't be archived (see the log)"
+
+
 def _rescue_sidebar(db: DB, ws: Workspace) -> None:
     """A root's sidebar may be sitting in ``ws``'s session: move it back to
     the root's own session before that session is killed."""
@@ -582,6 +588,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
         if not keep_session:
             _rescue_sidebar(db, ws)
             tmux.kill_session(ws.tmux_session)
+        if not history.archive(db, ws, db.list_agents(ws.id), "workspace removed"):
+            return Removed(False, f"existing checkout left untouched; {_UNARCHIVED}", None)
         pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)
         return Removed(False, "existing checkout left untouched", None)
@@ -667,6 +675,9 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
     from brindle import pipeline
 
+    if not history.archive(db, ws, db.list_agents(ws.id), "workspace removed"):
+        note = "; ".join(n for n in (removed.branch_note, _UNARCHIVED) if n)
+        return Removed(removed.branch_deleted, note, removed.teardown)
     rewind.forget_workspace(db, ws)  # its workers' turn snapshots (before the agents go)
     pipeline.on_workspace_cleanup(db, ws)
     db.delete_workspace(ws.id)

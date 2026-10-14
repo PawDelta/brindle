@@ -303,20 +303,42 @@ def share_rows(models: list[tuple[str, int]], width: int) -> list[str]:
 
 def provider_rows(providers: list[tuple[str, int]], width: int,
                   windows: dict[str, list[tuple[str, int]]] | None = None) -> list[tuple[str, str]]:
-    """``(text, style)`` per provider with the percent left in each usage
-    window, 'claude 5h 64% · wk 91% left', or 'antigravity limit reached';
-    "alert" once any window is past ``USAGE_WARN_USED`` percent used."""
+    """``(text, style)`` per provider with the percent used in each usage
+    window, 'claude 5h 36% · wk 9% used', or 'antigravity limit reached';
+    "alert" once any window is past ``USAGE_WARN_USED`` percent used. Each row
+    fits ``width``: the windows with the most headroom drop first, then the
+    name shortens."""
     windows = windows or {}
     name_w = min(max((len(n) for n, _ in providers), default=0), max(width - 6, 4))
     out = []
     for name, p in providers:
-        wins = windows.get(name, [])
-        left = " · ".join(f"{w} {pct}%" for w, pct in wins)
+        wins = windows.get(name, []) or ([("", p)] if p else [])
         lowest = min([pct for _, pct in wins] or [p])
         style = "alert" if 100 - lowest > USAGE_WARN_USED else "normal"
-        out.append((f"{name[:name_w]:<{name_w}} "
-                    f"{f'{left} left' if left else 'limit reached' if not p else f'{p}% left'}", style))
+        out.append((_fit_row(name, name_w, wins, width), style))
     return out
+
+
+def _fit_row(name: str, name_w: int, wins: list[tuple[str, int]], width: int) -> str:
+    """'name 5h 36% · wk 9% used' within ``width``, dropping whole windows
+    (most headroom first) before shortening the name."""
+    if not wins:
+        details = ["limit reached"]
+    else:
+        # windows by headroom, most first: the order they are dropped in
+        drop = sorted(range(len(wins)), key=lambda i: -wins[i][1])
+        details = []
+        for k in range(len(wins), 0, -1):
+            keep = sorted(drop[len(wins) - k:])
+            used = " · ".join(f"{wins[i][0]} {100 - wins[i][1]}%".lstrip() for i in keep)
+            details.append(f"{used} used")
+        details.append(details[-1].removesuffix(" used"))
+    for detail in details:
+        if name_w + 1 + len(detail) <= width:
+            return f"{name[:name_w]:<{name_w}} {detail}"
+    detail = details[-1]
+    room = width - 1 - len(detail)
+    return f"{name[:room]} {detail}" if room >= 1 else detail[:width]
 
 
 def title(collapsed: bool, width: int, local_: Local | None) -> str:
@@ -324,8 +346,10 @@ def title(collapsed: bool, width: int, local_: Local | None) -> str:
     # The provider with the least headroom left: the one that holds work up.
     top = ([min(local_.providers, key=lambda p: (p[1], p[0]))] if (local_ and local_.providers)
            else (shares(local_.models)[:1] if local_ else []))
-    left = " left" if local_ and local_.providers else ""
-    tail = f" ({short(top[0][0])} {top[0][1]}%{left})" if top else ""
+    if local_ and local_.providers:
+        tail = f" ({short(top[0][0])} {100 - top[0][1]}% used)"
+    else:
+        tail = f" ({short(top[0][0])} {top[0][1]}%)" if top else ""
     if len(arrow) + len("Costs") + len(tail) > width:
         tail = ""    # the title stays whole; the top model/provider shows when unfolded
     return arrow + "Costs"[:max(width - len(arrow) - len(tail), 1)] + tail
