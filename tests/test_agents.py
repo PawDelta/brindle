@@ -60,6 +60,36 @@ def test_unreported_notice_repeats_after_resume(db, ws, monkeypatch):
     assert len(sent) == 2
 
 
+def test_brief_resumes_while_stopped_give_one_alert(db, ws, monkeypatch):
+    sent = _unreported_setup(db, ws, monkeypatch)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    for _ in range(3):   # agy polling a command: stop, then a tool call, over and over
+        agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+        agents.handle_hook(db, "a1", "pre-tool", {})
+    assert len(sent) == 1
+
+
+def test_antigravity_worker_with_a_running_command_is_not_stopped(db, ws, monkeypatch):
+    from brindle import procs
+
+    P = procs.Proc
+    table = {
+        10: P(10, 1, "-zsh BRINDLE_AGENT_ID=a1"),
+        11: P(11, 10, "/home/u/.local/bin/agy --model x BRINDLE_AGENT_ID=a1"),
+        12: P(12, 11, "python -m pytest -q"),
+    }
+    monkeypatch.setattr(procs, "table", lambda: table)
+    monkeypatch.setattr(agents, "same_server", lambda a: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda d, a: True)
+    monkeypatch.setattr(agents.tmux, "window_pids", lambda w: [10])
+    agent = fake_agent(db, ws)
+    db.update_agent("a1", provider="antigravity")
+    agent = db.get_agent("a1")
+    assert agents.command_running(db, agent)
+    del table[12]
+    assert not agents.command_running(db, agent)   # just the CLI: stopped
+
+
 def test_running_commands_ignores_the_cli_and_shells_but_sees_a_test_run():
     from brindle import procs
 

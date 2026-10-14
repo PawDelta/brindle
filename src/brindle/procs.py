@@ -138,7 +138,7 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
 
 
 _SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh"}
-_PLUMBING = re.compile(r"claude|brindle|\bmcp\b|tmux|node_modules|\bnpm exec\b|caffeinate")
+_PLUMBING = re.compile(r"claude|codex|\bagy\b|antigravity|brindle|\bmcp\b|tmux|node_modules|\bnpm exec\b|caffeinate")
 
 
 def running_commands(agent_id: str, pane_pids: list[int] | None = None,

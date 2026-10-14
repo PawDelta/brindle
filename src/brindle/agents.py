@@ -2652,8 +2652,11 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
     if event in ("prompt-submit", "pre-tool", "tool-done") and agent.unreported_noted:
         # It's working again, so a later stop without a result is a new one
-        # its supervisor should hear about (see tell_parent_unreported).
-        db.update_agent(agent_id, unreported_noted=None)
+        # its supervisor should hear about (see tell_parent_unreported). A
+        # tool call alone isn't proof: agy resumes briefly each time it polls
+        # a running command, so only a prompt or a long-enough gap counts.
+        if event == "prompt-submit" or _unreported_note_expired(agent):
+            db.update_agent(agent_id, unreported_noted=None)
 
     if event == "session-start":
         from brindle import inbox
@@ -2764,7 +2767,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 # No Stop hook can remind it to report, and no hook says when
                 # it resumes: every turn it ends without a result is a stop
                 # its supervisor hears about.
-                db.update_agent(agent_id, unreported_noted=None)
+                if _unreported_note_expired(agent):
+                    db.update_agent(agent_id, unreported_noted=None)
                 tell_parent_unreported(db, db.get_agent(agent_id) or agent)
             if db.pending_count(agent_id) and not agent.headless:
                 flush(db, agent_id)
@@ -2889,11 +2893,19 @@ def agent_for_session(db: DB, session_id: object) -> str | None:
     return matches[-1].id if matches else None
 
 
+UNREPORTED_REALERT_SECONDS = 600
+
+
+def _unreported_note_expired(agent: Agent) -> bool:
+    """Whether the stop alert recorded in ``unreported_noted`` (the time it
+    was sent) is old enough that a new stop deserves its own alert."""
+    noted = agent.unreported_noted
+    return not noted or time.time() - noted > UNREPORTED_REALERT_SECONDS
+
+
 def command_running(db: DB, agent: Agent) -> bool:
     """Whether a command the agent started (possibly in the background) is
     still running under it. Never raises: when unsure, it says no."""
-    if agent.provider != "claude":
-        return False
     try:
         from brindle import procs
 
@@ -2928,7 +2940,7 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
         # still going: it isn't stopped, and the command finishing wakes it.
         # Not marked noted, so a real stop later still gets its one alert.
         return False
-    db.update_agent(agent.id, unreported_noted=1)
+    db.update_agent(agent.id, unreported_noted=int(time.time()))
     if agent.mode == "review" and ws is not None:
         from brindle import pipeline
 
