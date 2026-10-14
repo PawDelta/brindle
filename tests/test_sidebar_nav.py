@@ -231,3 +231,13 @@ def test_snapshot_carries_the_sessions_autopilot_and_open_question(db, repo):
     assert (entry()["autopilot"], entry()["asking"]) == (True, "root01")
     autopilot.set_enabled(db, "root01", False)
     assert entry()["autopilot"] is False
+
+
+def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(monkeypatch):
+    # macOS ncurses 6.0 with mouse version 1: no BUTTON5_PRESSED, and
+    # wheel-down is reported as REPORT_MOUSE_POSITION.
+    monkeypatch.delattr(curses, "BUTTON5_PRESSED", raising=False)
+    monkeypatch.setattr(curses, "BUTTON4_PRESSED", 0x00080000)
+    monkeypatch.setattr(curses, "REPORT_MOUSE_POSITION", 0x08000000)
+    assert watch.wheel_step(0x08000000) == 3
+    assert watch.wheel_down_mask() & 0x08000000
