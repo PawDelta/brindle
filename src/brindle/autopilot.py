@@ -1526,7 +1526,8 @@ def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agen
     return [a for a in agents.tree(db, root_id)[1:]
             if a.mode in agents.REPORTING_MODES and (reviewers or a.mode != "review")
             and (a.result is None or a.status in BUSY or a.pipeline)
-            and a.status not in ("paused", "done") and agents.is_alive(a)]
+            and a.status not in ("paused", "done") and agents.is_alive(a)
+            and not agents.review_moot(db, a)]
 
 
 def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[Agent], list[Agent]]:
