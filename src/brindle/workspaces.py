@@ -22,10 +22,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-# rewind is imported here, not when it's needed: brindle may be running from
-# the very worktree ``remove`` deletes (a reviewer's `uv run` in it), and a
-# module first imported after that can't be found, which left the row behind.
-from brindle import git, rewind, services, tmux
+# rewind and history are imported here, not when they're needed: brindle may
+# be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
+# in it), and a module first imported after that can't be found, which left
+# the row behind.
+from brindle import git, history, rewind, services, tmux
 from brindle.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
@@ -583,6 +584,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             _rescue_sidebar(db, ws)
             tmux.kill_session(ws.tmux_session)
         pipeline.on_workspace_cleanup(db, ws)
+        history.archive(db, ws, db.list_agents(ws.id), "workspace removed")
         db.delete_workspace(ws.id)
         return Removed(False, "existing checkout left untouched", None)
 
@@ -669,6 +671,7 @@ def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
 
     rewind.forget_workspace(db, ws)  # its workers' turn snapshots (before the agents go)
     pipeline.on_workspace_cleanup(db, ws)
+    history.archive(db, ws, db.list_agents(ws.id), "workspace removed")
     db.delete_workspace(ws.id)
     return removed
 

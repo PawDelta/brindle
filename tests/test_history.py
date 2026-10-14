@@ -54,10 +54,13 @@ def test_check_milestone_writes_check_and_milestone_rows(db, repo, monkeypatch):
 
 
 def test_history_survives_session_pruning(db, repo):
+    import json
+
     root_ws = workspaces.adopt_root(db, str(repo))
     ws = workspaces.create(db, str(repo), "feature").workspace
     add(db, root_ws, "boss", status="paused", since=1)
     add(db, ws, "w1", mode="assign", parent="boss", status="done")
+    db.update_agent("w1", result="all done", task="build it", inbox_token="secret-token")
     history.record(db, ws.repo_root, "worker_result", agent_id="w1", branch="feature",
                    profile="developer", task="task", result="done")
     for i in range(3):
@@ -67,8 +70,18 @@ def test_history_survives_session_pruning(db, repo):
 
     assert dropped == 1
     assert db.get_agent("boss") is None and db.get_agent("w1") is None
-    rows = db.list_history(ws.repo_root)
+    rows = db.list_history(ws.repo_root, "worker_result")
     assert len(rows) == 1 and rows[0].result == "done"
+    # The dropped records are archived, locally and privately, first.
+    archived = {r.agent_id: r for r in db.list_history(ws.repo_root, "archived")}
+    assert (archived["w1"].task, archived["w1"].result) == ("build it", "all done")
+    assert "boss" in archived
+    path = history.archive_dir() / "proj.jsonl"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert history.archive_dir().stat().st_mode & 0o777 == 0o700
+    entry = json.loads(path.read_text().splitlines()[0])
+    assert entry["workspace"]["id"] == ws.id
+    assert entry["agents"][0]["result"] == "all done" and "inbox_token" not in entry["agents"][0]
 
 
 # -- the CLI -------------------------------------------------------------------

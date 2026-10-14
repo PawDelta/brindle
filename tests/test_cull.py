@@ -176,6 +176,47 @@ def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     assert db.get_agent("w2").dismissed_at is not None
 
 
+# -- finished work leaves the live view ---------------------------------------
+
+
+def test_sweep_forgets_a_workspace_whose_worktree_is_gone(db, repo):
+    """Only `brindle prune` used to: the rows of worktrees deleted outside
+    brindle (or by a removal that crashed half way) stayed listed for good."""
+    import shutil
+
+    gone = workspaces.create(db, str(repo), "feat-gone", run_setup=False).workspace
+    with db.tx() as c:
+        c.execute("UPDATE workspaces SET created_at=? WHERE id=?", (time.time() - 7200, gone.id))
+    add(db, gone, "w1", status="done", result="did it")
+    shutil.rmtree(gone.path)
+    # One made a moment ago may not have its folder yet: not forgotten.
+    fresh = workspaces.create(db, str(repo), "feat-fresh", run_setup=False).workspace
+    shutil.rmtree(fresh.path)
+
+    cull.sweep(db)
+
+    assert db.get_workspace(gone.id) is None and db.get_agent("w1") is None
+    assert db.get_workspace(fresh.id) is not None
+
+
+def test_a_paused_reviewer_does_not_keep_a_merged_worktree(db, repo):
+    """A reviewer left paused without a report (its session paused, or a newer
+    round replaced it) counted as unfinished, so the merged worktree stayed."""
+    from conftest import sh
+
+    merged = workspaces.create(db, str(repo), "feat-merged", run_setup=False).workspace
+    with open(os.path.join(merged.path, "change.py"), "w") as f:
+        f.write("x = 1\n")
+    sh("git add -A && git commit -qm work", merged.path)
+    workspaces.merge_back(db, merged)
+    add(db, merged, "w1", status="done", result="did it")
+    add(db, merged, "r1", mode="review", status="paused")
+
+    cull.prune_retired(db)
+
+    assert db.get_workspace(merged.id) is None and not os.path.exists(merged.path)
+
+
 # -- another tmux server's pane list says nothing about this agent -----------
 #
 # The incident: `brindle demo`, recorded on a private tmux server

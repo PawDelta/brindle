@@ -209,6 +209,10 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     from brindle.native import serve
 
     done.extend(serve.stop_unused(db))
+
+    # 6. Finished work: merged worktrees and ones whose folder is gone leave
+    # the live view, archived (not only when someone runs `brindle prune`).
+    done.extend(prune_retired(db, now, cautious=True))
     return done
 
 
@@ -530,27 +534,40 @@ def clean_locks(db: DB, now: float | None = None) -> int:
 # -- `brindle prune` ---------------------------------------------------------------
 
 
-def prune_retired(db: DB, now: float | None = None) -> list[str]:
+def prune_retired(db: DB, now: float | None = None, *, cautious: bool = False) -> list[str]:
     """Remove the worktrees of finished workers whose branch is already
     merged (see ``view.retired``), and their branches unless the repo turns
     ``delete_merged_branches`` off. A worktree with
-    uncommitted changes (or the one this is run from) is kept and reported."""
-    from brindle import pipeline, view, workspaces
+    uncommitted changes (or the one this is run from) is kept and reported.
+    The records of a workspace whose folder is gone are forgotten (its
+    branch stays). Either way its records are archived first (see
+    ``history.archive``). ``cautious`` (the automatic sweep): a missing
+    folder is only forgotten once nothing runs there and it's past
+    ``view.UNUSED_WORKTREE_GRACE``, so one being created isn't."""
+    from brindle import history, pipeline, view, workspaces
 
     now = time.time() if now is None else now
     alive = view.live_agents(db, tmux.list_panes())
-    cwd = os.path.realpath(os.getcwd())
+    try:
+        cwd = os.path.realpath(os.getcwd())
+    except OSError:
+        cwd = ""  # run from a folder since deleted: it's in no worktree
     done = []
     for ws in db.find_workspaces():
         if not os.path.isdir(ws.path):
+            everyone = db.list_agents(ws.id)
+            if cautious and (now - ws.created_at <= view.UNUSED_WORKTREE_GRACE
+                             or any(a.id in alive for a in everyone)):
+                continue
             pipeline.on_workspace_cleanup(db, ws)
+            history.archive(db, ws, everyone, "worktree missing")
             db.delete_workspace(ws.id)
             done.append(f"forgot missing workspace {ws.id} ({ws.path})")
             continue
         if not view.retired(db, ws, alive, now):
             continue
         path = os.path.realpath(ws.path)
-        if cwd == path or cwd.startswith(path + os.sep):
+        if cwd and (cwd == path or cwd.startswith(path + os.sep)):
             done.append(f"kept {ws.branch}: you're in its worktree")
             continue
         try:
@@ -567,6 +584,8 @@ def prune_retired(db: DB, now: float | None = None) -> list[str]:
             continue
         branch = "branch deleted" if removed.branch_deleted else f"branch {ws.branch} kept"
         done.append(f"removed merged worktree {ws.path} ({branch})")
+    if cautious:  # every sweep: only what it did, not what it keeps leaving alone
+        done = [line for line in done if not line.startswith("kept ")]
     return done
 
 
