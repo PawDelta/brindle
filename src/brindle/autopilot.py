@@ -107,8 +107,11 @@ to be asked each step.
   approves. Treat any gaps it finds as unfinished work, and tighten (with
   `set_goal`) the check that let each gap through.
 - Keep going until every milestone passes. If you stop early, brindle will ask
-  you to continue. Stop only when you are blocked on something only the user
-  can decide: call `need_user` with the question, then ask it.
+  you to continue. A denied action, a stalled external job (a CI run no runner
+  picks up) or a question only the user can answer blocks only the steps that
+  depend on it: call `need_user` with the question, ask it, keep working the
+  rest, and report the blocked item with it. Stop only when nothing else is
+  left; once the user answers, call `need_user(answered=true)`.
 - When a milestone passes, tell the user in one line.
 - If a message says autopilot is off, stop driving: wait for the user's
   instructions.
@@ -632,7 +635,7 @@ def set_enabled(db: DB, root_id: str, on: bool) -> None:
     fields: dict[str, object] = {"enabled": int(on), "nudges": 0}
     ap = db.get_autopilot(root_id)
     if on and ap and ap.state in ("blocked", "stalled"):
-        fields.update(state="running", note=None)
+        fields.update(state="running", note=None, question=None)
     db.update_autopilot(root_id, **fields)
 
 
@@ -1043,16 +1046,40 @@ def resolve_profile(db: DB, caller_id: str, repo_root: str, requested: str | Non
     return choose_profile(db, caller_id, repo_root, requested, task, files)[0]
 
 
-def need_user(db: DB, root_id: str, question: str) -> None:
-    db.update_autopilot(root_id, state="blocked", note=question.strip()[:500], nudges=0)
+def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
+    """Block autopilot on ``question``. brindle's own blocks (credentials,
+    budget) stop the whole session until the user replies; a supervisor's
+    question (``ask``) holds only the work that depends on it, until the
+    supervisor says it's answered."""
+    note = question.strip()[:500]
+    fields: dict[str, object] = {"state": "blocked", "note": note, "nudges": 0,
+                                 "question": note if ask else None}
+    if ask:
+        ap = db.get_autopilot(root_id)
+        fields["nudged_at"] = ap.progress if ap else None
+    db.update_autopilot(root_id, **fields)
+
+
+def held(ap: Autopilot) -> bool:
+    """Autopilot waits on the supervisor's open question, and nothing has
+    blocked it since (that would have replaced the note)."""
+    return ap.state == "blocked" and bool(ap.question) and ap.question == ap.note
+
+
+def answered(db: DB, root_id: str) -> None:
+    db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0)
 
 
 def user_spoke(db: DB, agent: Agent) -> None:
     """The user typed into the supervisor's chat: whatever blocked autopilot
-    is theirs to have answered, so it may drive again."""
+    is theirs to have answered, so it may drive again. An open question stays
+    open (the message may be about something else), but the supervisor gets
+    one more reminder of it."""
     ap = db.get_autopilot(agent.id)
-    if ap and ap.state in ("blocked", "stalled"):
-        db.update_autopilot(agent.id, state="running", note=None, nudges=0)
+    if ap and held(ap):
+        db.update_autopilot(agent.id, nudges=0, nudged_at=None)
+    elif ap and ap.state in ("blocked", "stalled"):
+        db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0)
     elif ap:
         db.update_autopilot(agent.id, nudges=0)
 
@@ -1769,6 +1796,9 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
                 return None
         else:
             return None
+    elif held(ap):
+        if ap.nudged_at == ap.progress:
+            return None  # reminded of the open question since the last step or user message
     elif ap.state != "running":
         return None
 
@@ -1789,6 +1819,10 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
+    if held(ap):
+        # One reminder per step: never counts toward stalling.
+        db.update_autopilot(agent.id, nudges=0, nudged_at=ap.progress)
+        return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
     nudges = ap.nudges if ap.nudged_at == ap.progress else 0
     if nudges >= MAX_NUDGES:
         db.update_autopilot(agent.id, state="stalled", nudges=0,
@@ -1828,6 +1862,10 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
         pending += ("Every milestone's check passes, but the completion audit hasn't approved "
                     "the current commit. Close any gaps it found, commit, and call "
                     "check_milestone: that starts a fresh audit.\n\n")
+    if held(ap):
+        pending += (f"Waiting on the user for: {ap.question}. Work only on what doesn't depend "
+                    "on it; if nothing is left, stop. When they've answered, call "
+                    "need_user(answered=true).\n\n")
     return (
         "[brindle autopilot] The goal isn't reached yet, and no workers are running.\n"
         f"{progress(db, ap.root_id)}\n\n{pending}{stuck}"
