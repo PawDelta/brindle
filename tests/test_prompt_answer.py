@@ -155,6 +155,27 @@ def test_model_calls_are_capped_per_launch_across_sweeps(db, launch):
     assert len(asked) == prompt_answer.MAX_CALLS
 
 
+def test_the_delivered_brief_is_never_the_prompt(db, launch, monkeypatch):
+    # The brief the CLI echoes as "❯ <brief>" with indented wrapped lines reads
+    # as a menu, and its words (sign-in, API key) as a personal prompt.
+    from brindle import launch_health
+
+    brief = ("Review the changes on branch `fix/133-goal-hooks-off` and check that the sign-in flow "
+             "and the API key handling are untouched, then report back.")
+    launch(TRUST, ["Not now", "Allow this folder"], {"kind": "trust", "option": "Allow this folder"},
+           provider="claude", status="processing")
+    db.update_agent("w1", task="review")
+    launch_health.prepare(db, db.get_agent("w1"), "fp", submitted_prompt=brief)
+    screen = ("❯ Review the changes on branch `fix/133-goal-hooks-off` and check that the\n"
+              "  sign-in flow and the API key handling are untouched, then report\n"
+              "  back.\n\n"
+              "· Percolating… (42s · ↓ 2.0k tokens)\n")
+    monkeypatch.setattr(tmux, "capture", lambda target, **k: screen)
+    prompt_answer.finish_launch(db, db.get_agent("w1"))
+    assert db.pending_count("boss") == 0
+    assert db.get_agent("w1").status != "waiting"
+
+
 @pytest.mark.variant("race: the selection moves during the model call; the only test of the re-capture")
 def test_selection_is_checked_on_the_pane_as_it_is_after_the_model_call(db, launch):
     # The selection moved from Dark to Light while the model was deciding Dark.
