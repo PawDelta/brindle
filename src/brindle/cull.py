@@ -105,6 +105,17 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         # Only this server's panes can say whether this agent is running.
         return agents.same_server(a, panes)
 
+    # 0b. A chat that ended without pausing its session: killing its tmux
+    # session takes down the wrapper that would have (agents._pause_when_done),
+    # leaving every agent it started running. Pause the whole session now;
+    # step 1 then stops the processes of everything it paused.
+    for a in db.list_agents():
+        if (a.mode == "interactive" and a.parent_id is None and a.status not in ("paused", "done")
+                and a.dismissed_at is None and agents.runs_process(a) and here(a) and not alive(a)
+                and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
+            paused = agents.pause(db, a.id, stop_procs=False, stop_local_models=False)
+            done.append(f"paused session {a.id} ({len(paused)} agent(s)): its chat is gone")
+
     # 1. Processes of agents that shouldn't be running.
     leftovers = []
     for aid in procs.all_agent_ids(table):
