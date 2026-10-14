@@ -184,6 +184,30 @@ brindle pr fix-login                          # push + gh pr create
 brindle rm fix-login                          # deletes the branch only if it's merged (-K keeps it)
 ```
 
+### Choosing the supervisor and workers
+
+The first time you run `brindle` it asks which CLI runs the supervisor (the
+agent that plans the work and hands it out), and remembers your pick. After
+that it starts straight away and prints one line naming the CLI. It asks again
+only when your pick is no longer signed in or no longer allowed.
+
+- `brindle -s` opens the picker; `brindle -s codex` switches directly. Either
+  is remembered.
+- In the picker, `w` opens the workers screen: a model for each task size
+  (light, medium, heavy). Models are grouped by how they run: through a CLI
+  you sign in to, locally with Ollama, or hosted with an API key. Picking one
+  that isn't ready sets it up right there: signing in, installing Ollama and
+  downloading the model after a memory check, or asking for the API key.
+- API keys are checked with the provider before they're stored, and stay in
+  this machine's keychain.
+- The picker and the workers screen list only the CLIs and models you're
+  allowed to use. In an org that means its allowed providers and models for
+  your role, its managed routes, and whether personal API keys are allowed.
+  `-s` with anything else is refused, and saved picks are re-checked at every
+  launch.
+- Without a terminal (scripts, CI), with `--yes`, or in `brindle demo`, nothing
+  asks: brindle uses your last pick, else Claude Code.
+
 ## Recommended use
 
 brindle pays off when work splits into pieces that can proceed in parallel, or
@@ -312,6 +336,7 @@ your own status line prints, so what you see doesn't change.
 | | |
 |---|---|
 | `brindle` | a fresh supervisor chat here, dashboard alongside |
+| `brindle -s [CLI]` | pick the supervisor's CLI (no value: open the picker; `w` there picks worker models); remembered for next time |
 | `brindle supervisor` | the same, with `--branch`/`--worktree` to run it in another worktree |
 | `brindle init` | detect setup and test commands, write `.brindle/config.json`, check tools |
 | `brindle demo [--local]` | watch brindle finish a tiny practice repo: parallel workers, reviews, gated merges |
