@@ -300,9 +300,11 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
         prompt += PLAN_FIRST_NOTE
     prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch,
                                    guidance=worker_guidance(ws))
-    if done_when and provider.name == "claude" and not headless:
-        # /goal is an interactive command; headless workers get the finish
-        # line above and the Stop hook's reminder to report.
+    if (done_when and provider.name == "claude" and not headless
+            and not provider.hooks_disabled(ws.path)):
+        # /goal is an interactive command that Claude Code refuses when hooks
+        # are disabled (#133), and headless workers get the finish line above
+        # and the Stop hook's reminder to report either way.
         prompt = pilot.worker_goal(prompt, done_when, ws.branch) or prompt
     return prompt
 
@@ -3114,6 +3116,20 @@ def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
     return True
 
 
+def review_moot(db: DB, agent: Agent) -> bool:
+    """A reviewer whose branch already merged at its current commit: there is
+    nothing left for it to review or report. A reviewer of commits made after
+    the merge is not moot."""
+    if agent.mode != "review":
+        return False
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is None:
+        return False
+    from brindle import pipeline
+
+    return (pipeline._settled(db, ws) or "").startswith(pipeline.ALREADY_MERGED)
+
+
 def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
@@ -3126,6 +3142,9 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
         _note_reviewer_end(db, agent)
         return False
     ws = db.get_workspace(agent.workspace_id)
+    if review_moot(db, agent):
+        close_later(agent.id)
+        return False
     if agent.mode == "review" and ws is not None and os.path.isdir(ws.path):
         from brindle import gates
 

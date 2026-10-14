@@ -1476,12 +1476,33 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 # -- progress -----------------------------------------------------------------
 
-MARK = {"passed": "✓", "failed": "✗", "pending": "○"}
+MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌"}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
     ms = db.milestones(root_id)
     return sum(m.status == "passed" for m in ms), len(ms)
+
+
+def work_state(db: DB, root_id: str) -> str | None:
+    """Display-only: "working" or "waiting" while the session has work in
+    flight, else None. A failed milestone's last check is stale then, so it
+    shouldn't read as a plain failure. Never stored on the milestone.
+
+    shortcut: work isn't tied to a milestone, so any in-flight work marks every
+    failed milestone; upgrade if tasks get a milestone link."""
+    from brindle import login_pause
+
+    ap = db.get_autopilot(root_id)
+    if (ap is not None and ap.state == "usage_paused") or login_pause.paused(db, root_id):
+        return "waiting"
+    live = active_workers(db, root_id)
+    if any(a.status != "waiting" for a in live):
+        return "working"
+    if live or any(root_of(db, t.caller_id) == root_id
+                   for t in db.list_tasks(state="pending") if t.caller_id):
+        return "waiting"
+    return None
 
 
 def progress(db: DB, root_id: str) -> str:
@@ -1494,12 +1515,16 @@ def progress(db: DB, root_id: str) -> str:
                 "user's request (ask what we're building only if there is no request).")
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
-    for m in db.milestones(root_id):
+    ms = db.milestones(root_id)
+    w = work_state(db, root_id) if any(m.status == "failed" for m in ms) else None
+    for m in ms:
         where = f"@{m.repo}: " if m.repo else ""
         how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
         who = f", profile: {m.profile}" if m.profile else ""
-        lines.append(f"  {MARK.get(m.status, '·')} {m.position}. {m.title} ({how}{who}{when})")
+        shown = w if m.status == "failed" and w else m.status
+        stale = ", last check failed" if shown != m.status else ""
+        lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
     if ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
     elif ap.state == "auditing":
@@ -1526,7 +1551,8 @@ def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agen
     return [a for a in agents.tree(db, root_id)[1:]
             if a.mode in agents.REPORTING_MODES and (reviewers or a.mode != "review")
             and (a.result is None or a.status in BUSY or a.pipeline)
-            and a.status not in ("paused", "done") and agents.is_alive(a)]
+            and a.status not in ("paused", "done") and agents.is_alive(a)
+            and not agents.review_moot(db, a)]
 
 
 def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[Agent], list[Agent]]:

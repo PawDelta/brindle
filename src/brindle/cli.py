@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 import typer
 
@@ -187,14 +187,18 @@ def new(
     pr: Optional[int] = typer.Option(None, "--pr", help="Check out this GitHub PR's head branch (via `gh`), based on the PR's base branch. Don't also pass BRANCH or --base; the head branch is always fetched."),
     no_agent: bool = typer.Option(False, "--no-agent", help="Only create the worktree; start no supervisor."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the supervisor."),
-    provider: Optional[str] = typer.Option(None, help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity)."),
+    provider: Optional[str] = typer.Option(
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+    ),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Don't fetch the base branch first."),
     no_setup: bool = typer.Option(False, "--no-setup", help="Skip setup commands."),
     attach: bool = typer.Option(False, "--attach", help="Attach to the tmux session afterward."),
+    provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Create a worktree on a new branch and start a supervisor in it."""
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
 
+    provider = provider or provider_alias
     if provider and provider in NOT_SUPERVISOR:
         _fail(f"the {provider} provider can't run the supervisor; use one of: "
               f"{', '.join(SUPERVISOR_PROVIDERS)}")
@@ -246,12 +250,15 @@ def new(
 @app.command()
 def start(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
-    provider: Optional[str] = typer.Option(None),
+    provider: Optional[str] = typer.Option(
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+    ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
+    provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Start a fresh supervisor chat here, with the dashboard alongside. A launch only ever starts a supervisor; it starts the other agents itself.
 
@@ -263,6 +270,7 @@ def start(
     from brindle.config import load_repo_config
     from brindle import scratch
 
+    provider = provider or provider_alias
     db = DB()
     if branch or worktree:
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
@@ -741,10 +749,14 @@ def default(
     ctx: typer.Context,
     cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="Start with autopilot on or off (default: on, or `autopilot` in .brindle/config.json)."),
-    provider: Optional[str] = typer.Option(None, "--provider", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity)."),
+    provider: Optional[str] = typer.Option(
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+    ),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
+    provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
+    provider = provider or provider_alias
     if show_version:
         from brindle import __version__
 
@@ -768,14 +780,18 @@ def default(
 @app.command()
 def supervisor(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
-    provider: Optional[str] = typer.Option(None),
+    provider: Optional[str] = typer.Option(
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+    ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
+    provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Start an explicit supervisor session to coordinate coding agents."""
+    provider = provider or provider_alias
     start(prompt=prompt, provider=provider, attach=attach, watch=watch,
           autopilot=autopilot, branch=branch, worktree=worktree)
 

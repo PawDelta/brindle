@@ -1388,7 +1388,7 @@ change files under a directory without prompts.
 
 ### Which provider can do what
 
-| Provider | Supervisor (`brindle --provider …`) | Worker / reviewer |
+| Provider | Supervisor (`brindle --supervisor …`) | Worker / reviewer |
 |---|---|---|
 | `claude` (Claude Code) | yes (the default) | yes |
 | `codex` | yes | yes |
@@ -1450,7 +1450,7 @@ When running long, unattended autopilot sessions with API keys:
   - **Codex (unsupported runtime auth detection)**: Codex CLI turn completion (`agent-turn-complete`) does not classify auth errors at runtime. If an OpenAI API key expires or is rejected, Codex workers will not automatically transition to `failed` or trigger an autopilot credential pause. When running Codex workers unattended, monitor their progress via `brindle watch` or check tmux panes; if an auth failure occurs, manually restart or rotate keys.
 - **Supervisor credential refresh and key rotation**:
   - **Recovering failed/blocked workers**: When an agent fails on an expired key or autopilot pauses with a credential error, export the fresh key (or update `brindle keys set`), then run `brindle continue`. This unpauses the session and relaunches paused/failed agents with the new credentials. The replacement credentials are automatically synced to the session credential store, dynamically refreshed by the supervisor's launcher on all subsequent worker delegations (`assign`/`handoff`).
-  - **Proactive rotation in live sessions**: Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
+  - **Proactive rotation in live sessions**: For Claude keys rotated outside brindle, set Claude Code's `apiKeyHelper` in `~/.claude/settings.json` or the project's `.claude/settings.json`. Claude Code re-runs the helper every 5 minutes (configurable with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`) and after a 401, so running workers pick up the new key. Don't also export `ANTHROPIC_API_KEY` or set a Claude key with `brindle keys set`, since an environment key takes precedence over the helper. Codex and Antigravity keys still need workers stopped, then `brindle keys set`, then `brindle continue`. Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
   - **Precedence**: Newly stored keys (`brindle keys set`) or session credentials updated during recovery take effect dynamically for all new panes, overriding stale launcher environments. For profile-level overrides, an explicit profile key (`env.NAME`) takes precedence over default provider credentials.
 - **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts unless permissions are pre-populated in `settings.json` (see Permissions) or run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
 
@@ -1935,7 +1935,8 @@ you to sign in. `agy` takes no other key or token from the environment; its
 Google Cloud, Workforce Identity and Application Default Credentials sign-ins are
 chosen on its sign-in screen.
 
-Then run the whole session on it with `brindle --provider antigravity`, or mix models:
+Then run the supervisor on it with `brindle --supervisor antigravity`.
+Workers keep their own profiles' providers. To mix models,
 give a profile `provider: antigravity` (for example a `gemini-reviewer` for a second
 model's review) and the supervisor can hand it tasks.
 

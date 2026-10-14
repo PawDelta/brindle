@@ -349,8 +349,12 @@ def apply_profile(m: Managed | None, profile):
         c = m.claude
         if profile.provider == "native" and m.codex is not None:
             return replace(profile, base_url=m.codex.base_url)
-        if profile.provider == "claude" and c is not None and c.model_ids and profile.model not in c.model_ids:
-            return replace(profile, model=c.default_model or c.model_ids[0])
+        if profile.provider == "claude" and c is not None:
+            from brindle import company_login
+
+            model = company_login.route_model(c, profile.model)
+            if model != profile.model:
+                return replace(profile, model=model)
         return profile
     c = m.config
     if c is None:

@@ -410,6 +410,12 @@ class _OrgCommands:
 
         self._say(f"Policy for org {p.org_id}, version {p.version}{note}")
         rules(p)
+        c = p.agent_setup.claude if p.agent_setup else None
+        if c is not None:
+            from brindle.pro import managed_models
+
+            route = managed_models._describe_claude(c) if c.route in managed_models.CLAUDE_ROUTE_NAMES else c.route
+            self._say(f"  {'agent setup':<22} Claude: {route}")
         if p.roles:
             self._say("Role overrides (what a role's members get instead):")
             for role, over in sorted(p.roles.items()):
