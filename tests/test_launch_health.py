@@ -350,13 +350,14 @@ def health(db, root, monkeypatch):
     ("■ unexpected status 403 Forbidden: secret-token https://private", "launch_auth", "provider_403"),
     ("Error: model not found secret-token", "launch_model", None),
     ("● API Error: model use case details have not been submitted secret-token", "bedrock_use_case", None),
+    ("⏺ The model claude-fable-5-1 is not available on your vertex deployment.", "launch_model", None),
 ])
 def test_current_failures_report_safe_actions_and_effective_cooldown(db, health, monkeypatch, screen, cause, refused):
     from brindle import model_access
     from brindle.pro import route_health
     lh, a, _, _, _, reports = health
     # Only the actual provider's response marker can attest a current failure.
-    provider = "claude" if screen.startswith("●") else "native" if screen.startswith("──") else "codex"
+    provider = "claude" if screen.startswith(("●", "⏺")) else "native" if screen.startswith("──") else "codex"
     db.update_agent(a.id, provider=provider)
     monkeypatch.setattr(lh, "capture", lambda a: screen)
     monkeypatch.setattr(agents, "route_context", lambda db_, agent, ws: ("bedrock", "claude-opus-5-5"))
@@ -370,6 +371,7 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     assert "Fix:" in body and "secret-token" not in body and "https://private" not in body
     denied = model_access.refused(a.profile, fp="effective-account")
     assert denied.key == cause
+    assert (db.get_agent(a.id).status == "failed") == (cause == "launch_model")
     ws = db.get_workspace(a.workspace_id)
     assert route_health.pending() == ({(ws.repo_root, provider, "bedrock", "claude-opus-5-5", refused): 1}
                                       if refused else {})
