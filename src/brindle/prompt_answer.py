@@ -60,7 +60,14 @@ SAFE_OPTION = {
     "trust": re.compile(r"(?i)^(?:yes|trust|allow|continue|proceed|open)\b"),
     "acknowledge": re.compile(r"(?i)^(?:ok(?:ay)?|continue|got it|dismiss|close|next|(?:press )?enter to continue)\b"),
 }
-BROAD = re.compile(r"(?i)\b(?:all|always|future|every\w*|don.t ask)\b")
+# Every word of an option brindle picks for trust or acknowledge comes from
+# here, so "Yes, and enable this project's servers" never passes for "Yes".
+SAFE_WORDS = frozenset("yes i trust this the folder project workspace directory files contents allow "
+                       "continue proceed open and ok okay got it next dismiss close press enter to "
+                       "work in here".split())
+# Config files a path on screen can name (a project's MCP servers, hooks,
+# settings), which normalize() hides behind <path>.
+CONFIG_PATH = re.compile(r"(?i)\.(?:mcp|claude|codex|gemini|agy)\b|settings(?:\.local)?\.json|hooks?\b")
 # Text that may be a credential: a screen showing one never leaves this machine.
 SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}"
                     r"|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN"
@@ -206,11 +213,11 @@ def next_key(screen: str, decision: Decision) -> str | None:
     once it shows selected, else "Up" or "Down". None when the option isn't
     on screen (once), or no selection can be seen to verify it."""
     lines = _tail(screen)
-    want = " ".join(decision.option.split()).casefold()
+    want = _option_text(decision.option)
     if not want:
         return None
-    exact = [i for i, ln in enumerate(lines) if _option_text(ln) == want]
-    matches = exact or [i for i, ln in enumerate(lines) if want in (_option_text(ln) or "")]
+    # Only the exact line: what brindle checked is what it selects.
+    matches = [i for i, ln in enumerate(lines) if _option_text(ln) == want]
     if len(matches) != 1:
         return None
     target = matches[0]
@@ -238,10 +245,11 @@ def _may_answer(screen: str, decision: Decision) -> bool:
     """brindle's own check of the model's pick (cached ones too): an
     answerable kind, an option it allows for that kind and nothing broader
     ("all future", "always"), and trust only for a brindle worktree."""
-    if decision.kind not in ANSWERABLE or BROAD.search(decision.option):
+    option = _option_text(decision.option) or ""
+    if decision.kind not in ANSWERABLE or not option:
         return False
     safe = SAFE_OPTION.get(decision.kind)
-    if safe and not safe.search(decision.option.strip()):
+    if safe and not (safe.search(option) and set(re.findall(r"[^\W_]+", option)) <= SAFE_WORDS):
         return False
     return decision.kind != "trust" or _brindle_folder(screen)
 
@@ -273,7 +281,8 @@ class Startup:
 
     def decide(self, screen: str) -> Decision:
         text = normalize(screen)
-        if PERSONAL.search(text) or SECRET.search(text):
+        if (PERSONAL.search(text) or SECRET.search(text)
+                or any(CONFIG_PATH.search(p) for p in PATH.findall("\n".join(_tail(screen))))):
             return Decision("needs_user")
         key = _key(text)
         cached = _cached(key)

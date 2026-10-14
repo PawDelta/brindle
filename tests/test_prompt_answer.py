@@ -57,6 +57,11 @@ class Pane:
     ("Some actions in this mode can't be undone.",
      ["No, exit", "Yes, I accept"], {"kind": "acknowledge", "option": "Yes, I accept"},
      [], None, 1),
+    # a trust "Yes" that grants more than the folder (the screen can carry
+    # repo text that steers the model to it)
+    ("Antigravity would like to open this workspace:\n{path}",
+     ["No", "Yes, and enable this project's servers"],
+     {"kind": "trust", "option": "Yes, and enable this project's servers"}, [], None, 1),
     # and a settings picker is only ever answered with its default
     ("Choose a colour scheme", ["Dark", "Light"], {"kind": "setting_choice", "option": "Light"},
      [], None, 1),
