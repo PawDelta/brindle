@@ -151,6 +151,22 @@ def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provid
     assert sent == ["boss"]
 
 
+def test_idle_sweep_honors_the_unreported_alert_cooldown(db, ws, monkeypatch):
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor")
+    add(db, ws, "w1", parent_id="boss", mode="assign", status_since=time.time() - 600)
+    db.update_agent("w1", unreported_noted=int(time.time()))   # alerted a moment ago
+    sent = []
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: time.time() - 600)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
+    cull.sweep(db)
+    assert sent == []
+    db.update_agent("w1", unreported_noted=int(time.time()) - agents.UNREPORTED_REALERT_SECONDS - 1)
+    cull.sweep(db)
+    assert sent == ["boss"]
+
+
 def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
     add(db, ws, "w1", parent_id="boss", status="paused")
