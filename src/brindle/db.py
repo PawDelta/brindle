@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS agents (
     stop_reminded_at REAL,         -- a Stop last reminded it of unread mail (DB.claim_stop_reminder)
     tmux_server TEXT,              -- the private tmux server (BRINDLE_TMUX_SOCKET) its window is on; NULL: the default server
     reopened_at REAL,              -- when a dead reviewer's session was reopened once (pipeline.on_reviewer_unreported)
-    hooks_off TEXT                 -- why its CLI runs none of brindle's hooks, shown on its sidebar row (agents.screen_status)
+    hooks_off TEXT,                -- why its CLI runs none of brindle's hooks, shown on its sidebar row (agents.screen_status)
+    reviewing_since REAL           -- when its last report put its branch in review (pipeline.on_report)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -390,7 +391,8 @@ CREATE TABLE IF NOT EXISTS launch_health (
     submitted_prompt TEXT NOT NULL DEFAULT '',
     delivered_at REAL,
     baseline TEXT NOT NULL DEFAULT '',
-    outcome TEXT
+    outcome TEXT,
+    launched_at REAL
 );
 -- A launch whose CLI hasn't shown its input box yet, and the model calls
 -- spent reading its startup prompts (brindle.prompt_answer).
@@ -456,6 +458,7 @@ class Agent:
     stop_reminded_at: float | None = None
     reopened_at: float | None = None
     hooks_off: str | None = None       # why its CLI runs none of brindle's hooks (agents.screen_status)
+    reviewing_since: float | None = None   # when its last report put its branch in review (pipeline.on_report)
 
 
 @dataclass
@@ -698,7 +701,8 @@ class DB:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT"),
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
-                          ("reopened_at", "REAL"), ("hooks_off", "TEXT")):
+                          ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
+                          ("reviewing_since", "REAL")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
@@ -759,6 +763,8 @@ class DB:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN argv_task INTEGER NOT NULL DEFAULT 0")
         if "submitted_prompt" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN submitted_prompt TEXT NOT NULL DEFAULT ''")
+        if "launched_at" not in health_cols:
+            self.conn.execute("ALTER TABLE launch_health ADD COLUMN launched_at REAL")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -1130,6 +1136,14 @@ class DB:
             "AND COALESCE(held,0)=0", (agent_id,)
         ).fetchone()
         return int(row[0])
+
+    def oldest_pending(self, agent_id: str) -> float | None:
+        """When the oldest message ``pending_count`` counts was queued."""
+        row = self.conn.execute(
+            "SELECT MIN(created_at) FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
+            "AND COALESCE(held,0)=0", (agent_id,)
+        ).fetchone()
+        return row[0]
 
     # Pull mode: messages held for the agent to read with read_messages.
 

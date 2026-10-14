@@ -8,10 +8,12 @@ the existing readiness, watch and cull paths continue to handle later problems.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
 import re
+import sys
 import time
 import tomllib
 import uuid
@@ -105,9 +107,10 @@ def _codex_config_revision(path: Path) -> str:
 def prepare(db, agent, fp: str, *, argv_task: bool = False, submitted_prompt: str = "") -> None:
     if agent.parent_id and agent.task:
         agent._launch_health_token = uuid.uuid4().hex
-        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint,argv_task,submitted_prompt) "
-                        "VALUES (?,?,?,?,?,?)",
-                        (agent.id, agent._launch_health_token, "", fp, argv_task, submitted_prompt))
+        db.conn.execute("INSERT OR REPLACE INTO launch_health (agent_id,token,pane,fingerprint,argv_task,submitted_prompt,launched_at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (agent.id, agent._launch_health_token, "", fp, argv_task, submitted_prompt,
+                         int(time.time() * 1000) / 1000))   # the log names' resolution
 
 
 def bind(db, agent, pane: str) -> None:
@@ -400,3 +403,69 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     except agents.AgentError:
         db.enqueue(agent.parent_id, body, None)
     return outcome
+
+
+def mcp_log_dir(worktree: str) -> Path:
+    """Where Claude Code writes the brindle MCP server's per-start logs."""
+    cache = (Path.home() / "Library" / "Caches" if sys.platform == "darwin"
+             else Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"))
+    return cache / "claude-cli-nodejs" / re.sub(r"[^A-Za-z0-9]", "-", worktree) / "mcp-logs-brindle"
+
+
+def _log_started(name: str) -> float | None:
+    m = re.fullmatch(r"(\d{4})-(\d\d)-(\d\d)T(\d\d)-(\d\d)-(\d\d)(?:-(\d+))?Z\.jsonl", name)
+    if not m:
+        return None
+    *whole, frac = m.groups()
+    # Without a fraction the stamp is only good to the second: assume the end of it.
+    return (calendar.timegm(tuple(int(g) for g in whole) + (0, 0, 0))
+            + (int(frac) / 10 ** len(frac) if frac else 0.999))
+
+
+def mcp_failed(worktree: str, session_id: str, launched_at: float) -> bool:
+    """Did the brindle MCP server fail to start for this session since this launch?
+
+    Reads only the explicit error rows Claude Code logs; a missing directory or
+    an unfamiliar format reads as healthy, and nothing here raises.
+    """
+    try:
+        for path in mcp_log_dir(worktree).iterdir():
+            started = _log_started(path.name)
+            if started is None or started < launched_at:
+                continue
+            for line in path.read_text(errors="replace").splitlines():
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if (isinstance(row, dict) and row.get("sessionId") == session_id
+                        and isinstance(row.get("error"), str) and row["error"]):
+                    return True
+    except (OSError, ValueError, TypeError):
+        pass
+    return False
+
+
+def check_mcp(db, agent) -> None:
+    """From the tool-done hook: tell the supervisor once if the agent has no brindle tools."""
+    from brindle import agents
+
+    if agent.provider != "claude" or not agent.session_ref or not agent.parent_id:
+        return
+    row = db.conn.execute("SELECT launched_at FROM launch_health WHERE agent_id=? "
+                          "AND (outcome IS NULL OR outcome='pending')", (agent.id,)).fetchone()
+    ws = db.get_workspace(agent.workspace_id)
+    if not row or row["launched_at"] is None or not ws:
+        return
+    if not mcp_failed(ws.path, agent.session_ref, row["launched_at"]):
+        return
+    if not db.conn.execute("UPDATE launch_health SET outcome='mcp-failed' WHERE agent_id=? "
+                           "AND (outcome IS NULL OR outcome='pending')", (agent.id,)).rowcount:
+        return
+    body = (f"Worker {agent.id} launch health: its brindle MCP server failed to connect, so it has no "
+            "report_result/submit_review tools and cannot finish. Restart it with `brindle continue "
+            f"{agent.id}` or remove its workspace.")
+    try:
+        agents.send_message(db, agent.parent_id, body)
+    except agents.AgentError:
+        db.enqueue(agent.parent_id, body, None)

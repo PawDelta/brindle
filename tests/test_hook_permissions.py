@@ -73,6 +73,14 @@ def test_plan_first_agents_hook_edit_tools_too():
     assert entry["matcher"] == "Bash|Edit|Write|NotebookEdit"
 
 
+@pytest.mark.variant("incident #159: MCP CONNECT_TIMEOUT under load")
+def test_claude_launch_outlasts_default_mcp_startup_timeout(monkeypatch):
+    monkeypatch.delenv("MCP_TIMEOUT", raising=False)
+    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go"))
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert int(settings["env"]["MCP_TIMEOUT"]) > 30000
+
+
 def test_stuck_message_says_when_auto_mode_should_have_answered(db, ws, monkeypatch):
     """The built-in developer profile runs in Claude Code's auto mode, so a
     prompt from it means auto mode is off in that session; the supervisor

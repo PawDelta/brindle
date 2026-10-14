@@ -555,6 +555,13 @@ class ClaudeCode(Provider):
             # assign, ...) -- an interactive session is a human's own chat,
             # who may want the agent view themselves, whatever it's named.
             "disableAgentView": ctx.mode != "interactive",
+            # Claude's default 30s MCP startup timeout expires under heavy load
+            # before brindle's MCP server connects (CONNECT_TIMEOUT), and Claude
+            # never retries a stdio server, so the agent runs without
+            # report_result/submit_review. --settings env is applied before MCP
+            # servers connect. Not agents.agent_env: that feeds the launch
+            # fingerprint and would reset stored refusals.
+            "env": {"MCP_TIMEOUT": os.environ.get("MCP_TIMEOUT", "120000")},
         }
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
@@ -1281,6 +1288,9 @@ class Codex(Provider):
             # Pre-approve brindle's own tools (report_result, send_message, ...),
             # like --allowedTools mcp__brindle for Claude Code. Nothing else.
             "-c", 'mcp_servers.brindle.default_tools_approval_mode="approve"',
+            # Codex's default MCP startup timeout (10s) is too short on a loaded
+            # machine; without it a worker can start without brindle's tools (#159).
+            "-c", "mcp_servers.brindle.startup_timeout_sec=120",
             "-c", f"notify={json.dumps(notify)}",
         ]
         # brindle's permission policy, when it's on and the person has trusted

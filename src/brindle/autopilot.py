@@ -1815,12 +1815,13 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
                     "approved=false to ask for changes; the worker is waiting on you.\n\n")
     stuck = ""
     if stalled:
-        names = ", ".join(a.id for a in stalled)
+        seen = "\n".join(f"- {a.id}: {agents.liveness(db, a, db.get_workspace(a.workspace_id))}"
+                         for a in stalled)
         stuck = (
-            f"{names} went idle without ever calling report_result and won't be reminded "
-            "again on their own. Check on them: workspace_diff to see what they did, "
-            "send_message asking them to report or finish, or remove_workspace if the work "
-            "is abandoned.\n\n"
+            "These went idle without ever calling report_result and won't be reminded "
+            f"again on their own. What brindle sees of each:\n{seen}\nDecide from that: "
+            "send_message asking them to report or finish, workspace_diff for the full change, "
+            "or remove_workspace if the work is abandoned.\n\n"
         )
     ms = db.milestones(ap.root_id)
     if ms and all(m.status == "passed" for m in ms):
