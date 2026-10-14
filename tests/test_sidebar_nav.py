@@ -3,8 +3,10 @@
 follows its agent, and text that fits a 30-column pane. Everything here runs
 against ``render`` and ``handle_key``, so no curses screen is needed."""
 
+import collections
 import curses
 import time
+import types
 
 from brindle import autopilot, view, watch, workspaces
 from brindle.db import Agent
@@ -231,3 +233,44 @@ def test_snapshot_carries_the_sessions_autopilot_and_open_question(db, repo):
     assert (entry()["autopilot"], entry()["asking"]) == (True, "root01")
     autopilot.set_enabled(db, "root01", False)
     assert entry()["autopilot"] is False
+
+
+def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(db, monkeypatch):
+    # macOS ncurses 6.0 with mouse version 1: no BUTTON5_PRESSED, and
+    # wheel-down is reported as REPORT_MOUSE_POSITION.
+    monkeypatch.delattr(curses, "BUTTON5_PRESSED", raising=False)
+    monkeypatch.setattr(curses, "BUTTON4_PRESSED", 0x00080000)
+    monkeypatch.setattr(curses, "REPORT_MOUSE_POSITION", 0x08000000)
+    monkeypatch.setattr(curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(curses, "mousemask", lambda mask: (mask, 0))
+    monkeypatch.setattr(curses, "getmouse", lambda: (0, 1, 5, 0, 0x08000000))
+    monkeypatch.setattr(watch, "_styles", lambda: collections.defaultdict(int))
+    monkeypatch.setattr(watch, "_start_status", lambda: None)
+    monkeypatch.setattr(watch, "_cull_in_background", lambda: None)
+    monkeypatch.setattr(watch.tmux, "list_panes", lambda: [])
+    many = [ws([agent(f"a{i}")], id=f"repo/b{i}", branch=f"b{i}") for i in range(30)]
+    monkeypatch.setattr(watch.view, "snapshot", lambda *a, **k: many)
+    monkeypatch.setattr(watch.view, "autopilot_entry", lambda *a, **k: None)
+    monkeypatch.setattr(watch.watch_costs, "local", lambda *a, **k: watch.watch_costs.Local())
+    monkeypatch.setattr(watch.watch_costs, "Feed", lambda root: types.SimpleNamespace(get=lambda: None))
+
+    class Screen:
+        """A 12-row pane: a wheel-down, then `q`. Records each frame's text."""
+        def __init__(self):
+            self.keys, self.frames = [curses.KEY_MOUSE, ord("q")], [[]]
+        def getmaxyx(self):
+            return 12, 30
+        def getch(self):
+            self.frames.append([])
+            return self.keys.pop(0)
+        def addnstr(self, y, x, text, *rest):
+            self.frames[-1].append(text)
+        def timeout(self, ms): pass
+        def erase(self): pass
+        def refresh(self): pass
+
+    screen = Screen()
+    watch._loop(screen, None)
+    # The wheel-down scrolls the top section (Costs) off the pane.
+    assert "▾ Costs" in screen.frames[0]
+    assert "▾ Costs" not in screen.frames[1]
