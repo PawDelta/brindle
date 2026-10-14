@@ -60,7 +60,7 @@ def test_unreported_notice_repeats_after_resume(db, ws, monkeypatch):
     assert len(sent) == 2
 
 
-def test_brief_resumes_while_stopped_give_one_alert(db, ws, monkeypatch):
+def test_unreported_brief_resumes_while_stopped_give_one_alert(db, ws, monkeypatch):
     sent = _unreported_setup(db, ws, monkeypatch)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     for _ in range(3):   # agy polling a command: stop, then a tool call, over and over
@@ -69,7 +69,7 @@ def test_brief_resumes_while_stopped_give_one_alert(db, ws, monkeypatch):
     assert len(sent) == 1
 
 
-def test_antigravity_worker_with_a_running_command_is_not_stopped(db, ws, monkeypatch):
+def test_command_running_sees_a_command_under_an_antigravity_worker_so_not_stopped(db, ws, monkeypatch):
     from brindle import procs
 
     P = procs.Proc
