@@ -57,7 +57,10 @@ def _sidebar_lock(root_id: str, timeout: float | None = None):
 
 
 def _agent_for_window(db: DB, ws: Workspace, window: str) -> Agent | None:
+    # An old paused root can share the workspace (and a stale window id) with
+    # the live one: while any agent here is live, only live ones count.
     agents_here = db.list_agents(ws.id)
+    agents_here = [a for a in agents_here if a.status not in ("paused", "done")] or agents_here
     for agent in agents_here:
         if agent.tmux_window and tmux.pane_window(agent.tmux_window) == window:
             return agent
