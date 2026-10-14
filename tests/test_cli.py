@@ -1,6 +1,7 @@
 import json
 import time
 
+import pytest
 from typer.testing import CliRunner
 
 from brindle import workspaces
@@ -8,6 +9,19 @@ from brindle.cli import app
 from brindle.db import Agent
 
 from conftest import sh
+
+
+@pytest.mark.parametrize("command", [[], ["new", "feat/provider"], ["start"], ["supervisor"]])
+@pytest.mark.parametrize("flag", [
+    "--supervisor-provider",
+    pytest.param("--provider", marks=pytest.mark.variant("existing scripts use the hidden alias")),
+])
+def test_supervisor_provider_rejects_worker_only_cli(db, repo, monkeypatch, command, flag):
+    monkeypatch.chdir(repo)
+    # Native is a worker provider; either spelling must reach supervisor validation.
+    result = CliRunner().invoke(app, [*command, flag, "native"])
+    assert result.exit_code == 1, result.output
+    assert result.exception is not None and isinstance(result.exception, SystemExit)
 
 
 def test_ls_json(db, repo, monkeypatch):
