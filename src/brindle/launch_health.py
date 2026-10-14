@@ -31,7 +31,9 @@ MODEL = model_access.LAUNCH_MODEL
 CAPACITY = model_access.LAUNCH_CAPACITY
 # Claude Code's own line for a --model its backend doesn't serve (a 404), which
 # carries no "API Error:" marker: "There's an issue with the selected model (...)".
-SELECTED_MODEL = r"(?i:there.s an issue with the selected model)"
+# Vertex says "The model X is not available on your vertex deployment." instead.
+SELECTED_MODEL = (r"(?i:there.s an issue with the selected model"
+                  r"|the model \S+ is not available on your \w+ deployment)")
 
 
 def fingerprint(profile, env) -> str:
@@ -382,6 +384,8 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     agents._note_reviewer_end(db, agent, ws)
     if cause and ws:
         model_access.refuse(agent.profile, cause, repo_root=ws.repo_root, fp=row["fingerprint"])
+        if cause.key == MODEL.key:  # permanent for this profile; AUTH/CAPACITY may be transient
+            db.update_agent(agent.id, status="failed")
         refused = route_health.provider_outcome(error_block)   # the status code only, never the text
         if refused:
             route, model = agents.route_context(db, agent, ws)
