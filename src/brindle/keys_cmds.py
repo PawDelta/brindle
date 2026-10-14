@@ -53,8 +53,9 @@ def keys_set(name: str = typer.Argument(..., help="The variable, e.g. ANTHROPIC_
         value = getpass.getpass(f"{name}: ")
     else:
         value = sys.stdin.readline()
-    if value.strip():
-        problem = key_check.verify(name, value.strip())
+    value = value.strip()
+    if value:
+        problem = key_check.verify(name, value)
         if problem:
             _fail(f"{name} not stored: {problem}")
     try:

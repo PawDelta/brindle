@@ -1,30 +1,13 @@
 """`brindle keys set|list|unset`."""
-from typer.testing import CliRunner
-
-from brindle import keystore
-from brindle.cli import app
-
 from types import SimpleNamespace
 
-import pytest
+from typer.testing import CliRunner
 
-from brindle import agents, key_check
+from brindle import agents, keystore
+from brindle.cli import app
 
 FAKE = "sk-ant-test-0123456789wxyz"
 runner = CliRunner()
-
-
-@pytest.fixture(autouse=True)
-def provider_http(monkeypatch):
-    """No network: the provider answers 200 unless a test sets `reply`."""
-    reply = {"status": 200, "body": {}, "calls": []}
-
-    def fake_get(url, headers):
-        reply["calls"].append(url)
-        return reply["status"], reply["body"]
-
-    monkeypatch.setattr(key_check, "_get", fake_get)
-    return reply
 
 
 def test_key_check_rejects_a_401_and_stores_nothing(provider_http):
@@ -47,7 +30,7 @@ def test_key_check_openrouter_needs_credit_left(provider_http, monkeypatch):
     assert provider_http["calls"][-1] == "https://openrouter.ai/api/v1/key"
 
 
-def test_key_check_is_skipped_when_the_org_denies_personal_keys(provider_http, monkeypatch):
+def test_key_check_refuses_before_any_call_when_the_org_denies_personal_keys(provider_http, monkeypatch):
     class Org:
         deny_personal_keys = True
 

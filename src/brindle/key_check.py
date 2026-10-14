@@ -57,7 +57,9 @@ def verify(name: str, value: str) -> str | None:
     if status != 200:
         return f"the provider answered {status} when checking the key"
     if name == "OPENROUTER_API_KEY":
-        data = body.get("data") or {}
+        data = (body.get("data") if isinstance(body, dict) else None) or {}
+        if not isinstance(data, dict):
+            data = {}
         left = data.get("limit_remaining")
         if left is not None and left <= 0:
             return "this OpenRouter key has no credit left"

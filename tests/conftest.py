@@ -177,6 +177,22 @@ def no_launch_catalog_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def provider_http(monkeypatch):
+    """No network for `brindle keys set`: the provider answers 200 unless a test
+    changes ``status``/``body``; ``calls`` lists the URLs asked."""
+    from brindle import key_check
+
+    reply = {"status": 200, "body": {}, "calls": []}
+
+    def fake_get(url, headers):
+        reply["calls"].append(url)
+        return reply["status"], reply["body"]
+
+    monkeypatch.setattr(key_check, "_get", fake_get)
+    return reply
+
+
+@pytest.fixture(autouse=True)
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
