@@ -298,6 +298,14 @@ def start(
                     typer.secho(f"✓ Switched to '{default_b}'.", fg="green")
             except Exception:
                 pass
+        elif curr_b and git.upstream_gone(ws.path, curr_b):
+            typer.secho(f"! Branch '{curr_b}' was deleted on origin but has unmerged changes.", fg="yellow")
+        try:
+            if curr_b and git.current_branch(ws.path) == git.default_branch(ws.repo_root):
+                if warning := git.fast_forward(ws.path, git.current_branch(ws.path)):
+                    typer.secho(f"! {warning}", fg="yellow")
+        except git.GitError:
+            pass
 
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
 

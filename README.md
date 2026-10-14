@@ -384,7 +384,7 @@ knowing them helps when you tell the supervisor how to work.
 | `complete_subagent` | supervisor | record the result of a `subagent`-profile task |
 | `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
 | `record_audit_decision` | supervisor | record acceptance of an audit finding with rationale so subsequent audits respect it |
-| `need_user` | supervisor | stop autopilot and ask you a question |
+| `need_user` | supervisor | ask you a question (a decision, a denied action, a stalled external job such as a CI run no runner picks up); only the steps that depend on it wait, the rest keeps going; `answered=true` once you've replied |
 | `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
 | `handover` | supervisor | hand the session to a new supervisor on another branch or worktree, with a note |
 
@@ -609,6 +609,8 @@ hosted learning is on it chooses among the profiles left; otherwise the first
 wins. When every candidate is out, the repo's `default_agent` runs. The reply says
 what was picked and why, e.g. `weight medium -> developer (Codex at 93%, skipped developer-codex)`.
 An `agent_profile` you pass, or a milestone's `profile`, always wins over weight.
+
+The supervisor runs on your Claude Code model. If your organisation's Claude Code managed settings pin the model (e.g. to Sonnet), that applies to the brindle supervisor too. Supervising goes best on Opus (or Fable where available), so if your org allows it, switch in the supervisor's own session with `/model`. Worker profiles set their own model and aren't affected.
 
 Provisioning and routing also check explicit models against supported read-only
 catalogs, with the managed model, stored keys and the worker's filtered pane

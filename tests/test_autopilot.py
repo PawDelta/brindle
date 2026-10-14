@@ -119,6 +119,28 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")
 
 
+def test_need_user_question_holds_until_answered(db, root, monkeypatch):
+    # A question holds only the work that depends on it: an unrelated user
+    # message doesn't cancel it, and the supervisor is reminded once per step.
+    agent, _ = root
+    with_goal(db)
+    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
+    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
+    assert autopilot.on_stop(db, agent, {}) is None
+    autopilot.user_spoke(db, agent)
+    assert db.get_autopilot("boss").state == "blocked"
+    out = autopilot.on_stop(db, agent, {})
+    assert out and out["decision"] == "block"
+    assert "Waiting on the user for: Postgres or SQLite?" in out["reason"]
+    assert autopilot.on_stop(db, agent, {}) is None
+    db.bump_progress("boss")
+    assert autopilot.on_stop(db, agent, {}) is not None
+    assert autopilot.on_stop(db, agent, {}) is None
+    autopilot.answered(db, "boss")
+    ap = db.get_autopilot("boss")
+    assert ap.state == "running" and ap.note is None and ap.question is None
+
+
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     agent, ws = root
     with_goal(db)

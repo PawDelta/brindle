@@ -1117,16 +1117,24 @@ def record_milestone_changes(db: DB, root_id: str, ws: Workspace, before: dict,
 
 
 @mcp.tool()
-def need_user(question: str) -> str:
-    """Autopilot: you're blocked on a decision only the user can make. brindle
-    stops asking you to keep going until the user replies. Ask them the
-    question right after calling this."""
+def need_user(question: str = "", answered: bool = False) -> str:
+    """Autopilot: a step is blocked on something only the user can resolve (a
+    decision, a denied action, an external job stuck on them). Ask them the
+    question right after calling this, then keep working on whatever doesn't
+    depend on it; brindle reminds you of the open question instead of pushing
+    you on. Call again with answered=true once they've answered."""
     db = DB()
     found = _session(db)
     if isinstance(found, str):
         return found
-    autopilot.need_user(db, found[0], question)
-    return "Noted. Ask the user now; autopilot resumes when they reply."
+    if answered:
+        autopilot.answered(db, found[0])
+        return "Noted: the question is answered and autopilot drives again."
+    if not question.strip():
+        return "Give the question you need the user to answer, or answered=true once they have."
+    autopilot.need_user(db, found[0], question, ask=True)
+    return ("Noted. Ask the user now, then keep working on what doesn't depend on it; "
+            "call need_user(answered=true) once they answer.")
 
 
 @mcp.tool()
