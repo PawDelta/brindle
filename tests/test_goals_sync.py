@@ -120,6 +120,13 @@ def test_an_unedited_file_resumes_to_the_same_goal(db, repo):
     autopilot.reload_goals_file(db, "boss")
     assert [(m.title, m.check_cmd, m.detail) for m in db.milestones("boss")] == ms
     assert db.milestones("boss")[0].status == "passed" and db.get_autopilot("boss").detail == "# not the goal"
+    # A hand-written fenced check (trailing space on its field, no status line yet).
+    path(repo).write_text("# Hand written\n\n## Fenced\ncheck: \n```\ntrue\nfalse\n```\n")
+    autopilot.reload_goals_file(db, "boss")
+    pass_first(db)
+    autopilot.sync_goals_file(db, "boss")
+    autopilot.reload_goals_file(db, "boss")
+    assert [(m.check_cmd, m.status) for m in db.milestones("boss")] == [("true\nfalse", "passed")]
 
 
 def test_a_sync_failure_is_logged_not_raised(db, repo, monkeypatch, caplog):

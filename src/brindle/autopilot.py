@@ -504,8 +504,8 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
     the rest byte for byte. None when the file's milestones don't number
     ``len(lines_for)``."""
     lines = text.splitlines(keepends=True)
-    inside = {k for start, (_, after) in _fences([l.rstrip("\r\n") for l in lines]).items()
-              for k in range(start, after)}
+    fences = _fences([l.rstrip("\r\n") for l in lines])
+    inside = {k for start, (_, after) in fences.items() for k in range(start, after)}
     sections: list[list[int]] = []   # line indexes per milestone, heading first
     for i, line in enumerate(lines):
         if i not in inside and re.match(r"^##\s+(.+?)\s*$", line.rstrip("\r\n")):
@@ -519,11 +519,14 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
         body = [lines[i] for i in idx]
         eol = "\r\n" if body[0].endswith("\r\n") else "\n"
         placed, anchor, have_profile, have_check = False, 0, False, False
+        check_end = None   # the last line of a fenced check's block: the status goes after it
         kept: list[str] = []
         for j, line in enumerate(body):
             bare = line.rstrip("\r\n")
             if idx[j] in inside:
                 kept.append(line)
+                if idx[j] == check_end:
+                    anchor = len(kept)
                 continue
             if j and STATUS_RE.match(bare):
                 if not placed:
@@ -531,9 +534,11 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
                     placed = True
                 continue
             kept.append(line)
-            if j and not have_profile and re.match(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", bare, re.I):
+            if j and not have_profile and PROFILE_RE.match(bare):
                 have_profile, anchor = True, len(kept)
-            elif j and not have_check and re.match(r"^\s*check:\s*`?(.+?)`?\s*$", bare, re.I):
+            elif j and not have_check and idx[j] + 1 in fences and FENCED_CHECK_RE.match(bare):
+                have_check, check_end = True, fences[idx[j] + 1][1] - 1
+            elif j and not have_check and CHECK_RE.match(bare):
                 have_check, anchor = True, len(kept)
         if not placed:
             anchor = anchor or 1
@@ -639,6 +644,9 @@ def set_goal(db: DB, root_id: str, goal: str,
         raise AutopilotError("the goal needs a title")
     if not milestones:
         raise AutopilotError("give at least one milestone")
+    # Before the goal changes: a shared goals.md still saying the old goal
+    # would otherwise look unowned and seed the next session with it.
+    _adopt_legacy(db, root_id)
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
     fields: dict[str, object] = {}
