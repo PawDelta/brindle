@@ -13,7 +13,8 @@ from conftest import sh
 
 @pytest.mark.parametrize("command", [[], ["new", "feat/provider"], ["start"], ["supervisor"]])
 @pytest.mark.parametrize("flag", [
-    "--supervisor-provider",
+    "--supervisor",
+    pytest.param("-s", marks=pytest.mark.variant("short form")),
     pytest.param("--provider", marks=pytest.mark.variant("existing scripts use the hidden alias")),
 ])
 def test_supervisor_provider_rejects_worker_only_cli(db, repo, monkeypatch, command, flag):
