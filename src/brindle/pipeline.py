@@ -321,7 +321,7 @@ def _small_diff_stat(ws: Workspace) -> str | None:
             lines += int(parts[0]) + int(parts[1])
         if lines == 0 or lines > SMALL_DIFF_LINES:
             return None
-        return git.diff(ws.path, ws.base_branch, stat=True)
+        return git.out(["diff", "--stat", mb], ws.path).strip()
     except git.GitError:
         return None
 
@@ -372,16 +372,67 @@ def _partial_findings(reviewer: Agent) -> str | None:
     return rewind._last_assistant_text(path)
 
 
-def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent) -> tuple[str, str]:
-    """Which reviewer profile to run for the fallback and a short note
-    explaining why: keeps ``cfg.review_profile`` / ``cfg.reviewer`` (including
-    ``reviewer-local`` only when configured by the repo)."""
+def _repo_pins_reviewer(repo_root: str | None) -> bool:
+    """Whether ``repo_root``'s own ``.brindle/config.json`` or
+    ``config.local.json`` explicitly sets ``reviewer`` or ``review_profile``."""
+    if not repo_root:
+        return False
+    from brindle.config import CONFIG_DIR, CONFIG_FILE, LOCAL_CONFIG_FILE, _read_json, config_root
+
+    base = config_root(repo_root) / CONFIG_DIR
+    for name in (LOCAL_CONFIG_FILE, CONFIG_FILE):
+        try:
+            raw = _read_json(base / name)
+        except ValueError:
+            continue
+        if "review_profile" in raw or "reviewer" in raw:
+            return True
+    return False
+
+
+def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
+                       repo_root: str | None = None) -> tuple[str, str]:
+    """Which reviewer profile to run for the fallback and why: keeps an
+    explicitly pinned ``cfg.review_profile`` / ``cfg.reviewer``; otherwise
+    routes to the cheapest available reviewer tier (reusing weight/price
+    tiers, and including ``reviewer-local`` only when configured by the repo),
+    falling back to ``cfg.reviewer``."""
     if cfg.review_profile:
         return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
-    profile = cfg.reviewer or "reviewer"
-    if profile != "reviewer":
-        return profile, f"using {profile} (pinned by reviewer config)"
-    return profile, f"using {profile} (default reviewer, reusing cached checks without re-running)"
+    default = cfg.reviewer or "reviewer"
+    if default != "reviewer" or _repo_pins_reviewer(repo_root):
+        return default, f"using {default} (pinned by reviewer config)"
+    from brindle import autopilot, pricing, profiles
+
+    allow_local = "reviewer-local" in (
+        *cfg.learning_candidates,
+        *cfg.second_review.values(),
+        *cfg.routing.get("light", ()),
+    )
+    names = [
+        p.name for p in profiles.list_profiles(repo_root)
+        if (p.name == "reviewer" or p.name.startswith("reviewer-"))
+        and (allow_local or p.name != "reviewer-local")
+    ]
+    for extra in (*cfg.routing.get("light", ()), *cfg.learning_candidates):
+        if extra.startswith("reviewer") and extra not in names and (allow_local or extra != "reviewer-local"):
+            names.append(extra)
+    rank_of = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3}
+    scored: list[tuple[tuple[int, float, int], str, str]] = []
+    for name in names:
+        if repo_root and autopilot._unavailable(name, cfg, repo_root) is not None:
+            continue
+        tier = autopilot.profile_weight(name, cfg, repo_root)
+        price = pricing.profile_price(name, repo_root)
+        rate = (price.input + price.output) if price is not None else float("inf")
+        scored.append(((rank_of.get(tier, 1), rate, 0 if name == default else 1), name, tier))
+    if scored:
+        scored.sort(key=lambda item: item[0])
+        _, best, tier = scored[0]
+        info = autopilot.model_cost_info(best, cfg, repo_root)
+        return best, f"using {best}{info} (cheapest available {tier} reviewer tier)"
+    tier = autopilot.profile_weight(default, cfg, repo_root)
+    return default, f"using {default} ({tier} reviewer tier; no other reviewer available)"
 
 
 def _supervisor_review_summary(ws: Workspace, worker: Agent, reviewer: Agent,
@@ -409,13 +460,14 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     needed:
     1. Liveness: ignore if a command is still running or its transcript was
        written to recently.
-    2. Reopen the dead reviewer's own recorded conversation once with a short
-       verdict prompt.
-    3. For a small diff, hand the supervisor a ready-made summary instead of
-       spawning another reviewer.
-    4. Otherwise start one fallback review (``cfg.reviewer``) reusing the
-       commit's cached check results and the first reviewer's partial
-       findings."""
+    2. Resume the same reviewer once with a short verdict prompt (messaging a
+       live idle reviewer, or reopening a dead reviewer's own recorded session).
+    3. If step 2 could not resume the reviewer (or the resumed turn also
+       stopped without a verdict) and the diff is small, hand the supervisor a
+       ready-made summary instead of spawning another reviewer.
+    4. Otherwise start one fallback review on the cheapest available reviewer
+       tier (unless the repo pins one), reusing the commit's cached check
+       results and the first reviewer's partial findings."""
     import time
 
     worker = piped_worker(db, ws)
@@ -441,9 +493,12 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     tried = any(a.id != reviewer.id and a.mode == "review" and a.result is None
                 and a.unreported_noted and a.review_sha == reviewer.review_sha
                 for a in db.list_agents(ws.id))
-    if not tried and not agents.is_alive(reviewer) and not reviewer.reopened_at:
+    if not tried and not reviewer.reopened_at:
         try:
             if agents.reopen_reviewer(db, reviewer, ws):
+                # Clearing unreported_noted lets tell_parent_unreported re-enter
+                # on_reviewer_unreported if this resumed turn also stops without
+                # a verdict, while reopened_at prevents resuming a second time.
                 db.update_agent(reviewer.id, reopened_at=time.time(), unreported_noted=None)
                 return True
         except agents.AgentError:
@@ -463,7 +518,7 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
         return True
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if not tried and parent is not None:
-        profile, reason = _fallback_reviewer(cfg, reviewer)
+        profile, reason = _fallback_reviewer(cfg, reviewer, ws.repo_root)
         focus_parts = [f"Fallback review ({reason})."]
         if partial:
             focus_parts.append(

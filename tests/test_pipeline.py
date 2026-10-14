@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, gates, pipeline, workspaces
+from brindle import agents, autopilot, gates, pipeline, workspaces
 from test_merge_order import add
 from test_pipeline_idempotent import drain
 
@@ -55,7 +55,7 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: alive.get(a.id, False))
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    launched, fallbacks = [], []
+    launched, messaged, fallbacks = [], [], []
 
     def fake_launch(db_, a, ws_, *, prompt, resume, **kw):
         prof = agents.load_profile(a.profile, ws_.repo_root)
@@ -63,21 +63,27 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
         launched.append(agents.get_provider(a.provider).command(ctx))
 
     monkeypatch.setattr(agents, "_launch", fake_launch)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to_id, body, **kw: (messaged.append((to_id, body)), "delivered")[1])
     monkeypatch.setattr(agents, "request_review", lambda *a, **k: fallbacks.append(1))
 
     # 1. Recent transcript write on a live reviewer -> treated as still active.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is False
-    assert launched == [] and fallbacks == []
+    assert launched == [] and messaged == [] and fallbacks == []
 
-    # 2. Dead reviewer with no recorded session_ref -> never uses --continue or --last.
+    # 2. Live idle reviewer -> resumed once via send_message with REOPEN_VERDICT_PROMPT.
     old = time.time() - 120
     os.utime(transcript, (old, old))
+    assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
+    assert messaged == [("rev0", agents.REOPEN_VERDICT_PROMPT)] and fallbacks == []
+    assert db.get_agent("rev0").reopened_at is not None
+
+    # 3. Dead reviewer with no recorded session_ref -> never uses --continue or --last.
     alive["rev0"] = False
-    db.update_agent("rev0", transcript_path=None, session_ref=None)
+    db.update_agent("rev0", reopened_at=None, transcript_path=None, session_ref=None)
     assert agents.reopen_reviewer(db, db.get_agent("rev0"), ws) is False
     assert launched == []
 
-    # 3. Dead reviewer with its own recorded session -> reopened once before any fallback.
+    # 4. Dead reviewer with its own recorded session -> reopened once before any fallback.
     db.update_agent("rev0", session_ref="sess-rev0", transcript_path=str(transcript))
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert len(launched) == 1 and fallbacks == []
@@ -85,13 +91,16 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
     assert "--continue" not in launched[0] and "--last" not in launched[0]
     assert db.get_agent("rev0").reopened_at is not None
 
-    # 4. Stalling again after reopen -> does not loop; falls back to request_review.
+    # 5. Stalling again after reopen -> does not loop; falls back to request_review.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert len(launched) == 1 and len(fallbacks) == 1
 
 
 def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, tmp_path, monkeypatch):
-    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "agents").mkdir(parents=True)
+    (repo / ".brindle" / "agents" / "reviewer-light.md").write_text(
+        "---\nname: reviewer-light\nextends: reviewer\nmodel: haiku\neffort: low\n---\n"
+    )
     (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["pytest -q"]}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")
@@ -108,11 +117,12 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     os.utime(transcript, (old, old))
     add(db, ws, "w1", "assign", parent="boss", result="added big.py", pipeline="reviewing")
     add(db, ws, "rev0", "review", "reviewer", parent="boss")
-    db.update_agent("rev0", review_sha=sha, transcript_path=str(transcript))
+    db.update_agent("rev0", review_sha=sha, transcript_path=str(transcript), reopened_at=1.0)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, prof, cfg: prof or "reviewer")
+    monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
     monkeypatch.setattr(gates, "check_summary", lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-ran checks")))
     spawned = []
     monkeypatch.setattr(
@@ -120,12 +130,23 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
         lambda db_, ws_, prof, prompt=None, **kw: spawned.append((prof, prompt)),
     )
 
+    # Unpinned config -> routes to the cheaper reviewer-light tier and reuses cached checks + findings.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert len(spawned) == 1
     prof, prompt = spawned[0]
-    assert prof == "reviewer"
+    assert prof == "reviewer-light"
+    assert "cheapest available light reviewer tier" in prompt
     assert "Blocker in big.py line 12" in prompt
     assert "PASS `pytest -q`" in prompt
+
+    # Pinned config -> keeps the pinned reviewer profile instead of downgrading.
+    (repo / ".brindle" / "config.json").write_text(
+        json.dumps({"checks": ["pytest -q"], "review_profile": "reviewer"})
+    )
+    db.update_agent("rev0", unreported_noted=None)
+    assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
+    assert spawned[-1][0] == "reviewer"
+    assert "pinned by review_profile" in spawned[-1][1]
 
 
 def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, tmp_path, monkeypatch):
@@ -146,7 +167,7 @@ def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, t
     os.utime(transcript, (old, old))
     add(db, ws, "w1", "assign", parent="boss", result="added small.py", pipeline="reviewing")
     add(db, ws, "rev0", "review", "reviewer", parent="boss")
-    db.update_agent("rev0", review_sha=sha, transcript_path=str(transcript))
+    db.update_agent("rev0", review_sha=sha, transcript_path=str(transcript), reopened_at=1.0)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
@@ -181,4 +202,3 @@ def test_reviewer_stopping_on_a_deleted_worktree_tells_the_supervisor(db, repo, 
 ])
 def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
-
