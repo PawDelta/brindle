@@ -166,12 +166,14 @@ def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     assert "api_key_env: OPENROUTER_API_KEY" in (user_profiles_dir() / "developer-or-qwen3-coder.md").read_text()
 
 
-@pytest.mark.parametrize("signed_in, light", [([ "codex"], ["developer-codex"]), ([], None)])
-def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatch, capsys, signed_in, light):
+@pytest.mark.parametrize("signed_in, allowed, light", [(["codex"], None, ["developer-codex"]), ([], None, None),
+                                                       (["codex"], ("claude",), None)])    # the org narrowed since the pick
+def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatch, capsys, signed_in, allowed, light):
     from brindle import worker_models
     from brindle.config import DEFAULT_ROUTING, load_repo_config
 
     monkeypatch.setattr(worker_models, "_warned", set())
+    monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(org_id=ORG, allowed_providers=allowed))
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: signed_in)
     set_user("routing_light", "codex")
     cfg = load_repo_config(str(repo))

@@ -269,7 +269,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                     cfg.routing_sources[norm_tier] = str(path)
     from brindle import worker_models
 
-    worker_models.apply(cfg, user)     # the models picked on the picker's workers screen
+    worker_models.apply(cfg, user, str(repo_root))   # the models picked on the picker's workers screen
     for source in (shared, local):  # per weight, so a repo can override one and keep the rest
         second = source.get("second_review")
         if isinstance(second, dict):

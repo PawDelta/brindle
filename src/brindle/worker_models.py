@@ -102,10 +102,10 @@ def ensure_profile(m: Model) -> None:
 _warned: set[tuple[str, str]] = set()
 
 
-def apply(cfg, user: dict) -> None:
+def apply(cfg, user: dict, repo_root: str | None = None) -> None:
     """Route each size the person picked a model for to that model's profile
-    (``cfg.routing[size] = [profile]``). A pick that isn't ready, or is gone
-    from the catalog, leaves the built-in routing for that size and says so once."""
+    (``cfg.routing[size] = [profile]``). A pick that isn't ready, isn't allowed
+    by the org policy now, or is gone from the catalog, leaves the built-in routing for that size and says so once."""
     from brindle import doctor
     from brindle.config import user_config_path
 
@@ -114,9 +114,12 @@ def apply(cfg, user: dict) -> None:
              if user.get(f"routing_{t}") and cfg.routing_sources[t] in ("DEFAULT_ROUTING", str(user_config_path()))}
     if not picks:
         return
+    from brindle.pro import team_policy
+
+    acc = team_policy.access(repo_root)      # the policy may have narrowed since the pick; unreadable: nothing
     signed_in = doctor.signed_in_providers()
     for tier, m in picks.items():
-        if m is not None and ready(m, signed_in):
+        if m is not None and m in offered(acc, tier) and ready(m, signed_in):
             cfg.routing[tier] = [m.profile]
             cfg.routing_sources[tier] = str(user_config_path())
         elif (tier, str(user.get(f"routing_{tier}"))) not in _warned:
