@@ -82,6 +82,18 @@ LAUNCH_MODEL = Cause("launch_model", "", "the selected model was rejected",
 LAUNCH_CAPACITY = Cause("launch_capacity", "", "the provider refused work on capacity or quota",
                         "wait for capacity or quota to recover, or choose another profile")
 
+# Not a refusal: the login itself lapsed, so the same call works again after the
+# provider's login command. Never recorded by ``refuse``, never retried or swapped.
+EXPIRED_LOGIN = Cause("expired_login", "", "the cloud login has expired",
+                      "run the provider's login command (`brindle ci doctor` names it)")
+
+_EXPIRED_MARKERS = (
+    "could not load google cloud credentials", "invalid_grant", "invalid_rapt",
+    "expiredtoken", "security token included in the request is expired",
+)
+# Entra ID codes for an expired or revoked token / session / refresh token.
+_AADSTS_EXPIRED = re.compile(r"AADSTS(?:70043|70008|700082|700084|50173|50132)\b")
+
 _DATA_SHARING = re.compile(r"requires data sharing to be enabled for publisher\s*['\"‘’]?anthropic",
                            re.IGNORECASE)
 
@@ -110,6 +122,17 @@ def classify(text: str | None) -> Cause | None:
         return FOUNDRY_QUOTA
     if "invalidmodelproviderdata" in low:
         return FOUNDRY_PROVIDER_DATA
+    return None
+
+
+def expired_login(text: str | None) -> Cause | None:
+    """``EXPIRED_LOGIN`` when ``text`` is a Google, AWS or Azure expired-credential
+    error, else None."""
+    if not text:
+        return None
+    low = text.lower()
+    if any(m in low for m in _EXPIRED_MARKERS) or _AADSTS_EXPIRED.search(text):
+        return EXPIRED_LOGIN
     return None
 
 
@@ -207,7 +230,10 @@ def _key(profile: str, fp: str) -> str:
 
 def refuse(profile: str, cause: Cause, swapped_to: str | None = None, *,
            repo_root: str | None = None, fp: str | None = None) -> None:
-    """Record that ``profile``'s model was refused, and where its tasks go."""
+    """Record that ``profile``'s model was refused, and where its tasks go. An
+    expired login is not a refusal and is never recorded."""
+    if cause is EXPIRED_LOGIN:
+        return
     now = time.time()
     fp = fingerprint(profile, repo_root) if fp is None else fp
     with _refusal_lock():
