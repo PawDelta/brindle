@@ -47,9 +47,20 @@ NUMBERED = re.compile(rf"^\s*(?:[{CURSOR}]\s*)?\d+[.)]\s+\S")
 HINT = re.compile(r"(?i)\benter to (?:confirm|continue|select|proceed)\b|\bpress enter\b")
 # A CLI's own input box and footer: the CLI is ready (or busy), not asking.
 INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt", re.I)
-# Only the person answers these, whatever the model makes of them.
+# Only the person answers these, whatever the model makes of them: their
+# accounts and data, and anything that widens what the agent may run (a
+# project's MCP servers or hooks, skipping permission checks, installing).
 PERSONAL = re.compile(r"(?i)sign.?in|log.?in\b|password|api.?key|payment|billing|credit card|subscri"
-                      r"|delet|erase|outside (?:this|the) (?:folder|project|worktree|workspace)")
+                      r"|delet|erase|outside (?:this|the) (?:folder|project|worktree|workspace)"
+                      r"|\bmcp\b|\bhooks?\b|bypass|dangerous|skip\w*.{0,20}permission|install|updat")
+# The model only points at an option; brindle answers with it only if it is
+# one of these (the screen can carry text from the repo, which can steer the
+# model). A settings picker is only ever answered with its default.
+SAFE_OPTION = {
+    "trust": re.compile(r"(?i)^(?:yes|trust|allow|continue|proceed|open)\b"),
+    "acknowledge": re.compile(r"(?i)^(?:ok(?:ay)?|continue|got it|dismiss|close|next|(?:press )?enter to continue)\b"),
+}
+BROAD = re.compile(r"(?i)\b(?:all|always|future|every\w*|don.t ask)\b")
 # Text that may be a credential: a screen showing one never leaves this machine.
 SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}"
                     r"|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN"
@@ -223,6 +234,18 @@ def _brindle_folder(screen: str) -> bool:
     return bool(paths) and all(_in_worktree(os.path.expanduser(p)) for p in paths)
 
 
+def _may_answer(screen: str, decision: Decision) -> bool:
+    """brindle's own check of the model's pick (cached ones too): an
+    answerable kind, an option it allows for that kind and nothing broader
+    ("all future", "always"), and trust only for a brindle worktree."""
+    if decision.kind not in ANSWERABLE or BROAD.search(decision.option):
+        return False
+    safe = SAFE_OPTION.get(decision.kind)
+    if safe and not safe.search(decision.option.strip()):
+        return False
+    return decision.kind != "trust" or _brindle_folder(screen)
+
+
 def redact(text: str) -> str:
     return SECRET.sub("[redacted]", text)
 
@@ -276,9 +299,9 @@ class Startup:
         decision = self.decide(screen)
         if decision.kind == "not_a_prompt":
             return ""
-        key = None
-        if decision.kind in ANSWERABLE and (decision.kind != "trust" or _brindle_folder(screen)):
-            key = next_key(screen, decision)
+        key = next_key(screen, decision) if _may_answer(screen, decision) else None
+        if decision.kind == "setting_choice" and key != "Enter":
+            key = None   # only the default, already selected; never one the model steers to
         if key in ("Up", "Down"):
             self.moves += 1
             if self.moves > MAX_MOVES:

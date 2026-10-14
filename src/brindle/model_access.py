@@ -322,17 +322,22 @@ def swap(routing: Mapping[str, list[str]], weight: str | None, profile: str, err
 
 
 def _claude_p(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str],
-              run, timeout: float):
-    return run([binary, "-p", "--model", model, "--output-format", "json"], cwd=cwd,
+              run, timeout: float, extra: tuple[str, ...] = ()):
+    return run([binary, "-p", "--model", model, "--output-format", "json", *extra], cwd=cwd,
                env=dict(env), input=prompt, capture_output=True, text=True, timeout=timeout)
+
+
+# A call whose prompt carries text brindle doesn't control (a CLI's screen)
+# gets no tools and no MCP servers: it can only reply.
+NO_TOOLS = ("--tools", "", "--strict-mcp-config", "--no-session-persistence")
 
 
 def ask(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str], *,
         run=subprocess.run, timeout: float = PROBE_TIMEOUT) -> str | None:
-    """One small call to ``model`` through the claude CLI: its reply, or None
-    when the call failed."""
+    """One small call to ``model`` through the claude CLI, with no tools: its
+    reply, or None when the call failed."""
     try:
-        proc = _claude_p(binary, model, prompt, cwd, env, run, timeout)
+        proc = _claude_p(binary, model, prompt, cwd, env, run, timeout, NO_TOOLS)
     except (subprocess.TimeoutExpired, OSError):
         return None
     if proc.returncode != 0:

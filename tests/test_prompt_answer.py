@@ -50,8 +50,16 @@ class Pane:
     ("Sign in to Antigravity to continue",
      ["Continue with Google", "Use a key file"], {"kind": "trust", "option": "Continue with Google"},
      [], None, 1),
-    ("Connecting MCP servers", ["brindle", "github"], {"kind": "not_a_prompt", "option": ""},
+    ("Starting up", ["brindle", "github"], {"kind": "not_a_prompt", "option": ""},
      [], None, 0),
+    # the model only points at an option: one brindle doesn't allow for the
+    # kind (accepting a risky mode as a "notice") is left for the person
+    ("Some actions in this mode can't be undone.",
+     ["No, exit", "Yes, I accept"], {"kind": "acknowledge", "option": "Yes, I accept"},
+     [], None, 1),
+    # and a settings picker is only ever answered with its default
+    ("Choose a colour scheme", ["Dark", "Light"], {"kind": "setting_choice", "option": "Light"},
+     [], None, 1),
 ])
 def test_unrecognized_startup_prompt(db, repo, monkeypatch, question, options, reply, keys, chosen, told):
     folder = str(worktrees_dir() / "proj" / "feature")
