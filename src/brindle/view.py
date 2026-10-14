@@ -140,10 +140,13 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
 
 
 def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
-    """Ids of every agent that is running (see agents.owns_pane)."""
+    """Ids of every agent that is running (see agents.owns_pane). An agent on
+    another tmux server is asked of its own: this server's owner of the same
+    pane id is no claim on it."""
     owners = agents.pane_owners(db, panes)
     return {a.id for a in db.list_agents()
-            if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)}
+            if agents.is_alive(a, panes)
+            and agents.owns_pane(db, a, owners if agents.same_server(a, panes) else None)}
 
 
 def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,

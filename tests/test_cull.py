@@ -3,11 +3,12 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, cull, procs, tmux, workspaces
-from brindle.db import Agent
+from brindle import agents, cull, procs, tmux, view, workspaces
+from brindle.db import Agent, Workspace
 
 SLEEPER = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
 
@@ -179,19 +180,32 @@ def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
 # -- finished work leaves the live view ---------------------------------------
 
 
-def test_sweep_forgets_a_workspace_whose_worktree_is_gone(db, repo):
+def worktree_row(db, repo, name, path, created_at=None):
+    ws = Workspace(f"proj/{name}", str(repo), name, "worktree", name, "main", str(path), None,
+                   f"brindle_proj_{name}", time.time() - 7200 if created_at is None else created_at)
+    db.add_workspace(ws)
+    return ws
+
+
+@pytest.fixture
+def merged(monkeypatch):
+    """Every worktree reads as merged and clean; removals are recorded, not done."""
+    removed = []
+    monkeypatch.setattr(view.status_cache, "cached_status", lambda path, base, now=None:
+                        SimpleNamespace(ahead=0))
+    monkeypatch.setattr(cull.git, "dirty_files", lambda path: [])
+    monkeypatch.setattr(workspaces, "remove", lambda db, ws, **kw:
+                        removed.append(ws.id) or SimpleNamespace(branch_deleted=True))
+    return removed
+
+
+def test_sweep_forgets_a_workspace_whose_worktree_is_gone(db, repo, tmp_path):
     """Only `brindle prune` used to: the rows of worktrees deleted outside
     brindle (or by a removal that crashed half way) stayed listed for good."""
-    import shutil
-
-    gone = workspaces.create(db, str(repo), "feat-gone", run_setup=False).workspace
-    with db.tx() as c:
-        c.execute("UPDATE workspaces SET created_at=? WHERE id=?", (time.time() - 7200, gone.id))
+    gone = worktree_row(db, repo, "feat-gone", tmp_path / "gone")
     add(db, gone, "w1", status="done", result="did it")
-    shutil.rmtree(gone.path)
     # One made a moment ago may not have its folder yet: not forgotten.
-    fresh = workspaces.create(db, str(repo), "feat-fresh", run_setup=False).workspace
-    shutil.rmtree(fresh.path)
+    fresh = worktree_row(db, repo, "feat-fresh", tmp_path / "fresh", created_at=time.time())
 
     cull.sweep(db)
 
@@ -199,22 +213,36 @@ def test_sweep_forgets_a_workspace_whose_worktree_is_gone(db, repo):
     assert db.get_workspace(fresh.id) is not None
 
 
-def test_a_paused_reviewer_does_not_keep_a_merged_worktree(db, repo):
+def test_a_paused_reviewer_does_not_keep_a_merged_worktree(db, repo, tmp_path, merged):
     """A reviewer left paused without a report (its session paused, or a newer
     round replaced it) counted as unfinished, so the merged worktree stayed."""
-    from conftest import sh
-
-    merged = workspaces.create(db, str(repo), "feat-merged", run_setup=False).workspace
-    with open(os.path.join(merged.path, "change.py"), "w") as f:
-        f.write("x = 1\n")
-    sh("git add -A && git commit -qm work", merged.path)
-    workspaces.merge_back(db, merged)
-    add(db, merged, "w1", status="done", result="did it")
-    add(db, merged, "r1", mode="review", status="paused")
+    ws = worktree_row(db, repo, "feat-merged", tmp_path)
+    add(db, ws, "w1", status="done", result="did it")
+    add(db, ws, "r1", mode="review", status="paused")
 
     cull.prune_retired(db)
 
-    assert db.get_workspace(merged.id) is None and not os.path.exists(merged.path)
+    assert merged == [ws.id]
+
+
+def test_a_running_reviewer_on_another_server_keeps_its_worktree(db, repo, tmp_path, merged,
+                                                                monkeypatch):
+    """The same pane id, live on both servers: this server's owner of it is
+    no claim on the other server's reviewer, which is still at work."""
+    here = tmux.PaneSnapshot(tmux.current_server())
+    there = tmux.PaneSnapshot("other")
+    for panes, owner in ((here, "mine"), (there, "r1")):
+        panes["%1"] = True
+        panes.tags["%1"] = {agents.AGENT_TAG: owner}
+    monkeypatch.setattr(tmux, "list_panes", lambda server=None: there if server == "other" else here)
+    monkeypatch.setattr(tmux, "window_alive", lambda pane, server=None: server == "other")
+    ws = worktree_row(db, repo, "feat-merged", tmp_path)
+    add(db, ws, "w1", status="done", result="did it")
+    add(db, ws, "r1", mode="review", status="processing", tmux_window="%1", tmux_server="other")
+
+    cull.prune_retired(db, cautious=True)
+
+    assert merged == []
 
 
 # -- another tmux server's pane list says nothing about this agent -----------

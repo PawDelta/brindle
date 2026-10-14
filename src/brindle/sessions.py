@@ -175,7 +175,9 @@ def _forget(db: DB, s: Session) -> None:
             workspaces.remove(db, ws, force=False)
         except (workspaces.WorkspaceError, git.GitError):
             pass
-    history.archive(db, None, [a for a in s.members if db.get_agent(a.id)], "session dropped")
+    if not history.archive(db, None, [a for a in s.members if db.get_agent(a.id)],
+                           "session dropped"):
+        return  # kept for a later try
     for a in s.members:
         agents._note_reviewer_end(db, a)
         db.delete_agent(a.id)
@@ -222,6 +224,9 @@ def prune_scratch(db: DB, now: float | None = None) -> int:
             continue  # untransferred work stays
         for s in paused(db, ws.repo_root):
             _forget(db, s)
+        # Done sessions aren't paused ones: their records go with the workspace.
+        if not history.archive(db, ws, db.list_agents(ws.id), "scratch session dropped"):
+            continue
         tmux.kill_session(ws.tmux_session)
         pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)

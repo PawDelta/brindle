@@ -395,7 +395,7 @@ def _agent_model(db: DB | None, agent) -> str | None:
     return None
 
 
-def antigravity_agent_usage(db: DB, agent) -> Usage | None:
+def _antigravity_transcript(agent) -> Path | None:
     path = None
     if getattr(agent, "transcript_path", None):
         path = Path(agent.transcript_path)
@@ -405,7 +405,26 @@ def antigravity_agent_usage(db: DB, agent) -> Usage | None:
             candidate = brain / agent.session_ref / ".system_generated" / "logs" / "transcript.jsonl"
             if candidate.is_file():
                 path = candidate
-    if path is None or not path.is_file():
+    return path if path is not None and path.is_file() else None
+
+
+def agent_transcripts(db: DB, agent) -> list[Path]:
+    """The transcript files ``agent_usage`` reads ``agent``'s usage from
+    (with Claude Code's subagent transcripts), those that exist."""
+    if agent.provider == "codex":
+        ws = db.get_workspace(agent.workspace_id)
+        path = find_codex_rollout(agent.session_ref, ws.path if ws else None, agent.created_at)
+        return [Path(path)] if path else []
+    if agent.provider == "antigravity":
+        path = _antigravity_transcript(agent)
+        return [path] if path else []
+    main = Path(agent.transcript_path) if agent.transcript_path else None
+    return [main, *_subagent_transcripts(main)] if main and main.is_file() else []
+
+
+def antigravity_agent_usage(db: DB, agent) -> Usage | None:
+    path = _antigravity_transcript(agent)
+    if path is None:
         return None
 
     st = path.stat()

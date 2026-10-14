@@ -559,8 +559,10 @@ def prune_retired(db: DB, now: float | None = None, *, cautious: bool = False) -
             if cautious and (now - ws.created_at <= view.UNUSED_WORKTREE_GRACE
                              or any(a.id in alive for a in everyone)):
                 continue
+            if not history.archive(db, ws, everyone, "worktree missing"):
+                done.append(f"kept the records of missing workspace {ws.id}: couldn't archive them")
+                continue
             pipeline.on_workspace_cleanup(db, ws)
-            history.archive(db, ws, everyone, "worktree missing")
             db.delete_workspace(ws.id)
             done.append(f"forgot missing workspace {ws.id} ({ws.path})")
             continue
