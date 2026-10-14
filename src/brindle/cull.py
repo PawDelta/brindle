@@ -233,8 +233,11 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     owners = agents.pane_owners(db, panes)
     for agent_id, pane, launched_at in prompt_answer.pending(db):
         a = db.get_agent(agent_id)
-        if (not a or a.tmux_window != pane or now - launched_at < STARTUP_GRACE or a.result is not None
-                or a.dismissed_at is not None or a.status in ("paused", "done")
+        if not a or a.result is not None or a.dismissed_at is not None or a.status == "done":
+            # It ended before its CLI settled: nothing left to answer.
+            db.conn.execute("UPDATE startup_prompts SET pending=0 WHERE agent_id=?", (agent_id,))
+            continue
+        if (a.tmux_window != pane or now - launched_at < STARTUP_GRACE or a.status == "paused"
                 or not agents.same_server(a, panes) or not agents.is_alive(a, panes)
                 or not agents.owns_pane(db, a, owners)):
             continue

@@ -331,6 +331,8 @@ def settled(db, agent) -> None:
     """after_launch saw ``agent``'s input box: its launch is no longer pending."""
     db.conn.execute("UPDATE startup_prompts SET pending=0 WHERE agent_id=? AND pane=?",
                     (agent.id, agent.tmux_window))
+    if _BOUND.get(agent.tmux_window, (None, None))[1] == agent.id:
+        del _BOUND[agent.tmux_window]   # a later agent may get this pane id
 
 
 class Startup:
