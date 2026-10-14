@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import os
 import re
 import subprocess
 import time
@@ -212,6 +213,45 @@ def fetch_remote_branch(root: str | Path, branch: str, remote: str = "origin") -
     run(["fetch", "--quiet", "--no-tags", remote,
          f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"], root)
     return f"{remote}/{branch}"
+
+
+def _quiet_env() -> dict[str, str]:
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def fast_forward(path: str | Path, branch: str) -> str | None:
+    """Bring the checked-out ``branch`` up to ``origin/<branch>`` with a
+    fast-forward only. Returns a warning when it couldn't (diverged, or local
+    changes in the way), None when it's current, updated, offline or has no
+    remote. Never rewrites history or touches uncommitted work."""
+    if not has_remote(path):
+        return None
+    try:
+        run_env(["fetch", "--quiet", "--no-tags", "origin",
+                 f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                path, _quiet_env(), timeout=5)
+    except GitError:
+        pass
+    remote = f"origin/{branch}"
+    if not remote_branch_exists(path, branch) or ok(["merge-base", "--is-ancestor", remote, "HEAD"], path):
+        return None
+    if not ok(["merge-base", "--is-ancestor", "HEAD", remote], path):
+        return f"'{branch}' has diverged from '{remote}'; left as is."
+    if run(["merge", "--ff-only", "--quiet", remote], path, check=False).returncode != 0:
+        return f"'{branch}' is behind '{remote}'; run git pull --ff-only."
+    return None
+
+
+def upstream_gone(path: str | Path, branch: str) -> bool:
+    """True if ``branch`` tracks origin and that branch no longer exists there."""
+    if run(["config", "--get", f"branch.{branch}.remote"], path, check=False).stdout.strip() != "origin":
+        return False
+    try:
+        proc = run_env(["ls-remote", "--exit-code", "--heads", "origin", branch],
+                       path, _quiet_env(), check=False, timeout=5)
+    except GitError:
+        return False
+    return proc.returncode == 2
 
 
 def worktree_for_branch(root: str | Path, branch: str) -> str | None:
