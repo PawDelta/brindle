@@ -484,7 +484,19 @@ def claude_model(model: str | None, repo_root: str | None = None) -> str | None:
     if got is None or got is UNAVAILABLE:
         return model
     c = got[1].claude
-    if c is None or not c.model_ids or model in c.model_ids or not route_in_use(got[0], got[1]):
+    if c is None or not route_in_use(got[0], got[1]):
+        return model
+    return route_model(c, model)
+
+
+def route_model(c, model: str | None) -> str | None:
+    """The model a Claude pane runs on route ``c`` (a ``ClaudeSetup``) for a
+    profile's ``model``: the profile's own when the route serves it, or when
+    it is an alias (opus, sonnet, haiku) the route pins in ``models`` (the
+    pane's ANTHROPIC_DEFAULT_*_MODEL maps it); else the route's default."""
+    if not c.model_ids or model in c.model_ids:
+        return model
+    if model in ("opus", "sonnet", "haiku") and c.models is not None and getattr(c.models, model):
         return model
     return c.default_model or c.model_ids[0]
 

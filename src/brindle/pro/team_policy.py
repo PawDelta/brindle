@@ -1081,10 +1081,24 @@ class ProPolicy(PolicyPlugin):
             from brindle import pricing
             norm_model = pricing.normalize(info.model) if info.model else None
             norm_allowed = {pricing.normalize(m) for m in p.allowed_models}
-            if norm_model not in norm_allowed and info.model not in p.allowed_models:
+            route = None
+            if p.agent_setup and p.agent_setup.claude and info.provider == "claude":
+                from brindle import company_login, providers
+
+                # only a route a Claude pane gets: see company_login.claude_model
+                if not providers.claude_org_managed() and company_login.route_in_use(p.org_id, p.agent_setup):
+                    route = p.agent_setup.claude
+            # an alias the org's Claude route pins runs as that route id
+            pinned = getattr(route.models, info.model, None) \
+                if route and route.models and info.model in ("opus", "sonnet", "haiku") else None
+            if norm_model not in norm_allowed and info.model not in p.allowed_models \
+                    and not (pinned and pinned in p.allowed_models):
                 got = f"model {info.model!r}" if info.model else "no declared model"
+                fix = (f"it is the default model of org {p.org_id}'s Claude route; an org admin must change "
+                       "agent_setup" if route and info.model and info.model == route.default_model
+                       else "set `model` in the profile")
                 return deny(f"{who} uses {got}; org {p.org_id} allows only "
-                            f"{', '.join(p.allowed_models) or 'no models'} (set `model` in the profile)")
+                            f"{', '.join(p.allowed_models) or 'no models'} ({fix})")
         if p.allowed_profiles is not None and info.profile not in p.allowed_profiles:
             got = who if info.profile else "a delegation with no profile"
             return deny(f"{got} is not allowed; org {p.org_id} allows only "
