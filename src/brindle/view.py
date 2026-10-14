@@ -323,14 +323,17 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
         root = max(roots, key=lambda a: a.created_at)
     ap = db.get_autopilot(root.id)
     assert ap is not None
+    ms = db.milestones(root.id)
+    w = autopilot.work_state(db, root.id) if any(m.status == "failed" for m in ms) else None
     return {
         "enabled": bool(ap.enabled),
         "goal": ap.goal,
         "state": ap.state,
         "note": ap.note,
         "usage_resets_at": ap.usage_resets_at,
-        "milestones": [{"position": m.position, "title": m.title, "status": m.status,
-                        "check": m.check_cmd} for m in db.milestones(root.id)],
+        "milestones": [{"position": m.position, "title": m.title,
+                        "status": w if m.status == "failed" and w else m.status,
+                        "check": m.check_cmd} for m in ms],
         "usage": autopilot.usage(),
         "quota": quota.notes(repo_root, native=False),
         "workers": len(autopilot.working_workers(db, root.id)),
