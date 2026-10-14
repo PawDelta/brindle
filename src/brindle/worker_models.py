@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 from dataclasses import dataclass
 
 TIERS = ("light", "medium", "heavy")
@@ -30,14 +31,14 @@ class Model:
     provider: str            # CLI name, or "native" for local and hosted
     profile: str             # the profile a pick runs on
     tiers: tuple[str, ...] = TIERS
-    model: str | None = None  # the model name the access policy judges
+    model: str | None = None  # what Ollama pulls, or what a hosted pick's profile asks OpenRouter for
     key_env: str | None = None
 
 
 CATALOG: tuple[Model, ...] = (
-    Model("claude-haiku", "Claude Haiku", CLI, "claude", "developer-light", ("light",), "claude-haiku-4-5"),
-    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer", ("light", "medium"), "claude-sonnet-4-5"),
-    Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("medium", "heavy"), "claude-opus-4-5"),
+    Model("claude-haiku", "Claude Haiku", CLI, "claude", "developer-light", ("light",)),
+    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer", ("light", "medium")),
+    Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("medium", "heavy")),
     Model("codex", "Codex", CLI, "codex", "developer-codex"),
     Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "developer-gemini", ("medium", "heavy")),
     Model("local-qwen3-coder", "Qwen3 Coder 30B", LOCAL, "native", "developer-local", ("light", "medium"),
@@ -55,13 +56,29 @@ def find(model_id: object) -> Model | None:
     return next((m for m in CATALOG if m.id == model_id), None)
 
 
-def offered(acc, tier: str) -> list[Model]:
-    """The models for ``tier`` that ``acc`` (``team_policy.access``) allows, and
-    nothing else: no hosted-key model when personal keys are denied."""
-    return [m for m in CATALOG
-            if tier in m.tiers and acc.allows(m.provider)
-            and (m.model is None or acc.allows_model(m.model))
-            and not (m.how == KEY and acc.deny_personal_keys)]
+def runs(m: Model, repo_root: str | None = None) -> tuple[str | None, str | None]:
+    """(provider, model) of the profile ``m`` runs on, resolved as check_assign
+    resolves them; a hosted pick whose profile isn't written yet runs what
+    :func:`profile_text` will write."""
+    from brindle.policy import _profile_fields
+
+    provider, model = _profile_fields(m.profile, repo_root or "")
+    if provider is None and m.how == KEY:
+        return "native", m.model
+    return provider, model
+
+
+def allowed(acc, m: Model, repo_root: str | None = None) -> bool:
+    """Whether ``acc`` (``team_policy.access``) would let a worker start on
+    ``m``'s profile; never a hosted-key model when personal keys are denied."""
+    if m.how == KEY and acc.deny_personal_keys:
+        return False
+    return acc.allows_profile(m.profile, *runs(m, repo_root))
+
+
+def offered(acc, tier: str, repo_root: str | None = None) -> list[Model]:
+    """The models for ``tier`` that ``acc`` allows, and nothing else."""
+    return [m for m in CATALOG if tier in m.tiers and allowed(acc, m, repo_root)]
 
 
 def ready(m: Model, signed_in: list[str]) -> bool:
@@ -100,12 +117,25 @@ def ensure_profile(m: Model) -> None:
 
 
 _warned: set[tuple[str, str]] = set()
+_local_ready: dict[str, bool] = {}    # model -> whether Ollama had it, probed once per process
+_applying = threading.local()
 
 
 def apply(cfg, user: dict, repo_root: str | None = None) -> None:
     """Route each size the person picked a model for to that model's profile
     (``cfg.routing[size] = [profile]``). A pick that isn't ready, isn't allowed
     by the org policy now, or is gone from the catalog, leaves the built-in routing for that size and says so once."""
+    # Judging a pick loads its profile, which loads the repo config again: that inner load keeps its routing.
+    if getattr(_applying, "on", False):
+        return
+    _applying.on = True
+    try:
+        _apply(cfg, user, repo_root)
+    finally:
+        _applying.on = False
+
+
+def _apply(cfg, user: dict, repo_root: str | None) -> None:
     from brindle import doctor
     from brindle.config import user_config_path
 
@@ -118,8 +148,17 @@ def apply(cfg, user: dict, repo_root: str | None = None) -> None:
 
     acc = team_policy.access(repo_root)      # the policy may have narrowed since the pick; unreadable: nothing
     signed_in = doctor.signed_in_providers()
+
+    def is_ready(m: Model) -> bool:
+        if m.how != LOCAL:
+            return ready(m, signed_in)
+        key = m.model or ""
+        if key not in _local_ready:          # an HTTP probe of Ollama: not on every config load
+            _local_ready[key] = ready(m, signed_in)
+        return _local_ready[key]
+
     for tier, m in picks.items():
-        if m is not None and m in offered(acc, tier) and ready(m, signed_in):
+        if m is not None and tier in m.tiers and allowed(acc, m, repo_root) and is_ready(m):
             cfg.routing[tier] = [m.profile]
             cfg.routing_sources[tier] = str(user_config_path())
         elif (tier, str(user.get(f"routing_{tier}"))) not in _warned:
