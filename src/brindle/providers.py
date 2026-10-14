@@ -36,14 +36,17 @@ def brindle_invocation() -> list[str]:
     """argv that re-enters this same brindle install, independent of PATH.
     A brindle run from a worktree's venv (developing brindle with brindle)
     would write that venv's python into hooks that outlive the worktree, so
-    the installed ``brindle`` is used instead when there is one."""
+    the installed ``brindle`` is used instead when there is one. ``-P``: these
+    run from inside worktrees (hooks, a re-exec'd sidebar), and ``-m`` would
+    otherwise put the cwd first on sys.path, so a ``brindle/`` there would be
+    imported instead of the install."""
     if _in_worktree(sys.executable):
         # Past every worktree's own bin (``uv run`` puts it first on PATH).
         for directory in os.environ.get("PATH", "").split(os.pathsep):
             installed = shutil.which("brindle", path=directory) if directory else None
             if installed and not _in_worktree(installed):
                 return [installed]
-    return [sys.executable, "-m", "brindle"]
+    return [sys.executable, "-P", "-m", "brindle"]
 
 
 def mcp_server_spec(agent_id: str) -> dict:

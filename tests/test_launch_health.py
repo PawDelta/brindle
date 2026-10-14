@@ -81,7 +81,7 @@ def detached(monkeypatch):
     real = subprocess.Popen
 
     def popen(args, *a, **k):
-        if isinstance(args, list) and args[1:3] == ["-m", "brindle"] and str(args[3]).startswith("_"):
+        if isinstance(args, list) and args[1:4] == ["-P", "-m", "brindle"] and str(args[4]).startswith("_"):
             started.append([str(x) for x in args])
             from unittest.mock import MagicMock
             mock_proc = MagicMock()
@@ -240,7 +240,7 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     assert elapsed < BUDGET
     assert db.get_agent(old.id).status == "paused"
     # Retention and culling went to the detached helper instead.
-    assert ["_cull", "--repo", ws.repo_root] in [argv[3:] for argv in detached]
+    assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
 
 
 # -- a prompt is visible: 'waiting', and its supervisor is told once -----------------
@@ -523,7 +523,7 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     cli.after_launch_cmd(a.id, token=token)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
     assert row["delivered_at"] == 112 and row["outcome"] is None and reports == []
-    followups = [cmd for cmd in detached if cmd[3] == "_launch-health" and "--startup" not in cmd]
+    followups = [cmd for cmd in detached if cmd[4] == "_launch-health" and "--startup" not in cmd]
     assert len(followups) == 1
     now[0] = 114.0
     cli.launch_health_cmd(a.id, startup=False, token=token)

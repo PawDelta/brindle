@@ -108,22 +108,32 @@ def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
     assert db.get_agent("w1").dismissed_at is None
 
 
-@pytest.mark.parametrize("provider,mode", [
-    ("claude", "assign"),
-    ("codex", "assign"),   # no turn-start event: its pane must be quiet too
-    ("claude", "review"),  # a piped reviewer: the pipeline tells the supervisor
+@pytest.mark.parametrize("provider,mode,fixing", [
+    ("claude", "assign", False),
+    ("codex", "assign", False),   # no turn-start event: its pane must be quiet too
+    ("claude", "review", False),  # a piped reviewer: the pipeline tells the supervisor
+    # Reported once, then a review asked for fixes and it went quiet (it had
+    # lost its brindle connection): no new commit, no new report.
+    ("claude", "assign", "unchanged"),
+    # The same, but it committed a fix after the review before going quiet.
+    ("claude", "assign", "committed"),
 ])
-def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provider, mode):
+def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provider, mode, fixing):
     """autopilot.on_stop only checks on workers when a goal is set; most
     sessions have none, so the sweep reminds the supervisor itself, even if
     the worker's stop already sent a notice that went unread."""
-    from brindle import pipeline
+    from brindle import gates, pipeline
 
     add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor")
     db.add_autopilot("boss")
     add(db, ws, "w1", parent_id="boss", provider=provider, mode=mode,
         status_since=time.time() - 600)
     db.update_agent("w1", unreported_noted=1)
+    if fixing:
+        db.update_agent("w1", result="done", pipeline="fixing", pipeline_rounds=1)
+        reviewed = gates.head(ws) if fixing == "unchanged" else "0" * 40
+        db.add_review(ws.id, reviewed, "r1", False, "fix the bug")
+        db.conn.execute("UPDATE reviews SET created_at=?", (time.time() - 900,))
     sent = []
     activity = time.time()  # its pane printed just now
     monkeypatch.setattr(tmux, "window_activity", lambda target, **k: activity)

@@ -1,8 +1,10 @@
 import asyncio
 import shutil
+import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
 from mcp import Client
 
 import brindle
@@ -53,3 +55,17 @@ def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
 
     watch.run("/repo", sidebar=True)
     assert execs == [["/venv/bin/brindle", "watch", "--sidebar"]]
+
+
+@pytest.mark.variant("a module hijack attempt; what it guards runs in the child process")
+def test_a_brindle_package_in_the_cwd_is_not_what_brindle_runs_again(monkeypatch, tmp_path):
+    """A sidebar re-execs, and hooks run brindle, from inside a worktree: a
+    `brindle/` a worker wrote there must not shadow the install."""
+    (tmp_path / "brindle").mkdir()
+    (tmp_path / "brindle" / "__init__.py").write_text("raise SystemExit('decoy imported')")
+    monkeypatch.setattr("brindle.providers._in_worktree", lambda path: False)
+    from brindle.providers import brindle_invocation
+
+    run = subprocess.run([*brindle_invocation(), "--version"], cwd=tmp_path, capture_output=True, text=True)
+    assert "decoy" not in run.stderr
+    assert run.returncode == 0
