@@ -294,6 +294,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at REAL
 );
 CREATE INDEX IF NOT EXISTS tasks_repo_root ON tasks(repo_root);
+-- A session's cloud login (brindle.login_pause), keyed by its root: when it
+-- was last looked at, and while only the person can renew it (state
+-- 'auth_paused'), what they run and how they were told. Back at 'ok', the
+-- next lapse may tell them again.
+CREATE TABLE IF NOT EXISTS login_state (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'ok',  -- ok | auth_paused
+    checked_at REAL,               -- the last look ahead at its expiry
+    agent_id TEXT,                 -- whose login lapsed: re-checked in its env
+    refresh_cmd TEXT,
+    expired_at REAL,
+    noticed TEXT,                  -- how the person was told: chat | bar
+    next_check REAL,               -- the next re-check while paused
+    delay REAL                     -- the backoff before it
+);
 -- The one `brindle watch --sidebar` pane per interactive session root (see
 -- agents.sidebar_follow): its tmux pane id, so any session in that root's
 -- tree can find and relocate it instead of starting a second one. Keyed by
@@ -453,6 +468,19 @@ class Autopilot:
     audit_sha: str | None = None       # the commit the last completion audit judged
     audit_ok: int | None = None        # its verdict
     audit_history: str | None = None   # persistent audit notes and accepted decisions
+
+
+@dataclass
+class LoginState:
+    root_id: str
+    state: str
+    checked_at: float | None = None
+    agent_id: str | None = None
+    refresh_cmd: str | None = None
+    expired_at: float | None = None
+    noticed: str | None = None
+    next_check: float | None = None
+    delay: float | None = None
 
 
 @dataclass
@@ -1394,6 +1422,20 @@ class DB:
             "SELECT * FROM native_subagents WHERE parent_id=? ORDER BY started_at", (parent_id,)
         )
         return [_load(NativeSubagent, r) for r in rows]
+
+    # -- cloud login (brindle.login_pause) -------------------------------------
+
+    def get_login_state(self, root_id: str) -> LoginState | None:
+        row = self.conn.execute("SELECT * FROM login_state WHERE root_id=?", (root_id,)).fetchone()
+        return _load(LoginState, row) if row else None
+
+    def set_login_state(self, root_id: str, **fields: object) -> None:
+        cols = ", ".join(fields)
+        marks = ", ".join("?" for _ in fields)
+        update = ", ".join(f"{k}=excluded.{k}" for k in fields)
+        with self.tx() as c:
+            c.execute(f"INSERT INTO login_state (root_id, {cols}) VALUES (?, {marks}) "
+                      f"ON CONFLICT(root_id) DO UPDATE SET {update}", (root_id, *fields.values()))
 
     # -- sidebar (one `brindle watch --sidebar` pane per session root) --------
 

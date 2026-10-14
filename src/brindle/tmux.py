@@ -474,6 +474,16 @@ def session_attached(session: str) -> bool:
     return proc.stdout.strip() not in ("", "0")
 
 
+def client_activity(session: str) -> float | None:
+    """When a client attached to ``session`` last had input (epoch seconds,
+    the latest across its clients), or None with no client attached."""
+    proc = _tmux("list-clients", "-t", f"={session}", "-F", "#{client_activity}", check=False)
+    if proc.returncode != 0:
+        return None
+    times = [float(t) for t in proc.stdout.split() if t.isdigit()]
+    return max(times) if times else None
+
+
 def current_session() -> str | None:
     """The tmux session this process runs in (from its pane), or None."""
     pane = os.environ.get("TMUX_PANE")
