@@ -65,6 +65,10 @@ SAFE_OPTION = {
 SAFE_WORDS = frozenset("yes i trust this the folder project workspace directory files contents allow "
                        "continue proceed open and ok okay got it next dismiss close press enter to "
                        "work in here".split())
+# Never picked, whatever the kind: options that grant more than the one
+# folder or the one notice, including a settings picker's default.
+BROAD = re.compile(r"(?i)\b(?:all|always|future|every\w*|don.t ask|enabl\w*|accept\w*|auto\w*|skip\w*"
+                   r"|bypass\w*|permissions?|run|execute|yolo)\b")
 # Config files a path on screen can name (a project's MCP servers, hooks,
 # settings), which normalize() hides behind <path>.
 CONFIG_PATH = re.compile(r"(?i)\.(?:mcp|claude|codex|gemini|agy)\b|settings(?:\.local)?\.json|hooks?\b")
@@ -246,7 +250,7 @@ def _may_answer(screen: str, decision: Decision) -> bool:
     answerable kind, an option it allows for that kind and nothing broader
     ("all future", "always"), and trust only for a brindle worktree."""
     option = _option_text(decision.option) or ""
-    if decision.kind not in ANSWERABLE or not option:
+    if decision.kind not in ANSWERABLE or not option or BROAD.search(option):
         return False
     safe = SAFE_OPTION.get(decision.kind)
     if safe and not (safe.search(option) and set(re.findall(r"[^\W_]+", option)) <= SAFE_WORDS):

@@ -65,6 +65,9 @@ class Pane:
     # and a settings picker is only ever answered with its default
     ("Choose a colour scheme", ["Dark", "Light"], {"kind": "setting_choice", "option": "Light"},
      [], None, 1),
+    # never even its default when that grants more than a setting
+    ("Choose how edits are handled", ["Always allow edits", "Ask each time"],
+     {"kind": "setting_choice", "option": "Always allow edits"}, [], None, 1),
 ])
 def test_unrecognized_startup_prompt(db, repo, monkeypatch, question, options, reply, keys, chosen, told):
     folder = str(worktrees_dir() / "proj" / "feature")
