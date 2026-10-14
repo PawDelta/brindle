@@ -1081,7 +1081,13 @@ class ProPolicy(PolicyPlugin):
             from brindle import pricing
             norm_model = pricing.normalize(info.model) if info.model else None
             norm_allowed = {pricing.normalize(m) for m in p.allowed_models}
-            route = p.agent_setup.claude if p.agent_setup and info.provider == "claude" else None
+            route = None
+            if p.agent_setup and p.agent_setup.claude and info.provider == "claude":
+                from brindle import company_login, providers
+
+                # only a route a Claude pane gets: see company_login.claude_model
+                if not providers.claude_org_managed() and company_login.route_in_use(p.org_id, p.agent_setup):
+                    route = p.agent_setup.claude
             # an alias the org's Claude route pins runs as that route id
             pinned = getattr(route.models, info.model, None) \
                 if route and route.models and info.model in ("opus", "sonnet", "haiku") else None

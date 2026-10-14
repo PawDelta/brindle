@@ -1,5 +1,6 @@
 """Company login: `brindle login` applies the org policy's agent_setup."""
 
+import dataclasses
 import json
 import os
 import shlex
@@ -113,13 +114,17 @@ def test_a_pinned_alias_wins_over_the_route_default(repo, monkeypatch):
     p = Profile("developer-opus", "", "claude", "", model="opus")
     monkeypatch.setattr("brindle.profiles.load_profile", lambda *a: p)
     plugin = ProPolicy(str(repo))
+    org = {"setup": setup}
     monkeypatch.setattr(plugin, "policy", lambda: OrgPolicy(org_id=ORG, version=1, allowed_models=(IDS[0],),
-                                                             agent_setup=setup))
+                                                             agent_setup=org["setup"]))
     monkeypatch.setattr(policy, "plugin", lambda *a: plugin)
     m = managed_models.Managed(ORG, None, False, setup=setup)
     decision = policy.check_assign(RepoConfig(), str(repo), p.name, "task", "assign")
+    org["setup"] = dataclasses.replace(setup, enforce=False)     # the pane doesn't get this route
+    unused = policy.check_assign(RepoConfig(), str(repo), p.name, "task", "assign")
     assert (company_login.claude_model("opus"), company_login.claude_model("sonnet"),
-            managed_models.apply_profile(m, p).model, decision.allowed) == ("opus", IDS[-1], "opus", True)
+            managed_models.apply_profile(m, p).model, decision.allowed, unused.allowed) == \
+        ("opus", IDS[-1], "opus", True, False)
 
 
 class _Ent:
