@@ -249,7 +249,6 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         except agents.AgentError:
             continue  # its supervisor isn't running; try again on a later sweep
         db.update_agent(a.id, stuck_noted=since)
-        agents._note_reviewer_end(db, a, ws)
         done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
     return done
 
@@ -362,7 +361,6 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         except agents.AgentError:
             continue
         db.update_agent(a.id, stuck_noted=last)
-        agents._note_reviewer_end(db, a, ws)
         done.append(f"told {a.parent_id} that worker {a.id} has gone silent")
     return done
 

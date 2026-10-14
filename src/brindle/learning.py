@@ -87,6 +87,7 @@ class LearningPlugin(ABC):
 
 _learners: dict[str, LearningPlugin] = {}
 _settled: set[str] = set()
+_no_verdict: set[str] = set()
 
 
 def plugin(cfg: RepoConfig, repo_root: str) -> LearningPlugin | None:
@@ -106,6 +107,7 @@ def reset() -> None:
     """Forget the learners made so far (tests use it)."""
     _learners.clear()
     _settled.clear()
+    _no_verdict.clear()
 
 
 def settled(agent_id: str) -> bool:
@@ -158,12 +160,11 @@ def _task_info(db: DB, worker: Agent, ws: Workspace) -> TaskInfo:
 
 def _reviewer_info(db: DB, reviewer: Agent, ws: Workspace,
                    worker: Agent | None = None) -> TaskInfo:
+    from brindle import agents
     from brindle.profiles import load_profile
 
     if worker is None:
-        workers = [a for a in db.list_agents(ws.id)
-                   if a.mode in ("handoff", "handoff_detached", "assign")]
-        worker = workers[0] if workers else None
+        worker = agents.workspace_worker(db, ws)
     model = None
     try:
         model = load_profile(reviewer.profile, ws.repo_root).model
@@ -214,19 +215,24 @@ def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace
     try:
         if reviewer is None or reviewer.mode != "review" or ws is None or reviewer.id in _settled:
             return
-        if approved is None:
+        if isinstance(approved, bool):
+            _settled.add(reviewer.id)
+            event: str = "verdict"
+        else:
+            if reviewer.id in _no_verdict:
+                return
             current = db.get_agent(reviewer.id)
             if (current and current.result is not None) or db.conn.execute(
                 "SELECT 1 FROM reviews WHERE reviewer_id = ?", (reviewer.id,)
             ).fetchone():
                 return
-        _settled.add(reviewer.id)
+            _no_verdict.add(reviewer.id)
+            event = "no_verdict"
         p = plugin(cfg, ws.repo_root)
         if p is None:
             return
         info = _reviewer_info(db, reviewer, ws, worker)
         wall = max(0.0, time.time() - reviewer.created_at)
-        event = "verdict" if isinstance(approved, bool) else "no_verdict"
         p.record(info, Outcome(event, approved=approved if isinstance(approved, bool) else None,
                                tokens=_tokens(db, reviewer), wall_seconds=wall))
     except Exception:
