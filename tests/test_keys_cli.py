@@ -1,11 +1,56 @@
 """`brindle keys set|list|unset`."""
+from types import SimpleNamespace
+
 from typer.testing import CliRunner
 
-from brindle import keystore
+from brindle import agents, keystore
 from brindle.cli import app
 
 FAKE = "sk-ant-test-0123456789wxyz"
 runner = CliRunner()
+
+
+def test_key_check_rejects_a_401_and_stores_nothing(provider_http):
+    provider_http["status"] = 401
+    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=FAKE + "\n")
+    assert r.exit_code == 1 and "401" in r.output and FAKE not in r.output
+    assert provider_http["calls"] == ["https://api.anthropic.com/v1/models"]
+    assert keystore.get_key("ANTHROPIC_API_KEY") is None
+
+
+def test_key_check_openrouter_needs_credit_left(provider_http, monkeypatch):
+    monkeypatch.setattr(keystore, "known_names", lambda root=None: ["OPENROUTER_API_KEY"])
+    provider_http["body"] = {"data": {"limit_remaining": 0}}
+    r = runner.invoke(app, ["keys", "set", "OPENROUTER_API_KEY"], input="or-key\n")
+    assert r.exit_code == 1 and "no credit" in r.output
+    assert keystore.get_key("OPENROUTER_API_KEY") is None
+    provider_http["body"] = {"data": {"limit_remaining": 3.5}}
+    r = runner.invoke(app, ["keys", "set", "OPENROUTER_API_KEY"], input="or-key\n")
+    assert r.exit_code == 0 and keystore.get_key("OPENROUTER_API_KEY") == "or-key"
+    assert provider_http["calls"][-1] == "https://openrouter.ai/api/v1/key"
+
+
+def test_key_check_refuses_before_any_call_when_the_org_denies_personal_keys(provider_http, monkeypatch):
+    class Org:
+        deny_personal_keys = True
+
+    monkeypatch.setattr(agents, "managed", lambda root: Org())
+    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=FAKE + "\n")
+    assert r.exit_code == 1 and "denies personal" in r.output
+    assert provider_http["calls"] == [] and keystore.get_key("ANTHROPIC_API_KEY") is None
+
+
+def test_key_check_interactive_shows_the_page_and_o_opens_it(monkeypatch):
+    opened = []
+    tty = SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("brindle.keys_cmds.sys", tty)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "o")
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": FAKE)
+    monkeypatch.setattr("webbrowser.open", opened.append)
+    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input="n\n")
+    assert "https://console.anthropic.com/settings/keys" in r.output
+    assert opened == ["https://console.anthropic.com/settings/keys"]
+    assert keystore.get_key("ANTHROPIC_API_KEY") == FAKE
 
 
 def test_set_list_unset_round_trip(brindle_home):
