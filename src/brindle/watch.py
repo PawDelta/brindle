@@ -180,7 +180,8 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
     return [fit(t, width) for t in wrapped]
 
 
-MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "pending": ("○", "dim")}
+MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "pending": ("○", "dim"),
+                  "working": ("◐", "busy"), "waiting": ("◌", "alert")}
 
 
 def render_autopilot(pilot: dict, width: int) -> list[Line]:

@@ -402,3 +402,30 @@ def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     monkeypatch.setattr(agents, "is_alive", lambda a: a.id == "live_auditor")
     db.update_autopilot("boss", state="auditing", auditor_id="live_auditor", audit_sha=head_sha)
     assert autopilot.on_stop(db, agent, {}) is None
+
+
+@pytest.mark.parametrize("flight, expected", [
+    ("processing", "working"),
+    ("waiting", "waiting"),
+    ("pending_task", "waiting"),
+    ("usage_paused", "waiting"),
+    (None, "failed"),
+])
+def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
+    from brindle import view
+    from brindle.db import Task
+
+    _, ws = root
+    with_goal(db)
+    db.record_check(db.milestones("boss")[0].id, False, "nope")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    if flight in ("processing", "waiting"):
+        add_agent(db, ws, "w1", mode="assign", parent="boss", status=flight)
+    elif flight == "pending_task":
+        db.add_task(Task("t1", ws.repo_root, None, "boss", ws.id, "dev", "do it", "assign", 1,
+                         None, None, None, None, "pending", time.time()))
+    elif flight == "usage_paused":
+        db.update_autopilot("boss", state="usage_paused")
+    entry = view.autopilot_entry(db, ws.repo_root, root_id="boss")
+    assert entry["milestones"][0]["status"] == expected
+    assert entry["milestones"][1]["status"] == "pending"
