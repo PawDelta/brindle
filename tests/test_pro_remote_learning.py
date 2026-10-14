@@ -93,15 +93,17 @@ def no_forbidden(body):
 
 def test_record_payload_keys_and_contents(parts, remote):
     lr = make(parts, remote)
+    lr.record(task(), Outcome("reported", wall_seconds=12.5))
     lr.record(task(), Outcome("review", approved=False))
     lr.record(task(), Outcome("escalated"))
     lr.record(task(), Outcome("merged", checks_passed=True, tokens=1234, wall_seconds=61.5))
     lr.flush()
-    review, escalated, merged = remote.records
+    reported, review, escalated, merged = remote.records
     assert set(review) == {"org_id", "key_id", "repo_key", "agent_ref", "profile", "weight", "features", "event",
                            "approved", "checks_passed", "review_rounds", "escalations",
                            "tokens", "wall_seconds"}
-    assert set(escalated) == set(merged) == set(review) - {"approved"}
+    assert set(reported) == set(escalated) == set(merged) == set(review) - {"approved"}
+    assert reported["event"] == "reported" and reported["wall_seconds"] == 12.5
     assert review["approved"] is False and review["event"] == "review"
     assert (review["org_id"], review["key_id"]) == ("org_1", "k1")
     assert merged == {**merged, "profile": "developer", "weight": "heavy", "event": "merged",

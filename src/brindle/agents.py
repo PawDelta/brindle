@@ -837,6 +837,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle.providers import trust_folder
 
         trust_folder(ws.path)  # no trust dialog for nobody to answer
+    if provider.name == "antigravity" and m is not None and m.setup is not None and m.setup.antigravity is not None:
+        try:
+            providers.set_agy_gemini()
+        except (OSError, ValueError) as e:
+            raise AgentError(f"couldn't set Antigravity to the company Gemini route in its settings.json: {e}") from e
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first)))
     if prompt or db.pending_count(agent.id):
@@ -1681,6 +1686,7 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     else:
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
+    first = agent.result is None
     db.set_result(agent.id, result)
     # Usage and history are extras: never let them stop the result arriving.
     try:
@@ -1707,6 +1713,8 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     else:
         forwarded = result
     if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
+        if first:
+            pipeline.note_reported(db, ws, agent)
         warm_checks(ws)
         if forward and pipeline.on_report(db, agent, ws, forwarded):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "

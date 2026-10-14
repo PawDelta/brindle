@@ -95,7 +95,16 @@ def _dispatch(cfg: RepoConfig, event: Event) -> None:
                           type(p).__name__, event.kind)
 
 
-def _model(profile: str | None, repo_root: str) -> str | None:
+def _model(profile: str | None, repo_root: str, worker: Agent | None = None, db=None) -> str | None:
+    if worker is not None:
+        try:
+            from brindle import usage
+
+            m = usage._agent_model(db, worker)
+            if m:
+                return m
+        except Exception:
+            pass
     if not profile:
         return None
     try:
@@ -136,12 +145,12 @@ def _by_model(kind: str, worker: Agent | None, repo_root: str,
     """``{model: {"tokens", "usd"}}`` for the spend ``_cost`` covers, under the
     same conditions. Unpriced tokens count with ``usd`` 0. When ``cost_usd``
     (which can include live usage) exceeds what the history rows add up to,
-    the remainder is an "unknown model" entry with no tokens, so the split
-    sums to ``cost_usd``."""
+    the remainder is attributed to the worker's live/launch model (or
+    "unknown model" when none is known), so the split sums to ``cost_usd``."""
     if kind not in ("remove", "cost") or worker is None:
         return None
     try:
-        from brindle import cost
+        from brindle import cost, usage
         from brindle.db import DB
         from brindle.pro import license
 
@@ -159,6 +168,20 @@ def _by_model(kind: str, worker: Agent | None, repo_root: str,
             slot = out.setdefault(cost.model_label(p), {"tokens": 0, "usd": 0.0})
             slot["tokens"] += p.tokens
             slot["usd"] += p.dollars or 0.0
+        live = None
+        if getattr(worker, "provider", None) or getattr(worker, "transcript_path", None) or getattr(worker, "session_ref", None):
+            try:
+                live = usage.agent_usage(db, worker)
+            except Exception:
+                live = None
+        live_model = (live.model if live and live.model and live.model != "unknown" else None) or _model(
+            getattr(worker, "profile", None), repo_root, worker, db
+        )
+        if kind == "remove" and live and live.total > 0 and live_model:
+            unrecorded = live.total - sum(b["tokens"] for b in out.values())
+            if unrecorded > 0:
+                slot = out.setdefault(live_model, {"tokens": 0, "usd": 0.0})
+                slot["tokens"] += unrecorded
         total_usd = sum(b["usd"] for b in out.values())
         if cost_usd is not None and total_usd > cost_usd > 0:
             factor = cost_usd / total_usd
@@ -171,7 +194,7 @@ def _by_model(kind: str, worker: Agent | None, repo_root: str,
         else:
             rest = round((cost_usd or 0.0) - total_usd, 4)
             if rest > 0:
-                slot = out.setdefault("unknown model", {"tokens": 0, "usd": 0.0})
+                slot = out.setdefault(live_model or "unknown model", {"tokens": 0, "usd": 0.0})
                 slot["usd"] += rest
         return out or None
     except Exception:
@@ -191,7 +214,7 @@ def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None,
             kind=kind, repo_root=ws.repo_root, agent_id=worker.id if worker else None,
             branch=ws.branch, profile=worker.profile if worker else None,
             provider=worker.provider if worker else None,
-            model=_model(worker.profile if worker else None, ws.repo_root),
+            model=_model(worker.profile if worker else None, ws.repo_root, worker),
             actor=who, approved=approved, merged=merged, workspace_id=ws.id,
             cost_usd=cost_usd,
             by_model=_by_model(kind, worker, ws.repo_root, cost_usd),

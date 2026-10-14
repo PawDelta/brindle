@@ -204,7 +204,8 @@ ENV_NAMES = frozenset({
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     # a federated org's cloud hooks (cloud_credential)
     "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
-    "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"})
+    "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE",
+    "GOOGLE_GEMINI_BASE_URL"})
 
 
 def store_env(org_id: str, env: dict[str, str], self_serve: bool = False) -> None:
@@ -487,20 +488,29 @@ def claude_model(model: str | None, repo_root: str | None = None) -> str | None:
 
 
 def org_setup(repo_root: str | None = None, store=None, client=None):
-    """(org id, AgentSetup) for the signed-in team org; None when the policy
-    was had and there is no ``agent_setup`` (or no team entitlement);
+    """(org id, AgentSetup) for the signed-in org; personal policies supply
+    only federated Claude setup. None when there is no applicable setup;
     ``UNAVAILABLE`` when it couldn't be had, which says nothing about the setup."""
-    from brindle.pro import license, team_policy
+    from brindle.pro import credentials, license, team_policy
 
     try:
+        store = store or credentials.default_store()
         ent = license.current(store=store, client=client)
-        if team_policy.FEATURE not in ent.features:
+        personal = team_policy.FEATURE not in ent.features
+        if personal and (ent.policy_version <= 0 or (store.load() or {}).get("org_id")
+                         or ent.plan in ("team", "enterprise")):
             return None
         p = team_policy.current_policy(ent, client, store, repo_root)
+        setup = p.agent_setup
+        if personal:
+            if setup is None or setup.claude is None or not setup.claude.federated:
+                return None
+            # Personal policies configure federation, never other agents or enforcement.
+            setup = team_policy.AgentSetup(claude=setup.claude)
     except Exception:  # noqa: BLE001 - offline, logged out, unparsable: leave things as they are
         log.debug("no org policy for company login", exc_info=True)
         return UNAVAILABLE
-    return (ent.org_id, p.agent_setup) if p.agent_setup is not None else None
+    return (ent.org_id, setup) if setup is not None else None
 
 
 def _logged_in(store=None, client=None) -> bool:

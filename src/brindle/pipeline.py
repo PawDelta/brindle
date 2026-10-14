@@ -139,9 +139,9 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
           actor: Agent | str | None = None, **event) -> None:
     """Tell the learning and events plugins about ``ws``'s worker (a no-op
     unless the repo has them; never raises). ``event`` is one of
-    ``approved=``, ``escalated=True`` or ``merged=`` (see learning.note);
-    the events plugin hears it as a review, escalated, merge or remove
-    event from ``actor``."""
+    ``reported=True``, ``approved=``, ``escalated=True`` or ``merged=``
+    (see learning.note); the events plugin hears it as a review, escalated,
+    merge or remove event from ``actor``."""
     try:
         cfg = load_repo_config(ws.repo_root)
         worker = worker or agents.workspace_worker(db, ws)
@@ -151,7 +151,8 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
         learning.note(db, cfg, worker, ws, **event)
     except Exception:
         pass
-    savings.note_outcome(db, worker, **event)
+    if not event.get("reported"):
+        savings.note_outcome(db, worker, **event)
     if event.get("approved") is not None:
         events.emit(cfg, "review", ws, worker, actor=actor, approved=event["approved"])
     if event.get("escalated"):
@@ -160,6 +161,10 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
         events.emit(cfg, "merge", ws, worker, actor=actor)
     elif event.get("merged") is False:
         events.emit(cfg, "remove", ws, worker, actor=actor, merged=False)
+
+
+def note_reported(db: DB, ws: Workspace, worker: Agent | None = None) -> None:
+    _note(db, ws, worker, reported=True)
 
 
 def note_review(db: DB, ws: Workspace, approved: bool, reviewer: Agent | None = None) -> None:

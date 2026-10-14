@@ -49,8 +49,8 @@ import logging
 from dataclasses import dataclass, replace
 
 from brindle import secrets
-from brindle.pro.team_policy import (CLAUDE_CLOUD_ROUTES, CODEX_ENDPOINT_ROUTES, AgentSetup,
-                                     OrgPolicy, ProviderConfig)
+from brindle.pro.team_policy import (ANTIGRAVITY_ENDPOINT_ROUTES, CLAUDE_CLOUD_ROUTES,
+                                     CODEX_ENDPOINT_ROUTES, AgentSetup, OrgPolicy, ProviderConfig)
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 ROUTING_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
                "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_RESOURCE", "CLAUDE_CODE_USE_BEDROCK",
                "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "OPENAI_BASE_URL",
+               "GOOGLE_GEMINI_BASE_URL",
                "AWS_REGION", "AWS_DEFAULT_REGION", "CLOUD_ML_REGION", "ANTHROPIC_VERTEX_PROJECT_ID")
 
 NAMES = {"bedrock": "AWS Bedrock", "vertex": "Google Vertex AI", "azure": "Azure",
@@ -67,6 +68,7 @@ NAMES = {"bedrock": "AWS Bedrock", "vertex": "Google Vertex AI", "azure": "Azure
 CLAUDE_ROUTE_NAMES = {"bedrock": NAMES["bedrock"], "vertex": NAMES["vertex"], "foundry": NAMES["azure"],
                       "gateway": "an Anthropic-compatible gateway"}
 CODEX_ROUTE_NAMES = {"azure": NAMES["azure"], "gateway": NAMES["openai-compatible"]}
+ANTIGRAVITY_ROUTE_NAMES = {"gateway": "a Gemini-compatible gateway"}
 
 # The variable the org's key (``key_env`` / ``key_helper``) is set as in a pane,
 # by the agent's provider, for the managed provider that carries a key.
@@ -106,6 +108,13 @@ class Managed:
         return s.codex if s is not None and s.codex is not None and s.codex.route in CODEX_ENDPOINT_ROUTES \
             and s.codex.base_url else None
 
+    @property
+    def antigravity(self):
+        """The managed Antigravity route (an ``AntigravitySetup`` with a ``base_url``), or None."""
+        s = self.setup
+        return s.antigravity if s is not None and s.antigravity is not None and s.antigravity.route in ANTIGRAVITY_ENDPOINT_ROUTES \
+            and s.antigravity.base_url else None
+
     def describe(self) -> str:
         parts = []
         c = self.config
@@ -124,6 +133,8 @@ class Managed:
             parts.append("Claude on " + _describe_claude(self.claude))
         if self.codex is not None:
             parts.append(f"Codex on {CODEX_ROUTE_NAMES[self.codex.route]} ({self.codex.base_url})")
+        if self.antigravity is not None:
+            parts.append(f"Antigravity on {ANTIGRAVITY_ROUTE_NAMES[self.antigravity.route]} ({self.antigravity.base_url})")
         if self.exclusive:
             parts.append("agents without a route refused")
         if self.deny_personal_keys:
@@ -280,6 +291,8 @@ def _route_refusal(m: Managed, profile, who: str) -> str | None:
         where = CLAUDE_ROUTE_NAMES[m.claude.route]
     elif provider in ("codex", "native") and m.codex is not None:
         where = CODEX_ROUTE_NAMES[m.codex.route]
+    elif provider == "antigravity" and m.antigravity is not None:
+        where = ANTIGRAVITY_ROUTE_NAMES[m.antigravity.route]
     else:
         return _exclusive_refusal(m, profile, who) if m.exclusive else None
     if provider == "native":
@@ -308,8 +321,11 @@ def _exclusive_refusal(m: Managed, profile, who: str) -> str | None:
         return None
     if provider == "codex" and s.codex is not None:
         return None
+    if provider == "antigravity" and s.antigravity is not None:
+        return None
     where = (CLAUDE_ROUTE_NAMES[m.claude.route] if m.claude is not None
              else CODEX_ROUTE_NAMES[m.codex.route] if m.codex is not None
+             else ANTIGRAVITY_ROUTE_NAMES[m.antigravity.route] if m.antigravity is not None
              else "the routes")
     if provider == "claude":
         return (f"{who} runs Claude Code, which can't use {where}, the provider org {m.org_id} "
@@ -351,14 +367,16 @@ def apply_profile(m: Managed | None, profile):
 def route_env(m: Managed, provider: str) -> dict[str, str]:
     """The environment of ``provider``'s managed ``agent_setup`` route: for
     Claude, ``company_login.claude_env`` (the one builder); for Codex, the
-    endpoint. Empty for an agent with no managed route (native reads the
-    profile's base_url, see :func:`apply_profile`)."""
+    endpoint; for Antigravity, GOOGLE_GEMINI_BASE_URL. Empty for an agent with no
+    managed route (native reads the profile's base_url, see :func:`apply_profile`)."""
     from brindle import company_login
 
     if provider == "claude" and m.claude is not None:
         return company_login.claude_env(m.org_id, m.claude)
     if provider == "codex" and m.codex is not None:
         return {"OPENAI_BASE_URL": m.codex.base_url}
+    if provider == "antigravity" and m.antigravity is not None:
+        return {"GOOGLE_GEMINI_BASE_URL": m.antigravity.base_url}
     return {}
 
 
