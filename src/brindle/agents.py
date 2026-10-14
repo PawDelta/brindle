@@ -1759,6 +1759,7 @@ def wait_for_result(db: DB, agent_id: str, timeout: float, poll: float = 2.0) ->
         if agent.result is not None:
             return agent.result
         if not is_alive(agent):
+            _note_reviewer_end(db, agent)
             screen = ""
             try:
                 screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
@@ -1885,8 +1886,25 @@ def pause_worker(db: DB, agent: Agent) -> None:
     db.set_status(agent.id, "paused")
 
 
+def _note_reviewer_end(db: DB, agent: Agent, ws: Workspace | None = None) -> None:
+    if agent.mode != "review" or agent.result is not None:
+        return
+    ws = ws or db.get_workspace(agent.workspace_id)
+    if ws is None:
+        return
+    from brindle import learning
+    from brindle.config import RepoConfig, load_repo_config
+
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except ValueError:
+        cfg = RepoConfig()
+    learning.note_reviewer(db, cfg, agent, ws)
+
+
 def kill(db: DB, agent_id: str) -> None:
     agent = get(db, agent_id)
+    _note_reviewer_end(db, agent)
     _stop(db, agent)
     db.delete_agent(agent.id)
 
@@ -1898,6 +1916,7 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
     lists it, and a paused session can still be continued (which shows it
     again). Returns the agent as it was before closing."""
     agent = get(db, agent_id)
+    _note_reviewer_end(db, agent)
     if is_alive(agent, panes) and owns_pane(db, agent):
         _stop(db, agent)
         db.set_status(agent.id, "done" if agent.result is not None else "paused")
@@ -2045,8 +2064,10 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     if _local_reviewer_available():
         candidates.append("reviewer-local")
     candidates = list(dict.fromkeys(candidates))
+    files, weight = learning._task_files(db, worker, repo_root) if worker else ((), None)
     pick, _ = learning.choose_why(db, cfg, repo_root, task, candidates=candidates,
-                                  default=cfg.reviewer)
+                                  default=cfg.reviewer, files=list(files) or None,
+                                  weight=weight)
     return pick or cfg.reviewer
 
 
@@ -2807,6 +2828,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if is_auth or is_model:
             db.set_status(agent_id, "failed")
             db.clear_permission_requests(agent_id)
+            _note_reviewer_end(db, agent)
             from brindle import providers, autopilot as pilot
             if is_auth:
                 providers.invalidate_signed_in(agent.provider)
@@ -3022,6 +3044,7 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     if agent.mode not in FORWARDING_MODES or not agent.parent_id:
         return False  # a synchronous handoff's caller is still waiting on it
     if db.get_agent(agent.parent_id) is None:
+        _note_reviewer_end(db, agent)
         return False
     ws = db.get_workspace(agent.workspace_id)
     if agent.mode == "review" and ws is not None and os.path.isdir(ws.path):
@@ -3042,6 +3065,7 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
 
         if pipeline.on_reviewer_unreported(db, get(db, agent.id), ws):
             return True  # resumed, a fallback reviewer took over, or the supervisor was told
+    _note_reviewer_end(db, agent, ws)
     where =f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
     tool = "submit_review" if agent.mode == "review" else "report_result"
     who = "Reviewer" if agent.mode == "review" else "Worker"

@@ -116,6 +116,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             db.end_native_subagents(a.id)
             db.set_status(a.id, "done" if a.mode != "interactive" and a.result is not None
                           else "paused")
+            agents._note_reviewer_end(db, a)
             leftovers.append(aid)
     if leftovers:
         found = procs.agent_pids(leftovers, procs=table)
@@ -248,6 +249,7 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         except agents.AgentError:
             continue  # its supervisor isn't running; try again on a later sweep
         db.update_agent(a.id, stuck_noted=since)
+        agents._note_reviewer_end(db, a, ws)
         done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
     return done
 
@@ -360,6 +362,7 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         except agents.AgentError:
             continue
         db.update_agent(a.id, stuck_noted=last)
+        agents._note_reviewer_end(db, a, ws)
         done.append(f"told {a.parent_id} that worker {a.id} has gone silent")
     return done
 
@@ -486,7 +489,7 @@ def prune_retired(db: DB, now: float | None = None) -> list[str]:
     merged (see ``view.retired``), and their branches unless the repo turns
     ``delete_merged_branches`` off. A worktree with
     uncommitted changes (or the one this is run from) is kept and reported."""
-    from brindle import view, workspaces
+    from brindle import pipeline, view, workspaces
 
     now = time.time() if now is None else now
     alive = view.live_agents(db, tmux.list_panes())
@@ -494,6 +497,7 @@ def prune_retired(db: DB, now: float | None = None) -> list[str]:
     done = []
     for ws in db.find_workspaces():
         if not os.path.isdir(ws.path):
+            pipeline.on_workspace_cleanup(db, ws)
             db.delete_workspace(ws.id)
             done.append(f"forgot missing workspace {ws.id} ({ws.path})")
             continue

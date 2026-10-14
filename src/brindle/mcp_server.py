@@ -853,8 +853,11 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
             unmerged = ahead > 0
         except git.GitError:
             pass
-    if unmerged:
-        tasks.on_removed_unmerged(db, ws)
+    worker = agents.workspace_worker(db, ws)
+    abandoned = bool(worker and worker.result is None and not db.merged_sha(ws.id))
+    if unmerged or abandoned:
+        if unmerged:
+            tasks.on_removed_unmerged(db, ws)
         pipeline.note_removed_unmerged(db, ws, actor=caller)
     else:
         pipeline.note_removed_merged(db, ws, actor=caller)

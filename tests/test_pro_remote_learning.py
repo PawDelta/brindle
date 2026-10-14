@@ -97,18 +97,35 @@ def test_record_payload_keys_and_contents(parts, remote):
     lr.record(task(), Outcome("review", approved=False))
     lr.record(task(), Outcome("escalated"))
     lr.record(task(), Outcome("merged", checks_passed=True, tokens=1234, wall_seconds=61.5))
+    lr.record(task(agent_id="rev-1", profile="reviewer-codex"),
+              Outcome("verdict", approved=True, wall_seconds=9.5))
+    lr.record(task(agent_id="rev-2", profile="reviewer"),
+              Outcome("no_verdict", wall_seconds=14.0))
     lr.flush()
-    reported, review, escalated, merged = remote.records
+    reported, review, escalated, merged, verdict, no_verdict = remote.records
     assert set(review) == {"org_id", "key_id", "repo_key", "agent_ref", "profile", "weight", "features", "event",
                            "approved", "checks_passed", "review_rounds", "escalations",
                            "tokens", "wall_seconds"}
-    assert set(reported) == set(escalated) == set(merged) == set(review) - {"approved"}
+    assert set(verdict) == set(review)
+    assert set(reported) == set(escalated) == set(merged) == set(no_verdict) == set(review) - {"approved"}
     assert reported["event"] == "reported" and reported["wall_seconds"] == 12.5
     assert review["approved"] is False and review["event"] == "review"
     assert (review["org_id"], review["key_id"]) == ("org_1", "k1")
     assert merged == {**merged, "profile": "developer", "weight": "heavy", "event": "merged",
                       "checks_passed": True, "review_rounds": 1, "escalations": 1,
                       "tokens": 1234, "wall_seconds": 61.5}
+    assert verdict == {**verdict, "profile": "reviewer-codex", "weight": "heavy", "event": "verdict",
+                       "approved": True, "wall_seconds": 9.5, "features": merged["features"]}
+    assert verdict["agent_ref"] != merged["agent_ref"]
+    assert no_verdict == {**no_verdict, "profile": "reviewer", "weight": "heavy",
+                          "event": "no_verdict", "wall_seconds": 14.0}
+    dec = type("D", (), {"baseline_profile": "developer", "learned": True})()
+    key = cloud.OrgKey("org_1", "k1", b"0" * 32)
+    assert "baseline_profile" in cloud.record_payload(key, "id", task(), Outcome("merged"), decision=dec, cost=lr.cost)
+    assert "baseline_profile" not in cloud.record_payload(key, "id", task(profile="reviewer"),
+                                                          Outcome("verdict", approved=True), decision=dec, cost=lr.cost)
+    assert "baseline_profile" not in cloud.record_payload(key, "id", task(profile="reviewer"),
+                                                          Outcome("no_verdict"), decision=dec, cost=lr.cost)
     for body in remote.records:
         no_forbidden(body)
         assert set(body) <= cloud.RECORD_KEYS

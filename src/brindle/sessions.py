@@ -166,8 +166,6 @@ def _forget(db: DB, s: Session) -> None:
             if ws and ws.kind == "worktree":
                 worker_workspaces[ws.id] = ws
     member_ids = {a.id for a in s.members}
-    for a in s.members:
-        db.delete_agent(a.id)
     for ws in worker_workspaces.values():
         if any(a.id not in member_ids for a in db.list_agents(ws.id)):
             continue  # someone else still works here
@@ -177,6 +175,9 @@ def _forget(db: DB, s: Session) -> None:
             workspaces.remove(db, ws, force=False)
         except (workspaces.WorkspaceError, git.GitError):
             pass
+    for a in s.members:
+        agents._note_reviewer_end(db, a)
+        db.delete_agent(a.id)
 
 
 def enforce(db: DB, repo_root: str, now: float | None = None) -> int:
@@ -206,6 +207,8 @@ def enforce(db: DB, repo_root: str, now: float | None = None) -> int:
 def prune_scratch(db: DB, now: float | None = None) -> int:
     """Delete scratch sessions older than MAX_AGE_DAYS whose work was
     transferred (or that never had any), with no agent still running there."""
+    from brindle import pipeline
+
     now = now or time.time()
     removed = 0
     for ws in scratch.sessions(db):
@@ -219,6 +222,7 @@ def prune_scratch(db: DB, now: float | None = None) -> int:
         for s in paused(db, ws.repo_root):
             _forget(db, s)
         tmux.kill_session(ws.tmux_session)
+        pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)
         shutil.rmtree(ws.path, ignore_errors=True)
         removed += 1

@@ -14,15 +14,16 @@ into brindle.
 What leaves the machine is fixed by :func:`record_payload` and
 :func:`suggest_payload`: kind/size one-hots from :mod:`brindle.pro.features`,
 the declared weight, profile names and their relative cost, outcome event
-("reported", "review", "escalated", "merged", "removed_unmerged") and
-counters (including elapsed ``wall_seconds`` on "reported" and terminal
-events), an opaque ``repo_key`` and ``agent_ref``. On a terminal event
-("merged", "removed_unmerged") also, when this machine recorded a routing
-decision for the worker, four coarse savings fields: ``baseline_profile`` (the
-profile brindle would have used without learning), ``learned`` (whether
-learning made the pick), ``cost_rank`` and ``baseline_cost_rank`` (0-16, the
-relative cost of the profile used and of the baseline). Never task text, file
-paths, repo paths, branch names, provider or model.
+("reported", "review", "escalated", "merged", "removed_unmerged", "verdict",
+"no_verdict") and counters (including elapsed ``wall_seconds`` on "reported"
+and terminal events), an opaque ``repo_key`` and ``agent_ref``. On a worker
+terminal event ("merged", "removed_unmerged") also, when this machine recorded
+a routing decision for the worker, four coarse savings fields:
+``baseline_profile`` (the profile brindle would have used without learning),
+``learned`` (whether learning made the pick), ``cost_rank`` and
+``baseline_cost_rank`` (0-16, the relative cost of the profile used and of the
+baseline). Never task text, file paths, repo paths, branch names, provider or
+model.
 
 ``repo_key`` and ``agent_ref`` are HMACs under the active org's learning key
 over the repo's identity (root commit, else normalized origin URL) and the
@@ -59,11 +60,12 @@ FORBIDDEN_BACKOFF = 600.0      # after a 403, don't ask again for this long
 ERROR_BACKOFF = 60.0           # after a transport error or a 429
 DAILY_LIMIT_BACKOFF = 3600.0   # after the repo's daily event cap
 WEIGHTS = ("light", "medium", "heavy", "advanced")
-EVENTS = ("reported", "review", "escalated", "merged", "removed_unmerged")
+EVENTS = ("reported", "review", "escalated", "merged", "removed_unmerged", "verdict", "no_verdict")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MAX_CANDIDATES = 16
 
-TERMINAL = ("merged", "removed_unmerged")
+TERMINAL = ("merged", "removed_unmerged", "verdict", "no_verdict")
+WORKER_TERMINAL = ("merged", "removed_unmerged")
 
 RECORD_KEYS = frozenset({"org_id", "key_id", "repo_key", "agent_ref", "profile", "weight", "features", "event",
                          "approved", "checks_passed", "review_rounds", "escalations", "tokens",
@@ -168,9 +170,9 @@ def record_payload(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
     }
     if task.agent_id:
         body["agent_ref"] = key.agent_ref(task.agent_id)
-    if outcome.event == "review" and isinstance(outcome.approved, bool):
+    if outcome.event in ("review", "verdict") and isinstance(outcome.approved, bool):
         body["approved"] = outcome.approved
-    if outcome.event in TERMINAL and decision is not None and cost is not None:
+    if outcome.event in WORKER_TERMINAL and decision is not None and cost is not None:
         baseline = getattr(decision, "baseline_profile", None)
         if isinstance(baseline, str) and PROFILE_RE.match(baseline):
             try:
@@ -386,7 +388,7 @@ class CloudLearner(LearningPlugin):
                 return
             task, outcome, rounds, escalations = item
             decision = None
-            if outcome.event in TERMINAL and task.agent_id:
+            if outcome.event in WORKER_TERMINAL and task.agent_id:
                 try:
                     decision = self.decision_for(task.agent_id)
                 except Exception:  # noqa: BLE001 - no decision on record: omit the savings fields
