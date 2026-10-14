@@ -92,6 +92,19 @@ def test_idle_status_falls_back_to_created_at(db, root, monkeypatch):
     assert autopilot.stalled_workers(db, "boss") == []
 
 
+def test_merged_branch_reviewer_is_not_stalled(db, root, monkeypatch):
+    from brindle import gates
+
+    _, ws = root
+    r = add_agent(db, ws, "r1", status="idle", status_since=LONG_AGO)
+    db.update_agent("r1", mode="review")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    assert [a.id for a in autopilot.stalled_workers(db, "boss")] == ["r1"]
+    db.set_merged(ws.id, gates.head(ws))
+    assert autopilot.stalled_workers(db, "boss") == []
+    assert agents.tell_parent_unreported(db, agents.get(db, r.id)) is False
+
+
 # -- Bug 3: nothing woke a supervisor that went idle before its worker ------
 
 

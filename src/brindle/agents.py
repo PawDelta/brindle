@@ -3116,6 +3116,20 @@ def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
     return True
 
 
+def review_moot(db: DB, agent: Agent) -> bool:
+    """A reviewer whose branch already merged at its current commit: there is
+    nothing left for it to review or report. A reviewer of commits made after
+    the merge is not moot."""
+    if agent.mode != "review":
+        return False
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is None:
+        return False
+    from brindle import pipeline
+
+    return (pipeline._settled(db, ws) or "").startswith(pipeline.ALREADY_MERGED)
+
+
 def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
@@ -3128,6 +3142,9 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
         _note_reviewer_end(db, agent)
         return False
     ws = db.get_workspace(agent.workspace_id)
+    if review_moot(db, agent):
+        close_later(agent.id)
+        return False
     if agent.mode == "review" and ws is not None and os.path.isdir(ws.path):
         from brindle import gates
 
