@@ -1509,17 +1509,16 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     terminal as a side effect of just rendering the dashboard.
 
     An agent whose CLI runs none of brindle's hooks (``hooks_off``: the
-    person's settings turn them off, or none reported within HOOKS_GRACE of
-    its input box appearing) has only the screen to go by: it may leave
-    'starting', a single read may move it from 'idle' to busy, and a
-    ``samples`` >= 2 idle read delivers what's queued even when the status
-    was already idle, since no Stop hook ever will."""
+    person's settings turn them off, at launch or later through /hooks, or
+    none reported within HOOKS_GRACE of its input box appearing) has only the
+    screen to go by: it may leave 'starting', a single read may move it from
+    'idle' to busy, and a ``samples`` >= 2 idle read delivers what's queued
+    even when the status was already idle, since no Stop hook ever will."""
     provider = get_provider(agent.provider)
     if (agent.headless or not provider.uses_hooks
             or agent.status not in ("starting", "idle", "processing", "waiting")):
         return None  # a headless pane shows output, not a TUI to read
-    if agent.status == "starting" and not agent.hooks_off:
-        _note_hooks_off(db, agent, provider.hooks_disabled(*_settings_scope(db, agent)))
+    _sync_hooks_off(db, agent, provider.hooks_disabled(*_settings_scope(db, agent)))
     if agent.status == "idle" and samples < 2 and not agent.hooks_off:
         return None
     seen, ready = set(), True
@@ -1535,10 +1534,11 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
             state = None
         seen.add(state)
         ready = ready and provider.input_ready(screen)
-    if (agent.status == "starting" and not agent.hooks_off and ready
+    if (agent.status == "starting" and not agent.hooks_off and ready and provider.announces_start
             and time.time() - (agent.status_since or agent.created_at) >= HOOKS_GRACE):
         # Its input box is up, and SessionStart, which runs before it, never reported.
-        _note_hooks_off(db, agent, f"no hook events from {provider.name}")
+        # (A CLI without one is marked ready by after_launch instead: see ready.)
+        _sync_hooks_off(db, agent, f"{NO_HOOK_EVENTS} from {provider.name}")
     if len(seen) != 1:
         return None
     state = seen.pop()
@@ -1563,11 +1563,20 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
 # How long a hooks CLI may show its input box while still 'starting' before
 # brindle takes it that none of its hooks run (see screen_status).
 HOOKS_GRACE = 60.0
+# How hooks_off reads when no settings explain it, only the missing events.
+NO_HOOK_EVENTS = "no hook events"
+
+
+_settings_scopes: dict[tuple[str, float], tuple[str | None, list[str] | None]] = {}
 
 
 def _settings_scope(db: DB, agent: Agent) -> tuple[str | None, list[str] | None]:
     """Where ``agent``'s CLI reads its settings: its workspace, and the
-    profile's setting_sources (None: all of them)."""
+    profile's setting_sources (None: all of them). Kept per agent, as the
+    sidebar asks on every refresh and a running CLI keeps its launch flags."""
+    key = (agent.id, agent.created_at)
+    if key in _settings_scopes:
+        return _settings_scopes[key]
     from brindle.profiles import ProfileError
 
     ws = db.get_workspace(agent.workspace_id)
@@ -1575,11 +1584,16 @@ def _settings_scope(db: DB, agent: Agent) -> tuple[str | None, list[str] | None]
         sources = load_profile(agent.profile, ws.repo_root if ws else None).setting_sources
     except (KeyError, ProfileError):
         sources = None
-    return (ws.path if ws else None), sources
+    scope = _settings_scopes[key] = (ws.path if ws else None), sources
+    return scope
 
 
-def _note_hooks_off(db: DB, agent: Agent, why: str | None) -> None:
-    if why:
+def _sync_hooks_off(db: DB, agent: Agent, why: str | None) -> None:
+    """Record ``why`` its hooks are off; None clears a reason the settings
+    gave (turned back on), but not missing events, which only a hook clears."""
+    if why is None and agent.hooks_off and agent.hooks_off.startswith(NO_HOOK_EVENTS):
+        return
+    if why != agent.hooks_off:
         db.update_agent(agent.id, hooks_off=why)
         agent.hooks_off = why
 
