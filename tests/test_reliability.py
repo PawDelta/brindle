@@ -228,3 +228,34 @@ def test_send_message_delivered_when_reconcile_already_flushed_it(db, root, monk
     assert db.pending_count("w1") == 0
 
 
+@pytest.mark.parametrize("cause", ["settings", "grace"])
+def test_sidebar_leaves_starting_and_says_so_when_claude_runs_no_hooks(db, root, tmp_path, monkeypatch, cause):
+    # Claude Code with disableAllHooks never runs SessionStart, the only thing
+    # that moved a 'starting' agent on: its row read "starting up" forever and
+    # a message queued for it never went in.
+    from brindle import view, watch
+
+    _, ws = root
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    if cause == "settings":
+        (config / "settings.json").write_text('{"disableAllHooks": true}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    monkeypatch.setenv("BRINDLE_CLAUDE_MANAGED_SETTINGS", "")
+    since = time.time() - (3600 if cause == "grace" else 0)   # grace: well past agents.HOOKS_GRACE
+    add_agent(db, ws, "w1", status="starting", status_since=since)
+    db.enqueue("w1", "hello", "boss")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
+
+    entry = view.agent_entry(db, db.get_agent("w1"))   # the sidebar's one-sample read
+    assert entry["status"] == "idle" and not pasted
+    rows = " ".join(ln.text for ln in watch.render_agent(entry, {"id": ws.id}, time.time(), 30))
+    assert "hooks off" in rows
+
+    agents.reconcile(db, db.get_agent("w1"))           # a two-sample read delivers it
+    assert pasted and db.pending_count("w1") == 0
+
+

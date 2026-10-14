@@ -281,6 +281,11 @@ def render_agent(a: dict, ws: dict, now: float, width: int, spend: float | str |
         detail.append(spend if isinstance(spend, str) else pricing.money(spend))
     detail.append(a["id"][:6])
     lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
+    if a.get("hooks_off"):
+        # Its CLI runs none of brindle's hooks: say why, and how to fix it.
+        warning = (f"⚠ hooks off ({a['hooks_off']}): status is read from its screen. "
+                   "Turn them back on: /hooks, or disableAllHooks false.")
+        lines += [Line(t, "alert", workspace=ws) for t in _wrap(warning, width, "    ")]
     for sub in a.get("subagents") or []:
         sub_name = sub.get("agent_type") or "subagent"
         if sub["ended_at"] is None:
