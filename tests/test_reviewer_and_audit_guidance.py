@@ -253,6 +253,7 @@ def test_session_handover_preserves_audit_history_and_accepted_decisions(db, rep
     assert "Accepted exclusion of deprecated driver" in autopilot.audit_prompt(db, new_ap, "commit-head")
 
 
+@pytest.mark.variant("incident: 0.3.4 sent every review to reviewer-gemini whenever agy was installed; the fix removed that branch")
 def test_default_review_profile_ignores_agy_without_learner(db, repo, monkeypatch):
     from brindle.config import RepoConfig
     from brindle import agents
