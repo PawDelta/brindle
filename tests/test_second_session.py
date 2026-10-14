@@ -18,6 +18,7 @@ def running(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "sup1")
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cli, "_preflight", lambda *a: None)
+    monkeypatch.setattr(cli, "_resolve_supervisor", lambda root, provider, **kw: provider)   # no picker
     monkeypatch.chdir(repo)
     return ws
 
