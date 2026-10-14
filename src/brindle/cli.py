@@ -437,6 +437,9 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
         why = acc.refusal(provider)
         if why:
             _fail(f"can't run the supervisor on {provider}: {why}")
+        if _can_prompt(yes, demo) and provider not in doctor_mod.signed_in_providers():
+            if not picker.sign_in(provider):
+                raise typer.Exit(1)
     elif _can_prompt(yes, demo) and not (pick and acc.allows(pick)
                                          and pick in doctor_mod.signed_in_providers()):
         provider = ask()

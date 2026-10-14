@@ -26,20 +26,21 @@ def _unavailable(root):
     raise managed_models.ManagedUnavailable("couldn't read the org's managed-models policy")
 
 
-@pytest.mark.parametrize("policy, managed, clis, model_ok", [
-    (allow(), None, ["claude", "antigravity"], True),        # no team org: everything installed
-    ({"allowed_providers": ["codex", "claude"], "allowed_models": ["gpt-5"]}, None, ["claude", "codex"], False),
-    ({}, "exclusive", ["codex"], True),                       # the managed routing serves only Codex
-    ({}, _unavailable, [], False),                            # can't read it: nothing
-    (deny("never fetched"), None, [], False),
+@pytest.mark.parametrize("policy, managed, installed, clis, model_ok", [
+    (allow(), None, ["claude", "antigravity"], ["claude", "codex", "antigravity"], True),
+    ({}, None, [], ["claude", "codex", "antigravity"], True),                            # fresh machine: no CLI installed
+    ({"allowed_providers": ["codex", "claude"], "allowed_models": ["gpt-5"]}, None, ["claude", "antigravity"], ["claude", "codex"], False),
+    ({}, "exclusive", ["claude", "antigravity"], ["codex"], True),                       # the managed routing serves only Codex
+    ({}, _unavailable, ["claude", "antigravity"], [], False),                            # can't read it: nothing
+    (deny("never fetched"), None, ["claude", "antigravity"], [], False),
 ])
-def test_supervisor_access_narrows_to_the_org(monkeypatch, policy, managed, clis, model_ok):
+def test_supervisor_access_narrows_to_the_org(monkeypatch, policy, managed, installed, clis, model_ok):
     p = policy if not isinstance(policy, dict) else parse_policy(ORG, {"version": 1, "policy": policy})
     monkeypatch.setattr(team_policy.ProPolicy, "policy", lambda self: p)
     m = _exclusive(monkeypatch) if managed == "exclusive" else managed
     monkeypatch.setattr(managed_models, "current", m if callable(m) else lambda root: m)
     acc = team_policy.access("/repo")
-    assert acc.clis(installed=["claude", "antigravity"]) == clis
+    assert acc.clis(installed=installed) == clis
     assert acc.allows_model("claude-sonnet-4-5") is model_ok
     assert acc.deny_personal_keys is (managed == "exclusive")
 
@@ -78,6 +79,7 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
     monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(org_id=ORG, allowed_providers=allowed))
     asked = []
     monkeypatch.setattr(picker, "pick_supervisor", lambda acc, cur: asked.append(cur) or "antigravity")
+    monkeypatch.setattr(picker, "sign_in", lambda p: asked.append(f"sign_in:{p}") or True)
     try:
         got = cli._resolve_supervisor(None, provider)
     except (typer.Exit, SystemExit):
@@ -86,7 +88,8 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
 
 
 @pytest.mark.parametrize("kw, got, asked, remembered", [
-    (dict(provider="codex"), "codex", [], "codex"),                                 # -s CLI is remembered
+    (dict(provider="codex", signed_in=["codex"]), "codex", [], "codex"),            # -s CLI is remembered
+    (dict(provider="codex"), "codex", ["sign_in:codex"], "codex"),                  # -s CLI not signed in: sign in first
     (dict(provider="codex", allowed=("claude",)), "refused", [], None),             # -s refuses what the org doesn't allow
     (dict(provider=picker.PICK), "antigravity", [None], "antigravity"),             # bare -s opens the picker
     (dict(provider=picker.PICK, tty=False), "refused", [], None),
