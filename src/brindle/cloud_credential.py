@@ -231,7 +231,7 @@ def hook_argv(argv0: str | None = None, python: str | None = None) -> list[str]:
         return [raw]
     interpreter = python or sys.executable
     _vet(interpreter, "the Python interpreter")
-    return [interpreter, "-m", "brindle"]
+    return [interpreter, "-P", "-m", "brindle"]    # -P: not a brindle/ in the hook's cwd
 
 
 def hook_command(cloud: str, org_id: str, argv0: str | None = None, python: str | None = None) -> str:
@@ -346,7 +346,7 @@ def assume_role(sts: Sts, region: str, role_arn: str, id_token: str, now: float)
     c = claims(id_token)
     status, raw = sts(f"https://sts.{region}.amazonaws.com/", {
         "Action": "AssumeRoleWithWebIdentity", "Version": "2011-06-15", "RoleArn": role_arn,
-        "RoleSessionName": session_name(str(c.get("member") or ""), str(c.get("fid") or "")),
+        "RoleSessionName": session_name(str(c.get("member") or c.get("sub") or ""), str(c.get("fid") or "")),
         "WebIdentityToken": id_token, "DurationSeconds": str(AWS_SESSION_SECONDS)})
     leaves = _xml(raw)
     if status != 200:
@@ -432,13 +432,28 @@ def device_headers() -> dict[str, str]:
     return {"X-Brindle-Version": brindle.__version__}
 
 
+def _personal(store, client, org_id: str) -> bool:
+    """Whether ``org_id`` is the signed-in user's own org (no team org is
+    selected and the stored entitlement is for it)."""
+    from brindle.pro import license
+
+    try:
+        if (store.load() or {}).get("org_id"):
+            return False
+        ent = license.current(store=store, client=client)
+    except Exception:  # noqa: BLE001 - no usable entitlement: treat it as a team org
+        return False
+    return ent.org_id == org_id and "team" not in ent.features and ent.plan not in ("team", "enterprise")
+
+
 def _mint(client, store, org_id: str, cloud: str) -> str:
     """An ID token for ``cloud`` from PawDelta. A revoked or too-old sign-in
     signs the family out on the server, then deletes the stored credentials."""
     from brindle.pro import auth
 
+    path = "/me/federation/token" if _personal(store, client, org_id) else f"/orgs/{org_id}/federation/token"
     try:
-        status, body = auth.authed(client, store, "POST", f"/orgs/{org_id}/federation/token",
+        status, body = auth.authed(client, store, "POST", path,
                                    auth.JSONBody({"cloud": cloud}), headers=device_headers())
     except auth.AuthError as e:
         if isinstance(e, auth.TransportError):
@@ -515,7 +530,7 @@ def credential(cloud: str, org_id: str | None = None, *, client=None, store=None
                sts: Sts | None = None, now: float | None = None) -> str:
     """What ``cloud``'s hook prints (empty for Azure, which reads a file).
     Raises :class:`CredentialError` with the line to show."""
-    from brindle.pro import auth, credentials
+    from brindle.pro import auth, credentials, license
 
     if cloud not in CLOUDS:
         raise CredentialError(f"unknown cloud {cloud}")
@@ -526,11 +541,16 @@ def credential(cloud: str, org_id: str | None = None, *, client=None, store=None
         cur = {}
     if not cur.get("refresh_token"):
         raise CredentialError(LOGIN_LINE)
+    client = client or auth.Client(cur.get("base_url"))
     org_id = org_id or cur.get("org_id")
+    if not org_id:
+        try:  # a personal sign-in stores no org: use the entitlement's own
+            org_id = license.current(store=store, client=client).org_id
+        except Exception:  # noqa: BLE001 - no usable entitlement
+            pass
     if not org_id:
         raise CredentialError("no organization given; pass --org ID")
     d = org_dir(org_id, create=True)
-    client = client or auth.Client(cur.get("base_url"))
     now = time.time() if now is None else now
     with mint_lock(d):
         # Under the lock: the process that held it may have just minted.

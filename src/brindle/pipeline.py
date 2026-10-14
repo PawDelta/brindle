@@ -139,9 +139,9 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
           actor: Agent | str | None = None, **event) -> None:
     """Tell the learning and events plugins about ``ws``'s worker (a no-op
     unless the repo has them; never raises). ``event`` is one of
-    ``approved=``, ``escalated=True`` or ``merged=`` (see learning.note);
-    the events plugin hears it as a review, escalated, merge or remove
-    event from ``actor``."""
+    ``reported=True``, ``approved=``, ``escalated=True`` or ``merged=``
+    (see learning.note); the events plugin hears it as a review, escalated,
+    merge or remove event from ``actor``."""
     try:
         cfg = load_repo_config(ws.repo_root)
         worker = worker or agents.workspace_worker(db, ws)
@@ -151,7 +151,8 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
         learning.note(db, cfg, worker, ws, **event)
     except Exception:
         pass
-    savings.note_outcome(db, worker, **event)
+    if not event.get("reported"):
+        savings.note_outcome(db, worker, **event)
     if event.get("approved") is not None:
         events.emit(cfg, "review", ws, worker, actor=actor, approved=event["approved"])
     if event.get("escalated"):
@@ -160,6 +161,10 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
         events.emit(cfg, "merge", ws, worker, actor=actor)
     elif event.get("merged") is False:
         events.emit(cfg, "remove", ws, worker, actor=actor, merged=False)
+
+
+def note_reported(db: DB, ws: Workspace, worker: Agent | None = None) -> None:
+    _note(db, ws, worker, reported=True)
 
 
 def note_review(db: DB, ws: Workspace, approved: bool, reviewer: Agent | None = None) -> None:
@@ -292,6 +297,260 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
     return handled
 
 
+SMALL_DIFF_LINES = 40
+SMALL_DIFF_FILES = 3
+
+
+def _small_diff_stat(ws: Workspace) -> str | None:
+    """The ``git diff --stat`` output when ``ws`` has a small, non-empty diff
+    against its base (at most ``SMALL_DIFF_LINES`` changed lines across at most
+    ``SMALL_DIFF_FILES`` files); None otherwise."""
+    if not ws.base_branch or not os.path.isdir(ws.path):
+        return None
+    try:
+        mb = git.merge_base(ws.path, git.base_ref(ws.path, ws.base_branch))
+        numstat = git.out(["diff", "--numstat", mb], ws.path).splitlines()
+        untracked = git.paths(["ls-files", "--others", "--exclude-standard"], ws.path)
+        if untracked or not numstat or len(numstat) > SMALL_DIFF_FILES:
+            return None
+        lines = 0
+        for row in numstat:
+            parts = row.split("\t", 2)
+            if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+                return None
+            lines += int(parts[0]) + int(parts[1])
+        if lines == 0 or lines > SMALL_DIFF_LINES:
+            return None
+        return git.out(["diff", "--stat", mb], ws.path).strip()
+    except git.GitError:
+        return None
+
+
+def _cached_check_summary(db: DB, ws: Workspace, cfg: RepoConfig, reviewer: Agent) -> str | None:
+    """Stored check results for ``ws``'s commit without re-running any
+    command: from ``reviewer.task`` if ``review_after_checks`` already put
+    them there, else from ``check_cache``."""
+    if reviewer.task:
+        marker = "The repo's checks have already run on this commit:\n\n"
+        end_marker = "\n\nTake these results into account; don't run the whole suite yourself."
+        if marker in reviewer.task and end_marker in reviewer.task:
+            body = reviewer.task.split(marker, 1)[1].split(end_marker, 1)[0].strip()
+            if body:
+                return body
+    if not os.path.isdir(ws.path):
+        return None
+    try:
+        sha = reviewer.review_sha or gates.head(ws)
+    except git.GitError:
+        return None
+    rows = db.conn.execute(
+        "SELECT command, ok, output FROM check_cache WHERE workspace_id=? AND sha=?",
+        (ws.id, sha),
+    ).fetchall()
+    if not rows:
+        return None
+    by_cmd = {r["command"]: (bool(r["ok"]), r["output"] or "") for r in rows}
+    order = list(cfg.checks) + [r["command"] for r in rows if r["command"] not in cfg.checks]
+    lines = [
+        f"PASS `{c}`" if by_cmd[c][0] else f"FAIL `{c}`\n{by_cmd[c][1]}".rstrip()
+        for c in order if c in by_cmd
+    ]
+    return f"Checks for {ws.branch} at {sha[:8]}:\n\n" + "\n".join(lines)
+
+
+def _partial_findings(reviewer: Agent) -> str | None:
+    """The stalled reviewer's partial findings or last transcript/screen
+    words, if any."""
+    from brindle import rewind
+
+    words = rewind.turn_words(reviewer)
+    if words:
+        return words
+    path = agents.transcript_file(reviewer)
+    if not path:
+        return None
+    return rewind._last_assistant_text(path)
+
+
+def _repo_pins_reviewer(repo_root: str | None) -> bool:
+    """Whether ``repo_root``'s own ``.brindle/config.json`` or
+    ``config.local.json`` explicitly sets ``reviewer`` or ``review_profile``."""
+    if not repo_root:
+        return False
+    from brindle.config import CONFIG_DIR, CONFIG_FILE, LOCAL_CONFIG_FILE, _read_json, config_root
+
+    base = config_root(repo_root) / CONFIG_DIR
+    for name in (LOCAL_CONFIG_FILE, CONFIG_FILE):
+        try:
+            raw = _read_json(base / name)
+        except ValueError:
+            continue
+        if "review_profile" in raw or "reviewer" in raw:
+            return True
+    return False
+
+
+def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
+                       repo_root: str | None = None) -> tuple[str, str]:
+    """Which reviewer profile to run for the fallback and why: keeps an
+    explicitly pinned ``cfg.review_profile`` / ``cfg.reviewer``; otherwise
+    routes to the cheapest available reviewer tier (reusing weight/price
+    tiers, and including ``reviewer-local`` only when configured by the repo),
+    falling back to ``cfg.reviewer``."""
+    if cfg.review_profile:
+        return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
+    default = cfg.reviewer or "reviewer"
+    if default != "reviewer" or _repo_pins_reviewer(repo_root):
+        return default, f"using {default} (pinned by reviewer config)"
+    from brindle import autopilot, pricing, profiles
+
+    allow_local = "reviewer-local" in (
+        *cfg.learning_candidates,
+        *cfg.second_review.values(),
+        *cfg.routing.get("light", ()),
+    )
+    names = [
+        p.name for p in profiles.list_profiles(repo_root)
+        if (p.name == "reviewer" or p.name.startswith("reviewer-"))
+        and (allow_local or p.name != "reviewer-local")
+    ]
+    for extra in (*cfg.routing.get("light", ()), *cfg.learning_candidates):
+        if extra.startswith("reviewer") and extra not in names and (allow_local or extra != "reviewer-local"):
+            names.append(extra)
+    rank_of = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3}
+    scored: list[tuple[tuple[int, float, int], str, str]] = []
+    for name in names:
+        if repo_root and autopilot._unavailable(name, cfg, repo_root) is not None:
+            continue
+        tier = autopilot.profile_weight(name, cfg, repo_root)
+        price = pricing.profile_price(name, repo_root)
+        rate = (price.input + price.output) if price is not None else float("inf")
+        scored.append(((rank_of.get(tier, 1), rate, 0 if name == default else 1), name, tier))
+    if scored:
+        scored.sort(key=lambda item: item[0])
+        _, best, tier = scored[0]
+        info = autopilot.model_cost_info(best, cfg, repo_root)
+        return best, f"using {best}{info} (cheapest available {tier} reviewer tier)"
+    tier = autopilot.profile_weight(default, cfg, repo_root)
+    return default, f"using {default} ({tier} reviewer tier; no other reviewer available)"
+
+
+def _supervisor_review_summary(ws: Workspace, worker: Agent, reviewer: Agent,
+                               diff_stat: str | None, check_summary: str | None,
+                               partial: str | None) -> str:
+    parts = [
+        f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
+        f"stopped without a verdict. Review it yourself with workspace_diff, then "
+        f"merge_workspace(\"{ws.id}\")."
+    ]
+    if diff_stat:
+        parts.append(f"Diff stat:\n{diff_stat}")
+    if check_summary:
+        parts.append(f"Check results:\n{check_summary}")
+    if partial:
+        parts.append(f"Reviewer {reviewer.id}'s partial findings:\n{partial}")
+    if worker.result:
+        parts.append(f"Worker's report:\n{worker.result}")
+    return "\n\n".join(parts)
+
+
+def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
+    """A reviewer of a piped branch stopped without a verdict, which would
+    leave its worker in ``pipeline='reviewing'`` for good. Escalates only as
+    needed:
+    1. Liveness: ignore if a command is still running or its transcript was
+       written to recently.
+    2. Resume the same reviewer once with a short verdict prompt (messaging a
+       live idle reviewer, or reopening a dead reviewer's own recorded session).
+    3. If step 2 could not resume the reviewer (or the resumed turn also
+       stopped without a verdict) and the diff is small, hand the supervisor a
+       ready-made summary instead of spawning another reviewer.
+    4. Otherwise start one fallback review on the cheapest available reviewer
+       tier (unless the repo pins one), reusing the commit's cached check
+       results and the first reviewer's partial findings."""
+    import time
+
+    worker = piped_worker(db, ws)
+    if worker is None or worker.pipeline != "reviewing":
+        return False
+    if agents.command_running(db, reviewer) or (
+        agents.is_alive(reviewer) and agents.transcript_active(reviewer)
+    ):
+        return False
+    if not os.path.isdir(ws.path):
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        _tell(db, worker.parent_id,
+              f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
+              f"stopped without a verdict, and the branch's worktree {ws.path} no longer exists, "
+              f"so nothing is left to review or merge. remove_workspace(\"{ws.id}\") clears "
+              "its record.", reviewer.id)
+        return True
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except ValueError:
+        cfg = RepoConfig()
+    tried = any(a.id != reviewer.id and a.mode == "review" and a.result is None
+                and a.unreported_noted and a.review_sha == reviewer.review_sha
+                for a in db.list_agents(ws.id))
+    now = time.time()
+    in_flight_queued = (
+        reviewer.reopened_at is not None
+        and agents.is_alive(reviewer)
+        and db.pending_count(reviewer.id) > 0
+        and now - reviewer.reopened_at < agents.TRANSCRIPT_ACTIVE_SECONDS
+    )
+    if not tried and (not reviewer.reopened_at or in_flight_queued):
+        try:
+            if agents.reopen_reviewer(db, reviewer, ws):
+                # Clearing unreported_noted lets tell_parent_unreported re-enter
+                # on_reviewer_unreported if this resumed turn also stops without
+                # a verdict, while reopened_at prevents resuming a second time
+                # (and respects a queued reminder while it is still in flight).
+                db.update_agent(reviewer.id, reopened_at=reviewer.reopened_at or now,
+                                unreported_noted=None)
+                return True
+        except agents.AgentError:
+            pass
+    if not reviewer.unreported_noted:
+        db.update_agent(reviewer.id, unreported_noted=int(now))
+    check_summary = _cached_check_summary(db, ws, cfg, reviewer)
+    partial = _partial_findings(reviewer)
+    diff_stat = _small_diff_stat(ws)
+    if diff_stat is not None:
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        agents.close_later(reviewer.id)
+        _tell(db, worker.parent_id,
+              _supervisor_review_summary(ws, worker, reviewer, diff_stat, check_summary, partial),
+              reviewer.id)
+        return True
+    parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+    if not tried and parent is not None:
+        profile, reason = _fallback_reviewer(cfg, reviewer, ws.repo_root)
+        focus_parts = [f"Fallback review ({reason})."]
+        if partial:
+            focus_parts.append(
+                f"Earlier reviewer {reviewer.id} ({reviewer.profile}) stopped without a verdict; "
+                f"its partial findings:\n{partial}"
+            )
+        try:
+            agents.request_review(
+                db, parent, ws, profile, focus="\n\n".join(focus_parts),
+                cfg=cfg, check_summary=check_summary,
+            )
+            agents.close_later(reviewer.id)
+            return True
+        except agents.AgentError:
+            pass
+    db.update_agent(worker.id, pipeline=None)
+    _escalate(db, ws, worker)
+    _tell(db, worker.parent_id,
+          _supervisor_review_summary(ws, worker, reviewer, None, check_summary, partial),
+          reviewer.id)
+    return True
+
+
 def has_supervisor_action(summary: str) -> bool:
     """Parse review summary for actionable supervisor findings.
     Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
@@ -315,6 +574,10 @@ def has_supervisor_action(summary: str) -> bool:
     first_sentence = re.split(r"[.\n;]", section_text.strip())[0]
     first_cleaned = re.sub(r"[^\w]+", " ", first_sentence).strip().lower()
     if first_cleaned and first_cleaned in negations:
+        return False
+    # "None — all fixable by the worker.", "No items.": a section that opens
+    # with a negation has nothing for the supervisor, whatever follows it.
+    if re.match(r"(?:none|no|n a|na|nil|nothing)\b", cleaned):
         return False
     return True
 

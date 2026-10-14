@@ -25,7 +25,8 @@ status``). Antigravity and gateway routes can't be verified and are skipped.
   account.
 
 State is ``$BRINDLE_HOME/signin-pause.json`` (0600): which agents were paused
-and why, and the identity each launched under. Identities are ids (Claude org,
+and why, the identity each launched under, and the warnings already given (so
+another sweeping process doesn't repeat one). Identities are ids (Claude org,
 AWS account and role, GCP project, Azure subscription), never tokens.
 """
 
@@ -37,7 +38,7 @@ import os
 import time
 from dataclasses import dataclass
 
-from brindle import agents, company_identity, config
+from brindle import agents, company_identity, company_login, config
 
 log = logging.getLogger(__name__)
 
@@ -45,19 +46,18 @@ INTERVAL = 30.0
 STATE_FILE = "signin-pause.json"
 NAMES = {"claude": "Claude", "codex": "Codex"}
 CLOUD_ROUTES = ("bedrock", "vertex", "foundry")
+ROUTED = CLOUD_ROUTES + ("gateway",)   # routes whose env, not the person's sign-in, picks the account
 # The reason of an agent paused with no identity to come back under: never auto-resumed.
 NO_IDENTITY = "paused at sign-out; resume it yourself once you've checked the account"
 
 _last = 0.0
 _cloud: dict[str, tuple[tuple, "Check"]] = {}   # route -> (fingerprint, determined answer)
-_warned: set[tuple[str, str]] = set()
 
 
 def reset() -> None:
     global _last
     _last = 0.0
     _cloud.clear()
-    _warned.clear()
 
 
 @dataclass
@@ -81,7 +81,7 @@ def _load() -> dict:
     except (OSError, ValueError):
         got = {}
     got = got if isinstance(got, dict) else {}
-    for key in ("paused", "identity", "different"):
+    for key in ("paused", "identity", "different", "warned"):
         if not isinstance(got.get(key), dict):
             got[key] = {}
     return got
@@ -116,10 +116,7 @@ def check(provider: str, cache: bool = False) -> tuple[Check, bool] | None:
         return _from(company_identity.codex_identity(cache)), False
     if provider != "claude":
         return None
-    got = company_identity._setup()
-    org_id, setup = got if got else (None, None)
-    claude = setup.claude if setup else None
-    enforce = bool(setup and setup.enforce)
+    org_id, claude, enforce = _claude_setup(company_identity._setup())
     route = claude.route if claude is not None else None
     if route == "gateway":
         return None
@@ -136,6 +133,20 @@ def check(provider: str, cache: bool = False) -> tuple[Check, bool] | None:
         else:
             _cloud[route] = (key, res)
     return res, enforce
+
+
+def _claude_setup(got) -> tuple[str | None, object, bool]:
+    """(org id, the ``ClaudeSetup`` Claude's panes run under, whether the policy
+    enforces) for ``got``, an (org id, ``AgentSetup``) or None. A cloud or gateway
+    route whose env no pane gets (``company_login.route_in_use``: not stored by
+    company login, not enforced) leaves Claude on the person's own sign-in, which
+    is what's checked then. A login route has no env: its policy always applies."""
+    org_id, setup = got if got else (None, None)
+    claude = setup.claude if setup else None
+    if (claude is not None and claude.route in ROUTED
+            and not company_login.route_in_use(org_id, setup)):
+        claude = None
+    return org_id, claude, bool(setup and setup.enforce)
 
 
 def _from(ident) -> Check:
@@ -225,20 +236,31 @@ def run(db) -> list[str]:
     return done
 
 
-def _warn_once(db, provider: str, key: str, text: str, agent_list) -> list[str]:
-    if (provider, key) in _warned:
+def _warn_once(db, state, provider: str, key: str, text: str, agent_list) -> list[str]:
+    """Tell once per spell of the same state. Kept in the state file, since every
+    sweeping process (each pane's watcher, the CLI) starts with no memory of it."""
+    warned = state["warned"].get(provider)
+    if not isinstance(warned, list):
+        warned = state["warned"][provider] = []
+    if key in warned:
         return []
-    _warned.add((provider, key))
+    warned.append(key)
     _tell(db, agent_list, text)
     return [f"warned: {text}"]
+
+
+def _unwarn(state, provider: str, prefix: str) -> None:
+    warned = state["warned"].get(provider)
+    if isinstance(warned, list):
+        warned[:] = [k for k in warned if not (isinstance(k, str) and k.startswith(prefix))]
 
 
 def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str]:
     name = NAMES[provider]
     if res.kind == "undetermined":
-        return _warn_once(db, provider, "undetermined",
+        return _warn_once(db, state, provider, "undetermined",
                           f"{name}'s sign-in can't be verified ({res.line}); agents keep running.", running)
-    _warned.discard((provider, "undetermined"))
+    _unwarn(state, provider, "undetermined")
     if res.kind == "signed_out":
         return _pause(db, state, provider, running, f"{name} signed out",
                       f"{name} is signed out. Run `brindle login` or `brindle doctor --fix` "
@@ -253,10 +275,9 @@ def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str
                       "enforces it. Fix it and they resume on their own.")
     out: list[str] = []
     if res.problem:
-        out += _warn_once(db, provider, "mismatch:" + res.problem, f"{res.problem}.", running)
+        out += _warn_once(db, state, provider, "mismatch:" + res.problem, f"{res.problem}.", running)
     else:
-        for k in [k for k in _warned if k[0] == provider and k[1].startswith("mismatch:")]:
-            _warned.discard(k)
+        _unwarn(state, provider, "mismatch:")
     return out + _resume(db, state, provider, res)
 
 
@@ -264,11 +285,10 @@ def _expected() -> str | None:
     """The identity the org's agent_setup expects Claude to run as (or the
     saved self-serve setup's); None when there's nothing to check against."""
     try:
-        got = company_identity._setup() or company_identity._local_setup()
+        claude = _claude_setup(company_identity._setup() or company_identity._local_setup())[1]
     except Exception:  # noqa: BLE001 - an unreadable setup means nothing expected
         return None
-    setup = got[1] if got else None
-    return company_identity.expected_ident(setup.claude if setup else None)
+    return company_identity.expected_ident(claude)
 
 
 def _pause(db, state, provider, running, reason: str, advice: str) -> list[str]:

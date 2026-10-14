@@ -63,7 +63,7 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.3.11`). A session started before an upgrade keeps
+session shows it too (`brindle 0.3.15`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -1834,11 +1834,63 @@ documents its own quirks (no prompt caching on most, smaller context windows),
 so prefer the native provider for open-weight models and keep this route for
 Claude itself behind a gateway.
 
+To run workers on your own Bedrock, Vertex, Codex or Antigravity account, see
+[Running workers on your own cloud](#running-workers-on-your-own-cloud) below.
+
 Codex agents report status through Codex's `notify` hook (brindle passes
 `-c notify=[...]` at launch, leaving your own Codex config alone): a completed turn
 marks the agent idle and delivers any queued message. Codex has no Stop hook, so for
 an autopilot supervisor on Codex that turn end is also where brindle tells it to keep
 going, with the same limit on reminders as Claude Code.
+
+### Running workers on your own cloud
+
+Any brindle user, free tier included, can run a worker's model on their own cloud
+account. A profile's `env.NAME: value` lines are set in the agent's environment
+before brindle's own variables, so the profile decides which backend the worker
+uses. Profiles live in `.brindle/agents/` in the repo, or in your user profiles
+folder; `brindle profile new` writes one.
+
+```markdown
+---
+name: developer-bedrock
+provider: claude
+model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # a Bedrock model id your account can use
+env.CLAUDE_CODE_USE_BEDROCK: 1
+env.AWS_REGION: us-east-1
+---
+```
+
+Pass `developer-bedrock` as the worker profile (`agent_profile` in `assign`), or
+list it under `routing` in `.brindle/config.json`.
+
+- **Claude Code on Bedrock.** Set `env.CLAUDE_CODE_USE_BEDROCK: 1` and
+  `env.AWS_REGION`. The worker uses the AWS credentials on this machine (an
+  `AWS_PROFILE` from `~/.aws/config`, SSO or environment keys), so sign in to AWS
+  first. See [Claude Code on Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock).
+- **Claude Code on Vertex AI.** Set `env.CLAUDE_CODE_USE_VERTEX: 1`,
+  `env.CLOUD_ML_REGION` and `env.ANTHROPIC_VERTEX_PROJECT_ID`. The worker
+  authenticates with Application Default Credentials, so run
+  `gcloud auth application-default login` once. See
+  [Claude Code on Google Vertex AI](https://code.claude.com/docs/en/google-vertex-ai).
+- **Codex on Bedrock.** Codex picks its provider in `config.toml` in its home
+  folder (`$CODEX_HOME`, default `~/.codex`). Point that file at the
+  `amazon-bedrock` provider, as described in
+  [Codex advanced configuration](https://learn.chatgpt.com/docs/config-file/config-advanced).
+  To give one profile its own Codex home, add `env.CODEX_HOME: /path/to/home`
+  to it. Each Codex home keeps its own sign-in (`auth.json`).
+- **Google Antigravity.** `agy` can run on a Gemini API key: set
+  `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
+  export `GEMINI_API_KEY` in your shell, or put it in a profile in your user
+  profiles folder; never in a profile under `.brindle/agents/`, which is committed. For a
+  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. As of
+  1.3.4, `agy` ignores Vertex AI credentials, so use a Gemini API key or gateway.
+  The full setup is in [Google Antigravity](#google-antigravity) below.
+
+If your org runs brindle for a team, its admins can set a route for everyone in
+the org's Routing settings on the brindle dashboard; an enforced org route replaces
+a profile's `env.` lines, so a profile can't move a worker off the company's route. See
+[Using your company's access](#using-your-companys-access).
 
 ### Using your company's access
 
@@ -1877,8 +1929,8 @@ agy        # sign in with your Google account, then quit
 To run unattended workers without a browser login, `agy` (1.1.13 or newer) can use
 a Gemini API key instead: put `"modelProvider": "gemini"` in
 `~/.gemini/antigravity-cli/settings.json` and set `GEMINI_API_KEY`, in your
-environment or in a profile's `env.GEMINI_API_KEY: ...` line (keep the key out of
-the repo). The key alone does nothing: without `modelProvider`, `agy` still asks
+environment or in a profile's `env.GEMINI_API_KEY: ...` line in your user
+profiles folder (never in `.brindle/agents/`, which is committed). The key alone does nothing: without `modelProvider`, `agy` still asks
 you to sign in. `agy` takes no other key or token from the environment; its
 Google Cloud, Workforce Identity and Application Default Credentials sign-ins are
 chosen on its sign-in screen.

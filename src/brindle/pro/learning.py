@@ -13,14 +13,16 @@ into brindle.
 
 What leaves the machine is fixed by :func:`record_payload` and
 :func:`suggest_payload`: kind/size one-hots from :mod:`brindle.pro.features`,
-the declared weight, profile names and their relative cost, outcome counters,
-an opaque ``repo_key`` and ``agent_ref``. On a terminal event ("merged",
-"removed_unmerged") also, when this machine recorded a routing decision for
-the worker, four coarse savings fields: ``baseline_profile`` (the profile brindle
-would have used without learning), ``learned`` (whether learning made the
-pick), ``cost_rank`` and ``baseline_cost_rank`` (0-16, the relative cost of
-the profile used and of the baseline). Never task text, file paths, repo
-paths, branch names, provider or model.
+the declared weight, profile names and their relative cost, outcome event
+("reported", "review", "escalated", "merged", "removed_unmerged") and
+counters (including elapsed ``wall_seconds`` on "reported" and terminal
+events), an opaque ``repo_key`` and ``agent_ref``. On a terminal event
+("merged", "removed_unmerged") also, when this machine recorded a routing
+decision for the worker, four coarse savings fields: ``baseline_profile`` (the
+profile brindle would have used without learning), ``learned`` (whether
+learning made the pick), ``cost_rank`` and ``baseline_cost_rank`` (0-16, the
+relative cost of the profile used and of the baseline). Never task text, file
+paths, repo paths, branch names, provider or model.
 
 ``repo_key`` and ``agent_ref`` are HMACs under the active org's learning key
 over the repo's identity (root commit, else normalized origin URL) and the
@@ -57,7 +59,7 @@ FORBIDDEN_BACKOFF = 600.0      # after a 403, don't ask again for this long
 ERROR_BACKOFF = 60.0           # after a transport error or a 429
 DAILY_LIMIT_BACKOFF = 3600.0   # after the repo's daily event cap
 WEIGHTS = ("light", "medium", "heavy", "advanced")
-EVENTS = ("review", "escalated", "merged", "removed_unmerged")
+EVENTS = ("reported", "review", "escalated", "merged", "removed_unmerged")
 PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MAX_CANDIDATES = 16
 

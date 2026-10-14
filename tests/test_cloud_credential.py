@@ -139,6 +139,56 @@ def test_each_cloud_gets_what_its_library_reads_and_the_mint_sends_device_header
     assert rc == 0 and fed.sts_calls == []                              # the library, not brindle, exchanges
 
 
+def test_a_personal_entitlement_mints_through_me_and_an_older_server_gets_a_readable_error(fed, backend, store, signing_key):
+    backend.routes[PATH] = lambda form, headers: pytest.fail("a personal org must not use the org route")
+    def mint(form, headers):
+        status, body = fed.mint(form, headers)
+        if status == 200:       # a personal token names the user, not an SSO member
+            payload = json.loads(base64.urlsafe_b64decode(body["id_token"].split(".")[1] + "=="))
+            payload.pop("member")
+            body["id_token"] = f"{b64({'alg': 'RS256'})}.{b64({**payload, 'sub': 'user_1'})}.sig"
+        return status, body
+
+    backend.routes["POST /me/federation/token"] = mint
+    cur = store.load()
+    cur.pop("org_id")
+    expired = claims(org_id=ORG, iat=int(fed.at) - 9000, exp=int(fed.at) - 4000)
+    store.save({**cur, "entitlement": sign(signing_key, expired)})
+    backend.routes["GET /entitlement"] = lambda form, headers: (
+        200, {"entitlement": sign(signing_key, claims(org_id=ORG))})
+    rc, out, err = call(fed, backend, store, "aws", org=None)     # the entitlement's own org
+    assert rc == 0 and fed.mints == 1 and json.loads(out)["AccessKeyId"] == "ASIAEXAMPLE"
+    assert fed.sts_calls[-1][1]["RoleSessionName"].startswith("brindle-user_1-")
+    assert "GET /entitlement" in backend.paths()
+    fed.answer = (404, {"error": "not_found"})
+    rc, out, err = call(fed, backend, store, "aws", now=fed.at + 1000)
+    assert rc == 1 and "doesn't offer federated credentials yet" in err
+
+
+def test_apply_current_personal_federation(fed, backend, store, signing_key, monkeypatch):
+    from brindle import company_login
+    from brindle.pro.team_policy import CodexSetup, GcpFederation, GcpSetup, OrgPolicy
+
+    cur = store.load()
+    cur.pop("org_id")
+    store.save({**cur, "entitlement": sign(signing_key, claims(org_id=ORG, policy_version=1))})
+    setup = AgentSetup(claude=ClaudeSetup(route="vertex", auth="federated", gcp=GcpSetup(
+        "acme-prod", "us-east5", GcpFederation("123456789", "pool", "pawdelta", "me@acme-prod.iam.gserviceaccount.com"))),
+        codex=CodexSetup("chatgpt"), enforce=True)
+    policy = OrgPolicy(ORG, 1, agent_setup=setup, cached_for=(None, None))
+    monkeypatch.setattr(team_policy, "load_cached", lambda org: policy)
+    monkeypatch.setattr(company_login, "run_cmd", lambda *a, **k: pytest.fail("personal Codex setup applied"))
+    fed.cloud = "gcp"
+    backend.routes["POST /me/federation/token"] = fed.mint
+    assert company_login.apply_current(lambda line: None, store=store, client=auth.Client(BASE, backend))
+    doc = json.loads(cc.gcp_config_path(ORG).read_text())
+    assert doc["audience"].endswith("/workloadIdentityPools/pool/providers/pawdelta")
+    env = company_login.config.user_settings()[company_login.ENV_KEY]["env"]
+    assert env["GOOGLE_APPLICATION_CREDENTIALS"] == str(cc.gcp_config_path(ORG))
+    assert json.loads((cc.org_dir(ORG) / cc.GCP_TOKEN).read_text())["id_token"] == id_token(fed.at)
+    assert "POST /me/federation/token" in backend.paths() and fed.mints == 1
+
+
 def test_azure_refresh_rewrites_the_file_only_below_30_percent(fed, backend, store, monkeypatch):
     fed.cloud = "azure"
     real = cc.credential
@@ -237,7 +287,7 @@ def test_the_hook_command_names_the_running_script_or_the_interpreter(tmp_path):
     assert cc.hook_command("aws", ORG, argv0=exe) == f'"{exe}" cloud-credential aws --org {ORG}'
     py = script(tmp_path, "python3")
     assert cc.hook_command("gcp", ORG, argv0="/x/pytest/__main__.py", python=py) == \
-        f'"{py}" -m brindle cloud-credential gcp --org {ORG}'
+        f'"{py}" -P -m brindle cloud-credential gcp --org {ORG}'
 
 
 @pytest.mark.parametrize("how", ["relative", "world_writable_file", "world_writable_dir", "quote", "missing", "not_executable"])

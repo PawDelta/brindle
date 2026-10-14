@@ -16,9 +16,10 @@ import textwrap
 import time
 from dataclasses import dataclass, field
 
-from brindle import agents, airgap, pricing, tmux, view, watch_costs
+from brindle import agents, airgap, pricing, tmux, upgrade, view, watch_costs
 from brindle.db import DB
 
+RESTART = "restart"      # what _loop returns when brindle was upgraded under it
 REFRESH_SECONDS = 2.0
 # How often a running dashboard culls leftover processes and stale workers
 # (see brindle.cull), on a thread of its own so the screen never waits on it.
@@ -825,7 +826,8 @@ def _start_status():
         return None
 
 
-def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
+def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
+    install = upgrade.InstallWatch()
     # The session this sidebar belongs to: quitting the sidebar quits it.
     own_root = agents.sidebar_root(os.environ.get("TMUX_PANE")) if sidebar else None
     curses.curs_set(0)
@@ -852,6 +854,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
 
         bar = org_status.Bar(tmux.pane_session(os.environ["TMUX_PANE"]))
     while True:
+        if install.changed():
+            return RESTART
         if poller is not None and own_root and time.time() - delivered_at >= 5.0:
             try:
                 from brindle.pro import status as org_status
@@ -1015,7 +1019,10 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
     _log_to_file()
-    curses.wrapper(_loop, repo_root, sidebar)
+    if curses.wrapper(_loop, repo_root, sidebar) == RESTART:
+        # Run again from the upgraded install, in this same pane (curses.wrapper
+        # has put the terminal back); returning would count as quitting the sidebar.
+        upgrade.reexec()
 
 
 def _log_to_file() -> None:

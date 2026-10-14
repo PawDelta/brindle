@@ -23,9 +23,9 @@ brindle sends it after that is typed in as a new turn once it's idle.
 agy's hooks, mapped onto brindle's:
 - ``PreInvocation`` before each model call: working. ``invocationNum`` 0 means
   a new turn, typed by the user unless brindle just delivered a message.
-- ``Stop``: a queued message is typed in as a new turn; otherwise brindle's Stop
-  hook (the report reminder, autopilot), where ``{"decision": "continue",
-  "reason": ...}`` keeps it going.
+- ``Stop``: a queued message is typed in as a new turn, and so is what
+  brindle's Stop hook would block with (the report reminder, autopilot): a
+  ``{"decision": "continue"}`` turn would have no MCP tools to act on it.
 - ``PostToolUse``: a tool ran, so a permission prompt was answered.
 - ``PreToolUse`` (only with ``permission_policy: "on"``): brindle's permission
   policy (brindle.permissions) answers deny, or what agy would do anyway (allow
@@ -275,10 +275,12 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
 
     if event == "agy-pre-invocation":
         db.set_status(agent_id, "processing")
-        if payload.get("invocationNum", 0) == 0:
-            # A new turn: the user's, unless brindle just typed a message in.
+        if payload.get("invocationNum", 0) == 0 and not db.delivered_since(agent_id, time.time() - DELIVERY_WINDOW):
+            # A new turn the user typed. One brindle typed in (the report
+            # reminder among them) keeps stop_blocked: the stop path resets
+            # it itself before delivering anything else.
             db.update_agent(agent_id, stop_blocked=0)
-            if agent.mode == "interactive" and not db.delivered_since(agent_id, time.time() - DELIVERY_WINDOW):
+            if agent.mode == "interactive":
                 autopilot.user_spoke(db, agent)
         return None
     if event == "agy-post-tool":
@@ -298,6 +300,12 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
             error_type = "rate_limit" if limited else ("auth" if autherr else "error")
             agents.handle_hook(db, agent_id, "stop-failure",
                                {**base, "error_type": error_type, "error": error})
+            failed = db.get_agent(agent_id)
+            if failed is not None and failed.status != "failed":   # not a sign-in problem
+                db.update_agent(agent_id, stop_blocked=0)
+                if db.pending_count(agent_id):
+                    _flush_soon(agent_id)
+                _tell_parent_stopped_on_error(db, failed, error_type)
             return None
         if db.pending_count(agent_id):
             # A new turn, not a continuation: only then does agy give the
@@ -309,11 +317,39 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
         out = agents.handle_hook(db, agent_id, "stop",
                                  {**base, "stop_hook_active": bool(agent.stop_blocked)})
         if out and out.get("decision") == "block":
+            # Typed in as a new turn too: a turn the Stop hook continues has
+            # no MCP tools, so the agent couldn't call report_result in it.
+            # stop_blocked stays set through that turn (see agy-pre-invocation),
+            # so the reminder is sent once.
             db.update_agent(agent_id, stop_blocked=1)
-            return {"decision": "continue", "reason": out["reason"]}
+            db.enqueue(agent_id, out["reason"], None)
+            db.set_status(agent_id, "idle")
+            _flush_soon(agent_id)
+            return None
         db.update_agent(agent_id, stop_blocked=0)
         return None
     return None
+
+
+def _tell_parent_stopped_on_error(db, agent, error_type: str) -> None:
+    """A worker's turn ended on a provider error (not sign-in, which
+    stop-failure reports itself): no Stop hook follows, so it gets no report
+    reminder and its supervisor would wait on it with nothing to wake it."""
+    from brindle import agents, tmux
+
+    if (agent.mode not in agents.FORWARDING_MODES or not agent.parent_id or agent.result is not None
+            or db.get_agent(agent.parent_id) is None):
+        return
+    queued = " Its queued messages are being typed in as a new turn." if db.pending_count(agent.id) else ""
+    tool = "submit_review" if agent.mode == "review" else "report_result"
+    # The error type only: provider output can carry URLs, keys or prompt text.
+    body = (f"{'Reviewer' if agent.mode == 'review' else 'Worker'} {agent.id}'s turn ended on a "
+            f"provider error ({error_type}) before it called {tool}.{queued} Check on it: "
+            "send_message to have it carry on, or remove_workspace if the work is abandoned.")
+    try:
+        agents.send_message(db, agent.parent_id, body)
+    except (agents.AgentError, tmux.TmuxError):
+        db.enqueue(agent.parent_id, body, None)
 
 
 def _flush_soon(agent_id: str, delay: float = 1.5) -> None:
@@ -353,6 +389,10 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         except KeyError:
             pass
     decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+    if strict and decision.decision == "ask":
+        # A compound or quoted command whose every part is allowed, read as
+        # Claude Code's hook reads a profile's allowed_tools.
+        decision = permissions.allowlist_decision(req, rules, cfg.checks, cd_root=ws.path) or decision
     spaces = payload.get("workspacePaths")
     spaces = [s for s in spaces if isinstance(s, str) and s] if isinstance(spaces, list) else []
     if strict:
@@ -368,7 +408,13 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             out = {"decision": "deny", "reason": f"brindle: {ambiguous}, so it can't be checked; "
                                                  "use one absolute path inside your worktree"}
         else:
-            out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root])
+            # agy keeps what it tells the model about brindle's MCP server
+            # (its instructions and tools) and its built-in skills here:
+            # readable, never writable. Other servers' folders are not.
+            agy_home = Path.home() / ".gemini" / "antigravity-cli"
+            out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root],
+                         readable=[str(agy_home / "mcp" / "brindle"), str(agy_home / "builtin")],
+                         has_supervisor=bool(agent.parent_id))
     else:
         out = output(decision, req, spaces)
     if req is not None and out["decision"] == "deny":

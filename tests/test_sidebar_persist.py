@@ -53,6 +53,17 @@ def make_window(session, name):
     return proc.stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def inert_sidebar(monkeypatch):
+    """The sidebar pane runs a stand-in, not `brindle watch --sidebar`: the
+    real dashboard's cull sweep runs outside this process's fakes, finds
+    Claude signed out under the temporary config dir and pauses the fake
+    workers, closing their windows (and a sidebar in one) mid-test."""
+    from brindle import providers
+
+    monkeypatch.setattr(providers, "brindle_invocation", lambda: ["sh", "-c", "exec sleep 3600"])
+
+
 @pytest.fixture
 def session(tmp_path):
     name = "brindle_persisttest"

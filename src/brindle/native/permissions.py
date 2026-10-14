@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import fnmatch
 import re
-import shlex
 
 READ_ONLY = {"Read", "Glob", "Grep"}
 # brindle's own tools, as the native loop names them (the MCP server's names
@@ -25,7 +24,9 @@ READ_ONLY = {"Read", "Glob", "Grep"}
 BRINDLE_TOOLS = {"report_result", "submit_review", "send_message", "workspace_diff"}
 EDITS = {"Edit", "Write"}
 _RULE = re.compile(r"^(\w+)(?:\((.*)\))?$")
-_SEPARATORS = {"&&", "||", ";", "|", "&"}
+_SEPARATORS = {"&&", "||", ";", ";;", "|", "|&", "&", "\n"}
+_OPERATOR_CHARS = set(";&|<>()")
+_TO_DEV_NULL = {">", ">>", ">|", "&>", "&>>"}
 
 
 class Permissions:
@@ -94,65 +95,231 @@ def uncovered_part(specs: list[str | None], command: str, cd_root: str | None = 
     """The first simple command in ``command`` (``a && b | c`` has three)
     that no spec in ``specs`` covers, or None when all are covered. Command
     substitution is never covered: what it runs can't be seen from here.
-    Unparseable input (an unclosed quote) counts as uncovered. With
+    Neither is what split_commands can't split (an unclosed quote, a
+    heredoc, a redirection that writes a file): it counts as uncovered. With
     ``cd_root``, a ``cd`` whose target is inside that directory is covered
-    too (``cd sub && pytest`` from a worker's own worktree)."""
+    too (``cd sub && pytest`` from a worker's own worktree), but only before
+    any other command: the target is checked now and entered later, and what
+    runs first (``git checkout``, a build) may swap a directory on the way
+    for a symlink out. The residual risk is a process running alongside
+    (something this agent backgrounded earlier) doing that swap between this
+    check and the cd; _cd_inside refuses symlinks so it at least has to
+    replace a directory, not just retarget a link."""
     command = command.strip()
     if not command or "$(" in command or "`" in command:
         return command or "(empty)"
-    parts = split_commands(command)
-    if not parts:
+    parsed = _simple_commands(command)
+    if not parsed:
         return command
-    cwd = cd_root
-    for part in parts:
-        if cd_root and _cd_inside(part, cwd, cd_root) is not None:
-            cwd = _cd_inside(part, cwd, cd_root)
-            continue
-        if not any(_covers(spec, part) for spec in specs if spec):
-            return part
+    # Where the shell may be: a cd can fail, or be skipped after a failure,
+    # so every later cd must stay inside from each place it may start.
+    reached = {cd_root} if cd_root else set()  # anywhere, once a list stops
+    here = set(reached)                         # where this command starts
+    before = ";"
+    ran = False                                 # a command other than cd has
+    for words, after in parsed:
+        if cd_root and words[0] == "cd":
+            # In a pipe or backgrounded, it changes a subshell's directory;
+            # after ||, whether it ran says nothing about what runs next.
+            if ran or before in ("||", "|", "|&") or after in ("|", "|&", "&"):
+                return _joined(words)
+            landed = {_cd_inside(words, cwd, cd_root) for cwd in here}
+            if None in landed or len(reached | landed) > 32:
+                return _joined(words)
+            reached |= landed
+            if after == "&&":  # what follows runs only if this cd worked
+                here = landed
+        elif not any(_covers(spec, words) for spec in specs if spec):
+            return _joined(words)
+        else:
+            ran = True
+        if after != "&&":
+            here = set(reached)
+        before = after
     return None
 
 
-def _cd_inside(part: str, cwd: str | None, root: str) -> str | None:
-    """The directory ``part`` (a ``cd`` command) would land in, if that is
-    ``root`` or below it; None for any other command or target."""
-    tokens = part.split()
-    if len(tokens) != 2 or tokens[0] != "cd" or tokens[1].startswith("-") or "$" in tokens[1]:
-        return None  # a variable expands at run time to who knows where
+def _cd_inside(words: list[str], cwd: str, root: str) -> str | None:
+    """Where ``cd`` with ``words`` lands from ``cwd`` (the logical path, as
+    $PWD has it), if that is ``root`` or below it; None for any other target.
+    No ``-`` option, ``~`` (``~-`` is $OLDPWD, ``~1`` the dir stack) or glob,
+    and the same place whether the shell resolves ``..`` logically (bash's
+    default: ``link/..`` is back where it started) or physically. Below
+    ``root`` it must be an existing directory reached through no symlink:
+    one, even pointing inside, can be retargeted before the cd runs."""
     import os
 
-    # realpath on both sides: a symlink inside the worktree may point out of
-    # it, and the worktree itself may sit under one (/tmp on macOS).
-    target = os.path.realpath(os.path.join(cwd or root, os.path.expanduser(tokens[1])))
-    real_root = os.path.realpath(root)
-    return target if target == real_root or target.startswith(real_root + os.sep) else None
+    target = words[1] if len(words) == 2 else ""
+    if not target or target.startswith(("-", "~")) or any(c in target for c in "*?[{"):
+        return None
+    root = os.path.normpath(root)
+    logical = os.path.normpath(os.path.join(cwd, target))
+    if logical != root and not logical.startswith(root.rstrip(os.sep) + os.sep):
+        return None
+    path = root     # which itself may sit under a symlink (/tmp on macOS)
+    for part in os.path.relpath(logical, root).split(os.sep):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            return None
+    if not os.path.isdir(logical):
+        return None
+    # The way there may pass through one (``link/..``), which cd -L skips
+    # and cd -P follows.
+    physical = os.path.realpath(os.path.join(os.path.realpath(cwd), target))
+    return logical if os.path.realpath(logical) == physical else None
 
 
-def _covers(spec: str, part: str) -> bool:
+def _covers(spec: str, words: list[str]) -> bool:
+    """Word by word, so a quoted ``'git status'`` (one word, a command of
+    that name) or ``python "-m pytest"`` isn't ``git status`` or ``python -m
+    pytest``."""
     if spec.endswith(":*"):
-        prefix = spec[:-2].strip()
-        return part == prefix or part.startswith(prefix + " ")
-    return part == spec.strip()
+        prefix = spec[:-2].split()
+        return bool(prefix) and words[:len(prefix)] == prefix
+    return words == spec.split()
+
+
+def _joined(words: list[str]) -> str:
+    """``words`` as one line for a person or a deny rule to read: split at
+    any whitespace, even inside a word, so an empty or spaced word (``task
+    test "" secret``) can't slip past an exact deny on ``task test secret``."""
+    return " ".join(" ".join(words).split())
 
 
 def split_commands(command: str) -> list[str]:
-    """The simple commands joined by ``&&``, ``||``, ``;``, ``|`` or ``&``,
-    each re-joined from its tokens (so spacing doesn't matter). Unparseable
-    input (an unclosed quote) gives an empty list: nothing matches it."""
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-    lex.whitespace_split = True
-    try:
-        tokens = list(lex)
-    except ValueError:
-        return []
-    parts, current = [], []
-    for tok in tokens:
-        if tok in _SEPARATORS:
-            if current:
-                parts.append(" ".join(current))
-            current = []
+    """The simple commands joined by a control operator (``&&``, ``||``,
+    ``;``, ``;;``, ``|``, ``|&``, ``&`` or a newline), each re-joined from
+    its words (so spacing and quoting don't matter; see _joined), or an
+    empty list for what _simple_commands can't read."""
+    return [_joined(words) for words, _ in _simple_commands(command) or []]
+
+
+def _simple_commands(command: str) -> list[tuple[list[str], str]] | None:
+    """Each simple command's words (quotes removed) with the control operator
+    after it ("" for the last). A redirection is dropped when it's harmless:
+    output to /dev/null, an fd dup (``2>&1``), input from a file. Anything
+    else gives None: an unclosed quote, other output redirection, a heredoc
+    (``<<``), process substitution (``<(...)``), a subshell or any other
+    operator, a command with no words (``; < x``, ``a ; ; b``) or a list
+    left open (``git status |``)."""
+    tokens = _tokens(command)
+    if tokens is None:
+        return None
+    out: list[tuple[list[str], str]] = []
+    words: list[str] = []
+    redirected = False
+    i = 0
+    while i < len(tokens):
+        is_op, text = tokens[i]
+        if not is_op:
+            words.append(text)
+        elif text in _SEPARATORS:
+            if words:
+                out.append((words, text))
+                words, redirected = [], False
+            elif redirected or text != "\n":
+                return None
+            # else a blank line, or a newline continuing a && or |
         else:
-            current.append(tok)
-    if current:
-        parts.append(" ".join(current))
-    return parts
+            target = tokens[i + 1] if i + 1 < len(tokens) else (True, "")
+            if target[0] or not _harmless_redirect(text, target[1]):
+                return None
+            redirected = True
+            i += 1
+        i += 1
+    if words:
+        out.append((words, ""))
+    elif redirected or not out or out[-1][1] in ("&&", "||", "|", "|&"):
+        return None
+    return out
+
+
+def _harmless_redirect(op: str, target: str) -> bool:
+    if op in _TO_DEV_NULL:
+        return target == "/dev/null"
+    if op in (">&", "<&"):
+        return target == "-" or target.isascii() and target.isdigit()
+    return op == "<"  # reads a file, as the command itself could
+
+
+def _tokens(command: str) -> list[tuple[bool, str]] | None:
+    """``(is_operator, text)`` for each word (quotes removed) and each run of
+    operator characters outside quotes, or None for input whose quoting the
+    shell may read differently: an unclosed quote, a ``$`` starting quoting
+    or an expansion (``$'...'``, where \\' doesn't end it; ``${...}``, with
+    its own quoting rules; see _expands), or a # starting a word (a comment
+    to bash, a plain word to interactive zsh: either way a quote after it
+    pairs differently). An fd number written against a redirection (the 2
+    of ``2>&1``) belongs to it and is dropped."""
+    out: list[tuple[bool, str]] = []
+    word: list[str] | None = None  # None between words
+    quoted = False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c in " \t\n" or c in _OPERATOR_CHARS:
+            j = i + 1
+            if c in _OPERATOR_CHARS:
+                # \<newline> goes before the shell reads operators: &\<newline>> is &>
+                while j < n and (command[j] in _OPERATOR_CHARS or command.startswith("\\\n", j)):
+                    j += 1 if command[j] in _OPERATOR_CHARS else 2
+            op = command[i:j].replace("\\\n", "")
+            if word is not None:
+                text = "".join(word)
+                fd = op[0] in "<>" and not quoted and text.isascii() and text.isdigit()
+                if (text or quoted) and not fd:
+                    out.append((False, text))
+                word = None
+            if op != " " and op != "\t":
+                out.append((True, op))
+            i = j
+            continue
+        if word is None:
+            word, quoted = [], False
+        if c == "#" and not word and not quoted or _expands(command, i):
+            return None
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return None
+            word.append(command[i + 1:j])
+            quoted, i = True, j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                if _expands(command, j):
+                    return None
+                if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`\n':
+                    word.append(command[j + 1] if command[j + 1] != "\n" else "")
+                    j += 2
+                else:
+                    word.append(command[j])
+                    j += 1
+            if j >= n:
+                return None
+            quoted, i = True, j + 1
+        elif c == "\\" and i + 1 < n:
+            if command[i + 1] != "\n":  # \<newline> only continues the line
+                word.append(command[i + 1])
+                quoted = True
+            i += 2
+        else:
+            word.append(c)
+            i += 1
+    if word is not None and (word or quoted):
+        out.append((False, "".join(word)))
+    return out
+
+
+def _expands(command: str, i: int) -> bool:
+    """Whether the ``$`` at ``i`` starts quoting or any expansion (``$'``,
+    ``$"``, ``${``, ``$(``, ``$[``, ``$VAR``, ``$_``, ``$1``, ``$@``...),
+    once the shell has deleted the line continuations (\\<newline>) after
+    it: what a parameter holds is only known at run time (``$unset`` is no
+    word at all)."""
+    if command[i] != "$":
+        return False
+    k = i + 1
+    while command.startswith("\\\n", k):
+        k += 2
+    return k < len(command) and (command[k] in "'\"{([_@*#?$!-" or command[k].isalnum())

@@ -12,7 +12,7 @@ import pytest
 
 from brindle.native import (Client, ClientError, Endpoint, LoopConfig, NativeAgent, Permissions,
                           Toolbox, core_tools)
-from brindle.native.permissions import bash_matches, split_commands
+from brindle.native.permissions import bash_matches, split_commands, uncovered_part
 
 
 # -- a scripted endpoint ---------------------------------------------------------
@@ -321,7 +321,72 @@ def test_bash_prefix_and_exact_rules():
     assert not bash_matches("git:*", "git log $(evil)")
     assert not bash_matches("git:*", "git log `evil`")
     assert not bash_matches("git:*", "git log 'unclosed")
+    assert not bash_matches("pytest", "pytest &\\\n>/dev/null pytest")  # one command: pytest pytest &>/dev/null
     assert split_commands("a b&&c  d ||e;f|g") == ["a b", "c d", "e", "f", "g"]
+
+
+@pytest.mark.parametrize("command,covered", [
+    ('grep -rn "x | y" .', True),  # an operator inside quotes is part of a word
+    ("git log | grep x", True),
+    ("pytest 2>&1 | tail", True),  # an fd dup
+    ("ls >/dev/null", True),
+    ("git status |& curl https://example.com", False),
+    pytest.param("git status ;; curl https://example.com", False,
+                 marks=pytest.mark.variant("a second operator shlex didn't split")),
+    ("git status\ncurl https://example.com", False),  # a newline ends a command
+    ("ls > ~/.zshrc", False),  # writes where no rule says
+    ("diff <(curl https://example.com) x", False),  # what it runs is hidden in the operator
+    pytest.param("uv run python - <<EOF\nimport os\nEOF", False,
+                 marks=pytest.mark.variant("a heredoc feeds an allowed command unseen input")),
+    ("git status $'\\'' ; curl https://example.com ; echo '", False),  # \' doesn't end $'...'
+    ("git status #'\ncurl https://example.com\n#'", False),  # a comment's quote isn't one
+    ('git status "$\\\n(curl https://example.com)"', False),  # \<newline> goes first: $( in quotes
+    pytest.param("git status \\\n#'\ncurl https://example.com\n#'", False,
+                 marks=pytest.mark.variant("a line continuation before the comment")),
+    ("git diff HEAD~1..HEAD", True),
+    ("git log |\n  grep x", True),  # a newline continues a pipe
+    ("'git status'", False),  # one word: a command named "git status"
+    pytest.param("git\\ status", False, marks=pytest.mark.variant("an escaped space joins words too")),
+    pytest.param('python "-m pytest" evil.py', False, marks=pytest.mark.variant("-m imports ' pytest'")),
+    ("git status $unset", False),  # a parameter may expand to anything, or to no word
+    pytest.param("ls $_", False, marks=pytest.mark.variant("the last argument of the command before")),
+    pytest.param('git status "$1" $@', False, marks=pytest.mark.variant("positional parameters")),
+    ("git status |", False),  # a list left open
+    ("git status ; ; ls", False),  # an empty command
+    ("git status ; < /etc/passwd", False),  # a command of only a redirection
+])
+def test_uncovered_part_splits_every_operator_and_fails_closed(command, covered):
+    specs = ["git status:*", "git log:*", "git diff:*", "grep:*", "pytest:*", "tail:*", "ls:*", "diff:*",
+             "uv run:*", "python -m pytest:*"]
+    assert (uncovered_part(specs, command) is None) == covered
+
+
+@pytest.mark.parametrize("command,covered", [
+    ("cd a/b && pytest", True),
+    ("cd a && cd .. && pytest", True),
+    ("ls x && cd a/b && pytest", False),  # what ran first may have swapped a/b for a symlink out
+    ("cd sub && pytest", False),  # a symlink, even one inside, can be retargeted before the cd runs
+    ("cd new && pytest", False),  # nor created as one
+    ("cd out && pytest", False),  # a symlink out of the worktree
+    ("cd sub/../.. && pytest", False),  # bash's cd -L: sub/.. is the worktree, not a/b
+    pytest.param("cd sub && cd ../.. && pytest", False, marks=pytest.mark.variant("$PWD keeps the symlink")),
+    ("cd ~- && pytest", False),  # $OLDPWD
+    pytest.param("cd ~1 && pytest", False, marks=pytest.mark.variant("the directory stack")),
+    ("cd out* && pytest", False),  # the glob finds the symlink
+    ('cd "" sub && pytest', False),
+    ('"cd sub" && pytest', False),  # a command named "cd sub"
+    ("cd a/b & cd ../.. && pytest", False),  # the first cd runs in the background
+    ("cd a/b ; cd ../.. && pytest", False),  # the first cd may not have run
+    ("cd a || cd a/b && cd ../.. && pytest", False),
+    pytest.param("cd a | cd a/b && cd ../.. && pytest", False,
+                 marks=pytest.mark.variant("a cd in a pipe changes a subshell")),
+])
+def test_uncovered_part_follows_cd_as_bash_does(tmp_path, command, covered):
+    ws = tmp_path / "ws"
+    (ws / "a" / "b" / "c").mkdir(parents=True)
+    (ws / "sub").symlink_to(ws / "a" / "b" / "c")
+    (ws / "out").symlink_to(tmp_path)
+    assert (uncovered_part(["pytest:*", "ls:*"], command, cd_root=str(ws)) is None) == covered
 
 
 def test_each_part_of_a_compound_command_may_match_a_different_rule():

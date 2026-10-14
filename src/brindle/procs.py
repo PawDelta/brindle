@@ -104,11 +104,14 @@ def _home_matches(p: Proc, from_config: bool = False) -> bool:
 
 
 def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] | None = None,
-               procs: dict[int, Proc] | None = None) -> dict[str, set[int]]:
+               procs: dict[int, Proc] | None = None, through_ancestors: bool = False) -> dict[str, set[int]]:
     """Process ids by agent. ``pane_pids``: agent id -> the pids of its tmux
-    panes (taken before the window was closed)."""
+    panes (taken before the window was closed). The caller's own ancestors are
+    left out, so stopping an agent never signals the process doing it;
+    ``through_ancestors`` (read-only discovery) walks through them instead, to
+    find commands beside a hook running under the agent's CLI."""
     procs = table() if procs is None else procs
-    skip = _ancestors(procs)
+    skip = {os.getpid()} if through_ancestors else _ancestors(procs)
     children: dict[int, list[int]] = {}
     for p in procs.values():
         children.setdefault(p.ppid, []).append(p.pid)
@@ -139,6 +142,18 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
 
 _SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh"}
 _PLUMBING = re.compile(r"claude|brindle|\bmcp\b|tmux|node_modules|\bnpm exec\b|caffeinate")
+_CLI_NAMES = {"codex", "agy", "antigravity"}
+_LAUNCHERS = {"node", "python", "python3", "npx"}
+
+
+def _is_cli(cmd: str) -> bool:
+    """Whether the command is a provider CLI itself: its executable (or the
+    script a launcher runs) is named for it, not just mentioned in arguments."""
+    words = cmd.split()
+    for word in words[:1] + (words[1:2] if words and os.path.basename(words[0]) in _LAUNCHERS else []):
+        if os.path.splitext(os.path.basename(word))[0] in _CLI_NAMES:
+            return True
+    return False
 
 
 def running_commands(agent_id: str, pane_pids: list[int] | None = None,
@@ -146,7 +161,8 @@ def running_commands(agent_id: str, pane_pids: list[int] | None = None,
     """Processes of this agent that look like a command it started (a test
     run, a build, a sleep), not its CLI, its MCP servers, hooks or a bare shell."""
     procs = table() if procs is None else procs
-    pids = agent_pids([agent_id], {agent_id: pane_pids or []}, procs).get(agent_id, set())
+    pids = agent_pids([agent_id], {agent_id: pane_pids or []}, procs,
+                      through_ancestors=True).get(agent_id, set())
     out = []
     for pid in pids:
         p = procs.get(pid)
@@ -154,7 +170,7 @@ def running_commands(agent_id: str, pane_pids: list[int] | None = None,
             continue
         cmd = p.text.split(" BRINDLE_", 1)[0].strip()
         first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
-        if first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd):
+        if first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd):
             continue
         out.append(p)
     return out

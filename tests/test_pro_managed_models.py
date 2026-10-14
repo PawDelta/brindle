@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from brindle import agents, company_identity, company_login, doctor, secrets, tmux, workspaces
+from brindle import agents, company_identity, company_login, doctor, providers, secrets, tmux, workspaces
 from brindle.db import Agent
 from brindle.pro import license, managed_models, team_policy
 from brindle.pro.team_policy import ProviderConfig, parse_policy
@@ -285,6 +285,8 @@ OLD_SERVER = {"enforce": True, "claude": {"route": "bedrock", "aws": {"region": 
 VERTEX_ONLY = {"enforce": True, "exclusive": True,
                "claude": {"route": "vertex", "gcp": {"project": "acme-project", "region": "europe-west1"}}}
 CODEX_ONLY = {"enforce": True, "exclusive": True, "codex": {"route": "azure", "base_url": AZURE["endpoint"]}}
+ANTIGRAVITY_ONLY = {"enforce": True, "exclusive": True,
+                    "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}}
 
 
 def from_policy(monkeypatch, entitled=True, **policy):
@@ -349,10 +351,16 @@ def test_without_the_exclusive_key_provider_config_stays_the_managed_source(db, 
     (VERTEX_ONLY, profile("native", base_url="http://localhost:11434/v1"), "uses its own endpoint, which isn't Google Vertex AI"),
     (VERTEX_ONLY, profile("antigravity"), "uses antigravity, which can't run on Google Vertex AI"),
     (CODEX_ONLY, profile(), "runs Claude Code, which can't use Azure"),
+    (ANTIGRAVITY_ONLY, profile(), "runs Claude Code, which can't use a Gemini-compatible gateway"),
     ({"enforce": True, "exclusive": True}, profile(), "can't use the routes"),
     # a route is a route, a login one included; shell and subagents have no model of their own
     (VERTEX_ONLY, profile(), None), (VERTEX_ONLY, profile("shell"), None),
     ({**VERTEX_ONLY, "codex": {"route": "chatgpt"}}, profile("codex"), None),
+    ({**VERTEX_ONLY, "antigravity": {"route": "gemini"}}, profile("antigravity"), None),
+    ({**VERTEX_ONLY, "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}}, profile("antigravity"), None),
+    ({**VERTEX_ONLY, "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}},
+     profile("antigravity", env={"GOOGLE_GEMINI_BASE_URL": "https://other"}),
+     "pointing it away from a Gemini-compatible gateway"),
     ({**CODEX_ONLY, "claude": LOGINS["claude"]}, profile(), None),
     (CODEX_ONLY, profile("native"), None),
     # not exclusive: an org that set up Company agents directly keeps running Codex
@@ -363,6 +371,41 @@ def test_without_the_exclusive_key_provider_config_stays_the_managed_source(db, 
 def test_exclusive_refuses_an_agent_the_routing_leaves_out(raw, p, words):
     why = managed_models.refusal(setup_managed(raw), p)
     assert (why is None) is (words is None) and (words is None or words in why and f"org {ORG} manages" in why)
+
+
+def test_antigravity_gateway_route_yields_endpoint_and_model_provider_at_launch(
+        db, ws, repo, tmp_path, monkeypatch):
+    agents_dir = repo / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "dev-agy.md").write_text("---\nname: dev-agy\nprovider: antigravity\n---\n")
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"theme": "dark"}))
+    monkeypatch.setenv("BRINDLE_AGY_SETTINGS", str(settings))
+    m = setup_managed({"enforce": True, "exclusive": True,
+                       "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}})
+    monkeypatch.setattr(agents, "managed", lambda root: m)
+    seen = {}
+
+    def fake_new_window(session, name, cwd, command, env, tag=None, keep=(), **kw):
+        seen.update(env)
+        return "@1"
+
+    monkeypatch.setattr(agents.tmux, "ensure_session", lambda *a, **k: None)
+    monkeypatch.setattr(agents.tmux, "new_window", fake_new_window)
+    monkeypatch.setattr(agents, "_ensure_sidebar", lambda *a, **k: None)
+    monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "signed_out", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "_detach", lambda *a, **k: None)
+    monkeypatch.setattr(providers.Antigravity, "after_launch", lambda *a, **k: True)
+    monkeypatch.setattr(providers.Antigravity, "command", lambda self, ctx: ["agy"])
+
+    a = Agent("g1", ws.id, "dev-agy", "antigravity", None, "assign", "idle", "@0", None, time.time())
+    db.add_agent(a)
+    agents._launch(db, a, ws, prompt=None, resume=None, watch_pane=False, model_checked=True)
+
+    assert seen.get("GOOGLE_GEMINI_BASE_URL") == GATEWAY_URL
+    assert json.loads(settings.read_text()) == {"theme": "dark", "modelProvider": "gemini"}
+    assert "Antigravity on a Gemini-compatible gateway" in m.describe()
 
 
 # -- an old provider_config policy and its migrated agent_setup behave the same ------------------

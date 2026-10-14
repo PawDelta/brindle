@@ -14,18 +14,39 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sys
 import time
 from dataclasses import dataclass
 
 from brindle import codemap, tmux
-from brindle.config import brindle_home
+from brindle.config import brindle_home, worktrees_dir
 from brindle.profiles import Profile
 
 
+def _in_worktree(path: str) -> bool:
+    """``path`` (not resolved: a venv's python is a symlink out of it) lies in
+    one of brindle's worktrees."""
+    path = os.path.abspath(path)
+    roots = {os.path.abspath(worktrees_dir()), os.path.realpath(worktrees_dir())}
+    return any(path.startswith(root + os.sep) for root in roots)
+
+
 def brindle_invocation() -> list[str]:
-    """argv that re-enters this same brindle install, independent of PATH."""
-    return [sys.executable, "-m", "brindle"]
+    """argv that re-enters this same brindle install, independent of PATH.
+    A brindle run from a worktree's venv (developing brindle with brindle)
+    would write that venv's python into hooks that outlive the worktree, so
+    the installed ``brindle`` is used instead when there is one. ``-P``: these
+    run from inside worktrees (hooks, a re-exec'd sidebar), and ``-m`` would
+    otherwise put the cwd first on sys.path, so a ``brindle/`` there would be
+    imported instead of the install."""
+    if _in_worktree(sys.executable):
+        # Past every worktree's own bin (``uv run`` puts it first on PATH).
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            installed = shutil.which("brindle", path=directory) if directory else None
+            if installed and not _in_worktree(installed):
+                return [installed]
+    return [sys.executable, "-P", "-m", "brindle"]
 
 
 def mcp_server_spec(agent_id: str) -> dict:
@@ -52,6 +73,9 @@ class LaunchContext:
 class Provider:
     name = "base"
     uses_hooks = False
+    # Whether a hook reports each turn's start (or a resume), so an 'idle'
+    # status means no turn is running. Only meaningful with uses_hooks.
+    announces_turns = True
     # Whether a hook reports when the CLI is ready for input. Without one,
     # brindle marks it ready once after_launch sees its input box.
     announces_start = True
@@ -527,8 +551,8 @@ class ClaudeCode(Provider):
             argv += ["--session-id", ctx.session_id]
         if ctx.resume:
             argv += ["--resume", ctx.resume]
-            if p.headless and ctx.initial_prompt:
-                argv.append(ctx.initial_prompt)  # -p needs the next turn's prompt
+            if ctx.initial_prompt:
+                argv.append(ctx.initial_prompt)
         elif ctx.initial_prompt:
             argv.append(ctx.initial_prompt)
         return argv
@@ -1100,6 +1124,7 @@ class Codex(Provider):
     # Status comes from Codex's `notify` command (turn complete); it has no
     # ready or turn-start event, so after_launch says when it's ready.
     uses_hooks = True
+    announces_turns = False
     announces_start = False
     # Codex's approval prompts: run a command, make edits, grant permissions,
     # send input to a terminal. Nothing else on its screen asks this way.
@@ -1171,6 +1196,16 @@ class Codex(Provider):
             return "typing"
         return None
 
+    @staticmethod
+    def can_resume(session_id: str) -> bool:
+        """Codex can resume a session by its own id when its rollout file
+        exists under ``$CODEX_HOME/sessions``."""
+        from brindle import usage
+
+        if not session_id:
+            return False
+        return usage.find_codex_rollout(session_id, None, 0) is not None
+
     def command(self, ctx: LaunchContext) -> list[str]:
         spec = mcp_server_spec(ctx.agent_id)
         # Codex appends the event's JSON as the last argument.
@@ -1197,6 +1232,11 @@ class Codex(Provider):
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
             argv += ["-c", f"model_reasoning_effort={json.dumps(ctx.profile.effort)}"]
+        if ctx.resume:
+            argv += ["resume", ctx.resume]
+            if ctx.initial_prompt:
+                argv.append(ctx.initial_prompt)
+            return argv
         # Codex has no system-prompt flag; lead the first message with the profile.
         first = "\n\n".join(p for p in (ctx.profile.prompt, ctx.initial_prompt) if p)
         if first:
@@ -1303,7 +1343,11 @@ class Antigravity(Provider):
             argv += ["-i", ctx.initial_prompt]
         return argv
 
-    TRUST_DIALOG = re.compile(r"Do you trust the contents of this project\?", re.I)
+    # agy has worded this prompt both ways ("Do you trust the contents of this
+    # project?", "Antigravity CLI requires permission to read, edit, and
+    # execute files here."); both offer the same "Yes, I trust this folder".
+    TRUST_DIALOG = re.compile(r"Do you trust the contents of this project\?|requires permission to read, edit,"
+                              r"|Yes, I trust this folder", re.I)
     TRUST_SELECTED = re.compile(r">\s*Yes, I trust this folder")
     READY = re.compile(r"\? for shortcuts|esc to cancel")
     INPUT_LINE = re.compile(r"^\s*>\s*(.*)$", re.M)
