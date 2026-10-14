@@ -37,7 +37,7 @@ RESULT_CHARS = 2000
 CAP_PER_REPO = 5000
 
 KINDS = ("worker_result", "review", "merge", "check", "milestone", "permission", "learned_rules",
-         "escape")
+         "escape", "graph_query")
 
 
 def _trim(text: str | None, limit: int) -> str | None:

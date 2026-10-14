@@ -442,19 +442,29 @@ def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
             live = git.current_branch(path)
             if branch and live != branch:
                 raise WorkspaceError(f"{path} has {live or 'a detached HEAD'} checked out, not {branch!r}")
-            return adopt_root(db, str(path))
+            ws = adopt_root(db, str(path))
+            from brindle import codemap
+            codemap.seed_session(ws.path, ws.repo_root)
+            return ws
         if not branch:
             raise WorkspaceError(f"{path} isn't a worktree yet; pass --branch to create one there")
         cfg = load_repo_config(repo_root)
         base = cfg.base_branch or git.default_branch(repo_root)
         git.add_worktree(repo_root, path, branch, git.resolve_start_point(repo_root, base, cfg.fetch))
-        return adopt_root(db, str(path))
+        ws = adopt_root(db, str(path))
+        from brindle import codemap
+        codemap.seed_session(ws.path, ws.repo_root)
+        return ws
     if not branch:
         raise WorkspaceError("give a branch or a worktree path")
     existing = git.worktree_for_branch(repo_root, branch)
     if existing:
-        return adopt_root(db, existing)
-    return create(db, repo_path, branch, apply_prefix=False).workspace
+        ws = adopt_root(db, existing)
+    else:
+        ws = create(db, repo_path, branch, apply_prefix=False).workspace
+    from brindle import codemap
+    codemap.seed_session(ws.path, ws.repo_root)
+    return ws
 
 
 def checkout_for_target(db: DB, repo_path: str, target: str) -> Workspace:
@@ -611,6 +621,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
         _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)
     if exists:
+        from brindle import codemap
+        codemap.remove_session_graph(ws.path)
         try:
             git.remove_worktree(ws.repo_root, ws.path, force=force)
         except git.GitError:

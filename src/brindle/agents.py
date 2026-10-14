@@ -148,7 +148,7 @@ def worker_guidance(ws: Workspace) -> str:
         checks = load_repo_config(ws.repo_root).checks
     except ValueError:
         checks = []
-    parts = (codemap.guidance(ws.repo_root), test_guidance(checks),
+    parts = (codemap.guidance(ws), test_guidance(checks),
              PERMISSION_GUIDANCE.format(root=ws.repo_root))
     return "\n".join(p for p in parts if p)
 
@@ -379,6 +379,9 @@ def spawn(
         if plan and not prompt:
             prompt = agent.task = pilot.kickoff(plan)
             db.update_agent(agent_id, task=prompt)
+    if mode == "interactive":
+        from brindle import codemap
+        codemap.seed_session(ws.path, ws.repo_root)
     try:
         _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
                 background_setup=background_setup, model_checked=True)
@@ -449,9 +452,12 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if agent.mode == "interactive":
         from brindle import codemap, repos
 
-        note = codemap.guidance(ws.repo_root)
+        note = codemap.guidance(ws)
         if note:
             profile = replace(profile, prompt=f"{profile.prompt}\n\n{note}".strip())
+        repo_map = codemap.supervisor_map(ws) if autopilot_on or agent.profile == "supervisor" else None
+        if repo_map:
+            profile = replace(profile, prompt=f"{profile.prompt}\n\n{repo_map}".strip())
         attached = repos.guidance(db, agent.id)   # a session root's attached repos
         if attached:
             profile = replace(profile, prompt=f"{profile.prompt}\n\n{attached}".strip())
@@ -2405,6 +2411,9 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
     ws = db.get_workspace(agent.workspace_id)
+    from brindle import codemap
+
+    codemap.record_query(db, agent, ws, command)
     try:
         profile = load_profile(agent.profile, ws.repo_root if ws else None)
     except Exception:

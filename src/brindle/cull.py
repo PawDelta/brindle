@@ -83,6 +83,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     owners = agents.pane_owners(db, panes)
     done: list[str] = []
 
+    from brindle import codemap
+
+    removed_graphs = codemap.prune_stores(now)
+    if removed_graphs:
+        done.append(f"removed {removed_graphs} stale graph store(s)")
+
     # 0. A Claude Code inbox held by an agent that isn't Claude Code is its
     # launcher's: messages to it would go to the supervisor's chat.
     from brindle import inbox

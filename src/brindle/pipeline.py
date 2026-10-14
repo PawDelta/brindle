@@ -47,7 +47,7 @@ import threading
 from contextlib import contextmanager
 
 from brindle import (
-    agents, autopilot, codemap, conflicts, events, gates, git, history, learning, policy, savings,
+    agents, autopilot, codemap, codemap_docs, conflicts, events, gates, git, history, learning, policy, savings,
     tasks, workspaces,
 )
 from brindle.config import RepoConfig, load_repo_config
@@ -793,7 +793,10 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     )
     _note(db, ws, merged=True, checks_passed=True, actor=caller)
     tasks.on_merged(db, ws)
-    codemap.refresh_later(ws.repo_root)
+    codemap.refresh_later(target, repo_root=ws.repo_root)
+    doc_note = codemap_docs.docs_refresh_note(ws, target=target)
+    if doc_note:
+        text += f" {doc_note}"
     if pilot:
         db.bump_progress(pilot.root_id)
         if pilot.goal:
