@@ -101,7 +101,7 @@ def _aws_token_key(profile: str, config_path: Path) -> str | None:
 
 
 def _aws(env: Mapping[str, str], home: Path, now: float) -> LoginStatus:
-    profile = env.get("AWS_PROFILE") or "default"
+    profile = env.get("AWS_PROFILE") or env.get("AWS_DEFAULT_PROFILE") or "default"
     refresh = f"aws sso login --profile {profile}"
     config = Path(env.get("AWS_CONFIG_FILE") or home / ".aws" / "config")
     key = _aws_token_key(profile, config)

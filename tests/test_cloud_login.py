@@ -48,6 +48,13 @@ def test_aws_reads_only_the_selected_profiles_sso_session(tmp_path):
     assert live.refresh_cmd == "aws sso login --profile dev"
     assert not cloud_login.status("bedrock", env=env, home=tmp_path, now=NOW + 1).ok   # other is live
     assert not cloud_login.status("bedrock", env={**env, "AWS_PROFILE": "old"}, home=tmp_path, now=NOW).ok
+    # AWS_DEFAULT_PROFILE selects dev (expired) beside a live default session
+    (tmp_path / ".aws" / "config").write_text(
+        "[default]\nsso_session = def-sess\n\n[profile dev]\nsso_session = dev-sess\n")
+    _sso_token(cache, "def-sess", "2099-01-01T00:00:00Z")
+    alt = {"AWS_DEFAULT_PROFILE": "dev", "AWS_CONFIG_FILE": env["AWS_CONFIG_FILE"]}
+    s = cloud_login.status("bedrock", env=alt, home=tmp_path, now=NOW + 1)
+    assert not s.ok and s.refresh_cmd == "aws sso login --profile dev"
 
 
 AZ_TOKEN = json.dumps({"accessToken": "SECRET", "expiresOn": "2027-01-15 08:00:00.000000",
