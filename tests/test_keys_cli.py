@@ -10,12 +10,23 @@ FAKE = "sk-ant-test-0123456789wxyz"
 runner = CliRunner()
 
 
-def test_key_check_rejects_a_401_and_stores_nothing(provider_http):
+def test_key_check_stores_nothing_when_refused(provider_http, monkeypatch):
+    # The provider rejects the key: one call, a 401 message, nothing stored.
     provider_http["status"] = 401
     r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=FAKE + "\n")
     assert r.exit_code == 1 and "401" in r.output and FAKE not in r.output
     assert provider_http["calls"] == ["https://api.anthropic.com/v1/models"]
     assert keystore.get_key("ANTHROPIC_API_KEY") is None
+
+    # The org denies personal keys: refused before any call to the provider.
+    class Org:
+        deny_personal_keys = True
+
+    provider_http["calls"].clear()
+    monkeypatch.setattr(agents, "managed", lambda root: Org())
+    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=FAKE + "\n")
+    assert r.exit_code == 1 and "denies personal" in r.output
+    assert provider_http["calls"] == [] and keystore.get_key("ANTHROPIC_API_KEY") is None
 
 
 def test_key_check_openrouter_needs_credit_left(provider_http, monkeypatch):
@@ -28,16 +39,6 @@ def test_key_check_openrouter_needs_credit_left(provider_http, monkeypatch):
     r = runner.invoke(app, ["keys", "set", "OPENROUTER_API_KEY"], input="or-key\n")
     assert r.exit_code == 0 and keystore.get_key("OPENROUTER_API_KEY") == "or-key"
     assert provider_http["calls"][-1] == "https://openrouter.ai/api/v1/key"
-
-
-def test_key_check_refuses_before_any_call_when_the_org_denies_personal_keys(provider_http, monkeypatch):
-    class Org:
-        deny_personal_keys = True
-
-    monkeypatch.setattr(agents, "managed", lambda root: Org())
-    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=FAKE + "\n")
-    assert r.exit_code == 1 and "denies personal" in r.output
-    assert provider_http["calls"] == [] and keystore.get_key("ANTHROPIC_API_KEY") is None
 
 
 def test_key_check_interactive_shows_the_page_and_o_opens_it(monkeypatch):

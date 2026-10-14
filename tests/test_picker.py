@@ -166,6 +166,7 @@ def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     assert "api_key_env: OPENROUTER_API_KEY" in (user_profiles_dir() / "developer-or-qwen3-coder.md").read_text()
 
 
+@pytest.mark.variant("the launch-time access re-check is the user-mandated guard that a saved worker pick the org no longer allows is never used")
 @pytest.mark.parametrize("pick, signed_in, access, light", [
     ("codex", ["codex"], {}, ["developer-codex"]),
     ("codex", [], {}, None),

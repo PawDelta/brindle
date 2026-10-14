@@ -85,19 +85,14 @@ def test_insufficient_memory_returns_fallback(fake_env):
     assert fake_env["commands"] == [] and fake_env["urls"] == []
 
 
-def test_missing_ollama_without_tty_never_prompts_and_returns_fallback(fake_env):
-    fake_env["tty"] = False
+@pytest.mark.parametrize("tty, answer, asked", [(False, True, 0), (True, "n", 1)], ids=["no-tty", "declined"])
+def test_no_ollama_install_without_consent_returns_fallback(fake_env, tty, answer, asked):
+    # Without a terminal nothing is asked; a "no" is asked once. Neither installs.
+    fake_env["tty"] = tty
     prompts: list[str] = []
-    res = local_setup.setup_model(ask= lambda p: prompts.append(p) or True, say=lambda _: None)
+    res = local_setup.setup_model(ask=lambda p: (prompts.append(p), answer)[1], say=lambda _: None)
     assert not res.ready and res.fallback
-    assert prompts == [] and fake_env["commands"] == []
-
-
-def test_declining_ollama_install_returns_fallback_without_installing(fake_env):
-    prompts: list[str] = []
-    res = local_setup.setup_model(ask=lambda p: (prompts.append(p), "n")[1], say=lambda _: None)
-    assert not res.ready and res.fallback
-    assert len(prompts) == 1 and fake_env["commands"] == []
+    assert len(prompts) == asked and fake_env["commands"] == []
 
 
 def test_installs_starts_server_pulls_with_progress_and_verifies_tags(fake_env, monkeypatch, tmp_path):
