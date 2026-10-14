@@ -137,6 +137,7 @@ def test_sweep_answers_a_prompt_after_after_launch_gave_up(db, launch, provider,
     assert prompt_answer.pending(db) == []
 
 
+@pytest.mark.variant("bypass attempt: a menu the agent raises mid-task; the only test of the hook ending startup")
 def test_a_menu_after_the_session_started_is_never_answered(db, launch):
     # A hook ran, so the session is going: a menu now is the agent's own
     # question, even though after_launch never saw the input box.
@@ -154,6 +155,7 @@ def test_model_calls_are_capped_per_launch_across_sweeps(db, launch):
     assert len(asked) == prompt_answer.MAX_CALLS
 
 
+@pytest.mark.variant("race: the selection moves during the model call; the only test of the re-capture")
 def test_selection_is_checked_on_the_pane_as_it_is_after_the_model_call(db, launch):
     # The selection moved from Dark to Light while the model was deciding Dark.
     pane, _ = launch("Choose a colour scheme", ["Dark", "Light"], {"kind": "setting_choice", "option": "Dark"},
