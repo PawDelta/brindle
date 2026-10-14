@@ -231,7 +231,7 @@ def hook_argv(argv0: str | None = None, python: str | None = None) -> list[str]:
         return [raw]
     interpreter = python or sys.executable
     _vet(interpreter, "the Python interpreter")
-    return [interpreter, "-m", "brindle"]
+    return [interpreter, "-P", "-m", "brindle"]    # -P: not a brindle/ in the hook's cwd
 
 
 def hook_command(cloud: str, org_id: str, argv0: str | None = None, python: str | None = None) -> str:

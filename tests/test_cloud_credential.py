@@ -287,7 +287,7 @@ def test_the_hook_command_names_the_running_script_or_the_interpreter(tmp_path):
     assert cc.hook_command("aws", ORG, argv0=exe) == f'"{exe}" cloud-credential aws --org {ORG}'
     py = script(tmp_path, "python3")
     assert cc.hook_command("gcp", ORG, argv0="/x/pytest/__main__.py", python=py) == \
-        f'"{py}" -m brindle cloud-credential gcp --org {ORG}'
+        f'"{py}" -P -m brindle cloud-credential gcp --org {ORG}'
 
 
 @pytest.mark.parametrize("how", ["relative", "world_writable_file", "world_writable_dir", "quote", "missing", "not_executable"])
