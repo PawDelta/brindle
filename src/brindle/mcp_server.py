@@ -57,6 +57,13 @@ def _root_id(db: DB, caller: Agent | None) -> str | None:
     return autopilot.root_of(db, caller.id) if caller else None
 
 
+def _remind_goal(db: DB, caller: Agent | None, text: str) -> str:
+    """A delegation reply, plus the set_goal reminder when the caller's
+    autopilot session has no goal yet: the work starts either way."""
+    reminder = autopilot.goal_reminder(db, caller.id) if caller else None
+    return f"{text}\n\n{reminder}" if reminder else text
+
+
 def _target(db: DB, caller: Agent | None, here: Workspace, repo: str | None) -> Workspace:
     """The workspace a tool works from: ``here`` (the caller's own), or, with
     ``repo`` (an alias or path of a repo attached to the session), the main
@@ -318,8 +325,9 @@ async def handoff(
                 weight=effective_weight,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
-            return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
-                    + "".join(f"\nprofile: {w}" for w in why))
+            return _remind_goal(db, caller,
+                                f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
+                                + "".join(f"\nprofile: {w}" for w in why))
         warning = tasks.overlap_warning(db, ws, files)
         if warning and load_repo_config(ws.repo_root).overlap == "block":
             return (f"Not started: this task {warning}. Two workers editing the same files "
@@ -338,7 +346,7 @@ async def handoff(
         )
         savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
-            return agents.subagent_brief(worker, wws)
+            return _remind_goal(db, caller, agents.subagent_brief(worker, wws))
         missing = agents.add_dirs_warning(worker, wws)
         unhooked = codex_hook.launch_warning(worker.provider, wws.path)
         result = _await_worker(db, worker.id, wait_seconds)
@@ -348,7 +356,7 @@ async def handoff(
         for w in (warning, missing, unhooked, brief):
             if w:
                 result += f"\n\nWarning: {w}"
-        return result
+        return _remind_goal(db, caller, result)
 
     return await asyncio.to_thread(run)
 
@@ -446,8 +454,9 @@ async def assign(
                 weight=effective_weight,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
-            return (f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
-                    + "".join(f"\nprofile: {w}" for w in why))
+            return _remind_goal(db, caller,
+                                f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
+                                + "".join(f"\nprofile: {w}" for w in why))
         warning = tasks.overlap_warning(db, ws, files)
         if warning and load_repo_config(ws.repo_root).overlap == "block":
             return (f"Not started: this task {warning}. Two workers editing the same files "
@@ -466,7 +475,7 @@ async def assign(
         )
         savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
         if not agents.runs_process(worker):
-            return agents.subagent_brief(worker, wws)
+            return _remind_goal(db, caller, agents.subagent_brief(worker, wws))
         text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
         if repo and repo.strip():
             text += f" (repo {repo.strip()}: {wws.repo_root})"
@@ -484,7 +493,7 @@ async def assign(
         estimate = cost_estimate.reply_note(db, wws.repo_root, [cost_estimate.TaskSpec(profile, weight)])
         if estimate:
             text += f"\n{estimate}"
-        return text
+        return _remind_goal(db, caller, text)
 
     return await asyncio.to_thread(run)
 

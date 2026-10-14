@@ -1,4 +1,5 @@
-"""Milestone status is written back to .brindle/goals.md, and nothing else."""
+"""Milestone status is written back to the session's own goal file
+(.brindle/goals/<session id>.md, claimed from .brindle/goals.md), and nothing else."""
 
 import os
 import re
@@ -42,8 +43,12 @@ def load(db, repo, agent_id="boss", text=GOALS, status="processing"):
     return ws
 
 
+def path(repo, agent_id="boss"):
+    return repo / ".brindle" / "goals" / f"{agent_id}.md"
+
+
 def goals(repo):
-    return (repo / ".brindle" / "goals.md").read_text()
+    return path(repo).read_text()
 
 
 def pass_first(db, agent_id="boss", sha=SHA):
@@ -63,9 +68,9 @@ def test_status_is_written_after_a_check_and_the_rest_is_preserved(db, repo):
     assert autopilot.parse_goals(new) == autopilot.parse_goals(GOALS)
     # The status goes after the check/profile lines, and rewriting is idempotent.
     assert new.index("profile: reviewer") < new.index("status: passed")
-    before = os.stat(repo / ".brindle" / "goals.md").st_mtime_ns
+    before = os.stat(path(repo)).st_mtime_ns
     autopilot.sync_goals_file(db, "boss")
-    assert goals(repo) == new and os.stat(repo / ".brindle" / "goals.md").st_mtime_ns == before
+    assert goals(repo) == new and os.stat(path(repo)).st_mtime_ns == before
 
 
 def test_crlf_and_missing_final_newline_survive(db, repo):
@@ -77,7 +82,7 @@ def test_crlf_and_missing_final_newline_survive(db, repo):
     autopilot.enable(db, "boss", ws)
     pass_first(db)
     autopilot.sync_goals_file(db, "boss")
-    raw = (repo / ".brindle" / "goals.md").read_bytes().decode()
+    raw = path(repo).read_bytes().decode()
     assert "\r\nstatus: passed" in raw and not re.search(r"(?<!\r)\n", raw)
     assert raw.replace("\r\nstatus: passed at abc1234 (" + time.strftime("%Y-%m-%d") + ")", "").count("status") == 1
 
@@ -94,12 +99,13 @@ def test_a_stopped_session_stops_writing(db, repo, how):
     assert goals(repo) == GOALS
 
 
-def test_a_replaced_goal_no_longer_matches_the_file(db, repo):
+def test_a_file_the_person_edited_is_left_for_resume(db, repo):
     load(db, repo)
-    autopilot.set_goal(db, "boss", "Something else", [("Other", "true", None)])
+    edited = "# Something else\n\n## Other\ncheck: true\n"
+    path(repo).write_text(edited)
     pass_first(db)
     autopilot.sync_goals_file(db, "boss")
-    assert goals(repo) == GOALS
+    assert goals(repo) == edited
 
 
 def test_a_sync_failure_is_logged_not_raised(db, repo, monkeypatch, caplog):

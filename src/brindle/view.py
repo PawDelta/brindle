@@ -286,21 +286,28 @@ def _autopilot_flags(db: DB, shown: list[Agent]) -> tuple[bool, str | None]:
     return on, asking
 
 
-def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> dict | None:
-    """The goal and milestones of the newest running autopilot session in
-    ``repo_root``, for the sidebar. ``panes`` should be the same
+def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+                    root_id: str | None = None) -> dict | None:
+    """The goal and milestones for the sidebar: session ``root_id``'s (a
+    sidebar shows only its own session's goal), else the newest running
+    autopilot session's in ``repo_root``. ``panes`` should be the same
     ``tmux.list_panes()`` result passed to ``snapshot`` for this refresh, so
     liveness isn't checked with a second tmux subprocess."""
     from brindle import autopilot, quota
 
     if not repo_root:
         return None
-    roots = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
-             if a.mode == "interactive" and a.status not in ("paused", "done")
-             and db.get_autopilot(a.id) and agents.is_alive(a, panes)]
-    if not roots:
-        return None
-    root = max(roots, key=lambda a: a.created_at)
+    if root_id:
+        root = db.get_agent(root_id)
+        if root is None or db.get_autopilot(root_id) is None:
+            return None
+    else:
+        roots = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
+                 if a.mode == "interactive" and a.status not in ("paused", "done")
+                 and db.get_autopilot(a.id) and agents.is_alive(a, panes)]
+        if not roots:
+            return None
+        root = max(roots, key=lambda a: a.created_at)
     ap = db.get_autopilot(root.id)
     assert ap is not None
     return {

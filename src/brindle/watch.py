@@ -895,7 +895,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
                 state.notice = f"{str(e).partition(':')[0]}; showing the last snapshot"
             else:
                 snap = view.snapshot(db, repo_root, panes=panes)
-                pilot = view.autopilot_entry(db, repo_root, panes=panes)
+                pilot = view.autopilot_entry(db, repo_root, panes=panes, root_id=own_root)
             stale = False
         # Re-rendered every pass: folding, filtering and `?` change it between refreshes.
         if state.help:
