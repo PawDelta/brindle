@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 
 TIERS = ("light", "medium", "heavy")
@@ -116,8 +117,11 @@ def ensure_profile(m: Model) -> None:
         path.write_text(profile_text(m), encoding="utf-8")
 
 
+SIGNED_IN_TTL = 60.0
+
 _warned: set[tuple[str, str]] = set()
-_local_ready: dict[str, bool] = {}    # model -> whether Ollama had it, probed once per process
+_local_ready: dict[str, bool] = {}    # model -> True once Ollama has it
+_signed_in: tuple[float, list[str]] | None = None
 _applying = threading.local()
 
 
@@ -136,6 +140,7 @@ def apply(cfg, user: dict, repo_root: str | None = None) -> None:
 
 
 def _apply(cfg, user: dict, repo_root: str | None) -> None:
+    global _signed_in
     from brindle import doctor
     from brindle.config import user_config_path
 
@@ -147,15 +152,18 @@ def _apply(cfg, user: dict, repo_root: str | None) -> None:
     from brindle.pro import team_policy
 
     acc = team_policy.access(repo_root)      # the policy may have narrowed since the pick; unreadable: nothing
-    signed_in = doctor.signed_in_providers()
+    now = time.monotonic()
+    if _signed_in is None or now >= _signed_in[0]:
+        _signed_in = (now + SIGNED_IN_TTL, doctor.signed_in_providers())
+    signed_in = _signed_in[1]
 
     def is_ready(m: Model) -> bool:
         if m.how != LOCAL:
             return ready(m, signed_in)
         key = m.model or ""
-        if key not in _local_ready:          # an HTTP probe of Ollama: not on every config load
-            _local_ready[key] = ready(m, signed_in)
-        return _local_ready[key]
+        if not _local_ready.get(key) and ready(m, signed_in):   # an HTTP probe of Ollama: cached once ready
+            _local_ready[key] = True
+        return _local_ready.get(key, False)
 
     for tier, m in picks.items():
         if m is not None and tier in m.tiers and allowed(acc, m, repo_root) and is_ready(m):
