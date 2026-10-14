@@ -547,14 +547,20 @@ def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeyp
     assert now[0] == 136
 
 
-def test_codex_trust_confirmation_is_not_yet_task_acceptance(monkeypatch):
+@pytest.mark.parametrize("provider,trust_screen,ready_screen", [
+    ("codex", "Trust this folder?\n› 1. Trust and continue", "› 100% context left"),
+    # agy's newer wording, which brindle missed: the worker sat on it unanswered
+    ("antigravity", "Antigravity CLI requires permission to read, edit, and execute files here.\n\n"
+                    "> Yes, I trust this folder\n  No, exit", "? for shortcuts"),
+])
+def test_trust_confirmation_is_not_yet_task_acceptance(monkeypatch, provider, trust_screen, ready_screen):
     now, keys = [100.0], []
     monkeypatch.setattr(time, "time", lambda: now[0])
     monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
-    screens = iter(["Trust this folder?\n› 1. Trust and continue", "loading", "› 100% context left"])
+    screens = iter([trust_screen, "loading", ready_screen])
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
     monkeypatch.setattr(tmux, "send_keys", lambda *a: keys.append(a))
-    assert agents.get_provider("codex").after_launch("%test") is True
+    assert agents.get_provider(provider).after_launch("%test") is True
     assert now[0] == 101.5 and keys == [("%test", "Enter")]
 
 

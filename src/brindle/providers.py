@@ -1343,7 +1343,11 @@ class Antigravity(Provider):
             argv += ["-i", ctx.initial_prompt]
         return argv
 
-    TRUST_DIALOG = re.compile(r"Do you trust the contents of this project\?", re.I)
+    # agy has worded this prompt both ways ("Do you trust the contents of this
+    # project?", "Antigravity CLI requires permission to read, edit, and
+    # execute files here."); both offer the same "Yes, I trust this folder".
+    TRUST_DIALOG = re.compile(r"Do you trust the contents of this project\?|requires permission to read, edit,"
+                              r"|Yes, I trust this folder", re.I)
     TRUST_SELECTED = re.compile(r">\s*Yes, I trust this folder")
     READY = re.compile(r"\? for shortcuts|esc to cancel")
     INPUT_LINE = re.compile(r"^\s*>\s*(.*)$", re.M)
