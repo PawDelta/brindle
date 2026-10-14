@@ -297,6 +297,48 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
     return handled
 
 
+def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
+    """A reviewer of a piped branch stopped without a verdict, which would
+    leave its worker in ``pipeline='reviewing'`` for good. Start one fallback
+    review with ``cfg.reviewer``; if this was already the fallback (another
+    reviewer of the same commit stopped the same way), or it can't start, take
+    the branch out of the pipeline and tell the supervisor. Returns whether
+    the pipeline handled it (so the generic "stopped without" notice isn't
+    sent as well)."""
+    worker = piped_worker(db, ws)
+    if worker is None or worker.pipeline != "reviewing":
+        return False
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except ValueError:
+        cfg = RepoConfig()
+    tried = any(a.id != reviewer.id and a.mode == "review" and a.result is None
+                and a.unreported_noted and a.review_sha == reviewer.review_sha
+                for a in db.list_agents(ws.id))
+    parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+    if not tried and parent is not None:
+        try:
+            agents.request_review(db, parent, ws, cfg.reviewer, cfg=cfg)
+            agents.close_later(reviewer.id)
+            return True
+        except agents.AgentError:
+            pass
+    db.update_agent(worker.id, pipeline=None)
+    _escalate(db, ws, worker)
+    if not os.path.isdir(ws.path):
+        _tell(db, worker.parent_id,
+              f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
+              f"stopped without a verdict, and the branch's worktree {ws.path} no longer exists, "
+              f"so nothing is left to review or merge. remove_workspace(\"{ws.id}\") clears "
+              "its record.", reviewer.id)
+        return True
+    _tell(db, worker.parent_id,
+          f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
+          f"stopped without a verdict. Review it yourself with workspace_diff, then "
+          f"merge_workspace.", reviewer.id)
+    return True
+
+
 def has_supervisor_action(summary: str) -> bool:
     """Parse review summary for actionable supervisor findings.
     Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
@@ -320,6 +362,10 @@ def has_supervisor_action(summary: str) -> bool:
     first_sentence = re.split(r"[.\n;]", section_text.strip())[0]
     first_cleaned = re.sub(r"[^\w]+", " ", first_sentence).strip().lower()
     if first_cleaned and first_cleaned in negations:
+        return False
+    # "None — all fixable by the worker.", "No items.": a section that opens
+    # with a negation has nothing for the supervisor, whatever follows it.
+    if re.match(r"(?:none|no|n a|na|nil|nothing)\b", cleaned):
         return False
     return True
 

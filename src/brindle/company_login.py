@@ -472,7 +472,9 @@ def claude_model(model: str | None, repo_root: str | None = None) -> str | None:
     the profile's CLI flag, just as it does in the company login env.
     Launch and policy checks share this resolution without changing the
     saved profile. Claude Code's own managed settings pick their own route.
-    An unavailable setup leaves the profile alone, as company login does.
+    An unavailable setup leaves the profile alone, as company login does,
+    and so does a launch the route's env doesn't reach (``route_in_use``):
+    a route model id on the person's own Anthropic sign-in doesn't exist.
     """
     from brindle import providers
 
@@ -482,9 +484,24 @@ def claude_model(model: str | None, repo_root: str | None = None) -> str | None:
     if got is None or got is UNAVAILABLE:
         return model
     c = got[1].claude
-    if c is None or not c.model_ids or model in c.model_ids:
+    if c is None or not c.model_ids or model in c.model_ids or not route_in_use(got[0], got[1]):
         return model
     return c.default_model or c.model_ids[0]
+
+
+def route_in_use(org_id: str, setup) -> bool:
+    """Whether a Claude pane gets this org's route env: an enforced setup's
+    (``company_identity.enforced_route_env``), or the env company login
+    stored for this org (``stored_env``, what ``agents.agent_env`` applies)."""
+    if setup.enforce:
+        return True
+    if not stored_env():
+        return False
+    try:
+        got = config.user_settings().get(ENV_KEY)
+    except (OSError, ValueError):
+        return False
+    return isinstance(got, dict) and got.get("org") == org_id
 
 
 def org_setup(repo_root: str | None = None, store=None, client=None):

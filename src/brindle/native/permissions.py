@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import fnmatch
 import re
-import shlex
 
 READ_ONLY = {"Read", "Glob", "Grep"}
 # brindle's own tools, as the native loop names them (the MCP server's names
@@ -25,7 +24,9 @@ READ_ONLY = {"Read", "Glob", "Grep"}
 BRINDLE_TOOLS = {"report_result", "submit_review", "send_message", "workspace_diff"}
 EDITS = {"Edit", "Write"}
 _RULE = re.compile(r"^(\w+)(?:\((.*)\))?$")
-_SEPARATORS = {"&&", "||", ";", "|", "&"}
+_SEPARATORS = {"&&", "||", ";", ";;", "|", "|&", "&", "\n"}
+_OPERATOR_CHARS = set(";&|<>()")
+_TO_DEV_NULL = {">", ">>", ">|", "&>", "&>>"}
 
 
 class Permissions:
@@ -94,7 +95,8 @@ def uncovered_part(specs: list[str | None], command: str, cd_root: str | None = 
     """The first simple command in ``command`` (``a && b | c`` has three)
     that no spec in ``specs`` covers, or None when all are covered. Command
     substitution is never covered: what it runs can't be seen from here.
-    Unparseable input (an unclosed quote) counts as uncovered. With
+    Neither is what split_commands can't split (an unclosed quote, a
+    heredoc, a redirection that writes a file): it counts as uncovered. With
     ``cd_root``, a ``cd`` whose target is inside that directory is covered
     too (``cd sub && pytest`` from a worker's own worktree)."""
     command = command.strip()
@@ -136,23 +138,120 @@ def _covers(spec: str, part: str) -> bool:
 
 
 def split_commands(command: str) -> list[str]:
-    """The simple commands joined by ``&&``, ``||``, ``;``, ``|`` or ``&``,
-    each re-joined from its tokens (so spacing doesn't matter). Unparseable
-    input (an unclosed quote) gives an empty list: nothing matches it."""
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-    lex.whitespace_split = True
-    try:
-        tokens = list(lex)
-    except ValueError:
+    """The simple commands joined by a control operator (``&&``, ``||``,
+    ``;``, ``;;``, ``|``, ``|&``, ``&`` or a newline), each re-joined from
+    its words (so spacing and quoting don't matter). A redirection is dropped
+    when it's harmless: output to /dev/null, an fd dup (``2>&1``), input from
+    a file. Anything else gives an empty list, which nothing matches: an
+    unclosed quote, other output redirection, a heredoc (``<<``), process
+    substitution (``<(...)``), a subshell or any other operator."""
+    tokens = _tokens(command)
+    if tokens is None:
         return []
     parts, current = [], []
-    for tok in tokens:
-        if tok in _SEPARATORS:
+    i = 0
+    while i < len(tokens):
+        is_op, text = tokens[i]
+        if not is_op:
+            current.append(text)
+        elif text in _SEPARATORS:
             if current:
                 parts.append(" ".join(current))
             current = []
         else:
-            current.append(tok)
+            target = tokens[i + 1] if i + 1 < len(tokens) else (True, "")
+            if target[0] or not _harmless_redirect(text, target[1]):
+                return []
+            i += 1
+        i += 1
     if current:
         parts.append(" ".join(current))
     return parts
+
+
+def _harmless_redirect(op: str, target: str) -> bool:
+    if op in _TO_DEV_NULL:
+        return target == "/dev/null"
+    if op in (">&", "<&"):
+        return target == "-" or target.isascii() and target.isdigit()
+    return op == "<"  # reads a file, as the command itself could
+
+
+def _tokens(command: str) -> list[tuple[bool, str]] | None:
+    """``(is_operator, text)`` for each word (quotes removed) and each run of
+    operator characters outside quotes, or None for input whose quoting the
+    shell may read differently: an unclosed quote, a ``$`` starting quoting
+    or an expansion (``$'...'``, where \\' doesn't end it; ``${...}``, with
+    its own quoting rules; see _expands), or a # starting a word (a comment
+    to bash, a plain word to interactive zsh: either way a quote after it
+    pairs differently). An fd number written against a redirection (the 2
+    of ``2>&1``) belongs to it and is dropped."""
+    out: list[tuple[bool, str]] = []
+    word: list[str] | None = None  # None between words
+    quoted = False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c in " \t\n" or c in _OPERATOR_CHARS:
+            j = i + 1
+            if c in _OPERATOR_CHARS:
+                while j < n and command[j] in _OPERATOR_CHARS:
+                    j += 1
+            op = command[i:j]
+            if word is not None:
+                text = "".join(word)
+                fd = op[0] in "<>" and not quoted and text.isascii() and text.isdigit()
+                if (text or quoted) and not fd:
+                    out.append((False, text))
+                word = None
+            if op != " " and op != "\t":
+                out.append((True, op))
+            i = j
+            continue
+        if word is None:
+            word, quoted = [], False
+        if c == "#" and not word and not quoted or _expands(command, i):
+            return None
+        if c == "'":
+            j = command.find("'", i + 1)
+            if j < 0:
+                return None
+            word.append(command[i + 1:j])
+            quoted, i = True, j + 1
+        elif c == '"':
+            j = i + 1
+            while j < n and command[j] != '"':
+                if _expands(command, j):
+                    return None
+                if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`\n':
+                    word.append(command[j + 1] if command[j + 1] != "\n" else "")
+                    j += 2
+                else:
+                    word.append(command[j])
+                    j += 1
+            if j >= n:
+                return None
+            quoted, i = True, j + 1
+        elif c == "\\" and i + 1 < n:
+            if command[i + 1] != "\n":  # \<newline> only continues the line
+                word.append(command[i + 1])
+                quoted = True
+            i += 2
+        else:
+            word.append(c)
+            i += 1
+    if word is not None and (word or quoted):
+        out.append((False, "".join(word)))
+    return out
+
+
+def _expands(command: str, i: int) -> bool:
+    """Whether the ``$`` at ``i`` starts quoting or an expansion with its own
+    parsing (``$'``, ``$"``, ``${``, ``$(``, ``$[``), once the shell has
+    deleted the line continuations (\\<newline>) after it."""
+    if command[i] != "$":
+        return False
+    k = i + 1
+    while command.startswith("\\\n", k):
+        k += 2
+    return k < len(command) and command[k] in "'\"{(["

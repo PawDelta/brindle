@@ -1,12 +1,15 @@
 import json
 import os
+import sys
 
 import pytest
 
+import brindle
 from brindle import git, workspaces
 from brindle.config import load_repo_config
 
 from conftest import sh
+from test_merge_order import add
 
 
 def write_config(repo, **cfg):
@@ -53,6 +56,27 @@ def test_remove_refuses_dirty_and_keeps_branch(db, repo):
     assert git.branch_exists(str(repo), "feature")
     assert not os.path.exists(ws.path)
     assert db.get_workspace(ws.id) is None
+
+
+@pytest.mark.variant("incident: 8 merged workspaces kept their rows after a reviewer's "
+                     "`uv run` from the worktree")
+def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, repo, monkeypatch):
+    # A reviewer ran brindle from the worktree under review (`uv run` there):
+    # removing it took brindle's source with it, so a module not loaded yet
+    # failed to import afterwards, leaving the row and its agents behind.
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    add(db, ws, "rev0", "review", "reviewer")
+    real = git.remove_worktree
+
+    def remove_with_the_source(*a, **k):
+        real(*a, **k)
+        monkeypatch.delattr(brindle, "rewind", raising=False)
+        monkeypatch.setitem(sys.modules, "brindle.rewind", None)
+
+    monkeypatch.setattr(git, "remove_worktree", remove_with_the_source)
+    workspaces.remove(db, ws)
+    assert db.get_workspace(ws.id) is None
+    assert db.get_agent("rev0") is None
 
 
 def test_existing_branch_is_reused_and_names_dedupe(db, repo):

@@ -80,6 +80,17 @@ def test_local_change_since_last_sync_is_pushed_not_overwritten(backend, store):
     assert read_cfg() == {"delegation": "conservative"}
 
 
+def test_first_sync_never_overwrites_a_value_set_here(backend, store):
+    # A stale account copy (delegation "fast") replaced the "balanced" set on
+    # this machine on its first sync, without the person doing anything.
+    backend.settings, backend.settings_at = {"delegation": "fast", "sidebar": "bottom"}, time.time()
+    write_cfg(delegation="balanced", max_agents=20)
+    r = settings_sync.pull(client(backend), store)
+    assert r.action == "pushed"
+    assert read_cfg() == {"delegation": "balanced", "max_agents": 20, "sidebar": "bottom"}
+    assert backend.settings == {"delegation": "balanced", "max_agents": 20, "sidebar": "bottom"}
+
+
 def test_push_from_a_fresh_machine_keeps_the_servers_other_keys(backend, store):
     backend.settings, backend.settings_at = {"sidebar": "bottom"}, time.time()
     write_cfg(delegation="fast")

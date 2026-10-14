@@ -14,6 +14,21 @@ def test_repo_add_dirs_expand_a_leading_tilde(tmp_path, monkeypatch):
     assert load_profile("developer", str(repo)).add_dirs == [str(home / "cache")]
 
 
+def test_doctor_warns_override_drops_allowlist(brindle_home):
+    """A ~/.brindle/agents copy of reviewer-codex with no allowed_tools hides the
+    built-in's allowlist; a copy that keeps one, and a new name, are fine."""
+    from brindle import doctor
+
+    agents = brindle_home / "agents"
+    agents.mkdir(parents=True)
+    (agents / "reviewer-codex.md").write_text("---\nname: reviewer-codex\nprovider: antigravity\n---\nReview.\n")
+    (agents / "developer.md").write_text("---\nname: developer\nallowed_tools: Bash(ls:*)\n---\nWork.\n")
+    (agents / "my-reviewer.md").write_text("---\nname: my-reviewer\n---\nReview.\n")
+
+    warned = doctor.override_checks()
+    assert [(c.level, c.name) for c in warned] == [(doctor.WARN, "profile reviewer-codex")]
+
+
 def test_an_unknown_user_in_add_dirs_is_reported_not_raised(tmp_path):
     """``~typo/cache`` makes expanduser raise. Kept as written instead, so
     loading the profile (and every launch with it) still works and launch

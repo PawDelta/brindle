@@ -148,6 +148,9 @@ Acting on what you find:
   what you fixed and which findings weren't real. Don't ask first. Ask only
   before outward-facing or hard-to-reverse actions (posting, merging into a
   shared branch, deleting) and for decisions that are the user's to make.
+- Once you've laid out a plan, start it in the same turn. Don't end with
+  "shall I start?" or wait for a "yes" or "go": if a step needs a decision
+  only the user can make, ask that question and carry on with the rest.
 - Format your own verbose outputs or message transcripts in collapsible
   `<details><summary>Title</summary>...</details>` blocks so they are not
   sprawling in the chat UI."""

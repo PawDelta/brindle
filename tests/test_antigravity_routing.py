@@ -81,7 +81,6 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     monkeypatch.chdir(repo)
     monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
     monkeypatch.setattr(Antigravity, "after_launch", lambda *a: True)
-    monkeypatch.setattr(Antigravity, "warmup", lambda *a: pytest.fail("synthetic warmup"))
     monkeypatch.setattr(model_access, "probe", lambda *a, **k: pytest.fail("availability generation probe"))
     monkeypatch.setattr(autopilot, "guide", lambda *a: "\nAutopilot context must survive initialization.")
     monkeypatch.setattr(cli, "_preflight", lambda *a: None)
@@ -101,7 +100,7 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     assert expected in delivered and antigravity.TOOLS_NOTE in delivered
     assert "Delegation rule:" in delivered
     assert "Autopilot context must survive initialization." in delivered
-    assert antigravity.WARMUP_END not in delivered
+    assert antigravity.WARMUP_END in delivered
     assert db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone() is None
     assert not any("_launch-health" in argv for argv in helpers)
     assert db.pending_count(a.id) == 0
@@ -155,7 +154,8 @@ def boss(db, ws, repo, monkeypatch, tmp_path):
     return ws
 
 
-def test_assign_starts_an_antigravity_worker(db, boss, launcher_inbox, fake_tmux, helpers):
+def test_agy_warmup_queued_before_task(db, boss, launcher_inbox, fake_tmux, helpers):
+    # agy has no MCP tools in its first turn, so the task must be the second.
     out = asyncio.run(mcp_server.assign("developer-antigravity", "write the readme", branch="docs/readme"))
     m = re.search(r"Started worker (\S+) \(developer-antigravity\)", out)
     assert m, out
@@ -165,17 +165,20 @@ def test_assign_starts_an_antigravity_worker(db, boss, launcher_inbox, fake_tmux
     # What the detached _after-launch helper does once agy shows its prompt.
     agents.ready(db, worker.id)
     assert not db.get_agent(worker.id).inbox_socket
-    assert db.pending_count(worker.id) == 1
+    assert db.pending_count(worker.id) == 2
     assert agents.flush(db, worker.id)
-    assert len(fake_tmux) == 1 and fake_tmux[0][0] == "@9"
-    delivered = fake_tmux[0][1]
-    assert "You are a developer agent" in delivered
-    assert "When you run under brindle" in delivered and "call_mcp_tool" in delivered
-    assert delivered.count("write the readme") == 1 and antigravity.WARMUP_END not in delivered
+    db.set_status(worker.id, "idle")   # agy's Stop hook after the warm-up turn
+    assert agents.flush(db, worker.id)
+    assert [t for t, _ in fake_tmux] == ["@9", "@9"]
+    warmup, task = (text for _, text in fake_tmux)
+    assert "You are a developer agent" in warmup
+    assert "When you run under brindle" in warmup and "call_mcp_tool" in warmup
+    assert antigravity.WARMUP_END in warmup and "write the readme" not in warmup
+    assert task.count("write the readme") == 1 and antigravity.WARMUP_END not in task
     assert db.pending_count(worker.id) == 0
     db.set_status(worker.id, "idle")
     assert not agents.flush(db, worker.id)
-    assert len(fake_tmux) == 1
+    assert len(fake_tmux) == 2
     assert launcher_inbox == []
 
 

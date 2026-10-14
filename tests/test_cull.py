@@ -108,6 +108,39 @@ def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
     assert db.get_agent("w1").dismissed_at is None
 
 
+@pytest.mark.parametrize("provider,mode", [
+    ("claude", "assign"),
+    ("codex", "assign"),   # no turn-start event: its pane must be quiet too
+    ("claude", "review"),  # a piped reviewer: the pipeline tells the supervisor
+])
+def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provider, mode):
+    """autopilot.on_stop only checks on workers when a goal is set; most
+    sessions have none, so the sweep reminds the supervisor itself, even if
+    the worker's stop already sent a notice that went unread."""
+    from brindle import pipeline
+
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor")
+    db.add_autopilot("boss")
+    add(db, ws, "w1", parent_id="boss", provider=provider, mode=mode,
+        status_since=time.time() - 600)
+    db.update_agent("w1", unreported_noted=1)
+    sent = []
+    activity = time.time()  # its pane printed just now
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: activity)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
+    monkeypatch.setattr(pipeline, "on_reviewer_unreported",
+                        lambda db_, r, ws_: sent.append(r.parent_id) or True)
+    cull.sweep(db)
+    # Codex still reads 'idle' through a resumed turn: its fresh output says otherwise.
+    assert sent == ([] if provider == "codex" else ["boss"])
+    activity = time.time() - 600
+    cull.sweep(db)
+    cull.sweep(db)
+    assert sent == ["boss"]
+
+
 def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
     add(db, ws, "w1", parent_id="boss", status="paused")

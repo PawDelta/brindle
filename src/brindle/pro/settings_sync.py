@@ -8,8 +8,9 @@
   server's ``updated_at`` and the synced values as of the last sync. If the
   local values differ from that snapshot, they were changed since: they are
   pushed. Otherwise a newer server copy is written into the config file
-  (other keys are kept). On a machine's first sync (no snapshot) the account's
-  values win over differing local ones; keys only this machine has are pushed.
+  (other keys are kept). On a machine's first sync (no snapshot) it adopts the
+  account's keys it lacks, but a value set here is never replaced by the
+  account's (which may be older): differing and local-only values are pushed.
   PUT replaces the server's whole map, so a push first reads the server and
   keeps its keys this machine lacks.
 * Needs the ``settings_sync`` feature in the verified entitlement (checked
@@ -116,10 +117,10 @@ def _sync(client=None, store=None) -> Result:
 
     if state is not None and _subset(state["settings"]) != local:
         return put()                                   # changed here since the last sync
+    if state is None and any(server.get(k) != v for k, v in local.items()):
+        return push(client, store)                     # first sync: keep this machine's values
     if ua is None or (state is not None and state.get("updated_at") is not None
                       and ua <= state["updated_at"]):
-        if state is None and local:
-            return put()                               # first sync, nothing on the server yet
         if state is None:
             _save_state(ua, local)
         return Result("unchanged")
