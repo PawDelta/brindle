@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import sh
 
 from brindle import agents, tmux, workspaces
 from brindle.db import Agent
@@ -46,10 +47,13 @@ def test_no_unreported_alert_while_a_long_command_runs(db, ws, monkeypatch):
 def test_unreported_alert_still_fires_once_when_nothing_is_running(db, ws, monkeypatch):
     sent = _unreported_setup(db, ws, monkeypatch)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    (Path(ws.path) / "parser.py").write_text("x = 1\n")
+    sh("git add -A && git commit -qm wip", ws.path)
     agents.handle_hook(db, "a1", "stop", {})
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert len(sent) == 1 and sent[0][1] == "boss"
+    assert "parser.py" in sent[0][2]   # what it did, so the supervisor needn't go and look
 
 
 def test_unreported_notice_repeats_after_resume(db, ws, monkeypatch):

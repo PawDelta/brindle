@@ -146,11 +146,15 @@ def test_other_azure_subscription_warns(monkeypatch):
     assert c.level == doctor.WARN and "other-sub" in c.detail and "az account set" in c.detail
 
 
-def test_missing_cli_warns_without_a_mismatch(monkeypatch):
-    Fake(monkeypatch, missing={"aws"})
+@pytest.mark.parametrize("rc, missing, said, not_said", [
+    ({}, {"aws"}, "isn't installed", "couldn't run"),
+    ({("aws", "sts"): (124, "timed out")}, set(), "couldn't run", "isn't installed"),
+])
+def test_missing_cli_warns_without_a_mismatch(monkeypatch, rc, missing, said, not_said):
+    Fake(monkeypatch, rc, missing=missing)
     policy(monkeypatch, claude_setup("bedrock", aws=AWS))
     c = by_name()["claude identity"]
-    assert c.level == doctor.WARN and "isn't installed" in c.detail
+    assert c.level == doctor.WARN and said in c.detail and not_said not in c.detail
 
 
 # -- a route that leaves the cloud sign-in to the person ---------------------------------

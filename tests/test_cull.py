@@ -185,6 +185,61 @@ def test_idle_sweep_honors_the_unreported_alert_cooldown(db, ws, monkeypatch):
     assert sent == ["boss"]
 
 
+def _live_panes():
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes.update({"@998": True, "@999": True})
+    return panes
+
+
+@pytest.mark.parametrize("name", [
+    "wip.py",
+    pytest.param("café.py", marks=pytest.mark.variant("git status C-quotes non-ASCII paths")),
+])
+def test_idle_worker_changing_files_is_not_alerted(db, ws, monkeypatch, name):
+    """Idle by its hooks, but something it started is still editing its worktree."""
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
+    add(db, ws, "w1", parent_id="boss", status_since=time.time() - 600)
+    wip = os.path.join(ws.path, name)
+    with open(wip, "w") as f:
+        f.write("x = 1\n")
+    sent = []
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: None)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
+    cull.note_idle_unreported(db, time.time(), _live_panes())
+    assert sent == []
+    os.utime(wip, (time.time() - 600, time.time() - 600))
+    cull.note_idle_unreported(db, time.time(), _live_panes())
+    assert sent == ["boss"]
+
+
+@pytest.mark.parametrize("problem", ["unpicked", "inbox"])
+def test_reported_branch_problems_reach_the_supervisor(db, ws, monkeypatch, problem):
+    """#135: a worker reported, then its work went nowhere: its branch waited
+    for a review nobody started, or messages to it sat undelivered. The
+    supervisor hears once, with what to do."""
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
+    add(db, ws, "w1", parent_id="boss", result="done")
+    sent = []
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: None)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
+    later = time.time()
+    if problem == "unpicked":
+        # Reported long after its last commit: the wait starts at the report.
+        reported = time.time() + cull.UNPICKED_AFTER
+        db.update_agent("w1", pipeline="reviewing", reviewing_since=reported)
+        cull.note_reported_stuck(db, reported + 60, _live_panes())
+        assert sent == []
+        later = reported + cull.UNPICKED_AFTER + 60
+    else:
+        db.enqueue("w1", "changes requested", "r1")
+        db.conn.execute("UPDATE inbox SET created_at=?", (time.time() - 600,))
+    cull.note_reported_stuck(db, later, _live_panes())
+    cull.note_reported_stuck(db, later, _live_panes())
+    assert len(sent) == 1 and sent[0][0] == "boss" and ws.id in sent[0][1]
+
+
 def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
     add(db, ws, "w1", parent_id="boss", status="paused")

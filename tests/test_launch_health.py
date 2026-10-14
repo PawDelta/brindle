@@ -895,3 +895,29 @@ def test_old_launch_cannot_bind_replacement_pane(db, health):
     lh.bind(db, old, "%old")
     row = db.conn.execute("SELECT pane FROM launch_health WHERE agent_id=?", (old.id,)).fetchone()
     assert row["pane"] == "" and started == []
+
+
+@pytest.mark.parametrize("stamp,sid,outcome", [
+    ("1970-01-01T00-01-40-800Z", "sess-1", "mcp-failed"),     # same second as the launch
+    ("1970-01-01T00-01-40-800Z", "other-session", None),      # another session's failure
+    ("1970-01-01T00-00-10-000Z", "sess-1", None),             # a log from before this launch
+])
+def test_failed_brindle_mcp_start_is_told_to_the_supervisor(db, health, monkeypatch, tmp_path,
+                                                            stamp, sid, outcome):
+    lh, a, now, _, _, reports = health
+    now[0] = 100.5
+    lh.prepare(db, a, "effective-account")      # launched at t=100.5s
+    monkeypatch.setenv("HOME", str(tmp_path))
+    db.update_agent(a.id, provider="claude", session_ref="sess-1")
+    logs = lh.mcp_log_dir(db.get_workspace(a.workspace_id).path)
+    logs.mkdir(parents=True)
+    (logs / f"{stamp}.jsonl").write_text(
+        json.dumps({"debug": "Starting connection", "sessionId": sid}) + "\n"
+        + json.dumps({"error": "Connection timeout triggered", "sessionId": sid}) + "\n")
+
+    agents.handle_hook(db, a.id, "tool-done", {})
+    agents.handle_hook(db, a.id, "tool-done", {})   # reported once
+
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?",
+                           (a.id,)).fetchone()[0] == outcome
+    assert [to for to, _ in reports] == (["boss"] if outcome else [])

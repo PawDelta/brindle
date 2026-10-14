@@ -134,3 +134,4 @@ def test_command_passes_the_profiles_model_and_effort(monkeypatch):
     assert argv[argv.index("--model") + 1] == "gpt-6.1-sol"
     assert 'model_reasoning_effort="high"' in argv
     assert argv[argv.index('model_reasoning_effort="high"') - 1] == "-c"
+    assert argv[argv.index("mcp_servers.brindle.startup_timeout_sec=120") - 1] == "-c"

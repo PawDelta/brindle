@@ -278,10 +278,13 @@ class Identity:
     billed: str | None = None       # who pays for this agent's use, when known
 
 
-def _unknown(provider: str, tool: str, why: str = "") -> Identity:
+def _unknown(provider: str, tool: str, why: str = "", exe: str = "") -> Identity:
     install = company_login.INSTALL.get(tool)
     if why:
         return Identity(provider, f"{tool}: {why}", determined=False)
+    if company_login.which(exe or tool):
+        return Identity(provider, f"{tool} is installed but its sign-in check couldn't run, "
+                        "so the identity can't be checked", determined=False)
     return Identity(provider, f"{tool} isn't installed, so the identity can't be checked"
                     + (f" (install: {install})" if install else ""), determined=False)
 
@@ -306,9 +309,12 @@ def claude_identity(org_id: str, claude, cache: bool = True) -> Identity:
 
 
 def _claude_login(claude, route, cache) -> Identity:
-    got = _probe(["claude", "auth", "status"], cache)
+    from brindle import providers
+
+    exe = providers.claude_binary()
+    got = _probe([exe, "auth", "status"], cache)
     if got is None:
-        return _unknown("claude", "claude")
+        return _unknown("claude", "claude", exe=exe)
     status = _json(got[1])
     if status is None:
         return Identity("claude", "claude: status unreadable", determined=False)

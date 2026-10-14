@@ -207,6 +207,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
+    done.extend(note_reported_stuck(db, now, panes))
     done.extend(note_silent(db, now, panes))
     done.extend(note_model_refused(db, now, panes))
 
@@ -356,6 +357,9 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
             if last is None:
                 continue  # no telling whether a later turn is running
             since = max(since, last)
+        # Still changing files (a script or a background command editing its
+        # worktree) isn't idle. Commits don't count: see _fix_round_since.
+        since = max(since, _last_edit(db.get_workspace(a.workspace_id)))
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
             continue
         if agents.unreported_note_expired(a):
@@ -364,6 +368,98 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
         if agents.tell_parent_unreported(db, db.get_agent(a.id) or a):
             db.update_agent(a.id, stuck_noted=since)
             done.append(f"told {a.parent_id} that worker {a.id} is idle without reporting")
+    return done
+
+
+def _last_edit(ws: Workspace | None) -> float:
+    """When a file with uncommitted changes in ``ws`` was last written; 0 if none."""
+    newest = 0.0
+    if ws is None or not os.path.isdir(ws.path):
+        return newest
+    try:
+        # -z: paths unquoted (git.dirty_files' would be C-quoted past ASCII),
+        # and a rename's source after its destination, as an entry of its own.
+        entries = git.run(["status", "--porcelain", "-z", "--untracked-files=all"],
+                          ws.path).stdout.split("\0")
+    except git.GitError:
+        return newest
+    source = False
+    for entry in entries:
+        if source or len(entry) < 4:
+            source = False
+            continue
+        source = entry[0] in "RC"
+        try:
+            newest = max(newest, os.stat(os.path.join(ws.path, entry[3:])).st_mtime)
+        except OSError:
+            pass   # deleted
+    return newest
+
+
+# How long a reported branch may wait for a review that nobody started, and how
+# long a message may wait for a live worker that isn't taking it, before the
+# supervisor is told.
+UNPICKED_AFTER = 1800.0
+UNDELIVERED_AFTER = 300.0
+
+
+def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once per spell, about a worker that reported but
+    whose work went nowhere: its branch waits in the pipeline for a review no
+    reviewer is doing (none running, no verdict for its commit) for
+    UNPICKED_AFTER seconds, or twice the repo's checks if they take longer;
+    or it's sitting idle with brindle messages it hasn't taken for
+    UNDELIVERED_AFTER seconds. Nobody else would notice either: the
+    supervisor waits for a message that never comes."""
+    from brindle import gates, pipeline
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if a.mode not in pipeline.WORKER_MODES or not a.parent_id or a.result is None:
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None:
+            continue
+        where = f"branch `{ws.branch}`, workspace {ws.id}"
+        oldest = db.oldest_pending(a.id)
+        if (oldest is not None and now - oldest >= UNDELIVERED_AFTER and a.dismissed_at is None
+                and a.status in ("idle", "waiting")
+                and agents.same_server(a, panes) and agents.is_alive(a, panes)
+                and agents.owns_pane(db, a, owners)):
+            since = oldest
+            body = (f"Worker {a.id} ({where}) has {db.pending_count(a.id)} brindle message(s) "
+                    f"waiting {int((now - oldest) // 60)} min that it hasn't taken. "
+                    f"What brindle sees: {agents.liveness(db, a, ws, panes)}. Re-send what it needs "
+                    f"with send_message, or replace the worker.")
+        elif (a.pipeline == "reviewing" and a.reviewing_since is not None
+                and pipeline._settled(db, ws) is None):
+            try:
+                head = gates.head(ws)
+                wait = agents.expected_check_wait(db, ws, load_repo_config(ws.repo_root)) or 0.0
+            except (git.GitError, ValueError):
+                continue
+            # The spell starts at the report that put it in review, or at a
+            # later reviewer's start (a fallback review, say).
+            reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
+            since = max([a.reviewing_since] + [r.created_at for r in reviewers])
+            if (now - since < max(UNPICKED_AFTER, 2 * wait) or db.latest_review(ws.id, head)
+                    or any(r.dismissed_at is None and r.status not in ("paused", "done")
+                           and agents.is_alive(r, panes) for r in reviewers)):
+                continue
+            body = (f"Worker {a.id} reported on {where}, and for {int((now - since) // 60)} min no "
+                    f"reviewer has been running and its commit {head[:8]} has had no verdict. Call "
+                    f"request_review(\"{ws.id}\") to get it reviewed.")
+        else:
+            continue
+        if a.stuck_noted == since:
+            continue
+        try:
+            agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        except agents.AgentError:
+            continue
+        db.update_agent(a.id, stuck_noted=since)
+        done.append(f"told {a.parent_id} that reported worker {a.id} is stuck")
     return done
 
 

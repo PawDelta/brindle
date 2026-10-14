@@ -44,6 +44,7 @@ import hashlib
 import os
 import re
 import threading
+import time
 from contextlib import contextmanager
 
 from brindle import (
@@ -293,7 +294,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
               f"start ({e}). Review it yourself with workspace_diff, then merge_workspace.\n\n"
               f"Its report:\n\n{result}", worker.id)
         return True
-    db.update_agent(worker.id, pipeline="reviewing")
+    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
     return True
 
 

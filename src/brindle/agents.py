@@ -2814,6 +2814,11 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         db.set_status(agent_id, "processing", only_if="waiting")
         db.set_status(agent_id, "processing", only_if="idle")  # see "pre-tool"
         note_permission_outcome(db, agent, payload)
+        from brindle import launch_health
+        try:
+            launch_health.check_mcp(db, agent)
+        except Exception:  # noqa: BLE001
+            log.exception("brindle: couldn't check the brindle MCP server's start")
     elif event == "stop":
         from brindle import inbox, tasks
 
@@ -3130,6 +3135,33 @@ def review_moot(db: DB, agent: Agent) -> bool:
     return (pipeline._settled(db, ws) or "").startswith(pipeline.ALREADY_MERGED)
 
 
+def liveness(db: DB, a: Agent, ws: Workspace | None, panes: dict[str, bool] | None = None) -> str:
+    """What brindle can see of an agent for free, as one line for its
+    supervisor: whether it's running, when it last did anything, and what
+    its branch holds, so deciding what to do about it takes no digging.
+    Never raises: a fact it can't read is left out."""
+    parts = []
+    try:
+        parts.append("running" if is_alive(a, panes) else "not running")
+        path = transcript_file(a)
+        last = (os.stat(path).st_mtime if path else
+                tmux.window_activity(a.tmux_window, server=server_of(a)) if a.tmux_window else None)
+        if last:
+            parts[-1] += f", last active {int((time.time() - last) // 60)} min ago"
+        if ws is not None and os.path.isdir(ws.path):
+            base = git.base_ref(ws.path, ws.base_branch or git.default_branch(ws.repo_root))
+            ahead = git.ahead_behind(ws.path, base)[1]
+            stat = git.out(["diff", "--stat", git.merge_base(ws.path, base)], ws.path).splitlines()
+            files = ", ".join(ln.split("|")[0].strip() for ln in stat[:-1][:5])
+            more = f" and {len(stat) - 6} more" if len(stat) > 6 else ""
+            parts.append(f"{ahead} commit(s) ahead of {base}"
+                         + (f" ({files}{more}: {stat[-1].strip()})" if stat else ""))
+            parts.append(f"{len(git.dirty_files(ws.path))} uncommitted file(s)")
+    except Exception:  # noqa: BLE001
+        pass
+    return "; ".join(parts)
+
+
 def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
@@ -3173,9 +3205,10 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
             if agent.pipeline == "fixing" and agent.result is not None
             else f"stopped without calling {tool}")
     body = (
-        f"{who} {agent.id}{where} {what}, and won't be reminded "
-        f"again on its own. Check on it: workspace_diff to see what it did, send_message to "
-        f"ask it to finish or report, or remove_workspace if the work is abandoned."
+        f"{who} {agent.id}{where} {what}, and won't be reminded again on its own. "
+        f"What brindle sees: {liveness(db, agent, ws)}. Decide from that: send_message to "
+        f"ask it to finish or report, workspace_diff for the full change, or remove_workspace "
+        f"if the work is abandoned."
     )
     try:
         send_message(db, agent.parent_id, body)
