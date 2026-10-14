@@ -115,6 +115,23 @@ def test_start_on_a_merged_branch_switches_to_main_only_when_clean(db, repo, sta
     assert [branch for branch, _, _ in started] == [expected]
 
 
+@pytest.mark.parametrize("local_commit", [False, True])
+def test_start_on_main_fast_forwards_to_origin_and_never_drops_local_work(
+        db, repo, started, tmp_path, local_commit):
+    other = tmp_path / "other"
+    sh(f"git clone -q {tmp_path / 'origin.git'} other && cd other && echo y > pushed.txt"
+       " && git add pushed.txt && git commit -qm pushed && git push -q origin main", tmp_path)
+    pushed = git.out(["rev-parse", "HEAD"], other)
+    (repo / "notes.txt").write_text("my notes")
+    if local_commit:
+        sh("echo z > local.txt && git add local.txt && git commit -qm local", repo)
+    local = git.out(["rev-parse", "HEAD"], repo)
+    cli.start(prompt=None, provider=None, attach=False, watch=False, autopilot=None,
+              branch=None, worktree=None)
+    assert git.out(["rev-parse", "HEAD"], repo) == (local if local_commit else pushed)
+    assert (repo / "notes.txt").read_text() == "my notes"
+
+
 def test_bare_brindle_always_starts_a_supervisor(db, repo, started, monkeypatch):
     # default_agent is for workers; a launch is always a supervisor, autopilot on
     monkeypatch.setattr(cli, "_say_autopilot", lambda *a: None)
