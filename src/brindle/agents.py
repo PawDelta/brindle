@@ -134,7 +134,9 @@ PERMISSION_GUIDANCE = (
     "Never `cd` into or read from the main checkout ({root}): it isn't yours, and it "
     "pauses you for approval. This worktree is already your isolated copy: don't create "
     "or enter another one (no EnterWorktree, no `git worktree add`). Write files with your Edit and Write tools, never with "
-    "shell heredocs or scripts, and don't write to /tmp."
+    "shell heredocs or scripts, and don't write to /tmp.\n"
+    "Waiting: to wait on something (your supervisor, a long command), wait for brindle's "
+    "messages or use the Monitor tool; don't poll with short cron loops."
 )
 
 
@@ -501,6 +503,10 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     server = tmux.current_server()
     db.update_agent(agent.id, tmux_window=target, tmux_server=server)
     agent.tmux_window, agent.tmux_server = target, server
+    if get_provider(agent.provider).startup_prompts and not agent.headless:
+        from brindle import prompt_answer
+
+        prompt_answer.launched(db, agent)
     if watch_pane:
         try:
             _ensure_sidebar(db, root_of(db, agent.id), ws, target)
@@ -881,11 +887,9 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             env={**base, **agent_env(ws, agent.id)},
         )
     else:
-        accepted = provider.after_launch(target)
-        if accepted:
-            ready(db, agent.id)
-            from brindle import launch_health
-            launch_health.accepted(db, agent)
+        from brindle import prompt_answer
+
+        prompt_answer.finish_launch(db, agent)
 
 
 def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
@@ -1468,6 +1472,10 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None) -> str
                    server=server_of(agent))
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id)
+    from brindle import login_pause
+
+    if login_pause.holding(db, agent.id):
+        return "queued"  # its session waits on an expired cloud login
     if _deliver_to_inbox(db, agent, message_id, text, sender_id):
         return "delivered"
     reconcile(db, agent)
@@ -1559,10 +1567,13 @@ def flush(db: DB, agent_id: str) -> bool:
     something was delivered."""
     from brindle import inbox
     from brindle import launch_health
+    from brindle import login_pause
 
     agent = db.get_agent(agent_id)
     if agent is None or agent.headless:
         return False  # its runner takes messages from the inbox itself
+    if login_pause.holding(db, agent_id):
+        return False  # its session waits on an expired cloud login; resuming flushes it
     if inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
@@ -2629,6 +2640,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     agent = db.get_agent(agent_id)
     if agent is None:
         return None
+    # A hook runs only once the session is going, so its launch is past any
+    # startup prompt: a menu on its pane from now on is the agent's own (a
+    # question for the user), which no sweep may answer.
+    from brindle import prompt_answer
+
+    prompt_answer.settled(db, agent)
     if event == "codex-permission-request":
         # Session/status writes are bookkeeping, never prerequisites for
         # returning a policy decision (especially a deny).

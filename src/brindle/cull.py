@@ -150,6 +150,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     done.extend(signin_pause.sweep(db, now))
 
+    # 1f'. Cloud logins: renewed in the background; a session whose login only
+    # the person can renew waits, and they're told once.
+    from brindle import login_pause
+
+    done.extend(login_pause.sweep(db, now, panes))
+
     # 1g. Periodic cost events (Team org_budgets): report delta spend for supervisor and workers.
     from brindle import events
 
@@ -184,7 +190,9 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
                         f"after {int(idle_for // 60)} min")
 
-    # 3. Workers stuck on a prompt nobody is answering, or gone silent.
+    # 3. Launches stopped on a startup prompt; workers stuck on a prompt
+    # nobody is answering, or gone silent.
+    done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
     done.extend(note_silent(db, now, panes))
@@ -206,6 +214,46 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 # How long a worker may sit on a permission or trust prompt before its
 # supervisor is told (once per spell of waiting).
 STUCK_AFTER = 90.0
+# How long after a launch a sweep starts looking at a CLI that hasn't shown
+# its input box: past the 30 seconds its own after_launch watches.
+STARTUP_GRACE = 40.0
+
+
+def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Every launch, worker or supervisor, whose CLI hasn't shown its input
+    box STARTUP_GRACE seconds on (brindle.prompt_answer keeps them, whatever
+    the agent's status says: an argv task starts 'processing', a startup
+    menu can read as 'waiting'). If its pane is ready now, or shows a
+    startup prompt (an agy worker once sat on a reworded trust prompt for 40
+    minutes), run after_launch again: it answers the prompt by what it asks,
+    or leaves it for the person and its supervisor is told."""
+    from brindle import prompt_answer
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for agent_id, pane, launched_at in prompt_answer.pending(db):
+        a = db.get_agent(agent_id)
+        if not a or a.result is not None or a.dismissed_at is not None or a.status == "done":
+            # It ended before its CLI settled: nothing left to answer.
+            db.conn.execute("UPDATE startup_prompts SET pending=0 WHERE agent_id=?", (agent_id,))
+            continue
+        if (a.tmux_window != pane or now - launched_at < STARTUP_GRACE or a.status == "paused"
+                or not agents.same_server(a, panes) or not agents.is_alive(a, panes)
+                or not agents.owns_pane(db, a, owners)):
+            continue
+        provider = agents.get_provider(a.provider)
+        try:
+            screen = tmux.capture(pane, lines=60, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        if provider.tool_permission(screen):
+            continue  # the permission policy's, never a startup prompt
+        if not provider.input_ready(screen) and (not prompt_answer.looks_like_prompt(screen)
+                                                 or prompt_answer.cached_kind(screen) == "not_a_prompt"):
+            continue
+        if prompt_answer.finish_launch(db, a):
+            done.append(f"{a.id} past its startup prompts")
+    return done
 
 
 def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:

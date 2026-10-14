@@ -91,6 +91,10 @@ class Provider:
     # their pane, turn by turn, for providers with no TUI of their own
     # (a headless Claude worker runs `brindle _headless`; see agents).
     runner = "_headless"
+    # Whether after_launch answers the CLI's startup prompts (see
+    # brindle.prompt_answer), so a sweep can run it again on a worker that
+    # outlived its 30 seconds on one.
+    startup_prompts = False
 
     def warmup(self, profile: Profile) -> str | None:
         """A message to send before the first prompt, for CLIs that need a
@@ -113,6 +117,18 @@ class Provider:
         """Best-effort read of the terminal: 'idle', 'waiting', 'busy', or
         None when unsure. Only used to correct a status hooks left stale."""
         return None
+
+    def tool_permission(self, screen: str) -> bool:
+        """Whether ``screen`` asks to approve a tool call: the permission
+        policy's to answer, never a startup prompt's."""
+        from brindle import prompt_answer
+
+        return bool(prompt_answer.TOOL_PERMISSION.search("\n".join(prompt_answer.plain(screen).splitlines()[-25:])))
+
+    def input_ready(self, screen: str) -> bool:
+        """Whether ``screen`` shows the CLI's own input box, so its launch is
+        past any startup prompt."""
+        return False
 
     def busy_in_footer(self, screen: str) -> bool:
         """Whether the busy marker is right by the input box (wherever the
@@ -381,6 +397,7 @@ def _pre_tool_matcher(ctx: "LaunchContext") -> str:
 class ClaudeCode(Provider):
     name = "claude"
     uses_hooks = True
+    startup_prompts = True
 
     TRUST_DIALOG = re.compile(r"(one you trust|trust (this|the files in this) folder)", re.I)
     # Claude Code's input box, across versions: the "❯" prompt line, the old
@@ -424,6 +441,9 @@ class ClaudeCode(Provider):
         won't retry it, else None."""
         error = cls.api_error(screen)
         return error if error and cls.FATAL_API_ERROR.match(error) else None
+
+    def input_ready(self, screen: str) -> bool:
+        return bool(self.INPUT_FOOTER.search(screen))
 
     @classmethod
     def first_run_screen(cls, screen: str) -> str | None:
@@ -725,6 +745,11 @@ class ClaudeCode(Provider):
         # whether to trust it. brindle created the worktree from the user's own
         # repo, so choose "Yes". The dialog's cursor starts on "No, exit", so
         # move it explicitly and never press Enter unless "Yes" is selected.
+        # Any other prompt (a reworded one, a first-run screen, whose "❯"
+        # cursor would pass for READY) is answered by what it asks.
+        from brindle import prompt_answer
+
+        prompts = prompt_answer.Startup(target, permission=self.tool_permission)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -733,7 +758,11 @@ class ClaudeCode(Provider):
             except tmux.TmuxError:
                 return False
             if not self.TRUST_DIALOG.search(screen):
-                if self.READY.search(screen):
+                asking = not self.INPUT_FOOTER.search(screen) and prompt_answer.looks_like_prompt(screen)
+                answer = prompts.step(screen) if asking else ""
+                if answer == "blocked":
+                    return False
+                if not answer and self.READY.search(screen):
                     return True
                 continue
             if self.YES_SELECTED.search(screen):
@@ -1121,6 +1150,7 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
 
 class Codex(Provider):
     name = "codex"
+    startup_prompts = True
     # Status comes from Codex's `notify` command (turn complete); it has no
     # ready or turn-start event, so after_launch says when it's ready.
     uses_hooks = True
@@ -1246,6 +1276,12 @@ class Codex(Provider):
     TRUST_DIALOG = re.compile(r"Trust this folder\?", re.I)
     TRUST_SELECTED = re.compile(r"›\s*1\.\s*Trust and continue")
 
+    def tool_permission(self, screen: str) -> bool:
+        return super().tool_permission(screen) or bool(self.APPROVAL.search(self.ANSI_SGR.sub("", screen)))
+
+    def input_ready(self, screen: str) -> bool:
+        return self.launch_ready(screen)
+
     def launch_ready(self, screen: str) -> bool:
         plain = self.ANSI_SGR.sub("", screen)
         lines = plain.splitlines()
@@ -1263,6 +1299,9 @@ class Codex(Provider):
     def after_launch(self, target: str) -> bool:
         # Same situation as Claude Code: a new worktree of the user's own repo.
         # Codex saves this trust for the repository root in ~/.codex/config.toml.
+        from brindle import prompt_answer
+
+        prompts = prompt_answer.Startup(target, permission=self.tool_permission)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -1278,6 +1317,8 @@ class Codex(Provider):
                     tmux.send_keys(target, "Enter")
                 else:
                     tmux.send_keys(target, "Up")
+            elif prompts.step(screen) == "blocked":
+                return False
         return False
 
     def screen_state(self, screen: str) -> str | None:
@@ -1295,6 +1336,7 @@ class Antigravity(Provider):
     """Google Antigravity's terminal agent, agy (see brindle.antigravity)."""
 
     name = "antigravity"
+    startup_prompts = True
     uses_hooks = True
     announces_start = False
     # With -i, agy starts on the prompt before its MCP servers connect, and
@@ -1373,6 +1415,9 @@ class Antigravity(Provider):
     def after_launch(self, target: str) -> bool:
         # A new worktree is a folder agy hasn't seen. brindle made it from the
         # user's own repo, so trust it; never press Enter unless "Yes" is selected.
+        from brindle import prompt_answer
+
+        prompts = prompt_answer.Startup(target, permission=self.tool_permission)
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(0.5)
@@ -1387,7 +1432,12 @@ class Antigravity(Provider):
                     tmux.send_keys(target, "Up")
             elif self.READY.search(screen):
                 return True
+            elif prompts.step(screen) == "blocked":
+                return False
         return False
+
+    def input_ready(self, screen: str) -> bool:
+        return bool(self.READY.search(screen))
 
     def screen_state(self, screen: str) -> str | None:
         tail = "\n".join(screen.rstrip().splitlines()[-25:])

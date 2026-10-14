@@ -151,6 +151,10 @@ Acting on what you find:
 - Once you've laid out a plan, start it in the same turn. Don't end with
   "shall I start?" or wait for a "yes" or "go": if a step needs a decision
   only the user can make, ask that question and carry on with the rest.
+- To wait for workers, checks or anything else brindle runs, wait for
+  brindle's messages (they wake you) or use the Monitor tool; don't poll with
+  short cron loops, which spend turns and keep running while brindle has
+  paused the session (an expired cloud login, say).
 - Format your own verbose outputs or message transcripts in collapsible
   `<details><summary>Title</summary>...</details>` blocks so they are not
   sprawling in the chat UI."""
@@ -1501,8 +1505,10 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     ap = db.get_autopilot(agent.id)
     if ap is None or not ap.enabled or not ap.goal:
         return None
-    from brindle import agents
+    from brindle import agents, login_pause
 
+    if login_pause.paused(db, agent.id):
+        return None  # only the person can renew the login; a nudge would just fail
     if ap.state == "auditing":
         if ap.auditor_id:
             auditor = db.get_agent(ap.auditor_id)
