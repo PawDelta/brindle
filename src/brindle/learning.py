@@ -2,10 +2,10 @@
 
 Nothing is learned on this machine, and there is no plugin interface for it:
 no installed package can act as a learner. brindle reports what happened to each
-worker task (a review verdict, an escalation to the supervisor, a merge, the
-worktree removed unmerged) to the hosted learner (``brindle.pro.learning``), and
-asks it to pick a profile when ``assign``/``handoff`` get none and no
-milestone names one.
+worker task (its first report, a review verdict, an escalation to the
+supervisor, a merge, the worktree removed unmerged) to the hosted learner
+(``brindle.pro.learning``), and asks it to pick a profile when
+``assign``/``handoff`` get none and no milestone names one.
 
 The repo config's ``learning`` key is ``"auto"`` (the default: hosted learning
 when the brindle Pro entitlement includes it, else off), ``"cloud"`` or
@@ -46,9 +46,9 @@ class TaskInfo:
 
 @dataclass(frozen=True)
 class Outcome:
-    """One event in a worker task's life. ``event`` is "review" (with
-    ``approved``), "escalated" (the supervisor was asked to step in),
-    "merged" or "removed_unmerged" (the task is over)."""
+    """One event in a worker task's life. ``event`` is "reported" (its first
+    report_result), "review" (with ``approved``), "escalated" (the supervisor
+    was asked to step in), "merged" or "removed_unmerged" (the task is over)."""
     event: str
     approved: bool | None = None
     checks_passed: bool = False
@@ -147,8 +147,9 @@ def _task_info(db: DB, worker: Agent, ws: Workspace) -> TaskInfo:
 
 
 def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
-         approved: bool | None = None, escalated: bool = False,
-         merged: bool | None = None, checks_passed: bool = False) -> None:
+         reported: bool = False, approved: bool | None = None,
+         escalated: bool = False, merged: bool | None = None,
+         checks_passed: bool = False) -> None:
     """Tell the learner about one event in ``worker``'s task. Does nothing
     without a learner, and never raises."""
     try:
@@ -156,6 +157,9 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
         if p is None or worker is None:
             return
         info = _task_info(db, worker, ws)
+        wall = max(0.0, time.time() - worker.created_at)
+        if reported:
+            p.record(info, Outcome("reported", wall_seconds=wall))
         if approved is not None:
             p.record(info, Outcome("review", approved=approved))
         if escalated:
@@ -163,7 +167,7 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
         if merged is not None:
             p.record(info, Outcome(
                 "merged" if merged else "removed_unmerged", checks_passed=checks_passed,
-                tokens=_tokens(db, worker), wall_seconds=max(0.0, time.time() - worker.created_at),
+                tokens=_tokens(db, worker), wall_seconds=wall,
             ))
     except Exception:
         log.exception("brindle: the learner failed to record an outcome")

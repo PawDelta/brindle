@@ -5,6 +5,7 @@ profile's allowed_tools cover, so a worker isn't stuck on a prompt for
 import json
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,7 @@ def bash(command):
 def test_cd_into_the_worktree_counts_as_covered(db, ws):
     a = worker(db, ws)
     assert agents.handle_hook(db, a.id, "pre-tool", bash(f"cd {ws.path} && git status")) is not None
+    (Path(ws.path) / "src").mkdir(exist_ok=True)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd src && pytest -q")) is not None
 
 

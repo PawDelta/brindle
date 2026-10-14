@@ -72,9 +72,25 @@ def test_remove_event_carries_per_model_tokens_and_usd_for_that_agent_only(monke
                    "mystery-model": {"tokens": 500, "usd": 0.0}}
 
 
-def test_empty_history_with_cost_is_a_single_unknown_entry(monkeypatch):
+def test_empty_history_with_cost_is_a_single_unknown_entry(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
     from brindle import events
 
     _setup(monkeypatch, [])
     assert events._by_model("remove", _worker(), "/r", 3.0) == {"unknown model": {"tokens": 0, "usd": 3.0}}
     assert events._by_model("remove", _worker(), "/r", None) is None
+
+    prof_dir = tmp_path / ".brindle" / "agents"
+    prof_dir.mkdir(parents=True)
+    (prof_dir / "agy-low.md").write_text(
+        "---\nname: agy-low\ndescription: t\nprovider: antigravity\nmodel: gemini-3.1-pro-low\n---\nGo.\n"
+    )
+    agy_worker = SimpleNamespace(id="a1", profile="agy-low", provider="antigravity")
+    assert events._by_model("cost", agy_worker, str(tmp_path), 1.25) == {
+        "gemini-3.1-pro-low": {"tokens": 0, "usd": 1.25},
+    }
+    _setup(monkeypatch, [_row("a1", "unknown", 400, profile="agy-low")])
+    assert events._by_model("remove", agy_worker, str(tmp_path), 1.25) == {
+        "gemini-3.1-pro-low": {"tokens": 400, "usd": 1.25},
+    }

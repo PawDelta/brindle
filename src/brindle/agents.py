@@ -817,14 +817,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
-        # Workers receive their instructions and real task in one delivery.
-        # A fresh interactive chat without a task still needs its profile.
-        if provider.name == "antigravity" and not resume and (prompt or agent.mode == "interactive"):
-            from brindle import antigravity
-            instructions = "\n\n".join(filter(None, (antigravity.TOOLS_NOTE, profile.prompt)))
-            prompt = "\n\n".join(filter(None, (antigravity.format_delivered_message(instructions), prompt)))
-        if prompt:
-            db.enqueue(agent.id, prompt, None)
+        # Typed in once it's ready, after a warm-up carrying its instructions:
+        # agy connects its MCP servers only once a conversation has started,
+        # so the task must arrive as a second turn (see brindle.antigravity).
+        for text in ((provider.warmup(profile) if not resume else None), prompt):
+            if text:
+                db.enqueue(agent.id, text, None)
         prompt = None
     # Recorded before launching: the agent's hooks may fire within milliseconds.
     status = "processing" if prompt else "starting"
@@ -837,6 +835,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle.providers import trust_folder
 
         trust_folder(ws.path)  # no trust dialog for nobody to answer
+    if provider.name == "antigravity" and m is not None and m.setup is not None and m.setup.antigravity is not None:
+        try:
+            providers.set_agy_gemini()
+        except (OSError, ValueError) as e:
+            raise AgentError(f"couldn't set Antigravity to the company Gemini route in its settings.json: {e}") from e
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first)))
     if prompt or db.pending_count(agent.id):
@@ -1681,6 +1684,7 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     else:
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
+    first = agent.result is None
     db.set_result(agent.id, result)
     # Usage and history are extras: never let them stop the result arriving.
     try:
@@ -1707,6 +1711,8 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     else:
         forwarded = result
     if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
+        if first:
+            pipeline.note_reported(db, ws, agent)
         warm_checks(ws)
         if forward and pipeline.on_report(db, agent, ws, forwarded):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "
@@ -2017,12 +2023,6 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
         return cfg.review_profile
     if cfg.reviewer and cfg.reviewer != "reviewer":
         return cfg.reviewer
-    if unusable("antigravity") is None:
-        try:
-            load_profile("reviewer-gemini", repo_root)
-            return "reviewer-gemini"
-        except Exception:
-            pass
     if db is None or not repo_root:
         return cfg.reviewer
     from brindle import learning
@@ -2069,6 +2069,15 @@ def _review_kill_switch(ws: Workspace) -> None:
     why_not = rollout.kill_switch_reason(ws.repo_root)   # Enterprise managed rollout
     if why_not:
         raise AgentError(f"No reviewer started: {why_not}")
+
+
+def _review_worktree_present(ws: Workspace) -> None:
+    """Raises ``AgentError`` when ``ws``'s worktree is gone from disk (removed
+    outside brindle, so its record outlived it): every git call on the branch
+    would fail there, and nothing is left to review."""
+    if not os.path.isdir(ws.path):
+        raise AgentError(f"No reviewer started: {ws.id}'s worktree {ws.path} no longer exists. "
+                         f"remove_workspace {ws.id} clears its record.")
 
 
 def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
@@ -2136,6 +2145,7 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     from brindle.config import load_repo_config
     from brindle.providers import brindle_invocation
 
+    _review_worktree_present(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
     if not cfg.checks:
         return request_review(db, caller, ws, profile, focus, cfg)
@@ -2214,12 +2224,15 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     from brindle import gates
     from brindle.config import load_repo_config
 
+    _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
     sha = gates.head(ws)
     for old in db.list_agents(ws.id):
         if old.mode != "review" or old.result is not None or not is_alive(old):
             continue
+        if old.unreported_noted:
+            continue   # it stopped without a verdict: not the reviewer of anything
         if old.review_sha == sha:
             if profile and old.profile != profile:
                 continue   # another profile's review of this commit (a second review): keep both
@@ -2459,13 +2472,49 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            from dataclasses import replace
+
+            from brindle.native.permissions import Permissions, split_commands, uncovered_part
             from brindle.profiles import load_profile
 
             try:
-                rules += permissions.profile_bash_allows(load_profile(agent.profile, ws.repo_root))
+                profile = load_profile(agent.profile, ws.repo_root)
             except KeyError:
-                pass  # deleted profile: no extra allowances
+                profile = None  # deleted profile: no extra allowances
+            if profile is not None:
+                rules += permissions.profile_bash_allows(profile)
             decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            if decision.decision == "ask" and len(reqs) == 1:
+                # A deny on one part of a compound command (cd x && <denied>)
+                # wins before any part-by-part allow below.
+                decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+            if decision.decision == "ask" and profile is not None:
+                perms = Permissions(profile.permission_mode, profile.allowed_tools)
+                command = reqs[0].command or ""
+                specs = [spec for name, spec in perms.rules
+                         if name == "Bash" and spec not in (None, "", "*")]
+                cwd = os.path.realpath(reqs[0].cwd or ws.path)
+                root = os.path.realpath(ws.path)
+                # Like pre_tool_decision: a compound command whose every part
+                # allowed_tools covers (a cd within the worktree counts).
+                if (len(reqs) == 1 and reqs[0].kind == "bash" and specs
+                        and (cwd == root or cwd.startswith(root + os.sep))
+                        and uncovered_part(specs, command, cd_root=ws.path) is None):
+                    decision = permissions.Decision(
+                        "allow", "every part of the command matches the profile's allowed_tools")
+                    # Deny each part as the allow just read it (quotes and a
+                    # harmless redirection gone), which deny_in_parts doesn't.
+                    for part in split_commands(command):
+                        denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
+                        if denied.decision == "deny":
+                            decision = denied
+                            break
+                elif perms.mode == "dontAsk":
+                    # Nobody watches this pane: a prompt would stall the agent.
+                    decision = permissions.Decision(
+                        "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
+                        "never asks (permission_mode dontAsk). Don't retry it: do without it, or ask "
+                        "your supervisor with the send_message tool (brindle MCP server)")
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
@@ -2524,24 +2573,26 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False)
     """What the Stop hook decides: a "block" with the reason to carry on, or
     None to let the agent stop. ``via_inbox``: the reason will be sent as an
     inbox message rather than block the stop, so ``stop_hook_active`` never
-    caps a repeat; the unread-mail reminder is then limited like a notice."""
+    caps a repeat; the unread-mail reminder is then limited to one per
+    NOTICE_TTL (DB.claim_stop_reminder)."""
     msg = db.pop_pending(agent.id)
     if msg:
         db.set_status(agent.id, "processing")
         return {"decision": "block", "reason": msg.body}
-    if agent.mode == "interactive" and db.unread_count(agent.id):
+    if (agent.mode == "interactive" and db.unread_count(agent.id)
+            and not payload.get("stop_hook_active")):
+        # Stopping with mail unread, even moments after its notice went out:
+        # that notice may have been lost, and nothing else will wake it.
         ap = db.get_autopilot(agent.id)
-        if (ap is not None and ap.enabled and not payload.get("stop_hook_active")
-                and (not via_inbox or db.claim_notice(agent.id))):
-            # An autopilot supervisor doesn't stop with mail it hasn't read.
+        pilot = ap is not None and ap.enabled
+        # An autopilot supervisor that would really be blocked doesn't stop
+        # with mail it hasn't read; stop_hook_active caps that.
+        claimed = db.unread(agent.id) if pilot and not via_inbox else db.claim_stop_reminder(agent.id)
+        if claimed:
             db.set_status(agent.id, "processing")
             return {"decision": "block", "reason": (
                 "[brindle autopilot] You have unread messages. Call read_messages "
-                "before you stop.")}
-        claimed = None if payload.get("stop_hook_active") else db.claim_notice(agent.id)
-        if claimed:  # the notice never went out (or was lost): hand it over now
-            db.set_status(agent.id, "processing")
-            return {"decision": "block", "reason": unread_notice(db, claimed)}
+                "before you stop." if pilot else unread_notice(db, claimed))}
     needs_report = agent.mode in REPORTING_MODES and agent.result is None
     if needs_report and not payload.get("stop_hook_active"):
         db.set_status(agent.id, "processing")
@@ -2598,6 +2649,14 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     transcript = payload.get("transcript_path")
     if transcript and agent.provider == "claude" and transcript != agent.transcript_path:
         db.update_agent(agent_id, transcript_path=str(transcript))
+
+    if event in ("prompt-submit", "pre-tool", "tool-done") and agent.unreported_noted:
+        # It's working again, so a later stop without a result is a new one
+        # its supervisor should hear about (see tell_parent_unreported). A
+        # tool call alone isn't proof: agy resumes briefly each time it polls
+        # a running command, so only a prompt or a long-enough gap counts.
+        if event == "prompt-submit" or unreported_note_expired(agent):
+            db.update_agent(agent_id, unreported_noted=None)
 
     if event == "session-start":
         from brindle import inbox
@@ -2703,6 +2762,14 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 decision = pilot.on_stop(db, agent, payload)
                 if decision:
                     db.enqueue(agent_id, decision["reason"], None)
+            if (agent.mode in REPORTING_MODES and agent.result is None
+                    and not db.pending_count(agent_id)):
+                # No Stop hook can remind it to report, and no hook says when
+                # it resumes: every turn it ends without a result is a stop
+                # its supervisor hears about.
+                if unreported_note_expired(agent):
+                    db.update_agent(agent_id, unreported_noted=None)
+                tell_parent_unreported(db, db.get_agent(agent_id) or agent)
             if db.pending_count(agent_id) and not agent.headless:
                 flush(db, agent_id)
     elif event == "stop-failure":
@@ -2730,17 +2797,32 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 "oauth_org_not_allowed", "billing_error"
             ))
         )
-        if is_auth:
+        # Claude Code's line for a --model its backend doesn't serve: every
+        # turn fails the same way, so the agent can't go on (launch_health
+        # reads the same line on screen).
+        from brindle import launch_health
+
+        is_model = not is_rate_limit and not is_auth and bool(
+            re.search(launch_health.SELECTED_MODEL, err_fields))
+        if is_auth or is_model:
             db.set_status(agent_id, "failed")
             db.clear_permission_requests(agent_id)
             from brindle import providers, autopilot as pilot
-            providers.invalidate_signed_in(agent.provider)
-            err_desc = payload.get("error_details") or payload.get("error") or payload.get("error_type") or "401/403"
-            msg = (
-                f"[brindle] Agent {agent_id} encountered an authentication failure "
-                f"(invalid or expired credentials): {err_desc}. "
-                "Check API keys or login status."
-            )
+            if is_auth:
+                providers.invalidate_signed_in(agent.provider)
+                err_desc = payload.get("error_details") or payload.get("error") or payload.get("error_type") or "401/403"
+                msg = (
+                    f"[brindle] Agent {agent_id} encountered an authentication failure "
+                    f"(invalid or expired credentials): {err_desc}. "
+                    "Check API keys or login status."
+                )
+            else:
+                err_desc = "its model isn't available on this route"
+                msg = (
+                    f"[brindle] Agent {agent_id} failed: Claude Code says there's an issue with "
+                    "the selected model (it may not exist, or the account or route may lack access). "
+                    "Check the profile's model and the Claude route (`brindle doctor`), then retry."
+                )
             if agent.parent_id:
                 try:
                     send_message(db, agent.parent_id, msg, sender_id="brindle")
@@ -2751,7 +2833,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                         pass
             root_id = pilot.root_of(db, agent_id)
             if db.get_autopilot(root_id):
-                pilot.need_user(db, root_id, f"Credentials need attention for agent {agent_id}: {err_desc}")
+                what = "Credentials need" if is_auth else "The model needs"
+                pilot.need_user(db, root_id, f"{what} attention for agent {agent_id}: {err_desc}")
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
@@ -2810,11 +2893,19 @@ def agent_for_session(db: DB, session_id: object) -> str | None:
     return matches[-1].id if matches else None
 
 
+UNREPORTED_REALERT_SECONDS = 600
+
+
+def unreported_note_expired(agent: Agent) -> bool:
+    """Whether the stop alert recorded in ``unreported_noted`` (the time it
+    was sent) is old enough that a new stop deserves its own alert."""
+    noted = agent.unreported_noted
+    return not noted or time.time() - noted > UNREPORTED_REALERT_SECONDS
+
+
 def command_running(db: DB, agent: Agent) -> bool:
     """Whether a command the agent started (possibly in the background) is
     still running under it. Never raises: when unsure, it says no."""
-    if agent.provider != "claude":
-        return False
     try:
         from brindle import procs
 
@@ -2826,34 +2917,141 @@ def command_running(db: DB, agent: Agent) -> bool:
         return False
 
 
-def tell_parent_unreported(db: DB, agent: Agent) -> None:
+TRANSCRIPT_ACTIVE_SECONDS = 45
+REOPEN_VERDICT_PROMPT = (
+    "Submit your verdict now: call the brindle `submit_review` tool with "
+    "`approved` and `summary` based on what you have already read."
+)
+
+
+def transcript_file(agent: Agent) -> str | None:
+    """The path to ``agent``'s own recorded transcript or rollout file, if one
+    exists on disk; None when the agent has no recorded session."""
+    if agent.transcript_path and os.path.isfile(agent.transcript_path):
+        return agent.transcript_path
+    ref = (agent.session_ref or "").strip()
+    if not ref:
+        return None
+    if agent.provider == "claude":
+        import glob
+
+        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        found = glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(ref)}.jsonl"))
+        return found[0] if found else None
+    if agent.provider == "codex":
+        from brindle import usage
+
+        rollout = usage.find_codex_rollout(ref, None, agent.created_at)
+        return str(rollout) if rollout and rollout.is_file() else None
+    if agent.provider == "antigravity":
+        candidate = os.path.expanduser(
+            f"~/.gemini/antigravity-cli/brain/{ref}/.system_generated/logs/transcript.jsonl"
+        )
+        return candidate if os.path.isfile(candidate) else None
+    if agent.provider == "native":
+        return ref if os.path.isfile(ref) else None
+    return None
+
+
+def transcript_active(agent: Agent, now: float | None = None) -> bool:
+    """Whether ``agent`` wrote to its transcript within
+    ``TRANSCRIPT_ACTIVE_SECONDS``. Never raises: when unsure, it says no."""
+    try:
+        path = transcript_file(agent)
+        if not path:
+            return False
+        now = time.time() if now is None else now
+        return now - os.stat(path).st_mtime < TRANSCRIPT_ACTIVE_SECONDS
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def recorded_session(agent: Agent) -> str | None:
+    """The CLI session id recorded for ``agent`` itself, if its provider can
+    resume that conversation; None when no resumable session was recorded.
+    Never guesses from the working directory (``--continue``, ``resume --last``),
+    since a reviewer shares its worker's worktree."""
+    provider = get_provider(agent.provider)
+    ref = (agent.session_ref or "").strip()
+    if not ref and agent.provider == "claude" and agent.transcript_path:
+        if os.path.isfile(agent.transcript_path):
+            return Path(agent.transcript_path).stem
+    if not ref:
+        return None
+    if agent.provider == "claude" and agent.transcript_path and os.path.isfile(agent.transcript_path):
+        return ref
+    return ref if provider.can_resume(ref) else None
+
+
+def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
+                    prompt: str = REOPEN_VERDICT_PROMPT) -> bool:
+    """Resume a stalled reviewer once with a short verdict prompt: send the
+    prompt as a message if the reviewer's process is still alive (or keep an
+    already-queued reminder in flight), or reopen its own recorded CLI session
+    if the process exited. Returns True if resumed or queued, False when it has
+    no live pane or recorded session of its own."""
+    if not os.path.isdir(ws.path):
+        return False
+    if is_alive(agent):
+        if db.pending_count(agent.id) > 0:
+            try:
+                flush(db, agent.id)
+            except tmux.TmuxError:
+                db.set_status(agent.id, "idle", only_if="processing")
+            return True
+        try:
+            return send_message(db, agent.id, prompt) in ("delivered", "queued")
+        except (AgentError, tmux.TmuxError):
+            db.set_status(agent.id, "idle", only_if="processing")
+            return False
+    ref = recorded_session(agent)
+    if not ref:
+        return False
+    if agent.dismissed_at is not None:
+        db.update_agent(agent.id, dismissed_at=None)
+    _launch(db, agent, ws, prompt=prompt, resume=ref, watch_pane=False, background_setup=True)
+    return True
+
+
+def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
     usually gone idle waiting for it with nothing left to wake it, so tell the
-    supervisor (queued if it's busy, delivered now if it's idle)."""
+    supervisor (queued if it's busy, delivered now if it's idle). Returns
+    whether the supervisor was told."""
     if agent.mode not in FORWARDING_MODES or not agent.parent_id:
-        return  # a synchronous handoff's caller is still waiting on it
+        return False  # a synchronous handoff's caller is still waiting on it
     if db.get_agent(agent.parent_id) is None:
-        return
+        return False
     ws = db.get_workspace(agent.workspace_id)
-    if agent.mode == "review" and ws is not None:
+    if agent.mode == "review" and ws is not None and os.path.isdir(ws.path):
         from brindle import gates
 
         if db.latest_review(ws.id, gates.head(ws)):
-            return  # its verdict for the current commit is already recorded
+            return False  # its verdict for the current commit is already recorded
     if agent.unreported_noted:
-        return  # the supervisor was told once; no repeats
-    if command_running(db, agent):
+        return False  # the supervisor was told about this stop; cleared once it resumes
+    if command_running(db, agent) or (is_alive(agent) and transcript_active(agent)):
         # Its turn ended while a long or background command (a test run) is
-        # still going: it isn't stopped, and the command finishing wakes it.
-        # Not marked noted, so a real stop later still gets its one alert.
-        return
-    db.update_agent(agent.id, unreported_noted=1)
-    where = f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
+        # still going, or it is still writing to its transcript: it isn't
+        # stopped. Not marked noted, so a real stop later still gets its alert.
+        return False
+    db.update_agent(agent.id, unreported_noted=int(time.time()))
+    if agent.mode == "review" and ws is not None:
+        from brindle import pipeline
+
+        if pipeline.on_reviewer_unreported(db, get(db, agent.id), ws):
+            return True  # resumed, a fallback reviewer took over, or the supervisor was told
+    where =f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
     tool = "submit_review" if agent.mode == "review" else "report_result"
     who = "Reviewer" if agent.mode == "review" else "Worker"
+    # A fix round's worker reported once already; the review's fixes are what's missing.
+    what = (f"stopped in a review fix round without committing or calling {tool} again "
+            "(it may have lost its brindle connection)"
+            if agent.pipeline == "fixing" and agent.result is not None
+            else f"stopped without calling {tool}")
     body = (
-        f"{who} {agent.id}{where} stopped without calling {tool}, and won't be reminded "
+        f"{who} {agent.id}{where} {what}, and won't be reminded "
         f"again on its own. Check on it: workspace_diff to see what it did, send_message to "
         f"ask it to finish or report, or remove_workspace if the work is abandoned."
     )
@@ -2862,7 +3060,8 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
     except (AgentError, tmux.TmuxError):
         # The parent isn't running (or can't take messages): the notice is
         # deliberately dropped here, since there's nothing left to tell.
-        pass
+        return False
+    return True
 
 
 PERMISSION_EVENTS = ("permission-request", "codex-permission-request")

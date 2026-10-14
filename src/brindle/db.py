@@ -65,7 +65,9 @@ CREATE TABLE IF NOT EXISTS agents (
     stuck_noted REAL,              -- status_since of the 'waiting' spell its supervisor was told about (brindle.cull)
     review_sha TEXT,               -- the commit a reviewer was started on (agents.request_review)
     unreported_noted INTEGER,      -- its supervisor was told it stopped without reporting (agents.tell_parent_unreported)
-    tmux_server TEXT               -- the private tmux server (BRINDLE_TMUX_SOCKET) its window is on; NULL: the default server
+    stop_reminded_at REAL,         -- a Stop last reminded it of unread mail (DB.claim_stop_reminder)
+    tmux_server TEXT,              -- the private tmux server (BRINDLE_TMUX_SOCKET) its window is on; NULL: the default server
+    reopened_at REAL               -- when a dead reviewer's session was reopened once (pipeline.on_reviewer_unreported)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -426,6 +428,8 @@ class Agent:
     plan_first: int | None = None      # must get its plan approved before editing (brindle.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
     tmux_server: str | None = None     # the private tmux server its window is on (see tmux.current_server)
+    stop_reminded_at: float | None = None
+    reopened_at: float | None = None
 
 
 @dataclass
@@ -654,7 +658,8 @@ class DB:
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT"),
-                          ("tmux_server", "TEXT")):
+                          ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
+                          ("reopened_at", "REAL")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
@@ -1134,6 +1139,24 @@ class DB:
             )
             return [_load(Message, r) for r in rows]
 
+    def claim_stop_reminder(self, agent_id: str) -> list[Message] | None:
+        """The unread messages a Stop should remind the agent of, marking the
+        reminder sent; None when there are none, or a Stop reminded it of this
+        unread batch within ``NOTICE_TTL`` (read_held ends the batch). Separate from claim_notice: a notice that went out when
+        the message arrived may have been lost, and the stop is the last chance
+        to hand it over before the agent sits idle."""
+        with self.tx() as c:
+            rows = c.execute(
+                "SELECT * FROM inbox WHERE agent_id=? AND held=1 AND delivered_at IS NULL ORDER BY id",
+                (agent_id,),
+            ).fetchall()
+            last = c.execute("SELECT stop_reminded_at FROM agents WHERE id=?",
+                             (agent_id,)).fetchone()
+            if not rows or (last and last[0] and time.time() - last[0] < self.NOTICE_TTL):
+                return None
+            c.execute("UPDATE agents SET stop_reminded_at=? WHERE id=?", (time.time(), agent_id))
+            return [_load(Message, r) for r in rows]
+
     def reset_notice(self, agent_id: str) -> None:
         """A notice that couldn't go out: let the next one try again."""
         with self.tx() as c:
@@ -1143,7 +1166,8 @@ class DB:
             )
 
     def read_held(self, agent_id: str) -> list[Message]:
-        """Every unread held message, marked read."""
+        """Every unread held message, marked read. A Stop's reminder covered
+        only these (claim_stop_reminder): mail after them gets its own."""
         with self.tx() as c:
             rows = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND held=1 AND delivered_at IS NULL ORDER BY id",
@@ -1153,6 +1177,7 @@ class DB:
                 "UPDATE inbox SET delivered_at=? WHERE agent_id=? AND held=1 AND delivered_at IS NULL",
                 (time.time(), agent_id),
             )
+            c.execute("UPDATE agents SET stop_reminded_at=NULL WHERE id=?", (agent_id,))
             return [_load(Message, r) for r in rows]
 
     def message_delivered(self, message_id: int) -> bool:

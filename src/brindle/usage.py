@@ -353,6 +353,48 @@ def usage_cost(u: Usage | None, extra=None, fallback=None) -> float | None:
     return price.cost(u.input_tokens, u.output_tokens, u.cache_creation_tokens, u.cache_read_tokens)
 
 
+def _agent_model(db: DB | None, agent) -> str | None:
+    """The model ``agent`` was launched with (``agent.model`` or its profile's
+    configured/effective model), or None when none is set."""
+    model = getattr(agent, "model", None)
+    if isinstance(model, str) and model.strip() and model.strip() != "unknown":
+        return model.strip()
+    profile_name = getattr(agent, "profile", None)
+    if not profile_name:
+        return None
+    repo_root = None
+    ws_id = getattr(agent, "workspace_id", None)
+    if db is not None and ws_id:
+        try:
+            ws = db.get_workspace(ws_id)
+            if ws is not None:
+                repo_root = ws.repo_root
+        except Exception:
+            pass
+    try:
+        from brindle.profiles import load_profile
+
+        prof = load_profile(profile_name, repo_root)
+    except Exception:
+        return None
+    try:
+        from brindle.agents import managed
+        from brindle.pro import managed_models
+
+        mg = managed(repo_root)
+        if mg is not None:
+            prof = managed_models.apply_profile(mg, prof)
+    except Exception:
+        pass
+    if prof.model and prof.model.strip():
+        return prof.model.strip()
+    for k in ("GEMINI_MODEL", "MODEL"):
+        val = (prof.env or {}).get(k)
+        if val and val.strip():
+            return val.strip()
+    return None
+
+
 def antigravity_agent_usage(db: DB, agent) -> Usage | None:
     path = None
     if getattr(agent, "transcript_path", None):
@@ -363,11 +405,6 @@ def antigravity_agent_usage(db: DB, agent) -> Usage | None:
             candidate = brain / agent.session_ref / ".system_generated" / "logs" / "transcript.jsonl"
             if candidate.is_file():
                 path = candidate
-        if (path is None or not path.is_file()) and brain.is_dir():
-            matches = list(brain.glob("*/.system_generated/logs/transcript.jsonl"))
-            if matches:
-                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                path = matches[0]
     if path is None or not path.is_file():
         return None
 
@@ -375,14 +412,14 @@ def antigravity_agent_usage(db: DB, agent) -> Usage | None:
     cached = db.get_usage_cache(str(path))
     offset = 0
     inp, out, read, write = 0, 0, 0, 0
-    model = "gemini-2.5-pro"
+    model = _agent_model(db, agent) or "unknown"
     if cached and cached["inode"] == st.st_ino and cached["size"] <= st.st_size:
         offset = cached["size"]
         inp = cached["input_tokens"]
         out = cached["output_tokens"]
         read = cached["cache_read_tokens"]
         write = cached["cache_creation_tokens"]
-        if cached["model"]:
+        if cached["model"] and cached["model"] != "unknown":
             model = cached["model"]
 
     if offset < st.st_size:

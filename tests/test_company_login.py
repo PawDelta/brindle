@@ -74,6 +74,7 @@ def test_route_model_is_used_by_launch_and_policy(repo, monkeypatch, model, ids,
 
     setup = claude("bedrock", aws=OWN_AWS, model_ids=ids, default_model=IDS[-1])
     monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, setup))
+    company_login.store_env(ORG, company_login.claude_env(ORG, setup.claude))
     monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
     p = Profile("routed", "", "claude", "", model=model)
     monkeypatch.setattr("brindle.profiles.load_profile", lambda *a: p)
@@ -85,6 +86,17 @@ def test_route_model_is_used_by_launch_and_policy(repo, monkeypatch, model, ids,
     decision = policy.check_assign(RepoConfig(), str(repo), p.name, "task", "assign")
     assert (argv[argv.index("--model") + 1], policy._profile_fields(p.name, str(repo)),
             decision.allowed) == (expected, ("claude", expected), True)
+
+
+def test_route_model_only_when_the_route_env_reaches_the_launch(monkeypatch):
+    from brindle import providers
+
+    setup = claude("bedrock", aws=OWN_AWS, model_ids=(IDS[-1],), default_model=IDS[-1])
+    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, setup))
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    off = [company_login.claude_model(m) for m in (None, "sonnet")]
+    company_login.store_env(ORG, company_login.claude_env(ORG, setup.claude))
+    assert (off, company_login.claude_model("sonnet")) == ([None, "sonnet"], IDS[-1])
 
 
 class _Ent:

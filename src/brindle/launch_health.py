@@ -29,6 +29,9 @@ _LAUNCH_ENV = frozenset({"BRINDLE_AGENT_ID", "BRINDLE_ROOT_PATH", "BRINDLE_WORKS
 AUTH = model_access.LAUNCH_AUTH
 MODEL = model_access.LAUNCH_MODEL
 CAPACITY = model_access.LAUNCH_CAPACITY
+# Claude Code's own line for a --model its backend doesn't serve (a 404), which
+# carries no "API Error:" marker: "There's an issue with the selected model (...)".
+SELECTED_MODEL = r"(?i:there.s an issue with the selected model)"
 
 
 def fingerprint(profile, env) -> str:
@@ -283,7 +286,8 @@ def _failure(screen: str, *, baseline: str = "", task: str = "", submitted_promp
             # A tool result or assistant explanation is not a provider error.
             if context in ("assistant", "prose", "prompt"):
                 continue  # copied provider markers remain part of that block
-            context = "provider" if provider in (None, "claude") and re.match(r"^[●⏺]\s*API Error:", stripped) else "assistant"
+            context = ("provider" if provider in (None, "claude")
+                       and re.match(r"^[●⏺]\s*(?:API Error:|" + SELECTED_MODEL + ")", stripped) else "assistant")
             candidate = _cause(stripped) if context == "provider" and stripped not in old else None
             error_block = stripped if context == "provider" and stripped not in old else ""
         elif (len(line) - len(line.lstrip()) <= 1
@@ -294,7 +298,7 @@ def _failure(screen: str, *, baseline: str = "", task: str = "", submitted_promp
                 error_block = stripped if stripped not in old else ""
         elif (not line[:1].isspace() and (context in ("startup", "provider")
               or (provider == "claude" and context == "submitted"))
-              and re.match(r"^(?:(?:API )?Error:|ERROR\b)", stripped)):
+              and re.match(r"^(?:(?:API )?Error:|ERROR\b|" + SELECTED_MODEL + ")", stripped)):
             context = "provider"
             candidate = _cause(stripped) if stripped not in old else None
             error_block = stripped if stripped not in old else ""
@@ -329,7 +333,8 @@ def _cause(line: str):
         return AUTH
     if re.search(r"\b429\b|rate.limit|quota|capacity|overloaded|resource.exhausted|usage.limit", low):
         return CAPACITY
-    if re.search(r"model.*(?:not found|does not exist|not available|not supported|unavailable)|unsupported model", low):
+    if re.search(r"model.*(?:not found|does not exist|not available|not supported|unavailable)|unsupported model"
+                 r"|" + SELECTED_MODEL, low):
         return MODEL
     return None
 

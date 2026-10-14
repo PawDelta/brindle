@@ -186,6 +186,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     # 3. Workers stuck on a prompt nobody is answering, or gone silent.
     done.extend(note_stuck(db, now, panes))
+    done.extend(note_idle_unreported(db, now, panes))
     done.extend(note_silent(db, now, panes))
     done.extend(note_model_refused(db, now, panes))
 
@@ -251,6 +252,67 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     return done
 
 
+# How long a worker may sit idle without having reported before its supervisor
+# is told (once per idle spell).
+IDLE_UNREPORTED_AFTER = 300.0
+
+
+def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once per idle spell, about a worker that has sat
+    idle for IDLE_UNREPORTED_AFTER seconds without reporting, goal or not
+    (autopilot's Stop hook only checks on workers when a goal is set). It's
+    a reminder: the notice its stop sent may have gone unread, or been lost.
+
+    A worker whose provider has no hook for a turn starting (Codex) stays
+    'idle' from its first finished turn on, through any later turns, so it
+    also needs a pane that has printed nothing for that long, and the spell
+    starts at its last output.
+
+    A worker in a pipeline fix round already has a result from its first
+    report, so it counts as unreported while it hasn't reported again since
+    the review that asked for fixes (committing doesn't count), and its spell
+    starts no earlier than that review."""
+    from brindle.providers import get_provider
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        fix_round = _fix_round_since(db, a) if a.result is not None else None
+        # Only these are ever told (a synchronous handoff's caller is waiting).
+        if (a.mode not in agents.FORWARDING_MODES or not a.parent_id
+                or (a.result is not None and fix_round is None)
+                or a.dismissed_at is not None or a.status != "idle"
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        since = max(a.status_since or a.created_at, fix_round or 0)
+        provider = get_provider(a.provider)
+        if not (provider.uses_hooks and provider.announces_turns):
+            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+            if last is None:
+                continue  # no telling whether a later turn is running
+            since = max(since, last)
+        if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
+            continue
+        if agents.unreported_note_expired(a):
+            db.update_agent(a.id, unreported_noted=None)
+        # Not told while a command it started is still running; tried again then.
+        if agents.tell_parent_unreported(db, db.get_agent(a.id) or a):
+            db.update_agent(a.id, stuck_noted=since)
+            done.append(f"told {a.parent_id} that worker {a.id} is idle without reporting")
+    return done
+
+
+def _fix_round_since(db: DB, a: Agent) -> float | None:
+    """When the review that put a worker's branch in a fix round was given,
+    if the worker is still in that round, whether or not it has committed
+    since; None otherwise. Reporting again moves the branch on to 'reviewing'."""
+    if a.pipeline != "fixing":
+        return None
+    review = db.last_review(a.workspace_id)
+    return review.created_at if review is not None else None
+
+
 # How long a worker no hook reports on (Codex) may show nothing new before its
 # supervisor is told. Such a CLI can sit on a startup error forever: signed in
 # without a plan that includes it, say (issue #42).
@@ -259,17 +321,23 @@ SILENT_AFTER = 600.0
 
 def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     """Tell each supervisor, once per silence, about a worker whose status
-    no hook reports ('unknown') or that never got past 'starting', and whose
-    pane hasn't printed anything for SILENT_AFTER seconds without a result."""
+    no hook reports ('unknown'), that never got past 'starting', or that is
+    mid-turn ('processing': a running turn's spinner redraws the pane), and
+    whose pane hasn't printed anything for SILENT_AFTER seconds without a
+    result."""
     done = []
     owners = agents.pane_owners(db, panes)
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
-                or a.dismissed_at is not None or a.status not in ("unknown", "starting")
+                or a.dismissed_at is not None
+                or a.status not in ("unknown", "starting", "processing")
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a)) or a.created_at
+        activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        if a.status == "processing" and (activity is None or a.headless):
+            continue  # no screen to go by, and its turn may well be running
+        last = activity or a.created_at
         if now - last < SILENT_AFTER or a.stuck_noted == last:
             continue
         ws = db.get_workspace(a.workspace_id)
@@ -280,9 +348,11 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])
         where = f" on branch `{ws.branch}`" if ws else ""
         look = f"Look with `brindle attach {ws.name}`, or" if ws else "Look at its pane, or"
+        why = ("Its CLI may be hung mid-turn." if a.status == "processing" else
+               "Its CLI may be stuck at startup (for example signed in without a plan "
+               "that includes it).")
         body = (f"Worker {a.id} ({a.profile}, {a.provider}){where} has shown nothing new for "
-                f"{int((now - last) // 60)} min and hasn't reported. Its CLI may be stuck at "
-                f"startup (for example signed in without a plan that includes it). {look} "
+                f"{int((now - last) // 60)} min and hasn't reported. {why} {look} "
                 "cancel it and assign the task to another profile."
                 f"\n\nIts screen:\n{tail}")
         try:

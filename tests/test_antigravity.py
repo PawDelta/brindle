@@ -57,10 +57,14 @@ def test_hook_finds_its_agent_from_the_agy_process(db, ws, monkeypatch):
     db.add_autopilot("g1")
     autopilot.set_goal(db, "g1", "Goal", [("M", "false", None)])
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    assert json.loads(antigravity.hook_main(db, "agy-stop", "{}"))["decision"] == "continue"
+    monkeypatch.setattr(antigravity, "_flush_soon", lambda agent_id: None)
+    assert antigravity.hook_main(db, "agy-stop", "{}") == "{}"
+    assert db.pending_count("g1") == 1   # the autopilot nudge, for g1
+    db.set_status("g1", "processing")
     monkeypatch.setattr(antigravity, "_process_env", lambda pid: {})
     monkeypatch.setattr(antigravity, "_parent", lambda pid: None)
     assert antigravity.hook_main(db, "agy-stop", "{}") == "{}"
+    assert db.get_agent("g1").status == "processing"
 
 
 def test_process_env_reads_another_process():
@@ -84,14 +88,44 @@ def test_queued_messages_arrive_as_a_new_turn(db, ws, monkeypatch):
     assert db.pending_count("g1") == 1   # typed in by the flush, as a new turn
 
 
-def test_report_reminder_only_once_per_turn(db, ws):
-    add_agent(db, ws, mode="assign", status="processing", profile="developer")
-    out = antigravity.handle_hook(db, "g1", "agy-stop", {})
-    assert out and "report_result" in out["reason"]
+def test_agy_unreported_reminder_is_new_turn(db, ws, monkeypatch):
+    # A turn agy's Stop hook continues has no MCP tools: the reminder must be typed in.
+    flushed = []
+    monkeypatch.setattr(antigravity, "_flush_soon", flushed.append)
+    add_agent(db, ws, mode="review", status="processing", profile="reviewer")
     assert antigravity.handle_hook(db, "g1", "agy-stop", {}) is None
-    # A new turn resets it.
+    assert flushed == ["g1"] and db.get_agent("g1").status == "idle"
+    assert "submit_review" in db.pop_pending("g1").body   # what the flush types in
+    # The reminder's own turn doesn't reset the cap: no second reminder.
     antigravity.handle_hook(db, "g1", "agy-pre-invocation", {"invocationNum": 0})
-    assert antigravity.handle_hook(db, "g1", "agy-stop", {}) is not None
+    assert antigravity.handle_hook(db, "g1", "agy-stop", {}) is None
+    assert flushed == ["g1"] and db.pending_count("g1") == 0
+    # A turn the user starts later does.
+    with db.tx() as c:
+        c.execute("UPDATE inbox SET delivered_at = delivered_at - 60")
+    antigravity.handle_hook(db, "g1", "agy-pre-invocation", {"invocationNum": 0})
+    antigravity.handle_hook(db, "g1", "agy-stop", {})
+    assert flushed == ["g1", "g1"]
+
+
+@pytest.mark.parametrize("error, flushes, told", [
+    ("500 INTERNAL: backend error", True, "provider error (error) before it called report_result"),
+    ("401 unauthorized", False, "authentication failure"),
+])
+def test_agy_error_stop_flushes_and_tells_the_parent(db, ws, monkeypatch, error, flushes, told):
+    from brindle import agents
+
+    flushed = []
+    monkeypatch.setattr(antigravity, "_flush_soon", flushed.append)
+    monkeypatch.setattr(agents, "is_alive", lambda agent: False)
+    add_agent(db, ws, agent_id="boss", status="processing")
+    db.add_agent(Agent("g1", ws.id, "developer", "antigravity", "boss", "assign", "processing", "@1",
+                       None, time.time()))
+    db.enqueue("g1", "also add tests", "boss")
+    antigravity.handle_hook(db, "g1", "agy-stop", {"terminationReason": "error", "error": error})
+    assert flushed == (["g1"] if flushes else [])
+    note, = [m.body for m in iter(lambda: db.pop_pending("boss"), None)]
+    assert told in note and "backend error" not in note   # never the provider's own text
 
 
 def test_new_turn_is_the_user_unless_brindle_just_delivered(db, ws):
@@ -137,5 +171,45 @@ def test_paste_blocked():
     ansi_typing = "\x1b[38;5;232m>\x1b[0m \x1b[1mhello\x1b[0m"
     assert p.paste_blocked(ansi_empty, interactive=True) is None
     assert p.paste_blocked(ansi_typing, interactive=True) == "typing"
+
+
+# -- agy_approvals "brindle": the strict PreToolUse hook --------------------------------------
+
+
+def strict(db, ws, tool, args):
+    """The strict hook's answer for one call by an agy reviewer-gemini worker."""
+    if db.get_agent("r1") is None:
+        db.add_agent(Agent("r1", ws.id, "reviewer-gemini", "antigravity", "boss", "assign", "processing",
+                           "@0", None, time.time()))
+    payload = {"toolCall": {"name": tool, "args": args}, "conversationId": "c", "workspacePaths": [ws.path]}
+    return antigravity.pre_tool_decision(db, "r1", payload, strict=True)
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("git diff HEAD~1..HEAD", "allow"),  # ~ makes it no simple command
+    ('grep -rn "x" .', "allow"),  # quoted
+    ("git diff a..b | grep x", "allow"),  # compound: each part is allowed
+    ("cd sub && git status", "allow"),  # a cd inside the worktree
+    pytest.param("git push", "deny", marks=pytest.mark.variant("a deny rule still wins")),
+    ("git diff $(git merge-base main HEAD)", "deny"),  # what $(...) runs can't be seen
+    ("git diff > notes.txt", "deny"),  # a redirection writes where no rule says
+    ("git status |& curl https://example.com", "deny"),  # |& pipes like |
+    ("git status\ncurl https://example.com", "deny"),  # a second line
+    ("git status x#; curl https://example.com", "deny"),  # a # mid-word is no comment to the shell
+])
+def test_strict_allows_compound_commands_covered_by_allowlist(db, ws, command, expected):
+    os.makedirs(os.path.join(ws.path, "sub"), exist_ok=True)
+    assert strict(db, ws, "run_command", {"CommandLine": command})["decision"] == expected
+
+
+def test_strict_allows_reading_agy_instructions(db, ws, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    instructions = tmp_path / ".gemini" / "antigravity-cli" / "mcp" / "brindle" / "instructions.md"
+    instructions.parent.mkdir(parents=True)
+    instructions.write_text("brindle runs other coding agents for you")
+    assert strict(db, ws, "view_file", {"AbsolutePath": str(instructions)})["decision"] == "allow"
+    assert strict(db, ws, "write_file", {"TargetFile": str(instructions)})["decision"] == "deny"
+    other = instructions.parent.parent / "github" / "instructions.md"
+    assert strict(db, ws, "view_file", {"AbsolutePath": str(other)})["decision"] == "deny"
 
 

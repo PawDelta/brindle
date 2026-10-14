@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from brindle import agents, company_identity, signin_pause
+from brindle import agents, company_identity, company_login, signin_pause
 from brindle.company_identity import Identity
 from brindle.db import Agent, Workspace
 from brindle.pro.team_policy import AgentSetup, AwsSetup, ClaudeSetup
@@ -38,6 +38,8 @@ class World:
         self.fail_resume = False
         monkeypatch.setattr(company_identity, "_setup", self.setup)
         monkeypatch.setattr(company_identity, "_local_setup", lambda: None)
+        # Company login stored the org's route env: panes run on the route.
+        monkeypatch.setattr(company_login, "route_in_use", lambda org_id, setup: True)
         monkeypatch.setattr(company_identity, "claude_identity", self.probe_claude)
         monkeypatch.setattr(company_identity, "codex_identity", self.probe_codex)
         monkeypatch.setattr(company_identity, "_fingerprint", lambda route: self.fp)
@@ -81,6 +83,7 @@ class World:
 
 
 _REAL_CHECK = signin_pause.check
+_REAL_ROUTE_IN_USE = company_login.route_in_use
 
 
 @pytest.fixture
@@ -99,11 +102,32 @@ def test_undetermined_never_pauses_and_warns_once(w):
     assert w.status("c1") == "processing"
     assert signin_pause.paused_for_signin() == {}
     assert [to for to, b in w.messages if "can't be verified" in b] == ["chat"]
+    signin_pause.reset()        # the next sweep runs in another process: still told once
+    signin_pause.run(w.db)
+    assert sum("can't be verified" in b for _, b in w.messages) == 1
     w.claude = OK
     signin_pause.run(w.db)
     w.claude = UNKNOWN          # a new spell of it warns again
     signin_pause.run(w.db)
     assert sum("can't be verified" in b for _, b in w.messages) == 2
+
+
+def test_an_org_route_not_in_use_checks_the_persons_own_signin(w, monkeypatch):
+    # The org sets up a federated Bedrock route, but company login stored no env
+    # and the policy doesn't enforce: panes run on the person's own sign-in.
+    w.route = "bedrock"
+    monkeypatch.setattr(company_login, "route_in_use", _REAL_ROUTE_IN_USE)
+    monkeypatch.setattr(company_identity, "claude_identity", lambda org_id, claude, cache=True: (
+        Identity("claude", "AWS federated role: no credential fetched yet", determined=False)
+        if claude is not None else w.claude))
+    w.agent("c1")
+    w.claude = PERSONAL
+    assert signin_pause.check("claude")[0].ident == PERSONAL.ident
+    signin_pause.run(w.db)
+    assert w.messages == [] and w.status("c1") == "processing"
+    w.claude = OUT              # a real problem with the person's own sign-in still shows
+    signin_pause.run(w.db)
+    assert w.status("c1") == "paused"
 
 
 def test_mismatch_pauses_only_with_enforce(w):

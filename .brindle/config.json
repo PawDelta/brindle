@@ -1,6 +1,5 @@
 {
-  "reviewer": "reviewer-gemini",
-  "review_profile": "reviewer-gemini",
+  "reviewer": "reviewer",
   "checks": [
     "uv run python scripts/check_test_quality.py",
     "uv run pytest -q -n auto -m 'not serial'",

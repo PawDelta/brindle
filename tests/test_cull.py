@@ -108,6 +108,65 @@ def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
     assert db.get_agent("w1").dismissed_at is None
 
 
+@pytest.mark.parametrize("provider,mode,fixing", [
+    ("claude", "assign", False),
+    ("codex", "assign", False),   # no turn-start event: its pane must be quiet too
+    ("claude", "review", False),  # a piped reviewer: the pipeline tells the supervisor
+    # Reported once, then a review asked for fixes and it went quiet (it had
+    # lost its brindle connection): no new commit, no new report.
+    ("claude", "assign", "unchanged"),
+    # The same, but it committed a fix after the review before going quiet.
+    ("claude", "assign", "committed"),
+])
+def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provider, mode, fixing):
+    """autopilot.on_stop only checks on workers when a goal is set; most
+    sessions have none, so the sweep reminds the supervisor itself, even if
+    the worker's stop already sent a notice that went unread."""
+    from brindle import gates, pipeline
+
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor")
+    db.add_autopilot("boss")
+    add(db, ws, "w1", parent_id="boss", provider=provider, mode=mode,
+        status_since=time.time() - 600)
+    db.update_agent("w1", unreported_noted=1)
+    if fixing:
+        db.update_agent("w1", result="done", pipeline="fixing", pipeline_rounds=1)
+        reviewed = gates.head(ws) if fixing == "unchanged" else "0" * 40
+        db.add_review(ws.id, reviewed, "r1", False, "fix the bug")
+        db.conn.execute("UPDATE reviews SET created_at=?", (time.time() - 900,))
+    sent = []
+    activity = time.time()  # its pane printed just now
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: activity)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
+    monkeypatch.setattr(pipeline, "on_reviewer_unreported",
+                        lambda db_, r, ws_: sent.append(r.parent_id) or True)
+    cull.sweep(db)
+    # Codex still reads 'idle' through a resumed turn: its fresh output says otherwise.
+    assert sent == ([] if provider == "codex" else ["boss"])
+    activity = time.time() - 600
+    cull.sweep(db)
+    cull.sweep(db)
+    assert sent == ["boss"]
+
+
+def test_idle_sweep_honors_the_unreported_alert_cooldown(db, ws, monkeypatch):
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor")
+    add(db, ws, "w1", parent_id="boss", mode="assign", status_since=time.time() - 600)
+    db.update_agent("w1", unreported_noted=int(time.time()))   # alerted a moment ago
+    sent = []
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: time.time() - 600)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
+    cull.sweep(db)
+    assert sent == []
+    db.update_agent("w1", unreported_noted=int(time.time()) - agents.UNREPORTED_REALERT_SECONDS - 1)
+    cull.sweep(db)
+    assert sent == ["boss"]
+
+
 def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
     add(db, ws, "w1", parent_id="boss", status="paused")

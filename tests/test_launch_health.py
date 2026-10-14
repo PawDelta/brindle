@@ -81,7 +81,7 @@ def detached(monkeypatch):
     real = subprocess.Popen
 
     def popen(args, *a, **k):
-        if isinstance(args, list) and args[1:3] == ["-m", "brindle"] and str(args[3]).startswith("_"):
+        if isinstance(args, list) and args[1:4] == ["-P", "-m", "brindle"] and str(args[4]).startswith("_"):
             started.append([str(x) for x in args])
             from unittest.mock import MagicMock
             mock_proc = MagicMock()
@@ -240,7 +240,7 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     assert elapsed < BUDGET
     assert db.get_agent(old.id).status == "paused"
     # Retention and culling went to the detached helper instead.
-    assert ["_cull", "--repo", ws.repo_root] in [argv[3:] for argv in detached]
+    assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
 
 
 # -- a prompt is visible: 'waiting', and its supervisor is told once -----------------
@@ -291,13 +291,16 @@ def test_trust_writes_through_a_symlinked_config(tmp_path, claude_config):
     assert json.loads(real.read_text())["projects"][os.path.realpath(folder)]["hasTrustDialogAccepted"] is True
 
 
-def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch):
-    """Issue #42: a Codex worker (no hooks) stuck on a startup error."""
+@pytest.mark.parametrize("status,provider", [
+    ("unknown", "codex"),       # issue #42: no hooks, stuck on a startup error
+    ("processing", "claude"),   # a turn whose pane stopped redrawing
+])
+def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch, status, provider):
     _, ws = root
     screens["%w1"] = "■ unexpected status 403 Forbidden: your plan doesn't include Codex\n"
     now = time.time()
-    a = worker_on(db, ws, "unknown", now - 3600)
-    db.update_agent(a.id, provider="codex")
+    a = worker_on(db, ws, status, now - 3600)
+    db.update_agent(a.id, provider=provider)
     last = now - cull.SILENT_AFTER - 5
     monkeypatch.setattr(tmux, "window_activity", lambda target, **k: last)
 
@@ -479,8 +482,16 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
     monkeypatch.setattr(time, "time", lambda: now[0])
+    # time.sleep is patched process-wide: other threads and subprocess's
+    # timeout polling get the real sleep, and only this thread's health waits
+    # move the fake clock (same guard as the `health` fixture, #123).
+    creator, real_sleep = threading.current_thread(), time.sleep
+
     def sleep(delay):
-        if abs(delay - 5.0) < 0.01 or abs(delay - 3.0) < 0.01:
+        if (threading.current_thread() is not creator
+                or sys._getframe(1).f_globals.get("__name__") == "subprocess"):
+            real_sleep(delay)
+        elif abs(delay - 5.0) < 0.01 or abs(delay - 3.0) < 0.01:
             sleeps.append(delay)
             now[0] += delay
     monkeypatch.setattr(time, "sleep", sleep)
@@ -512,7 +523,7 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     cli.after_launch_cmd(a.id, token=token)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
     assert row["delivered_at"] == 112 and row["outcome"] is None and reports == []
-    followups = [cmd for cmd in detached if cmd[3] == "_launch-health" and "--startup" not in cmd]
+    followups = [cmd for cmd in detached if cmd[4] == "_launch-health" and "--startup" not in cmd]
     assert len(followups) == 1
     now[0] = 114.0
     cli.launch_health_cmd(a.id, startup=False, token=token)
@@ -536,14 +547,20 @@ def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeyp
     assert now[0] == 136
 
 
-def test_codex_trust_confirmation_is_not_yet_task_acceptance(monkeypatch):
+@pytest.mark.parametrize("provider,trust_screen,ready_screen", [
+    ("codex", "Trust this folder?\n› 1. Trust and continue", "› 100% context left"),
+    # agy's newer wording, which brindle missed: the worker sat on it unanswered
+    ("antigravity", "Antigravity CLI requires permission to read, edit, and execute files here.\n\n"
+                    "> Yes, I trust this folder\n  No, exit", "? for shortcuts"),
+])
+def test_trust_confirmation_is_not_yet_task_acceptance(monkeypatch, provider, trust_screen, ready_screen):
     now, keys = [100.0], []
     monkeypatch.setattr(time, "time", lambda: now[0])
     monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
-    screens = iter(["Trust this folder?\n› 1. Trust and continue", "loading", "› 100% context left"])
+    screens = iter([trust_screen, "loading", ready_screen])
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
     monkeypatch.setattr(tmux, "send_keys", lambda *a: keys.append(a))
-    assert agents.get_provider("codex").after_launch("%test") is True
+    assert agents.get_provider(provider).after_launch("%test") is True
     assert now[0] == 101.5 and keys == [("%test", "Enter")]
 
 
@@ -750,6 +767,8 @@ def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monk
 @pytest.mark.parametrize("provider,screen,cause", [
     ("claude", "Claude Code v2.1.0\n● API Error: 400 The selected model\n  is not available for this account", "bedrock_quota"),
     ("claude", "Claude Code v2.1.0\n● Example:\n  API Error: 400 The selected model\n  is not available for this account", None),
+    ("claude", "Claude Code v2.1.0\n⏺ There's an issue with the selected model (us.anthropic.claude-haiku-4-5-v1:0).\n"
+               "  It may not exist or you may not have access to it.", "launch_model"),
 ])
 def test_wrapped_provider_blocks_require_provider_context(provider, screen, cause):
     from brindle import launch_health
