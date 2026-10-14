@@ -322,10 +322,12 @@ def spawn(
     autopilot: bool = False,
     plan_first: bool = False,
     review_sha: str | None = None,
+    claim_goals: bool = True,
 ) -> Agent:
     """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
-    agent is a session root that drives toward a goal (see brindle.autopilot)."""
+    agent is a session root that drives toward a goal (see brindle.autopilot);
+    with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
     from brindle import identity_lock
 
@@ -377,9 +379,9 @@ def spawn(
         db.update_agent(agent_id, plan_first=1)
         agent.plan_first = 1
     if autopilot:
-        plan = pilot.enable(db, agent_id, ws)
+        plan = pilot.enable(db, agent_id, ws, claim=claim_goals)
         if plan and not prompt:
-            prompt = agent.task = pilot.kickoff(plan)
+            prompt = agent.task = pilot.kickoff(plan, agent_id)
             db.update_agent(agent_id, task=prompt)
     if mode == "interactive":
         from brindle import codemap
@@ -1177,6 +1179,10 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
                   if a.status in ("paused", "failed") and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
+    if any(a.id == root_id for a in candidates):
+        from brindle import autopilot as pilot
+
+        pilot.reload_goals_file(db, root_id)   # edits the person made to this session's goal file
     resumed = []
     for a in candidates:
         if a.status == "failed":
