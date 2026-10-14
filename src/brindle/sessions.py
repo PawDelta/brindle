@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle import agents, git, pool, scratch, tmux, workspaces
+from brindle import agents, git, history, pool, scratch, tmux, workspaces
 from brindle.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -177,6 +177,9 @@ def _forget(db: DB, s: Session) -> None:
             workspaces.remove(db, ws, force=False)
         except (workspaces.WorkspaceError, git.GitError):
             pass
+    if not history.archive(db, None, [a for a in s.members if db.get_agent(a.id)],
+                           "session dropped"):
+        return  # kept for a later try
     from brindle import autopilot as pilot
     pilot.remove_goals_file(db, s.root.id)   # the session's own goal file goes with it
     for a in s.members:
@@ -225,6 +228,9 @@ def prune_scratch(db: DB, now: float | None = None) -> int:
             continue  # untransferred work stays
         for s in paused(db, ws.repo_root):
             _forget(db, s)
+        # Done sessions aren't paused ones: their records go with the workspace.
+        if not history.archive(db, ws, db.list_agents(ws.id), "scratch session dropped"):
+            continue
         tmux.kill_session(ws.tmux_session)
         pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)
