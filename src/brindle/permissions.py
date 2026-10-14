@@ -850,7 +850,10 @@ def deny_in_parts(req: Request, *, checks: list[str] | None = None,
         return None
     denies = [rule for rule in rules if rule.decision == "deny"]
     for words in _segments(req.command):
-        decision = decide(replace(req, command=" ".join(words)), checks=checks, rules=denies)
+        # Split even inside a word, as split_commands does: an empty or
+        # spaced word (task test "" secret) mustn't dodge an exact deny.
+        command = " ".join(" ".join(words).split())
+        decision = decide(replace(req, command=command), checks=checks, rules=denies)
         if decision.decision == "deny":
             return decision
     return None

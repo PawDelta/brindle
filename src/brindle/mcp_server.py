@@ -10,7 +10,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, workspaces
+from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
@@ -36,6 +36,9 @@ mcp = MCPServer(
         "`list_repos` shows them, and `repo=<alias>` on handoff/assign (and on the workspace "
         "tools) puts a worker in that repo, with that repo's own checks, review and merge."
     ),
+    # Loads all of brindle up front, so an upgrade under this long-lived server
+    # leaves it serving the version it started with (see upgrade.py).
+    lifespan=upgrade.preloaded,
 )
 
 
