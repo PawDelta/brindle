@@ -362,8 +362,11 @@ def test_uncovered_part_splits_every_operator_and_fails_closed(command, covered)
 
 
 @pytest.mark.parametrize("command,covered", [
-    ("cd sub && pytest", True),
+    ("cd a/b && pytest", True),
     ("cd a && cd .. && pytest", True),
+    ("ls x && cd a/b && pytest", False),  # what ran first may have swapped a/b for a symlink out
+    ("cd sub && pytest", False),  # a symlink, even one inside, can be retargeted before the cd runs
+    ("cd new && pytest", False),  # nor created as one
     ("cd out && pytest", False),  # a symlink out of the worktree
     ("cd sub/../.. && pytest", False),  # bash's cd -L: sub/.. is the worktree, not a/b
     pytest.param("cd sub && cd ../.. && pytest", False, marks=pytest.mark.variant("$PWD keeps the symlink")),
@@ -373,9 +376,9 @@ def test_uncovered_part_splits_every_operator_and_fails_closed(command, covered)
     ('cd "" sub && pytest', False),
     ('"cd sub" && pytest', False),  # a command named "cd sub"
     ("cd a/b & cd ../.. && pytest", False),  # the first cd runs in the background
-    ("ls x && cd a/b ; cd ../.. && pytest", False),  # the first cd may not have run
-    ("ls x || cd a/b && cd ../.. && pytest", False),
-    pytest.param("ls x | cd a/b && cd ../.. && pytest", False,
+    ("cd a/b ; cd ../.. && pytest", False),  # the first cd may not have run
+    ("cd a || cd a/b && cd ../.. && pytest", False),
+    pytest.param("cd a | cd a/b && cd ../.. && pytest", False,
                  marks=pytest.mark.variant("a cd in a pipe changes a subshell")),
 ])
 def test_uncovered_part_follows_cd_as_bash_does(tmp_path, command, covered):

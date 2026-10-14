@@ -2937,8 +2937,13 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     where =f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
     tool = "submit_review" if agent.mode == "review" else "report_result"
     who = "Reviewer" if agent.mode == "review" else "Worker"
+    # A fix round's worker reported once already; the review's fixes are what's missing.
+    what = (f"stopped in a review fix round without committing or calling {tool} again "
+            "(it may have lost its brindle connection)"
+            if agent.pipeline == "fixing" and agent.result is not None
+            else f"stopped without calling {tool}")
     body = (
-        f"{who} {agent.id}{where} stopped without calling {tool}, and won't be reminded "
+        f"{who} {agent.id}{where} {what}, and won't be reminded "
         f"again on its own. Check on it: workspace_diff to see what it did, send_message to "
         f"ask it to finish or report, or remove_workspace if the work is abandoned."
     )

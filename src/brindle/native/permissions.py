@@ -98,7 +98,13 @@ def uncovered_part(specs: list[str | None], command: str, cd_root: str | None = 
     Neither is what split_commands can't split (an unclosed quote, a
     heredoc, a redirection that writes a file): it counts as uncovered. With
     ``cd_root``, a ``cd`` whose target is inside that directory is covered
-    too (``cd sub && pytest`` from a worker's own worktree)."""
+    too (``cd sub && pytest`` from a worker's own worktree), but only before
+    any other command: the target is checked now and entered later, and what
+    runs first (``git checkout``, a build) may swap a directory on the way
+    for a symlink out. The residual risk is a process running alongside
+    (something this agent backgrounded earlier) doing that swap between this
+    check and the cd; _cd_inside refuses symlinks so it at least has to
+    replace a directory, not just retarget a link."""
     command = command.strip()
     if not command or "$(" in command or "`" in command:
         return command or "(empty)"
@@ -110,11 +116,12 @@ def uncovered_part(specs: list[str | None], command: str, cd_root: str | None = 
     reached = {cd_root} if cd_root else set()  # anywhere, once a list stops
     here = set(reached)                         # where this command starts
     before = ";"
+    ran = False                                 # a command other than cd has
     for words, after in parsed:
         if cd_root and words[0] == "cd":
             # In a pipe or backgrounded, it changes a subshell's directory;
             # after ||, whether it ran says nothing about what runs next.
-            if before in ("||", "|", "|&") or after in ("|", "|&", "&"):
+            if ran or before in ("||", "|", "|&") or after in ("|", "|&", "&"):
                 return _joined(words)
             landed = {_cd_inside(words, cwd, cd_root) for cwd in here}
             if None in landed or len(reached | landed) > 32:
@@ -124,6 +131,8 @@ def uncovered_part(specs: list[str | None], command: str, cd_root: str | None = 
                 here = landed
         elif not any(_covers(spec, words) for spec in specs if spec):
             return _joined(words)
+        else:
+            ran = True
         if after != "&&":
             here = set(reached)
         before = after
@@ -135,20 +144,29 @@ def _cd_inside(words: list[str], cwd: str, root: str) -> str | None:
     $PWD has it), if that is ``root`` or below it; None for any other target.
     No ``-`` option, ``~`` (``~-`` is $OLDPWD, ``~1`` the dir stack) or glob,
     and the same place whether the shell resolves ``..`` logically (bash's
-    default: ``link/..`` is back where it started) or physically."""
+    default: ``link/..`` is back where it started) or physically. Below
+    ``root`` it must be an existing directory reached through no symlink:
+    one, even pointing inside, can be retargeted before the cd runs."""
     import os
 
     target = words[1] if len(words) == 2 else ""
     if not target or target.startswith(("-", "~")) or any(c in target for c in "*?[{"):
         return None
+    root = os.path.normpath(root)
     logical = os.path.normpath(os.path.join(cwd, target))
-    physical = os.path.realpath(os.path.join(os.path.realpath(cwd), target))
-    # realpath on both sides: a symlink inside the worktree may point out of
-    # it, and the worktree itself may sit under one (/tmp on macOS).
-    real_root = os.path.realpath(root)
-    if os.path.realpath(logical) != physical:
+    if logical != root and not logical.startswith(root.rstrip(os.sep) + os.sep):
         return None
-    return logical if physical == real_root or physical.startswith(real_root + os.sep) else None
+    path = root     # which itself may sit under a symlink (/tmp on macOS)
+    for part in os.path.relpath(logical, root).split(os.sep):
+        path = os.path.join(path, part)
+        if os.path.islink(path):
+            return None
+    if not os.path.isdir(logical):
+        return None
+    # The way there may pass through one (``link/..``), which cd -L skips
+    # and cd -P follows.
+    physical = os.path.realpath(os.path.join(os.path.realpath(cwd), target))
+    return logical if os.path.realpath(logical) == physical else None
 
 
 def _covers(spec: str, words: list[str]) -> bool:

@@ -266,19 +266,26 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
     A worker whose provider has no hook for a turn starting (Codex) stays
     'idle' from its first finished turn on, through any later turns, so it
     also needs a pane that has printed nothing for that long, and the spell
-    starts at its last output."""
+    starts at its last output.
+
+    A worker in a pipeline fix round already has a result from its first
+    report, so it counts as unreported while it hasn't reported again since
+    the review that asked for fixes (committing doesn't count), and its spell
+    starts no earlier than that review."""
     from brindle.providers import get_provider
 
     done = []
     owners = agents.pane_owners(db, panes)
     for a in db.list_agents():
+        fix_round = _fix_round_since(db, a) if a.result is not None else None
         # Only these are ever told (a synchronous handoff's caller is waiting).
-        if (a.mode not in agents.FORWARDING_MODES or not a.parent_id or a.result is not None
+        if (a.mode not in agents.FORWARDING_MODES or not a.parent_id
+                or (a.result is not None and fix_round is None)
                 or a.dismissed_at is not None or a.status != "idle"
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = a.status_since or a.created_at
+        since = max(a.status_since or a.created_at, fix_round or 0)
         provider = get_provider(a.provider)
         if not (provider.uses_hooks and provider.announces_turns):
             last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
@@ -293,6 +300,16 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
             db.update_agent(a.id, stuck_noted=since)
             done.append(f"told {a.parent_id} that worker {a.id} is idle without reporting")
     return done
+
+
+def _fix_round_since(db: DB, a: Agent) -> float | None:
+    """When the review that put a worker's branch in a fix round was given,
+    if the worker is still in that round, whether or not it has committed
+    since; None otherwise. Reporting again moves the branch on to 'reviewing'."""
+    if a.pipeline != "fixing":
+        return None
+    review = db.last_review(a.workspace_id)
+    return review.created_at if review is not None else None
 
 
 # How long a worker no hook reports on (Codex) may show nothing new before its

@@ -198,6 +198,7 @@ def strict(db, ws, tool, args):
     ("git status x#; curl https://example.com", "deny"),  # a # mid-word is no comment to the shell
 ])
 def test_strict_allows_compound_commands_covered_by_allowlist(db, ws, command, expected):
+    os.makedirs(os.path.join(ws.path, "sub"), exist_ok=True)
     assert strict(db, ws, "run_command", {"CommandLine": command})["decision"] == expected
 
 
