@@ -503,6 +503,10 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     server = tmux.current_server()
     db.update_agent(agent.id, tmux_window=target, tmux_server=server)
     agent.tmux_window, agent.tmux_server = target, server
+    if get_provider(agent.provider).startup_prompts and not agent.headless:
+        from brindle import prompt_answer
+
+        prompt_answer.launched(db, agent)
     if watch_pane:
         try:
             _ensure_sidebar(db, root_of(db, agent.id), ws, target)
@@ -883,11 +887,9 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             env={**base, **agent_env(ws, agent.id)},
         )
     else:
-        accepted = provider.after_launch(target)
-        if accepted:
-            ready(db, agent.id)
-            from brindle import launch_health
-            launch_health.accepted(db, agent)
+        from brindle import prompt_answer
+
+        prompt_answer.finish_launch(db, agent)
 
 
 def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
@@ -2638,6 +2640,12 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     agent = db.get_agent(agent_id)
     if agent is None:
         return None
+    # A hook runs only once the session is going, so its launch is past any
+    # startup prompt: a menu on its pane from now on is the agent's own (a
+    # question for the user), which no sweep may answer.
+    from brindle import prompt_answer
+
+    prompt_answer.settled(db, agent)
     if event == "codex-permission-request":
         # Session/status writes are bookkeeping, never prerequisites for
         # returning a policy decision (especially a deny).

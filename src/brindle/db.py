@@ -391,6 +391,15 @@ CREATE TABLE IF NOT EXISTS launch_health (
     baseline TEXT NOT NULL DEFAULT '',
     outcome TEXT
 );
+-- A launch whose CLI hasn't shown its input box yet, and the model calls
+-- spent reading its startup prompts (brindle.prompt_answer).
+CREATE TABLE IF NOT EXISTS startup_prompts (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    pane TEXT NOT NULL,
+    launched_at REAL NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    pending INTEGER NOT NULL DEFAULT 1
+);
 CREATE TABLE IF NOT EXISTS agent_reported_spend (
     agent_id TEXT PRIMARY KEY,
     reported_usd REAL NOT NULL,
