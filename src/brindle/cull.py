@@ -105,6 +105,17 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         # Only this server's panes can say whether this agent is running.
         return agents.same_server(a, panes)
 
+    # 0b. A chat that ended without pausing its session: killing its tmux
+    # session takes down the wrapper that would have (agents._pause_when_done),
+    # leaving every agent it started running. Pause the whole session now;
+    # step 1 then stops the processes of everything it paused.
+    for a in db.list_agents():
+        if (a.mode == "interactive" and a.parent_id is None and a.status not in ("paused", "done")
+                and a.dismissed_at is None and agents.runs_process(a) and here(a) and not alive(a)
+                and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
+            paused = agents.pause(db, a.id, stop_procs=False, stop_local_models=False)
+            done.append(f"paused session {a.id} ({len(paused)} agent(s)): its chat is gone")
+
     # 1. Processes of agents that shouldn't be running.
     leftovers = []
     for aid in procs.all_agent_ids(table):
@@ -209,6 +220,10 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     from brindle.native import serve
 
     done.extend(serve.stop_unused(db))
+
+    # 6. Finished work: merged worktrees and ones whose folder is gone leave
+    # the live view, archived (not only when someone runs `brindle prune`).
+    done.extend(prune_retired(db, now, cautious=True))
     return done
 
 
@@ -530,19 +545,34 @@ def clean_locks(db: DB, now: float | None = None) -> int:
 # -- `brindle prune` ---------------------------------------------------------------
 
 
-def prune_retired(db: DB, now: float | None = None) -> list[str]:
+def prune_retired(db: DB, now: float | None = None, *, cautious: bool = False) -> list[str]:
     """Remove the worktrees of finished workers whose branch is already
     merged (see ``view.retired``), and their branches unless the repo turns
     ``delete_merged_branches`` off. A worktree with
-    uncommitted changes (or the one this is run from) is kept and reported."""
-    from brindle import pipeline, view, workspaces
+    uncommitted changes (or the one this is run from) is kept and reported.
+    The records of a workspace whose folder is gone are forgotten (its
+    branch stays). Either way its records are archived first (see
+    ``history.archive``). ``cautious`` (the automatic sweep): a missing
+    folder is only forgotten once nothing runs there and it's past
+    ``view.UNUSED_WORKTREE_GRACE``, so one being created isn't."""
+    from brindle import history, pipeline, view, workspaces
 
     now = time.time() if now is None else now
     alive = view.live_agents(db, tmux.list_panes())
-    cwd = os.path.realpath(os.getcwd())
+    try:
+        cwd = os.path.realpath(os.getcwd())
+    except OSError:
+        cwd = ""  # run from a folder since deleted: it's in no worktree
     done = []
     for ws in db.find_workspaces():
         if not os.path.isdir(ws.path):
+            everyone = db.list_agents(ws.id)
+            if cautious and (now - ws.created_at <= view.UNUSED_WORKTREE_GRACE
+                             or any(a.id in alive for a in everyone)):
+                continue
+            if not history.archive(db, ws, everyone, "worktree missing"):
+                done.append(f"kept the records of missing workspace {ws.id}: couldn't archive them")
+                continue
             pipeline.on_workspace_cleanup(db, ws)
             db.delete_workspace(ws.id)
             done.append(f"forgot missing workspace {ws.id} ({ws.path})")
@@ -550,7 +580,7 @@ def prune_retired(db: DB, now: float | None = None) -> list[str]:
         if not view.retired(db, ws, alive, now):
             continue
         path = os.path.realpath(ws.path)
-        if cwd == path or cwd.startswith(path + os.sep):
+        if cwd and (cwd == path or cwd.startswith(path + os.sep)):
             done.append(f"kept {ws.branch}: you're in its worktree")
             continue
         try:
@@ -567,6 +597,8 @@ def prune_retired(db: DB, now: float | None = None) -> list[str]:
             continue
         branch = "branch deleted" if removed.branch_deleted else f"branch {ws.branch} kept"
         done.append(f"removed merged worktree {ws.path} ({branch})")
+    if cautious:  # every sweep: only what it did, not what it keeps leaving alone
+        done = [line for line in done if not line.startswith("kept ")]
     return done
 
 

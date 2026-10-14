@@ -228,3 +228,43 @@ def test_send_message_delivered_when_reconcile_already_flushed_it(db, root, monk
     assert db.pending_count("w1") == 0
 
 
+@pytest.mark.parametrize("cause, status", [
+    ("settings", "starting"),   # disableAllHooks at launch
+    ("grace", "starting"),      # no settings explain it; no hook ever reported
+    ("settings", "idle"),       # turned off later, through /hooks
+])
+def test_sidebar_leaves_starting_and_says_so_when_claude_runs_no_hooks(db, root, monkeypatch, cause, status):
+    # Claude Code with disableAllHooks never runs SessionStart, the only thing
+    # that moved a 'starting' agent on: its row read "starting up" forever and
+    # a message queued for it never went in.
+    import os
+    from pathlib import Path
+
+    from brindle import view, watch
+
+    _, ws = root
+    settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"   # conftest's temporary one
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    if cause == "settings":
+        settings.write_text('{"disableAllHooks": true}')
+    since = time.time() - (3600 if cause == "grace" else 0)   # grace: well past agents.HOOKS_GRACE
+    add_agent(db, ws, "w1", status=status, status_since=since)
+    db.enqueue("w1", "hello", "boss")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
+
+    entry = view.agent_entry(db, db.get_agent("w1"))   # the sidebar's one-sample read
+    assert entry["status"] == "idle" and not pasted
+    rows = " ".join(ln.text for ln in watch.render_agent(entry, {"id": ws.id}, time.time(), 30))
+    assert "hooks off" in rows
+
+    agents.reconcile(db, db.get_agent("w1"))           # a two-sample read delivers it
+    assert pasted and db.pending_count("w1") == 0
+
+    if cause == "settings":                            # turned back on: the warning goes
+        settings.write_text('{"disableAllHooks": false}')
+        assert "hooks_off" not in view.agent_entry(db, db.get_agent("w1"))
+
+

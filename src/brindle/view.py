@@ -121,6 +121,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     unread = db.unread_count(a.id)
     if unread:
         entry["unread"] = unread
+    if a.hooks_off and status not in _PARENT_NOT_RUNNING:
+        entry["hooks_off"] = a.hooks_off
     if detail:
         subs = db.native_subagents(a.id) if native_subagents is None else native_subagents
         visible = _visible_native_subagents(subs, now if now is not None else time.time())
@@ -140,10 +142,13 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
 
 
 def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
-    """Ids of every agent that is running (see agents.owns_pane)."""
+    """Ids of every agent that is running (see agents.owns_pane). An agent on
+    another tmux server is asked of its own: this server's owner of the same
+    pane id is no claim on it."""
     owners = agents.pane_owners(db, panes)
     return {a.id for a in db.list_agents()
-            if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)}
+            if agents.is_alive(a, panes)
+            and agents.owns_pane(db, a, owners if agents.same_server(a, panes) else None)}
 
 
 def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,
@@ -175,7 +180,15 @@ def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,
 
 
 def _finished(a: Agent) -> bool:
-    return a.dismissed_at is not None or a.status == "done" or a.result is not None
+    """Closed, done or reported."""
+    if a.dismissed_at is not None or a.status == "done" or a.result is not None:
+        return True
+    # A reviewer that isn't running (callers rule out running ones) holds no
+    # work of its own: one left "paused" without a report (its session
+    # paused, or a newer round replaced it) mustn't keep a merged worktree.
+    if a.mode == "review":
+        return True
+    return False
 
 
 def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
@@ -286,21 +299,28 @@ def _autopilot_flags(db: DB, shown: list[Agent]) -> tuple[bool, str | None]:
     return on, asking
 
 
-def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> dict | None:
-    """The goal and milestones of the newest running autopilot session in
-    ``repo_root``, for the sidebar. ``panes`` should be the same
+def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+                    root_id: str | None = None) -> dict | None:
+    """The goal and milestones for the sidebar: session ``root_id``'s (a
+    sidebar shows only its own session's goal), else the newest running
+    autopilot session's in ``repo_root``. ``panes`` should be the same
     ``tmux.list_panes()`` result passed to ``snapshot`` for this refresh, so
     liveness isn't checked with a second tmux subprocess."""
     from brindle import autopilot, quota
 
     if not repo_root:
         return None
-    roots = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
-             if a.mode == "interactive" and a.status not in ("paused", "done")
-             and db.get_autopilot(a.id) and agents.is_alive(a, panes)]
-    if not roots:
-        return None
-    root = max(roots, key=lambda a: a.created_at)
+    if root_id:
+        root = db.get_agent(root_id)
+        if root is None or db.get_autopilot(root_id) is None:
+            return None
+    else:
+        roots = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
+                 if a.mode == "interactive" and a.status not in ("paused", "done")
+                 and db.get_autopilot(a.id) and agents.is_alive(a, panes)]
+        if not roots:
+            return None
+        root = max(roots, key=lambda a: a.created_at)
     ap = db.get_autopilot(root.id)
     assert ap is not None
     return {

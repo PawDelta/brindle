@@ -3,11 +3,12 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, cull, procs, tmux, workspaces
-from brindle.db import Agent
+from brindle import agents, cull, procs, tmux, view, workspaces
+from brindle.db import Agent, Workspace
 
 SLEEPER = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
 
@@ -89,14 +90,31 @@ def test_sweep_stops_processes_of_paused_agents(db, ws, proc_cleanup):
     assert any("leftover" in n for n in notes)
 
 
-def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup):
-    add(db, ws, "abc12345", mode="interactive", status="processing", profile="supervisor")
+def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypatch):
+    """Killing the chat's tmux session also kills the wrapper that would have
+    paused its session (agents._pause_when_done): the sweep must stop every
+    agent the chat started, and nothing of another session."""
+    add(db, ws, "abc12345", mode="interactive", status="processing", profile="supervisor", tmux_window="%1")
+    add(db, ws, "w1", parent_id="abc12345", status="processing", tmux_window="%2", status_since=time.time())
+    add(db, ws, "r1", parent_id="w1", mode="review", status="processing", tmux_window="%3",
+        status_since=time.time())
+    add(db, ws, "other", mode="interactive", status="processing", profile="supervisor", tmux_window="%4")
+    add(db, ws, "w2", parent_id="other", status="processing", tmux_window="%5", status_since=time.time())
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes.update({"%2": True, "%3": True, "%4": True, "%5": True})  # the chat's pane %1 is gone
+    killed = []
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    monkeypatch.setattr(tmux, "kill_window", killed.append)
+    monkeypatch.setattr(tmux, "kill_session", lambda *a, **k: None)
     p = launch_as("abc12345")
     proc_cleanup.append(p)
     cull.sweep(db)
     p.wait(timeout=5)
     a = db.get_agent("abc12345")
     assert a.status == "paused" and a.dismissed_at is None  # still resumable, still shown
+    assert {a: db.get_agent(a).status for a in ("w1", "r1", "other", "w2")} == {
+        "w1": "paused", "r1": "paused", "other": "processing", "w2": "processing"}
+    assert set(killed) == {"%1", "%2", "%3"}
 
 
 def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
@@ -124,7 +142,7 @@ def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provid
     the worker's stop already sent a notice that went unread."""
     from brindle import gates, pipeline
 
-    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor")
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
     db.add_autopilot("boss")
     add(db, ws, "w1", parent_id="boss", provider=provider, mode=mode,
         status_since=time.time() - 600)
@@ -152,7 +170,7 @@ def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provid
 
 
 def test_idle_sweep_honors_the_unreported_alert_cooldown(db, ws, monkeypatch):
-    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor")
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
     add(db, ws, "w1", parent_id="boss", mode="assign", status_since=time.time() - 600)
     db.update_agent("w1", unreported_noted=int(time.time()))   # alerted a moment ago
     sent = []
@@ -174,6 +192,74 @@ def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     cull.sweep(db)
     assert db.get_agent("w1").dismissed_at is None
     assert db.get_agent("w2").dismissed_at is not None
+
+
+# -- finished work leaves the live view ---------------------------------------
+
+
+def worktree_row(db, repo, name, path, created_at=None):
+    ws = Workspace(f"proj/{name}", str(repo), name, "worktree", name, "main", str(path), None,
+                   f"brindle_proj_{name}", time.time() - 7200 if created_at is None else created_at)
+    db.add_workspace(ws)
+    return ws
+
+
+@pytest.fixture
+def merged(monkeypatch):
+    """Every worktree reads as merged and clean; removals are recorded, not done."""
+    removed = []
+    monkeypatch.setattr(view.status_cache, "cached_status", lambda path, base, now=None:
+                        SimpleNamespace(ahead=0))
+    monkeypatch.setattr(cull.git, "dirty_files", lambda path: [])
+    monkeypatch.setattr(workspaces, "remove", lambda db, ws, **kw:
+                        removed.append(ws.id) or SimpleNamespace(branch_deleted=True))
+    return removed
+
+
+def test_sweep_forgets_a_workspace_whose_worktree_is_gone(db, repo, tmp_path):
+    """Only `brindle prune` used to: the rows of worktrees deleted outside
+    brindle (or by a removal that crashed half way) stayed listed for good."""
+    gone = worktree_row(db, repo, "feat-gone", tmp_path / "gone")
+    add(db, gone, "w1", status="done", result="did it")
+    # One made a moment ago may not have its folder yet: not forgotten.
+    fresh = worktree_row(db, repo, "feat-fresh", tmp_path / "fresh", created_at=time.time())
+
+    cull.sweep(db)
+
+    assert db.get_workspace(gone.id) is None and db.get_agent("w1") is None
+    assert db.get_workspace(fresh.id) is not None
+
+
+def test_a_paused_reviewer_does_not_keep_a_merged_worktree(db, repo, tmp_path, merged):
+    """A reviewer left paused without a report (its session paused, or a newer
+    round replaced it) counted as unfinished, so the merged worktree stayed."""
+    ws = worktree_row(db, repo, "feat-merged", tmp_path)
+    add(db, ws, "w1", status="done", result="did it")
+    add(db, ws, "r1", mode="review", status="paused")
+
+    cull.prune_retired(db)
+
+    assert merged == [ws.id]
+
+
+def test_a_running_reviewer_on_another_server_keeps_its_worktree(db, repo, tmp_path, merged,
+                                                                monkeypatch):
+    """The same pane id, live on both servers: this server's owner of it is
+    no claim on the other server's reviewer, which is still at work."""
+    here = tmux.PaneSnapshot(tmux.current_server())
+    there = tmux.PaneSnapshot("other")
+    for panes, owner in ((here, "mine"), (there, "r1")):
+        panes["%1"] = True
+        panes.tags["%1"] = {agents.AGENT_TAG: owner}
+    monkeypatch.setattr(tmux, "list_panes", lambda server=None: there if server == "other" else here)
+    monkeypatch.setattr(tmux, "window_alive", lambda pane, server=None: server == "other")
+    ws = worktree_row(db, repo, "feat-merged", tmp_path)
+    add(db, ws, "w1", status="done", result="did it")
+    add(db, ws, "r1", mode="review", status="processing", tmux_window="%1", tmux_server="other")
+
+    cull.prune_retired(db, cautious=True)
+
+    assert merged == []
 
 
 # -- another tmux server's pane list says nothing about this agent -----------

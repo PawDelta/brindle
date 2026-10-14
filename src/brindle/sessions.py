@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle import agents, git, pool, scratch, tmux, workspaces
+from brindle import agents, git, history, pool, scratch, tmux, workspaces
 from brindle.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -95,7 +95,8 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
     prompt = handover_prompt(db, old, note)
     # Always a supervisor, even from a session started as something else.
     new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
-                       watch_pane=True, background_setup=True, autopilot=bool(ap and ap.enabled))
+                       watch_pane=True, background_setup=True, autopilot=bool(ap and ap.enabled),
+                       claim_goals=False)
     if ap and ap.enabled and ap.goal:
         old_ms = db.milestones(old_root_id)
         pilot.set_goal(db, new.id, ap.goal,
@@ -105,7 +106,8 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                 db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
                                 passed_sha=prev.passed_sha)
         db.update_autopilot(new.id, goal_sha=ap.goal_sha, audit_history=ap.audit_history)   # the audit reviews the whole goal's work
-        db.update_autopilot(old_root_id, enabled=0)   # the old session stops syncing goals.md
+        db.update_autopilot(old_root_id, enabled=0)   # the old session stops syncing its goal file
+        pilot.remove_goals_file(db, old_root_id)      # the goal lives in the new session's file now
         pilot.sync_goals_file(db, new.id)
     with db.tx() as c:
         c.execute("UPDATE agents SET parent_id=? WHERE parent_id=?", (new.id, old_root_id))
@@ -175,6 +177,11 @@ def _forget(db: DB, s: Session) -> None:
             workspaces.remove(db, ws, force=False)
         except (workspaces.WorkspaceError, git.GitError):
             pass
+    if not history.archive(db, None, [a for a in s.members if db.get_agent(a.id)],
+                           "session dropped"):
+        return  # kept for a later try
+    from brindle import autopilot as pilot
+    pilot.remove_goals_file(db, s.root.id)   # the session's own goal file goes with it
     for a in s.members:
         agents._note_reviewer_end(db, a)
         db.delete_agent(a.id)
@@ -221,6 +228,9 @@ def prune_scratch(db: DB, now: float | None = None) -> int:
             continue  # untransferred work stays
         for s in paused(db, ws.repo_root):
             _forget(db, s)
+        # Done sessions aren't paused ones: their records go with the workspace.
+        if not history.archive(db, ws, db.list_agents(ws.id), "scratch session dropped"):
+            continue
         tmux.kill_session(ws.tmux_session)
         pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)

@@ -14,8 +14,12 @@ is running, its Stop hook tells it to keep going. It stops pushing when:
 - it has nudged MAX_NUDGES times in a row with no progress (stalled), or
 - Claude usage is near its limit.
 
-Goals come from the chat (the supervisor calls ``set_goal``) or from
-``.brindle/goals.md``, loaded when the session starts:
+Every session has its own goal, never shared with another session. It comes
+from the chat (the supervisor calls ``set_goal`` as soon as it delegates) and
+lives in ``.brindle/goals/<session id>.md``, which ``set_goal`` writes and
+``brindle continue`` reloads, so the person can read and edit it there. A
+hand-written ``.brindle/goals.md`` is a one-time seed: the first new session
+claims it (moves it to its own file), so no second session picks it up:
 
     # Settings page
 
@@ -48,6 +52,7 @@ from brindle.profiles import load_profile
 log = logging.getLogger(__name__)
 
 GOALS_FILE = "goals.md"
+GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's own goal
 MAX_NUDGES = 3
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
 OUTPUT_TAIL_LINES = 30
@@ -60,19 +65,23 @@ You are this project's manager. Drive the goal to completion without waiting
 to be asked each step.
 
 - Size first, by the delegation rule. A request that rule has you do
-  yourself is not a goal: do it directly, run the targeted tests, and report.
-  No `set_goal`, no workers. Use the rest of this guide only for multi-part
-  work that benefits from milestones and parallel workers.
-- Within a goal, the same rule decides which of a milestone's tasks you do
-  yourself and which you `assign`.
-- The goal: if none is set yet, ask the user what we're building. Turn the
-  answer into a goal with 2-6 milestones, each with a `check` command brindle can
-  run from the root of this checkout that exits 0 only when that milestone is
-  done (e.g. `uv run pytest tests/test_settings.py -q`). A check must test what
-  the milestone promises, not just that the suite passes: name the tests that
-  cover its acceptance criteria. Record it with
-  `set_goal`, tell the user the plan in a few lines, then start. If
-  `.brindle/goals.md` exists, brindle has already loaded it: call `get_progress`.
+  yourself needs no goal: do it directly, run the targeted tests, and report.
+- The goal: as soon as you delegate work (before your first `assign` or
+  `handoff`), record a goal derived from the user's request with `set_goal`,
+  without asking: the request is the goal, its parts are 1-6 milestones. Ask
+  the user what we're building only when there is no request at all. Each
+  milestone has a `check` command brindle can run from the root of this
+  checkout that exits 0 only when that milestone is done (e.g.
+  `uv run pytest tests/test_settings.py -q`). A check must test what the
+  milestone promises, not just that the suite passes: name the tests that
+  cover its acceptance criteria. Tell the user the plan in a few lines, then
+  start. If the session started with a goal, call `get_progress`.
+- A later request in this session becomes new milestones on this session's
+  goal: call `set_goal` with the existing milestones (unchanged, so they keep
+  their results) plus the new ones. The goal is this session's alone; brindle
+  keeps it in `.brindle/goals/<session id>.md`.
+- Within a goal, the delegation rule decides which of a milestone's tasks you
+  do yourself and which you `assign`.
 - Work on the first unverified milestone. Split it into independent tasks and
   `assign` them to workers in parallel (at most {max_agents} at once). Give
   every task a `done_when` finish line the worker can verify itself. Pass
@@ -176,7 +185,8 @@ def delegation_rule(cfg: RepoConfig) -> str:
 
 
 KICKOFF = (
-    "[brindle autopilot] The goal in .brindle/goals.md is loaded: {goal} ({n} milestones). "
+    "[brindle autopilot] The goal in .brindle/goals.md is now this session's (kept in "
+    ".brindle/goals/{root_id}.md): {goal} ({n} milestones). "
     "Call get_progress, tell me your plan in a few lines, then start working toward it."
 )
 
@@ -195,14 +205,50 @@ class Plan:
     milestones: list[tuple]   # (title, check, detail[, profile[, repo]])
 
 
+PROFILE_RE = re.compile(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", re.I)
+REPO_RE = re.compile(r"^\s*repo:\s*`?([\w.-]+)`?\s*$", re.I)
+CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*`?(.+?)`?\s*$", re.I)
+FENCED_CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*$", re.I)   # the command is the fenced block below
+FENCE_RE = re.compile(r"^(`{3,})")
+
+
+def _fences(lines: list[str]) -> dict[int, tuple[int, int]]:
+    """Fenced blocks: opening line index -> (closing line index, index after
+    the block). Nothing inside a block is a heading, field or status line."""
+    out, i = {}, 0
+    while i < len(lines):
+        if m := FENCE_RE.match(lines[i]):
+            close = re.compile(rf"^`{{{len(m.group(1))},}}\s*$")
+            j = next((k for k in range(i + 1, len(lines)) if close.match(lines[k])), len(lines))
+            out[i] = (j, min(j + 1, len(lines)))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
 def parse_goals(text: str) -> Plan | None:
     """``# Goal`` then ``## Milestone`` sections, each with an optional
     ``check: <command>`` line (``check@<alias>: <command>`` runs it in a repo
     attached to the session; so does a ``repo: <alias>`` line) and a
-    ``profile: <name>`` line. Returns None when there's no goal heading."""
+    ``profile: <name>`` line. A bare ``check:`` line followed by a fenced
+    block takes the block as the command (any number of lines). A detail
+    line starting with a backslash is that line without it, so detail can
+    hold text that would otherwise read as a heading or a field. Returns None
+    when there's no goal heading."""
     goal, detail_lines = None, []
     milestones: list[list] = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    fences = _fences(lines)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        detail = milestones[-1][2] if milestones else detail_lines
+        if i in fences:   # a code block in the detail: kept verbatim
+            detail.extend(lines[i:fences[i][1]])
+            i = fences[i][1]
+            continue
+        i += 1
         if m := re.match(r"^#\s+(.+?)\s*$", line):
             if goal is None:
                 goal = m.group(1)
@@ -212,42 +258,219 @@ def parse_goals(text: str) -> Plan | None:
             continue
         if milestones and STATUS_RE.match(line):
             continue   # written by sync_goals_file: information only, never read back
-        if milestones and milestones[-1][3] is None and (
-            m := re.match(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", line, re.I)
-        ):
+        if milestones and milestones[-1][3] is None and (m := PROFILE_RE.match(line)):
             milestones[-1][3] = m.group(1)
             continue
-        if milestones and milestones[-1][4] is None and (
-            m := re.match(r"^\s*repo:\s*`?([\w.-]+)`?\s*$", line, re.I)
-        ):
+        if milestones and milestones[-1][4] is None and (m := REPO_RE.match(line)):
             milestones[-1][4] = m.group(1)
             continue
-        if milestones and milestones[-1][1] is None and (
-            m := re.match(r"^\s*check(?:@([\w.-]+))?:\s*`?(.+?)`?\s*$", line, re.I)
-        ):
+        if milestones and milestones[-1][1] is None and i in fences and (m := FENCED_CHECK_RE.match(line)):
+            close, after = fences[i]
+            milestones[-1][1] = "\n".join(lines[i + 1:close])
+            i = after
+        elif milestones and milestones[-1][1] is None and (m := CHECK_RE.match(line)):
             milestones[-1][1] = m.group(2)
-            if m.group(1):
-                milestones[-1][4] = m.group(1)
+        else:
+            detail.append(line[1:] if line.startswith("\\") else line)
             continue
-        (milestones[-1][2] if milestones else detail_lines).append(line)
+        if m.group(1):
+            milestones[-1][4] = m.group(1)
     if not goal:
         return None
     clean = lambda lines: "\n".join(lines).strip() or None  # noqa: E731
-    out = []
-    for t, c, d, p, r in milestones:
-        item: tuple = (t, c, clean(d))
-        if p or r:
-            item += (p,)
-        if r:
-            item += (r,)
-        out.append(item)
-    return Plan(goal, clean(detail_lines), out)
+    return Plan(goal, clean(detail_lines), [_item(t, c, clean(d), p, r) for t, c, d, p, r in milestones])
+
+
+def _item(title: str, check: str | None, detail: str | None,
+          profile: str | None, repo: str | None) -> tuple:
+    item: tuple = (title, check or None, detail)
+    if profile or repo:
+        item += (profile or None,)
+    if repo:
+        item += (repo,)
+    return item
+
+
+def _escaped(detail: str) -> list[str]:
+    """``detail``'s lines, each that ``parse_goals`` would read as something
+    other than detail text behind a backslash."""
+    def special(line: str) -> bool:
+        return (line.startswith(("\\", "#")) or any(r.match(line) for r in (
+            FENCE_RE, STATUS_RE, PROFILE_RE, REPO_RE, CHECK_RE, FENCED_CHECK_RE)))
+    return ["\\" + line if special(line) else line for line in detail.splitlines()]
+
+
+def _check_lines(check: str, repo: str | None) -> list[str]:
+    key = f"check@{repo}:" if repo else "check:"
+    m = CHECK_RE.match(f"{key} {check}")
+    if m and m.group(2) == check:
+        return [f"{key} {check}"]
+    # Anything a one-line field can't hold exactly (several lines, edge
+    # backticks or spaces) goes in a fenced block longer than any run inside.
+    fence = "`" * max(3, 1 + max((len(r) for r in re.findall(r"`+", check)), default=0))
+    return [key, fence, *check.split("\n"), fence]
+
+
+def render_goals(plan: Plan, statuses: list[str]) -> str:
+    """``plan`` as goals.md text that ``parse_goals`` reads back as ``plan``,
+    with ``statuses`` (one ``status_line`` per milestone)."""
+    out = [f"# {plan.goal}", ""]
+    if plan.detail:
+        out += [*_escaped(plan.detail), ""]
+    for item, status in zip(plan.milestones, statuses):
+        title, check, detail = item[:3]
+        profile = item[3] if len(item) > 3 else None
+        repo = item[4] if len(item) > 4 else None
+        out += [f"## {title}", status]
+        if check:
+            out += _check_lines(check, repo)
+        elif repo:
+            out.append(f"repo: {repo}")
+        if profile:
+            out.append(f"profile: {profile}")
+        if detail:
+            out += _escaped(detail)
+        out.append("")
+    return "\n".join(out)
 
 
 def goals_path(root: str) -> Path:
-    # config_root: in a linked worktree the git-ignored .brindle lives in the
-    # main checkout, and that is the file the session loads (and syncs to).
+    """The hand-written seed, ``.brindle/goals.md``. config_root: in a linked
+    worktree the git-ignored .brindle lives in the main checkout."""
     return config_root(root) / CONFIG_DIR / GOALS_FILE
+
+
+def session_goals_path(db: DB, root_id: str) -> Path | None:
+    """Session ``root_id``'s own goal file, ``.brindle/goals/<root_id>.md``:
+    derived from the session, so no two sessions ever write the same file."""
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if ws is None:
+        return None
+    base = config_root(ws.path)
+    if not (base / CONFIG_DIR).is_dir():
+        base = Path(ws.repo_root)   # never create a .brindle that would hide the main checkout's
+    return base / CONFIG_DIR / GOALS_DIR / f"{root_id}.md"
+
+
+def _goals_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ignore = path.parent / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("*\n", encoding="utf-8")   # session files never dirty the checkout
+
+
+def _replace(path: Path, text: str) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(text.encode("utf-8"))
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _db_plan(db: DB, root_id: str) -> Plan | None:
+    ap = db.get_autopilot(root_id)
+    if not ap or not ap.goal:
+        return None
+    return Plan(ap.goal, (ap.detail or "").strip() or None,
+                [_item(m.title, m.check_cmd, m.detail, m.profile, m.repo) for m in db.milestones(root_id)])
+
+
+def write_goals_file(db: DB, root_id: str) -> None:
+    """Write the session's goal to its own file. A file that already says this
+    goal is left byte for byte (a check only updates its status lines; see
+    ``sync_goals_file``). Never raises."""
+    try:
+        path, plan = session_goals_path(db, root_id), _db_plan(db, root_id)
+        if path is None or plan is None:
+            return
+        try:
+            if parse_goals(path.read_bytes().decode("utf-8")) == plan:
+                return
+        except OSError:
+            pass
+        text = render_goals(plan, [status_line(m) for m in db.milestones(root_id)])
+        if parse_goals(text) != plan:
+            # The file can't say this goal exactly (a title over several
+            # lines, say): no file rather than one a resume would misread.
+            log.warning("brindle: session %s's goal can't be written to its goal file", root_id)
+            path.unlink(missing_ok=True)
+            return
+        _goals_dir(path)
+        _replace(path, text)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't write the session's goal file")
+
+
+def _adopt_legacy(db: DB, root_id: str) -> None:
+    """A session from before each session had its own file kept its goal in
+    the shared goals.md it was loaded from (``goals_file``). Give it its own
+    file, taking the shared one along when it still says this session's goal
+    (so no new session imports it), and forget the shared path."""
+    ap = db.get_autopilot(root_id)
+    if not ap or not ap.goals_file:
+        return
+    own, legacy = session_goals_path(db, root_id), Path(ap.goals_file)
+    try:
+        plan = parse_goals(legacy.read_bytes().decode("utf-8"))
+        if own is not None and ap.goal and plan is not None and plan.goal == ap.goal:
+            _goals_dir(own)
+            os.replace(legacy, own)
+    except OSError:
+        pass   # gone already (adopted by an older owner of the same file), or unreadable
+    db.update_autopilot(root_id, goals_file=None)
+    write_goals_file(db, root_id)   # the file says exactly the session's goal
+
+
+def remove_goals_file(db: DB, root_id: str) -> None:
+    """The session's goal is done, handed over or dropped: remove its file."""
+    _adopt_legacy(db, root_id)
+    path = session_goals_path(db, root_id)
+    if path is not None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            log.exception("brindle: couldn't remove the session's goal file")
+
+
+def reload_goals_file(db: DB, root_id: str) -> None:
+    """A session resumes: take up edits the person made to its goal file.
+    Milestones that keep their title and check keep their results. Never raises."""
+    try:
+        _adopt_legacy(db, root_id)
+        path = session_goals_path(db, root_id)
+        if path is None or not path.is_file() or not db.get_autopilot(root_id):
+            return
+        plan = parse_goals(path.read_bytes().decode("utf-8"))
+        if plan is not None and plan != _db_plan(db, root_id):
+            set_goal(db, root_id, plan.goal, plan.milestones, plan.detail)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't reload the session's goal file")
+
+
+def _claim_seed(db: DB, root_id: str, ws: Workspace) -> Plan | None:
+    """Move a hand-written ``.brindle/goals.md`` to this session's own file.
+    The move is atomic, so of sessions starting together only one gets it.
+    A goals.md an existing session loaded its goal from (before each session
+    had its own file) is that session's: it moves there instead."""
+    seed, own = goals_path(ws.path), session_goals_path(db, root_id)
+    for other in db.legacy_goal_owners():   # newest first: the newest owner takes the file
+        ap = db.get_autopilot(other)
+        if other != root_id and ap and ap.goals_file and Path(ap.goals_file).resolve() == seed.resolve():
+            _adopt_legacy(db, other)
+    if own is None or not seed.is_file():
+        return None
+    try:
+        if parse_goals(seed.read_bytes().decode("utf-8")) is None:
+            return None
+        _goals_dir(own)
+        os.replace(seed, own)
+    except FileNotFoundError:
+        return None   # another session claimed it first
+    return parse_goals(own.read_bytes().decode("utf-8"))
 
 
 def load_goals_file(root: str) -> Plan | None:
@@ -281,9 +504,11 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
     the rest byte for byte. None when the file's milestones don't number
     ``len(lines_for)``."""
     lines = text.splitlines(keepends=True)
+    fences = _fences([l.rstrip("\r\n") for l in lines])
+    inside = {k for start, (_, after) in fences.items() for k in range(start, after)}
     sections: list[list[int]] = []   # line indexes per milestone, heading first
     for i, line in enumerate(lines):
-        if re.match(r"^##\s+(.+?)\s*$", line.rstrip("\r\n")):
+        if i not in inside and re.match(r"^##\s+(.+?)\s*$", line.rstrip("\r\n")):
             sections.append([i])
         elif sections:
             sections[-1].append(i)
@@ -294,18 +519,26 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
         body = [lines[i] for i in idx]
         eol = "\r\n" if body[0].endswith("\r\n") else "\n"
         placed, anchor, have_profile, have_check = False, 0, False, False
+        check_end = None   # the last line of a fenced check's block: the status goes after it
         kept: list[str] = []
         for j, line in enumerate(body):
             bare = line.rstrip("\r\n")
+            if idx[j] in inside:
+                kept.append(line)
+                if idx[j] == check_end:
+                    anchor = len(kept)
+                continue
             if j and STATUS_RE.match(bare):
                 if not placed:
                     kept.append(new + (line[len(bare):] or eol))
                     placed = True
                 continue
             kept.append(line)
-            if j and not have_profile and re.match(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", bare, re.I):
+            if j and not have_profile and PROFILE_RE.match(bare):
                 have_profile, anchor = True, len(kept)
-            elif j and not have_check and re.match(r"^\s*check:\s*`?(.+?)`?\s*$", bare, re.I):
+            elif j and not have_check and idx[j] + 1 in fences and FENCED_CHECK_RE.match(bare):
+                have_check, check_end = True, fences[idx[j] + 1][1] - 1
+            elif j and not have_check and CHECK_RE.match(bare):
                 have_check, anchor = True, len(kept)
         if not placed:
             anchor = anchor or 1
@@ -317,56 +550,44 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
 
 
 def sync_goals_file(db: DB, root_id: str) -> None:
-    """Write each milestone's status back to the goals.md this session's goal
-    was loaded from. goals.md may be committed, so what goes in it is only
-    passed/failed/pending, a short sha and a date; loading it never trusts a
-    status line. Does nothing for a session that didn't load its goal from a
-    file, has autopilot off (a handover switches the old session's off),
-    is paused, or whose milestones no longer match the file. Never raises: a
-    file we can't write must not fail a check."""
+    """Write each milestone's status back to the session's own goal file. What
+    goes in it is only passed/failed/pending, a short sha and a date; loading
+    it never trusts a status line. Does nothing for a session with no file,
+    with autopilot off (a handover switches the old session's off), paused,
+    or whose milestones no longer match the file (the person edited it: the
+    edit is taken up when the session resumes). Never raises: a file we
+    can't write must not fail a check."""
     try:
+        _adopt_legacy(db, root_id)
         ap = db.get_autopilot(root_id)
         root = db.get_agent(root_id)
-        if not ap or not ap.enabled or not ap.goals_file or not ap.goal or root is None \
+        if not ap or not ap.enabled or not ap.goal or root is None \
                 or root.status in ("paused", "done"):
             return
-        path = Path(ap.goals_file)
+        path = session_goals_path(db, root_id)
+        if path is None or not path.is_file():
+            return
         text = path.read_bytes().decode("utf-8")
         plan = parse_goals(text)
         ms = db.milestones(root_id)
         if plan is None or plan.goal != ap.goal or [m[0] for m in plan.milestones] != [m.title for m in ms]:
-            return   # the goal was replaced from the chat: the file is no longer ours
+            return   # the person edited the file: it's taken up on resume
         new = rewrite_goals(text, [status_line(m) for m in ms])
         if new is None or new == text:
             return
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        try:
-            tmp.write_bytes(new.encode("utf-8"))
-            os.chmod(tmp, path.stat().st_mode & 0o7777)
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        _replace(path, new)
     except Exception:  # noqa: BLE001
-        log.exception("brindle: couldn't sync milestone status to goals.md")
+        log.exception("brindle: couldn't sync milestone status to the session's goal file")
 
 
 def clear_finished_goal(db: DB, root_id: str) -> None:
-    """The goal is reached: empty the goals.md it was loaded from (when that
-    file is still this goal's) and clear the session's goal, so the next
-    session doesn't reload a finished goal. Never raises: a file we can't
-    write must not fail the verdict."""
+    """The goal is reached: remove the session's goal file and clear its
+    goal. Never raises: a file we can't write must not fail the verdict."""
     try:
         ap = db.get_autopilot(root_id)
         if not ap or not ap.goal:
             return
-        if ap.goals_file:
-            path = Path(ap.goals_file)
-            try:
-                plan = parse_goals(path.read_bytes().decode("utf-8"))
-            except OSError:
-                plan = None
-            if plan is not None and plan.goal == ap.goal:
-                path.write_bytes(b"")
+        remove_goals_file(db, root_id)
         db.set_milestones(root_id, [])
         db.update_autopilot(root_id, goal=None, detail=None, goals_file=None, goal_sha=None,
                             audit_sha=None, audit_ok=None, auditor_id=None, note=None,
@@ -396,16 +617,13 @@ def for_agent(db: DB, agent_id: str) -> Autopilot | None:
     return db.get_autopilot(root_of(db, agent_id))
 
 
-def enable(db: DB, root_id: str, ws: Workspace) -> Plan | None:
-    """Turn autopilot on for a new session. Loads ``.brindle/goals.md`` if the
-    checkout has one, and returns it."""
+def enable(db: DB, root_id: str, ws: Workspace, *, claim: bool = True) -> Plan | None:
+    """Turn autopilot on for a new session. With ``claim``, a hand-written
+    ``.brindle/goals.md`` becomes this session's goal (and file), and is returned."""
     db.add_autopilot(root_id)
-    plan = load_goals_file(ws.path)
+    plan = _claim_seed(db, root_id, ws) if claim else None
     if plan:
         set_goal(db, root_id, plan.goal, plan.milestones, plan.detail)
-        # Recorded after set_goal, so loading a file never rewrites it: the
-        # first write is after a check. Every milestone starts pending.
-        db.update_autopilot(root_id, goals_file=str(goals_path(ws.path)))
     return plan
 
 
@@ -426,6 +644,9 @@ def set_goal(db: DB, root_id: str, goal: str,
         raise AutopilotError("the goal needs a title")
     if not milestones:
         raise AutopilotError("give at least one milestone")
+    # Before the goal changes: a shared goals.md still saying the old goal
+    # would otherwise look unowned and seed the next session with it.
+    _adopt_legacy(db, root_id)
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
     fields: dict[str, object] = {}
@@ -445,7 +666,7 @@ def set_goal(db: DB, root_id: str, goal: str,
             db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
                             passed_sha=prev.passed_sha)
     db.bump_progress(root_id)
-    sync_goals_file(db, root_id)
+    write_goals_file(db, root_id)
 
 
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy"}
@@ -1269,7 +1490,8 @@ def progress(db: DB, root_id: str) -> str:
         return "Autopilot is not set up for this session."
     head = f"Autopilot {'on' if ap.enabled else 'off'}"
     if not ap.goal:
-        return f"{head}. No goal yet: ask the user what we're building, then call set_goal."
+        return (f"{head}. No goal yet: call set_goal with a goal and milestones derived from the "
+                "user's request (ask what we're building only if there is no request).")
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
     for m in db.milestones(root_id):
@@ -1609,8 +1831,25 @@ def guide(cfg: RepoConfig, repo_root: str | None = None) -> str:
     return text
 
 
-def kickoff(plan: Plan) -> str:
-    return KICKOFF.format(goal=plan.goal, n=len(plan.milestones))
+def kickoff(plan: Plan, root_id: str) -> str:
+    return KICKOFF.format(goal=plan.goal, n=len(plan.milestones), root_id=root_id)
+
+
+GOAL_REMINDER = (
+    "[brindle autopilot] This session has no goal yet. Call set_goal now, without asking: "
+    "the user's request is the goal, its parts are the milestones, each with a check. "
+    "Later requests in this session become new milestones on it."
+)
+
+
+def goal_reminder(db: DB, caller_id: str) -> str | None:
+    """What a delegating supervisor is told when its autopilot session has no
+    goal yet. Only a session root is reminded: a nested supervisor delegating
+    isn't the one that owns the goal."""
+    if root_of(db, caller_id) != caller_id:
+        return None
+    ap = db.get_autopilot(caller_id)
+    return GOAL_REMINDER if ap and ap.enabled and not ap.goal else None
 
 
 def worker_goal(prompt: str, done_when: str, branch: str) -> str | None:

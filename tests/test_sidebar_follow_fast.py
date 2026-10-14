@@ -39,14 +39,17 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
     monkeypatch, reported_window, reported_tag, should_skip,
 ):
     ws = SimpleNamespace(id="ws", tmux_session="session")
-    agent = SimpleNamespace(id="root", tmux_window="%agent", parent_id=None)
+    agent = SimpleNamespace(id="root", tmux_window="%agent", parent_id=None, status="idle")
+    # An older paused root in the same workspace whose stale pane id also
+    # resolves to the active window: the live root is the one followed.
+    stale = SimpleNamespace(id="stale", tmux_window="%stale", parent_id=None, status="paused")
 
     class FakeDB:
         def workspace_by_tmux_session(self, session):
             return ws
 
         def list_agents(self, workspace_id):
-            return [agent]
+            return [stale, agent]
 
         def get_agent(self, agent_id):
             return agent
@@ -76,5 +79,3 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
         with pytest.raises(AssertionError, match="slow path reached"):
             sidebar_follow.sidebar_follow(FakeDB(), "session")
     assert calls == [("%sidebar", "@brindle_sidebar")]
-
-
