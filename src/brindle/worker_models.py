@@ -1,0 +1,126 @@
+"""The models a task size (light, medium, heavy) can run on, as the workers
+screen of the picker offers them.
+
+Each model runs one of three ways: through a signed-in CLI (an existing
+developer profile), locally on Ollama (``developer-local``), or hosted with an
+API key (a native profile on OpenRouter, written when it is picked). A pick is
+saved as ``routing_<size>`` in the user config; :func:`apply` turns the saved
+picks into ``RepoConfig.routing`` and falls back to the built-in routing for a
+size whose pick isn't ready.
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+from dataclasses import dataclass
+
+TIERS = ("light", "medium", "heavy")
+CLI, LOCAL, KEY = "cli", "local", "key"
+HOW = {CLI: "a signed-in CLI", LOCAL: "local (Ollama)", KEY: "hosted, with an API key (OpenRouter)"}
+OPENROUTER_KEY = "OPENROUTER_API_KEY"
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+
+
+@dataclass(frozen=True)
+class Model:
+    id: str
+    label: str
+    how: str
+    provider: str            # CLI name, or "native" for local and hosted
+    profile: str             # the profile a pick runs on
+    tiers: tuple[str, ...] = TIERS
+    model: str | None = None  # the model name the access policy judges
+    key_env: str | None = None
+
+
+CATALOG: tuple[Model, ...] = (
+    Model("claude-haiku", "Claude Haiku", CLI, "claude", "developer-light", ("light",), "claude-haiku-4-5"),
+    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer", ("light", "medium"), "claude-sonnet-4-5"),
+    Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("medium", "heavy"), "claude-opus-4-5"),
+    Model("codex", "Codex", CLI, "codex", "developer-codex"),
+    Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "developer-gemini", ("medium", "heavy")),
+    Model("local-qwen3-coder", "Qwen3 Coder 30B", LOCAL, "native", "developer-local", ("light", "medium"),
+          "qwen3-coder:30b"),
+    Model("or-qwen3-coder", "Qwen3 Coder", KEY, "native", "developer-or-qwen3-coder", ("light", "medium"),
+          "qwen/qwen3-coder", OPENROUTER_KEY),
+    Model("or-glm-4.6", "GLM 4.6", KEY, "native", "developer-or-glm-4.6", ("medium", "heavy"),
+          "z-ai/glm-4.6", OPENROUTER_KEY),
+    Model("or-kimi-k2", "Kimi K2", KEY, "native", "developer-or-kimi-k2", ("medium", "heavy"),
+          "moonshotai/kimi-k2", OPENROUTER_KEY),
+)
+
+
+def find(model_id: object) -> Model | None:
+    return next((m for m in CATALOG if m.id == model_id), None)
+
+
+def offered(acc, tier: str) -> list[Model]:
+    """The models for ``tier`` that ``acc`` (``team_policy.access``) allows, and
+    nothing else: no hosted-key model when personal keys are denied."""
+    return [m for m in CATALOG
+            if tier in m.tiers and acc.allows(m.provider)
+            and (m.model is None or acc.allows_model(m.model))
+            and not (m.how == KEY and acc.deny_personal_keys)]
+
+
+def ready(m: Model, signed_in: list[str]) -> bool:
+    """Whether ``m`` can run now: its CLI is signed in, Ollama has it, or its key is stored."""
+    if m.how == CLI:
+        return m.provider in signed_in
+    if m.how == LOCAL:
+        from brindle import local_setup
+        from brindle.native import serve
+
+        return serve.ollama_available() and local_setup.verify_tags(local_setup.DEFAULT_HOST, m.model or "")
+    import os
+
+    from brindle import keystore
+
+    return bool(os.environ.get(m.key_env or "") or keystore.get_key(m.key_env or ""))
+
+
+def profile_text(m: Model) -> str:
+    return (f"---\nname: {m.profile}\n"
+            f"description: Implements a task on {m.label} through OpenRouter (written by the picker)\n"
+            f"extends: developer-local\napi: openai\nbase_url: {OPENROUTER_URL}\nmodel: {m.model}\n"
+            f"api_key_env: {m.key_env}\ncontext_tokens: 128k\n---\n")
+
+
+def ensure_profile(m: Model) -> None:
+    """Write the native profile a hosted model runs on, if the person has none by that name."""
+    from brindle.config import user_profiles_dir
+
+    if m.how != KEY or not re.fullmatch(r"[\w.-]+", m.profile):
+        return
+    path = user_profiles_dir() / f"{m.profile}.md"
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(profile_text(m), encoding="utf-8")
+
+
+_warned: set[tuple[str, str]] = set()
+
+
+def apply(cfg, user: dict) -> None:
+    """Route each size the person picked a model for to that model's profile
+    (``cfg.routing[size] = [profile]``). A pick that isn't ready, or is gone
+    from the catalog, leaves the built-in routing for that size and says so once."""
+    from brindle import doctor
+    from brindle.config import user_config_path
+
+    # A size the repo's own config routes stays as the repo set it.
+    picks = {t: find(user.get(f"routing_{t}")) for t in TIERS
+             if user.get(f"routing_{t}") and cfg.routing_sources[t] in ("DEFAULT_ROUTING", str(user_config_path()))}
+    if not picks:
+        return
+    signed_in = doctor.signed_in_providers()
+    for tier, m in picks.items():
+        if m is not None and ready(m, signed_in):
+            cfg.routing[tier] = [m.profile]
+            cfg.routing_sources[tier] = str(user_config_path())
+        elif (tier, str(user.get(f"routing_{tier}"))) not in _warned:
+            _warned.add((tier, str(user.get(f"routing_{tier}"))))
+            name = m.label if m else user.get(f"routing_{tier}")
+            print(f"brindle: {name} isn't ready for {tier} tasks; using the built-in {tier} profile "
+                  "(`brindle -s`, then w, to fix it)", file=sys.stderr)

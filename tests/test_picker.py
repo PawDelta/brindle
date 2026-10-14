@@ -26,21 +26,20 @@ def _unavailable(root):
     raise managed_models.ManagedUnavailable("couldn't read the org's managed-models policy")
 
 
-@pytest.mark.parametrize("policy, managed, installed, clis, model_ok", [
-    (allow(), None, ["claude", "antigravity"], ["claude", "codex", "antigravity"], True),
-    ({}, None, [], ["claude", "codex", "antigravity"], True),                            # fresh machine: no CLI installed
-    ({"allowed_providers": ["codex", "claude"], "allowed_models": ["gpt-5"]}, None, ["claude", "antigravity"], ["claude", "codex"], False),
-    ({}, "exclusive", ["claude", "antigravity"], ["codex"], True),                       # the managed routing serves only Codex
-    ({}, _unavailable, ["claude", "antigravity"], [], False),                            # can't read it: nothing
-    (deny("never fetched"), None, ["claude", "antigravity"], [], False),
+@pytest.mark.parametrize("policy, managed, clis, model_ok", [
+    (allow(), None, ["claude", "codex", "antigravity"], True),
+    ({"allowed_providers": ["codex", "claude"], "allowed_models": ["gpt-5"]}, None, ["claude", "codex"], False),
+    ({}, "exclusive", ["codex"], True),                       # the managed routing serves only Codex
+    ({}, _unavailable, [], False),                            # can't read it: nothing
+    (deny("never fetched"), None, [], False),
 ])
-def test_supervisor_access_narrows_to_the_org(monkeypatch, policy, managed, installed, clis, model_ok):
+def test_supervisor_access_narrows_to_the_org(monkeypatch, policy, managed, clis, model_ok):
     p = policy if not isinstance(policy, dict) else parse_policy(ORG, {"version": 1, "policy": policy})
     monkeypatch.setattr(team_policy.ProPolicy, "policy", lambda self: p)
     m = _exclusive(monkeypatch) if managed == "exclusive" else managed
     monkeypatch.setattr(managed_models, "current", m if callable(m) else lambda root: m)
     acc = team_policy.access("/repo")
-    assert acc.clis(installed=installed) == clis
+    assert acc.clis() == clis
     assert acc.allows_model("claude-sonnet-4-5") is model_ok
     assert acc.deny_personal_keys is (managed == "exclusive")
 
@@ -123,3 +122,58 @@ def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, va
     result = CliRunner().invoke(cli.app, argv)
     assert result.exit_code == 0, result.output
     assert seen == [value]
+
+
+def _workers(acc, keys, **kw):
+    from brindle import worker_models
+
+    it = iter(keys)
+    out = []
+    picker.workers_screen(acc, key=lambda: next(it), echo=lambda s="", nl=True: out.append(s), **kw)
+    return out, worker_models
+
+
+def test_workers_screen_offers_only_allowed_models_and_sets_one_up(monkeypatch):
+    from brindle import local_setup
+    from brindle.config import user_settings
+
+    acc = team_policy.Access(org_id=ORG, allowed_providers=("claude", "native"), deny_personal_keys=True)
+    steps = iter([local_setup.SetupResult(ready=False, reason="needs 24 GB", fallback=True),
+                  local_setup.SetupResult(ready=True)])
+    signed = []
+    out, wm = _workers(acc, ["1", "3", "1", "3", "2", "1", "q"], is_ready=lambda m: False,
+                       local_setup=lambda model: next(steps),
+                       cli_setup=lambda p: signed.append(p) or True)
+    assert [m.id for m in wm.offered(acc, "medium")] == ["claude-sonnet", "claude-opus", "local-qwen3-coder"]
+    text = "\n".join(out)
+    assert "Codex" not in text and "OpenRouter" not in text and "✗ needs 24 GB" in text
+    assert user_settings()["routing_light"] == "local-qwen3-coder"      # the failed setup saved nothing
+    assert user_settings()["routing_medium"] == "claude-sonnet" and signed == ["claude"]
+
+
+def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
+    from brindle import key_check, keystore
+    from brindle.config import user_profiles_dir, user_settings
+
+    answers = iter(["bad", "good"])
+    stored = {}
+    monkeypatch.setattr(key_check, "verify", lambda name, value: "rejected" if value == "bad" else None)
+    monkeypatch.setattr(keystore, "set_key", lambda name, value, repo_root=None: stored.update({name: value}))
+    out, wm = _workers(team_policy.Access(), ["1", "5", "1", "5", "q"], is_ready=lambda m: False,
+                       read_secret=lambda name: next(answers))
+    assert "✗ rejected" in "\n".join(out) and stored == {"OPENROUTER_API_KEY": "good"}
+    assert user_settings()["routing_light"] == "or-qwen3-coder"
+    assert "api_key_env: OPENROUTER_API_KEY" in (user_profiles_dir() / "developer-or-qwen3-coder.md").read_text()
+
+
+@pytest.mark.parametrize("signed_in, light", [([ "codex"], ["developer-codex"]), ([], None)])
+def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatch, capsys, signed_in, light):
+    from brindle import worker_models
+    from brindle.config import DEFAULT_ROUTING, load_repo_config
+
+    monkeypatch.setattr(worker_models, "_warned", set())
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: signed_in)
+    set_user("routing_light", "codex")
+    cfg = load_repo_config(str(repo))
+    assert cfg.routing["light"] == (light or DEFAULT_ROUTING["light"])
+    assert ("isn't ready for light tasks" in capsys.readouterr().err) is (light is None)

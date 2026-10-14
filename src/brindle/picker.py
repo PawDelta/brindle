@@ -49,7 +49,7 @@ def supervisor_rows(acc, current: str | None, signed_in: list[str], installed: l
     from brindle.providers import SUPERVISOR_PROVIDERS
 
     rows = []
-    for p in acc.clis(installed):
+    for p in acc.clis():
         if p not in SUPERVISOR_PROVIDERS:
             continue
         tags = ["current"] if p == current else []
@@ -147,6 +147,101 @@ def pick_supervisor(acc, current: str | None = None, *, signed_in: list[str] | N
         if chosen.ready or setup(chosen.provider):
             return chosen.provider
         shown = 0      # the setup printed below the list: draw it afresh
+
+
+def _setup_worker_model(m, *, is_ready, cli_setup, local_setup, read_secret, echo) -> bool:
+    """Make ``m`` ready to run if it isn't: sign its CLI in, set Ollama up
+    with the model, or take and check an API key. True when it can run."""
+    from brindle import key_check, keystore, worker_models
+
+    if is_ready(m):
+        return True
+    if m.how == worker_models.CLI:
+        return cli_setup(m.provider)
+    if m.how == worker_models.LOCAL:
+        res = local_setup(m.model)
+        if not res:
+            echo(f"✗ {res.reason}")
+        return bool(res)
+    page = key_check.key_page(m.key_env)
+    echo(f"{m.label} runs on OpenRouter and needs a key{f' (create one at {page})' if page else ''}.")
+    value = read_secret(m.key_env).strip()
+    if not value:
+        return False
+    problem = key_check.verify(m.key_env, value)
+    if problem:
+        echo(f"✗ {problem}")
+        return False
+    keystore.set_key(m.key_env, value)
+    echo(f"✓ key checked and stored on this machine ({m.key_env}).")
+    return True
+
+
+def workers_screen(acc=None, *, key: Callable[[], str] | None = None, is_ready=None, cli_setup=None,
+                   local_setup=None, read_secret=None, echo: Callable[..., None] = typer.echo) -> None:
+    """Pick a model for each task size (light, medium, heavy): only the ones
+    ``acc`` allows, grouped by how they run. One that isn't ready is set up
+    first; the pick is saved as ``routing_<size>`` in the user config."""
+    import os
+
+    from brindle import doctor, worker_models
+    from brindle import local_setup as local
+    from brindle.config import set_user, user_settings
+    from brindle.pro import team_policy
+
+    acc = acc or team_policy.access(os.getcwd())
+    if key is None:
+        key = read_key if raw_keys() else (lambda: typer.prompt("Pick", default="q", show_default=False).strip().lower())
+    if is_ready is None:
+        signed_in = doctor.signed_in_providers()
+        is_ready = lambda m: worker_models.ready(m, signed_in)      # noqa: E731
+    cli_setup = cli_setup or sign_in
+    local_setup = local_setup or (lambda model: local.setup_model(
+        model, say=echo, ask=lambda p: typer.confirm(p.replace(" [y/N]", "").strip(), default=False)))
+    read_secret = read_secret or (lambda name: typer.prompt(f"Paste the key for {name} (hidden; Enter to cancel)",
+                                                            hide_input=True, default="", show_default=False))
+    while True:
+        picks = user_settings()
+        echo("Which model should each task size run on?")
+        for i, t in enumerate(worker_models.TIERS, 1):
+            m = worker_models.find(picks.get(f"routing_{t}"))
+            echo(f"  {i}) {t}: {m.label if m else 'built-in'}")
+        echo("  a number to change one · q back")
+        k = key()
+        if k not in ("1", "2", "3"):
+            if k in ("q", "quit"):
+                return
+            continue
+        tier = worker_models.TIERS[int(k) - 1]
+        models = worker_models.offered(acc, tier)
+        echo(f"Models for {tier} tasks:")
+        n = 0
+        for how, title in worker_models.HOW.items():
+            group = [m for m in models if m.how == how]
+            if group:
+                echo(f" {title}")
+            for m in group:
+                n += 1
+                state = "" if is_ready(m) else "  (needs setting up)"
+                echo(f"  {n}) {m.label}{'  (current)' if picks.get(f'routing_{tier}') == m.id else ''}{state}")
+        echo("  0) built-in · q back")
+        ordered = [m for how in worker_models.HOW for m in models if m.how == how]
+        k = key()
+        if k == "0":
+            set_user(f"routing_{tier}", None)
+        elif k.isdigit() and 1 <= int(k) <= len(ordered):
+            m = ordered[int(k) - 1]
+            if _setup_worker_model(m, is_ready=is_ready, cli_setup=cli_setup, local_setup=local_setup,
+                                   read_secret=read_secret, echo=echo):
+                worker_models.ensure_profile(m)
+                set_user(f"routing_{tier}", m.id)
+
+
+def _open_workers() -> None:
+    workers_screen()
+
+
+SCREENS["w"] = ("workers", _open_workers)
 
 
 def _login_command(provider: str) -> list[str]:
