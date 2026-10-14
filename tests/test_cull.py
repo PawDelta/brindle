@@ -90,22 +90,12 @@ def test_sweep_stops_processes_of_paused_agents(db, ws, proc_cleanup):
     assert any("leftover" in n for n in notes)
 
 
-def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup):
-    add(db, ws, "abc12345", mode="interactive", status="processing", profile="supervisor")
-    p = launch_as("abc12345")
-    proc_cleanup.append(p)
-    cull.sweep(db)
-    p.wait(timeout=5)
-    a = db.get_agent("abc12345")
-    assert a.status == "paused" and a.dismissed_at is None  # still resumable, still shown
-
-
-def test_sweep_pauses_the_whole_session_of_a_chat_whose_tmux_went_away(db, ws, monkeypatch):
+def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypatch):
     """Killing the chat's tmux session also kills the wrapper that would have
     paused its session (agents._pause_when_done): the sweep must stop every
     agent the chat started, and nothing of another session."""
-    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="%1")
-    add(db, ws, "w1", parent_id="boss", status="processing", tmux_window="%2", status_since=time.time())
+    add(db, ws, "abc12345", mode="interactive", status="processing", profile="supervisor", tmux_window="%1")
+    add(db, ws, "w1", parent_id="abc12345", status="processing", tmux_window="%2", status_since=time.time())
     add(db, ws, "r1", parent_id="w1", mode="review", status="processing", tmux_window="%3",
         status_since=time.time())
     add(db, ws, "other", mode="interactive", status="processing", profile="supervisor", tmux_window="%4")
@@ -116,9 +106,14 @@ def test_sweep_pauses_the_whole_session_of_a_chat_whose_tmux_went_away(db, ws, m
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
     monkeypatch.setattr(tmux, "kill_window", killed.append)
     monkeypatch.setattr(tmux, "kill_session", lambda *a, **k: None)
+    p = launch_as("abc12345")
+    proc_cleanup.append(p)
     cull.sweep(db)
-    assert {a: db.get_agent(a).status for a in ("boss", "w1", "r1", "other", "w2")} == {
-        "boss": "paused", "w1": "paused", "r1": "paused", "other": "processing", "w2": "processing"}
+    p.wait(timeout=5)
+    a = db.get_agent("abc12345")
+    assert a.status == "paused" and a.dismissed_at is None  # still resumable, still shown
+    assert {a: db.get_agent(a).status for a in ("w1", "r1", "other", "w2")} == {
+        "w1": "paused", "r1": "paused", "other": "processing", "w2": "processing"}
     assert set(killed) == {"%1", "%2", "%3"}
 
 

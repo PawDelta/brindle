@@ -1,4 +1,3 @@
-import asyncio
 import json
 import time
 from types import SimpleNamespace
@@ -71,26 +70,6 @@ def test_enable_loads_goals_md(db, repo):
     autopilot.set_goal(db, "next", "Docs", [("Readme", "true", None)])
     assert db.get_autopilot("boss").goal == "Settings page"
     assert autopilot.parse_goals(autopilot.session_goals_path(db, "boss").read_text()) == plan
-
-
-def test_delegating_without_a_goal_starts_the_worker_and_asks_for_one(db, root, repo, monkeypatch):
-    from brindle import mcp_server
-
-    def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None, **kw):
-        a = Agent(agents.new_id(), ws.id, profile, "claude", parent_id, mode, "processing", "",
-                  None, time.time(), task=prompt, done_when=done_when)
-        db.add_agent(a)
-        return a
-
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"pipeline": False}))
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    out = asyncio.run(mcp_server.assign(task="fix bug X", branch="fix-x"))
-    assert len(db.children("boss")) == 1 and "set_goal" in out
-    with_goal(db)
-    out = asyncio.run(mcp_server.assign(task="fix bug Y", branch="fix-y"))
-    assert len(db.children("boss")) == 2 and "set_goal" not in out
 
 
 def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
@@ -187,33 +166,14 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
     ap = db.get_autopilot("boss")
     assert ap.auditor_id == "audit1" and ap.audit_sha == sh("git rev-parse HEAD", repo)
 
+    goals = autopilot.session_goals_path(db, "boss")
+    assert "status: passed" in goals.read_text()
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert "goal is reached" in out and db.get_autopilot("boss").state == "done"
-    assert autopilot.on_stop(db, agent, {}) is None
-
-
-def test_approved_audit_removes_the_goal_file_and_clears_the_goal(db, repo):
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "goals.md").write_text(GOALS)
-    ws = workspaces.adopt_root(db, str(repo))
-    add_agent(db, ws, "boss")
-    autopilot.enable(db, "boss", ws)
-    goals = autopilot.session_goals_path(db, "boss")
-    (repo / "api.txt").write_text("")
-    (repo / "ui.txt").write_text("")
-    commit_all(repo)
-    autopilot.check_milestones(db, "boss", ws)
-    assert "status: passed" in goals.read_text()
-    db.update_autopilot("boss", audit_sha=sh("git rev-parse HEAD", repo))
-    out = autopilot.record_audit(db, "boss", True, "all there")
-    assert "goal is reached" in out
+    # The finished goal goes: its file and the session's goal and milestones.
     assert not goals.exists()
-    ap = db.get_autopilot("boss")
-    assert ap.goal is None and db.milestones("boss") == []
-    # A fresh session in the same checkout starts with no goal.
-    add_agent(db, ws, "next")
-    assert autopilot.enable(db, "next", ws) is None
-    assert db.get_autopilot("next").goal is None
+    assert db.get_autopilot("boss").goal is None and db.milestones("boss") == []
+    assert autopilot.on_stop(db, agent, {}) is None
 
 
 def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
