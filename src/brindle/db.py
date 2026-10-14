@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS agents (
     unreported_noted INTEGER,      -- its supervisor was told it stopped without reporting (agents.tell_parent_unreported)
     stop_reminded_at REAL,         -- a Stop last reminded it of unread mail (DB.claim_stop_reminder)
     tmux_server TEXT,              -- the private tmux server (BRINDLE_TMUX_SOCKET) its window is on; NULL: the default server
-    reopened_at REAL               -- when a dead reviewer's session was reopened once (pipeline.on_reviewer_unreported)
+    reopened_at REAL,              -- when a dead reviewer's session was reopened once (pipeline.on_reviewer_unreported)
+    hooks_off TEXT                 -- why its CLI runs none of brindle's hooks, shown on its sidebar row (agents.screen_status)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -454,6 +455,7 @@ class Agent:
     tmux_server: str | None = None     # the private tmux server its window is on (see tmux.current_server)
     stop_reminded_at: float | None = None
     reopened_at: float | None = None
+    hooks_off: str | None = None       # why its CLI runs none of brindle's hooks (agents.screen_status)
 
 
 @dataclass
@@ -696,7 +698,7 @@ class DB:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT"),
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
-                          ("reopened_at", "REAL")):
+                          ("reopened_at", "REAL"), ("hooks_off", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}

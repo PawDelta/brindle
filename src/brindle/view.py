@@ -121,6 +121,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     unread = db.unread_count(a.id)
     if unread:
         entry["unread"] = unread
+    if a.hooks_off and status not in _PARENT_NOT_RUNNING:
+        entry["hooks_off"] = a.hooks_off
     if detail:
         subs = db.native_subagents(a.id) if native_subagents is None else native_subagents
         visible = _visible_native_subagents(subs, now if now is not None else time.time())

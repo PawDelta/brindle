@@ -130,6 +130,12 @@ class Provider:
         past any startup prompt."""
         return False
 
+    def hooks_disabled(self, cwd: str | None, setting_sources: list[str] | None = None) -> str | None:
+        """Which of the person's settings turns off the hooks brindle gives
+        this CLI (e.g. "disableAllHooks in ~/.claude/settings.json"), or None.
+        Read only, never changed."""
+        return None
+
     def busy_in_footer(self, screen: str) -> bool:
         """Whether the busy marker is right by the input box (wherever the
         provider puts it), so it can't be a transcript quoting it elsewhere
@@ -444,6 +450,31 @@ class ClaudeCode(Provider):
 
     def input_ready(self, screen: str) -> bool:
         return bool(self.INPUT_FOOTER.search(screen))
+
+    def hooks_disabled(self, cwd: str | None, setting_sources: list[str] | None = None) -> str | None:
+        # brindle's hooks come in through --settings, which disableAllHooks
+        # (also what /hooks writes) turns off from any settings file Claude
+        # Code loads, as does a managed allowManagedHooksOnly. --setting-sources
+        # limits which of the person's own files it loads; managed ones always count.
+        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        files = [(p, ("disableAllHooks", "allowManagedHooksOnly")) for p in managed_settings_paths()]
+        sources = {"user": [os.path.join(config, "settings.json")]}
+        if cwd:
+            sources["project"] = [os.path.join(cwd, ".claude", "settings.json")]
+            sources["local"] = [os.path.join(cwd, ".claude", "settings.local.json")]
+        for source in setting_sources or ("user", "project", "local"):
+            files += [(p, ("disableAllHooks",)) for p in sources.get(source, [])]
+        for path, keys in files:
+            try:
+                data = _read_json(path)
+            except (OSError, ValueError):
+                continue
+            key = next((k for k in keys if isinstance(data, dict) and data.get(k) is True), None)
+            if key:
+                home = os.path.expanduser("~")
+                shown = "~" + path[len(home):] if path.startswith(home + os.sep) else path
+                return f"{key} in {shown}"
+        return None
 
     @classmethod
     def first_run_screen(cls, screen: str) -> str | None:
