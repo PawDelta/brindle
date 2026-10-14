@@ -7,10 +7,11 @@ from __future__ import annotations
 import getpass
 import os
 import sys
+import webbrowser
 
 import typer
 
-from brindle import keystore
+from brindle import key_check, keystore
 
 app = typer.Typer(no_args_is_help=True,
                   help="Store model API keys once; every agent pane gets the ones its provider reads.")
@@ -37,10 +38,26 @@ def keys_set(name: str = typer.Argument(..., help="The variable, e.g. ANTHROPIC_
         keystore.check_name(name, _root())
     except keystore.CredentialError as e:
         _fail(str(e))
+    try:
+        denied = key_check.personal_keys_denied(_root())
+    except Exception as e:  # noqa: BLE001 - policy unreadable: fail closed
+        _fail(f"couldn't read your org's key policy: {e}")
+    if denied:
+        _fail("your org's policy denies personal API keys; brindle won't store one")
+    page = key_check.key_page(name)
     if sys.stdin.isatty():
+        if page:
+            typer.echo(f"Get a key at {page}")
+            if input("Press o to open it in your browser, or Enter to paste a key: ").strip().lower() == "o":
+                webbrowser.open(page)
         value = getpass.getpass(f"{name}: ")
     else:
         value = sys.stdin.readline()
+    value = value.strip()
+    if value:
+        problem = key_check.verify(name, value)
+        if problem:
+            _fail(f"{name} not stored: {problem}")
     try:
         keystore.set_key(name, value, _root())
     except keystore.CredentialError as e:
