@@ -1388,7 +1388,7 @@ change files under a directory without prompts.
 
 ### Which provider can do what
 
-| Provider | Supervisor (`brindle --provider …`) | Worker / reviewer |
+| Provider | Supervisor (`brindle --supervisor-provider …`) | Worker / reviewer |
 |---|---|---|
 | `claude` (Claude Code) | yes (the default) | yes |
 | `codex` | yes | yes |
@@ -1935,7 +1935,8 @@ you to sign in. `agy` takes no other key or token from the environment; its
 Google Cloud, Workforce Identity and Application Default Credentials sign-ins are
 chosen on its sign-in screen.
 
-Then run the whole session on it with `brindle --provider antigravity`, or mix models:
+Then run the supervisor on it with `brindle --supervisor-provider antigravity`.
+Workers keep their own profiles' providers. To mix models,
 give a profile `provider: antigravity` (for example a `gemini-reviewer` for a second
 model's review) and the supervisor can hand it tasks.
 
