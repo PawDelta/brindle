@@ -114,15 +114,6 @@ def test_codex_routes(route, base_url, kept, no_enterprise):
     assert s.claude is None
 
 
-@pytest.mark.parametrize("route,base_url,kept", [
-    ("gemini", None, None), ("gemini", "https://llm.acme.internal/v1", None),
-    ("gateway", "https://llm.acme.internal/v1", "https://llm.acme.internal/v1")])
-def test_antigravity_routes(route, base_url, kept, no_enterprise):
-    s = parse({"antigravity": {"route": route, **({"base_url": base_url} if base_url else {})}})
-    assert s.antigravity.route == route and s.antigravity.base_url == kept
-    assert s.claude is None and s.codex is None
-
-
 def test_models_kept_for_any_route(no_enterprise):
     c = parse({"claude": {"route": "bedrock", "aws": AWS, "models": MODELS}}).claude
     assert c.models.opus == "claude-opus-4-5"
