@@ -2655,7 +2655,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # its supervisor should hear about (see tell_parent_unreported). A
         # tool call alone isn't proof: agy resumes briefly each time it polls
         # a running command, so only a prompt or a long-enough gap counts.
-        if event == "prompt-submit" or _unreported_note_expired(agent):
+        if event == "prompt-submit" or unreported_note_expired(agent):
             db.update_agent(agent_id, unreported_noted=None)
 
     if event == "session-start":
@@ -2767,7 +2767,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 # No Stop hook can remind it to report, and no hook says when
                 # it resumes: every turn it ends without a result is a stop
                 # its supervisor hears about.
-                if _unreported_note_expired(agent):
+                if unreported_note_expired(agent):
                     db.update_agent(agent_id, unreported_noted=None)
                 tell_parent_unreported(db, db.get_agent(agent_id) or agent)
             if db.pending_count(agent_id) and not agent.headless:
@@ -2896,7 +2896,7 @@ def agent_for_session(db: DB, session_id: object) -> str | None:
 UNREPORTED_REALERT_SECONDS = 600
 
 
-def _unreported_note_expired(agent: Agent) -> bool:
+def unreported_note_expired(agent: Agent) -> bool:
     """Whether the stop alert recorded in ``unreported_noted`` (the time it
     was sent) is old enough that a new stop deserves its own alert."""
     noted = agent.unreported_noted

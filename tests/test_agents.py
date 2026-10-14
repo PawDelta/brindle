@@ -1,3 +1,4 @@
+import os
 import shutil
 import time
 from pathlib import Path
@@ -76,18 +77,21 @@ def test_command_running_sees_a_command_under_an_antigravity_worker_so_not_stopp
     table = {
         10: P(10, 1, "-zsh BRINDLE_AGENT_ID=a1"),
         11: P(11, 10, "/home/u/.local/bin/agy --model x BRINDLE_AGENT_ID=a1"),
-        12: P(12, 11, "python -m pytest -q"),
+        12: P(12, 11, "python -m pytest -q tests/test_codex.py"),
+        # the Stop hook running this check: a child of the CLI, beside the test run
+        os.getpid(): P(os.getpid(), 11, "python -m brindle hook stop"),
     }
     monkeypatch.setattr(procs, "table", lambda: table)
     monkeypatch.setattr(agents, "same_server", lambda a: True)
     monkeypatch.setattr(agents, "owns_pane", lambda d, a: True)
     monkeypatch.setattr(agents.tmux, "window_pids", lambda w: [10])
-    agent = fake_agent(db, ws)
+    sent = _unreported_setup(db, ws, monkeypatch)
     db.update_agent("a1", provider="antigravity")
-    agent = db.get_agent("a1")
-    assert agents.command_running(db, agent)
+    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    assert sent == []   # the test run is going: not stopped
     del table[12]
-    assert not agents.command_running(db, agent)   # just the CLI: stopped
+    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    assert len(sent) == 1   # just the CLI left: stopped
 
 
 def test_running_commands_ignores_the_cli_and_shells_but_sees_a_test_run():

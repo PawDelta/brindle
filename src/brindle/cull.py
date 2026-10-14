@@ -287,7 +287,8 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
             since = max(since, last)
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
             continue
-        db.update_agent(a.id, unreported_noted=None)
+        if agents.unreported_note_expired(a):
+            db.update_agent(a.id, unreported_noted=None)
         # Not told while a command it started is still running; tried again then.
         if agents.tell_parent_unreported(db, db.get_agent(a.id) or a):
             db.update_agent(a.id, stuck_noted=since)
