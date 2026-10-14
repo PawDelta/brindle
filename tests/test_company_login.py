@@ -99,6 +99,29 @@ def test_route_model_only_when_the_route_env_reaches_the_launch(monkeypatch):
     assert (off, company_login.claude_model("sonnet")) == ([None, "sonnet"], IDS[-1])
 
 
+def test_a_pinned_alias_wins_over_the_route_default(repo, monkeypatch):
+    from brindle import policy, providers
+    from brindle.config import RepoConfig
+    from brindle.pro import managed_models
+    from brindle.pro.team_policy import OrgPolicy, ProPolicy
+    from brindle.profiles import Profile
+
+    setup = AgentSetup(claude=ClaudeSetup(route="bedrock", aws=OWN_AWS, models=ModelsSetup(opus=IDS[0]),
+                                          model_ids=(IDS[0], IDS[-1]), default_model=IDS[-1]), enforce=True)
+    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, setup))
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    p = Profile("developer-opus", "", "claude", "", model="opus")
+    monkeypatch.setattr("brindle.profiles.load_profile", lambda *a: p)
+    plugin = ProPolicy(str(repo))
+    monkeypatch.setattr(plugin, "policy", lambda: OrgPolicy(org_id=ORG, version=1, allowed_models=(IDS[0],),
+                                                             agent_setup=setup))
+    monkeypatch.setattr(policy, "plugin", lambda *a: plugin)
+    m = managed_models.Managed(ORG, None, False, setup=setup)
+    decision = policy.check_assign(RepoConfig(), str(repo), p.name, "task", "assign")
+    assert (company_login.claude_model("opus"), company_login.claude_model("sonnet"),
+            managed_models.apply_profile(m, p).model, decision.allowed) == ("opus", IDS[-1], "opus", True)
+
+
 class _Ent:
     def __init__(self, org_id):
         self.org_id = org_id
