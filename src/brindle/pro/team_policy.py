@@ -1148,7 +1148,7 @@ class Access:
         return bool(model) and (model in self.allowed_models or pricing.normalize(model)
                                 in {pricing.normalize(m) for m in self.allowed_models})
 
-    def clis(self, installed: list[str] | None = None) -> list[str]:
+    def clis(self) -> list[str]:
         """The CLIs to offer: every supervisor CLI when nothing narrows the
         choice, else each one the org allows (installed or not: the picker
         sets it up)."""
