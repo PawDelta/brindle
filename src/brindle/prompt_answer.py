@@ -348,6 +348,29 @@ class Startup:
         self.calls = 0         # for a launch no launcher bound (see bind)
         self.moves = 0
         self.acted_on = None   # the screen the last key answered, until the CLI redraws
+        db, agent_id = _BOUND.get(target, (None, None))
+        row = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
+                              (agent_id,)).fetchone() if db is not None else None
+        self.brief = " ".join(((row["submitted_prompt"] if row else "") or "").split())
+
+    def _past_brief(self, screen: str) -> str:
+        """``screen`` after the brief brindle sent, which the CLI echoes as
+        "❯ <brief>" with wrapped lines: that echo is not a prompt. Unchanged
+        when the brief isn't on screen (a real prompt comes before it)."""
+        lines = screen.splitlines()
+        for i, line in enumerate(lines if self.brief else ()):
+            text = " ".join(re.sub(rf"^\s*[{CURSOR}]", "", plain(line)).split())
+            if len(text) >= 20 and self.brief.startswith(text) or text and text == self.brief:
+                seen = text
+                j = i + 1
+                while j < len(lines) and len(seen) < len(self.brief):
+                    part = " ".join(plain(lines[j]).split())
+                    if part and not self.brief[len(seen):].lstrip().startswith(part):
+                        break
+                    seen = (seen + " " + part).strip() if part else seen
+                    j += 1
+                return "\n".join(lines[j:])
+        return screen
 
     def _spend_call(self) -> bool:
         """Count one model call against the launch's budget; False when it's spent."""
@@ -383,6 +406,7 @@ class Startup:
         """Act on one capture of the pane: "answering" (a key went in),
         "blocked" (only the person can answer it; see take_blocked), or ""
         (nothing to answer)."""
+        screen = self._past_brief(screen)
         if self.permission(screen) or not looks_like_prompt(screen):
             return ""
         if _tail(screen) == self.acted_on:
@@ -395,7 +419,7 @@ class Startup:
             # now, and only if it still shows the same prompt.
             asked = screen
             try:
-                screen = tmux.capture(self.target, lines=60)
+                screen = self._past_brief(tmux.capture(self.target, lines=60))
             except tmux.TmuxError:
                 return ""
             if _key(normalize(screen)) != _key(normalize(asked)):
