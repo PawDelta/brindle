@@ -150,6 +150,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     done.extend(signin_pause.sweep(db, now))
 
+    # 1f'. Cloud logins: renewed in the background; a session whose login only
+    # the person can renew waits, and they're told once.
+    from brindle import login_pause
+
+    done.extend(login_pause.sweep(db, now, panes))
+
     # 1g. Periodic cost events (Team org_budgets): report delta spend for supervisor and workers.
     from brindle import events
 

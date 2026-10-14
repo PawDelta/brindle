@@ -36,6 +36,9 @@ class LoginStatus:
     expires_at: float | None
     refresh_cmd: str
     note: str
+    # The login lapsed and the CLI couldn't renew it: only ``refresh_cmd`` (the
+    # person) can. False for a login that is fine, missing or undetermined.
+    expired: bool = False
 
 
 def provider_from_env(env: Mapping[str, str] | None = None) -> str | None:
@@ -80,7 +83,7 @@ def _from_expiry(expires_at: float | None, refresh_cmd: str, now: float, missing
     if expires_at is None:
         return LoginStatus(False, None, refresh_cmd, missing)
     if expires_at <= now:
-        return LoginStatus(False, expires_at, refresh_cmd, "login expired")
+        return LoginStatus(False, expires_at, refresh_cmd, "login expired", expired=True)
     return LoginStatus(True, expires_at, refresh_cmd, "logged in")
 
 
@@ -147,7 +150,7 @@ def _azure(run, env, now: float) -> LoginStatus:
         if exp is not None:
             return _from_expiry(exp, refresh, now, "")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
-        return LoginStatus(False, None, refresh, "login expired")
+        return LoginStatus(False, None, refresh, "login expired", expired=True)
     return LoginStatus(False, None, refresh, "no Azure CLI login found")
 
 
@@ -179,7 +182,7 @@ def _google(run, env, now: float, expiry) -> LoginStatus:
             return LoginStatus(True, None, refresh, "logged in; token expiry unknown")
         return LoginStatus(True, now + left, refresh, "logged in")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
-        return LoginStatus(False, None, refresh, "login expired (invalid_grant)")
+        return LoginStatus(False, None, refresh, "login expired (invalid_grant)", expired=True)
     return LoginStatus(False, None, refresh, "gcloud could not produce an access token")
 
 
@@ -200,3 +203,23 @@ def status(provider: str | None = None, *, env: Mapping[str, str] | None = None,
     if provider == "foundry":
         return _azure(run, supplied, now)
     return LoginStatus(True, None, "", "no cloud provider selected")
+
+
+def refresh(provider: str | None = None, *, env: Mapping[str, str] | None = None,
+            home: str | Path | None = None, now: float | None = None,
+            run=subprocess.run, expiry=tokeninfo_expiry) -> LoginStatus:
+    """Renew the login without the person where the CLI can, and return the
+    status after. Asking gcloud or az for an access token (as ``status`` does)
+    renews it from the stored refresh token; the AWS CLI renews an SSO token
+    from its sso-session refresh token on any call. What needs a browser
+    (invalid_rapt, a lapsed SSO session) stays ``expired``."""
+    full = os.environ if env is None else {**os.environ, **env}
+    provider = provider or provider_from_env(full)
+    if provider == "bedrock":
+        profile = full.get("AWS_PROFILE") or full.get("AWS_DEFAULT_PROFILE") or "default"
+        try:
+            run(["aws", "sts", "get-caller-identity", "--profile", profile, "--output", "json"],
+                capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
+        except (subprocess.TimeoutExpired, OSError):
+            pass    # the cache then still says what the login is
+    return status(provider, env=env, home=home, now=now, run=run, expiry=expiry)

@@ -148,6 +148,10 @@ Acting on what you find:
   what you fixed and which findings weren't real. Don't ask first. Ask only
   before outward-facing or hard-to-reverse actions (posting, merging into a
   shared branch, deleting) and for decisions that are the user's to make.
+- To wait for workers, checks or anything else brindle runs, wait for
+  brindle's messages (they wake you) or use the Monitor tool; don't poll with
+  short cron loops, which spend turns and keep running while brindle has
+  paused the session (an expired cloud login, say).
 - Format your own verbose outputs or message transcripts in collapsible
   `<details><summary>Title</summary>...</details>` blocks so they are not
   sprawling in the chat UI."""
@@ -1498,8 +1502,10 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     ap = db.get_autopilot(agent.id)
     if ap is None or not ap.enabled or not ap.goal:
         return None
-    from brindle import agents
+    from brindle import agents, login_pause
 
+    if login_pause.paused(db, agent.id):
+        return None  # only the person can renew the login; a nudge would just fail
     if ap.state == "auditing":
         if ap.auditor_id:
             auditor = db.get_agent(ap.auditor_id)

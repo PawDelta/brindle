@@ -54,7 +54,14 @@ def test_aws_reads_only_the_selected_profiles_sso_session(tmp_path):
     _sso_token(cache, "def-sess", "2099-01-01T00:00:00Z")
     alt = {"AWS_DEFAULT_PROFILE": "dev", "AWS_CONFIG_FILE": env["AWS_CONFIG_FILE"]}
     s = cloud_login.status("bedrock", env=alt, home=tmp_path, now=NOW + 1)
-    assert not s.ok and s.refresh_cmd == "aws sso login --profile dev"
+    assert not s.ok and s.expired and s.refresh_cmd == "aws sso login --profile dev"
+    # refresh: any AWS CLI call renews the SSO token from the sso-session's refresh token
+
+    def renew(cmd, **kw):
+        assert cmd[:4] == ["aws", "sts", "get-caller-identity", "--profile"] and cmd[4] == "dev"
+        _sso_token(cache, "dev-sess", "2099-01-01T00:00:00Z")
+
+    assert cloud_login.refresh("bedrock", env=alt, home=tmp_path, now=NOW + 1, run=renew).ok
 
 
 AZ_TOKEN = json.dumps({"accessToken": "SECRET", "expiresOn": "2027-01-15 08:00:00.000000",
