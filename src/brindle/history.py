@@ -6,7 +6,9 @@ reviewer's verdict, a successful merge, and a milestone check. Written at
 
 Session pruning (sessions.py) deletes agent rows (and cascades reviews and
 milestones with them) to keep disk use bounded; history has no foreign keys
-so it survives that. It's capped per repo instead (see CAP_PER_REPO).
+so it survives that. It's capped per repo instead (see CAP_PER_REPO). Before
+finished work's rows go, ``archive`` keeps them: an ``archived`` row per
+agent here, and the full rows in brindle's local ``archive/`` folder.
 
 A row's tokens are what its agent used since that agent's previous row (see
 ``_delta``), so summing any set of rows never double counts. Milestone and
@@ -22,13 +24,18 @@ the report, merge or check it describes.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import os
+import shutil
 import time
+from dataclasses import asdict
+from pathlib import Path
 
-from brindle.db import DB, HistoryEntry
-from brindle.usage import Usage, agent_usage, format_tokens
+from brindle.config import brindle_home
+from brindle.db import DB, Agent, HistoryEntry, Workspace
+from brindle.usage import Usage, agent_transcripts, agent_usage, format_tokens
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +44,12 @@ RESULT_CHARS = 2000
 CAP_PER_REPO = 5000
 
 KINDS = ("worker_result", "review", "merge", "check", "milestone", "permission", "learned_rules",
-         "escape", "graph_query")
+         "escape", "graph_query", "archived")
+
+# Agent columns left out of the archive: live plumbing, and the inbox token,
+# which is a credential.
+_NOT_ARCHIVED = ("inbox_socket", "inbox_token", "tmux_window", "tmux_server", "stop_blocked",
+                 "stuck_noted", "unreported_noted", "stop_reminded_at")
 
 
 def _trim(text: str | None, limit: int) -> str | None:
@@ -112,6 +124,86 @@ def record_safely(db: DB, repo_root: str, kind: str, *, agent=None, usage: Usage
               profile=agent.profile if agent else None, task=task, result=result, usage=u)
     except Exception:
         log.exception("brindle: couldn't record %s history", kind)
+
+
+def archive_dir() -> Path:
+    return brindle_home() / "archive"
+
+
+def _private_dir(d: Path) -> Path:
+    """``d`` (under ``archive_dir()``) and every folder from there down to it,
+    made 0700."""
+    root = archive_dir()
+    for p in [*(root / q for q in reversed(d.relative_to(root).parents)), d]:
+        p.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(p, 0o700)
+    return d
+
+
+def _copy_transcripts(db: DB, a: Agent) -> list[str]:
+    """Gzipped copies of ``a``'s transcripts (and its subagents') under
+    ``archive/transcripts/<id>/``, so the conversation outlives the CLI's own
+    files. Their paths, relative to ``archive_dir()``."""
+    files = agent_transcripts(db, a)
+    if not files:
+        return []
+    base, out = files[0].parent, []
+    for src in files:
+        rel = src.relative_to(base) if src.is_relative_to(base) else Path(src.name)
+        dest = archive_dir() / "transcripts" / a.id / f"{rel}.gz"
+        _private_dir(dest.parent)
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb") as gz, \
+                open(src, "rb") as f:
+            shutil.copyfileobj(f, gz)
+        out.append(str(dest.relative_to(archive_dir())))
+    return out
+
+
+def archive(db: DB, ws: Workspace | None, members: list[Agent], reason: str) -> bool:
+    """Keep finished work whose records are about to be deleted, in
+    ``archive/`` under brindle's home: one line in ``<repo>.jsonl`` with the
+    full agent rows (each with its cumulative usage and model), the
+    workspace row, its reviews and merge, and a copy of every agent's
+    transcripts. Then an ``archived`` history row per agent (its task,
+    result and the tokens no earlier row counted, so `brindle cost` keeps
+    them). Local only and private (0700/0600): tasks, results and
+    conversations can hold secrets. False when it couldn't be kept: the
+    caller must then keep the records, for a later try. Never raises."""
+    if not members:
+        return True
+    try:
+        repo_root = ws.repo_root if ws else None
+        if repo_root is None:
+            root_ws = db.get_workspace(members[0].workspace_id)
+            repo_root = root_ws.repo_root if root_ws else ""
+        usages = {a.id: agent_usage(db, a) for a in members}
+        rows = []
+        for a in members:
+            row = {k: v for k, v in asdict(a).items() if k not in _NOT_ARCHIVED}
+            u = usages[a.id]
+            row["usage"] = json.loads(_tokens_json(u)) if u else None
+            row["transcripts"] = _copy_transcripts(db, a)
+            rows.append(row)
+        entry = {
+            "ts": time.time(), "reason": reason, "repo_root": repo_root,
+            "workspace": asdict(ws) if ws else None, "agents": rows,
+            "reviews": [asdict(r) for r in db.workspace_reviews(ws.id)] if ws else [],
+            "merged_sha": db.merged_sha(ws.id) if ws else None,
+        }
+        name = os.path.basename(repo_root.rstrip(os.sep)) or "unknown"
+        path = _private_dir(archive_dir()) / f"{name}.jsonl"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        log.exception("brindle: couldn't archive %s", ws.id if ws else members[0].id)
+        return False
+    for a in members:
+        record_safely(db, repo_root, "archived", agent=a, usage=usages[a.id],
+                      branch=ws.branch if ws else None, task=a.task, result=a.result)
+    return True
 
 
 def _token_totals(tokens: str | None) -> dict | None:

@@ -3,9 +3,9 @@ import time
 
 from typer.testing import CliRunner
 
-from brindle import cli, agents, autopilot, history, mcp_server, sessions, workspaces
+from brindle import cli, agents, autopilot, cull, history, mcp_server, sessions, workspaces
 from brindle.cli import app
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
 from brindle.usage import Usage
 
 
@@ -53,11 +53,20 @@ def test_check_milestone_writes_check_and_milestone_rows(db, repo, monkeypatch):
 # -- survives pruning -----------------------------------------------------------
 
 
-def test_history_survives_session_pruning(db, repo):
+def test_history_survives_session_pruning(db, repo, tmp_path):
+    import gzip
+    import json
+
     root_ws = workspaces.adopt_root(db, str(repo))
     ws = workspaces.create(db, str(repo), "feature").workspace
     add(db, root_ws, "boss", status="paused", since=1)
     add(db, ws, "w1", mode="assign", parent="boss", status="done")
+    transcript, sub = tmp_path / "s1.jsonl", tmp_path / "s1" / "subagents" / "agent-a.jsonl"
+    sub.parent.mkdir(parents=True)
+    transcript.write_text(_usage_line("m1", 1000))
+    sub.write_text(_usage_line("m2", 50))
+    db.update_agent("w1", result="all done", task="build it", inbox_token="secret-token",
+                    transcript_path=str(transcript))
     history.record(db, ws.repo_root, "worker_result", agent_id="w1", branch="feature",
                    profile="developer", task="task", result="done")
     for i in range(3):
@@ -67,8 +76,57 @@ def test_history_survives_session_pruning(db, repo):
 
     assert dropped == 1
     assert db.get_agent("boss") is None and db.get_agent("w1") is None
-    rows = db.list_history(ws.repo_root)
+    rows = db.list_history(ws.repo_root, "worker_result")
     assert len(rows) == 1 and rows[0].result == "done"
+    # The dropped records are archived, locally and privately, first.
+    archived = {r.agent_id: r for r in db.list_history(ws.repo_root, "archived")}
+    assert (archived["w1"].task, archived["w1"].result) == ("build it", "all done")
+    assert "boss" in archived
+    path = history.archive_dir() / "proj.jsonl"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert history.archive_dir().stat().st_mode & 0o777 == 0o700
+    entry = json.loads(path.read_text().splitlines()[0])
+    assert entry["workspace"]["id"] == ws.id
+    w1 = entry["agents"][0]
+    assert w1["result"] == "all done" and "inbox_token" not in w1
+    # Its conversation and costs outlive the CLI's files and history's cap.
+    transcript.unlink()
+    sub.unlink()
+    assert w1["usage"]["output"] == 1050
+    copies = [gzip.open(history.archive_dir() / p, "rt").read() for p in w1["transcripts"]]
+    assert copies == [_usage_line("m1", 1000), _usage_line("m2", 50)]
+
+
+def _row(db, root, path, kind="worktree"):
+    ws = Workspace("proj/feat", str(root), "feat", kind, "feat", "main", str(path), None,
+                   "brindle_proj_feat", 1.0)
+    db.add_workspace(ws)
+    return ws
+
+
+def test_records_stay_when_they_cant_be_archived(db, repo, tmp_path):
+    history.archive_dir().parent.mkdir(parents=True, exist_ok=True)
+    history.archive_dir().write_text("a file in the way")
+    ws = _row(db, repo, tmp_path / "gone")
+    add(db, ws, "w1", mode="assign", status="done")
+
+    cull.prune_retired(db)
+
+    assert db.get_agent("w1") is not None and db.list_history(str(repo), "archived") == []
+
+
+def test_dropping_a_scratch_session_archives_its_finished_chat(db, tmp_path, monkeypatch):
+    # A done chat isn't a paused session, so it went with the workspace unkept.
+    (tmp_path / "s").mkdir()
+    ws = _row(db, tmp_path, tmp_path / "s", kind="main")
+    add(db, ws, "boss", status="done")
+    monkeypatch.setattr(sessions.scratch, "sessions", lambda db: [ws])
+    monkeypatch.setattr(sessions.scratch, "commit_count", lambda ws: 0)
+    monkeypatch.setattr(sessions.git, "dirty_files", lambda path: [])
+    monkeypatch.setattr(sessions.tmux, "kill_session", lambda name: None)
+
+    assert sessions.prune_scratch(db) == 1
+    assert [r.agent_id for r in db.list_history(str(tmp_path), "archived")] == ["boss"]
 
 
 # -- the CLI -------------------------------------------------------------------

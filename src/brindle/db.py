@@ -1315,6 +1315,12 @@ class DB:
         ).fetchone()
         return _load(Review, row) if row else None
 
+    def workspace_reviews(self, workspace_id: str) -> list[Review]:
+        """Every review of ``workspace_id``, oldest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM reviews WHERE workspace_id=? ORDER BY id", (workspace_id,))
+        return [_load(Review, r) for r in rows]
+
     # -- merges --------------------------------------------------------------
 
     def set_merged(self, workspace_id: str, sha: str) -> None:

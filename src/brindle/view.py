@@ -140,10 +140,13 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
 
 
 def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
-    """Ids of every agent that is running (see agents.owns_pane)."""
+    """Ids of every agent that is running (see agents.owns_pane). An agent on
+    another tmux server is asked of its own: this server's owner of the same
+    pane id is no claim on it."""
     owners = agents.pane_owners(db, panes)
     return {a.id for a in db.list_agents()
-            if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)}
+            if agents.is_alive(a, panes)
+            and agents.owns_pane(db, a, owners if agents.same_server(a, panes) else None)}
 
 
 def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,
@@ -175,7 +178,15 @@ def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,
 
 
 def _finished(a: Agent) -> bool:
-    return a.dismissed_at is not None or a.status == "done" or a.result is not None
+    """Closed, done or reported."""
+    if a.dismissed_at is not None or a.status == "done" or a.result is not None:
+        return True
+    # A reviewer that isn't running (callers rule out running ones) holds no
+    # work of its own: one left "paused" without a report (its session
+    # paused, or a newer round replaced it) mustn't keep a merged worktree.
+    if a.mode == "review":
+        return True
+    return False
 
 
 def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
