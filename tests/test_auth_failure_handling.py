@@ -253,7 +253,9 @@ def test_launch_resolves_effective_credentials_before_signed_out_probe(db, repo,
     monkeypatch.setattr(providers, "_SIGNED_IN", {})
     opened = []
     monkeypatch.setattr(agents, "_open_window", lambda *args, **kwargs: opened.append(True))
-    monkeypatch.setattr(agents.get_provider("claude"), "after_launch", lambda target: None)
+    # On the class: undoing a patch of the shared provider instance leaves its
+    # bound method behind as an instance attribute, shadowing later class patches.
+    monkeypatch.setattr(type(agents.get_provider("claude")), "after_launch", lambda self, target: None)
 
     agents._launch(db, worker, ws, prompt="Task", resume=None, watch_pane=False)
     assert len(opened) == 1

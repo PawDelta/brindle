@@ -118,6 +118,7 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     ("task test secret", "deny"),  # profile deny beats profile allow
     ("cd {ws} && task test secret", "deny"),  # ...in every part of a compound command too
     ("task test secret 2>&1", "deny"),  # ...as the allow reads the part, redirection dropped
+    ('task test "" secret', "deny"),  # ...and an empty word doesn't hide it
 ])
 def test_codex_checks_and_profile_commands(db, ws, command, expected):
     from pathlib import Path

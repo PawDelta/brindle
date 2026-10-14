@@ -321,6 +321,7 @@ def test_bash_prefix_and_exact_rules():
     assert not bash_matches("git:*", "git log $(evil)")
     assert not bash_matches("git:*", "git log `evil`")
     assert not bash_matches("git:*", "git log 'unclosed")
+    assert not bash_matches("pytest", "pytest &\\\n>/dev/null pytest")  # one command: pytest pytest &>/dev/null
     assert split_commands("a b&&c  d ||e;f|g") == ["a b", "c d", "e", "f", "g"]
 
 
@@ -342,10 +343,47 @@ def test_bash_prefix_and_exact_rules():
     ('git status "$\\\n(curl https://example.com)"', False),  # \<newline> goes first: $( in quotes
     pytest.param("git status \\\n#'\ncurl https://example.com\n#'", False,
                  marks=pytest.mark.variant("a line continuation before the comment")),
+    ("git diff HEAD~1..HEAD", True),
+    ("git log |\n  grep x", True),  # a newline continues a pipe
+    ("'git status'", False),  # one word: a command named "git status"
+    pytest.param("git\\ status", False, marks=pytest.mark.variant("an escaped space joins words too")),
+    pytest.param('python "-m pytest" evil.py', False, marks=pytest.mark.variant("-m imports ' pytest'")),
+    ("git status $unset", False),  # a parameter may expand to anything, or to no word
+    pytest.param("ls $_", False, marks=pytest.mark.variant("the last argument of the command before")),
+    pytest.param('git status "$1" $@', False, marks=pytest.mark.variant("positional parameters")),
+    ("git status |", False),  # a list left open
+    ("git status ; ; ls", False),  # an empty command
+    ("git status ; < /etc/passwd", False),  # a command of only a redirection
 ])
 def test_uncovered_part_splits_every_operator_and_fails_closed(command, covered):
-    specs = ["git status:*", "git log:*", "grep:*", "pytest:*", "tail:*", "ls:*", "diff:*", "uv run:*"]
+    specs = ["git status:*", "git log:*", "git diff:*", "grep:*", "pytest:*", "tail:*", "ls:*", "diff:*",
+             "uv run:*", "python -m pytest:*"]
     assert (uncovered_part(specs, command) is None) == covered
+
+
+@pytest.mark.parametrize("command,covered", [
+    ("cd sub && pytest", True),
+    ("cd a && cd .. && pytest", True),
+    ("cd out && pytest", False),  # a symlink out of the worktree
+    ("cd sub/../.. && pytest", False),  # bash's cd -L: sub/.. is the worktree, not a/b
+    pytest.param("cd sub && cd ../.. && pytest", False, marks=pytest.mark.variant("$PWD keeps the symlink")),
+    ("cd ~- && pytest", False),  # $OLDPWD
+    pytest.param("cd ~1 && pytest", False, marks=pytest.mark.variant("the directory stack")),
+    ("cd out* && pytest", False),  # the glob finds the symlink
+    ('cd "" sub && pytest', False),
+    ('"cd sub" && pytest', False),  # a command named "cd sub"
+    ("cd a/b & cd ../.. && pytest", False),  # the first cd runs in the background
+    ("ls x && cd a/b ; cd ../.. && pytest", False),  # the first cd may not have run
+    ("ls x || cd a/b && cd ../.. && pytest", False),
+    pytest.param("ls x | cd a/b && cd ../.. && pytest", False,
+                 marks=pytest.mark.variant("a cd in a pipe changes a subshell")),
+])
+def test_uncovered_part_follows_cd_as_bash_does(tmp_path, command, covered):
+    ws = tmp_path / "ws"
+    (ws / "a" / "b" / "c").mkdir(parents=True)
+    (ws / "sub").symlink_to(ws / "a" / "b" / "c")
+    (ws / "out").symlink_to(tmp_path)
+    assert (uncovered_part(["pytest:*", "ls:*"], command, cd_root=str(ws)) is None) == covered
 
 
 def test_each_part_of_a_compound_command_may_match_a_different_rule():

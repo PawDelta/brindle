@@ -40,6 +40,47 @@ from brindle.config import CONFIG_DIR, brindle_home, user_profiles_dir
 
 log = logging.getLogger(__name__)
 
+_BUILTIN_PACKAGES = ("brindle.builtin_agents", "brindle.builtin_rules")
+# The built-in profiles and rule packs as freeze_builtins() read them, by
+# package and then name (``security/backend``), for a long-lived process that
+# must not see an upgrade replace those files under it. None: read the files.
+_frozen: dict[str, dict[str, str]] | None = None
+
+
+def _builtin_files(package: str):
+    """(name, file) for each ``.md`` file under ``package``, the name being its
+    path below it without ``.md``."""
+    def walk(entry, prefix: str):
+        for child in entry.iterdir():
+            if child.is_dir():
+                yield from walk(child, f"{prefix}{child.name}/")
+            elif child.name.endswith(".md"):
+                yield f"{prefix}{child.name[:-3]}", child
+
+    return walk(resources.files(package), "")
+
+
+def freeze_builtins() -> None:
+    """Read every built-in profile and rule pack into memory, and serve them
+    from there from now on (see brindle.upgrade)."""
+    global _frozen
+    _frozen = {package: {name: f.read_text(encoding="utf-8") for name, f in _builtin_files(package)}
+               for package in _BUILTIN_PACKAGES}
+
+
+def _builtin_text(package: str, name: str) -> str | None:
+    if _frozen is not None:
+        return _frozen[package].get(name)
+    *dirs, last = name.split("/")
+    f = resources.files(package).joinpath(*dirs, f"{last}.md")
+    return f.read_text(encoding="utf-8") if f.is_file() else None
+
+
+def _builtin_names(package: str) -> list[str]:
+    if _frozen is not None:
+        return list(_frozen[package])
+    return [name for name, _ in _builtin_files(package)]
+
 
 class ProfileError(ValueError):
     """A profile file that can't be used as written: an ``extends`` cycle, or
@@ -389,9 +430,9 @@ def _read(name: str, repo_root: str | None) -> tuple[str, str] | None:
             return f.read_text(encoding="utf-8"), str(f)
     if org is not None:
         return org.text, f"org profile {name}"
-    builtin = resources.files("brindle.builtin_agents").joinpath(f"{name}.md")
-    if builtin.is_file():
-        return builtin.read_text(encoding="utf-8"), f"built-in profile {name}"
+    builtin = _builtin_text("brindle.builtin_agents", name)
+    if builtin is not None:
+        return builtin, f"built-in profile {name}"
     return None
 
 
@@ -483,9 +524,9 @@ def _read_pack(name: str, repo_root: str | None) -> tuple[str, str] | None:
             return f.read_text(encoding="utf-8"), str(f)
     if org is not None:
         return org.text, f"org rule pack {name}"
-    builtin = resources.files("brindle.builtin_rules").joinpath(*parts[:-1], f"{parts[-1]}.md")
-    if builtin.is_file():
-        return builtin.read_text(encoding="utf-8"), f"built-in rule pack {name}"
+    builtin = _builtin_text("brindle.builtin_rules", name)
+    if builtin is not None:
+        return builtin, f"built-in rule pack {name}"
     return None
 
 
@@ -561,17 +602,7 @@ def _required_packs(names: list[str]) -> list[RulePack]:
 
 def list_rule_packs(repo_root: str | None = None) -> list[str]:
     """Every rule pack name that would load, the nearest definition winning."""
-    names: set[str] = set()
-    builtin = resources.files("brindle.builtin_rules")
-
-    def walk(entry, prefix: str) -> None:
-        for child in entry.iterdir():
-            if child.is_dir():
-                walk(child, f"{prefix}{child.name}/")
-            elif child.name.endswith(".md"):
-                names.add(f"{prefix}{child.name[:-3]}")
-
-    walk(builtin, "")
+    names = set(_builtin_names("brindle.builtin_rules"))
     names.update(_org_names("pack"))
     for d in _rule_dirs(repo_root):
         if d.is_dir():
@@ -625,10 +656,7 @@ def profile_rules_for(name: str, repo_root: str | None = None):
 def profile_names(repo_root: str | None = None) -> list[str]:
     """Every profile file name (without ``.md``) in the lookup order's
     directories and the built-ins, each once."""
-    names: set[str] = set()
-    for entry in resources.files("brindle.builtin_agents").iterdir():
-        if entry.name.endswith(".md"):
-            names.add(entry.name[:-3])
+    names = set(_builtin_names("brindle.builtin_agents"))
     names.update(_org_names("profile"))
     for d in _search_dirs(repo_root):
         if d.is_dir():
