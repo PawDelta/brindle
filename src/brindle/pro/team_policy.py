@@ -1149,17 +1149,11 @@ class Access:
                                 in {pricing.normalize(m) for m in self.allowed_models})
 
     def clis(self, installed: list[str] | None = None) -> list[str]:
-        """The CLIs to offer: every installed one when nothing narrows the
+        """The CLIs to offer: every supervisor CLI when nothing narrows the
         choice, else each one the org allows (installed or not: the picker
         sets it up)."""
         if self.error:
             return []
-        if self.allowed_providers is None and not self.unrouted:
-            if installed is None:
-                from brindle import doctor
-
-                installed = doctor.signin_providers()
-            return list(installed)
         return [p for p in CLI_NAMES if self.allows(p)]
 
 
