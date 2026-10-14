@@ -493,18 +493,27 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     tried = any(a.id != reviewer.id and a.mode == "review" and a.result is None
                 and a.unreported_noted and a.review_sha == reviewer.review_sha
                 for a in db.list_agents(ws.id))
-    if not tried and not reviewer.reopened_at:
+    now = time.time()
+    in_flight_queued = (
+        reviewer.reopened_at is not None
+        and agents.is_alive(reviewer)
+        and db.pending_count(reviewer.id) > 0
+        and now - reviewer.reopened_at < agents.TRANSCRIPT_ACTIVE_SECONDS
+    )
+    if not tried and (not reviewer.reopened_at or in_flight_queued):
         try:
             if agents.reopen_reviewer(db, reviewer, ws):
                 # Clearing unreported_noted lets tell_parent_unreported re-enter
                 # on_reviewer_unreported if this resumed turn also stops without
-                # a verdict, while reopened_at prevents resuming a second time.
-                db.update_agent(reviewer.id, reopened_at=time.time(), unreported_noted=None)
+                # a verdict, while reopened_at prevents resuming a second time
+                # (and respects a queued reminder while it is still in flight).
+                db.update_agent(reviewer.id, reopened_at=reviewer.reopened_at or now,
+                                unreported_noted=None)
                 return True
         except agents.AgentError:
             pass
     if not reviewer.unreported_noted:
-        db.update_agent(reviewer.id, unreported_noted=int(time.time()))
+        db.update_agent(reviewer.id, unreported_noted=int(now))
     check_summary = _cached_check_summary(db, ws, cfg, reviewer)
     partial = _partial_findings(reviewer)
     diff_stat = _small_diff_stat(ws)

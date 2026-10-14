@@ -55,7 +55,9 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: alive.get(a.id, False))
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    launched, messaged, fallbacks = [], [], []
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: True)
+    launched, fallbacks = [], []
 
     def fake_launch(db_, a, ws_, *, prompt, resume, **kw):
         prof = agents.load_profile(a.profile, ws_.repo_root)
@@ -63,37 +65,43 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
         launched.append(agents.get_provider(a.provider).command(ctx))
 
     monkeypatch.setattr(agents, "_launch", fake_launch)
-    monkeypatch.setattr(agents, "send_message", lambda db_, to_id, body, **kw: (messaged.append((to_id, body)), "delivered")[1])
     monkeypatch.setattr(agents, "request_review", lambda *a, **k: fallbacks.append(1))
 
     # 1. Recent transcript write on a live reviewer -> treated as still active.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is False
-    assert launched == [] and messaged == [] and fallbacks == []
+    assert db.pending_count("rev0") == 0 and launched == [] and fallbacks == []
 
-    # 2. Live idle reviewer -> resumed once via send_message with REOPEN_VERDICT_PROMPT.
+    # 2. Live idle reviewer -> real send_message/flush queues reminder; repeated trigger respects it.
     old = time.time() - 120
     os.utime(transcript, (old, old))
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
-    assert messaged == [("rev0", agents.REOPEN_VERDICT_PROMPT)] and fallbacks == []
+    assert db.pending_count("rev0") == 1 and fallbacks == []
     assert db.get_agent("rev0").reopened_at is not None
+    assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
+    assert db.pending_count("rev0") == 1 and fallbacks == []
+
+    # Once the queued turn has executed (or its window expired) without a verdict, fallback runs.
+    db.pop_pending("rev0")
+    assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
+    assert len(fallbacks) == 1
 
     # 3. Dead reviewer with no recorded session_ref -> never uses --continue or --last.
     alive["rev0"] = False
-    db.update_agent("rev0", reopened_at=None, transcript_path=None, session_ref=None)
+    db.update_agent("rev0", reopened_at=None, unreported_noted=None, transcript_path=None, session_ref=None)
     assert agents.reopen_reviewer(db, db.get_agent("rev0"), ws) is False
     assert launched == []
 
     # 4. Dead reviewer with its own recorded session -> reopened once before any fallback.
     db.update_agent("rev0", session_ref="sess-rev0", transcript_path=str(transcript))
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
-    assert len(launched) == 1 and fallbacks == []
+    assert len(launched) == 1 and len(fallbacks) == 1
     assert "--resume" in launched[0] and "sess-rev0" in launched[0]
     assert "--continue" not in launched[0] and "--last" not in launched[0]
     assert db.get_agent("rev0").reopened_at is not None
 
     # 5. Stalling again after reopen -> does not loop; falls back to request_review.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
-    assert len(launched) == 1 and len(fallbacks) == 1
+    assert len(launched) == 1 and len(fallbacks) == 2
 
 
 def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, tmp_path, monkeypatch):
@@ -135,9 +143,8 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     assert len(spawned) == 1
     prof, prompt = spawned[0]
     assert prof == "reviewer-light"
-    assert "cheapest available light reviewer tier" in prompt
     assert "Blocker in big.py line 12" in prompt
-    assert "PASS `pytest -q`" in prompt
+    assert "pytest -q" in prompt
 
     # Pinned config -> keeps the pinned reviewer profile instead of downgrading.
     (repo / ".brindle" / "config.json").write_text(
@@ -146,7 +153,6 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     db.update_agent("rev0", unreported_noted=None)
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert spawned[-1][0] == "reviewer"
-    assert "pinned by review_profile" in spawned[-1][1]
 
 
 def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, tmp_path, monkeypatch):

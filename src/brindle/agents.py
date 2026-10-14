@@ -2986,14 +2986,21 @@ def recorded_session(agent: Agent) -> str | None:
 def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
                     prompt: str = REOPEN_VERDICT_PROMPT) -> bool:
     """Resume a stalled reviewer once with a short verdict prompt: send the
-    prompt as a message if the reviewer's process is still alive, or reopen its
-    own recorded CLI session if the process exited. Returns True if resumed,
-    False when it has no live pane or recorded session of its own."""
+    prompt as a message if the reviewer's process is still alive (or keep an
+    already-queued reminder in flight), or reopen its own recorded CLI session
+    if the process exited. Returns True if resumed or queued, False when it has
+    no live pane or recorded session of its own."""
     if not os.path.isdir(ws.path):
         return False
     if is_alive(agent):
+        if db.pending_count(agent.id) > 0:
+            try:
+                flush(db, agent.id)
+            except tmux.TmuxError:
+                db.set_status(agent.id, "idle", only_if="processing")
+            return True
         try:
-            return send_message(db, agent.id, prompt) == "delivered"
+            return send_message(db, agent.id, prompt) in ("delivered", "queued")
         except (AgentError, tmux.TmuxError):
             db.set_status(agent.id, "idle", only_if="processing")
             return False
