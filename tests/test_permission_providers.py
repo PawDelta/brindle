@@ -116,6 +116,8 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     ("task test unit", "allow"),  # profile prefix allowance
     ("task test unit && deploy", None),
     ("task test secret", "deny"),  # profile deny beats profile allow
+    ("cd {ws} && task test secret", "deny"),  # ...in every part of a compound command too
+    ("task test secret 2>&1", "deny"),  # ...as the allow reads the part, redirection dropped
 ])
 def test_codex_checks_and_profile_commands(db, ws, command, expected):
     from pathlib import Path
@@ -133,7 +135,7 @@ def test_codex_checks_and_profile_commands(db, ws, command, expected):
         Rule("bash", "make blocked", "exact", "deny").to_dict()]}))
     a = worker(db, ws)
     out = agents.hook_main(db, a.id, "codex-permission-request",
-                          json.dumps(codex_payload("Bash", {"command": command}, ws.path)))
+                          json.dumps(codex_payload("Bash", {"command": command.format(ws=ws.path)}, ws.path)))
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
@@ -169,6 +171,51 @@ def test_codex_patch_unknown_header_cannot_hide_a_known_deny(ws):
     reqs = from_codex(codex_payload("apply_patch", {"command": patch}, ws.path), ws.path, ws.repo_root)
     rules = [Rule("edit", "*", "glob", "allow"), Rule("edit", "denied.py", "exact", "deny")]
     assert decide_all(reqs, rules=rules).decision == "deny"
+
+
+def codex_behavior(db, ws, profile, command):
+    a = Agent(f"c-{profile}", ws.id, profile, "codex", "boss", "assign", "processing", "%c", None, time.time())
+    db.add_agent(a)
+    out = agents.hook_main(db, a.id, "codex-permission-request",
+                           json.dumps(codex_payload("Bash", {"command": command}, ws.path)))
+    return json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("cd {ws} && git status", "allow"),
+    ('grep -rn "x" .', "allow"),
+    pytest.param("git log |& rm -rf x", None, marks=pytest.mark.variant("shlex reads |& as one word")),
+    pytest.param("ls > ~/.zshrc", None, marks=pytest.mark.variant("redirection shlex doesn't split")),
+])
+def test_codex_compound_command_covered_is_allowed(db, ws, command, expected):
+    turn_on(ws)
+    assert codex_behavior(db, ws, "developer-codex", command.format(ws=ws.path)) == expected
+
+
+def test_codex_dontask_turns_ask_into_deny(db, ws):
+    # A heredoc's body isn't a command: uv run:* mustn't cover it, and the
+    # unwatched reviewer must be refused rather than left at a prompt.
+    turn_on(ws)
+    command = "uv run python - <<'PY'\nimport os; os.remove('x')\nPY"
+    assert codex_behavior(db, ws, "reviewer-codex", command) == "deny"
+
+
+def test_hook_invocation_skips_worktree_python(ws, monkeypatch, tmp_path):
+    # The worktree venv's own bin (where its brindle lives) comes first on
+    # PATH, as it does under `uv run`: the installed brindle further on wins.
+    from brindle import providers
+
+    venv_bin = os.path.join(ws.path, ".venv", "bin")
+    installed_bin = tmp_path / "installed" / "bin"
+    for d in (venv_bin, installed_bin):
+        os.makedirs(d, exist_ok=True)
+        exe = os.path.join(d, "brindle")
+        with open(exe, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(exe, 0o755)
+    monkeypatch.setattr("sys.executable", os.path.join(venv_bin, "python"))
+    monkeypatch.setenv("PATH", os.pathsep.join([venv_bin, str(installed_bin)]))
+    assert providers.brindle_invocation() == [str(installed_bin / "brindle")]
 
 
 def test_codex_hook_cli_finds_its_agent_in_the_environment(db, ws, monkeypatch):

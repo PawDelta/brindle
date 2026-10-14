@@ -22,6 +22,19 @@ def test_rate_limit_with_session_id_401_not_treated_as_auth_failure(db, repo):
     assert w.status != "failed"
 
 
+def test_selected_model_stop_failure_fails_the_worker_and_tells_its_parent(db, repo, monkeypatch):
+    ws = Workspace("ws-model", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-model", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    told = []
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append(to))
+    agents.handle_hook(db, worker.id, "stop-failure", {
+        "error": "invalid_request", "last_assistant_message": "There's an issue with the selected model "
+        "(us.anthropic.claude-haiku-4-5-v1:0). It may not exist or you may not have access to it."})
+    assert (db.get_agent(worker.id).status, told) == ("failed", [supervisor.id])
+
+
 def test_fresh_exported_key_included_in_agent_env(db, repo):
     from brindle.db import Workspace, Agent
     from brindle import agents, keystore

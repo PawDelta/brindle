@@ -311,6 +311,7 @@ def checks(repo_root: str | None) -> list[Check]:
                      "`brindle sidebar` (or prefix S in tmux) brings a lost sidebar back to the session you're in"))
 
     out.extend(native_checks(repo_root))
+    out.extend(override_checks())
     out.extend(quota_checks(repo_root))
     out.extend(airgap_checks(repo_root))
     update = updates.notice(refresh=True)
@@ -499,6 +500,34 @@ def native_checks(repo_root: str | None) -> list[Check]:
                              f"{ep.base_url} runs {ep.model} with a {ctx}-token context, less than "
                              f"the profile's context_tokens ({max_context_tokens}); Ollama truncates "
                              f"silently. Restart with: {fix}"))
+    return out
+
+
+def override_checks() -> list[Check]:
+    """A profile in ~/.brindle/agents named like a built-in hides it. If the
+    built-in has an ``allowed_tools`` list and the copy has none, its agents
+    lose that allowlist and stop on prompts (or refusals) the built-in avoids."""
+    from importlib import resources
+
+    from brindle import profiles
+    from brindle.config import user_profiles_dir
+
+    out = []
+    d = user_profiles_dir()
+    for f in sorted(d.glob("*.md")) if d.is_dir() else []:
+        builtin = resources.files("brindle.builtin_agents").joinpath(f.name)
+        if not builtin.is_file():
+            continue
+        try:
+            mine = profiles._load(f.stem, None)
+            theirs = profiles._build(*profiles._frontmatter(builtin.read_text(encoding="utf-8")), f.stem)
+        except (KeyError, profiles.ProfileError):
+            continue
+        if theirs.allowed_tools and not mine.allowed_tools:
+            out.append(Check(WARN, f"profile {f.stem}",
+                             f"{f} hides the built-in {f.stem}, and has no allowed_tools while the "
+                             "built-in does: its agents get no allowlist. Copy the built-in's "
+                             "allowed_tools into it, or delete the file to use the built-in"))
     return out
 
 

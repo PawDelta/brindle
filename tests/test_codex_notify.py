@@ -85,6 +85,19 @@ def test_hook_main_parses_notify_payload(db, ws):
     assert db.get_agent("c1").status == "idle"
 
 
+def test_codex_turn_complete_unreported_tells_parent(db, ws, monkeypatch):
+    """No Stop hook can remind a Codex worker to report: a turn it ends
+    without a result is one its supervisor hears about."""
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
+                       "@1", None, time.time()))
+    db.add_agent(Agent("c1", ws.id, "developer", "codex", "boss", "assign", "unknown", "@0",
+                       None, time.time()))
+    sent = []
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
+    agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
+    assert sent == ["boss"]
+
+
 def test_autopilot_codex_supervisor_is_told_to_keep_going(db, ws, monkeypatch):
     """No Stop hook on Codex: a finished turn is where autopilot nudges it."""
     from brindle import autopilot

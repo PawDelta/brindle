@@ -114,14 +114,18 @@ def _age_notices(db, seconds):
         c.execute("UPDATE inbox SET noticed_at=noticed_at-?", (seconds,))
 
 
-def test_stop_hook_resends_stale_notice_once(db, boss, pushed):
+def test_supervisor_stop_with_unread_mail_blocks(db, boss, pushed):
+    # Its notice went out moments ago, yet it's stopping with the mail unread:
+    # that notice may have been lost, and nothing else would wake it.
     agents.send_message(db, "boss", "one", sender_id="w1")
-    assert not agents.handle_hook(db, "boss", "stop", {})  # fresh notice: nothing more
-    _age_notices(db, db.NOTICE_TTL + 1)
-    assert agents.handle_hook(db, "boss", "stop", {"stop_hook_active": True}) is None
     out = agents.handle_hook(db, "boss", "stop", {})
     assert out["decision"] == "block" and "read_messages" in out["reason"]
-    assert not agents.handle_hook(db, "boss", "stop", {})  # once
+    assert agents.handle_hook(db, "boss", "stop", {"stop_hook_active": True}) is None
+    assert not agents.handle_hook(db, "boss", "stop", {})  # once per NOTICE_TTL
+    db.read_held("boss")
+    agents.send_message(db, "boss", "two", sender_id="w1")
+    out = agents.handle_hook(db, "boss", "stop", {})  # new mail since it read: reminded again
+    assert out["decision"] == "block" and "read_messages" in out["reason"]
 
 
 @pytest.fixture

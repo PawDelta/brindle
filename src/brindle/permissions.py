@@ -55,7 +55,7 @@ import shlex
 import subprocess
 import time
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterator
 
@@ -442,9 +442,12 @@ AGY_CONVERSATION_TOOLS = frozenset({"manage_task", "send_message", "ask_question
 # (.git/hooks, config), and brindle's repo config (checks, rules).
 AGY_PROTECTED_DIRS = (".agents", ".git", ".brindle")
 NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule allows this "
-                  "({why}). Don't try another way to do the same thing: tell your supervisor "
-                  "with send_message what you need and why, so the person can allow it with "
-                  "`brindle permissions allow`.")
+                  "({why}). If a simpler command would do (one command, no $(...), no "
+                  "redirection) or a file tool (view_file, grep_search, list_dir) gets you what "
+                  "you need, use that instead. Only if you still need this, {ask}, so the person "
+                  "can allow it with `brindle permissions allow`.")
+ASK_SUPERVISOR = "tell your supervisor with send_message what you need and why"
+ASK_PERSON = "say what you need and why in your reply to the person running brindle"
 
 
 def _lexically_within(literal: str, root: str) -> bool:
@@ -535,14 +538,18 @@ def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
 
 def agy_strict_output(decision: Decision | None, req: Request | None = None,
                       workspaces: list[str] | None = None,
-                      protected_roots: list[str] | None = None) -> dict:
+                      protected_roots: list[str] | None = None,
+                      readable: list[str] | None = None,
+                      has_supervisor: bool = True) -> dict:
     """agy's PreToolUse answer under ``agy_approvals: "brindle"``, where agy
     runs with --dangerously-skip-permissions: a hook's "ask" then runs the
     call without a prompt, so brindle answers allow or deny, never ask.
     Allowed: what a rule allows, a file inside a workspace (or the
-    conversation's artifact folder, passed in ``workspaces``), brindle's own
-    tools, and agy's conversation-only tools. Everything else is denied with
-    a reason that tells the agent to ask its supervisor."""
+    conversation's artifact folder, passed in ``workspaces``), a read
+    inside one of ``readable``, brindle's own tools, and agy's
+    conversation-only tools. Everything else is denied with a reason that
+    tells the agent to try a simpler way, then ask its supervisor (or, with
+    no supervisor, the person)."""
     if decision is not None and decision.decision == "deny":
         return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
     if decision is not None and decision.decision == "allow":
@@ -556,17 +563,53 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
                      and _agy_protected(literal, path, protected_roots or []))
         # In the workspace as written, not only once resolved: a path that
         # gets there through a symlink outside it would skip the symlink walk.
-        if path and not protected and any(
-                w and _lexically_within(literal, w) and (path == os.path.realpath(w) or _inside(path, w))
-                for w in workspaces or []):
+        def within(roots: list[str] | None) -> bool:
+            return any(r and _lexically_within(literal, r) and (path == os.path.realpath(r) or _inside(path, r))
+                       for r in roots or [])
+
+        if path and not protected and within(workspaces):
             return {"decision": "allow", "reason": "brindle: a file in the workspace"}
+        if path and req.kind == "read" and within(readable):
+            return {"decision": "allow", "reason": "brindle: reading agy's own instructions"}
         if req.kind == "mcp" and req.tool in _brindle_tools():
             return {"decision": "allow", "reason": "brindle: brindle's own tool"}
         if req.kind == "other" and req.tool in AGY_CONVERSATION_TOOLS:
             return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
     why = decision.reason if decision is not None else "brindle couldn't read the request"
     why = why.removesuffix("; asking the user")  # nobody is asked here
-    return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why)}
+    ask = ASK_SUPERVISOR if has_supervisor else ASK_PERSON
+    return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why, ask=ask)}
+
+
+def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str] | None = None,
+                       cd_root: str | None = None) -> Decision | None:
+    """For a shell command no rule allows as a whole: allow it when every
+    simple command in it (``a && b | c`` has three) is named by an exact or
+    prefix bash allow rule or a check, the reading Claude Code's PreToolUse
+    hook gives a profile's allowed_tools (brindle.agents.pre_tool_decision);
+    a ``cd`` inside ``cd_root`` counts too. A rule denying any one part wins.
+    None when neither applies, or for what uncovered_part can't vouch for
+    (a redirection that writes a file, a heredoc, ...)."""
+    from dataclasses import replace
+
+    from brindle.native.permissions import split_commands, uncovered_part
+
+    if req is None or req.kind != "bash" or not req.command:
+        return None
+    specs = [c.strip() for c in checks or []]
+    for rule in rules:
+        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip():
+            if rule.match_type == "exact":
+                specs.append(rule.match.strip())
+            elif rule.match_type == "prefix":
+                specs.append(rule.match.strip() + ":*")
+    if uncovered_part(specs, req.command, cd_root=cd_root) is not None:
+        return None
+    for part in split_commands(req.command):
+        denied = decide(replace(req, command=part), checks=checks, rules=rules)
+        if denied.decision == "deny":
+            return denied
+    return Decision("allow", "every part of the command is allowed by a rule or the profile's allowed_tools")
 
 
 # -- matching ---------------------------------------------------------------------------------
@@ -796,6 +839,21 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     else:
         why = "no rule allows or denies it"
     return Decision("ask", f"{why}; asking the user")
+
+
+def deny_in_parts(req: Request, *, checks: list[str] | None = None,
+                  rules: list[Rule]) -> Decision | None:
+    """The deny for any simple command inside ``req``'s shell command
+    (``cd x && rm y`` holds two), else None: an exact or prefix deny on the
+    whole command never sees a part of it."""
+    if req.kind != "bash" or not req.command:
+        return None
+    denies = [rule for rule in rules if rule.decision == "deny"]
+    for words in _segments(req.command):
+        decision = decide(replace(req, command=" ".join(words)), checks=checks, rules=denies)
+        if decision.decision == "deny":
+            return decision
+    return None
 
 
 # -- storage ----------------------------------------------------------------------------------

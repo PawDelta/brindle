@@ -2,6 +2,7 @@
 their results in its prompt; a repo without checks is reviewed at once."""
 import asyncio
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -137,6 +138,15 @@ def test_the_mcp_tool_returns_at_once_and_detaches_the_review(db, repo, ws, boss
     out = asyncio.run(mcp_server.request_review(ws.id, profile="reviewer"))
     assert "checks are running" in out and "about 2 min" in out
     assert spawned == [] and len(detached) == 1 and "_review-after-checks" in detached[0]
+
+
+def test_the_mcp_tool_says_so_when_the_worktree_is_gone(db, repo, ws, boss, spawned, detached):
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["true"]}))
+    shutil.rmtree(ws.path)   # removed outside brindle: the row outlives the directory
+    out = asyncio.run(mcp_server.request_review(ws.id, profile="reviewer"))
+    assert "No reviewer started" in out and ws.path in out
+    assert spawned == [] and detached == []
 
 
 def test_a_review_that_cannot_start_after_the_checks_reaches_the_supervisor(db, ws, boss, monkeypatch):

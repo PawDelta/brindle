@@ -253,13 +253,13 @@ def test_session_handover_preserves_audit_history_and_accepted_decisions(db, rep
     assert "Accepted exclusion of deprecated driver" in autopilot.audit_prompt(db, new_ap, "commit-head")
 
 
-def test_default_review_profile_prefers_gemini_over_codex(db, repo, monkeypatch):
+def test_default_review_profile_ignores_agy_without_learner(db, repo, monkeypatch):
     from brindle.config import RepoConfig
     from brindle import agents
 
     monkeypatch.setattr(agents, "unusable", lambda p, *args, **kwargs: None)
     chosen = agents.default_review_profile(RepoConfig(), None, db=db, repo_root=str(repo), task="Test task")
-    assert chosen == "reviewer-gemini"
+    assert chosen == "reviewer"
 
 
 def test_has_supervisor_action_markdown_formatting():

@@ -291,13 +291,16 @@ def test_trust_writes_through_a_symlinked_config(tmp_path, claude_config):
     assert json.loads(real.read_text())["projects"][os.path.realpath(folder)]["hasTrustDialogAccepted"] is True
 
 
-def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch):
-    """Issue #42: a Codex worker (no hooks) stuck on a startup error."""
+@pytest.mark.parametrize("status,provider", [
+    ("unknown", "codex"),       # issue #42: no hooks, stuck on a startup error
+    ("processing", "claude"),   # a turn whose pane stopped redrawing
+])
+def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch, status, provider):
     _, ws = root
     screens["%w1"] = "■ unexpected status 403 Forbidden: your plan doesn't include Codex\n"
     now = time.time()
-    a = worker_on(db, ws, "unknown", now - 3600)
-    db.update_agent(a.id, provider="codex")
+    a = worker_on(db, ws, status, now - 3600)
+    db.update_agent(a.id, provider=provider)
     last = now - cull.SILENT_AFTER - 5
     monkeypatch.setattr(tmux, "window_activity", lambda target, **k: last)
 
@@ -750,6 +753,8 @@ def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monk
 @pytest.mark.parametrize("provider,screen,cause", [
     ("claude", "Claude Code v2.1.0\n● API Error: 400 The selected model\n  is not available for this account", "bedrock_quota"),
     ("claude", "Claude Code v2.1.0\n● Example:\n  API Error: 400 The selected model\n  is not available for this account", None),
+    ("claude", "Claude Code v2.1.0\n⏺ There's an issue with the selected model (us.anthropic.claude-haiku-4-5-v1:0).\n"
+               "  It may not exist or you may not have access to it.", "launch_model"),
 ])
 def test_wrapped_provider_blocks_require_provider_context(provider, screen, cause):
     from brindle import launch_health

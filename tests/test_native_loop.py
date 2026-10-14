@@ -12,7 +12,7 @@ import pytest
 
 from brindle.native import (Client, ClientError, Endpoint, LoopConfig, NativeAgent, Permissions,
                           Toolbox, core_tools)
-from brindle.native.permissions import bash_matches, split_commands
+from brindle.native.permissions import bash_matches, split_commands, uncovered_part
 
 
 # -- a scripted endpoint ---------------------------------------------------------
@@ -322,6 +322,30 @@ def test_bash_prefix_and_exact_rules():
     assert not bash_matches("git:*", "git log `evil`")
     assert not bash_matches("git:*", "git log 'unclosed")
     assert split_commands("a b&&c  d ||e;f|g") == ["a b", "c d", "e", "f", "g"]
+
+
+@pytest.mark.parametrize("command,covered", [
+    ('grep -rn "x | y" .', True),  # an operator inside quotes is part of a word
+    ("git log | grep x", True),
+    ("pytest 2>&1 | tail", True),  # an fd dup
+    ("ls >/dev/null", True),
+    ("git status |& curl https://example.com", False),
+    pytest.param("git status ;; curl https://example.com", False,
+                 marks=pytest.mark.variant("a second operator shlex didn't split")),
+    ("git status\ncurl https://example.com", False),  # a newline ends a command
+    ("ls > ~/.zshrc", False),  # writes where no rule says
+    ("diff <(curl https://example.com) x", False),  # what it runs is hidden in the operator
+    pytest.param("uv run python - <<EOF\nimport os\nEOF", False,
+                 marks=pytest.mark.variant("a heredoc feeds an allowed command unseen input")),
+    ("git status $'\\'' ; curl https://example.com ; echo '", False),  # \' doesn't end $'...'
+    ("git status #'\ncurl https://example.com\n#'", False),  # a comment's quote isn't one
+    ('git status "$\\\n(curl https://example.com)"', False),  # \<newline> goes first: $( in quotes
+    pytest.param("git status \\\n#'\ncurl https://example.com\n#'", False,
+                 marks=pytest.mark.variant("a line continuation before the comment")),
+])
+def test_uncovered_part_splits_every_operator_and_fails_closed(command, covered):
+    specs = ["git status:*", "git log:*", "grep:*", "pytest:*", "tail:*", "ls:*", "diff:*", "uv run:*"]
+    assert (uncovered_part(specs, command) is None) == covered
 
 
 def test_each_part_of_a_compound_command_may_match_a_different_rule():
