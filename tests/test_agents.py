@@ -316,6 +316,16 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
     assert "Don't run the full suite yourself" in sub
 
 
+def test_no_goal_command_when_hooks_are_disabled(db, ws):
+    from brindle.providers import get_provider
+
+    (Path(ws.path) / ".claude").mkdir(exist_ok=True)
+    (Path(ws.path) / ".claude" / "settings.local.json").write_text('{"disableAllHooks": true}')
+    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, "tests pass", get_provider("claude"), headless=False)
+    assert not prompt.startswith("/goal")
+    assert "Finish line: tests pass" in prompt
+
+
 def test_render_unread_uses_details_block_for_brindle(db, ws):
     class Msg:
         def __init__(self, body, sender_id):

@@ -300,9 +300,11 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
         prompt += PLAN_FIRST_NOTE
     prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch,
                                    guidance=worker_guidance(ws))
-    if done_when and provider.name == "claude" and not headless:
-        # /goal is an interactive command; headless workers get the finish
-        # line above and the Stop hook's reminder to report.
+    if (done_when and provider.name == "claude" and not headless
+            and not provider.hooks_disabled(ws.path)):
+        # /goal is an interactive command that Claude Code refuses when hooks
+        # are disabled (#133), and headless workers get the finish line above
+        # and the Stop hook's reminder to report either way.
         prompt = pilot.worker_goal(prompt, done_when, ws.branch) or prompt
     return prompt
 
