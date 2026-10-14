@@ -206,7 +206,8 @@ only when your pick is no longer signed in or no longer allowed.
   `-s` with anything else is refused, and saved picks are re-checked at every
   launch.
 - Without a terminal (scripts, CI), with `--yes`, or in `brindle demo`, nothing
-  asks: brindle uses your last pick, else Claude Code.
+  asks: brindle uses your last pick, else the supervisor profile's CLI (Claude
+  Code unless you changed it).
 
 ## Recommended use
 
