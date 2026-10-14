@@ -166,9 +166,6 @@ def test_set_goal_shows_a_priced_estimate_with_pro(db, repo, boss, pro):
 def test_set_goal_and_assign_have_no_estimate_without_pro(db, boss, monkeypatch):
     from brindle import agents
 
-    out = mcp_server.set_goal("Settings", [{"title": "API", "check": "true"}])
-    assert "Cost estimate" not in out
-
     def spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None, **kw):
         a = Agent(agents.new_id(), ws.id, profile, "claude", parent_id, mode, "processing", "", None,
                   time.time(), task=prompt)
@@ -176,7 +173,14 @@ def test_set_goal_and_assign_have_no_estimate_without_pro(db, boss, monkeypatch)
         return a
 
     monkeypatch.setattr(agents, "spawn", spawn)
-    assert "Cost estimate" not in asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
+    # Delegating before there's a goal starts the worker and asks for one.
+    out = asyncio.run(mcp_server.assign(task="fix bug X", branch="fix-x"))
+    assert len(db.children("boss")) == 1 and "set_goal" in out
+
+    out = mcp_server.set_goal("Settings", [{"title": "API", "check": "true"}])
+    assert "Cost estimate" not in out
+    out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
+    assert "Cost estimate" not in out and "set_goal" not in out
 
 
 # -- budgets --------------------------------------------------------------------------------------
