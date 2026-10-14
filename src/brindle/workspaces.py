@@ -577,9 +577,12 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
     caller that itself runs in it (the pipeline's reviewer), which killing
     the session would take down mid-cleanup."""
     if ws.kind == "main":
+        from brindle import pipeline
+
         if not keep_session:
             _rescue_sidebar(db, ws)
             tmux.kill_session(ws.tmux_session)
+        pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)
         return Removed(False, "existing checkout left untouched", None)
 
@@ -662,7 +665,10 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 
 
 def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
+    from brindle import pipeline
+
     rewind.forget_workspace(db, ws)  # its workers' turn snapshots (before the agents go)
+    pipeline.on_workspace_cleanup(db, ws)
     db.delete_workspace(ws.id)
     return removed
 

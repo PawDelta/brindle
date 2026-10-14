@@ -379,6 +379,7 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     if outcome == "pending":
         return outcome  # diagnostics only; do not spend a supervisor turn on a live process
     ws = db.get_workspace(agent.workspace_id)
+    agents._note_reviewer_end(db, agent, ws)
     if cause and ws:
         model_access.refuse(agent.profile, cause, repo_root=ws.repo_root, fp=row["fingerprint"])
         refused = route_health.provider_outcome(error_block)   # the status code only, never the text

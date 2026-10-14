@@ -65,10 +65,11 @@ def env(monkeypatch):
 
 class FakeLearner:
     def __init__(self, pick):
-        self.pick, self.seen, self.last_reason = pick, None, None
+        self.pick, self.seen, self.info, self.last_reason = pick, None, None, None
 
     def suggest(self, info, names, default):
         self.seen = (list(names), default)
+        self.info = info
         return self.pick or default
 
 
@@ -106,5 +107,8 @@ def test_without_a_learner_it_is_the_baseline_and_nothing_is_probed(env, db):
 def test_learner_chooses_among_the_reviewers_that_can_run(env, db):
     env["codex"] = True
     env["learner"] = fake = FakeLearner("reviewer-codex")
+    db.add_routing_decision("/repo", task_id=None, agent_id="w1", weight="heavy",
+                            baseline_profile="developer-heavy", profile="developer-heavy", learned=False)
     assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo", "task") == "reviewer-codex"
     assert fake.seen == (["reviewer", "reviewer-codex", "reviewer-local"], "reviewer")
+    assert fake.info.weight == "heavy"

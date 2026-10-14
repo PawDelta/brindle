@@ -46,9 +46,11 @@ class TaskInfo:
 
 @dataclass(frozen=True)
 class Outcome:
-    """One event in a worker task's life. ``event`` is "reported" (its first
-    report_result), "review" (with ``approved``), "escalated" (the supervisor
-    was asked to step in), "merged" or "removed_unmerged" (the task is over)."""
+    """One event in a worker or reviewer run. ``event`` is "reported" (its
+    first report_result), "review" (with ``approved``), "escalated" (the
+    supervisor was asked to step in), "merged" or "removed_unmerged" (the
+    worker task is over), or "verdict" (with ``approved``) or "no_verdict"
+    (a reviewer run ended)."""
     event: str
     approved: bool | None = None
     checks_passed: bool = False
@@ -84,6 +86,8 @@ class LearningPlugin(ABC):
 
 
 _learners: dict[str, LearningPlugin] = {}
+_settled: set[str] = set()
+_no_verdict: set[str] = set()
 
 
 def plugin(cfg: RepoConfig, repo_root: str) -> LearningPlugin | None:
@@ -102,6 +106,13 @@ def plugin(cfg: RepoConfig, repo_root: str) -> LearningPlugin | None:
 def reset() -> None:
     """Forget the learners made so far (tests use it)."""
     _learners.clear()
+    _settled.clear()
+    _no_verdict.clear()
+
+
+def settled(agent_id: str) -> bool:
+    """Whether ``agent_id``'s terminal outcome was already sent in this process."""
+    return agent_id in _settled
 
 
 def _task_files(db: DB, worker: Agent, repo_root: str) -> tuple[tuple[str, ...], str | None]:
@@ -116,8 +127,9 @@ def _task_files(db: DB, worker: Agent, repo_root: str) -> tuple[tuple[str, ...],
                     files = tuple(f for f in json.loads(t.files) if isinstance(f, str))
                 except ValueError:
                     pass
-            return files, t.weight
-    return (), None
+            return files, t.weight or getattr(worker, "weight", None)
+    rd = db.routing_decision_for_agent(worker.id)
+    return (), getattr(worker, "weight", None) or (rd.weight if rd else None)
 
 
 def _tokens(db: DB, worker: Agent) -> int:
@@ -146,6 +158,27 @@ def _task_info(db: DB, worker: Agent, ws: Workspace) -> TaskInfo:
     )
 
 
+def _reviewer_info(db: DB, reviewer: Agent, ws: Workspace,
+                   worker: Agent | None = None) -> TaskInfo:
+    from brindle import agents
+    from brindle.profiles import load_profile
+
+    if worker is None:
+        worker = agents.workspace_worker(db, ws)
+    model = None
+    try:
+        model = load_profile(reviewer.profile, ws.repo_root).model
+    except Exception:
+        pass
+    files, weight = _task_files(db, worker, ws.repo_root) if worker else ((), None)
+    task = (worker.task if worker and worker.task else "") or (reviewer.task or "")
+    return TaskInfo(
+        repo_root=ws.repo_root, task=task, files=files, weight=weight,
+        agent_id=reviewer.id, profile=reviewer.profile, provider=reviewer.provider,
+        model=model, started_at=reviewer.created_at,
+    )
+
+
 def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
          reported: bool = False, approved: bool | None = None,
          escalated: bool = False, merged: bool | None = None,
@@ -153,6 +186,8 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
     """Tell the learner about one event in ``worker``'s task. Does nothing
     without a learner, and never raises."""
     try:
+        if merged is not None and worker is not None:
+            _settled.add(worker.id)
         p = plugin(cfg, ws.repo_root)
         if p is None or worker is None:
             return
@@ -171,6 +206,37 @@ def note(db: DB, cfg: RepoConfig, worker: Agent | None, ws: Workspace, *,
             ))
     except Exception:
         log.exception("brindle: the learner failed to record an outcome")
+
+
+def note_reviewer(db: DB, cfg: RepoConfig, reviewer: Agent | None, ws: Workspace | None, *,
+                  approved: bool | None = None, worker: Agent | None = None) -> None:
+    """Tell the learner how ``reviewer``'s run ended ("verdict" when ``approved``
+    is a bool, else "no_verdict"), at most once per reviewer."""
+    try:
+        if reviewer is None or reviewer.mode != "review" or ws is None or reviewer.id in _settled:
+            return
+        if isinstance(approved, bool):
+            _settled.add(reviewer.id)
+            event: str = "verdict"
+        else:
+            if reviewer.id in _no_verdict:
+                return
+            current = db.get_agent(reviewer.id)
+            if (current and current.result is not None) or db.conn.execute(
+                "SELECT 1 FROM reviews WHERE reviewer_id = ?", (reviewer.id,)
+            ).fetchone():
+                return
+            _no_verdict.add(reviewer.id)
+            event = "no_verdict"
+        p = plugin(cfg, ws.repo_root)
+        if p is None:
+            return
+        info = _reviewer_info(db, reviewer, ws, worker)
+        wall = max(0.0, time.time() - reviewer.created_at)
+        p.record(info, Outcome(event, approved=approved if isinstance(approved, bool) else None,
+                               tokens=_tokens(db, reviewer), wall_seconds=wall))
+    except Exception:
+        log.exception("brindle: the learner failed to record a reviewer outcome")
 
 
 def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
@@ -248,5 +314,5 @@ def used_prior(cfg: RepoConfig, repo_root: str) -> bool:
         return False
 
 
-__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "kept_note", "note", "plugin", "reset",
-           "used_prior"]
+__all__ = ["LearningPlugin", "Outcome", "TaskInfo", "choose", "choose_why", "kept_note", "note",
+           "note_reviewer", "plugin", "reset", "settled", "used_prior"]

@@ -147,13 +147,23 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
         worker = worker or agents.workspace_worker(db, ws)
     except Exception:
         return
-    try:
-        learning.note(db, cfg, worker, ws, **event)
-    except Exception:
-        pass
-    if not event.get("reported"):
-        savings.note_outcome(db, worker, **event)
+    terminal = event.get("merged") is not None
+    already = bool(terminal and worker and (
+        learning.settled(worker.id)
+        or (event.get("merged") is False
+            and (d := db.routing_decision_for_agent(worker.id)) is not None
+            and d.outcome is not None)
+    ))
+    if not already:
+        try:
+            learning.note(db, cfg, worker, ws, **event)
+        except Exception:
+            pass
+        if not event.get("reported"):
+            savings.note_outcome(db, worker, **event)
     if event.get("approved") is not None:
+        if isinstance(actor, Agent):
+            learning.note_reviewer(db, cfg, actor, ws, approved=event["approved"], worker=worker)
         events.emit(cfg, "review", ws, worker, actor=actor, approved=event["approved"])
     if event.get("escalated"):
         events.emit(cfg, "escalated", ws, worker, actor=actor)
@@ -173,6 +183,27 @@ def note_review(db: DB, ws: Workspace, approved: bool, reviewer: Agent | None = 
 
 def note_removed_unmerged(db: DB, ws: Workspace, actor: Agent | None = None) -> None:
     _note(db, ws, merged=False, actor=actor)
+
+
+def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
+    """Before ``ws``'s DB rows are deleted, record any reviewer still without
+    a verdict as ``no_verdict`` and any worker abandoned without a report as
+    ``removed_unmerged`` (if not already sent)."""
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except Exception:
+        cfg = RepoConfig()
+    merged = bool(db.merged_sha(ws.id))
+    worker = agents.workspace_worker(db, ws)
+    for a in db.list_agents(ws.id):
+        if a.mode == "review" and a.result is None:
+            learning.note_reviewer(db, cfg, a, ws, worker=worker)
+        elif (a.mode in ("handoff", "handoff_detached", "assign")
+              and a.result is None and not merged and not learning.settled(a.id)):
+            d = db.routing_decision_for_agent(a.id)
+            if not (d and d.outcome is not None):
+                learning.note(db, cfg, a, ws, merged=False)
+                savings.note_outcome(db, a, merged=False)
 
 
 def note_removed_merged(db: DB, ws: Workspace, actor: Agent | None = None,
@@ -477,7 +508,12 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
         agents.is_alive(reviewer) and agents.transcript_active(reviewer)
     ):
         return False
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except ValueError:
+        cfg = RepoConfig()
     if not os.path.isdir(ws.path):
+        learning.note_reviewer(db, cfg, reviewer, ws, worker=worker)
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, worker.parent_id,
@@ -486,10 +522,6 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
               f"so nothing is left to review or merge. remove_workspace(\"{ws.id}\") clears "
               "its record.", reviewer.id)
         return True
-    try:
-        cfg = load_repo_config(ws.repo_root)
-    except ValueError:
-        cfg = RepoConfig()
     tried = any(a.id != reviewer.id and a.mode == "review" and a.result is None
                 and a.unreported_noted and a.review_sha == reviewer.review_sha
                 for a in db.list_agents(ws.id))
@@ -514,6 +546,7 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
             pass
     if not reviewer.unreported_noted:
         db.update_agent(reviewer.id, unreported_noted=int(now))
+    learning.note_reviewer(db, cfg, reviewer, ws, worker=worker)
     check_summary = _cached_check_summary(db, ws, cfg, reviewer)
     partial = _partial_findings(reviewer)
     diff_stat = _small_diff_stat(ws)

@@ -126,3 +126,43 @@ def test_resolve_profile_precedence(db, ws, monkeypatch):
     db.add_agent(boss)
     assert autopilot.choose_profile(db, "boss", ws.repo_root, "reviewer", "t") == ("reviewer", False)
     assert autopilot.choose_profile(db, "boss", ws.repo_root, None, "t") == ("developer-local", True)
+
+
+def test_reviewer_verdict_and_no_verdict_and_abandoned_worker_cleanup(db, repo, ws, monkeypatch):
+    import json
+    from brindle import cull
+
+    p = Recorder()
+    install(monkeypatch, p)
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"learning": "cloud", "pipeline": False}))
+    monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **kw: "delivered")
+    work = workspaces.create(db, str(repo), "feat").workspace
+    now = time.time()
+    db.add_agent(Agent("w1", work.id, "developer-heavy", "claude", None, "assign", "processing",
+                       "", None, now - 20, task="fix the crash in parser.py"))
+    db.add_routing_decision(str(repo), task_id=None, agent_id="w1", weight="heavy",
+                            baseline_profile="developer-heavy", profile="developer-heavy", learned=False)
+    db.add_agent(Agent("r1", work.id, "reviewer-codex", "codex", "w1", "review", "waiting",
+                       "%1", None, now - 100, status_since=now - 100))
+    db.add_agent(Agent("r2", work.id, "reviewer", "claude", None, "review", "processing",
+                       "", None, now - 8))
+    cull.note_stuck(db, now, {"%1": True})
+    assert p.events == []
+    agents.submit_review(db, "r1", False, "blocker: missing null check")
+    agents.close(db, "r1")
+    agents.close(db, "r2")
+    workspaces.remove(db, work, force=True)
+    by_event = [(t.agent_id, t.profile, t.weight, t.task, o.event, o.approved, round(o.wall_seconds or 0))
+                for t, o in p.events]
+    assert [e[4] for e in by_event] == ["review", "verdict", "no_verdict", "removed_unmerged"]
+    verdict = by_event[1]
+    assert verdict[:6] == ("r1", "reviewer-codex", "heavy", "fix the crash in parser.py", "verdict", False)
+    assert verdict[6] >= 100
+    no_verdict = by_event[2]
+    assert no_verdict[:6] == ("r2", "reviewer", "heavy", "fix the crash in parser.py", "no_verdict", None)
+    assert no_verdict[6] >= 8
+    removed = by_event[3]
+    assert removed[:5] == ("w1", "developer-heavy", "heavy", "fix the crash in parser.py", "removed_unmerged")
+
