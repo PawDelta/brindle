@@ -174,7 +174,8 @@ def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
     ("claude-haiku", ["claude"], dict(allowed_models=("claude-haiku-5-5",)), ["developer-light"]),  # the profile's haiku
     ("claude-sonnet", ["claude"], dict(allowed_models=("claude-sonnet-4-5",)), None),   # developer runs 4-6
     ("claude-sonnet", ["claude"], dict(allowed_profiles=("developer-light",)), None),
-    ("local-qwen3-coder", [], {}, ["developer-local"]),                    # Ollama is probed once per process
+    ("local-qwen3-coder", [], {}, ["developer-local"]),                    # Ollama is probed once when ready
+    ("local-qwen3-coder", [], {}, None),                                   # ...and again when it wasn't
 ])
 def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatch, capsys, pick, signed_in, access,
                                                             light):
@@ -184,16 +185,18 @@ def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatc
 
     for var in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "CODEX_MODEL", "OPENAI_MODEL", "MODEL"):
         monkeypatch.delenv(var, raising=False)
-    probes = []
+    probes, signin_probes = [], []
     monkeypatch.setattr(serve, "ollama_available", lambda: probes.append(1) or True)
-    monkeypatch.setattr(local_setup, "verify_tags", lambda host, model: True)
+    monkeypatch.setattr(local_setup, "verify_tags", lambda host, model: light is not None)
     monkeypatch.setattr(worker_models, "_warned", set())
     monkeypatch.setattr(worker_models, "_local_ready", {})
+    monkeypatch.setattr(worker_models, "_signed_in", None, raising=False)
     monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(org_id=ORG, **access))
-    monkeypatch.setattr(doctor, "signed_in_providers", lambda: signed_in)
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: signin_probes.append(1) or signed_in)
     set_user("routing_light", pick)
     load_repo_config(str(repo))
     cfg = load_repo_config(str(repo))
     assert cfg.routing["light"] == (light or DEFAULT_ROUTING["light"])
     assert ("isn't ready for light tasks" in capsys.readouterr().err) is (light is None)
-    assert len(probes) == (pick == "local-qwen3-coder")
+    assert len(probes) == (0 if pick != "local-qwen3-coder" else 1 if light else 2)
+    assert len(signin_probes) == 1
