@@ -297,17 +297,143 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
     return handled
 
 
+SMALL_DIFF_LINES = 40
+SMALL_DIFF_FILES = 3
+
+
+def _small_diff_stat(ws: Workspace) -> str | None:
+    """The ``git diff --stat`` output when ``ws`` has a small, non-empty diff
+    against its base (at most ``SMALL_DIFF_LINES`` changed lines across at most
+    ``SMALL_DIFF_FILES`` files); None otherwise."""
+    if not ws.base_branch or not os.path.isdir(ws.path):
+        return None
+    try:
+        mb = git.merge_base(ws.path, git.base_ref(ws.path, ws.base_branch))
+        numstat = git.out(["diff", "--numstat", mb], ws.path).splitlines()
+        untracked = git.paths(["ls-files", "--others", "--exclude-standard"], ws.path)
+        if untracked or not numstat or len(numstat) > SMALL_DIFF_FILES:
+            return None
+        lines = 0
+        for row in numstat:
+            parts = row.split("\t", 2)
+            if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+                return None
+            lines += int(parts[0]) + int(parts[1])
+        if lines == 0 or lines > SMALL_DIFF_LINES:
+            return None
+        return git.diff(ws.path, ws.base_branch, stat=True)
+    except git.GitError:
+        return None
+
+
+def _cached_check_summary(db: DB, ws: Workspace, cfg: RepoConfig, reviewer: Agent) -> str | None:
+    """Stored check results for ``ws``'s commit without re-running any
+    command: from ``reviewer.task`` if ``review_after_checks`` already put
+    them there, else from ``check_cache``."""
+    if reviewer.task:
+        marker = "The repo's checks have already run on this commit:\n\n"
+        end_marker = "\n\nTake these results into account; don't run the whole suite yourself."
+        if marker in reviewer.task and end_marker in reviewer.task:
+            body = reviewer.task.split(marker, 1)[1].split(end_marker, 1)[0].strip()
+            if body:
+                return body
+    if not os.path.isdir(ws.path):
+        return None
+    try:
+        sha = reviewer.review_sha or gates.head(ws)
+    except git.GitError:
+        return None
+    rows = db.conn.execute(
+        "SELECT command, ok, output FROM check_cache WHERE workspace_id=? AND sha=?",
+        (ws.id, sha),
+    ).fetchall()
+    if not rows:
+        return None
+    by_cmd = {r["command"]: (bool(r["ok"]), r["output"] or "") for r in rows}
+    order = list(cfg.checks) + [r["command"] for r in rows if r["command"] not in cfg.checks]
+    lines = [
+        f"PASS `{c}`" if by_cmd[c][0] else f"FAIL `{c}`\n{by_cmd[c][1]}".rstrip()
+        for c in order if c in by_cmd
+    ]
+    return f"Checks for {ws.branch} at {sha[:8]}:\n\n" + "\n".join(lines)
+
+
+def _partial_findings(reviewer: Agent) -> str | None:
+    """The stalled reviewer's partial findings or last transcript/screen
+    words, if any."""
+    from brindle import rewind
+
+    words = rewind.turn_words(reviewer)
+    if words:
+        return words
+    path = agents.transcript_file(reviewer)
+    if not path:
+        return None
+    return rewind._last_assistant_text(path)
+
+
+def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent) -> tuple[str, str]:
+    """Which reviewer profile to run for the fallback and a short note
+    explaining why: keeps ``cfg.review_profile`` / ``cfg.reviewer`` (including
+    ``reviewer-local`` only when configured by the repo)."""
+    if cfg.review_profile:
+        return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
+    profile = cfg.reviewer or "reviewer"
+    if profile != "reviewer":
+        return profile, f"using {profile} (pinned by reviewer config)"
+    return profile, f"using {profile} (default reviewer, reusing cached checks without re-running)"
+
+
+def _supervisor_review_summary(ws: Workspace, worker: Agent, reviewer: Agent,
+                               diff_stat: str | None, check_summary: str | None,
+                               partial: str | None) -> str:
+    parts = [
+        f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
+        f"stopped without a verdict. Review it yourself with workspace_diff, then "
+        f"merge_workspace(\"{ws.id}\")."
+    ]
+    if diff_stat:
+        parts.append(f"Diff stat:\n{diff_stat}")
+    if check_summary:
+        parts.append(f"Check results:\n{check_summary}")
+    if partial:
+        parts.append(f"Reviewer {reviewer.id}'s partial findings:\n{partial}")
+    if worker.result:
+        parts.append(f"Worker's report:\n{worker.result}")
+    return "\n\n".join(parts)
+
+
 def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     """A reviewer of a piped branch stopped without a verdict, which would
-    leave its worker in ``pipeline='reviewing'`` for good. Start one fallback
-    review with ``cfg.reviewer``; if this was already the fallback (another
-    reviewer of the same commit stopped the same way), or it can't start, take
-    the branch out of the pipeline and tell the supervisor. Returns whether
-    the pipeline handled it (so the generic "stopped without" notice isn't
-    sent as well)."""
+    leave its worker in ``pipeline='reviewing'`` for good. Escalates only as
+    needed:
+    1. Liveness: ignore if a command is still running or its transcript was
+       written to recently.
+    2. Reopen the dead reviewer's own recorded conversation once with a short
+       verdict prompt.
+    3. For a small diff, hand the supervisor a ready-made summary instead of
+       spawning another reviewer.
+    4. Otherwise start one fallback review (``cfg.reviewer``) reusing the
+       commit's cached check results and the first reviewer's partial
+       findings."""
+    import time
+
     worker = piped_worker(db, ws)
     if worker is None or worker.pipeline != "reviewing":
         return False
+    if agents.command_running(db, reviewer) or (
+        agents.is_alive(reviewer) and agents.transcript_active(reviewer)
+    ):
+        return False
+    if not os.path.isdir(ws.path):
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        _tell(db, worker.parent_id,
+              f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
+              f"stopped without a verdict, and the branch's worktree {ws.path} no longer exists, "
+              f"so nothing is left to review or merge. remove_workspace(\"{ws.id}\") clears "
+              "its record.", reviewer.id)
+        return True
     try:
         cfg = load_repo_config(ws.repo_root)
     except ValueError:
@@ -315,27 +441,49 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     tried = any(a.id != reviewer.id and a.mode == "review" and a.result is None
                 and a.unreported_noted and a.review_sha == reviewer.review_sha
                 for a in db.list_agents(ws.id))
+    if not tried and not agents.is_alive(reviewer) and not reviewer.reopened_at:
+        try:
+            if agents.reopen_reviewer(db, reviewer, ws):
+                db.update_agent(reviewer.id, reopened_at=time.time(), unreported_noted=None)
+                return True
+        except agents.AgentError:
+            pass
+    if not reviewer.unreported_noted:
+        db.update_agent(reviewer.id, unreported_noted=int(time.time()))
+    check_summary = _cached_check_summary(db, ws, cfg, reviewer)
+    partial = _partial_findings(reviewer)
+    diff_stat = _small_diff_stat(ws)
+    if diff_stat is not None:
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        agents.close_later(reviewer.id)
+        _tell(db, worker.parent_id,
+              _supervisor_review_summary(ws, worker, reviewer, diff_stat, check_summary, partial),
+              reviewer.id)
+        return True
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if not tried and parent is not None:
+        profile, reason = _fallback_reviewer(cfg, reviewer)
+        focus_parts = [f"Fallback review ({reason})."]
+        if partial:
+            focus_parts.append(
+                f"Earlier reviewer {reviewer.id} ({reviewer.profile}) stopped without a verdict; "
+                f"its partial findings:\n{partial}"
+            )
         try:
-            agents.request_review(db, parent, ws, cfg.reviewer, cfg=cfg)
+            agents.request_review(
+                db, parent, ws, profile, focus="\n\n".join(focus_parts),
+                cfg=cfg, check_summary=check_summary,
+            )
             agents.close_later(reviewer.id)
             return True
         except agents.AgentError:
             pass
     db.update_agent(worker.id, pipeline=None)
     _escalate(db, ws, worker)
-    if not os.path.isdir(ws.path):
-        _tell(db, worker.parent_id,
-              f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
-              f"stopped without a verdict, and the branch's worktree {ws.path} no longer exists, "
-              f"so nothing is left to review or merge. remove_workspace(\"{ws.id}\") clears "
-              "its record.", reviewer.id)
-        return True
     _tell(db, worker.parent_id,
-          f"[brindle pipeline] review of `{ws.branch}` never came back: reviewer {reviewer.id} "
-          f"stopped without a verdict. Review it yourself with workspace_diff, then "
-          f"merge_workspace.", reviewer.id)
+          _supervisor_review_summary(ws, worker, reviewer, None, check_summary, partial),
+          reviewer.id)
     return True
 
 
