@@ -101,6 +101,7 @@ class Pricer:
         self.repo_root = repo_root
         self.extra = pricing.repo_overrides(repo_root)
         self._profiles: dict[str, Price | None] = {}
+        self._models: dict[str, str | None] = {}
 
     def profile(self, name: str | None) -> Price | None:
         if not name:
@@ -108,6 +109,18 @@ class Pricer:
         if name not in self._profiles:
             self._profiles[name] = pricing.profile_price(name, self.repo_root, self.extra)
         return self._profiles[name]
+
+    def profile_model(self, name: str | None) -> str | None:
+        if not name:
+            return None
+        if name not in self._models:
+            from brindle.profiles import load_profile
+
+            try:
+                self._models[name] = load_profile(name, self.repo_root).model
+            except Exception:
+                self._models[name] = None
+        return self._models[name]
 
     def row(self, row: HistoryEntry) -> Priced | None:
         """``row`` in dollars, or None when it carries no tokens."""
@@ -120,7 +133,8 @@ class Pricer:
         total = tokens_total(row.tokens)
         if not isinstance(d, dict) or total <= 0:
             return None
-        model = d.get("model") if isinstance(d.get("model"), str) else None
+        raw = d.get("model") if isinstance(d.get("model"), str) else None
+        model = (raw if raw and raw != "unknown" else None) or self.profile_model(row.profile) or raw
         price = pricing.price_for(model, self.extra) or self.profile(row.profile)
         dollars = None
         if price is not None:
@@ -156,7 +170,8 @@ class Summary:
 
 
 def model_label(p: Priced) -> str:
-    return p.model or (f"profile {p.row.profile}" if p.row.profile else "unknown model")
+    model = p.model if p.model and p.model != "unknown" else None
+    return model or (f"profile {p.row.profile}" if p.row.profile else "unknown model")
 
 
 def summary(db: DB, repo_root: str | None, now: float | None = None, days: int = DAYS) -> Summary:
