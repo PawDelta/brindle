@@ -311,6 +311,16 @@ def user_settings() -> dict:
     return _read_json(user_config_path())
 
 
+SUPERVISOR_KEY = "supervisor"      # ~/.brindle/config.json: the CLI the person last picked for the supervisor
+
+
+def supervisor_pick() -> str | None:
+    """The supervisor CLI this person last picked (in the picker or with
+    ``-s``), or None before the first pick."""
+    pick = user_settings().get(SUPERVISOR_KEY)
+    return pick if isinstance(pick, str) and pick else None
+
+
 def set_user(key: str, value: object) -> Path:
     """Set one key in ``~/.brindle/config.json`` (other keys are kept)."""
     path = user_config_path()
