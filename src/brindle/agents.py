@@ -134,7 +134,9 @@ PERMISSION_GUIDANCE = (
     "Never `cd` into or read from the main checkout ({root}): it isn't yours, and it "
     "pauses you for approval. This worktree is already your isolated copy: don't create "
     "or enter another one (no EnterWorktree, no `git worktree add`). Write files with your Edit and Write tools, never with "
-    "shell heredocs or scripts, and don't write to /tmp."
+    "shell heredocs or scripts, and don't write to /tmp.\n"
+    "Waiting: to wait on something (your supervisor, a long command), wait for brindle's "
+    "messages or use the Monitor tool; don't poll with short cron loops."
 )
 
 
@@ -1468,6 +1470,10 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None) -> str
                    server=server_of(agent))
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id)
+    from brindle import login_pause
+
+    if login_pause.holding(db, agent.id):
+        return "queued"  # its session waits on an expired cloud login
     if _deliver_to_inbox(db, agent, message_id, text, sender_id):
         return "delivered"
     reconcile(db, agent)
@@ -1559,10 +1565,13 @@ def flush(db: DB, agent_id: str) -> bool:
     something was delivered."""
     from brindle import inbox
     from brindle import launch_health
+    from brindle import login_pause
 
     agent = db.get_agent(agent_id)
     if agent is None or agent.headless:
         return False  # its runner takes messages from the inbox itself
+    if login_pause.holding(db, agent_id):
+        return False  # its session waits on an expired cloud login; resuming flushes it
     if inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
