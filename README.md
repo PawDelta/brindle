@@ -610,6 +610,8 @@ wins. When every candidate is out, the repo's `default_agent` runs. The reply sa
 what was picked and why, e.g. `weight medium -> developer (Codex at 93%, skipped developer-codex)`.
 An `agent_profile` you pass, or a milestone's `profile`, always wins over weight.
 
+The supervisor runs on your Claude Code model. If your organisation's Claude Code managed settings pin the model (e.g. to Sonnet), that applies to the brindle supervisor too. Supervising goes best on Opus (or Fable where available), so if your org allows it, switch in the supervisor's own session with `/model`. Worker profiles set their own model and aren't affected.
+
 Provisioning and routing also check explicit models against supported read-only
 catalogs, with the managed model, stored keys and the worker's filtered pane
 environment. A model absent from a complete authoritative catalog is rejected
