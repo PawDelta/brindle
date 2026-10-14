@@ -346,7 +346,7 @@ def assume_role(sts: Sts, region: str, role_arn: str, id_token: str, now: float)
     c = claims(id_token)
     status, raw = sts(f"https://sts.{region}.amazonaws.com/", {
         "Action": "AssumeRoleWithWebIdentity", "Version": "2011-06-15", "RoleArn": role_arn,
-        "RoleSessionName": session_name(str(c.get("member") or c.get("sub") or ""),str(c.get("fid") or "")),
+        "RoleSessionName": session_name(str(c.get("member") or c.get("sub") or ""), str(c.get("fid") or "")),
         "WebIdentityToken": id_token, "DurationSeconds": str(AWS_SESSION_SECONDS)})
     leaves = _xml(raw)
     if status != 200:
@@ -541,16 +541,16 @@ def credential(cloud: str, org_id: str | None = None, *, client=None, store=None
         cur = {}
     if not cur.get("refresh_token"):
         raise CredentialError(LOGIN_LINE)
+    client = client or auth.Client(cur.get("base_url"))
     org_id = org_id or cur.get("org_id")
     if not org_id:
         try:  # a personal sign-in stores no org: use the entitlement's own
-            org_id = license.current(refresh=False, store=store).org_id
+            org_id = license.current(store=store, client=client).org_id
         except Exception:  # noqa: BLE001 - no usable entitlement
             pass
     if not org_id:
         raise CredentialError("no organization given; pass --org ID")
     d = org_dir(org_id, create=True)
-    client = client or auth.Client(cur.get("base_url"))
     now = time.time() if now is None else now
     with mint_lock(d):
         # Under the lock: the process that held it may have just minted.
