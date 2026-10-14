@@ -491,12 +491,14 @@ def org_setup(repo_root: str | None = None, store=None, client=None):
     """(org id, AgentSetup) for the signed-in org; personal policies supply
     only federated Claude setup. None when there is no applicable setup;
     ``UNAVAILABLE`` when it couldn't be had, which says nothing about the setup."""
-    from brindle.pro import license, team_policy
+    from brindle.pro import credentials, license, team_policy
 
     try:
+        store = store or credentials.default_store()
         ent = license.current(store=store, client=client)
         personal = team_policy.FEATURE not in ent.features
-        if personal and ent.policy_version <= 0:
+        if personal and (ent.policy_version <= 0 or (store.load() or {}).get("org_id")
+                         or ent.plan in ("team", "enterprise")):
             return None
         p = team_policy.current_policy(ent, client, store, repo_root)
         setup = p.agent_setup
