@@ -185,7 +185,8 @@ def _pause(db: DB, root: Agent, culprit: Agent, s: cloud_login.LoginStatus,
     _interrupt(_members(db, root, panes), root, away=not active)
     noticed = None
     # The chat notice goes out before the session holds its messages.
-    if active and _send(db, root.id, f"The cloud login expired at {when} and needs you to renew "
+    # With no tmux session there is no bar to pin it in: the chat is all there is.
+    if (active or session is None) and _send(db, root.id, f"The cloud login expired at {when} and needs you to renew "
                         f"it: run `{s.refresh_cmd}`. Messages to this session's agents wait "
                         "until it's back; brindle keeps checking and says when to continue."):
         noticed = "chat"

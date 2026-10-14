@@ -294,10 +294,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at REAL
 );
 CREATE INDEX IF NOT EXISTS tasks_repo_root ON tasks(repo_root);
--- The one `brindle watch --sidebar` pane per interactive session root (see
--- agents.sidebar_follow): its tmux pane id, so any session in that root's
--- tree can find and relocate it instead of starting a second one. Keyed by
--- root, not repo, so a second supervisor in the same repo gets its own.
 -- A session's cloud login (brindle.login_pause), keyed by its root: when it
 -- was last looked at, and while only the person can renew it (state
 -- 'auth_paused'), what they run and how they were told. Back at 'ok', the
@@ -313,6 +309,10 @@ CREATE TABLE IF NOT EXISTS login_state (
     next_check REAL,               -- the next re-check while paused
     delay REAL                     -- the backoff before it
 );
+-- The one `brindle watch --sidebar` pane per interactive session root (see
+-- agents.sidebar_follow): its tmux pane id, so any session in that root's
+-- tree can find and relocate it instead of starting a second one. Keyed by
+-- root, not repo, so a second supervisor in the same repo gets its own.
 CREATE TABLE IF NOT EXISTS sidebars (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     pane TEXT NOT NULL,

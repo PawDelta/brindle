@@ -69,11 +69,12 @@ def test_a_refreshable_login_is_renewed_without_a_notice(db, world, expires_in, 
 
 
 @pytest.mark.parametrize("active", [False, True])
-def test_a_login_only_the_person_can_renew_pauses_and_notifies_once(db, world, active):
+def test_a_login_only_the_person_can_renew_pauses_and_notifies_once(db, world, active, monkeypatch):
     world.active, world.login_ok, world.screens["@1"] = active, False, EXPIRED
     sweep(db, world, T0)
     assert login_pause.paused(db, "boss")
-    db.enqueue("w1", "next task", "boss")
+    monkeypatch.setattr(agents, "_deliver_to_inbox", lambda *a: world.pasted.append("inbox") or True)
+    assert agents._send_message(db, db.get_agent("w1"), "next task", "boss") == "queued"
     world.screens["@1"] = BUSY                     # a cron turn starts on its own
     for at in (T0 + 30, T0 + 61, T0 + 181, T0 + 421):   # failed re-checks, backing off
         sweep(db, world, at)
