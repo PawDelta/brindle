@@ -241,8 +241,6 @@ def setup_model(
     return _ready(model)
 
 
-ensure_model = setup = ensure = setup_model
-
 __all__ = [
     "DEFAULT_CONTEXT_TOKENS",
     "DEFAULT_HOST",
@@ -251,14 +249,11 @@ __all__ = [
     "MIN_MEMORY_GB",
     "MODEL_MEMORY_GB",
     "SetupResult",
-    "ensure",
-    "ensure_model",
     "install_ollama",
     "is_tty",
     "machine_memory_gb",
     "pull_model",
     "required_memory_gb",
-    "setup",
     "setup_model",
     "verify_tags",
 ]
