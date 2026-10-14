@@ -34,7 +34,34 @@ class _App(typer.Typer):
             raise SystemExit(1)
 
 
-app = _App(add_completion=False, help="""brindle: run coding agents in parallel, each on its own git branch.
+SUPERVISOR_FLAGS = ("-s", "--supervisor")
+
+
+def _bare_supervisor_flag(args: list[str], commands) -> list[str]:
+    """``args`` with picker.PICK after each ``-s``/``--supervisor`` that has
+    no CLI after it (it's last, or an option or a command follows), so a bare
+    ``brindle -s`` opens the picker: a Typer option can't take an optional
+    value."""
+    from brindle.picker import PICK
+
+    out = []
+    for i, a in enumerate(args):
+        out.append(a)
+        if a == "--":
+            return out + list(args[i + 1:])
+        if a in SUPERVISOR_FLAGS:
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            if nxt is None or nxt.startswith("-") or nxt in commands:
+                out.append(PICK)
+    return out
+
+
+class _PickerGroup(typer.core.TyperGroup):
+    def parse_args(self, ctx, args):
+        return super().parse_args(ctx, _bare_supervisor_flag(args, self.commands))
+
+
+app = _App(cls=_PickerGroup, add_completion=False, help="""brindle: run coding agents in parallel, each on its own git branch.
 
 Run `brindle` with no arguments to open (or reopen) a supervisor chat here, with
 the live dashboard underneath. Outside a git repo it starts a scratch session;
@@ -177,7 +204,7 @@ def demo(
     typer.echo(f"demo repo: {root}")
     os.chdir(root)
     start(prompt=None, provider=None, attach=attach, watch=True,
-          autopilot=True, branch=None, worktree=None)
+          autopilot=True, branch=None, worktree=None, demo=True)
 
 
 @app.command()
@@ -193,6 +220,7 @@ def new(
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Don't fetch the base branch first."),
     no_setup: bool = typer.Option(False, "--no-setup", help="Skip setup commands."),
     attach: bool = typer.Option(False, "--attach", help="Attach to the tmux session afterward."),
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
     provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Create a worktree on a new branch and start a supervisor in it."""
@@ -209,6 +237,12 @@ def new(
             _fail("--base can't be combined with --pr (the PR's base branch is used)")
     elif not branch:
         _fail("missing BRANCH (or pass --pr <number>)")
+    if not no_agent:
+        try:
+            root = git.main_repo_root(os.getcwd())
+        except git.GitError:
+            root = None
+        provider = _resolve_supervisor(root, provider, yes=yes)
     db = DB()
     if pr is not None:
         created = _run(workspaces.create_from_pr, db, os.getcwd(), pr, run_setup=not no_setup)
@@ -258,7 +292,9 @@ def start(
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
     provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
+    demo: Annotated[bool, typer.Option("--demo-run", hidden=True)] = False,
 ) -> None:
     """Start a fresh supervisor chat here, with the dashboard alongside. A launch only ever starts a supervisor; it starts the other agents itself.
 
@@ -304,6 +340,7 @@ def start(
     if provider and provider in NOT_SUPERVISOR:
         _fail(f"the {provider} provider can't run the supervisor; use one of: "
               f"{', '.join(SUPERVISOR_PROVIDERS)}")
+    provider = _resolve_supervisor(ws.repo_root, provider, yes=yes, demo=demo)
     _preflight(agents.SUPERVISOR, provider, ws.repo_root)
     _trust_codex_hook(ws.repo_root)
     # Nothing slow before the chat starts: the paused session's leftover
@@ -356,6 +393,64 @@ def _preflight(agent: str, provider: Optional[str], repo_root: str) -> None:
         for p in problems:
             typer.secho(f"✗ {p}", fg="red", err=True)
         _fail("brindle can't start yet. `brindle doctor` checks everything else.")
+
+
+def _is_ci_env() -> bool:
+    for key in ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD", "JENKINS_URL", "BRINDLE_CI"):
+        val = (os.environ.get(key) or "").strip().lower()
+        if val and val not in ("0", "false", "no", "off"):
+            return True
+    return False
+
+
+def _can_prompt(yes: bool = False, demo: bool = False) -> bool:
+    return bool(sys.stdin.isatty() and yes is not True and demo is not True and not _is_ci_env())
+
+
+def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
+                        yes: bool = False, demo: bool = False) -> Optional[str]:
+    """The CLI the supervisor runs on (None: its profile's). ``-s CLI`` picks
+    it and is remembered; a bare ``-s`` opens the picker. Otherwise the
+    person's last pick, asked again in the picker only on the first launch or
+    when that pick isn't signed in or allowed, and only where brindle may ask.
+    A CLI the org doesn't allow this person is refused, whichever way it came."""
+    from brindle import doctor as doctor_mod, picker
+    from brindle.config import SUPERVISOR_KEY, set_user, supervisor_pick
+    from brindle.pro import team_policy
+
+    acc = team_policy.access(repo_root)
+    pick = supervisor_pick()
+
+    def ask() -> str:
+        chosen = picker.pick_supervisor(acc, pick)
+        if chosen is None:
+            typer.echo("No supervisor picked; nothing was started.")
+            raise typer.Exit(1)
+        return chosen
+
+    if provider == picker.PICK:
+        if not _can_prompt(yes, demo):
+            _fail("`brindle -s` on its own opens the supervisor picker, which needs a terminal; "
+                  "name the CLI instead, e.g. `brindle -s codex`")
+        provider = ask()
+    elif provider:
+        why = acc.refusal(provider)
+        if why:
+            _fail(f"can't run the supervisor on {provider}: {why}")
+    elif _can_prompt(yes, demo) and not (pick and acc.allows(pick)
+                                         and pick in doctor_mod.signed_in_providers()):
+        provider = ask()
+    elif pick and acc.allows(pick):
+        provider = pick
+    final = provider or _run(load_profile, agents.SUPERVISOR, repo_root).provider
+    why = acc.refusal(final)
+    if why:
+        _fail(f"can't run the supervisor on {final}: {why}. Pick another with `brindle -s`.")
+    if provider:
+        if provider != pick:
+            set_user(SUPERVISOR_KEY, provider)
+        typer.echo(f"Supervisor: {provider} (your pick) · brindle -s to change")
+    return provider
 
 
 def _trust_codex_hook(repo_root: str) -> None:
@@ -753,6 +848,7 @@ def default(
         None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
     ),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
     provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
@@ -774,7 +870,7 @@ def default(
             continue_cmd(session_id=None, attach=True)
         else:
             start(prompt=None, provider=provider, attach=True, watch=True,
-                  autopilot=autopilot, branch=None, worktree=None)
+                  autopilot=autopilot, branch=None, worktree=None, yes=yes)
 
 
 @app.command()
@@ -788,12 +884,13 @@ def supervisor(
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
     provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Start an explicit supervisor session to coordinate coding agents."""
     provider = provider or provider_alias
     start(prompt=prompt, provider=provider, attach=attach, watch=watch,
-          autopilot=autopilot, branch=branch, worktree=worktree)
+          autopilot=autopilot, branch=branch, worktree=worktree, yes=yes)
 
 
 def _session_root(db: DB) -> str:

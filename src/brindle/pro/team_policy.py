@@ -1106,6 +1106,89 @@ class ProPolicy(PolicyPlugin):
         return allow()
 
 
+CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "antigravity": "Google Antigravity"}
+
+
+@dataclass(frozen=True)
+class Access:
+    """The CLIs and models this person may use here: the org's
+    ``allowed_providers`` and ``allowed_models`` (the member's effective
+    policy, so narrowed by role and member), minus the CLIs an exclusive
+    managed routing gives no route, and whether personal API keys are denied.
+    ``error`` (the policy applies but can't be read) allows nothing. The
+    supervisor picker, the workers screen and ``-s`` all ask this, and only
+    this, what to offer and what to refuse."""
+    org_id: str | None = None
+    allowed_providers: tuple[str, ...] | None = None    # None: any CLI
+    allowed_models: tuple[str, ...] | None = None       # None: any model
+    deny_personal_keys: bool = False
+    unrouted: dict = field(default_factory=dict)        # CLI -> why the managed routing refuses it
+    error: str | None = None
+
+    def refusal(self, provider: str) -> str | None:
+        """Why this person may not run ``provider``'s CLI, or None."""
+        if self.error:
+            return self.error
+        if self.allowed_providers is not None and provider not in self.allowed_providers:
+            return (f"org {self.org_id} doesn't allow {CLI_NAMES.get(provider, provider)}; it allows "
+                    f"{', '.join(self.allowed_providers) or 'no CLIs'}")
+        return self.unrouted.get(provider)
+
+    def allows(self, provider: str) -> bool:
+        return self.refusal(provider) is None
+
+    def allows_model(self, model: str | None) -> bool:
+        """Whether ``model`` may be used, by check_assign's matching."""
+        if self.error:
+            return False
+        if self.allowed_models is None:
+            return True
+        from brindle import pricing
+
+        return bool(model) and (model in self.allowed_models or pricing.normalize(model)
+                                in {pricing.normalize(m) for m in self.allowed_models})
+
+    def clis(self, installed: list[str] | None = None) -> list[str]:
+        """The CLIs to offer: every installed one when nothing narrows the
+        choice, else each one the org allows (installed or not: the picker
+        sets it up)."""
+        if self.error:
+            return []
+        if self.allowed_providers is None and not self.unrouted:
+            if installed is None:
+                from brindle import doctor
+
+                installed = doctor.signin_providers()
+            return list(installed)
+        return [p for p in CLI_NAMES if self.allows(p)]
+
+
+def access(repo_root: str | None) -> Access:
+    """:class:`Access` for this person in ``repo_root``: everything when
+    there is no team org."""
+    from types import SimpleNamespace
+
+    from brindle.pro import managed_models
+
+    p = ProPolicy(repo_root or "").policy()
+    if isinstance(p, Decision):
+        return Access() if p.allowed else Access(error=p.reason)
+    try:
+        m = managed_models.current(repo_root)
+    except managed_models.ManagedUnavailable as e:
+        return Access(org_id=p.org_id, error=str(e))
+    unrouted = {}
+    if m is not None:
+        for cli, label in CLI_NAMES.items():
+            # A bare CLI sets no key and no endpoint: only its route is judged.
+            bare = SimpleNamespace(name=cli, provider=cli, env={}, api_key_env=None, base_url=None)
+            if managed_models.refusal(m, bare):
+                unrouted[cli] = f"org {m.org_id} manages its agents' routes and gives {label} none"
+    deny_keys = m.deny_personal_keys if m is not None else p.deny_personal_keys
+    return Access(org_id=p.org_id, allowed_providers=p.allowed_providers,
+                  allowed_models=p.allowed_models, deny_personal_keys=deny_keys, unrouted=unrouted)
+
+
 def make(repo_root: str) -> ProPolicy:
     return ProPolicy(repo_root)
 
