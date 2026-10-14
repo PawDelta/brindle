@@ -108,6 +108,20 @@ def test_a_file_the_person_edited_is_left_for_resume(db, repo):
     assert goals(repo) == edited
 
 
+def test_an_unedited_file_resumes_to_the_same_goal(db, repo):
+    ws = workspaces.adopt_root(db, str(repo))
+    add_agent(db, ws, "boss")
+    db.add_autopilot("boss")
+    ms = [("Both", "true\nfalse", "## not a milestone\ncheck: not a check\n\\ kept"),
+          ("Ticks", "echo `date`", None)]
+    autopilot.set_goal(db, "boss", "Edge cases", ms, "# not the goal")
+    pass_first(db)
+    autopilot.sync_goals_file(db, "boss")
+    autopilot.reload_goals_file(db, "boss")
+    assert [(m.title, m.check_cmd, m.detail) for m in db.milestones("boss")] == ms
+    assert db.milestones("boss")[0].status == "passed" and db.get_autopilot("boss").detail == "# not the goal"
+
+
 def test_a_sync_failure_is_logged_not_raised(db, repo, monkeypatch, caplog):
     ws = load(db, repo)
     monkeypatch.setattr(autopilot, "rewrite_goals", lambda *a: 1 / 0)

@@ -1231,6 +1231,13 @@ class DB:
         row = self.conn.execute("SELECT * FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
         return _load(Autopilot, row) if row else None
 
+    def legacy_goal_owners(self) -> list[str]:
+        """Sessions whose goal was loaded from a shared goals.md before each
+        session had its own file (``goals_file`` set), newest first."""
+        rows = self.conn.execute(
+            "SELECT root_id FROM autopilot WHERE goals_file IS NOT NULL ORDER BY created_at DESC")
+        return [r["root_id"] for r in rows]
+
     def add_autopilot(self, root_id: str, enabled: bool = True) -> None:
         with self.tx() as c:
             c.execute(

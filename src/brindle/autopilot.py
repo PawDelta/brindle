@@ -205,14 +205,50 @@ class Plan:
     milestones: list[tuple]   # (title, check, detail[, profile[, repo]])
 
 
+PROFILE_RE = re.compile(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", re.I)
+REPO_RE = re.compile(r"^\s*repo:\s*`?([\w.-]+)`?\s*$", re.I)
+CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*`?(.+?)`?\s*$", re.I)
+FENCED_CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*$", re.I)   # the command is the fenced block below
+FENCE_RE = re.compile(r"^(`{3,})")
+
+
+def _fences(lines: list[str]) -> dict[int, tuple[int, int]]:
+    """Fenced blocks: opening line index -> (closing line index, index after
+    the block). Nothing inside a block is a heading, field or status line."""
+    out, i = {}, 0
+    while i < len(lines):
+        if m := FENCE_RE.match(lines[i]):
+            close = re.compile(rf"^`{{{len(m.group(1))},}}\s*$")
+            j = next((k for k in range(i + 1, len(lines)) if close.match(lines[k])), len(lines))
+            out[i] = (j, min(j + 1, len(lines)))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
 def parse_goals(text: str) -> Plan | None:
     """``# Goal`` then ``## Milestone`` sections, each with an optional
     ``check: <command>`` line (``check@<alias>: <command>`` runs it in a repo
     attached to the session; so does a ``repo: <alias>`` line) and a
-    ``profile: <name>`` line. Returns None when there's no goal heading."""
+    ``profile: <name>`` line. A bare ``check:`` line followed by a fenced
+    block takes the block as the command (any number of lines). A detail
+    line starting with a backslash is that line without it, so detail can
+    hold text that would otherwise read as a heading or a field. Returns None
+    when there's no goal heading."""
     goal, detail_lines = None, []
     milestones: list[list] = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    fences = _fences(lines)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        detail = milestones[-1][2] if milestones else detail_lines
+        if i in fences:   # a code block in the detail: kept verbatim
+            detail.extend(lines[i:fences[i][1]])
+            i = fences[i][1]
+            continue
+        i += 1
         if m := re.match(r"^#\s+(.+?)\s*$", line):
             if goal is None:
                 goal = m.group(1)
@@ -222,24 +258,23 @@ def parse_goals(text: str) -> Plan | None:
             continue
         if milestones and STATUS_RE.match(line):
             continue   # written by sync_goals_file: information only, never read back
-        if milestones and milestones[-1][3] is None and (
-            m := re.match(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", line, re.I)
-        ):
+        if milestones and milestones[-1][3] is None and (m := PROFILE_RE.match(line)):
             milestones[-1][3] = m.group(1)
             continue
-        if milestones and milestones[-1][4] is None and (
-            m := re.match(r"^\s*repo:\s*`?([\w.-]+)`?\s*$", line, re.I)
-        ):
+        if milestones and milestones[-1][4] is None and (m := REPO_RE.match(line)):
             milestones[-1][4] = m.group(1)
             continue
-        if milestones and milestones[-1][1] is None and (
-            m := re.match(r"^\s*check(?:@([\w.-]+))?:\s*`?(.+?)`?\s*$", line, re.I)
-        ):
+        if milestones and milestones[-1][1] is None and i in fences and (m := FENCED_CHECK_RE.match(line)):
+            close, after = fences[i]
+            milestones[-1][1] = "\n".join(lines[i + 1:close])
+            i = after
+        elif milestones and milestones[-1][1] is None and (m := CHECK_RE.match(line)):
             milestones[-1][1] = m.group(2)
-            if m.group(1):
-                milestones[-1][4] = m.group(1)
+        else:
+            detail.append(line[1:] if line.startswith("\\") else line)
             continue
-        (milestones[-1][2] if milestones else detail_lines).append(line)
+        if m.group(1):
+            milestones[-1][4] = m.group(1)
     if not goal:
         return None
     clean = lambda lines: "\n".join(lines).strip() or None  # noqa: E731
@@ -256,26 +291,45 @@ def _item(title: str, check: str | None, detail: str | None,
     return item
 
 
+def _escaped(detail: str) -> list[str]:
+    """``detail``'s lines, each that ``parse_goals`` would read as something
+    other than detail text behind a backslash."""
+    def special(line: str) -> bool:
+        return (line.startswith(("\\", "#")) or any(r.match(line) for r in (
+            FENCE_RE, STATUS_RE, PROFILE_RE, REPO_RE, CHECK_RE, FENCED_CHECK_RE)))
+    return ["\\" + line if special(line) else line for line in detail.splitlines()]
+
+
+def _check_lines(check: str, repo: str | None) -> list[str]:
+    key = f"check@{repo}:" if repo else "check:"
+    m = CHECK_RE.match(f"{key} {check}")
+    if m and m.group(2) == check:
+        return [f"{key} {check}"]
+    # Anything a one-line field can't hold exactly (several lines, edge
+    # backticks or spaces) goes in a fenced block longer than any run inside.
+    fence = "`" * max(3, 1 + max((len(r) for r in re.findall(r"`+", check)), default=0))
+    return [key, fence, *check.split("\n"), fence]
+
+
 def render_goals(plan: Plan, statuses: list[str]) -> str:
     """``plan`` as goals.md text that ``parse_goals`` reads back as ``plan``,
     with ``statuses`` (one ``status_line`` per milestone)."""
     out = [f"# {plan.goal}", ""]
     if plan.detail:
-        out += [plan.detail, ""]
+        out += [*_escaped(plan.detail), ""]
     for item, status in zip(plan.milestones, statuses):
         title, check, detail = item[:3]
         profile = item[3] if len(item) > 3 else None
         repo = item[4] if len(item) > 4 else None
-        out.append(f"## {title}")
+        out += [f"## {title}", status]
         if check:
-            out.append(f"check@{repo}: {check}" if repo else f"check: {check}")
+            out += _check_lines(check, repo)
         elif repo:
             out.append(f"repo: {repo}")
         if profile:
             out.append(f"profile: {profile}")
-        out.append(status)
         if detail:
-            out.append(detail)
+            out += _escaped(detail)
         out.append("")
     return "\n".join(out)
 
@@ -338,14 +392,42 @@ def write_goals_file(db: DB, root_id: str) -> None:
                 return
         except OSError:
             pass
+        text = render_goals(plan, [status_line(m) for m in db.milestones(root_id)])
+        if parse_goals(text) != plan:
+            # The file can't say this goal exactly (a title over several
+            # lines, say): no file rather than one a resume would misread.
+            log.warning("brindle: session %s's goal can't be written to its goal file", root_id)
+            path.unlink(missing_ok=True)
+            return
         _goals_dir(path)
-        _replace(path, render_goals(plan, [status_line(m) for m in db.milestones(root_id)]))
+        _replace(path, text)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't write the session's goal file")
 
 
+def _adopt_legacy(db: DB, root_id: str) -> None:
+    """A session from before each session had its own file kept its goal in
+    the shared goals.md it was loaded from (``goals_file``). Give it its own
+    file, taking the shared one along when it still says this session's goal
+    (so no new session imports it), and forget the shared path."""
+    ap = db.get_autopilot(root_id)
+    if not ap or not ap.goals_file:
+        return
+    own, legacy = session_goals_path(db, root_id), Path(ap.goals_file)
+    try:
+        plan = parse_goals(legacy.read_bytes().decode("utf-8"))
+        if own is not None and ap.goal and plan is not None and plan.goal == ap.goal:
+            _goals_dir(own)
+            os.replace(legacy, own)
+    except OSError:
+        pass   # gone already (adopted by an older owner of the same file), or unreadable
+    db.update_autopilot(root_id, goals_file=None)
+    write_goals_file(db, root_id)   # the file says exactly the session's goal
+
+
 def remove_goals_file(db: DB, root_id: str) -> None:
     """The session's goal is done, handed over or dropped: remove its file."""
+    _adopt_legacy(db, root_id)
     path = session_goals_path(db, root_id)
     if path is not None:
         try:
@@ -358,6 +440,7 @@ def reload_goals_file(db: DB, root_id: str) -> None:
     """A session resumes: take up edits the person made to its goal file.
     Milestones that keep their title and check keep their results. Never raises."""
     try:
+        _adopt_legacy(db, root_id)
         path = session_goals_path(db, root_id)
         if path is None or not path.is_file() or not db.get_autopilot(root_id):
             return
@@ -370,8 +453,14 @@ def reload_goals_file(db: DB, root_id: str) -> None:
 
 def _claim_seed(db: DB, root_id: str, ws: Workspace) -> Plan | None:
     """Move a hand-written ``.brindle/goals.md`` to this session's own file.
-    The move is atomic, so of sessions starting together only one gets it."""
+    The move is atomic, so of sessions starting together only one gets it.
+    A goals.md an existing session loaded its goal from (before each session
+    had its own file) is that session's: it moves there instead."""
     seed, own = goals_path(ws.path), session_goals_path(db, root_id)
+    for other in db.legacy_goal_owners():   # newest first: the newest owner takes the file
+        ap = db.get_autopilot(other)
+        if other != root_id and ap and ap.goals_file and Path(ap.goals_file).resolve() == seed.resolve():
+            _adopt_legacy(db, other)
     if own is None or not seed.is_file():
         return None
     try:
@@ -415,9 +504,11 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
     the rest byte for byte. None when the file's milestones don't number
     ``len(lines_for)``."""
     lines = text.splitlines(keepends=True)
+    inside = {k for start, (_, after) in _fences([l.rstrip("\r\n") for l in lines]).items()
+              for k in range(start, after)}
     sections: list[list[int]] = []   # line indexes per milestone, heading first
     for i, line in enumerate(lines):
-        if re.match(r"^##\s+(.+?)\s*$", line.rstrip("\r\n")):
+        if i not in inside and re.match(r"^##\s+(.+?)\s*$", line.rstrip("\r\n")):
             sections.append([i])
         elif sections:
             sections[-1].append(i)
@@ -431,6 +522,9 @@ def rewrite_goals(text: str, lines_for: list[str]) -> str | None:
         kept: list[str] = []
         for j, line in enumerate(body):
             bare = line.rstrip("\r\n")
+            if idx[j] in inside:
+                kept.append(line)
+                continue
             if j and STATUS_RE.match(bare):
                 if not placed:
                     kept.append(new + (line[len(bare):] or eol))
@@ -459,6 +553,7 @@ def sync_goals_file(db: DB, root_id: str) -> None:
     edit is taken up when the session resumes). Never raises: a file we
     can't write must not fail a check."""
     try:
+        _adopt_legacy(db, root_id)
         ap = db.get_autopilot(root_id)
         root = db.get_agent(root_id)
         if not ap or not ap.enabled or not ap.goal or root is None \

@@ -45,8 +45,19 @@ def with_goal(db, checks=("test -f api.txt", "test -f ui.txt")):
 
 def test_enable_loads_goals_md(db, repo):
     (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "goals.md").write_text(GOALS)
+    seed = repo / ".brindle" / "goals.md"
     ws = workspaces.adopt_root(db, str(repo))
+    # A session from before per-session files, whose goal came from goals.md:
+    # a new session doesn't import that goal; the old one keeps it, in its own file.
+    seed.write_text("# Old goal\n\n## Old step\ncheck: true\n")
+    add_agent(db, ws, "old")
+    db.add_autopilot("old")
+    db.update_autopilot("old", goal="Old goal", goals_file=str(seed))
+    db.set_milestones("old", [("Old step", "true", None)])
+    add_agent(db, ws, "first")
+    assert autopilot.enable(db, "first", ws) is None and db.get_autopilot("first").goal is None
+    assert autopilot.parse_goals(autopilot.session_goals_path(db, "old").read_text()).goal == "Old goal"
+    seed.write_text(GOALS)
     add_agent(db, ws, "boss")
     plan = autopilot.enable(db, "boss", ws)
     assert plan and db.get_autopilot("boss").goal == "Settings page"
