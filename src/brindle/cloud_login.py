@@ -9,10 +9,14 @@ for an access token. Token values are never logged or returned.
 
 from __future__ import annotations
 
+import configparser
+import hashlib
 import json
 import os
 import subprocess
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,8 +24,7 @@ from typing import Mapping
 
 from brindle import model_access
 
-GCLOUD_TIMEOUT = 15.0
-GOOGLE_TOKEN_LIFETIME = 3600.0   # gcloud prints no expiry; Google access tokens last an hour
+CLI_TIMEOUT = 15.0
 
 _FLAGS = {"bedrock": "CLAUDE_CODE_USE_BEDROCK", "vertex": "CLAUDE_CODE_USE_VERTEX",
           "foundry": "CLAUDE_CODE_USE_FOUNDRY"}
@@ -55,7 +58,7 @@ def _epoch(value) -> float | None:
     except ValueError:
         pass
     try:
-        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.strip().replace("UTC", "Z").replace("Z", "+00:00"))
     except ValueError:
         return None
     if dt.tzinfo is None:
@@ -81,37 +84,100 @@ def _from_expiry(expires_at: float | None, refresh_cmd: str, now: float, missing
     return LoginStatus(True, expires_at, refresh_cmd, "logged in")
 
 
+def _aws_token_key(profile: str, config_path: Path) -> str | None:
+    """What the SSO cache file name is the SHA-1 of for ``profile``: its
+    sso_session name, or (legacy config) its sso_start_url; None when the
+    profile doesn't use SSO."""
+    cp = configparser.RawConfigParser()
+    try:
+        cp.read(config_path, encoding="utf-8")
+    except (OSError, configparser.Error):
+        return None
+    section = "default" if profile == "default" else f"profile {profile}"
+    if not cp.has_section(section):
+        return None
+    return cp.get(section, "sso_session", fallback=None) or cp.get(
+        section, "sso_start_url", fallback=None)
+
+
 def _aws(env: Mapping[str, str], home: Path, now: float) -> LoginStatus:
     profile = env.get("AWS_PROFILE") or "default"
     refresh = f"aws sso login --profile {profile}"
-    cache = home / ".aws" / "sso" / "cache"
-    expiries = [_epoch(d.get("expiresAt")) for d in _json_files(sorted(cache.glob("*.json")))
-                if isinstance(d, dict) and d.get("accessToken")]
-    expiries = [e for e in expiries if e is not None]
-    return _from_expiry(max(expiries, default=None), refresh, now, "no AWS SSO login found")
+    config = Path(env.get("AWS_CONFIG_FILE") or home / ".aws" / "config")
+    key = _aws_token_key(profile, config)
+    if key is None:
+        return LoginStatus(False, None, refresh, f"AWS profile {profile} is not an SSO profile")
+    token = home / ".aws" / "sso" / "cache" / (hashlib.sha1(key.strip().encode()).hexdigest() + ".json")
+    data = (_json_files([token]) or [None])[0]
+    expires = _epoch(data.get("expiresAt")) if isinstance(data, dict) and data.get("accessToken") else None
+    return _from_expiry(expires, refresh, now, "no AWS SSO login found for this profile")
 
 
-def _azure(home: Path, now: float) -> LoginStatus:
-    path = home / ".azure" / "accessTokens.json"
-    tokens = _json_files([path])
-    expiries = [_epoch(t.get("expires_on", t.get("expiresOn")))
-                for t in (tokens[0] if tokens and isinstance(tokens[0], list) else [])
-                if isinstance(t, dict)]
-    expiries = [e for e in expiries if e is not None]
-    return _from_expiry(max(expiries, default=None), "az login", now, "no Azure CLI login found")
+def _full_env(env: Mapping[str, str] | None) -> dict[str, str] | None:
+    """The environment for a CLI call: the supplied one over the ambient one,
+    or None (inherit) when the caller supplied none."""
+    return None if env is None else {**os.environ, **env}
 
 
-def _google(run, now: float) -> LoginStatus:
+def _azure_expiry(token: dict) -> float | None:
+    exp = _epoch(token.get("expires_on"))
+    if exp is not None:
+        return exp
+    try:   # "expiresOn" is a naive local time
+        return datetime.fromisoformat(str(token.get("expiresOn")).strip()).timestamp()
+    except ValueError:
+        return None
+
+
+def _azure(run, env, now: float) -> LoginStatus:
+    refresh = "az login"
+    try:
+        proc = run(["az", "account", "get-access-token", "--output", "json"],
+                   capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
+    except subprocess.TimeoutExpired:
+        return LoginStatus(False, None, refresh, "az timed out fetching an access token")
+    except OSError:
+        return LoginStatus(False, None, refresh, "az is not installed")
+    if proc.returncode == 0:
+        try:
+            token = json.loads(proc.stdout or "")
+        except ValueError:
+            token = None
+        exp = _azure_expiry(token) if isinstance(token, dict) else None
+        if exp is not None:
+            return _from_expiry(exp, refresh, now, "")
+    if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
+        return LoginStatus(False, None, refresh, "login expired")
+    return LoginStatus(False, None, refresh, "no Azure CLI login found")
+
+
+def tokeninfo_expiry(token: str, timeout: float = CLI_TIMEOUT) -> float | None:
+    """Seconds the Google access ``token`` has left, from Google's tokeninfo
+    endpoint (the token goes in the POST body, never a URL), or None."""
+    req = urllib.request.Request("https://oauth2.googleapis.com/tokeninfo",
+                                 data=urllib.parse.urlencode({"access_token": token}).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:   # noqa: S310 - fixed https URL
+            return float(json.load(r)["expires_in"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _google(run, env, now: float, expiry) -> LoginStatus:
     refresh = "gcloud auth application-default login"
     try:
         proc = run(["gcloud", "auth", "application-default", "print-access-token"],
-                   capture_output=True, text=True, timeout=GCLOUD_TIMEOUT)
+                   capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
     except subprocess.TimeoutExpired:
         return LoginStatus(False, None, refresh, "gcloud timed out refreshing the access token")
     except OSError:
         return LoginStatus(False, None, refresh, "gcloud is not installed")
-    if proc.returncode == 0 and (proc.stdout or "").strip():
-        return LoginStatus(True, now + GOOGLE_TOKEN_LIFETIME, refresh, "logged in")
+    token = (proc.stdout or "").strip()
+    if proc.returncode == 0 and token:
+        left = expiry(token)
+        if left is None:
+            return LoginStatus(True, None, refresh, "logged in; token expiry unknown")
+        return LoginStatus(True, now + left, refresh, "logged in")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
         return LoginStatus(False, None, refresh, "login expired (invalid_grant)")
     return LoginStatus(False, None, refresh, "gcloud could not produce an access token")
@@ -119,17 +185,18 @@ def _google(run, now: float) -> LoginStatus:
 
 def status(provider: str | None = None, *, env: Mapping[str, str] | None = None,
            home: str | Path | None = None, now: float | None = None,
-           run=subprocess.run) -> LoginStatus:
+           run=subprocess.run, expiry=tokeninfo_expiry) -> LoginStatus:
     """The login state for ``provider`` (bedrock, vertex or foundry; by default
     the one the environment's ``CLAUDE_CODE_USE_*`` flag selects)."""
-    env = os.environ if env is None else env
+    supplied = env
+    env = os.environ if env is None else {**os.environ, **env}
     provider = provider or provider_from_env(env)
     home = Path(home) if home is not None else Path.home()
     now = time.time() if now is None else now
     if provider == "bedrock":
         return _aws(env, home, now)
     if provider == "vertex":
-        return _google(run, now)
+        return _google(run, supplied, now, expiry)
     if provider == "foundry":
-        return _azure(home, now)
+        return _azure(run, supplied, now)
     return LoginStatus(True, None, "", "no cloud provider selected")
