@@ -102,6 +102,11 @@ def test_delivered_messages_are_one_line(db, boss, pushed, monkeypatch):
     pasted.clear()
     agents.send_message(db, "boss", report, sender_id="w1")
     assert len(pasted) == 1 and "\n" not in pasted[0]
+    # ...and so does a pull-mode "new messages" notice (seen live wrapped in a block).
+    pasted.clear()
+    agents._send_message(db, db.get_agent("boss"), "brindle (12:00:00): 1 new message (from w1). "
+                         "Call read_messages.", None, notice=True)
+    assert len(pasted) == 1 and "\n" not in pasted[0]
 
 
 def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch):

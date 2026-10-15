@@ -1497,7 +1497,7 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
         text = one_line(db, kept, body, sender_id)
     else:
         text = format_message(db, body, sender_id)
-    if agent.provider == "antigravity" and not condensed:
+    if agent.provider == "antigravity" and not (condensed or notice):
         from brindle.antigravity import format_delivered_message
         text = format_delivered_message(text)
     if agent.headless:
