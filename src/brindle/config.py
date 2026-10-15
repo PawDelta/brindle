@@ -95,7 +95,7 @@ class RepoConfig:
     pre_commit: bool = True            # run pre-commit (the framework) over a branch before merging
     max_agents: int = 5                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
-    check_concurrency: int = 2         # check runs at once on this machine, across branches; the rest queue (0: no cap)
+    check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
