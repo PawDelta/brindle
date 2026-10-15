@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -327,6 +328,10 @@ def supervisor_pick() -> str | None:
 def set_user(key: str, value: object) -> Path:
     """Set one key in ``~/.brindle/config.json`` (other keys are kept)."""
     path = user_config_path()
+    if os.environ.get("BRINDLE_AGENT_ID"):
+        # A brindle agent's CLI call must not change the person's own settings.
+        print("brindle: running as an agent, so ~/.brindle/config.json was not changed", file=sys.stderr)
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     data = _read_json(path)
     data[key] = value
