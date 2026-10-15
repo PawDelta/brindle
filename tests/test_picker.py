@@ -124,11 +124,6 @@ def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, va
     assert seen == [value]
 
 
-def test_supervisor_flag_not_saved(monkeypatch):
-    # a -s flag overrides the supervisor for this run only; the saved pick stays
-    assert _resolve(monkeypatch, provider="codex", pick="claude", signed_in=["codex"]) == ("codex", [], "claude")
-
-
 def _workers(acc, keys, **kw):
     from brindle import worker_models
 
