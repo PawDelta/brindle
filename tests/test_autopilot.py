@@ -284,6 +284,7 @@ def test_stop_hook_runs_autopilot_for_the_supervisor(db, root, monkeypatch):
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
     out = agents.handle_hook(db, "boss", "stop", {})
     assert out and "[brindle autopilot]" in out["reason"]
+    assert "\n" not in out["reason"]   # the chat shows one line; the rest via read_messages
     assert db.get_agent("boss").status == "processing"
 
 

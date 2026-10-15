@@ -2756,7 +2756,10 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False)
         decision = pilot.on_stop(db, agent, payload)
         if decision:
             db.set_status(agent.id, "processing")
-            return decision
+            # Claude Code shows the reason in the chat: one line, like any brindle message.
+            kept = db.enqueue_held(agent.id, decision["reason"], None)
+            db.mark_delivered(kept)
+            return {**decision, "reason": one_line(db, kept, decision["reason"], None)}
     db.set_status(agent.id, "idle")
     return None
 
@@ -2913,7 +2916,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 decision = pilot.on_stop(db, agent, payload)
                 if decision:
                     # Like any message from brindle: one line (or a notice), the rest via read_messages.
-                    send_message(db, agent_id, decision["reason"])
+                    try:
+                        send_message(db, agent_id, decision["reason"])
+                    except AgentError:
+                        pass  # gone since its turn ended: nobody to nudge
             if (agent.mode in REPORTING_MODES and agent.result is None
                     and not db.pending_count(agent_id)):
                 # No Stop hook can remind it to report, and no hook says when
