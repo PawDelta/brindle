@@ -418,7 +418,8 @@ def _can_prompt(yes: bool = False, demo: bool = False) -> bool:
 def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
                         yes: bool = False, demo: bool = False) -> Optional[str]:
     """The CLI the supervisor runs on (None: its profile's). ``-s CLI`` picks
-    it and is remembered; a bare ``-s`` opens the picker. Otherwise the
+    it for this run only; a bare ``-s`` opens the picker, whose choice is
+    remembered. Otherwise the
     person's last pick, asked again in the picker only on the first launch or
     when that pick isn't signed in or allowed, and only where brindle may ask.
     A CLI the org doesn't allow this person is refused, whichever way it came."""

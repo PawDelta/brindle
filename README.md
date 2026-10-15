@@ -337,7 +337,7 @@ your own status line prints, so what you see doesn't change.
 | | |
 |---|---|
 | `brindle` | a fresh supervisor chat here, dashboard alongside |
-| `brindle -s [CLI]` | pick the supervisor's CLI (no value: open the picker; `w` there picks worker models); remembered for next time |
+| `brindle -s [CLI]` | pick the supervisor's CLI (no value: open the picker; `w` there picks worker models); a picker choice is remembered, a named CLI is for this run only |
 | `brindle supervisor` | the same, with `--branch`/`--worktree` to run it in another worktree |
 | `brindle init` | detect setup and test commands, write `.brindle/config.json`, check tools |
 | `brindle demo [--local]` | watch brindle finish a tiny practice repo: parallel workers, reviews, gated merges |
