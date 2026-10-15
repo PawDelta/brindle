@@ -173,6 +173,7 @@ def test_paste_blocked():
     assert p.paste_blocked(ansi_typing, interactive=True) == "typing"
 
 
+@pytest.mark.variant("live incident: agy's accept-edits hint held a new supervisor's first messages")
 def test_new_supervisor_gets_its_queued_first_messages_over_the_mode_hint(db, ws, monkeypatch):
     # agy 1.3.5 started with --mode shows its mode as a hint in the empty
     # input box; the flush after its start must still type in the queue.
