@@ -510,14 +510,16 @@ def send_message(to_agent_id: str, message: str) -> str:
 
 
 @mcp.tool()
-def read_messages() -> str:
-    """Read your unread messages from agents and brindle (marks them read). Call
-    it when a "brindle (HH:MM:SS): N new messages" notice arrives, or when you're about to
-    stop."""
+def read_messages(message_id: int = 0) -> str:
+    """Read your unread messages from agents and brindle (marks them read), one
+    line each. Call it when a "brindle (HH:MM:SS): N new messages" notice arrives, or
+    when you're about to stop. message_id: return that message's full text instead."""
     db = DB()
     caller, _ = _caller(db)
     if not caller:
         return "Not running as a brindle agent; no messages."
+    if message_id:
+        return agents.full_message(db, caller.id, message_id)
     found = db.read_held(caller.id)
     if not found:
         return "No unread messages."

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import sh
+from conftest import full_text, sh
 from brindle import agents, autopilot, gates, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent
@@ -26,8 +26,8 @@ def branch(db, repo, name):
 
 
 def inbox(db, agent_id):
-    return [r["body"] for r in db.conn.execute(
-        "SELECT body FROM inbox WHERE agent_id=? ORDER BY id", (agent_id,))]
+    return [full_text(db, agent_id, r["body"]) for r in db.conn.execute(
+        "SELECT body FROM inbox WHERE agent_id=? AND COALESCE(held,0)=0 ORDER BY id", (agent_id,))]
 
 
 def configure(repo, **values):

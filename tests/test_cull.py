@@ -439,3 +439,27 @@ def test_pane_reads_and_keys_go_to_the_agents_own_server(db, ws, other_server, m
     assert tmux.window_activity(pane) is None
 
 
+
+
+def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):
+    """A flush that found the person typing leaves the message queued; with no
+    turn-end hook (agy) nothing else retries it, so the next sweep must once
+    the input box is clear, and never while it still holds typed text."""
+    add(db, ws, "boss", mode="interactive", provider="antigravity", profile="supervisor",
+        tmux_window="@998")
+    db.enqueue("boss", "first task", None)
+    screen = ["> half typed\n───\n? for shortcuts"]
+    pasted = []
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: _live_panes())
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen[0])
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
+    later = time.time() + 600
+    assert agents.flush(db, "boss") is False
+    cull.sweep(db, now=later)
+    assert pasted == [] and db.pending_count("boss") == 1
+    screen[0] = "> \n───\n? for shortcuts"
+    cull.sweep(db, now=later)
+    assert len(pasted) == 1 and "first task" in pasted[0]
+    assert db.pending_count("boss") == 0
+    cull.sweep(db, now=later)
+    assert len(pasted) == 1

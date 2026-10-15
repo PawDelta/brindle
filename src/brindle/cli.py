@@ -2950,8 +2950,10 @@ def check_milestones_cmd(root_id: str, workspace_id: str,
     try:
         text = autopilot.check_milestones(db, root_id, ws, position)
         record_milestone_changes(db, root_id, ws, before, root, position, text)
+        head = autopilot.check_summary(db, root_id, position, text)
     except Exception as e:  # noqa: BLE001 - the supervisor must hear about it either way
         text = f"The milestone check failed to run: {e}"
+        head = agents.first_line(text)
     try:
         autopilot.start_audit(db, root_id, ws)
     except Exception as e:  # noqa: BLE001
@@ -2963,7 +2965,7 @@ def check_milestones_cmd(root_id: str, workspace_id: str,
         db.update_autopilot(root_id, checking_since=None)
     if db.get_agent(root_id) is None:
         return
-    body = f"[brindle] Milestone check finished.\n\n{text}"
+    body = agents.condense(f"[brindle] {head}", text + "\n\n(The same progress, any time: get_progress.)")
     try:
         agents.send_message(db, root_id, body)
     except (agents.AgentError, tmux.TmuxError):

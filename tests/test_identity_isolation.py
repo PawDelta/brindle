@@ -271,7 +271,7 @@ def test_legacy_agents_without_a_recorded_identity_are_unaffected(db, ws, who, l
     who.ident = OTHER
     assert identity_lock.locked_by("w1") is None
     assert [a.id for a in agents.resume(db, "w1")] == ["w1"]
-    monkeypatch.setattr(agents, "_send_message", lambda db, a, body, sender: "delivered")
+    monkeypatch.setattr(agents, "_send_message", lambda db, a, body, sender, **k: "delivered")
     assert agents.send_message(db, "w1", "hi") == "delivered"
     identity_lock.ensure_workspace(db, ws)
     assert "locked" not in view.agent_entry(db, db.get_agent("w1"), alive=True)["status"]

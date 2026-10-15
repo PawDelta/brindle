@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import sh
+from conftest import full_text, sh
 from brindle import agents, mcp_server, tasks, workspaces
 from brindle.db import Agent
 from test_merge_order import fake_spawn
@@ -210,7 +210,8 @@ def test_a_queued_task_starting_names_a_missing_add_dir(db, repo, boss, monkeypa
     asyncio.run(mcp_server.merge_workspace(ws_a.id))
 
     msg = db.pop_pending("boss")
-    assert "Started" in msg.body and "add_dirs names /no/such/cache" in msg.body
+    body = full_text(db, "boss", msg.body)
+    assert "Started" in body and "add_dirs names /no/such/cache" in body
 
 
 def queued_task(db, repo, worker_id, branch="feat-b", **kw):

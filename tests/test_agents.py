@@ -330,18 +330,6 @@ def test_no_goal_command_when_hooks_are_disabled(db, ws):
     assert "Finish line: tests pass" in prompt
 
 
-def test_render_unread_uses_details_block_for_brindle(db, ws):
-    class Msg:
-        def __init__(self, body, sender_id):
-            self.body = body
-            self.sender_id = sender_id
-    messages = [Msg("first brindle message", None), Msg("second brindle message", None)]
-    rendered = agents.render_unread(db, messages)
-    assert "<details><summary>Message from brindle</summary>" in rendered
-    assert "first brindle message" in rendered
-    assert "second brindle message" in rendered
-    assert "\n\n" in rendered
-
 
 def test_add_dir_is_never_the_last_flag():
     """--add-dir is variadic, so a flag must follow the last one.

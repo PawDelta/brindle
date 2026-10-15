@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import sh
+from conftest import full_text, sh
 from brindle import agents, conflicts, gates, pipeline, workspaces
 from test_merge_order import add
 
@@ -88,7 +88,7 @@ def resolve(ws):
 
 
 def boss_messages(db):
-    return [db.pop_pending("boss").body for _ in range(db.pending_count("boss"))]
+    return [full_text(db, "boss", db.pop_pending("boss").body) for _ in range(db.pending_count("boss"))]
 
 
 def approve(db, ws, reviewer_id, summary):
