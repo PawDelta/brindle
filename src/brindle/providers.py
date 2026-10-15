@@ -562,6 +562,11 @@ class ClaudeCode(Provider):
             # servers connect. Not agents.agent_env: that feeds the launch
             # fingerprint and would reset stored refusals.
             "env": {"MCP_TIMEOUT": os.environ.get("MCP_TIMEOUT", "120000")},
+            # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
+            # application-default login`) whenever its own ADC probe fails, once
+            # per process: across a session's many panes that opens a Google
+            # sign-in tab each time. login_pause tells the person once instead.
+            "gcpAuthRefresh": "",
         }
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
