@@ -1056,11 +1056,15 @@ class DB:
 
     # -- inbox -------------------------------------------------------------
 
-    def enqueue(self, agent_id: str, body: str, sender_id: str | None) -> int:
+    def enqueue(self, agent_id: str, body: str, sender_id: str | None,
+                notice: bool = False) -> int:
+        """Queue ``body`` for delivery. ``notice``: it is a pull-mode "new
+        messages" notice (noticed_at set), dropped once those are read (read_held)."""
+        now = time.time()
         with self.tx() as c:
             cur = c.execute(
-                "INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,?,?,?)",
-                (agent_id, sender_id, body, time.time()),
+                "INSERT INTO inbox (agent_id, sender_id, body, created_at, noticed_at) VALUES (?,?,?,?,?)",
+                (agent_id, sender_id, body, now, now if notice else None),
             )
             return int(cur.lastrowid)
 
@@ -1239,6 +1243,9 @@ class DB:
                 (time.time(), agent_id),
             )
             c.execute("UPDATE agents SET stop_reminded_at=NULL WHERE id=?", (agent_id,))
+            # A notice still queued announces only what was just read: it would wake the agent for nothing.
+            c.execute("DELETE FROM inbox WHERE agent_id=? AND COALESCE(held,0)=0 "
+                      "AND delivered_at IS NULL AND noticed_at IS NOT NULL", (agent_id,))
             return [_load(Message, r) for r in rows]
 
     def message_delivered(self, message_id: int) -> bool:

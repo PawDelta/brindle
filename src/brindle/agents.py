@@ -1464,7 +1464,7 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
         if claimed is None:
             return "queued"
         try:
-            outcome = _send_message(db, agent, unread_notice(db, claimed), None)
+            outcome = _send_message(db, agent, unread_notice(db, claimed), None, notice=True)
         except BaseException:
             db.reset_notice(agent.id)
             raise
@@ -1477,7 +1477,7 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
 
 
 def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
-                  condensed: bool = False) -> str:
+                  condensed: bool = False, notice: bool = False) -> str:
     if not runs_process(agent):
         raise AgentError(
             f"agent {agent.id} is a subagent run by its supervisor's own Agent tool, so brindle "
@@ -1509,7 +1509,7 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
         tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
                    server=server_of(agent))
         return "delivered"
-    message_id = db.enqueue(agent.id, text, sender_id)
+    message_id = db.enqueue(agent.id, text, sender_id, notice=notice)
     from brindle import login_pause
 
     if login_pause.holding(db, agent.id):
@@ -1674,7 +1674,8 @@ def flush(db: DB, agent_id: str) -> bool:
                 delivered = True
                 launch_health.delivered(db, agent, baseline)
             else:
-                db.enqueue(agent_id, msg.body, msg.sender_id)  # back in the queue, for the pane
+                db.enqueue(agent_id, msg.body, msg.sender_id,  # back in the queue, for the pane
+                           notice=msg.noticed_at is not None)
                 break
         if delivered:
             return True
@@ -2911,7 +2912,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
                 decision = pilot.on_stop(db, agent, payload)
                 if decision:
-                    db.enqueue(agent_id, decision["reason"], None)
+                    # Like any message from brindle: one line (or a notice), the rest via read_messages.
+                    send_message(db, agent_id, decision["reason"])
             if (agent.mode in REPORTING_MODES and agent.result is None
                     and not db.pending_count(agent_id)):
                 # No Stop hook can remind it to report, and no hook says when

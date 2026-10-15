@@ -106,10 +106,14 @@ def test_autopilot_codex_supervisor_is_told_to_keep_going(db, ws, monkeypatch):
     db.add_autopilot("c1")
     autopilot.set_goal(db, "c1", "Ship it", [("Done", "false", None)])
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: "")
+    monkeypatch.setattr(agents, "is_alive", lambda a, *_: True)
     pasted = []
     monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
     agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
-    assert len(pasted) == 1 and "Keep going" in pasted[0]
+    # One line, like every message brindle sends a supervisor; the rest via read_messages.
+    assert len(pasted) == 1 and "\n" not in pasted[0]
+    message_id = int(pasted[0].rsplit("message_id=", 1)[1].rstrip(")"))
+    assert "Keep going" in agents.full_message(db, "c1", message_id)
     # Capped like any nudge: no endless loop on a supervisor making no progress.
     for _ in range(autopilot.MAX_NUDGES + 2):
         agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
