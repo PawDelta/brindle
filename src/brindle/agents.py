@@ -1418,15 +1418,34 @@ def unread_notice(db: DB, messages: list) -> str:
             f"(from {', '.join(senders)}). Call read_messages.")
 
 
+def one_line(db: DB, message_id: int, body: str, sender_id: str | None) -> str:
+    """A message as the single line a supervisor sees: sender, head line (the
+    first line of ``body``) and how to fetch the rest."""
+    if sender_id:
+        sender = db.get_agent(sender_id)
+        who = f"{sender.profile} {sender_id}" if sender else sender_id
+    else:
+        who = "brindle"
+    head = first_line(body, 300)
+    if not sender_id:
+        head = head.removeprefix("[brindle] ")  # the sender tag already says it
+    return (f"[{who}] {head} "
+            f"(full text: read_messages(message_id={message_id}))")
+
+
+def full_message(db: DB, agent_id: str, message_id: int) -> str:
+    """The whole text of one message to ``agent_id``, as read_messages(message_id=...) returns it."""
+    m = db.get_message(agent_id, message_id)
+    if m is None:
+        return f"No message {message_id}."
+    if m.sender_id:
+        return format_message(db, m.body, m.sender_id)
+    return f"<details><summary>Message from brindle</summary>\n\n{m.body}\n</details>"
+
+
 def render_unread(db: DB, messages: list) -> str:
-    """What read_messages returns: each message with its trust lead line."""
-    parts = []
-    for m in messages:
-        if m.sender_id:
-            parts.append(m.body)  # stored through format_message: sender and reply hint
-        else:
-            parts.append(f"<details><summary>Message from brindle</summary>\n\n{m.body}\n</details>")
-    return "\n\n".join(parts)
+    """What read_messages returns: one line per message."""
+    return "\n".join(one_line(db, m.id, m.body, m.sender_id) for m in messages)
 
 
 def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
@@ -1440,7 +1459,7 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
     identity_lock.ensure(agent)
     if not person and runs_process(agent) and is_alive(agent) and pulls_messages(db, agent):
         # Keep the message unread and deliver only a notice, once for everything unread.
-        db.enqueue_held(agent.id, format_message(db, body, sender_id), sender_id)
+        db.enqueue_held(agent.id, body, sender_id)
         claimed = db.claim_notice(agent.id)
         if claimed is None:
             return "queued"
@@ -1450,10 +1469,15 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
             db.reset_notice(agent.id)
             raise
         return outcome
-    return _send_message(db, agent, body, sender_id)
+    # A supervisor sees a message from an agent or brindle as one line; the
+    # person's own input is always delivered whole.
+    return _send_message(db, agent, body, sender_id,
+                         condensed=agent.mode == "interactive" and not person
+                         and agent.provider != "shell")
 
 
-def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None) -> str:
+def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
+                  condensed: bool = False) -> str:
     if not runs_process(agent):
         raise AgentError(
             f"agent {agent.id} is a subagent run by its supervisor's own Agent tool, so brindle "
@@ -1466,8 +1490,14 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None) -> str
                              "can resume its session with `brindle continue`; the message isn't kept.")
         raise AgentError(f"agent {agent.id} is not running")
     provider = get_provider(agent.provider)
-    text = format_message(db, body, sender_id)
-    if agent.provider == "antigravity":
+    if condensed:
+        # The full text is kept, already read, for read_messages(message_id=...).
+        kept = db.enqueue_held(agent.id, body, sender_id)
+        db.mark_delivered(kept)
+        text = one_line(db, kept, body, sender_id)
+    else:
+        text = format_message(db, body, sender_id)
+    if agent.provider == "antigravity" and not condensed:
         from brindle.antigravity import format_delivered_message
         text = format_delivered_message(text)
     if agent.headless:
@@ -1743,6 +1773,19 @@ def complete_subagent(db: DB, agent_id: str, result: str) -> Agent:
     return db.get_agent(agent.id) or agent
 
 
+def first_line(text: str, limit: int = 160) -> str:
+    """The first non-empty line of ``text``, cut to ``limit`` characters."""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
+def condense(head: str, *body: str) -> str:
+    """A message that opens with the one-line ``head`` and keeps the long
+    ``body`` sections inside a collapsible block."""
+    return (f"{head}\n\n<details><summary>Details</summary>\n\n"
+            + "\n\n".join(b for b in body if b) + "\n\n</details>")
+
+
 def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
                   removed: tuple[Agent, Workspace] | None = None) -> str:
     """Record a worker's or reviewer's result. A piped worker's report goes
@@ -1794,7 +1837,7 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
         send_message(
             db, agent.parent_id,
-            f"Assigned task finished{where}.\n\n{forwarded}",
+            condense(f"Assigned task finished{where}: {first_line(result)}", forwarded),
             sender_id=agent.id,
         )
         return "result recorded and sent to your supervisor"

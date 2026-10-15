@@ -270,8 +270,10 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent.id,
-              f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
-              f"changes, so it can't be reviewed or merged. Its report:\n\n{result}", worker.id)
+              agents.condense(
+                  f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
+                  "changes, so it can't be reviewed or merged. "
+                  f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
     try:
         second = second_profile(db, cfg, worker, ws)
@@ -290,9 +292,10 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent.id,
-              f"[brindle pipeline] {worker.id} reported on `{ws.branch}`, but no reviewer could "
-              f"start ({e}). Review it yourself with workspace_diff, then merge_workspace.\n\n"
-              f"Its report:\n\n{result}", worker.id)
+              agents.condense(
+                  f"[brindle pipeline] {worker.id} reported on `{ws.branch}`, but no reviewer could "
+                  f"start ({e}). Review it yourself with workspace_diff, then merge_workspace. "
+                  f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
     db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
     return True
@@ -642,12 +645,14 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             db.update_agent(worker.id, pipeline=None)
             _escalate(db, ws, worker)
             _tell(db, parent_id,
-                  f"[brindle pipeline] `{ws.branch}` was approved, but its base `{ws.base_branch}` "
-                  "is the repo's default branch, which brindle doesn't merge into on its own. "
-                  f"This needs you: merge_workspace(\"{ws.id}\") when you're ready to merge it "
-                  "(set \"merge_into\" to another branch, or \"auto_merge_default_branch\": true, "
-                  f"in .brindle/config.json to change this).\n\nWorker's report:\n{report}\n\n"
-                  f"Review ({reviewer.id}): approved.\n{summary}", worker.id)
+                  agents.condense(
+                      f"[brindle pipeline] `{ws.branch}` approved, base `{ws.base_branch}` is the default "
+                      f"branch, so it wasn't merged. This needs you: merge_workspace(\"{ws.id}\")",
+                      "To merge into the default branch automatically, set \"merge_into\" to another "
+                      "branch, or \"auto_merge_default_branch\": true, in .brindle/config.json.\n\n"
+                      f"Worker: {agents.first_line(report)}",
+                      f"Worker's report:\n{report}",
+                      f"Review ({reviewer.id}): approved.\n{summary}"), worker.id)
             return True, False
         # Ready means: the review on record for the branch's current commit
         # approves it. The verdict argument alone doesn't make it so: the
@@ -663,10 +668,12 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             why = ("its latest commit hasn't been reviewed" if recorded is None
                    else "a later review of that commit requested changes")
             _tell(db, parent_id,
-                  f"[brindle pipeline] {reviewer.id} approved `{ws.branch}`, but {why}, so it "
-                  f"wasn't merged. This needs you: request_review(\"{ws.id}\") again, then "
-                  f"merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}\n\n"
-                  f"Review ({reviewer.id}): approved.\n{summary}", worker.id)
+                  agents.condense(
+                      f"[brindle pipeline] `{ws.branch}` approved but not merged. This needs you: "
+                      f"request_review(\"{ws.id}\") again, then merge_workspace(\"{ws.id}\")",
+                      f"Why: {reviewer.id} approved, but {why}.\n\nWorker: {agents.first_line(report)}",
+                      f"Worker's report:\n{report}",
+                      f"Review ({reviewer.id}): approved.\n{summary}"), worker.id)
             return True, False
         if second_review_pending(db, cfg, worker, ws):
             return True, False   # the other reviewer's verdict decides; both must approve
@@ -695,8 +702,11 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
     _escalate(db, ws, worker)
     reason = "needs supervisor action" if needs_sup else f"still has review findings after {rounds - 1} fix round(s)"
     _tell(db, parent_id,
-          f"[brindle pipeline] `{ws.branch}` {reason}. This needs you: decide what to do.\n\nLatest review ({reviewer.id}):\n"
-          f"{summary}\n\nWorker's last report:\n{report}", worker.id)
+          agents.condense(
+              f"[brindle pipeline] `{ws.branch}` {reason}. This needs you: decide what to do. "
+              f"Worker: {agents.first_line(report)}",
+              f"Latest review ({reviewer.id}):\n{summary}",
+              f"Worker's last report:\n{report}"), worker.id)
     return True, False
 
 
@@ -794,8 +804,10 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         if keep is not None:
             db.set_status(keep.id, "done")
         _tell(db, parent_id,
-              f"[brindle pipeline] {text} Removing the worktree.\n\nWorker's report:\n{report}"
-              f"\n\n{verdict}", worker.id)
+              agents.condense(
+                  f"[brindle pipeline] {text} Removing the worktree. Worker: "
+                  f"{agents.first_line(report)}",
+                  f"Worker's report:\n{report}", verdict), worker.id)
         note = _remove(db, ws, keep=keep)
         if not note.startswith("("):
             note_removed_merged(db, ws, actor=keep or reviewer, worker=worker)
@@ -812,9 +824,11 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent_id,
-              f"[brindle pipeline] `{ws.branch}` was approved but couldn't be merged: {text}\n"
-              "This needs you: fix it (or have the worker fix it with send_message), then "
-              f"merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}", worker.id)
+              agents.condense(
+                  f"[brindle pipeline] `{ws.branch}` was approved but couldn't be merged: "
+                  f"{text}\nThis needs you: fix it (or have the worker fix it with send_message), "
+                  f"then merge_workspace(\"{ws.id}\"). Worker: {agents.first_line(report)}",
+                  f"Worker's report:\n{report}"), worker.id)
     return text
 
 
@@ -905,10 +919,12 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
     db.update_agent(worker.id, pipeline=None)
     db.update_agent(retry.id, pipeline="fixing", pipeline_rounds=0)
     _tell(db, worker.parent_id,
-          f"[brindle pipeline] `{ws.branch}` (heavy) failed on {worker.profile}: {why} Retrying "
-          f"once on {ESCALATION_PROFILE} ({retry.id}) in the same worktree; it is reviewed and "
-          "checked again before it merges. Nothing to do unless that fails too.\n\n"
-          f"Worker's last report:\n{report}", worker.id)
+          agents.condense(
+              f"[brindle pipeline] `{ws.branch}` (heavy) failed on {worker.profile}: "
+              f"{agents.first_line(why)} Retrying once on {ESCALATION_PROFILE} ({retry.id}) in "
+              "the same worktree; it is reviewed and checked again before it merges. Nothing to "
+              "do unless that fails too.",
+              f"Why: {why}", f"Worker's last report:\n{report}"), worker.id)
     return True
 
 
@@ -925,13 +941,16 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent_id,
-              f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
-              f"conflicts in protected path{'s' if len(guarded) > 1 else ''}: "
-              f"{', '.join(guarded)} (\"protected_paths\" in .brindle/config.json). brindle never "
-              "resolves those itself. This needs you: resolve the conflict yourself, or decide "
-              f"who should (in {ws.path}: `git merge {base}`, resolve, commit), then "
-              f"request_review and merge_workspace(\"{ws.id}\").\n\nAll conflicting files: "
-              f"{', '.join(files)}\n\nWorker's report:\n{report}", worker.id)
+              agents.condense(
+                  f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
+                  f"conflicts in protected path{'s' if len(guarded) > 1 else ''}: "
+                  f"{', '.join(guarded)} (\"protected_paths\" in .brindle/config.json). brindle "
+                  "never resolves those itself. This needs you: resolve the conflict yourself, or "
+                  f"decide who should (in {ws.path}: `git merge {base}`, resolve, commit), then "
+                  f"request_review and merge_workspace(\"{ws.id}\"). Worker: "
+                  f"{agents.first_line(report)}",
+                  f"All conflicting files: {', '.join(files)}",
+                  f"Worker's report:\n{report}"), worker.id)
         return
     task = resolution_task(ws, files, cfg)
     if agents.is_alive(worker):
@@ -958,11 +977,14 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent_id,
-              f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
-              f"conflicts in: {', '.join(files)}, its worker {worker.id} has finished, and no "
-              f"worker could be started to resolve it ({e}). This needs you: resolve it (in "
-              f"{ws.path}: `git merge {base}`, resolve, commit) or assign someone, then "
-              f"request_review and merge_workspace(\"{ws.id}\").\n\nWorker's report:\n{report}",
+              agents.condense(
+                  f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
+                  f"conflicts in: {', '.join(files)}, its worker {worker.id} has finished, and no "
+                  f"worker could be started to resolve it ({e}). This needs you: resolve it (in "
+                  f"{ws.path}: `git merge {base}`, resolve, commit) or assign someone, then "
+                  f"request_review and merge_workspace(\"{ws.id}\"). Worker: "
+                  f"{agents.first_line(report)}",
+                  f"Worker's report:\n{report}"),
               worker.id)
         return
     db.update_agent(worker.id, pipeline=None)

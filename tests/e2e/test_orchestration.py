@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import sh
+from conftest import full_text, sh
 from brindle import agents, autopilot, mcp_server, rewind, workspaces
 from brindle.db import Agent
 
@@ -183,7 +183,8 @@ def test_pipeline_review_checks_merge_and_removal(db, repo, boss, reviewers, mon
     assert db.get_agent(wid) is None
     assert "feat-p" not in sh("git branch --list", repo)        # merged branch deleted
     msg = db.pop_pending("boss")
-    assert msg and "Merged feat-p into main" in msg.body and "added new.py" in msg.body
+    body = full_text(db, "boss", msg.body)
+    assert "Merged feat-p into main" in body and "added new.py" in body
 
 
 def test_failed_checks_leave_the_branch_unmerged_and_need_the_supervisor(db, repo, boss, reviewers,
@@ -203,7 +204,7 @@ def test_failed_checks_leave_the_branch_unmerged_and_need_the_supervisor(db, rep
     assert db.get_agent(wid).pipeline is None
     bodies = []
     while (m := db.pop_pending("boss")) is not None:
-        bodies.append(m.body)
+        bodies.append(full_text(db, "boss", m.body))
     text = "\n".join(bodies)
     assert "couldn't be merged" in text and "This needs you" in text and "feat-f" in text
 
@@ -265,7 +266,7 @@ def test_depends_on_queues_then_starts_from_the_merged_base(db, repo, boss, revi
     assert (Path(ws_b.path) / "a_out.txt").exists()            # cut from main after A merged
     bodies = []
     while (m := db.pop_pending("boss")) is not None:
-        bodies.append(m.body)
+        bodies.append(full_text(db, "boss", m.body))
     assert any("Started" in b and b_task.agent_id in b for b in bodies)
 
 

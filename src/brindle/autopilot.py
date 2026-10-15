@@ -101,6 +101,9 @@ to be asked each step.
   the checks pass, merges it and removes the worktree; you get one message
   per branch: merged, or "needs you" with the details. Don't request_review
   or merge_workspace a reported branch yourself unless brindle says so.
+- Messages reach you as one line each; read_messages(message_id=N) gives the
+  full text only when you need it. Relay worker results to the user in one line.
+  Reply to an agent with send_message(to_agent_id=<sender id>).
 - After merging, call `check_milestone`. Only brindle's check marks a milestone
   done: never claim one is done yourself. When every milestone passes, brindle
   audits the work against the goal; the goal is reached only when that audit
@@ -1293,7 +1296,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         if m.output and m.status == "failed":
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
     if done and audit is None:
-        lines.append("\nEvery milestone's check passes: the goal is reached. Tell the user.")
+        lines.append("\n" + GOAL_REACHED)
         clear_finished_goal(db, root_id)
     elif done:
         lines.append("\n" + AUDIT_HOLD[audit].format(note=(ap.note if ap else None) or ""))
@@ -1307,6 +1310,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
 # adversarial reviewer compares the work with the original goal before the
 # goal counts as reached (``goal_audit`` in .brindle/config.json turns it off).
 
+GOAL_REACHED = "Every milestone's check passes: the goal is reached. Tell the user."
 AUDIT_HOLD = {
     "start": ("Every milestone's check passes. Before the goal counts as reached, an independent "
               "auditor is checking the work against the original goal; its verdict arrives as a "
@@ -1559,6 +1563,35 @@ def progress(db: DB, root_id: str) -> str:
     elif ap.audit_ok == 0 and ap.note:
         lines.append(f"Completion audit found gaps:\n{ap.note}")
     return "\n".join(lines)
+
+
+def check_summary(db: DB, root_id: str, position: int | None, text: str) -> str:
+    """The one line pushed after a milestone check: the result, how many
+    milestones are verified, and a REGRESSED note. ``text`` is what
+    check_milestones returned; the full progress stays in get_progress."""
+    from brindle.agents import first_line
+
+    ms = db.milestones(root_id)
+    done, total = counts(db, root_id)
+    if not ms:
+        return first_line(text)
+    chosen = [m for m in ms if position is None or m.position == position]
+    parts = []
+    for m in chosen if position is not None else [m for m in ms if m.status == "failed"]:
+        if m.status == "failed":
+            parts.append(f"Milestone {m.position} ✗ failed: {first_line(m.output or 'no output')}")
+        else:
+            parts.append(f"Milestone {m.position} {MARK.get(m.status, '·')} {m.status}")
+    head = "; ".join(parts) or "Milestone check"
+    head += f" ({done} of {total} verified)"
+    first = text.splitlines()[0] if text else ""
+    if first.startswith("REGRESSED:"):
+        head += f". {first}"
+    if GOAL_REACHED in text.splitlines():
+        head += ". Goal reached: tell the user"
+    elif ms and done == total:
+        head += ". Not done yet: completion audit pending, has gaps, or needs a commit"
+    return head
 
 
 # -- workers and the cap ----------------------------------------------------------

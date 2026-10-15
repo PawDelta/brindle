@@ -56,12 +56,52 @@ def test_read_messages_returns_and_marks_read(db, boss, pushed):
     agents.send_message(db, "boss", "the result", sender_id="w1")
     agents.send_message(db, "boss", "queued task started")
     text = mcp_server.read_messages()
-    assert "<details><summary>Message from developer agent w1</summary>" in text
-    assert "Reply with the brindle send_message tool, to_agent_id=w1" in text
-    assert "the result" in text
-    assert "<details><summary>Message from brindle</summary>" in text and "queued task started" in text
+    assert "[developer w1] the result" in text and "[brindle] queued task started" in text
     assert db.unread_count("boss") == 0
     assert mcp_server.read_messages() == "No unread messages."
+
+
+def test_delivered_messages_are_one_line(db, boss, pushed, monkeypatch):
+    from brindle import mcp_server
+
+    report = agents.condense("Assigned task finished: done", "line two\nline three\n" * 20)
+    agents.send_message(db, "boss", report, sender_id="w1")
+    line = mcp_server.read_messages()
+    assert "\n" not in line and "Assigned task finished: done" in line and "message_id=" in line
+    message_id = int(line.rsplit("message_id=", 1)[1].rstrip(")"))
+    full = mcp_server.read_messages(message_id=message_id)
+    assert "line three" in full and "to_agent_id=w1" in full
+
+    monkeypatch.setattr(agents, "pulls_messages", lambda *a: False)  # push mode
+    pasted = []
+    monkeypatch.setattr(agents, "_deliver_to_inbox", lambda db, a, mid, text, s: pasted.append(text) or True)
+    agents.send_message(db, "boss", report, sender_id="w1")
+    assert len(pasted) == 1 and "\n" not in pasted[0] and "message_id=" in pasted[0]
+    pushed_id = int(pasted[0].rsplit("message_id=", 1)[1].rstrip(")"))
+    assert "line three" in mcp_server.read_messages(message_id=pushed_id)
+
+    # The milestone check pushed by brindle itself (no sender) is a line too, with
+    # the audit still pending, and a long head keeps its action whole.
+    from brindle import autopilot
+
+    db.add_autopilot("boss")
+    db.set_milestones("boss", [("A", "true", None)])
+    db.record_check(db.milestones("boss")[0].id, True, "ok", "abc")
+    pending = autopilot.AUDIT_HOLD["start"]
+    head = autopilot.check_summary(db, "boss", 1, pending)
+    assert "Goal reached" not in head
+    action = 'merge_workspace("proj/feat")'
+    milestone = agents.condense(f"[brindle] {head}. On `{'x' * 80}` run {action}", pending)
+    pasted.clear()
+    agents.send_message(db, "boss", milestone)
+    assert len(pasted) == 1 and "\n" not in pasted[0] and action in pasted[0]
+
+    # Antigravity supervisors get the same single pasted line, not a wrapped block.
+    with db.tx() as c:
+        c.execute("UPDATE agents SET provider='antigravity' WHERE id='boss'")
+    pasted.clear()
+    agents.send_message(db, "boss", report, sender_id="w1")
+    assert len(pasted) == 1 and "\n" not in pasted[0]
 
 
 def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch):

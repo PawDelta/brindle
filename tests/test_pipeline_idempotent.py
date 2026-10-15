@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import sh
+from conftest import full_text, sh
 from brindle import agents, gates, pipeline, workspaces
 from brindle.db import DB
 from test_merge_order import add
@@ -44,7 +44,7 @@ def approved(db, repo, monkeypatch):
 def drain(db, agent_id="boss"):
     bodies = []
     while (msg := db.pop_pending(agent_id)):
-        bodies.append(msg.body)
+        bodies.append(full_text(db, agent_id, msg.body))
     return bodies
 
 

@@ -306,7 +306,9 @@ def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch, st
 
     assert cull.note_silent(db, now, {}) != []
     assert cull.note_silent(db, now + 60, {}) == []  # same silence: not again
-    body = db.pop_pending("boss").body
+    from conftest import full_text
+
+    body = full_text(db, "boss", db.pop_pending("boss").body)
     assert "w1" in body and "403" in body and "another profile" in body
 
 

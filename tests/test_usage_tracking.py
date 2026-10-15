@@ -151,12 +151,18 @@ def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
     db.add_agent(worker)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
 
-    agents.report_result(db, "w1", "done: added login")
+    agents.report_result(db, "w1", "done: added login\nmore detail")
     msg = db.pop_pending("boss")
     assert msg is not None
-    assert "done: added login" in msg.body
-    assert "tokens: 182k in (160k cached, 20k written)" in msg.body
-    assert "sonnet" in msg.body
+    from conftest import full_text
+
+    body = full_text(db, "boss", msg.body)
+    head, _, rest = body.partition("</summary>\n\n")[2].partition("\n\n")[2].partition("\n\n")
+    assert head.endswith("done: added login") and "\n" not in head
+    assert rest.startswith("<details><summary>Details</summary>") and rest.endswith("</details>")
+    assert "more detail" in rest
+    assert "tokens: 182k in (160k cached, 20k written)" in rest
+    assert "sonnet" in rest
 
 
 def test_hook_records_the_transcript_path(db, repo):

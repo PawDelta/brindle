@@ -1157,6 +1157,12 @@ class DB:
             )
             return int(cur.lastrowid)
 
+    def get_message(self, agent_id: str, message_id: int) -> Message | None:
+        row = self.conn.execute(
+            "SELECT * FROM inbox WHERE id=? AND agent_id=?", (message_id, agent_id)
+        ).fetchone()
+        return _load(Message, row) if row else None
+
     def unread(self, agent_id: str) -> list[Message]:
         rows = self.conn.execute(
             "SELECT * FROM inbox WHERE agent_id=? AND held=1 AND delivered_at IS NULL ORDER BY id",

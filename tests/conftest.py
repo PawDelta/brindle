@@ -8,6 +8,16 @@ import pytest
 from brindle.db import DB
 
 
+def full_text(db, agent_id, body):
+    """A supervisor is pushed a one-line pointer; this gives the full message it names."""
+    from brindle import agents
+
+    marker = "read_messages(message_id="
+    if marker not in body:
+        return body
+    return agents.full_message(db, agent_id, int(body.rsplit(marker, 1)[1].rstrip(")")))
+
+
 def sh(cmd: str, cwd: Path) -> str:
     return subprocess.run(
         cmd, shell=True, cwd=cwd, check=True, capture_output=True, text=True
