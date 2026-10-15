@@ -124,6 +124,18 @@ def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch):
     assert db.pending_count("boss") == 0
     assert db.unread_count("boss") == 1
 
+    # A notice still queued when the supervisor reads its mail announces
+    # nothing: it is dropped, not pasted later to wake it for an empty read.
+    _age_notices(db, db.NOTICE_TTL + 1)
+    screen = "Done.\n\n› half a request\n\n  ? for shortcuts"
+    assert agents.send_message(db, "boss", "another", sender_id="w1") == "queued"
+    assert db.pending_count("boss") == 1
+    db.read_held("boss")
+    db.set_status("boss", "idle")
+    screen = "Done.\n\n› \n\n  ? for shortcuts"
+    assert agents.flush(db, "boss") is False
+    assert len(pasted) == 1
+
 
 def test_codex_worker_delivery_ignores_input_text(db, boss, monkeypatch):
     with db.tx() as c:
