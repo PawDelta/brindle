@@ -49,6 +49,9 @@ from brindle.pro import route_health
 
 # An agent this new may not have its window recorded yet.
 LAUNCH_GRACE = 60.0
+# How long a message waits for its normal delivery (a hook, the start-up
+# flush) before a sweep retries it.
+FLUSH_RETRY_AFTER = 30.0
 
 
 def _root(db: DB, a: Agent) -> str:
@@ -201,6 +204,21 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             agents.close(db, a.id, panes)
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
                         f"after {int(idle_for // 60)} min")
+
+    # 2b. Messages a flush left queued because the pane wasn't ready (the
+    # person typing, say): an idle agent with no turn-end hook (agy), or one
+    # just waiting, would never get them otherwise. flush itself still waits
+    # for typed input, a held login, and claims the agent before pasting.
+    for a in db.list_agents():
+        oldest = db.oldest_pending(a.id)
+        if (oldest is not None and now - oldest >= FLUSH_RETRY_AFTER and a.status == "idle"
+                and not a.headless and a.dismissed_at is None and agents.runs_process(a)
+                and here(a) and alive(a)):
+            try:
+                if agents.flush(db, a.id):
+                    done.append(f"delivered a queued message to {a.id}")
+            except (agents.AgentError, tmux.TmuxError):
+                pass  # stays queued for the next sweep
 
     # 3. Launches stopped on a startup prompt; workers stuck on a prompt
     # nobody is answering, or gone silent.
