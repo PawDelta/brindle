@@ -87,8 +87,8 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
 
 
 @pytest.mark.parametrize("kw, got, asked, remembered", [
-    (dict(provider="codex", signed_in=["codex"]), "codex", [], "codex"),            # -s CLI is remembered
-    (dict(provider="codex"), "codex", ["sign_in:codex"], "codex"),                  # -s CLI not signed in: sign in first
+    (dict(provider="codex", signed_in=["codex"]), "codex", [], None),               # -s CLI is this session only
+    (dict(provider="codex"), "codex", ["sign_in:codex"], None),                     # -s CLI not signed in: sign in first
     (dict(provider="codex", allowed=("claude",)), "refused", [], None),             # -s refuses what the org doesn't allow
     (dict(provider=picker.PICK), "antigravity", [None], "antigravity"),             # bare -s opens the picker
     (dict(provider=picker.PICK, tty=False), "refused", [], None),

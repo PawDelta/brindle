@@ -45,6 +45,14 @@ def test_user_setting_applies_everywhere_but_a_repo_can_override(db, repo, monke
     assert json.loads(user_config_path().read_text())["delegation"] == "fast"  # untouched
 
 
+def test_set_user_agent_guard(monkeypatch):
+    set_user("delegation", "fast")
+    before = user_config_path().read_text()
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "87143685")
+    assert set_user("delegation", "conservative") == user_config_path()
+    assert user_config_path().read_text() == before  # a brindle agent never writes the person's config
+
+
 def test_known_unavailable_model_rejected_before_workspace_or_agent_side_effects(db, repo, monkeypatch):
     from brindle import model_availability as ma
     from brindle.profiles import Profile
