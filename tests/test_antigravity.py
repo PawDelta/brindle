@@ -173,6 +173,23 @@ def test_paste_blocked():
     assert p.paste_blocked(ansi_typing, interactive=True) == "typing"
 
 
+def test_new_supervisor_gets_its_queued_first_messages_over_the_mode_hint(db, ws, monkeypatch):
+    # agy 1.3.5 started with --mode shows its mode as a hint in the empty
+    # input box; the flush after its start must still type in the queue.
+    from brindle import agents, tmux
+
+    add_agent(db, ws, status="idle")
+    db.enqueue("g1", "brindle instructions", None)
+    db.enqueue("g1", "Say hi", None)
+    screen = ("\x1b[38;5;111m>\x1b[39m \x1b[38;5;110mAccept-edits mode: file edits auto-approved "
+              "(shift+tab to cycle)\x1b[39m\n" + "─" * 40 + "\n? for shortcuts   accept-edits · Gemini")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "g1")
+    assert pasted == ["brindle instructions"]
+
+
 # -- agy_approvals "brindle": the strict PreToolUse hook --------------------------------------
 
 

@@ -1434,6 +1434,9 @@ class Antigravity(Provider):
     TRUST_SELECTED = re.compile(r">\s*Yes, I trust this folder")
     READY = re.compile(r"\? for shortcuts|esc to cancel")
     INPUT_LINE = re.compile(r"^\s*>\s*(.*)$", re.M)
+    # The hint agy shows in its empty input box when started with --mode,
+    # e.g. "Accept-edits mode: file edits auto-approved (shift+tab to cycle)".
+    MODE_HINT = re.compile(r"^[\w-]+ mode: .*\(shift\+tab to cycle\)$")
     ANSI_SGR = re.compile(r"\x1b\[([0-9;]*)m")
 
     @classmethod
@@ -1449,7 +1452,7 @@ class Antigravity(Provider):
             return None
         plain_line = self._strip_ansi(candidates[-1])
         m = self.INPUT_LINE.match(plain_line)
-        if m and m.group(1).strip():
+        if m and m.group(1).strip() and not self.MODE_HINT.match(m.group(1).strip()):
             return "typing"
         return None
 
