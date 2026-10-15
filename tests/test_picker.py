@@ -87,8 +87,8 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
 
 
 @pytest.mark.parametrize("kw, got, asked, remembered", [
-    (dict(provider="codex", signed_in=["codex"]), "codex", [], "codex"),            # -s CLI is remembered
-    (dict(provider="codex"), "codex", ["sign_in:codex"], "codex"),                  # -s CLI not signed in: sign in first
+    (dict(provider="codex", signed_in=["codex"]), "codex", [], None),               # -s CLI is this session only
+    (dict(provider="codex"), "codex", ["sign_in:codex"], None),                     # -s CLI not signed in: sign in first
     (dict(provider="codex", allowed=("claude",)), "refused", [], None),             # -s refuses what the org doesn't allow
     (dict(provider=picker.PICK), "antigravity", [None], "antigravity"),             # bare -s opens the picker
     (dict(provider=picker.PICK, tty=False), "refused", [], None),
@@ -122,6 +122,11 @@ def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, va
     result = CliRunner().invoke(cli.app, argv)
     assert result.exit_code == 0, result.output
     assert seen == [value]
+
+
+def test_supervisor_flag_not_saved(monkeypatch):
+    # a -s flag overrides the supervisor for this run only; the saved pick stays
+    assert _resolve(monkeypatch, provider="codex", pick="claude", signed_in=["codex"]) == ("codex", [], "claude")
 
 
 def _workers(acc, keys, **kw):

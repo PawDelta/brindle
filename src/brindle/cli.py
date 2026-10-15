@@ -436,11 +436,13 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
             raise typer.Exit(1)
         return chosen
 
+    from_picker = False
     if provider == picker.PICK:
         if not _can_prompt(yes, demo):
             _fail("`brindle -s` on its own opens the supervisor picker, which needs a terminal; "
                   "name the CLI instead, e.g. `brindle -s codex`")
         provider = ask()
+        from_picker = True
     elif provider:
         why = acc.refusal(provider)
         if why:
@@ -451,6 +453,7 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
     elif _can_prompt(yes, demo) and not (pick and acc.allows(pick)
                                          and pick in doctor_mod.signed_in_providers()):
         provider = ask()
+        from_picker = True
     elif pick and acc.allows(pick):
         provider = pick
     final = provider or _run(load_profile, agents.SUPERVISOR, repo_root).provider
@@ -458,9 +461,10 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
     if why:
         _fail(f"can't run the supervisor on {final}: {why}. Pick another with `brindle -s`.")
     if provider:
-        if provider != pick:
+        # only the interactive picker saves a choice; a -s flag is this session's override
+        if from_picker and provider != pick:
             set_user(SUPERVISOR_KEY, provider)
-        typer.echo(f"Supervisor: {provider} (your pick) · brindle -s to change")
+        typer.echo(f"Supervisor: {provider} ({'your pick' if from_picker else 'this run'}) · brindle -s to change")
     return provider
 
 
