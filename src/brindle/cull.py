@@ -867,8 +867,13 @@ def prune(db: DB) -> list[str]:
 
 
 def sweep_quietly(db: DB) -> None:
-    """A sweep that never raises: culling must never break what calls it."""
+    """A sweep that never raises: culling must never break what calls it.
+    A step that fails must not stop finished work leaving the live view
+    (#167): that one is retried on its own."""
     try:
         sweep(db)
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            prune_retired(db, cautious=True)
+        except Exception:  # noqa: BLE001
+            pass
