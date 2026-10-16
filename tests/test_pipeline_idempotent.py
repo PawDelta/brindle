@@ -138,6 +138,7 @@ def test_submitting_the_same_review_twice_records_it_once(db, approved, monkeypa
     assert db.conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == reviews
 
 
+@pytest.mark.variant("live incident: a reviewer's submit_review retry closed it mid-merge, so queued workers never started")
 def test_a_slow_merge_neither_holds_up_the_reviewer_nor_is_cut_off_by_its_retry(db, approved, monkeypatch):
     """The merge after an approval runs the repo's checks, which can take
     minutes. submit_review returns at once (a reviewer left waiting calls it
