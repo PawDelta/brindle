@@ -1462,7 +1462,9 @@ def one_line(db: DB, message_id: int, body: str, sender_id: str | None) -> str:
         who = f"{sender.profile} {sender_id}" if sender else sender_id
     else:
         who = "brindle"
-    head = first_line(body, 300)
+    # A stuck-worker notice (cull.note_stuck) carries the prompt it waits on in
+    # its first line, which has to arrive whole.
+    head = first_line(body, 1500 if "has been waiting on a prompt for" in body[:200] else 300)
     if not sender_id:
         head = head.removeprefix("[brindle] ")  # the sender tag already says it
     return (f"[{who}] {head} "

@@ -134,6 +134,9 @@ class Profile:
     # and Claude Code loads any CLAUDE.md it finds in them. Added to the repo's own
     # add_dirs rather than replacing it; see load_profile.
     add_dirs: list[str] | None = None
+    # The repo's ``worker_extra_read_dirs``, resolved: read-only access (Claude
+    # Code ``Read(//dir/**)`` allow rules), set by load_profile, not the profile file.
+    read_dirs: list[str] | None = None
     # Additional profile-local deny rules (JSON array of "KIND MATCH_TYPE MATCH").
     permission_denies: list[str] = field(default_factory=list)
     permission_denies_errors: list[str] = field(default_factory=list)
@@ -372,7 +375,15 @@ def _with_repo_add_dirs(profile: Profile, repo_root: str | None) -> Profile:
         resolved = str(path if path.is_absolute() else (root / path).resolve())
         if resolved not in merged:
             merged.append(resolved)
-    return replace(profile, add_dirs=merged or None)
+    read_dirs: list[str] = []
+    for entry in load_repo_config(repo_root).worker_extra_read_dirs:
+        entry = str(entry).strip()
+        if entry:
+            path = Path(entry).expanduser()
+            resolved = str(path if path.is_absolute() else (root / path).resolve())
+            if resolved not in read_dirs:
+                read_dirs.append(resolved)
+    return replace(profile, add_dirs=merged or None, read_dirs=read_dirs or None)
 
 
 def missing_add_dirs(profile: Profile) -> list[str]:
