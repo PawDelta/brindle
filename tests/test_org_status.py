@@ -10,6 +10,18 @@ from brindle.pro import status
 NOW = 1_000_000.0
 
 
+def test_machines_with_one_hostname_get_distinct_stable_session_ids(monkeypatch, tmp_path):
+    """(#94) A hostname alone named two machines the same."""
+    monkeypatch.setattr(status.socket, "gethostname", lambda: "MacBook Pro")
+    ids = []
+    for home in ("a", "b"):
+        monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / home))
+        ids.append(status.session_id())
+        assert status.session_id() == ids[-1]
+    assert ids[0] != ids[1]
+    assert all(i.startswith("MacBook-Pro-") for i in ids)
+
+
 # -- pacing -------------------------------------------------------------------------------------
 
 

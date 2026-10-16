@@ -1984,28 +1984,30 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         close_later(caller.id)
         return "Audit recorded and sent to the supervisor. You're done."
     # Already recorded: closing this reviewer is its verdict's job, once
-    # whatever the verdict set off is done. Checked before the lock too, which
-    # that work (a merge running the checks) can hold for minutes.
-    recorded = "Your review was already recorded. You're done."
+    # whatever the verdict set off is done.
     if caller.result is not None:
-        return recorded
-    # One verdict at a time per workspace: a second one (the same reviewer
-    # calling twice, or another reviewer of the same branch) waits here, then
-    # finds what the first one did instead of merging alongside it.
-    with pipeline.merge_lock(ws.id):
-        caller = db.get_agent(caller_id)
-        if caller is not None and caller.result is not None:
-            return recorded
-        if caller is None or db.get_workspace(ws.id) is None or not os.path.isdir(ws.path):
-            close_later(caller_id)   # the branch merged (or was removed) meanwhile
-            return "The branch is already merged or removed. You're done."
+        return "Your review was already recorded. You're done."
+    # Recorded without the branch's merge lock: a merge holds it while the
+    # repo's checks run, for minutes, and a verdict waiting on it left the
+    # reviewer's call hanging until its CLI gave up on it, never recorded.
+    # Acting on the verdict (finish_review) takes the lock, apart from the
+    # reviewer, and finds whatever a merge in progress did: a second
+    # reviewer's verdict for a branch that merged meanwhile is dropped there.
+    gone = "The branch is already merged or removed. You're done."
+    if db.get_workspace(ws.id) is None or not os.path.isdir(ws.path):
+        close_later(caller_id)
+        return gone
+    try:
         sha = gates.head(ws)
-        db.add_review(ws.id, sha, caller.id, approved, summary)
-        if approved:
-            db.bump_progress(autopilot.root_of(db, caller.id))
-        pipeline.note_review(db, ws, approved, reviewer=caller)
-        verdict = "APPROVED" if approved else "CHANGES REQUESTED"
-        db.set_result(caller.id, _review_text(ws, sha, approved, summary))
+    except git.GitError:   # removed just now
+        close_later(caller_id)
+        return gone
+    db.add_review(ws.id, sha, caller.id, approved, summary)
+    if approved:
+        db.bump_progress(autopilot.root_of(db, caller.id))
+    pipeline.note_review(db, ws, approved, reviewer=caller)
+    verdict = "APPROVED" if approved else "CHANGES REQUESTED"
+    db.set_result(caller.id, _review_text(ws, sha, approved, summary))
     finish_review_later(caller.id, ws.id)
     return f"Review recorded ({verdict}); brindle takes it from here. You're done."
 
@@ -2399,30 +2401,45 @@ def expected_check_wait(db: DB, ws: Workspace, cfg: RepoConfig) -> float | None:
     return total if cfg.checks else None
 
 
+MOVED_RETRIES = 2   # check runs a branch that keeps moving under them gets again (review_after_checks)
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
     Meant to run from a detached process, which outlives the call that
-    started it. Gives up quietly when the branch moves on (the new commit
-    gets its own review), the workspace is gone, or a reviewer is already at
-    work on this commit. Raises ``AgentError`` when the reviewer can't
+    started it. Gives up quietly when the workspace is gone, a reviewer is
+    already at work on this commit, or the branch moves on to a commit a new
+    report hands to a run of its own. A piped branch that moves on without
+    a new report (its worker committed again, or merged its moved base in)
+    is checked again on its new head, up to ``MOVED_RETRIES`` times, and then
+    goes to the supervisor. Raises ``AgentError`` when the reviewer can't
     start."""
-    from brindle import gates
+    from brindle import gates, pipeline
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
-    sha = gates.head(ws)
-    if _live_reviewer(db, ws, sha, profile):
-        return None
-    try:
-        summary = gates.check_summary(db, ws, cfg, cancel=lambda: gates.head(ws) != sha)
-    except gates.Abandoned:
-        return None
-    except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
-        summary = f"(running the checks crashed: {e})"
-    if db.get_workspace(ws.id) is None or gates.head(ws) != sha:
+    since = pipeline.review_claim(db, ws)
+    for _attempt in range(MOVED_RETRIES + 1):
+        sha = gates.head(ws)
+        if _live_reviewer(db, ws, sha, profile):
+            return None
+        try:
+            summary = gates.check_summary(db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha)
+        except gates.Abandoned:
+            summary = None
+        except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
+            summary = f"(running the checks crashed: {e})"
+        if db.get_workspace(ws.id) is None:
+            return None
+        if gates.head(ws) == sha:
+            break
+        if not pipeline.still_claimed(db, ws, since):
+            return None
+    else:
+        pipeline.on_moved_during_checks(db, ws)
         return None
     caller = db.get_agent(caller_id) if caller_id else None
     text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
@@ -3324,7 +3341,9 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     if agent.mode == "review" and ws is not None and os.path.isdir(ws.path):
         from brindle import gates
 
-        if db.latest_review(ws.id, gates.head(ws)):
+        # Its own verdict only: another reviewer's (a second review's) says
+        # nothing about whether this one's call got through.
+        if any(r.reviewer_id == agent.id for r in db.reviews_at(ws.id, gates.head(ws))):
             return False  # its verdict for the current commit is already recorded
     if agent.unreported_noted:
         return False  # the supervisor was told about this stop; cleared once it resumes

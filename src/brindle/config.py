@@ -222,6 +222,25 @@ def _default_permission_policy() -> str:
         return "off"
 
 
+CHECK_RAM_GB = 2        # RAM budgeted per concurrent check run
+CHECK_CONCURRENCY_CAP = 6
+
+
+def _memory_gb() -> float:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+    except (ValueError, OSError):
+        return 0.0
+
+
+def host_check_concurrency() -> int:
+    """Check runs at once when the repo doesn't say: half the logical cores and
+    RAM for ``CHECK_RAM_GB`` per run, never below 2 or above the cap (#169)."""
+    cores = os.cpu_count() or 1
+    by_ram = int(_memory_gb() // CHECK_RAM_GB)
+    return max(2, min(cores // 2, by_ram, CHECK_CONCURRENCY_CAP))
+
+
 def load_repo_config(repo_root: str | Path) -> RepoConfig:
     base = config_root(repo_root) / CONFIG_DIR
     shared = _read_json(base / CONFIG_FILE)
@@ -251,6 +270,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
             if isinstance(rule, str) and rule.strip() and rule.strip() not in rules:
                 rules.append(rule.strip())
     cfg.rules = rules
+    if not any("check_concurrency" in source for source in (local, shared, user)):
+        cfg.check_concurrency = host_check_concurrency()
     if not any("permission_policy" in source for source in (local, shared, user)):
         cfg.permission_policy = _default_permission_policy()
     services = local["services"] if "services" in local else shared.get("services")
