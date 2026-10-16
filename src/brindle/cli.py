@@ -589,7 +589,12 @@ def _pause_running(db: DB, ws: Workspace, stop_procs: bool = True) -> None:
     ``stop_procs=False`` when a detached cull follows (see agents.pause)."""
     from brindle import scratch
 
-    for a in _live_sessions(db, ws):
+    live = _live_sessions(db, ws)
+    caller = os.environ.get("BRINDLE_AGENT_ID")
+    if caller and any(a.id == caller for a in live):
+        # Pausing kills the session's process tree, this command with it.
+        _fail("this command would stop the session running it; run it from a terminal instead")
+    for a in live:
         # A session starts here next: keep its local models loaded.
         agents.pause(db, a.id, stop_procs=stop_procs, stop_local_models=False)
         typer.echo(f"Paused the session that was still running here ({a.id}); "
