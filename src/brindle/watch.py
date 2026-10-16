@@ -16,7 +16,7 @@ import textwrap
 import time
 from dataclasses import dataclass, field
 
-from brindle import agents, airgap, pricing, tmux, upgrade, view, watch_costs
+from brindle import agents, airgap, pricing, sidebar_follow, tmux, upgrade, view, watch_costs
 from brindle.db import DB
 
 RESTART = "restart"      # what _loop returns when brindle was upgraded under it
@@ -377,8 +377,11 @@ def print_once(db: DB, repo_root: str | None, color: bool) -> str:
     feed.get()
     feed.wait()                  # a one-shot print has nothing to draw meanwhile
     costs = (watch_costs.local(db, repo_root, snap), feed.get())
-    for line in render(snap, time.time(), width, view.autopilot_entry(db, repo_root, panes=panes),
-                       costs=costs):
+    # Inside a supervisor's tmux session, show that session's own goal.
+    session = tmux.current_session()
+    root_id = sidebar_follow.root_for_session(db, session) if session else None
+    pilot = view.autopilot_entry(db, repo_root, panes=panes, root_id=root_id)
+    for line in render(snap, time.time(), width, pilot, costs=costs):
         code = ANSI.get(line.style) if color else None
         out.append(f"\033[{code}m{line.text}\033[0m" if code else line.text)
     return "\n".join(out)
