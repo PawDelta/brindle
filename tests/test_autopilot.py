@@ -76,9 +76,15 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
+    clock = [time.time()]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
     for _ in range(autopilot.MAX_NUDGES):
         out = autopilot.on_stop(db, agent, {"stop_hook_active": True})
         assert out and out["decision"] == "block" and "0 of 2 milestones verified" in out["reason"]
+        # (#177) The same reminder isn't repeated while nothing has changed:
+        # only a long backoff brings it back.
+        assert autopilot.on_stop(db, agent, {}) is None
+        clock[0] += autopilot.NUDGE_BACKOFF
     assert autopilot.on_stop(db, agent, {"stop_hook_active": True}) is None
     assert db.get_autopilot("boss").state == "stalled"
     # The user replies: autopilot drives again.

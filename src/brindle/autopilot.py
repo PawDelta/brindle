@@ -54,6 +54,7 @@ log = logging.getLogger(__name__)
 GOALS_FILE = "goals.md"
 GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's own goal
 MAX_NUDGES = 3
+NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
 OUTPUT_TAIL_LINES = 30
 
@@ -1856,12 +1857,16 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         # One reminder per step: never counts toward stalling.
         db.update_autopilot(agent.id, nudges=0, nudged_at=ap.progress)
         return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
+    now = time.time()
+    if (ap.nudged_at == ap.progress and ap.nudged_time is not None
+            and now - ap.nudged_time < NUDGE_BACKOFF):
+        return None  # (#177) already reminded since the last step: it's legitimately waiting
     nudges = ap.nudges if ap.nudged_at == ap.progress else 0
     if nudges >= MAX_NUDGES:
         db.update_autopilot(agent.id, state="stalled", nudges=0,
                             note=f"no progress after {MAX_NUDGES} reminders to keep going")
         return None
-    db.update_autopilot(agent.id, nudges=nudges + 1, nudged_at=ap.progress)
+    db.update_autopilot(agent.id, nudges=nudges + 1, nudged_at=ap.progress, nudged_time=now)
     return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
 
 
