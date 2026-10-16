@@ -1925,23 +1925,24 @@ NO_CHECKS = """- This repo has no `checks` in .brindle/config.json, so nothing v
 
 
 SAFE_ALLOW = re.compile(r"[A-Za-z0-9_./ =,@+-]+")   # no wildcard, quote, $, &, redirect or newline
-EXEC_BINARIES = {"curl", "wget", "bash", "sh", "zsh", "eval", "exec", "rm", "sudo", "ssh", "nc",
-                 "env", "xargs", "node", "perl", "ruby", "timeout", "nice", "nohup", "command",
-                 "npx", "uv", "make", "docker", "busybox", "time", "stdbuf"}   # wrappers run their argv
-INTERPRETER = re.compile(r"python[0-9.]*$|pypy[0-9.]*$")
+# Programs whose only job is checking code. Exact, case-sensitive matches: anything
+# else (wrappers, shells, package runners, interpreters) is refused.
+CHECK_PROGRAMS = {"pytest", "ruff", "mypy", "shellcheck", "eslint", "tsc", "cargo", "go",
+                  "flake8", "pyright", "golangci-lint"}
+CHECK_MODULES = {"pytest", "mypy", "ruff", "unittest"}   # the only `python -m` targets allowed
 
 
 def _runs_arbitrary(c: str) -> bool:
-    """True when the command's program is not a plain tool: a path, a wrapper or
-    shell, or an interpreter running anything but a ``-m`` module."""
+    """True unless the command runs a known check program. ``NAME=VALUE`` prefixes
+    and paths are refused; ``uv run`` is looked through to the program it runs."""
     argv = c.split()
-    prog = argv[0]
-    name = prog.rsplit("/", 1)[-1] if "/" not in prog else None
-    if name is None or name in EXEC_BINARIES:
+    if argv[:1] == ["uv"] and argv[1:2] == ["run"]:
+        argv = argv[2:]
+    if not argv or "=" in argv[0] or argv[0] not in CHECK_PROGRAMS | {"python", "python3"}:
         return True
-    if INTERPRETER.match(name):
-        return argv[1:2] != ["-m"]
-    return False
+    if argv[0] in CHECK_PROGRAMS:
+        return False
+    return argv[1:2] != ["-m"] or argv[2:3] == [] or argv[2] not in CHECK_MODULES
 
 
 def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
