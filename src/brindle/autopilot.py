@@ -1924,6 +1924,10 @@ NO_CHECKS = """- This repo has no `checks` in .brindle/config.json, so nothing v
 """
 
 
+UNSAFE_ALLOW = re.compile(r"[*`<>\n]|\$\(|:\*")
+EXEC_BINARIES = {"curl", "wget", "bash", "sh", "zsh", "eval", "exec", "rm", "sudo", "ssh", "nc"}
+
+
 def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     """Add approved ``checks`` to .brindle/config.json and, with ``allow``, one
     narrow Bash allow rule per command in them to .claude/settings.local.json."""
@@ -1938,11 +1942,15 @@ def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     text = f"Added {len(checks)} check(s) to {path}."
     if not allow:
         return text
+    commands = [c.strip() for check in checks for c in re.split(r"&&|\|\||;|\|", check)]
+    unsafe = [c for c in commands if c and (UNSAFE_ALLOW.search(c) or c.split()[0] in EXEC_BINARIES)]
+    if unsafe:
+        return (f"{text} Did not allow any commands: {unsafe[0]!r} has a wildcard, substitution, "
+                "redirect or a binary that runs arbitrary code. The user can add rules themselves.")
     settings_path = root / ".claude" / "settings.local.json"
     settings = _read_json(settings_path)
     perms = settings.setdefault("permissions", {})
     allowed = perms.setdefault("allow", [])
-    commands = [c.strip() for check in checks for c in re.split(r"&&|\|\||;|\|", check)]
     for rule in (f"Bash({c})" for c in commands if c):
         if rule not in allowed:
             allowed.append(rule)
