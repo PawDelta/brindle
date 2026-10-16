@@ -1927,8 +1927,10 @@ NO_CHECKS = """- This repo has no `checks` in .brindle/config.json, so nothing v
 SAFE_ALLOW = re.compile(r"[A-Za-z0-9_./ =,@+-]+")   # no wildcard, quote, $, &, redirect or newline
 # Programs whose only job is checking code. Exact, case-sensitive matches: anything
 # else (wrappers, shells, package runners, interpreters) is refused.
-CHECK_PROGRAMS = {"pytest", "ruff", "mypy", "shellcheck", "eslint", "tsc", "cargo", "go",
+CHECK_PROGRAMS = {"pytest", "ruff", "mypy", "shellcheck", "eslint", "tsc",
                   "flake8", "pyright", "golangci-lint"}
+# Toolchains run code through many subcommands (go run, cargo install, ...): only these.
+CHECK_SUBCOMMANDS = {"go": {"test", "vet"}, "cargo": {"test", "check", "clippy", "fmt"}}
 CHECK_MODULES = {"pytest", "mypy", "ruff", "unittest"}   # the only `python -m` targets allowed
 
 
@@ -1938,8 +1940,10 @@ def _runs_arbitrary(c: str) -> bool:
     argv = c.split()
     if argv[:1] == ["uv"] and argv[1:2] == ["run"]:
         argv = argv[2:]
-    if not argv or "=" in argv[0] or argv[0] not in CHECK_PROGRAMS | {"python", "python3"}:
+    if not argv or "=" in argv[0] or argv[0] not in {*CHECK_PROGRAMS, *CHECK_SUBCOMMANDS, "python", "python3"}:
         return True
+    if argv[0] in CHECK_SUBCOMMANDS:
+        return argv[1:2] == [] or argv[1] not in CHECK_SUBCOMMANDS[argv[0]]
     if argv[0] in CHECK_PROGRAMS:
         return False
     return argv[1:2] != ["-m"] or argv[2:3] == [] or argv[2] not in CHECK_MODULES
