@@ -179,6 +179,24 @@ def test_a_slow_merge_neither_holds_up_the_reviewer_nor_is_cut_off_by_its_retry(
     assert closed == ["rev0"] and len(runs) == 1
 
 
+def test_a_verdict_is_recorded_at_once_while_a_merge_holds_the_branch(db, approved, monkeypatch):
+    """#172: a merge holds the branch's lock while the repo's checks run. A
+    reviewer's submit_review waited on it, so the call hung and the verdict
+    was never recorded; it is recorded at once, and acted on apart from it."""
+    ws, runs = approved
+    db.conn.execute("DELETE FROM reviews WHERE reviewer_id = 'rev1'")
+    acted = []
+    monkeypatch.setattr(agents, "finish_review_later", lambda rid, ws_id: acted.append(rid))
+    with pipeline.merge_lock(ws.id):   # held by a merge, in another process in production
+        t = threading.Thread(target=lambda: agents.submit_review(DB(), "rev1", False, "fix it"))
+        t.start()
+        t.join(5)
+        answered = not t.is_alive()
+        rejected = [r.reviewer_id for r in db.reviews_at(ws.id, gates.head(ws)) if not r.approved]
+    t.join(5)
+    assert answered and rejected == ["rev1"] and acted == ["rev1"]
+
+
 def test_a_second_reviewer_submitting_after_the_removal_is_told_it_is_done(db, approved):
     ws, runs = approved
     agents.submit_review(db, "rev0", True, "lgtm")

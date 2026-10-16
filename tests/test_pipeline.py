@@ -31,6 +31,8 @@ def test_reviewer_without_verdict_gets_fallback(db, repo, monkeypatch):
         add(db, ws, "rev1", "review", profile, parent=caller.id)
 
     monkeypatch.setattr(agents, "request_review", fallback)
+    # A second review's verdict on the same commit isn't rev0's (#172).
+    db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
     agents.tell_parent_unreported(db, db.get_agent("rev0"))
     assert started == ["reviewer"]
