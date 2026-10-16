@@ -412,34 +412,67 @@ def on_merged(db: DB, ws: Workspace) -> None:
             if t.agent_id == worker.id:
                 db.update_task(t.id, state="merged")
     for t in db.list_tasks(state="pending"):
-        deps = _loads(t.depends_on)
         worker_id = worker.id if worker else None
         if not any(_dep_matches(d, ws, worker_id) and (d == worker_id or t.repo_root == ws.repo_root)
-                   for d in deps):
+                   for d in _loads(t.depends_on)):
             continue
-        caller_ws = db.get_workspace(t.caller_ws_id)
-        if not caller_ws:
-            continue
+        _start_if_ready(db, t, dep_ref)
+
+
+def _start_if_ready(db: DB, t: Task, dep_ref: str) -> bool:
+    """Start pending task ``t`` if every dependency is merged, and tell its
+    caller. The task is claimed first, so a second call (a sweep racing a
+    merge) finds it taken. A dependency that can never merge cancels it; a
+    start that fails cancels it too, with the reason sent to its caller
+    (``requeue`` makes a new one). Returns whether it started."""
+    caller_ws = db.get_workspace(t.caller_ws_id)
+    if not caller_ws:
+        return False
+    try:
+        if unmet_dependencies(db, caller_ws, _loads(t.depends_on)):
+            return False
+    except agents.AgentError as e:
+        _cancel(db, t.id, str(e))
+        return False
+    if not db.claim_task(t.id):
+        return False
+    try:
+        new_worker = start_queued(db, t)
+    except agents.AgentError as e:
+        db.update_task(t.id, state="pending")
+        _cancel(db, t.id, f"it could not start: {e}")
+        return False
+    if t.caller_id:
         try:
-            if unmet_dependencies(db, caller_ws, deps):
-                continue
-        except agents.AgentError as e:
-            _cancel(db, t.id, str(e))
-            continue
-        try:
-            new_worker = start_queued(db, t)
+            text = f"Started {new_worker.id} (was waiting on {dep_ref})."
+            new_ws = db.get_workspace(new_worker.workspace_id)
+            warning = agents.add_dirs_warning(new_worker, new_ws) if new_ws else None
+            if warning:
+                text += f"\nWarning: {warning}"
+            agents.send_message(db, t.caller_id, text, sender_id=None)
         except agents.AgentError:
-            continue
-        if t.caller_id:
-            try:
-                text = f"Started {new_worker.id} (was waiting on {dep_ref})."
-                new_ws = db.get_workspace(new_worker.workspace_id)
-                warning = agents.add_dirs_warning(new_worker, new_ws) if new_ws else None
-                if warning:
-                    text += f"\nWarning: {warning}"
-                agents.send_message(db, t.caller_id, text, sender_id=None)
-            except agents.AgentError:
-                pass
+            pass
+    return True
+
+
+def sweep(db: DB) -> int:
+    """Start every pending task whose dependencies are all merged, whatever
+    stranded it (a merge run cut off before ``on_merged``, a branch merged by
+    hand). A started task whose workspace has a merge record is first marked
+    merged, as ``on_merged`` would have. Safe to repeat: ``_start_if_ready``
+    claims each task. Returns how many started."""
+    pending = db.list_tasks(state="pending")
+    if not pending:
+        return 0
+    for t in db.list_tasks(state="started"):
+        agent = db.get_agent(t.agent_id) if t.agent_id else None
+        if agent and db.merged_sha(agent.workspace_id):
+            db.update_task(t.id, state="merged")
+    started = 0
+    for t in pending:
+        deps = _loads(t.depends_on)
+        started += _start_if_ready(db, t, ", ".join(deps) if deps else "its dependencies")
+    return started
 
 
 def on_removed_unmerged(db: DB, ws: Workspace) -> None:

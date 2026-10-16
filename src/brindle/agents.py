@@ -2795,6 +2795,15 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False)
     inbox message rather than block the stop, so ``stop_hook_active`` never
     caps a repeat; the unread-mail reminder is then limited to one per
     NOTICE_TTL (DB.claim_stop_reminder)."""
+    if agent.mode == "interactive":
+        # Every supervisor turn ends here: start any queued task a cut-off or
+        # manual merge left waiting (its "Started" note is delivered below).
+        try:
+            from brindle import tasks
+
+            tasks.sweep(db)
+        except Exception:  # noqa: BLE001 -- must never break the Stop hook
+            log.exception("brindle: queued-task sweep failed")
     msg = db.pop_pending(agent.id)
     if msg:
         db.set_status(agent.id, "processing")

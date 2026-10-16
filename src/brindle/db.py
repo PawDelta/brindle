@@ -1811,6 +1811,14 @@ class DB:
         with self.tx() as c:
             c.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), task_id))
 
+    def claim_task(self, task_id: str) -> bool:
+        """Move a pending task to 'starting', atomically: True for the one
+        caller that got it, so two sweeps or merges can't both start it."""
+        with self.tx() as c:
+            return c.execute(
+                "UPDATE tasks SET state='starting' WHERE id=? AND state='pending'", (task_id,)
+            ).rowcount == 1
+
     def get_reported_spend(self, agent_id: str) -> float:
         row = self.conn.execute("SELECT reported_usd FROM agent_reported_spend WHERE agent_id=?", (agent_id,)).fetchone()
         return float(row[0]) if row else 0.0

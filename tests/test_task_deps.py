@@ -87,6 +87,39 @@ def test_queued_task_stays_queued_if_only_some_dependencies_merged(db, repo, bos
     assert b_task.state == "pending"
 
 
+def test_a_stranded_queued_task_starts_at_the_supervisors_stop_and_only_once(db, repo, boss, monkeypatch):
+    """A merged without on_merged ever running (cut off, or merged by hand)."""
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    worker_a = started_worker_id(asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a")))
+    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
+    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=[worker_a]))
+    db.set_merged(ws_a.id, "abc123")
+
+    boss_agent = db.get_agent("boss")
+    agents._stop_decision(db, boss_agent, {})
+    agents._stop_decision(db, boss_agent, {})
+
+    [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
+    assert b_task.state == "started" and b_task.agent_id
+    assert len([a for a in db.list_agents() if a.parent_id == "boss"]) == 2   # A and B, B once
+
+
+def test_a_queued_task_that_fails_to_start_tells_its_caller_why(db, repo, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    worker_a = started_worker_id(asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a")))
+    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
+    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=[worker_a]))
+
+    def boom(db_, task):
+        raise agents.AgentError("no such profile")
+    monkeypatch.setattr(tasks, "start_queued", boom)
+    asyncio.run(mcp_server.merge_workspace(ws_a.id))
+
+    [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
+    assert b_task.state == "cancelled"
+    assert "no such profile" in full_text(db, "boss", db.pop_pending("boss").body)
+
+
 # -- cancellation on unmerged removal --------------------------------------------
 
 
