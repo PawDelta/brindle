@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
+from types import SimpleNamespace
 
 from brindle import cloud_credential, company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
 from brindle.config import RepoConfig
@@ -981,11 +982,12 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
     provider = get_provider(agent.provider)
     session = resume
     turn = 0
+    retry = None    # a turn the cloud login failed: run again before anything else
     while True:
         agent = db.get_agent(agent_id)
         if agent is None:
             return 0
-        msg = db.pop_pending(agent_id)
+        msg, retry = retry or db.pop_pending(agent_id), None
         if msg is None:
             if exit_when_idle:
                 return 0
@@ -1014,10 +1016,44 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
             return 0
         session = agent.session_ref or session
         if code != 0:
+            if wait_for_cloud_login(db, agent, ws):
+                # The same turn again, from where it stopped.
+                retry = SimpleNamespace(body=HEADLESS_CONTINUE) if session else msg
+                continue
             print(f"\n── brindle: claude exited with code {code}; this worker has stopped ──", flush=True)
             return code
         db.set_status(agent_id, "idle", only_if="processing")
         print("── brindle: turn finished; waiting for messages ──", flush=True)
+
+
+def wait_for_cloud_login(db: DB, agent: Agent, ws: Workspace, poll: float = 60.0) -> bool:
+    """A headless turn failed. If it was on a lapsed cloud login, wait here
+    (offering the one browser sign-in, see cloud_login.sign_in) until the
+    login works again and return True; False for any other failure."""
+    from brindle import cloud_login
+
+    try:
+        env = agent_env(ws, agent.id, agent)
+    except Exception:  # noqa: BLE001 - an unreadable env: not ours to wait on
+        return False
+    if cloud_login.provider_from_env({**os.environ, **env}) is None:
+        return False
+    s = cloud_login.refresh(env=env)
+    if not s.expired:
+        return False
+    print("\n── brindle: the cloud login lapsed; this worker waits until it's renewed "
+          f"(sign in with the browser tab brindle opens, or run `{s.refresh_cmd}`) ──", flush=True)
+    while db.get_agent(agent.id) is not None:
+        try:
+            last_input = tmux.last_input()
+        except tmux.TmuxError:
+            last_input = None
+        cloud_login.sign_in(env=env, last_input=last_input)
+        if cloud_login.status(env=env).ok:
+            print("── brindle: cloud login renewed; continuing ──", flush=True)
+            return True
+        time.sleep(poll)
+    return False
 
 
 def ready(db: DB, agent_id: str) -> None:

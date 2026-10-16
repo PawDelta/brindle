@@ -310,7 +310,9 @@ CREATE TABLE IF NOT EXISTS login_state (
     expired_at REAL,
     noticed TEXT,                  -- how the person was told: chat | bar
     next_check REAL,               -- the next re-check while paused
-    delay REAL                     -- the backoff before it
+    delay REAL,                    -- the backoff before it
+    interrupted TEXT,              -- JSON list of agents whose turn brindle escaped while paused
+    account TEXT                   -- who the lapsed login belonged to, when the CLI records it
 );
 -- The one `brindle watch --sidebar` pane per interactive session root (see
 -- agents.sidebar_follow): its tmux pane id, so any session in that root's
@@ -497,6 +499,8 @@ class LoginState:
     noticed: str | None = None
     next_check: float | None = None
     delay: float | None = None
+    interrupted: str | None = None
+    account: str | None = None
 
 
 @dataclass
@@ -729,6 +733,10 @@ class DB:
         for col in ("checked_sha", "passed_sha", "profile", "repo"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(login_state)")}
+        for col in ("interrupted", "account"):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE login_state ADD COLUMN {col} TEXT")
         cache_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(usage_cache)")}
         if "inode" not in cache_cols:
             self.conn.execute("ALTER TABLE usage_cache ADD COLUMN inode INTEGER")

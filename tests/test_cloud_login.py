@@ -57,9 +57,19 @@ def test_aws_reads_only_the_selected_profiles_sso_session(tmp_path):
     assert not s.ok and s.expired and s.refresh_cmd == "aws sso login --profile dev"
     # refresh: any AWS CLI call renews the SSO token from the sso-session's refresh token
 
+    def aws(stderr):
+        return lambda cmd, **kw: SimpleNamespace(returncode=255, stdout="", stderr=stderr)
+
+    # offline: the token is past its time but the session never said it lapsed
+    offline = aws("Could not connect to the endpoint URL: \"https://portal.sso.us-east-1.amazonaws.com\"")
+    assert not cloud_login.refresh("bedrock", env=alt, home=tmp_path, now=NOW + 1, run=offline).expired
+    lapsed = aws("Error when retrieving token from sso: Token has expired and refresh failed")
+    assert cloud_login.refresh("bedrock", env=alt, home=tmp_path, now=NOW + 1, run=lapsed).expired
+
     def renew(cmd, **kw):
         assert cmd[:4] == ["aws", "sts", "get-caller-identity", "--profile"] and cmd[4] == "dev"
         _sso_token(cache, "dev-sess", "2099-01-01T00:00:00Z")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
 
     assert cloud_login.refresh("bedrock", env=alt, home=tmp_path, now=NOW + 1, run=renew).ok
 
@@ -109,6 +119,30 @@ def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, tmp_p
     assert s.refresh_cmd == "gcloud auth application-default login" and "SECRET" not in repr(s)
     assert s.expires_at == (NOW + 1800.0 if ok else None)
     assert bool(seen) is ok
+
+
+@pytest.mark.parametrize("provider, stderr", [
+    # after `gcloud auth application-default revoke`
+    ("vertex", "ERROR: (gcloud.auth.application-default.print-access-token) "
+               "Your default credentials were not found."),
+    # after `aws sso logout`: no cached token
+    ("bedrock", "Error loading SSO Token: Token for dev-sess does not exist"),
+    # after `az logout`
+    ("foundry", "ERROR: Please run 'az login' to setup account."),
+])
+def test_signed_out_never_prompts(provider, stderr, tmp_path):
+    (tmp_path / ".aws").mkdir()
+    (tmp_path / ".aws" / "config").write_text("[profile dev]\nsso_session = dev-sess\n")
+    env = {"AWS_PROFILE": "dev", "AWS_CONFIG_FILE": str(tmp_path / ".aws" / "config"),
+           "CLOUDSDK_CONFIG": str(tmp_path / "gcloud"), "AZURE_CONFIG_DIR": str(tmp_path / "azure")}
+    failed = SimpleNamespace(returncode=1, stdout="", stderr=stderr)
+
+    def browser(cmd, **kw):
+        raise AssertionError(f"opened a sign-in: {cmd}")
+
+    how = cloud_login.sign_in(provider, env=env, home=tmp_path, now=NOW, last_input=NOW,
+                              run=lambda cmd, **kw: failed, popen=browser)   # the person is right there
+    assert how == "no lapse"
 
 
 def test_google_timeout_is_a_failed_login_not_an_exception(tmp_path):

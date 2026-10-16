@@ -7,7 +7,8 @@ import time
 
 import pytest
 
-from brindle import agents, tmux, workspaces
+from brindle import agents, cloud_login, tmux, workspaces
+from brindle.cloud_login import LoginStatus
 from brindle.db import Agent
 
 FAKE_CLAUDE = """#!/bin/sh
@@ -88,14 +89,30 @@ def test_runner_starts_a_session_then_resumes_it(db, ws, fake_claude, monkeypatc
     assert a.session_ref == sid and a.status == "idle"
 
 
-def test_runner_stops_when_claude_fails(db, ws, fake_claude, monkeypatch, capfd):
+@pytest.mark.parametrize("lapsed", [
+    False,      # any failure: the worker stops
+    True,       # its cloud login lapsed: it waits for the sign-in, then retries the turn
+])
+def test_runner_stops_when_claude_fails(db, ws, fake_claude, monkeypatch, capfd, lapsed):
     headless_agent(db, ws)
     monkeypatch.setenv("BRINDLE_AGENT_ID", "h1")
+    monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+    login = iter([False, True])         # still lapsed at the first look, then renewed
+    monkeypatch.setattr(cloud_login, "refresh",
+                        lambda **kw: LoginStatus(False, None, "gcloud", "", expired=lapsed))
+    monkeypatch.setattr(cloud_login, "sign_in", lambda **kw: "opened")
+    monkeypatch.setattr(cloud_login, "status", lambda **kw: LoginStatus(next(login), None, "", ""))
+    monkeypatch.setattr(tmux, "last_input", lambda: None)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
     db.enqueue("h1", "please FAIL", None)
-    db.enqueue("h1", "never run", None)
-    assert agents.run_headless(db, "h1", exit_when_idle=True) == 3
-    assert len(fake_claude()) == 1
-    assert "exited with code 3" in capfd.readouterr().out
+    db.enqueue("h1", "next", None)
+    assert agents.run_headless(db, "h1", exit_when_idle=True) == (0 if lapsed else 3)
+    calls = fake_claude()
+    assert len(calls) == (2 if lapsed else 1)
+    if lapsed:
+        assert calls[1][-1] == agents.HEADLESS_CONTINUE    # the failed turn, resumed first
+    else:
+        assert "exited with code 3" in capfd.readouterr().out
 
 
 def test_messages_to_a_headless_worker_go_through_its_inbox(db, ws, monkeypatch):

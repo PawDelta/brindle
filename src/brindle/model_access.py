@@ -90,6 +90,8 @@ EXPIRED_LOGIN = Cause("expired_login", "", "the cloud login has expired",
 _EXPIRED_MARKERS = (
     "could not load google cloud credentials", "invalid_grant", "invalid_rapt",
     "expiredtoken", "security token included in the request is expired",
+    # the AWS CLI, when the SSO session behind a profile has lapsed
+    "token has expired and refresh failed", "sso session associated with this profile has expired",
 )
 # Entra ID codes for an expired or revoked token / session / refresh token.
 _AADSTS_EXPIRED = re.compile(r"AADSTS(?:70043|70008|700082|700084|50173|50132)\b")

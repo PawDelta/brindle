@@ -484,6 +484,16 @@ def client_activity(session: str) -> float | None:
     return max(times) if times else None
 
 
+def last_input() -> float | None:
+    """When anyone last typed in any brindle session: the latest input of any
+    client attached to brindle's server, or None with nobody attached."""
+    proc = _tmux("list-clients", "-F", "#{client_activity}", check=False)
+    if proc.returncode != 0:
+        return None
+    times = [float(t) for t in proc.stdout.split() if t.isdigit()]
+    return max(times) if times else None
+
+
 def current_session() -> str | None:
     """The tmux session this process runs in (from its pane), or None."""
     pane = os.environ.get("TMUX_PANE")

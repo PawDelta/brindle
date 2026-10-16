@@ -565,7 +565,11 @@ class ClaudeCode(Provider):
             # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
             # application-default login`) whenever its own ADC probe fails, once
             # per process: across a session's many panes that opens a Google
-            # sign-in tab each time. login_pause tells the person once instead.
+            # sign-in tab each time. The probe counts any error but a timeout
+            # as invalid credentials: a network blip, or the ADC file half
+            # written (gcloud rewrites it in place) by another pane's login,
+            # so a fine login still opened tabs. login_pause opens the one
+            # sign-in a real lapse needs (cloud_login.sign_in) instead.
             "gcpAuthRefresh": "",
         }
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
