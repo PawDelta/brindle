@@ -4,7 +4,7 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, workspaces
+from brindle import agents, cli, workspaces
 from brindle.cli import app
 from brindle.db import Agent
 
@@ -77,7 +77,8 @@ def test_continue_from_inside_session(db, repo, monkeypatch):
     db.set_status(target.id, "paused")
     calls = []
     monkeypatch.setattr(agents, "is_alive", lambda a: a.id == caller.id)
-    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    # The caller is the one live session; no tmux state decides that.
+    monkeypatch.setattr(cli, "_live_sessions", lambda db_, ws_: [db.get_agent(caller.id)])
     monkeypatch.setattr(agents, "pause", lambda *a, **k: calls.append("pause"))
     monkeypatch.setattr(agents, "resume", lambda *a, **k: calls.append("resume") or [])
     monkeypatch.setenv("BRINDLE_AGENT_ID", caller.id)
