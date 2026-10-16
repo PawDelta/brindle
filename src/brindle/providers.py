@@ -583,7 +583,9 @@ class ClaudeCode(Provider):
             "--settings", json.dumps(settings),
             "--mcp-config", json.dumps(mcp),
             "--allowedTools", ",".join(["mcp__brindle", *codemap.ALLOWED_TOOLS,
-                                        *(ctx.profile.allowed_tools or [])]),
+                                        *(ctx.profile.allowed_tools or []),
+                                        # `//` makes the path absolute; reads only.
+                                        *(f"Read(/{d.rstrip('/')}/**)" for d in p.read_dirs or [])]),
         ]
         # Lightweight workers. --settings (brindle's hooks) is its own setting
         # source, so --setting-sources never drops them; --strict-mcp-config

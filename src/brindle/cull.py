@@ -322,8 +322,13 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         pending = agents.pending_permission(db, a.id)
         request = (f"\n\n{pending} Only the user can answer it; tell them exactly what is pending."
                    if pending else "")
+        # The supervisor sees a message's first line (agents.one_line), so the
+        # prompt itself goes there: which prompt it is says whether it's an
+        # access outside the project they can route around.
+        prompt = " | ".join(tail.splitlines())
         body = (f"Worker {a.id} ({a.profile}){where} has been waiting on a prompt for "
-                f"{int(now - since)}s and can't continue until someone answers it.{attach} "
+                f"{int(now - since)}s{': ' + prompt if prompt else ''}\n\n"
+                f"It can't continue until someone answers it.{attach} "
                 f"or remove the workspace if it's no longer needed.{auto_mode_note(a, ws)}"
                 f"{request}\n\nIts screen:\n{tail}")
         try:

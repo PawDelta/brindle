@@ -130,6 +130,9 @@ class RepoConfig:
     # already fast). 0 disables the pool.
     pool_size: int | None = None
     add_dirs: list[str] = field(default_factory=list)
+    # Directories outside the worktree that workers may read (not write), e.g. a
+    # gitignored results/ folder in the main checkout.
+    worker_extra_read_dirs: list[str] = field(default_factory=list)
     # Per-worktree Docker services (brindle Pro): [{"name", "preset"?, "image"?, "port"?, "env"?}]
     # -- see brindle.services.
     services: list[dict] = field(default_factory=list)
@@ -245,7 +248,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     user = user_settings()
 
     cfg = RepoConfig()
-    for key in ("setup", "teardown", "copy", "checks", "add_dirs", "protected_paths"):
+    for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "auto_update", "autopilot", "review",
