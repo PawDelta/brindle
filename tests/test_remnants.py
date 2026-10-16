@@ -10,7 +10,8 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import cull, procs, tmux, view, workspaces
+import test_cull
+from brindle import cull, tmux, view, workspaces
 
 # These start servers named after a dead pytest run, which every other
 # xdist worker's teardown would reap first: run them in the serial pass.
@@ -212,10 +213,7 @@ def test_a_session_whose_worktree_is_gone_is_killed_with_the_cli_in_it(db, tmp_p
     lines = cull.orphan_sessions(db)
 
     assert any(name in line for line in lines) and not tmux.has_session(name)
-    deadline = time.time() + 5
-    while any(procs.alive(p) for p in pids) and time.time() < deadline:
-        time.sleep(0.1)
-    assert not any(procs.alive(p) for p in pids)
+    assert not any(test_cull.alive(p) for p in pids)   # terminate() returns once they are gone
 
 
 def test_empty_worktree_folders_are_removed(db, repo):
