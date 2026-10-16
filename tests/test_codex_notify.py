@@ -114,8 +114,18 @@ def test_autopilot_codex_supervisor_is_told_to_keep_going(db, ws, monkeypatch):
     assert len(pasted) == 1 and "\n" not in pasted[0]
     message_id = int(pasted[0].rsplit("message_id=", 1)[1].rstrip(")"))
     assert "Keep going" in agents.full_message(db, "c1", message_id)
+    # Repeats are suppressed while the backoff runs: the supervisor is only waiting.
+    for _ in range(3):
+        agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
+    assert len(pasted) == 1
+    # Once the backoff has passed, a still-idle supervisor is nudged again.
+    clock = [time.time() + autopilot.NUDGE_BACKOFF + 1]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
+    assert len(pasted) == 2
     # Capped like any nudge: no endless loop on a supervisor making no progress.
     for _ in range(autopilot.MAX_NUDGES + 2):
+        clock[0] += autopilot.NUDGE_BACKOFF + 1
         agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
     assert len(pasted) == autopilot.MAX_NUDGES
 
