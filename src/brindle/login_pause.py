@@ -8,8 +8,13 @@ Claude Code agents use a cloud route (Bedrock, Vertex, Foundry; see
   on an expired-login API error, gets a silent refresh
   (``cloud_login.refresh``). Nobody is told; an agent stopped on the error is
   told to continue.
+  A pane's own credential errors only prompt that refresh: a pane also fails
+  on a signed-out login, an unreachable token endpoint or a half-written
+  credentials file, none of which a sign-in fixes. Only the CLI saying the
+  login lapsed (``LoginStatus.expired``) counts.
 * When only the person can renew it (Google's invalid_rapt, an AWS SSO
-  session that needs a browser) the session goes ``auth_paused``: autopilot
+  session that needs a browser) brindle opens the one browser sign-in for
+  the machine (``cloud_login.sign_in``) and the session goes ``auth_paused``: autopilot
   doesn't nudge (``autopilot.on_stop``), messages to its agents stay queued
   (``holding``), and a turn that starts on its own (a Claude Code cron) is
   interrupted with Escape; in the person's own chat only while they're away.
@@ -17,8 +22,10 @@ Claude Code agents use a cloud route (Bedrock, Vertex, Foundry; see
   else an alert pinned in its status bar with the command to run and when
   the login expired. Failed re-checks never tell them again.
 * While paused it re-checks with backoff (``FIRST_DELAY`` doubling up to
-  ``MAX_DELAY``), refreshing each time. Once the login is good it clears the
-  bar, delivers what was held and tells the supervisor to continue, once.
+  ``MAX_DELAY``), refreshing each time, and while the sign-in runs it waits on
+  it and re-checks once it's over. Once the login is good it clears the bar,
+  delivers what was held, tells agents stopped on the error and the
+  supervisor to continue, once.
 
 State is the ``login_state`` row of the session's root.
 """
@@ -130,9 +137,15 @@ def _session(db: DB, root: Agent, now: float, panes) -> list[str]:
     st = db.get_login_state(root.id)
     if st is not None and st.state == "auth_paused":
         session = _session_name(db, root)
-        _interrupt(_members(db, root, panes), root,
-                   away=session is None or not user_active(session, now))
-        return _recheck(db, root, st, now) if now >= (st.next_check or 0) else []
+        members = _members(db, root, panes)
+        _interrupt(members, root, away=session is None or not user_active(session, now))
+        culprit = db.get_agent(st.agent_id) if st.agent_id else None
+        env = _env(db, culprit or root)
+        if cloud_login.signing_in(env=env):
+            # Wait on the sign-in, and look as soon as it's over.
+            db.set_login_state(root.id, next_check=now, delay=FIRST_DELAY)
+            return []
+        return _recheck(db, root, st, env, members, now) if now >= (st.next_check or 0) else []
     done: list[str] = []
     for a in _members(db, root, panes):
         env = _env(db, a)
@@ -141,8 +154,8 @@ def _session(db: DB, root: Agent, now: float, panes) -> list[str]:
         s = cloud_login.refresh(env=env)
         if s.expired:
             return done + _pause(db, root, a, s, now, panes)
-        if s.ok and _send(db, a.id, "Your last request failed on an expired cloud login, which "
-                          "brindle has renewed. Continue where you left off."):
+        if s.ok and _send(db, a.id, "Your last request failed on the cloud login, which works "
+                          "again. Continue where you left off."):
             done.append(f"renewed the cloud login {a.id} stopped on")
     if st is not None and now - (st.checked_at or 0) < CHECK_EVERY:
         return done
@@ -183,15 +196,19 @@ def _pause(db: DB, root: Agent, culprit: Agent, s: cloud_login.LoginStatus,
     session = _session_name(db, root)
     active = session is not None and user_active(session, now)
     _interrupt(_members(db, root, panes), root, away=not active)
+    # Every pane and session shares the one login: one sign-in renews it for all.
+    how = cloud_login.sign_in(env=_env(db, culprit))
+    todo = (f"finish the sign-in open in your browser (or run `{s.refresh_cmd}`)"
+            if how in ("opened", "waiting") else f"run `{s.refresh_cmd}`")
     noticed = None
     # The chat notice goes out before the session holds its messages.
     # With no tmux session there is no bar to pin it in: the chat is all there is.
     if (active or session is None) and _send(db, root.id, f"The cloud login expired at {when} and needs you to renew "
-                        f"it: run `{s.refresh_cmd}`. Messages to this session's agents wait "
+                        f"it: {todo}. Messages to this session's agents wait "
                         "until it's back; brindle keeps checking and says when to continue."):
         noticed = "chat"
     elif session is not None:
-        tmux.set_alert(session, f"cloud login expired {when}: run {s.refresh_cmd}", "alert")
+        tmux.set_alert(session, f"cloud login expired {when}: {todo.replace('`', '')}", "alert")
         noticed = "bar"
     db.set_login_state(root.id, state="auth_paused", agent_id=culprit.id,
                        refresh_cmd=s.refresh_cmd, expired_at=expired_at, noticed=noticed,
@@ -200,10 +217,12 @@ def _pause(db: DB, root: Agent, culprit: Agent, s: cloud_login.LoginStatus,
             f"(told by {noticed or 'nothing'})"]
 
 
-def _recheck(db: DB, root: Agent, st: LoginState, now: float) -> list[str]:
-    culprit = db.get_agent(st.agent_id) if st.agent_id else None
-    s = cloud_login.refresh(env=_env(db, culprit or root))
+def _recheck(db: DB, root: Agent, st: LoginState, env: dict[str, str], members: list[Agent],
+             now: float) -> list[str]:
+    s = cloud_login.refresh(env=env)
     if not s.ok:
+        # No second sign-in: one that was abandoned or failed waits for the
+        # person (cloud_login.sign_in says "tried" for the same lapse).
         delay = min((st.delay or FIRST_DELAY) * 2, MAX_DELAY)
         db.set_login_state(root.id, next_check=now + delay, delay=delay)
         return []
@@ -212,12 +231,18 @@ def _recheck(db: DB, root: Agent, st: LoginState, now: float) -> list[str]:
         tmux.set_alert(session, "")
     db.set_login_state(root.id, state="ok", checked_at=now, agent_id=None, refresh_cmd=None,
                        expired_at=None, noticed=None, next_check=None, delay=None)
+    # Claude Code builds a new API client, which reads the credentials afresh,
+    # for every request: a pane needs no restart, only a turn. Agents whose
+    # turn ended on the error get one (held messages are a turn of their own).
+    stopped = [a for a in members if a.id != root.id and _ended_on_expired_login(db, a)]
     for a in agents.tree(db, root.id):
         if db.pending_count(a.id):
             try:
                 agents.flush(db, a.id)
             except (agents.AgentError, tmux.TmuxError):
                 pass    # stays queued; its Stop hook hands it over
+    for a in stopped:
+        _send(db, a.id, "Cloud credentials restored: continue where you left off.")
     _send(db, root.id, "Cloud credentials restored: continue where you left off. "
           "Messages held while the login was expired are delivered.")
     return [f"cloud login restored for {root.id}: resumed"]
