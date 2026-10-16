@@ -4,7 +4,7 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from brindle import workspaces
+from brindle import agents, cli, workspaces
 from brindle.cli import app
 from brindle.db import Agent
 
@@ -68,3 +68,22 @@ def test_version_flag_prints_the_installed_version():
     out = CliRunner().invoke(app, ["--version"])
     assert out.exit_code == 0 and out.output.strip() == f"brindle {__version__}"
     assert __version__ != "unknown"
+
+
+def test_continue_from_inside_session(db, repo, monkeypatch):
+    ws = workspaces.adopt_root(db, str(repo))
+    caller = agents.spawn(db, ws, "developer", mode="interactive")
+    target = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_status(target.id, "paused")
+    calls = []
+    monkeypatch.setattr(agents, "is_alive", lambda a: a.id == caller.id)
+    # The caller is the one live session; no tmux state decides that.
+    monkeypatch.setattr(cli, "_live_sessions", lambda db_, ws_: [db.get_agent(caller.id)])
+    monkeypatch.setattr(agents, "pause", lambda *a, **k: calls.append("pause"))
+    monkeypatch.setattr(agents, "resume", lambda *a, **k: calls.append("resume") or [])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", caller.id)
+    monkeypatch.chdir(repo)
+
+    res = CliRunner().invoke(app, ["continue", target.id, "--no-attach"])
+    assert res.exit_code == 1, res.output
+    assert calls == []
