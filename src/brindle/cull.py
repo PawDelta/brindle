@@ -41,9 +41,10 @@ import fcntl
 import os
 import re
 import time
+from pathlib import Path
 
 from brindle import agents, git, procs, tmux
-from brindle.config import brindle_home, load_repo_config, worktrees_dir
+from brindle.config import CONFIG_DIR, WORKTREES_DIR, brindle_home, load_repo_config, worktrees_dir
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import route_health
 
@@ -322,8 +323,13 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         pending = agents.pending_permission(db, a.id)
         request = (f"\n\n{pending} Only the user can answer it; tell them exactly what is pending."
                    if pending else "")
+        # The supervisor sees a message's first line (agents.one_line), so the
+        # prompt itself goes there: which prompt it is says whether it's an
+        # access outside the project they can route around.
+        prompt = " | ".join(tail.splitlines())
         body = (f"Worker {a.id} ({a.profile}){where} has been waiting on a prompt for "
-                f"{int(now - since)}s and can't continue until someone answers it.{attach} "
+                f"{int(now - since)}s{': ' + prompt if prompt else ''}\n\n"
+                f"It can't continue until someone answers it.{attach} "
                 f"or remove the workspace if it's no longer needed.{auto_mode_note(a, ws)}"
                 f"{request}\n\nIts screen:\n{tail}")
         try:
@@ -770,7 +776,10 @@ def workspaces_merged(ws: Workspace) -> bool:
 def orphan_sessions(db: DB) -> list[str]:
     """Kill brindle tmux sessions (``brindle_*``) that no running agent is in,
     unless someone is attached to them or something other than an idle shell
-    runs in them (a dev server in its shell window, say)."""
+    runs in them (a dev server in its shell window, say). A session no
+    workspace row names, whose every pane sits in a folder that is gone (its
+    worktree was removed, or the row forgotten), is orphaned whatever runs
+    in it: an agent CLI left behind, an Antigravity worker, is stopped too."""
     from brindle import view
 
     panes = tmux.list_panes()
@@ -778,14 +787,23 @@ def orphan_sessions(db: DB) -> list[str]:
     live_panes = {a.tmux_window for a in db.list_agents() if a.id in alive and a.tmux_window}
     live_sessions = {ws.tmux_session for ws in db.find_workspaces()
                      if any(a.id in alive for a in db.list_agents(ws.id))}
+    known_sessions = {ws.tmux_session for ws in db.find_workspaces()}
     done = []
     for name, attached in tmux.list_sessions():
         if not name.startswith("brindle_") or attached or name in live_sessions:
             continue
-        if live_panes & set(tmux.session_pane_ids(name)) or not tmux.session_idle(name):
+        if live_panes & set(tmux.session_pane_ids(name)):
             continue
+        folders = tmux.session_panes(name)
+        abandoned = (name not in known_sessions and bool(folders)
+                     and not any(path and os.path.isdir(path) for _, path in folders))
+        if not abandoned and not tmux.session_idle(name):
+            continue
+        if abandoned:
+            procs.terminate(procs.descendants([pid for pid, _ in folders]))
         tmux.kill_session(name)
-        done.append(f"killed tmux session {name} (no running agent)")
+        done.append(f"killed tmux session {name} "
+                    f"({'its worktree is gone' if abandoned else 'no running agent'})")
     return done
 
 
@@ -825,19 +843,24 @@ def orphan_servers() -> list[str]:
     return done
 
 
-def empty_worktree_dirs() -> int:
-    """Remove empty folders under the worktrees dir (``<repo>/feat`` once its
-    last worktree is gone). Returns how many."""
-    root = worktrees_dir()
+def empty_worktree_dirs(db: DB) -> int:
+    """Remove empty folders under the worktrees dirs (``feat`` once its last
+    worktree is gone): each known repo's ``<repo>/.brindle/worktrees`` and the
+    pre-#182 ``~/.brindle/worktrees``. A configured ``worktree_root`` may hold
+    other things, so it is left alone. Returns how many."""
+    roots = {worktrees_dir()} | {
+        Path(r) / CONFIG_DIR / WORKTREES_DIR for r in {w.repo_root for w in db.find_workspaces()}
+    }
     removed = 0
-    for path, _dirs, _files in os.walk(root, topdown=False):
-        if os.path.realpath(path) == os.path.realpath(root):
-            continue
-        try:
-            os.rmdir(path)
-            removed += 1
-        except OSError:
-            pass  # not empty
+    for root in roots:
+        for path, _dirs, _files in os.walk(root, topdown=False):
+            if os.path.realpath(path) == os.path.realpath(root):
+                continue
+            try:
+                os.rmdir(path)
+                removed += 1
+            except OSError:
+                pass  # not empty
     return removed
 
 
@@ -848,15 +871,20 @@ def prune(db: DB) -> list[str]:
     done += prune_retired(db)
     done += orphan_sessions(db)
     done += orphan_servers()
-    n = empty_worktree_dirs()
+    n = empty_worktree_dirs(db)
     if n:
         done.append(f"removed {n} empty worktree folder(s)")
     return done
 
 
 def sweep_quietly(db: DB) -> None:
-    """A sweep that never raises: culling must never break what calls it."""
+    """A sweep that never raises: culling must never break what calls it.
+    A step that fails must not stop finished work leaving the live view
+    (#167): that one is retried on its own."""
     try:
         sweep(db)
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            prune_retired(db, cautious=True)
+        except Exception:  # noqa: BLE001
+            pass

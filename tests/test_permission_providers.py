@@ -620,6 +620,10 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
     root_hooks = os.path.join(ws.repo_root, ".git", "hooks", "pre-commit")
     assert strict_answer(db, ws, "write_to_file", {"TargetFile": root_hooks},
                          workspacePaths=[ws.repo_root])["decision"] == "deny"
+    # Its own worktree sits under the repo's .brindle (#182); another one there doesn't.
+    sibling = os.path.join(ws.repo_root, ".brindle", "worktrees", "other", "app.py")
+    assert strict_answer(db, ws, "write_to_file", {"TargetFile": sibling},
+                         workspacePaths=[ws.repo_root])["decision"] == "deny"
     # Whatever agy might read differently from brindle is denied, not guessed:
     # a relative path (agy may not resolve it against Cwd), a JSON-encoded
     # value, ~, or a command run outside the worktree.
