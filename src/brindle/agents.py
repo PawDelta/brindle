@@ -2397,30 +2397,45 @@ def expected_check_wait(db: DB, ws: Workspace, cfg: RepoConfig) -> float | None:
     return total if cfg.checks else None
 
 
+MOVED_RETRIES = 2   # check runs a branch that keeps moving under them gets again (review_after_checks)
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
     Meant to run from a detached process, which outlives the call that
-    started it. Gives up quietly when the branch moves on (the new commit
-    gets its own review), the workspace is gone, or a reviewer is already at
-    work on this commit. Raises ``AgentError`` when the reviewer can't
+    started it. Gives up quietly when the workspace is gone, a reviewer is
+    already at work on this commit, or the branch moves on to a commit a new
+    report hands to a run of its own. A piped branch that moves on without
+    a new report (its worker committed again, or merged its moved base in)
+    is checked again on its new head, up to ``MOVED_RETRIES`` times, and then
+    goes to the supervisor. Raises ``AgentError`` when the reviewer can't
     start."""
-    from brindle import gates
+    from brindle import gates, pipeline
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
-    sha = gates.head(ws)
-    if _live_reviewer(db, ws, sha, profile):
-        return None
-    try:
-        summary = gates.check_summary(db, ws, cfg, cancel=lambda: gates.head(ws) != sha)
-    except gates.Abandoned:
-        return None
-    except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
-        summary = f"(running the checks crashed: {e})"
-    if db.get_workspace(ws.id) is None or gates.head(ws) != sha:
+    since = pipeline.review_claim(db, ws)
+    for _attempt in range(MOVED_RETRIES + 1):
+        sha = gates.head(ws)
+        if _live_reviewer(db, ws, sha, profile):
+            return None
+        try:
+            summary = gates.check_summary(db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha)
+        except gates.Abandoned:
+            summary = None
+        except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
+            summary = f"(running the checks crashed: {e})"
+        if db.get_workspace(ws.id) is None:
+            return None
+        if gates.head(ws) == sha:
+            break
+        if not pipeline.still_claimed(db, ws, since):
+            return None
+    else:
+        pipeline.on_moved_during_checks(db, ws)
         return None
     caller = db.get_agent(caller_id) if caller_id else None
     text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None

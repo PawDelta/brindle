@@ -275,6 +275,8 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   "changes, so it can't be reviewed or merged. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
+    # Before the check run starts: it reads this report's claim (see review_claim).
+    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
     try:
         second = second_profile(db, cfg, worker, ws)
         # With a second review both calls carry a concrete profile, so the
@@ -297,8 +299,36 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   f"start ({e}). Review it yourself with workspace_diff, then merge_workspace. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
-    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
     return True
+
+
+def review_claim(db: DB, ws: Workspace) -> float | None:
+    """Which report the review of ``ws`` now starting is for: its piped
+    worker's ``reviewing_since``, or None when the branch isn't in review."""
+    worker = piped_worker(db, ws)
+    return worker.reviewing_since if worker is not None and worker.pipeline == "reviewing" else None
+
+
+def still_claimed(db: DB, ws: Workspace, since: float | None) -> bool:
+    """Whether ``ws``'s branch is still in review for the report ``since``
+    (see ``review_claim``): False once a newer report took it over (that one
+    has a check run of its own), its review was settled, or it isn't piped."""
+    return since is not None and review_claim(db, ws) == since
+
+
+def on_moved_during_checks(db: DB, ws: Workspace) -> None:
+    """A reported branch kept getting new commits, with no new report, while
+    its checks ran (#168): hand it to the supervisor rather than leave it in
+    review with nobody reviewing it."""
+    worker = piped_worker(db, ws)
+    if worker is None:
+        return
+    db.update_agent(worker.id, pipeline=None)
+    _escalate(db, ws, worker)
+    _tell(db, worker.parent_id,
+          f"[brindle pipeline] `{ws.branch}` kept getting new commits while its checks ran, with "
+          "no new report, so it hasn't been reviewed. This needs you: once it settles, "
+          f"request_review(\"{ws.id}\"), then merge_workspace(\"{ws.id}\").", worker.id)
 
 
 # -- stage 2: the review came in ---------------------------------------------------
