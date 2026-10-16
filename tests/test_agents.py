@@ -345,6 +345,18 @@ def test_add_dir_is_never_the_last_flag():
     assert argv[last + 2].startswith("--"), argv[last:]
 
 
+def test_repo_read_dirs_become_read_only_allow_rules(ws):
+    """worker_extra_read_dirs reach Claude Code as Read allow rules, never --add-dir (which also writes)."""
+    from pathlib import Path
+
+    (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
+    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"worker_extra_read_dirs": ["results", "/srv/data/"]}')
+    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer", ws.repo_root), "do the thing"))
+    allowed = argv[argv.index("--allowedTools") + 1].split(",")
+    assert f"Read(/{Path(ws.repo_root).resolve()}/results/**)" in allowed and "Read(//srv/data/**)" in allowed
+    assert "--add-dir" not in argv
+
+
 def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     """Claude Code ignores an --add-dir that does not exist, so launch says so,
     once, however many times the profile is loaded on the way."""

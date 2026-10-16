@@ -87,6 +87,20 @@ def test_at_most_limit_runs_hold_a_slot_at_once(brindle_home, monkeypatch, limit
     assert meter.peak == limit
 
 
+def test_an_unset_check_concurrency_follows_the_host_size(repo, brindle_home, monkeypatch):
+    # #169: with no check_concurrency in any config, a small host gets fewer slots than a big one
+    from brindle import config
+
+    def host(cores, gb):
+        monkeypatch.setattr(config.os, "cpu_count", lambda: cores)
+        pages = int(gb * 2**30 // 4096)
+        monkeypatch.setattr(config.os, "sysconf", lambda name: 4096 if name == "SC_PAGE_SIZE" else pages)
+        return load_repo_config(str(repo)).check_concurrency
+
+    assert host(2, 4) == 2
+    assert host(16, 64) > host(2, 4)
+
+
 def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):
     configure(repo, check_concurrency=1, pre_commit=False)
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
