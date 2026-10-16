@@ -3,7 +3,9 @@ merged (or whose worktree is gone, or going) runs no gate, merges nothing and
 reports no failure. And the pipeline won't merge into the default branch
 unless told to."""
 import json
+import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -188,6 +190,32 @@ def test_a_second_reviewer_submitting_after_the_removal_is_told_it_is_done(db, a
     # The workspace row is gone, so submit_review can't tell it from a non-reviewer.
     assert out.startswith("Only a reviewer")
     assert drain(db) == [] and len(runs) == 1
+
+
+@pytest.mark.parametrize("in_use", ["new turn", "unread message", "uncommitted edits"])
+def test_a_merge_leaves_a_worker_still_at_work_and_its_worktree_alone(db, approved, monkeypatch, in_use):
+    """#170: report_result reports a result, not that the worker is done.
+    One that took on more since then keeps its worktree and its process."""
+    ws, runs = approved
+    stopped = []
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
+    if in_use == "new turn":   # the supervisor's next round arrived and it started on it
+        db.update_agent("w1", reviewing_since=time.time() - 60)
+    elif in_use == "unread message":
+        db.enqueue("w1", "round 3: ...", "boss")
+    else:
+        real_merge_back = workspaces.merge_back
+
+        def edits_meanwhile(db_, ws_, squash=False):
+            target = real_merge_back(db_, ws_, squash=squash)
+            (Path(ws_.path) / "wip.py").write_text("z = 3\n")
+            return target
+
+        monkeypatch.setattr(workspaces, "merge_back", edits_meanwhile)
+    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
+    assert any("Merged feat into main" in b for b in drain(db))
+    assert db.get_workspace(ws.id) is not None and db.get_agent("w1") is not None
+    assert os.path.isdir(ws.path) and "w1" not in stopped
 
 
 @pytest.mark.variant("safety: an approval never merges into the default branch on its own")
