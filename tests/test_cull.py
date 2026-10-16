@@ -285,6 +285,18 @@ def test_sweep_forgets_a_workspace_whose_worktree_is_gone(db, repo, tmp_path):
     assert db.get_workspace(fresh.id) is not None
 
 
+def test_a_failing_sweep_step_does_not_keep_an_unused_worktree(db, repo, tmp_path, merged, monkeypatch):
+    """#167: one step raising ended the quiet sweep before it retired anything."""
+    from brindle.native import serve
+
+    monkeypatch.setattr(serve, "stop_unused", lambda db: 1 / 0)
+    ws = worktree_row(db, repo, "feat-unused", tmp_path)
+
+    cull.sweep_quietly(db)
+
+    assert merged == [ws.id]
+
+
 def test_a_paused_reviewer_does_not_keep_a_merged_worktree(db, repo, tmp_path, merged):
     """A reviewer left paused without a report (its session paused, or a newer
     round replaced it) counted as unfinished, so the merged worktree stayed."""

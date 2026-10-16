@@ -776,7 +776,10 @@ def workspaces_merged(ws: Workspace) -> bool:
 def orphan_sessions(db: DB) -> list[str]:
     """Kill brindle tmux sessions (``brindle_*``) that no running agent is in,
     unless someone is attached to them or something other than an idle shell
-    runs in them (a dev server in its shell window, say)."""
+    runs in them (a dev server in its shell window, say). A session no
+    workspace row names, whose every pane sits in a folder that is gone (its
+    worktree was removed, or the row forgotten), is orphaned whatever runs
+    in it: an agent CLI left behind, an Antigravity worker, is stopped too."""
     from brindle import view
 
     panes = tmux.list_panes()
@@ -784,14 +787,23 @@ def orphan_sessions(db: DB) -> list[str]:
     live_panes = {a.tmux_window for a in db.list_agents() if a.id in alive and a.tmux_window}
     live_sessions = {ws.tmux_session for ws in db.find_workspaces()
                      if any(a.id in alive for a in db.list_agents(ws.id))}
+    known_sessions = {ws.tmux_session for ws in db.find_workspaces()}
     done = []
     for name, attached in tmux.list_sessions():
         if not name.startswith("brindle_") or attached or name in live_sessions:
             continue
-        if live_panes & set(tmux.session_pane_ids(name)) or not tmux.session_idle(name):
+        if live_panes & set(tmux.session_pane_ids(name)):
             continue
+        folders = tmux.session_panes(name)
+        abandoned = (name not in known_sessions and bool(folders)
+                     and not any(path and os.path.isdir(path) for _, path in folders))
+        if not abandoned and not tmux.session_idle(name):
+            continue
+        if abandoned:
+            procs.terminate(procs.descendants([pid for pid, _ in folders]))
         tmux.kill_session(name)
-        done.append(f"killed tmux session {name} (no running agent)")
+        done.append(f"killed tmux session {name} "
+                    f"({'its worktree is gone' if abandoned else 'no running agent'})")
     return done
 
 
@@ -866,8 +878,13 @@ def prune(db: DB) -> list[str]:
 
 
 def sweep_quietly(db: DB) -> None:
-    """A sweep that never raises: culling must never break what calls it."""
+    """A sweep that never raises: culling must never break what calls it.
+    A step that fails must not stop finished work leaving the live view
+    (#167): that one is retried on its own."""
     try:
         sweep(db)
     except Exception:  # noqa: BLE001
-        pass
+        try:
+            prune_retired(db, cautious=True)
+        except Exception:  # noqa: BLE001
+            pass
