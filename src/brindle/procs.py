@@ -156,6 +156,24 @@ def _is_cli(cmd: str) -> bool:
     return False
 
 
+def descendants(roots: list[int], procs: dict[int, Proc] | None = None) -> set[int]:
+    """``roots`` and every process they started, whatever they run: for a
+    pane nobody owns any more, whose CLI carries no agent id to find it by."""
+    procs = table() if procs is None else procs
+    children: dict[int, list[int]] = {}
+    for p in procs.values():
+        children.setdefault(p.ppid, []).append(p.pid)
+    found: set[int] = set()
+    queue = list(roots)
+    while queue:
+        pid = queue.pop()
+        if pid in found:
+            continue
+        found.add(pid)
+        queue.extend(children.get(pid, []))
+    return found - _ancestors(procs)
+
+
 def running_commands(agent_id: str, pane_pids: list[int] | None = None,
                      procs: dict[int, Proc] | None = None) -> list[Proc]:
     """Processes of this agent that look like a command it started (a test
