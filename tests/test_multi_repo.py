@@ -149,7 +149,7 @@ def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss
     from brindle import pool
     e1, e2 = pool.fill_one(db, str(repo)), pool.fill_one(db, str(twin))
     assert e1 and e2 and Path(e1.path).parent != Path(e2.path).parent
-    assert pool.pool_dir(str(twin), db) == Path(e2.path).parent
+    assert pool.pool_dir(str(twin)) == Path(e2.path).parent
 
 
 def test_attach_refuses_a_repo_attached_to_another_live_session(db, repo, web, boss, tmp_path, monkeypatch):

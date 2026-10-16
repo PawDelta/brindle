@@ -279,6 +279,29 @@ def add_worktree(root: str | Path, path: str | Path, branch: str, start: str) ->
     return "new"
 
 
+def exclude(root: str | Path, path: str | Path) -> None:
+    """Keep ``path`` (a folder inside the checkout at ``root``) out of ``git
+    status`` through the repo's ``info/exclude``. A path outside ``root`` is
+    left alone."""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+    if rel == "." or rel.startswith(".."):
+        return
+    pattern = "/" + Path(rel).as_posix() + "/"
+    info = Path(out(["rev-parse", "--path-format=absolute", "--git-common-dir"], root)) / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    # Locked, so two creates at once neither lose nor repeat the line.
+    with open(info / "exclude", "a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            fh.seek(0)
+            existing = fh.read()
+            if pattern not in existing.splitlines():
+                sep = "" if not existing or existing.endswith("\n") else "\n"
+                fh.write(f"{sep}{pattern}\n")
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> None:
     args = ["worktree", "remove", str(path)]
     if force:

@@ -30,8 +30,22 @@ def db_path() -> Path:
     return brindle_home() / "brindle.db"
 
 
+WORKTREES_DIR = "worktrees"
+
+
 def worktrees_dir() -> Path:
-    return brindle_home() / "worktrees"
+    """``~/.brindle/worktrees``, where worktrees went before they moved under
+    each repo (see ``worktree_root``). Existing ones there keep working."""
+    return brindle_home() / WORKTREES_DIR
+
+
+def worktree_root(repo_root: str | Path, cfg: RepoConfig | None = None) -> Path:
+    """Where ``repo_root``'s new worktrees go: ``<repo>/.brindle/worktrees``,
+    or the repo's ``worktree_root`` (``~`` expanded; relative to the repo)."""
+    configured = (cfg or load_repo_config(repo_root)).worktree_root
+    if not configured:
+        return Path(repo_root) / CONFIG_DIR / WORKTREES_DIR
+    return Path(repo_root) / os.path.expanduser(configured)
 
 
 def user_profiles_dir() -> Path:
@@ -80,6 +94,7 @@ class RepoConfig:
     copy: list[str] = field(default_factory=list)
     base_branch: str | None = None
     branch_prefix: str = ""
+    worktree_root: str | None = None   # where new worktrees go (None: <repo>/.brindle/worktrees; see worktree_root())
     default_agent: str = "developer"
     fetch: bool = True
     auto_update: bool = False          # upgrade the PyPI tool at session start
@@ -202,13 +217,22 @@ def config_root(path: str | Path) -> Path:
     path = Path(path)
     if (path / CONFIG_DIR).is_dir():
         return path
+    main = linked_main(path)
+    return main if main is not None and (main / CONFIG_DIR).is_dir() else path
+
+
+def linked_main(path: str | Path) -> Path | None:
+    """The main checkout of the linked worktree at ``path``, or None when
+    ``path`` isn't one. A linked worktree's ``.git`` is a file saying
+    ``gitdir: <main>/.git/worktrees/<name>``, and that folder's ``commondir``
+    names ``<main>/.git`` (relative to it), so no git process runs."""
+    path = Path(path)
     try:
-        gitdir = Path((path / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+        gitdir = path / (path / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip()
         common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
-    except (OSError, IndexError):  # not a linked worktree: nothing to discover
-        return path
-    main = common.parent
-    return main if common.name == ".git" and (main / CONFIG_DIR).is_dir() else path
+    except (OSError, IndexError):  # no .git file, or not a worktree's gitdir
+        return None
+    return common.parent if common.name == ".git" else None
 
 
 def _default_permission_policy() -> str:
@@ -251,7 +275,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
-    for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "auto_update", "autopilot", "review",
+    for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",

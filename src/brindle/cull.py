@@ -41,9 +41,10 @@ import fcntl
 import os
 import re
 import time
+from pathlib import Path
 
 from brindle import agents, git, procs, tmux
-from brindle.config import brindle_home, load_repo_config, worktrees_dir
+from brindle.config import CONFIG_DIR, WORKTREES_DIR, brindle_home, load_repo_config, worktrees_dir
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import route_health
 
@@ -830,19 +831,24 @@ def orphan_servers() -> list[str]:
     return done
 
 
-def empty_worktree_dirs() -> int:
-    """Remove empty folders under the worktrees dir (``<repo>/feat`` once its
-    last worktree is gone). Returns how many."""
-    root = worktrees_dir()
+def empty_worktree_dirs(db: DB) -> int:
+    """Remove empty folders under the worktrees dirs (``feat`` once its last
+    worktree is gone): each known repo's ``<repo>/.brindle/worktrees`` and the
+    pre-#182 ``~/.brindle/worktrees``. A configured ``worktree_root`` may hold
+    other things, so it is left alone. Returns how many."""
+    roots = {worktrees_dir()} | {
+        Path(r) / CONFIG_DIR / WORKTREES_DIR for r in {w.repo_root for w in db.find_workspaces()}
+    }
     removed = 0
-    for path, _dirs, _files in os.walk(root, topdown=False):
-        if os.path.realpath(path) == os.path.realpath(root):
-            continue
-        try:
-            os.rmdir(path)
-            removed += 1
-        except OSError:
-            pass  # not empty
+    for root in roots:
+        for path, _dirs, _files in os.walk(root, topdown=False):
+            if os.path.realpath(path) == os.path.realpath(root):
+                continue
+            try:
+                os.rmdir(path)
+                removed += 1
+            except OSError:
+                pass  # not empty
     return removed
 
 
@@ -853,7 +859,7 @@ def prune(db: DB) -> list[str]:
     done += prune_retired(db)
     done += orphan_sessions(db)
     done += orphan_servers()
-    n = empty_worktree_dirs()
+    n = empty_worktree_dirs(db)
     if n:
         done.append(f"removed {n} empty worktree folder(s)")
     return done

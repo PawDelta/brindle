@@ -346,7 +346,7 @@ def _with_repo_add_dirs(profile: Profile, repo_root: str | None) -> Profile:
 
     Entries are resolved against the repo root rather than passed through, because
     a worktree is the process's working directory and a relative path would
-    otherwise mean ``~/.brindle/worktrees/<repo>/<branch>/<path>``. A leading ``~``
+    otherwise mean ``<repo>/.brindle/worktrees/<branch>/<path>``. A leading ``~``
     is expanded first, since nothing downstream runs a shell that would.
     Checking that they exist is left to launch (see ``missing_add_dirs``): this
     runs every time a profile is loaded, several times per launch and on every

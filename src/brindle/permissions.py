@@ -476,6 +476,16 @@ def _through_symlink(literal: str, roots: list[str]) -> bool:
     return False
 
 
+def _in_nested_root(p: str, root: str, roots: list[str], f) -> bool:
+    """``p`` lies in another of ``roots`` that sits inside ``root`` (a worktree
+    under its repo's .brindle/worktrees): its folders are judged against that
+    root, where the worktree's own .agents/.git/.brindle are still protected."""
+    for other in (f(o) for o in roots if o):
+        if other != root and _lexically_within(other, root) and _lexically_within(p, other):
+            return True
+    return False
+
+
 def _agy_protected(literal: str, real: str, roots: list[str]) -> bool:
     """Whether a write lands in a .agents/.git/.brindle folder under one of
     ``roots``, at any depth, ignoring case (macOS and Windows file systems
@@ -487,11 +497,16 @@ def _agy_protected(literal: str, real: str, roots: list[str]) -> bool:
     if _through_symlink(literal, roots):
         return True  # where it really lands is not worth guessing at
     for root in (r for r in roots if r):
-        for p, r in ((literal, os.path.normpath(root)), (real, os.path.realpath(root))):
+        for p, f in ((literal, os.path.normpath), (real, os.path.realpath)):
+            r = f(root)
+            if _in_nested_root(p, r, roots, f):
+                continue
             rel = os.path.relpath(p, r)
             if rel != ".." and not rel.startswith(".." + os.sep):
                 if names & {part.casefold() for part in rel.split(os.sep)}:
                     return True
+        if _in_nested_root(real, os.path.realpath(root), roots, os.path.realpath):
+            continue
         for d in AGY_PROTECTED_DIRS:
             target = os.path.realpath(os.path.join(root, d))
             if real == target or real.startswith(target + os.sep):

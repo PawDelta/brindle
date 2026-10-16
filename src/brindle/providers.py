@@ -18,9 +18,10 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from brindle import codemap, tmux
-from brindle.config import brindle_home, worktrees_dir
+from brindle.config import brindle_home, linked_main, worktree_root, worktrees_dir
 from brindle.profiles import Profile
 
 
@@ -29,7 +30,22 @@ def _in_worktree(path: str) -> bool:
     one of brindle's worktrees."""
     path = os.path.abspath(path)
     roots = {os.path.abspath(worktrees_dir()), os.path.realpath(worktrees_dir())}
-    return any(path.startswith(root + os.sep) for root in roots)
+    if any(path.startswith(root + os.sep) for root in roots):
+        return True  # one from before worktrees moved under their repo (#182)
+    # Otherwise: the nearest checkout holding ``path`` must be a linked
+    # worktree that sits in its own repo's worktree_root.
+    for folder in (Path(path), *Path(path).parents):
+        if not (folder / ".git").exists():
+            continue
+        main = linked_main(folder)  # None for a main checkout (.git is a folder)
+        if main is None:
+            return False
+        try:
+            root = os.path.realpath(worktree_root(main))
+        except ValueError:  # the repo's config isn't valid JSON
+            return False
+        return os.path.realpath(folder).startswith(root + os.sep)
+    return False
 
 
 def brindle_invocation() -> list[str]:
