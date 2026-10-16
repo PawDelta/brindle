@@ -82,6 +82,16 @@ def test_spawn_runs_native_workers_headless_through_the_runner(db, ws, local_pro
     assert "report_result" in queued and "/goal" not in queued
 
 
+@pytest.mark.parametrize("models, expected", [(["tiny"], "local"), ([], "developer-light")])
+def test_spawn_falls_back_to_hosted_when_the_local_model_isnt_served(db, ws, repo, local_profile, fake,
+                                                                     monkeypatch, models, expected):
+    f = repo / ".brindle" / "agents" / "local.md"
+    f.write_text(f.read_text().replace("context_tokens:", "fallback: developer-light\ncontext_tokens:"))
+    fake.models = models
+    monkeypatch.setattr(agents, "_open_window", lambda *a: "@9")
+    assert agents.spawn(db, ws, local_profile, prompt="add a README", mode="assign").profile == expected
+
+
 # -- the runner ------------------------------------------------------------------------
 
 def test_runner_does_the_task_and_reports(db, ws, local_profile, fake, monkeypatch):
@@ -118,6 +128,26 @@ def test_runner_does_the_task_and_reports(db, ws, local_profile, fake, monkeypat
     assert a.session_ref and Path(a.session_ref).is_file()
     u = usage.agent_usage(db, a)
     assert u.input_tokens == 50 and u.output_tokens == 25 and u.model == "fake-1"
+
+
+def test_a_refused_request_is_retried_on_the_local_model(db, ws, repo, local_profile, fake):
+    hosted = FakeEndpoint()
+    try:
+        d = repo / ".brindle" / "agents"
+        (d / "hosted.md").write_text(f"---\nname: hosted\nprovider: native\napi: anthropic\n"
+                                     f"base_url: {hosted.base_url}\nmodel: claude-x\n---\nYou are hosted.\n")
+        # developer-local, the model refusals are retried on, is the fake's "tiny".
+        (d / "developer-local.md").write_text((d / "local.md").read_text())
+        native_agent(db, ws, profile="hosted")
+        db.enqueue("n1", "write red-team payloads", None)
+        hosted.replies = [anthropic_reply("I can't help with that.", stop="refusal")]
+        fake.replies = [openai_reply(calls=[("c1", "report_result", {"result": "wrote them"})]),
+                        openai_reply("done")]
+        assert run_native(db, "n1", exit_when_idle=True) == 0
+        assert db.get_agent("n1").result == "wrote them"
+        assert len(hosted.requests) == 1 and fake.requests[0]["model"] == "tiny"
+    finally:
+        hosted.close()
 
 
 def test_unreported_worker_is_reminded_once_then_its_parent_is_told(db, ws, local_profile, fake, monkeypatch):
