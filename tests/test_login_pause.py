@@ -190,8 +190,11 @@ def test_closed_tab_reopens_only_on_input(db, world, exits):
     sweep(db, world, T0 + 60)
     assert len(world.signins) == 1
     if exits:
-        world.signins[0].exit()
-    sweep(db, world, T0 + 120)                     # no input since it opened
+        world.signins[0].exit()                    # at once
+        sweep(db, world, T0 + 70)
+        world.typed_at = T0 + 75                   # typing right after: too soon for another
+        sweep(db, world, T0 + 80)
+    sweep(db, world, T0 + 120)                     # no input since it opened (or since the floor)
     if not exits:
         for at in (T0 + 200, T0 + 400, T0 + 600):  # typing on past a tab that still works
             world.typed_at = at - 5

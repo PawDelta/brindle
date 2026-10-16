@@ -35,6 +35,9 @@ CLI_TIMEOUT = 15.0
 # A sign-in tab this old is dead: AWS and Azure device codes and Google's
 # authorization codes are good for about 10 minutes.
 TAB_LIFE = 600.0
+# No fresh tab sooner than this after the last opened: a sign-in that dies at
+# once (the CLI won't start, a bad config) must not open one per keystroke.
+REOPEN_FLOOR = 60.0
 # The person is at brindle: someone typed in one of its sessions this recently.
 PRESENT_WITHIN = 300.0
 
@@ -429,7 +432,8 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
     first tab of a lapse opens once they're present (typed within
     ``PRESENT_WITHIN``; until then ``"deferred"``). A tab that was closed,
     ignored or failed is replaced only on input after it died (its sign-in
-    exited, or it is ``TAB_LIFE`` old), one fresh tab per such input; until
+    exited, or it is ``TAB_LIFE`` old) and at least ``REOPEN_FLOOR`` after it
+    opened, one fresh tab per such input; until
     then ``"tried"`` (or ``"waiting"`` while it can still be used), so typing
     on past an open tab never opens another.
 
@@ -456,7 +460,8 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
                 return "waiting"
             if not running and "dead_at" not in last:
                 lg.write({**last, "dead_at": dead_at})   # we hold the lock
-            if not present or last_input <= dead_at:
+            floor = float(last["opened_at"]) + REOPEN_FLOOR
+            if not present or last_input <= max(dead_at, floor):
                 return "tried"
         elif not present:
             return "deferred"
