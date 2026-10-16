@@ -128,7 +128,9 @@ def _concurrency(ws: Workspace) -> int:
     try:
         return int(load_repo_config(ws.repo_root).check_concurrency)
     except (ValueError, TypeError):
-        return RepoConfig().check_concurrency
+        from brindle.config import host_check_concurrency
+
+        return host_check_concurrency()
 
 
 @contextmanager
