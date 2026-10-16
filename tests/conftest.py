@@ -265,6 +265,16 @@ def push_messages(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def finish_review_inline(monkeypatch):
+    """A verdict's pipeline work runs in a detached brindle process, which
+    tests can't wait on: run it before submit_review returns instead."""
+    from brindle import agents
+
+    monkeypatch.setattr(agents, "finish_review_later",
+                        lambda reviewer_id, ws_id: agents.finish_review(DB(), reviewer_id, ws_id))
+
+
+@pytest.fixture(autouse=True)
 def cli_sign_in_unknown(monkeypatch):
     """No test asks the real claude or codex whether they're signed in (the
     temporary CLAUDE_CONFIG_DIR would say no); tests/test_signin.py fakes it."""

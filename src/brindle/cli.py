@@ -2814,6 +2814,15 @@ def close_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
         pass
 
 
+@app.command("_finish-review", hidden=True)
+def finish_review_cmd(reviewer_id: str, workspace_id: str) -> None:
+    import signal
+
+    # Started by the reviewer's submit_review, and must outlive its close.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    agents.finish_review(_helper_db(), reviewer_id, workspace_id)
+
+
 @app.command("_statusline", hidden=True)
 def statusline_cmd() -> None:
     from brindle.providers import status_line
