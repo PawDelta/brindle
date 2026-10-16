@@ -32,9 +32,11 @@ from typing import Mapping
 from brindle import model_access
 
 CLI_TIMEOUT = 15.0
-# Longer than any sign-in flow lasts: AWS and Azure device codes and Google's
+# A sign-in tab this old is dead: AWS and Azure device codes and Google's
 # authorization codes are good for about 10 minutes.
-SIGNIN_MAX = 1800.0
+TAB_LIFE = 600.0
+# The person is at brindle: someone typed in one of its sessions this recently.
+PRESENT_WITHIN = 300.0
 
 _FLAGS = {"bedrock": "CLAUDE_CODE_USE_BEDROCK", "vertex": "CLAUDE_CODE_USE_VERTEX",
           "foundry": "CLAUDE_CODE_USE_FOUNDRY"}
@@ -310,111 +312,170 @@ def _locked(fd: int) -> bool:
     return True
 
 
-def signing_in(provider: str | None = None, *, env: Mapping[str, str] | None = None,
-               home: str | Path | None = None, now: float | None = None) -> bool:
-    """Whether the browser sign-in for this login is running right now (a
-    stale one left running doesn't count: nothing waits on it)."""
+@dataclass(frozen=True)
+class _Login:
+    """One login's files: where the CLI keeps it, and brindle's sign-in lock
+    and record for it (shared by every pane using that login)."""
+    provider: str
+    env: Mapping[str, str]      # the full environment
+    creds: Path | None
+    lock: Path
+    record: Path
+
+    def fingerprint(self) -> str:
+        return _fingerprint(self.provider, self.creds)
+
+    def read(self) -> dict:
+        last = (_json_files([self.record]) or [None])[0]
+        return last if isinstance(last, dict) else {}
+
+    def write(self, data: dict) -> None:
+        tmp = self.record.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, self.record)     # several sweepers read it: never half written
+
+
+def _login(provider: str | None, env: Mapping[str, str] | None, home) -> _Login | None:
     full = os.environ if env is None else {**os.environ, **env}
     provider = provider or provider_from_env(full)
     if provider is None:
-        return False
-    home = Path(home) if home is not None else Path.home()
-    creds = _credentials_file(provider, full, home)
+        return None
+    creds = _credentials_file(provider, full, Path(home) if home is not None else Path.home())
     lock, record = _signin_paths(provider, creds)
+    return _Login(provider, full, creds, lock, record)
+
+
+def login_key(env: Mapping[str, str] | None = None, home: str | Path | None = None) -> str | None:
+    """Which login ``env`` uses (agents with the same key share one), or None
+    off the cloud."""
+    lg = _login(None, env, home)
+    return None if lg is None else str(lg.lock)
+
+
+def _running(lg: _Login) -> bool:
+    """Whether a sign-in for ``lg`` is running: something holds its lock."""
     try:
-        fd = os.open(lock, os.O_RDONLY)
+        fd = os.open(lg.lock, os.O_RDONLY)
     except OSError:
         return False
     try:
-        if _locked(fd):
-            return False
+        return not _locked(fd)
     finally:
         os.close(fd)
-    last = (_json_files([record]) or [None])[0]
-    return not _stale(last, _fingerprint(provider, creds), time.time() if now is None else now)
+
+
+def signing_in(provider: str | None = None, *, env: Mapping[str, str] | None = None,
+               home: str | Path | None = None) -> bool:
+    """Whether the browser sign-in for this lapse is open right now."""
+    lg = _login(provider, env, home)
+    return lg is not None and _running(lg) and lg.read().get("lapse") == lg.fingerprint()
 
 
 def _end_signin(pid: int) -> None:
     os.killpg(pid, signal.SIGTERM)    # its own session: the CLI and anything it started
 
 
-def _stale(last, lapse: str, now: float) -> bool:
-    """Whether the sign-in ``last`` records, if still running, is left over.
-
-    A login whose browser tab was closed waits forever (gcloud's redirect
-    server has no timeout) and keeps the lock. It is stale once the
-    credentials file changed since it started (the person signed in another
-    way) or it has run longer than any sign-in flow lasts."""
-    return isinstance(last, dict) and (
-        last.get("lapse") != lapse or now - float(last.get("started") or now) > SIGNIN_MAX)
-
-
-def _take_from_stale_holder(fd: int, last, lapse: str, now: float, still_lapsed, kill) -> bool:
-    """End a stale sign-in (``_stale``) and take its lock, if the login is
-    still lapsed."""
-    if not isinstance(last.get("pid") if isinstance(last, dict) else None, int):
-        return False
-    if not _stale(last, lapse, now) or not still_lapsed():
+def end_signin(provider: str | None = None, *, env: Mapping[str, str] | None = None,
+               home: str | Path | None = None, kill=None) -> bool:
+    """End brindle's sign-in for this login if one is still running: once the
+    login works (the person signed in some other way) its tab is no use."""
+    lg = _login(provider, env, home)
+    pid = lg.read().get("pid") if lg is not None else None
+    if not isinstance(pid, int) or not _running(lg):
         return False
     try:
-        (kill or _end_signin)(last["pid"])
+        (kill or _end_signin)(pid)
     except OSError:
-        pass    # already gone, or not ours to end: the lock says which
-    deadline = time.monotonic() + 5.0
-    while not _locked(fd):
-        if time.monotonic() > deadline:
-            return False
-        time.sleep(0.1)
+        return False    # already gone, or not ours to end
     return True
 
 
+def account(provider: str | None = None, *, env: Mapping[str, str] | None = None,
+            home: str | Path | None = None) -> str | None:
+    """Who the login on disk belongs to, when the CLI records it. shortcut:
+    only Google's ADC file names its account; an AWS profile pins its account
+    itself, and Azure's cache can hold several, so both give None."""
+    lg = _login(provider, env, home)
+    if lg is None or lg.provider != "vertex" or lg.creds is None:
+        return None
+    data = (_json_files([lg.creds]) or [None])[0]
+    name = data.get("account") if isinstance(data, dict) else None
+    return name if isinstance(name, str) and name else None
+
+
+def _dead_at(last: dict, running: bool, now: float) -> float | None:
+    """When the tab ``last`` records stopped being usable: its sign-in exited,
+    or it is older than ``TAB_LIFE``. None while it can still be used."""
+    opened = float(last.get("opened_at") or now)
+    if not running:
+        return float(last.get("dead_at") or now)
+    return opened + TAB_LIFE if now >= opened + TAB_LIFE else None
+
+
 def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None,
-            home: str | Path | None = None, now: float | None = None, run=subprocess.run,
-            expiry=tokeninfo_expiry, popen=None, kill=None, platform: str | None = None) -> str:
-    """Open the browser sign-in for a lapsed login, once machine-wide.
+            home: str | Path | None = None, now: float | None = None,
+            last_input: float | None = None, run=subprocess.run, expiry=tokeninfo_expiry,
+            popen=None, kill=None, platform: str | None = None) -> str:
+    """Open the browser sign-in a lapsed login needs: one tab machine-wide,
+    when the person is there to use it.
 
     Single-flight: the sign-in runs ``refresh_cmd`` holding an OS lock under
-    brindle's home for as long as it runs, and a caller that finds the lock
-    held gets ``"waiting"`` (unless the holder is stale, see
-    ``_take_from_stale_holder``). Under the lock the login is checked again, so
-    a sign-in that just finished elsewhere opens no second one. Only a real
-    lapse opens one (never a login that is fine, signed out or unreachable),
-    and one lapse opens at most one: a sign-in that is abandoned or fails
-    leaves the credentials file as it was, and the same lapse gets ``"tried"``
-    until the person changes it (signs in by hand, after which a later lapse
-    is new).
+    brindle's home for as long as it runs; a caller that finds it open gets
+    ``"waiting"``. Under the lock the login is checked again, so a sign-in
+    that just finished elsewhere opens no second one, and only a real lapse
+    opens one (never a login that is fine, signed out or unreachable).
 
-    Returns ``"opened"``, ``"waiting"``, ``"tried"``, ``"manual"`` (no browser
-    can open here, or the sign-in didn't start) or ``"no lapse"``."""
-    full = os.environ if env is None else {**os.environ, **env}
-    provider = provider or provider_from_env(full)
-    if provider is None:
+    ``last_input`` is when the person last typed in any brindle session. The
+    first tab of a lapse opens once they're present (typed within
+    ``PRESENT_WITHIN``; until then ``"deferred"``). A tab that was closed,
+    ignored or failed is replaced only on input after it died (its sign-in
+    exited, or it is ``TAB_LIFE`` old), one fresh tab per such input; until
+    then ``"tried"`` (or ``"waiting"`` while it can still be used), so typing
+    on past an open tab never opens another.
+
+    Also ``"manual"`` (no browser can open here, or the sign-in didn't start)
+    and ``"no lapse"``."""
+    lg = _login(provider, env, home)
+    if lg is None:
         return "no lapse"
-    home = Path(home) if home is not None else Path.home()
     now = time.time() if now is None else now
-    creds = _credentials_file(provider, full, home)
-    lock, record = _signin_paths(provider, creds)
-    lock.parent.mkdir(parents=True, exist_ok=True)
+    present = last_input is not None and now - last_input <= PRESENT_WITHIN
+    lg.lock.parent.mkdir(parents=True, exist_ok=True)
 
-    def lapsed() -> LoginStatus:
-        return refresh(provider=provider, env=env, home=home, now=now, run=run, expiry=expiry)
+    def still_lapsed() -> LoginStatus:
+        return refresh(provider=lg.provider, env=env, home=home, now=now, run=run, expiry=expiry)
 
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(lg.lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        lapse = _fingerprint(provider, creds)
-        last = (_json_files([record]) or [None])[0]
-        took_over = False
-        if not _locked(fd):
-            if not _take_from_stale_holder(fd, last, lapse, now, lambda: lapsed().expired, kill):
+        last = lg.read()
+        running = not _locked(fd)
+        this_lapse = last.get("lapse") == lg.fingerprint() and "opened_at" in last
+        if this_lapse:
+            dead_at = _dead_at(last, running, now)
+            if dead_at is None:
                 return "waiting"
-            took_over = True    # the ended sign-in was never finished: open a fresh one
-        s = lapsed()
+            if not running and "dead_at" not in last:
+                lg.write({**last, "dead_at": dead_at})   # we hold the lock
+            if not present or last_input <= dead_at:
+                return "tried"
+        elif not present:
+            return "deferred"
+        # Open one: this lapse has no tab yet, or its tab died and they typed since.
+        s = still_lapsed()
         if not s.expired or not s.refresh_cmd:
             return "no lapse"
-        lapse = _fingerprint(provider, creds)
-        if not took_over and isinstance(last, dict) and last.get("lapse") == lapse:
-            return "tried"
-        if not _browser_here(full, sys.platform if platform is None else platform):
+        if running:     # a dead tab, or one left from an earlier lapse: end it, take its lock
+            if isinstance(last.get("pid"), int):
+                try:
+                    (kill or _end_signin)(last["pid"])
+                except OSError:
+                    pass    # already gone, or not ours to end: the lock says which
+            deadline = time.monotonic() + 5.0
+            while not _locked(fd):
+                if time.monotonic() > deadline:
+                    return "waiting"
+                time.sleep(0.1)
+        if not _browser_here(lg.env, sys.platform if platform is None else platform):
             return "manual"
         try:
             # The child inherits the locked descriptor: the lock is held until
@@ -425,8 +486,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
                 start_new_session=True, pass_fds=(fd,))
         except OSError:
             return "manual"
-        record.write_text(json.dumps({"lapse": lapse, "pid": getattr(proc, "pid", None),
-                                      "started": now}), encoding="utf-8")
+        lg.write({"lapse": lg.fingerprint(), "pid": getattr(proc, "pid", None), "opened_at": now})
         return "opened"
     finally:
         os.close(fd)

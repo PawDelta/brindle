@@ -22,8 +22,8 @@ class SignIn:
     """A fake `gcloud auth application-default login`: like the real one it
     holds the lock it inherits until it exits."""
 
-    def __init__(self, cmd, pass_fds, **kw):
-        self.cmd, self.fd = cmd, os.dup(pass_fds[0])
+    def __init__(self, cmd, pid, pass_fds, **kw):
+        self.cmd, self.pid, self.fd = cmd, pid, os.dup(pass_fds[0])
 
     def exit(self):
         os.close(self.fd)
@@ -45,15 +45,24 @@ def world(db, repo, monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     w = SimpleNamespace(screens={"@0": IDLE, "@1": IDLE}, sent=[], keys=[], alerts=[], pasted=[],
                         refreshed=0, login_ok=True, expires_in=3600.0, active=False, now=T0,
-                        signins=[], signin_results=[])
+                        typed_at=T0 - 10, signins=[], ended=[], signin_results=[])
     real_sign_in = cloud_login.sign_in
 
+    def launch(cmd, **kw):
+        w.signins.append(SignIn(cmd, len(w.signins), **kw))
+        return w.signins[-1]
+
+    def kill(pid):
+        w.ended.append(pid)
+        w.signins[pid].exit()
+
     def sign_in(**kw):
-        how = real_sign_in(**kw, popen=lambda cmd, **kw: w.signins.append(SignIn(cmd, **kw)))
+        how = real_sign_in(**kw, popen=launch, kill=kill)
         w.signin_results.append(how)
         return how
 
     monkeypatch.setattr(cloud_login, "sign_in", sign_in)
+    monkeypatch.setattr(tmux, "last_input", lambda: w.typed_at)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status not in ("paused", "done"))
     monkeypatch.setattr(agents, "send_message",
                         lambda db, to, body, sender_id=None: w.sent.append((to, body)))
@@ -108,14 +117,14 @@ def test_a_login_only_the_person_can_renew_pauses_and_notifies_once(db, world, a
     db.set_result("w1", "reported")                # no worker left to wait on: a nudge is due
     assert autopilot.on_stop(db, db.get_agent("boss"), {}) is None
     assert agents.flush(db, "w1") is False and db.pending_count("w1") == 1
-    notices = [b for to, b in world.sent if to == "boss"] + world.alerts
-    assert len(notices) == 1 and CMD in notices[0]
+    chat = [b for to, b in world.sent if to == "boss"]
+    assert len(chat) == 1 and len(world.alerts) == 1 and CMD in chat[0] and CMD in world.alerts[0]
     assert world.refreshed == 5                    # 3 re-checks, 1 more under the sign-in's lock
 
     world.login_ok = True
     sweep(db, world, T0 + 421 + 480)
     assert not login_pause.paused(db, "boss")
-    assert world.alerts == ([] if active else [world.alerts[0], ""])
+    assert world.alerts == [world.alerts[0], ""]
     assert db.pending_count("w1") == 0 and world.pasted == ["@1"]
     resumed = [b for to, b in world.sent if to == "boss" and "restored" in b]
     assert len(resumed) == 1
@@ -123,38 +132,74 @@ def test_a_login_only_the_person_can_renew_pauses_and_notifies_once(db, world, a
 
 @pytest.fixture
 def lapsed(db, world):
-    """Two sessions on one Vertex login hit its lapse in the same sweep."""
+    """A supervisor's session and a run started from the CLI (no interactive
+    root) hit the lapse of their one Vertex login in the same sweep."""
     ws = db.get_agent("boss").workspace_id
-    db.add_agent(Agent("boss2", ws, "supervisor", "claude", None, "interactive",
+    db.add_agent(Agent("cli", ws, "developer", "claude", None, "assign",
                        "idle", "@2", None, time.time()))
-    world.screens["@2"] = IDLE
+    world.screens["@2"] = EXPIRED
     world.login_ok, world.expires_in, world.screens["@1"] = False, 300.0, EXPIRED
     sweep(db, world, T0)
-    assert login_pause.paused(db, "boss") and login_pause.paused(db, "boss2")
+    assert login_pause.paused(db, "boss") and login_pause.paused(db, "cli")
     return world
 
 
 def test_one_signin_across_sessions(db, lapsed):
     assert [s.cmd for s in lapsed.signins] == [CMD.split()]
     assert lapsed.signin_results == ["opened", "waiting"]
+    assert len(lapsed.alerts) == 2                 # each root's bar says work is paused
+    told = len(lapsed.sent)
     sweep(db, lapsed, T0 + 61)                     # both wait on the one sign-in
     lapsed.signins[0].exit()                       # the person abandons it
     ws = db.get_agent("boss").workspace_id         # a session that hits the lapse later
     db.add_agent(Agent("boss3", ws, "supervisor", "claude", None, "interactive",
                        "idle", "@3", None, time.time()))
     lapsed.screens["@3"] = IDLE
-    for at in (T0 + 122, T0 + 400, T0 + 2000):
+    for at in (T0 + 122, T0 + 400, T0 + 2000):     # no input since: nothing reopens
         sweep(db, lapsed, at)
-    assert len(lapsed.signins) == 1 and lapsed.signin_results == ["opened", "waiting", "tried"]
-    assert lapsed.sent == []
-    assert all(login_pause.paused(db, r) for r in ("boss", "boss2", "boss3"))
+    assert len(lapsed.signins) == 1 and lapsed.signin_results.count("opened") == 1
+    assert "tried" in lapsed.signin_results and len(lapsed.sent) == told + 1   # boss3's notice
+    assert all(login_pause.paused(db, r) for r in ("boss", "cli", "boss3"))
 
 
 def test_panes_resume_after_signin(db, lapsed):
-    sweep(db, lapsed, T0 + 30)                     # signing in
+    db.add_agent(Agent("w2", db.get_agent("boss").workspace_id, "developer", "claude", "boss",
+                       "assign", "idle", "@4", None, time.time()))
+    lapsed.screens["@4"] = BUSY                    # a cron turn starts while paused ...
+    sweep(db, lapsed, T0 + 30)                     # ... and is escaped
+    assert ("@4", "Escape") in lapsed.keys
+    lapsed.screens["@4"] = IDLE
     lapsed.login_ok = True
     lapsed.signins[0].exit()                       # signed in
     sweep(db, lapsed, T0 + 31)
-    assert not login_pause.paused(db, "boss") and not login_pause.paused(db, "boss2")
-    assert sorted(to for to, b in lapsed.sent if "restored" in b) == ["boss", "boss2", "w1"]
-    assert len(lapsed.signins) == 1
+    assert not login_pause.paused(db, "boss") and not login_pause.paused(db, "cli")
+    assert sorted(to for to, b in lapsed.sent if "restored" in b) == ["boss", "cli", "w1", "w2"]
+    assert len(lapsed.signins) == 1 and lapsed.alerts[-2:] == ["", ""]
+
+
+@pytest.mark.parametrize("exits", [
+    False,      # the tab is ignored: its sign-in keeps waiting
+    True,       # the sign-in exits (declined, failed, or its code expired)
+])
+def test_closed_tab_reopens_only_on_input(db, world, exits):
+    world.login_ok, world.screens["@1"] = False, EXPIRED
+    world.typed_at = T0 - 3600                     # away when it lapses
+    sweep(db, world, T0)
+    assert login_pause.paused(db, "boss") and world.signins == []
+    world.typed_at = T0 + 50                       # back
+    sweep(db, world, T0 + 60)
+    assert len(world.signins) == 1
+    if exits:
+        world.signins[0].exit()
+    sweep(db, world, T0 + 120)                     # no input since it opened
+    if not exits:
+        for at in (T0 + 200, T0 + 400, T0 + 600):  # typing on past a tab that still works
+            world.typed_at = at - 5
+            sweep(db, world, at)
+    assert len(world.signins) == 1
+    died = T0 + 120 if exits else T0 + 60 + cloud_login.TAB_LIFE
+    world.typed_at = died + 10                     # typing after it died: one fresh tab
+    sweep(db, world, died + 20)
+    world.typed_at = died + 30
+    sweep(db, world, died + 40)
+    assert len(world.signins) == 2 and world.ended == ([] if exits else [0])

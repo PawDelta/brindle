@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import os
 import subprocess
 from types import SimpleNamespace
 
@@ -141,40 +140,9 @@ def test_signed_out_never_prompts(provider, stderr, tmp_path):
     def browser(cmd, **kw):
         raise AssertionError(f"opened a sign-in: {cmd}")
 
-    how = cloud_login.sign_in(provider, env=env, home=tmp_path, run=lambda cmd, **kw: failed,
-                              popen=browser)
+    how = cloud_login.sign_in(provider, env=env, home=tmp_path, now=NOW, last_input=NOW,
+                              run=lambda cmd, **kw: failed, popen=browser)   # the person is right there
     assert how == "no lapse"
-
-
-@pytest.mark.parametrize("signed_in_by_hand, later", [
-    (True, 600.0),                              # the person signed in another way
-    (False, cloud_login.SIGNIN_MAX + 1),        # the tab was closed long ago
-])
-def test_a_stale_signin_gives_way_to_a_new_lapse(signed_in_by_hand, later, tmp_path):
-    adc = tmp_path / "gcloud" / "application_default_credentials.json"
-    adc.parent.mkdir()
-    adc.write_text('{"refresh_token": "first"}')
-    env = {"CLOUDSDK_CONFIG": str(adc.parent), "DISPLAY": ":0", "SSH_CONNECTION": "", "SSH_TTY": ""}
-    lapsed = SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant: Bad Request invalid_rapt")
-    holders, ended = [], []
-
-    def launch(cmd, pass_fds, **kw):     # a sign-in holding the lock it inherits
-        holders.append(os.dup(pass_fds[0]))
-        return SimpleNamespace(pid=1000 + len(holders))
-
-    def kill(pid):
-        ended.append(pid)
-        os.close(holders[pid - 1001])
-
-    def sign_in(at):
-        return cloud_login.sign_in("vertex", env=env, home=tmp_path, now=NOW + at,
-                                   run=lambda cmd, **kw: lapsed, popen=launch, kill=kill)
-
-    assert [sign_in(0), sign_in(60)] == ["opened", "waiting"]
-    if signed_in_by_hand:
-        adc.write_text('{"refresh_token": "second"}')   # ... which has lapsed again
-    assert sign_in(later) == "opened" and ended == [1001] and len(holders) == 2
-    os.close(holders[1])
 
 
 def test_google_timeout_is_a_failed_login_not_an_exception(tmp_path):
