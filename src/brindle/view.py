@@ -303,9 +303,10 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
                     root_id: str | None = None) -> dict | None:
     """The goal and milestones for the sidebar: session ``root_id``'s (a
     sidebar shows only its own session's goal), else the newest running
-    autopilot session's in ``repo_root``. ``panes`` should be the same
-    ``tmux.list_panes()`` result passed to ``snapshot`` for this refresh, so
-    liveness isn't checked with a second tmux subprocess."""
+    autopilot session's in ``repo_root`` that has a goal (any, if none does).
+    ``panes`` should be the same ``tmux.list_panes()`` result passed to
+    ``snapshot`` for this refresh, so liveness isn't checked with a second
+    tmux subprocess."""
     from brindle import autopilot, quota
 
     if not repo_root:
@@ -320,7 +321,9 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
                  and db.get_autopilot(a.id) and agents.is_alive(a, panes)]
         if not roots:
             return None
-        root = max(roots, key=lambda a: a.created_at)
+        # A session with no goal yet mustn't hide another's recorded milestones.
+        with_goal = [a for a in roots if db.get_autopilot(a.id).goal]
+        root = max(with_goal or roots, key=lambda a: a.created_at)
     ap = db.get_autopilot(root.id)
     assert ap is not None
     ms = db.milestones(root.id)

@@ -462,6 +462,26 @@ def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     assert autopilot.on_stop(db, agent, {}) is None
 
 
+def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
+    from brindle import sidebar_follow, tmux, watch_costs
+
+    _, ws = root
+    with_goal(db)                                   # "boss": two milestones
+    add_agent(db, ws, "newer")                      # newest, with a one-milestone goal
+    db.add_autopilot("newer")
+    autopilot.set_goal(db, "newer", "Other goal", [("Newer step", "true", None)])
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(tmux, "list_panes", tmux.PaneSnapshot)
+    monkeypatch.setattr(watch_costs, "Feed", lambda repo_root: SimpleNamespace(
+        get=lambda: None, wait=lambda: None))
+    monkeypatch.setattr(tmux, "current_session", lambda: "boss-session")
+    monkeypatch.setattr(sidebar_follow, "root_for_session", lambda db, session: "boss")
+    own = watch.print_once(db, ws.repo_root, color=False)
+    assert "Milestone 2" in own and "Newer step" not in own
+    monkeypatch.setattr(tmux, "current_session", lambda: None)   # outside tmux: newest goal
+    assert "Newer step" in watch.print_once(db, ws.repo_root, color=False)
+
+
 @pytest.mark.parametrize("flight, expected", [
     ("processing", "working"),
     ("waiting", "waiting"),
