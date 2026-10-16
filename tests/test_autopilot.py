@@ -93,6 +93,23 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     assert autopilot.on_stop(db, agent, {}) is not None
 
 
+def test_add_checks_also_allows_their_commands_in_one_step(repo):
+    # (#126) One approval writes the check and a narrow allow rule per command.
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "settings.local.json").write_text(
+        json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "model": "x"}))
+    autopilot.add_checks(str(repo), ["pytest -q && ruff check . ; shellcheck a.sh"], allow=True)
+    cfg = json.loads((repo / ".brindle" / "config.json").read_text())
+    assert cfg["checks"] == ["pytest -q && ruff check . ; shellcheck a.sh"]
+    settings = json.loads((repo / ".claude" / "settings.local.json").read_text())
+    assert settings["permissions"]["allow"] == [
+        "Bash(ls)", "Bash(pytest -q)", "Bash(ruff check .)", "Bash(shellcheck a.sh)"]
+    assert settings["model"] == "x"
+    autopilot.add_checks(str(repo), ["pytest -q"], allow=False)   # declined: config only
+    assert json.loads((repo / ".brindle" / "config.json").read_text())["checks"] == [
+        "pytest -q && ruff check . ; shellcheck a.sh", "pytest -q"]
+
+
 def test_running_workers_let_the_supervisor_idle(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)

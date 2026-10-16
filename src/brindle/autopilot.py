@@ -1917,9 +1917,38 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
 
 NO_CHECKS = """- This repo has no `checks` in .brindle/config.json, so nothing verifies a
   branch before it merges. Before the first `assign`, propose a check command
-  to the user{suggestion}, and once they agree add it to `checks` in
-  .brindle/config.json (create the file if needed) and commit it.
+  to the user{suggestion}. In that same question offer to allow its individual
+  commands in .claude/settings.local.json, so they answer once. When they
+  agree, call `add_checks` (allow=true if they accepted the permissions) and
+  commit .brindle/config.json.
 """
+
+
+def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
+    """Add approved ``checks`` to .brindle/config.json and, with ``allow``, one
+    narrow Bash allow rule per command in them to .claude/settings.local.json."""
+    from brindle.config import CONFIG_FILE, _read_json
+
+    root = Path(config_root(repo_root))
+    path = root / CONFIG_DIR / CONFIG_FILE
+    data = _read_json(path)
+    data["checks"] = [*(c for c in data.get("checks") or [] if c not in checks), *checks]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    text = f"Added {len(checks)} check(s) to {path}."
+    if not allow:
+        return text
+    settings_path = root / ".claude" / "settings.local.json"
+    settings = _read_json(settings_path)
+    perms = settings.setdefault("permissions", {})
+    allowed = perms.setdefault("allow", [])
+    commands = [c.strip() for check in checks for c in re.split(r"&&|\|\||;|\|", check)]
+    for rule in (f"Bash({c})" for c in commands if c):
+        if rule not in allowed:
+            allowed.append(rule)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return f"{text} Allowed their commands in {settings_path}."
 
 
 def guide(cfg: RepoConfig, repo_root: str | None = None) -> str:
