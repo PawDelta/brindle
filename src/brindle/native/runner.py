@@ -297,8 +297,14 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
         streamed["text"] = ""
         print(f"  · {line}", flush=True)
 
+    def on_refusal() -> Endpoint | None:
+        local = refusal_fallback(endpoint, ws.repo_root)
+        log(f"{endpoint.model} refused; retrying on the local {local.model}, which keeps the conversation"
+            if local else f"{endpoint.model} refused, and no local model is served to retry on")
+        return local
+
     loop = NativeAgent(
-        Client(endpoint, fallback=lambda: refusal_fallback(endpoint, ws.repo_root)), toolbox, permissions,
+        Client(endpoint, fallback=on_refusal), toolbox, permissions,
         system, config=config, transcript=transcript,
         on_status=lambda s: db.set_status(agent_id, s),
         inbox=lambda: _drain(db, agent_id),

@@ -1813,6 +1813,13 @@ in the same checkout keeps it running for the new one.
 
 Then a supervisor can `assign` a task to `developer-local`, or the repo config
 can make the free model the reviewer: `"review_profile": "reviewer-local"`.
+When the local model isn't served (Ollama isn't running, or the model isn't
+pulled), the worker starts as the profile's `fallback:` instead, and is recorded
+as that profile: `developer-light` (Haiku) for `developer-local`, `reviewer` for
+`reviewer-local`. A native worker on a hosted model that refuses a request
+retries it on `developer-local`'s model, when that is served on this machine or
+the private network, and keeps the rest of the conversation there; the transcript
+records which model gave each reply.
 Other endpoints, same fields:
 
 | Backend | `api` | `base_url` | Notes |

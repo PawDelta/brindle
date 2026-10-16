@@ -129,7 +129,7 @@ class Profile:
     # lets this profile run even when its endpoint can't be checked (e.g. a hostname).
     local: bool = False
     # ``fallback: <profile>, ...``: for a native profile, what runs instead when
-    # its model isn't served right now (see local_or_fallback).
+    # its model isn't served right now (see local_fallback).
     fallback: list[str] = field(default_factory=list)
     # Extra environment for the agent's process, from ``env.NAME: value`` lines.
     env: dict[str, str] = field(default_factory=dict)
@@ -502,30 +502,29 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
     return _with_repo_add_dirs(_load(name, repo_root), repo_root)
 
 
-def local_or_fallback(name: str, repo_root: str | None = None) -> str:
-    """``name``, or, when it is a native profile on this machine whose model
-    isn't served right now (Ollama isn't running, or the model isn't
-    pulled), the first of its ``fallback`` profiles that exists. The worker
-    then runs, and is recorded, as that profile. A hosted endpoint (say a
+def local_fallback(profile: Profile, repo_root: str | None = None) -> str | None:
+    """When ``profile`` is a native profile on this machine whose model isn't
+    served right now (Ollama isn't running, or the model isn't pulled), the
+    first of its ``fallback`` profiles that loads; the worker then runs, and
+    is recorded, as that profile. None otherwise: a hosted endpoint (say a
     profile that extends developer-local onto OpenRouter) is never swapped."""
     from brindle import airgap
 
-    profile = load_profile(name, repo_root)
     if profile.provider != "native" or not profile.fallback:
-        return name
+        return None
     if not (profile.local or airgap.is_local_url(profile.base_url)):
-        return name
+        return None
     from brindle.native import runner
 
     if runner.served(profile):
-        return name
+        return None
     for other in profile.fallback:
         try:
             load_profile(other, repo_root)
-        except KeyError:
+        except (KeyError, ProfileError):
             continue
         return other
-    return name
+    return None
 
 
 # -- rule packs ---------------------------------------------------------------

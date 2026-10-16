@@ -150,6 +150,17 @@ def test_a_refused_request_is_retried_on_the_local_model(db, ws, repo, local_pro
         hosted.close()
 
 
+@pytest.mark.parametrize("base_url", ["https://api.example.com/v1", None])
+def test_refusals_are_never_retried_on_a_hosted_or_the_same_endpoint(repo, local_profile, fake, base_url,
+                                                                     monkeypatch):
+    monkeypatch.setattr(runner, "served", lambda p, timeout=1.0: True)
+    d = repo / ".brindle" / "agents"
+    text = (d / "local.md").read_text()
+    (d / "developer-local.md").write_text(text.replace(f"{fake.base_url}/v1", base_url) if base_url else text)
+    asking = runner.endpoint_for(load_profile("local", str(repo)))   # what developer-local would retry on
+    assert runner.refusal_fallback(asking, str(repo)) is None
+
+
 def test_unreported_worker_is_reminded_once_then_its_parent_is_told(db, ws, local_profile, fake, monkeypatch):
     told = []
     monkeypatch.setattr(agents, "tell_parent_unreported", lambda db_, a: told.append(a.id))

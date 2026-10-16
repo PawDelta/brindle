@@ -26,7 +26,7 @@ from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
-from brindle.profiles import load_profile, local_or_fallback, missing_add_dirs
+from brindle.profiles import load_profile, local_fallback, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, signed_out, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
@@ -335,8 +335,10 @@ def spawn(
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
-    profile_name = local_or_fallback(profile_name, ws.repo_root)   # a local model that isn't up
     profile = load_profile(profile_name, ws.repo_root)
+    hosted = local_fallback(profile, ws.repo_root)   # its local model isn't up
+    if hosted:
+        profile_name, profile = hosted, load_profile(hosted, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
