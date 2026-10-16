@@ -1924,8 +1924,10 @@ NO_CHECKS = """- This repo has no `checks` in .brindle/config.json, so nothing v
 """
 
 
-UNSAFE_ALLOW = re.compile(r"[*`<>\n]|\$\(|:\*")
-EXEC_BINARIES = {"curl", "wget", "bash", "sh", "zsh", "eval", "exec", "rm", "sudo", "ssh", "nc"}
+SAFE_ALLOW = re.compile(r"[A-Za-z0-9_./ =,@+-]+")   # no wildcard, quote, $, &, redirect or newline
+EXEC_BINARIES = {"curl", "wget", "bash", "sh", "zsh", "eval", "exec", "rm", "sudo", "ssh", "nc",
+                 "env", "xargs", "node", "perl", "ruby"}
+EXEC_FLAGS = {"-c", "-e"}   # python -c style inline code
 
 
 def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
@@ -1943,7 +1945,9 @@ def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     if not allow:
         return text
     commands = [c.strip() for check in checks for c in re.split(r"&&|\|\||;|\|", check)]
-    unsafe = [c for c in commands if c and (UNSAFE_ALLOW.search(c) or c.split()[0] in EXEC_BINARIES)]
+    unsafe = [c for c in commands if c and (
+        not SAFE_ALLOW.fullmatch(c) or c.split()[0] in EXEC_BINARIES
+        or (c.split()[0].startswith("python") and EXEC_FLAGS & set(c.split()[1:2])))]
     if unsafe:
         return (f"{text} Did not allow any commands: {unsafe[0]!r} has a wildcard, substitution, "
                 "redirect or a binary that runs arbitrary code. The user can add rules themselves.")
