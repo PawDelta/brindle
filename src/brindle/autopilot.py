@@ -1931,6 +1931,8 @@ CHECK_PROGRAMS = {"pytest", "ruff", "mypy", "shellcheck", "eslint", "tsc",
                   "flake8", "pyright", "golangci-lint"}
 # Toolchains run code through many subcommands (go run, cargo install, ...): only these.
 CHECK_SUBCOMMANDS = {"go": {"test", "vet"}, "cargo": {"test", "check", "clippy", "fmt"}}
+# Flags allowed on those subcommands; any other flag can name a program to run (-exec, -toolexec, --config ...).
+HARMLESS_FLAGS = {"-v", "-q", "-race", "--check", "--all-targets", "--workspace"}
 CHECK_MODULES = {"pytest", "mypy", "ruff", "unittest"}   # the only `python -m` targets allowed
 
 
@@ -1943,7 +1945,8 @@ def _runs_arbitrary(c: str) -> bool:
     if not argv or "=" in argv[0] or argv[0] not in {*CHECK_PROGRAMS, *CHECK_SUBCOMMANDS, "python", "python3"}:
         return True
     if argv[0] in CHECK_SUBCOMMANDS:
-        return argv[1:2] == [] or argv[1] not in CHECK_SUBCOMMANDS[argv[0]]
+        return (argv[1:2] == [] or argv[1] not in CHECK_SUBCOMMANDS[argv[0]]
+                or any(a.startswith("-") and a not in HARMLESS_FLAGS for a in argv[2:]))
     if argv[0] in CHECK_PROGRAMS:
         return False
     return argv[1:2] != ["-m"] or argv[2:3] == [] or argv[2] not in CHECK_MODULES
