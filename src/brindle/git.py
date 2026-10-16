@@ -288,12 +288,18 @@ def exclude(root: str | Path, path: str | Path) -> None:
         return
     pattern = "/" + Path(rel).as_posix() + "/"
     info = Path(out(["rev-parse", "--path-format=absolute", "--git-common-dir"], root)) / "info"
-    existing = (info / "exclude").read_text(encoding="utf-8") if (info / "exclude").exists() else ""
-    if pattern in existing.splitlines():
-        return
     info.mkdir(parents=True, exist_ok=True)
-    sep = "" if not existing or existing.endswith("\n") else "\n"
-    (info / "exclude").write_text(f"{existing}{sep}{pattern}\n", encoding="utf-8")
+    # Locked, so two creates at once neither lose nor repeat the line.
+    with open(info / "exclude", "a+", encoding="utf-8") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            fh.seek(0)
+            existing = fh.read()
+            if pattern not in existing.splitlines():
+                sep = "" if not existing or existing.endswith("\n") else "\n"
+                fh.write(f"{sep}{pattern}\n")
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
 def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> None:

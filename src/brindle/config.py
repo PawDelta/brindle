@@ -214,13 +214,22 @@ def config_root(path: str | Path) -> Path:
     path = Path(path)
     if (path / CONFIG_DIR).is_dir():
         return path
+    main = linked_main(path)
+    return main if main is not None and (main / CONFIG_DIR).is_dir() else path
+
+
+def linked_main(path: str | Path) -> Path | None:
+    """The main checkout of the linked worktree at ``path``, or None when
+    ``path`` isn't one. A linked worktree's ``.git`` is a file saying
+    ``gitdir: <main>/.git/worktrees/<name>``, and that folder's ``commondir``
+    names ``<main>/.git`` (relative to it), so no git process runs."""
+    path = Path(path)
     try:
-        gitdir = Path((path / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+        gitdir = path / (path / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip()
         common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
-    except (OSError, IndexError):  # not a linked worktree: nothing to discover
-        return path
-    main = common.parent
-    return main if common.name == ".git" and (main / CONFIG_DIR).is_dir() else path
+    except (OSError, IndexError):  # no .git file, or not a worktree's gitdir
+        return None
+    return common.parent if common.name == ".git" else None
 
 
 def _default_permission_policy() -> str:
