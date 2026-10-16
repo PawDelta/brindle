@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -31,6 +32,9 @@ from typing import Mapping
 from brindle import model_access
 
 CLI_TIMEOUT = 15.0
+# Longer than any sign-in flow lasts: AWS and Azure device codes and Google's
+# authorization codes are good for about 10 minutes.
+SIGNIN_MAX = 1800.0
 
 _FLAGS = {"bedrock": "CLAUDE_CODE_USE_BEDROCK", "vertex": "CLAUDE_CODE_USE_VERTEX",
           "foundry": "CLAUDE_CODE_USE_FOUNDRY"}
@@ -259,12 +263,26 @@ def _credentials_file(provider: str, env: Mapping[str, str], home: Path) -> Path
     return None
 
 
-def _fingerprint(path: Path | None) -> str:
-    """Which login ``path`` holds, as a digest (never the credentials)."""
+def _fingerprint(provider: str, path: Path | None) -> str:
+    """Which sign-in ``path`` holds, as a digest (never the credentials). The
+    file changes on a sign-in and, while the login works, on renewals; during
+    a lapse only a sign-in changes it."""
+    if path is None:
+        return "none"
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest() if path else "none"
+        data = path.read_bytes()
     except OSError:
         return "missing"
+    if provider == "foundry":
+        # The MSAL cache also holds access tokens for every resource and
+        # tenant, which other `az` calls rewrite during a lapse; a sign-in is
+        # its refresh tokens. shortcut: every account's refresh tokens count,
+        # so another account's sign-in reads as a new lapse for this one.
+        try:
+            data = json.dumps(json.loads(data).get("RefreshToken"), sort_keys=True).encode()
+        except (ValueError, AttributeError):
+            pass
+    return hashlib.sha256(data).hexdigest()
 
 
 def _signin_paths(provider: str, creds: Path | None) -> tuple[Path, Path]:
@@ -293,71 +311,122 @@ def _locked(fd: int) -> bool:
 
 
 def signing_in(provider: str | None = None, *, env: Mapping[str, str] | None = None,
-               home: str | Path | None = None) -> bool:
-    """Whether the browser sign-in for this login is running right now."""
+               home: str | Path | None = None, now: float | None = None) -> bool:
+    """Whether the browser sign-in for this login is running right now (a
+    stale one left running doesn't count: nothing waits on it)."""
     full = os.environ if env is None else {**os.environ, **env}
     provider = provider or provider_from_env(full)
     if provider is None:
         return False
     home = Path(home) if home is not None else Path.home()
-    lock, _ = _signin_paths(provider, _credentials_file(provider, full, home))
+    creds = _credentials_file(provider, full, home)
+    lock, record = _signin_paths(provider, creds)
     try:
         fd = os.open(lock, os.O_RDONLY)
     except OSError:
         return False
     try:
-        return not _locked(fd)
+        if _locked(fd):
+            return False
     finally:
         os.close(fd)
+    last = (_json_files([record]) or [None])[0]
+    return not _stale(last, _fingerprint(provider, creds), time.time() if now is None else now)
+
+
+def _end_signin(pid: int) -> None:
+    os.killpg(pid, signal.SIGTERM)    # its own session: the CLI and anything it started
+
+
+def _stale(last, lapse: str, now: float) -> bool:
+    """Whether the sign-in ``last`` records, if still running, is left over.
+
+    A login whose browser tab was closed waits forever (gcloud's redirect
+    server has no timeout) and keeps the lock. It is stale once the
+    credentials file changed since it started (the person signed in another
+    way) or it has run longer than any sign-in flow lasts."""
+    return isinstance(last, dict) and (
+        last.get("lapse") != lapse or now - float(last.get("started") or now) > SIGNIN_MAX)
+
+
+def _take_from_stale_holder(fd: int, last, lapse: str, now: float, still_lapsed, kill) -> bool:
+    """End a stale sign-in (``_stale``) and take its lock, if the login is
+    still lapsed."""
+    if not isinstance(last.get("pid") if isinstance(last, dict) else None, int):
+        return False
+    if not _stale(last, lapse, now) or not still_lapsed():
+        return False
+    try:
+        (kill or _end_signin)(last["pid"])
+    except OSError:
+        pass    # already gone, or not ours to end: the lock says which
+    deadline = time.monotonic() + 5.0
+    while not _locked(fd):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+    return True
 
 
 def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None,
-            home: str | Path | None = None, run=subprocess.run, expiry=tokeninfo_expiry,
-            popen=None, platform: str | None = None) -> str:
+            home: str | Path | None = None, now: float | None = None, run=subprocess.run,
+            expiry=tokeninfo_expiry, popen=None, kill=None, platform: str | None = None) -> str:
     """Open the browser sign-in for a lapsed login, once machine-wide.
 
     Single-flight: the sign-in runs ``refresh_cmd`` holding an OS lock under
     brindle's home for as long as it runs, and a caller that finds the lock
-    held gets ``"waiting"``. Under the lock the login is checked again, so a
-    sign-in that just finished elsewhere opens no second one. Only a real lapse
-    opens one (never a login that is fine, signed out or unreachable), and one
-    lapse opens at most one: a sign-in that is abandoned or fails leaves the
-    credentials file as it was, and the same lapse gets ``"tried"`` until the
-    person changes it (signs in by hand, after which a later lapse is new).
+    held gets ``"waiting"`` (unless the holder is stale, see
+    ``_take_from_stale_holder``). Under the lock the login is checked again, so
+    a sign-in that just finished elsewhere opens no second one. Only a real
+    lapse opens one (never a login that is fine, signed out or unreachable),
+    and one lapse opens at most one: a sign-in that is abandoned or fails
+    leaves the credentials file as it was, and the same lapse gets ``"tried"``
+    until the person changes it (signs in by hand, after which a later lapse
+    is new).
 
     Returns ``"opened"``, ``"waiting"``, ``"tried"``, ``"manual"`` (no browser
-    can open here) or ``"no lapse"``."""
+    can open here, or the sign-in didn't start) or ``"no lapse"``."""
     full = os.environ if env is None else {**os.environ, **env}
     provider = provider or provider_from_env(full)
     if provider is None:
         return "no lapse"
     home = Path(home) if home is not None else Path.home()
+    now = time.time() if now is None else now
     creds = _credentials_file(provider, full, home)
     lock, record = _signin_paths(provider, creds)
     lock.parent.mkdir(parents=True, exist_ok=True)
+
+    def lapsed() -> LoginStatus:
+        return refresh(provider=provider, env=env, home=home, now=now, run=run, expiry=expiry)
+
     fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
+        lapse = _fingerprint(provider, creds)
+        last = (_json_files([record]) or [None])[0]
+        took_over = False
         if not _locked(fd):
-            return "waiting"
-        s = refresh(provider=provider, env=env, home=home, run=run, expiry=expiry)
+            if not _take_from_stale_holder(fd, last, lapse, now, lambda: lapsed().expired, kill):
+                return "waiting"
+            took_over = True    # the ended sign-in was never finished: open a fresh one
+        s = lapsed()
         if not s.expired or not s.refresh_cmd:
             return "no lapse"
-        lapse = _fingerprint(creds)
-        last = (_json_files([record]) or [None])[0]
-        if isinstance(last, dict) and last.get("lapse") == lapse:
+        lapse = _fingerprint(provider, creds)
+        if not took_over and isinstance(last, dict) and last.get("lapse") == lapse:
             return "tried"
         if not _browser_here(full, sys.platform if platform is None else platform):
             return "manual"
-        record.write_text(json.dumps({"lapse": lapse}), encoding="utf-8")
         try:
             # The child inherits the locked descriptor: the lock is held until
             # the sign-in exits, however long the person takes.
-            (popen or subprocess.Popen)(
-                  shlex.split(s.refresh_cmd), env=_full_env(env), stdin=subprocess.DEVNULL,
-                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                  start_new_session=True, pass_fds=(fd,))
+            proc = (popen or subprocess.Popen)(
+                shlex.split(s.refresh_cmd), env=_full_env(env), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True, pass_fds=(fd,))
         except OSError:
             return "manual"
+        record.write_text(json.dumps({"lapse": lapse, "pid": getattr(proc, "pid", None),
+                                      "started": now}), encoding="utf-8")
         return "opened"
     finally:
         os.close(fd)

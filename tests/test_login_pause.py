@@ -1,6 +1,5 @@
 """Expired cloud logins: silent refresh, one notice, a held session that resumes."""
 
-import functools
 import os
 import time
 from types import SimpleNamespace
@@ -46,9 +45,15 @@ def world(db, repo, monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
     w = SimpleNamespace(screens={"@0": IDLE, "@1": IDLE}, sent=[], keys=[], alerts=[], pasted=[],
                         refreshed=0, login_ok=True, expires_in=3600.0, active=False, now=T0,
-                        signins=[])
-    monkeypatch.setattr(cloud_login, "sign_in", functools.partial(
-        cloud_login.sign_in, popen=lambda cmd, **kw: w.signins.append(SignIn(cmd, **kw))))
+                        signins=[], signin_results=[])
+    real_sign_in = cloud_login.sign_in
+
+    def sign_in(**kw):
+        how = real_sign_in(**kw, popen=lambda cmd, **kw: w.signins.append(SignIn(cmd, **kw)))
+        w.signin_results.append(how)
+        return how
+
+    monkeypatch.setattr(cloud_login, "sign_in", sign_in)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status not in ("paused", "done"))
     monkeypatch.setattr(agents, "send_message",
                         lambda db, to, body, sender_id=None: w.sent.append((to, body)))
@@ -131,7 +136,7 @@ def lapsed(db, world):
 
 def test_one_signin_across_sessions(db, lapsed):
     assert [s.cmd for s in lapsed.signins] == [CMD.split()]
-    assert len(lapsed.alerts) == 2 and all("open in your browser" in a for a in lapsed.alerts)
+    assert lapsed.signin_results == ["opened", "waiting"]
     sweep(db, lapsed, T0 + 61)                     # both wait on the one sign-in
     lapsed.signins[0].exit()                       # the person abandons it
     ws = db.get_agent("boss").workspace_id         # a session that hits the lapse later
@@ -140,8 +145,8 @@ def test_one_signin_across_sessions(db, lapsed):
     lapsed.screens["@3"] = IDLE
     for at in (T0 + 122, T0 + 400, T0 + 2000):
         sweep(db, lapsed, at)
-    assert len(lapsed.signins) == 1 and lapsed.sent == []
-    assert len(lapsed.alerts) == 3 and "browser" not in lapsed.alerts[2]   # no sign-in is open
+    assert len(lapsed.signins) == 1 and lapsed.signin_results == ["opened", "waiting", "tried"]
+    assert lapsed.sent == []
     assert all(login_pause.paused(db, r) for r in ("boss", "boss2", "boss3"))
 
 

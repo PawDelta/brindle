@@ -141,7 +141,7 @@ def _session(db: DB, root: Agent, now: float, panes) -> list[str]:
         _interrupt(members, root, away=session is None or not user_active(session, now))
         culprit = db.get_agent(st.agent_id) if st.agent_id else None
         env = _env(db, culprit or root)
-        if cloud_login.signing_in(env=env):
+        if cloud_login.signing_in(env=env, now=now):
             # Wait on the sign-in, and look as soon as it's over.
             db.set_login_state(root.id, next_check=now, delay=FIRST_DELAY)
             return []
@@ -197,7 +197,7 @@ def _pause(db: DB, root: Agent, culprit: Agent, s: cloud_login.LoginStatus,
     active = session is not None and user_active(session, now)
     _interrupt(_members(db, root, panes), root, away=not active)
     # Every pane and session shares the one login: one sign-in renews it for all.
-    how = cloud_login.sign_in(env=_env(db, culprit))
+    how = cloud_login.sign_in(env=_env(db, culprit), now=now)
     todo = (f"finish the sign-in open in your browser (or run `{s.refresh_cmd}`)"
             if how in ("opened", "waiting") else f"run `{s.refresh_cmd}`")
     noticed = None
