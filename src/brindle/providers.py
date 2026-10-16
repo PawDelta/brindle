@@ -18,9 +18,10 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from brindle import codemap, tmux
-from brindle.config import brindle_home, worktrees_dir
+from brindle.config import brindle_home, worktree_root, worktrees_dir
 from brindle.profiles import Profile
 
 
@@ -29,7 +30,23 @@ def _in_worktree(path: str) -> bool:
     one of brindle's worktrees."""
     path = os.path.abspath(path)
     roots = {os.path.abspath(worktrees_dir()), os.path.realpath(worktrees_dir())}
-    return any(path.startswith(root + os.sep) for root in roots)
+    if any(path.startswith(root + os.sep) for root in roots):
+        return True  # one from before worktrees moved under their repo (#182)
+    # The linked worktree holding ``path``, if it sits in its repo's worktree_root.
+    for folder in (Path(path), *Path(path).parents):
+        dotgit = folder / ".git"
+        if dotgit.is_dir():
+            return False  # a main checkout
+        if not dotgit.is_file():
+            continue
+        try:
+            gitdir = Path(dotgit.read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+            common = (folder / gitdir / (folder / gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+            root = os.path.realpath(worktree_root(common.parent))
+        except (OSError, IndexError, ValueError):
+            return False
+        return common.name == ".git" and os.path.realpath(folder).startswith(root + os.sep)
+    return False
 
 
 def brindle_invocation() -> list[str]:

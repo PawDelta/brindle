@@ -16,7 +16,7 @@ from brindle import cull, tmux, view, workspaces
 # xdist worker's teardown would reap first: run them in the serial pass.
 pytestmark = pytest.mark.serial
 from brindle.cli import app
-from brindle.config import brindle_home, worktrees_dir
+from brindle.config import brindle_home, worktree_root, worktrees_dir
 from brindle.db import Agent
 
 OLD = time.time() - 3600
@@ -201,9 +201,11 @@ def test_orphan_brindle_sessions_are_killed(db, repo):
 
 def test_empty_worktree_folders_are_removed(db, repo):
     ws = workspaces.create(db, str(repo), "feat/real").workspace
-    (worktrees_dir() / "proj" / "fix" / "gone").mkdir(parents=True)
-    assert cull.empty_worktree_dirs() == 2
-    assert not (worktrees_dir() / "proj" / "fix").exists()
+    (worktree_root(repo) / "fix" / "gone").mkdir(parents=True)
+    (worktrees_dir() / "proj" / "old").mkdir(parents=True)  # from before #182
+    assert cull.empty_worktree_dirs(db) == 4
+    assert not (worktree_root(repo) / "fix").exists()
+    assert not (worktrees_dir() / "proj").exists()
     assert os.path.isdir(ws.path)
     assert worktrees_dir().is_dir()
 

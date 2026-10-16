@@ -279,6 +279,23 @@ def add_worktree(root: str | Path, path: str | Path, branch: str, start: str) ->
     return "new"
 
 
+def exclude(root: str | Path, path: str | Path) -> None:
+    """Keep ``path`` (a folder inside the checkout at ``root``) out of ``git
+    status`` through the repo's ``info/exclude``. A path outside ``root`` is
+    left alone."""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+    if rel == "." or rel.startswith(".."):
+        return
+    pattern = "/" + Path(rel).as_posix() + "/"
+    info = Path(out(["rev-parse", "--path-format=absolute", "--git-common-dir"], root)) / "info"
+    existing = (info / "exclude").read_text(encoding="utf-8") if (info / "exclude").exists() else ""
+    if pattern in existing.splitlines():
+        return
+    info.mkdir(parents=True, exist_ok=True)
+    sep = "" if not existing or existing.endswith("\n") else "\n"
+    (info / "exclude").write_text(f"{existing}{sep}{pattern}\n", encoding="utf-8")
+
+
 def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> None:
     args = ["worktree", "remove", str(path)]
     if force:
