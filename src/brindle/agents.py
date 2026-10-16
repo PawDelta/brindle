@@ -26,7 +26,7 @@ from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
-from brindle.profiles import load_profile, missing_add_dirs
+from brindle.profiles import load_profile, local_fallback, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, signed_out, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
@@ -336,6 +336,9 @@ def spawn(
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
     profile = load_profile(profile_name, ws.repo_root)
+    hosted = local_fallback(profile, ws.repo_root)   # its local model isn't up
+    if hosted:
+        profile_name, profile = hosted, load_profile(hosted, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
@@ -2277,14 +2280,12 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 def _local_reviewer_available() -> bool:
     """Whether the built-in ``reviewer-local`` profile's model is served
     right now. Any failure counts as not available."""
-    try:
-        from brindle.native import runner
+    from brindle.native import runner
 
-        endpoint = runner.endpoint_for(load_profile("reviewer-local"))
-        ok, detail = runner.probe(endpoint, timeout=1.0)
+    try:
+        return runner.served(load_profile("reviewer-local"))
     except Exception:
         return False
-    return bool(ok) and "is available" in detail
 
 
 def _review_kill_switch(ws: Workspace) -> None:

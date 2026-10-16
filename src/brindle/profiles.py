@@ -128,6 +128,9 @@ class Profile:
     # The model runs on this machine or the private network: air-gap mode (brindle.airgap)
     # lets this profile run even when its endpoint can't be checked (e.g. a hostname).
     local: bool = False
+    # ``fallback: <profile>, ...``: for a native profile, what runs instead when
+    # its model isn't served right now (see local_fallback).
+    fallback: list[str] = field(default_factory=list)
     # Extra environment for the agent's process, from ``env.NAME: value`` lines.
     env: dict[str, str] = field(default_factory=dict)
     # --add-dir. Full tool access, not read access: edits and Bash reach these too,
@@ -312,6 +315,7 @@ def _build(meta: dict[str, str], body: str, fallback_name: str) -> Profile:
         api_key_env=meta.get("api_key_env") or None,
         context_tokens=_int(meta.get("context_tokens")),
         local=_flag(meta.get("local")),
+        fallback=_list(meta.get("fallback")) or [],
         env={k[4:]: v for k, v in meta.items() if k.startswith("env.") and k[4:]},
         write_scope=_list(meta.get("write_scope")),
         read_scope=_list(meta.get("read_scope")),
@@ -507,6 +511,31 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
     find this same file, permissions and all. Raises KeyError when there is
     no such profile (or no such parent) and ProfileError on an extends cycle."""
     return _with_repo_add_dirs(_load(name, repo_root), repo_root)
+
+
+def local_fallback(profile: Profile, repo_root: str | None = None) -> str | None:
+    """When ``profile`` is a native profile on this machine whose model isn't
+    served right now (Ollama isn't running, or the model isn't pulled), the
+    first of its ``fallback`` profiles that loads; the worker then runs, and
+    is recorded, as that profile. None otherwise: a hosted endpoint (say a
+    profile that extends developer-local onto OpenRouter) is never swapped."""
+    from brindle import airgap
+
+    if profile.provider != "native" or not profile.fallback:
+        return None
+    if not (profile.local or airgap.is_local_url(profile.base_url)):
+        return None
+    from brindle.native import runner
+
+    if runner.served(profile):
+        return None
+    for other in profile.fallback:
+        try:
+            load_profile(other, repo_root)
+        except (KeyError, ProfileError):
+            continue
+        return other
+    return None
 
 
 # -- rule packs ---------------------------------------------------------------
