@@ -1007,9 +1007,12 @@ def add_checks(checks: list[str], allow: bool = False) -> str:
     question), also add one Bash allow rule per command to
     .claude/settings.local.json."""
     db = DB()
+    caller, _ = _caller(db)
     found = _session(db)
     if isinstance(found, str):
         return found
+    if caller and caller.id != found[0]:
+        return "Not authorized: only the supervisor (session root) can add checks."
     cleaned = [c.strip() for c in checks if c.strip()]
     if not cleaned:
         return "Give at least one check command."
