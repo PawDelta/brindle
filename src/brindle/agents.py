@@ -1867,6 +1867,16 @@ def _detach(args: list[str]) -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _detach_orphan(args: list[str]) -> None:
+    """Start a brindle helper that outlives this process and its agent: a
+    shell starts it in the background and exits, so it is nobody's child.
+    Stopping an agent stops every process descended from its MCP server
+    (brindle.procs), a helper ``_detach`` started there included."""
+    subprocess.run(["/bin/sh", "-c", '"$@" </dev/null >/dev/null 2>&1 &', "sh", *args],
+                   start_new_session=True, stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
 def wait_for_result(db: DB, agent_id: str, timeout: float, poll: float = 2.0) -> str:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1935,37 +1945,73 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
             db.enqueue(root_id, text, None)   # handed over at the supervisor's next Stop
         close_later(caller.id)
         return "Audit recorded and sent to the supervisor. You're done."
+    # Already recorded: closing this reviewer is its verdict's job, once
+    # whatever the verdict set off is done. Checked before the lock too, which
+    # that work (a merge running the checks) can hold for minutes.
+    recorded = "Your review was already recorded. You're done."
+    if caller.result is not None:
+        return recorded
     # One verdict at a time per workspace: a second one (the same reviewer
     # calling twice, or another reviewer of the same branch) waits here, then
     # finds what the first one did instead of merging alongside it.
     with pipeline.merge_lock(ws.id):
         caller = db.get_agent(caller_id)
-        if caller is None or caller.result is not None or db.get_workspace(ws.id) is None \
-                or not os.path.isdir(ws.path):
-            # Already recorded, or the branch merged (or was removed) meanwhile.
-            close_later(caller_id)
-            return "Your review was already recorded, or the branch is already merged. You're done."
+        if caller is not None and caller.result is not None:
+            return recorded
+        if caller is None or db.get_workspace(ws.id) is None or not os.path.isdir(ws.path):
+            close_later(caller_id)   # the branch merged (or was removed) meanwhile
+            return "The branch is already merged or removed. You're done."
         sha = gates.head(ws)
         db.add_review(ws.id, sha, caller.id, approved, summary)
         if approved:
             db.bump_progress(autopilot.root_of(db, caller.id))
         pipeline.note_review(db, ws, approved, reviewer=caller)
         verdict = "APPROVED" if approved else "CHANGES REQUESTED"
-        text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
-    # Outside the lock: an approval merges every ready branch of the base,
-    # taking each one's lock in turn, and holding this branch's lock while
-    # waiting for that would deadlock with a drain that wants it.
-    handled = pipeline.on_review(db, caller, ws, approved, summary)
-    # A merge the pipeline just made removes this reviewer's own record.
-    report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
-    close_later(caller.id)
-    if not approved:
-        from brindle import learned_rules
+        db.set_result(caller.id, _review_text(ws, sha, approved, summary))
+    finish_review_later(caller.id, ws.id)
+    return f"Review recorded ({verdict}); brindle takes it from here. You're done."
 
-        learned_rules.refresh_later(ws.repo_root)   # the finding just landed in the history
-    if handled:
-        return f"Review recorded ({verdict}); brindle takes it from here. You're done."
-    return f"Review recorded ({verdict}) and sent to your supervisor. You're done."
+
+def _review_text(ws: Workspace, sha: str, approved: bool, summary: str) -> str:
+    verdict = "APPROVED" if approved else "CHANGES REQUESTED"
+    return f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
+
+
+def finish_review_later(reviewer_id: str, ws_id: str) -> None:
+    """Act on a recorded verdict (``finish_review``) from a process of its
+    own. Not in the reviewer's MCP server: a merge runs the repo's checks,
+    which can take minutes, and a reviewer kept waiting that long calls
+    submit_review again, or is closed, which would stop the merge, the
+    queued tasks it starts and the supervisor's notice half way."""
+    from brindle.providers import brindle_invocation
+
+    _detach_orphan([*brindle_invocation(), "_finish-review", reviewer_id, ws_id])
+
+
+def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
+    """Hand a verdict submit_review recorded to the pipeline if the branch
+    is piped, else to the supervisor, then close the reviewer."""
+    from brindle import pipeline
+
+    try:
+        caller, ws = db.get_agent(reviewer_id), db.get_workspace(ws_id)
+        review = next((r for r in reversed(db.workspace_reviews(ws_id))
+                       if r.reviewer_id == reviewer_id), None) if caller and ws else None
+        if review is None:
+            return
+        # Outside the lock: an approval merges every ready branch of the base,
+        # taking each one's lock in turn, and holding this branch's lock while
+        # waiting for that would deadlock with a drain that wants it.
+        handled = pipeline.on_review(db, caller, ws, review.approved, review.summary or "")
+        # A merge the pipeline just made removes this reviewer's own record.
+        text = _review_text(ws, review.sha, review.approved, review.summary or "")
+        report_result(db, caller.id, text, forward=not handled, removed=(caller, ws))
+        if not review.approved:
+            from brindle import learned_rules
+
+            learned_rules.refresh_later(ws.repo_root)   # the finding just landed in the history
+    finally:
+        close_later(reviewer_id)
 
 
 def close_later(agent_id: str, delay: float = 5.0) -> None:

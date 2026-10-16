@@ -138,6 +138,46 @@ def test_submitting_the_same_review_twice_records_it_once(db, approved, monkeypa
     assert db.conn.execute("SELECT COUNT(*) FROM reviews").fetchone()[0] == reviews
 
 
+def test_a_slow_merge_neither_holds_up_the_reviewer_nor_is_cut_off_by_its_retry(db, approved, monkeypatch):
+    """The merge after an approval runs the repo's checks, which can take
+    minutes. submit_review returns at once (a reviewer left waiting calls it
+    again), the merge runs apart from the reviewer, and a repeated call while
+    it runs doesn't close the reviewer under it: the verdict's own run does,
+    once the merge is done."""
+    ws, runs = approved
+    in_gates, release = threading.Event(), threading.Event()
+    real_run = gates.run
+
+    def slow_run(*a, **k):
+        in_gates.set()
+        assert release.wait(10)
+        return real_run(*a, **k)
+
+    monkeypatch.setattr(gates, "run", slow_run)
+    closed, helpers, out = [], [], []
+    monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: closed.append(agent_id))
+
+    def detached(reviewer_id, ws_id):   # a separate process, in production
+        helpers.append(threading.Thread(target=lambda: agents.finish_review(DB(), reviewer_id, ws_id)))
+        helpers[-1].start()
+
+    monkeypatch.setattr(agents, "finish_review_later", detached, raising=False)
+    first = threading.Thread(target=lambda: out.append(agents.submit_review(DB(), "rev0", True, "lgtm")))
+    first.start()
+    try:
+        first.join(5)
+        assert out and in_gates.wait(10)   # answered while the merge waits on the checks
+        assert "already" in agents.submit_review(db, "rev0", True, "lgtm")
+        assert closed == []
+    finally:
+        release.set()
+        first.join(20)
+        for t in helpers:
+            t.join(20)
+    assert any("Merged feat into main" in b for b in drain(db))
+    assert closed == ["rev0"] and len(runs) == 1
+
+
 def test_a_second_reviewer_submitting_after_the_removal_is_told_it_is_done(db, approved):
     ws, runs = approved
     agents.submit_review(db, "rev0", True, "lgtm")
