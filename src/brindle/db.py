@@ -487,7 +487,7 @@ class Autopilot:
     audit_ok: int | None = None        # its verdict
     audit_history: str | None = None   # persistent audit notes and accepted decisions
     question: str | None = None        # the open need_user question the user hasn't answered
-    nudged_time: float | None = None   # when the last nudge was sent
+    nudged_time: float | None = None   # when the last nudge was sent; never cleared, the backoff ignores it once progress moves past nudged_at
 
 
 @dataclass
