@@ -32,6 +32,7 @@ from brindle.config import (
     PORT_RANGE_START,
     RepoConfig,
     load_repo_config,
+    worktree_root,
     worktrees_dir,
 )
 from brindle.db import DB, Workspace
@@ -123,13 +124,23 @@ def _db_slug(db: DB, repo_root: str) -> str:
     owners: dict[str, str] = {}
     for w in db.find_workspaces():
         owners.setdefault(w.id.split("/", 1)[0], w.repo_root)
-    # Pool worktrees live under <worktrees>/<slug>/.pool/<token>.
+    # Pool worktrees from before #182 live under ~/.brindle/worktrees/<slug>/_w/<token>.
+    legacy = worktrees_dir()
     for row in db.conn.execute("SELECT path, repo_root FROM pool_entries"):
-        owners.setdefault(Path(row["path"]).parent.parent.name, row["repo_root"])
+        if Path(row["path"]).parent.parent.parent == legacy:
+            owners.setdefault(Path(row["path"]).parent.parent.name, row["repo_root"])
     slug, n = base, 2
     while owners.get(slug, repo_root) != repo_root:
         slug, n = f"{base}-{n}", n + 1
     return slug
+
+
+def new_worktree_root(repo_root: str, cfg: RepoConfig | None = None) -> Path:
+    """``worktree_root`` for a worktree about to be added there, kept out of
+    the repo's ``git status`` when it lies inside the checkout."""
+    root = worktree_root(repo_root, cfg)
+    git.exclude(repo_root, root)
+    return root
 
 
 def _session_name(repo_root: str, name: str, slug: str | None = None) -> str:
@@ -373,7 +384,7 @@ def create(
         path = claimed.path
         how = "pool"
     else:
-        path = str(worktrees_dir() / _db_slug(db, repo_root) / branch)
+        path = str(new_worktree_root(repo_root, cfg) / branch)
         if os.path.exists(path):
             raise WorkspaceError(f"{path} already exists; remove it or choose another branch")
         how = git.add_worktree(repo_root, path, branch, start_point)

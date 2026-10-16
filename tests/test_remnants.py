@@ -10,13 +10,14 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
+import test_cull
 from brindle import cull, tmux, view, workspaces
 
 # These start servers named after a dead pytest run, which every other
 # xdist worker's teardown would reap first: run them in the serial pass.
 pytestmark = pytest.mark.serial
 from brindle.cli import app
-from brindle.config import brindle_home, worktrees_dir
+from brindle.config import brindle_home, worktree_root, worktrees_dir
 from brindle.db import Agent
 
 OLD = time.time() - 3600
@@ -199,11 +200,29 @@ def test_orphan_brindle_sessions_are_killed(db, repo):
     assert tmux.has_session("brindle_proj_devserver")  # something the person runs
 
 
+def test_a_session_whose_worktree_is_gone_is_killed_with_the_cli_in_it(db, tmp_path):
+    """#167: prune kept these for the agent CLI (agy) still running in them."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    name = "brindle_proj_fix-gone"
+    tmux.ensure_session(name, str(gone), {})
+    pane = tmux.new_window(name, "agy", str(gone), ["sleep", "61"], {})
+    pids = tmux.window_pids(pane)
+    gone.rmdir()
+
+    lines = cull.orphan_sessions(db)
+
+    assert any(name in line for line in lines) and not tmux.has_session(name)
+    assert not any(test_cull.alive(p) for p in pids)   # terminate() returns once they are gone
+
+
 def test_empty_worktree_folders_are_removed(db, repo):
     ws = workspaces.create(db, str(repo), "feat/real").workspace
-    (worktrees_dir() / "proj" / "fix" / "gone").mkdir(parents=True)
-    assert cull.empty_worktree_dirs() == 2
-    assert not (worktrees_dir() / "proj" / "fix").exists()
+    (worktree_root(repo) / "fix" / "gone").mkdir(parents=True)
+    (worktrees_dir() / "proj" / "old").mkdir(parents=True)  # from before #182
+    assert cull.empty_worktree_dirs(db) == 4
+    assert not (worktree_root(repo) / "fix").exists()
+    assert not (worktrees_dir() / "proj").exists()
     assert os.path.isdir(ws.path)
     assert worktrees_dir().is_dir()
 

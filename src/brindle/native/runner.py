@@ -27,7 +27,7 @@ from brindle.native.client import Client, ClientError, Endpoint
 from brindle.native.loop import LoopConfig, NativeAgent
 from brindle.native.permissions import Permissions
 from brindle.native.tools import Tool, Toolbox, ToolResult, core_tools
-from brindle.profiles import Profile, subscription_token_problem
+from brindle.profiles import Profile, load_profile, subscription_token_problem
 from brindle.providers import DELIVERY_NOTE
 
 DEFAULT_CONTEXT_TOKENS = 32_000
@@ -102,6 +102,41 @@ def probe(endpoint: Endpoint, timeout: float = 3.0) -> tuple[bool, str]:
         return True, f"reachable; {endpoint.model} is available"
     shown = ", ".join(names[:6]) + (", ..." if len(names) > 6 else "")
     return True, f"reachable, but {endpoint.model} isn't listed (it has: {shown})"
+
+
+def served(profile: Profile, timeout: float = 1.0) -> bool:
+    """Whether ``profile``'s model is served right now: its endpoint answers
+    and lists the model. Any failure (no endpoint, Ollama not running, the
+    model not pulled) counts as not served."""
+    try:
+        ok, detail = probe(endpoint_for(profile), timeout)
+    except Exception:
+        return False
+    return ok and "is available" in detail
+
+
+LOCAL_PROFILE = "developer-local"   # the local model a hosted model's refusal is retried on
+
+
+def refusal_fallback(endpoint: Endpoint, repo_root: str | None = None) -> Endpoint | None:
+    """Where to retry a request ``endpoint``'s model refuses: the
+    ``developer-local`` profile's model when it is served on this machine
+    or the private network, unless that is ``endpoint`` itself. None
+    otherwise: a repo that points developer-local at a hosted endpoint
+    doesn't get refusals sent there."""
+    from brindle import airgap
+
+    try:
+        local = load_profile(LOCAL_PROFILE, repo_root)
+    except Exception:
+        return None
+    if local.provider != "native" or not (local.local or airgap.is_local_url(local.base_url)):
+        return None
+    if not served(local):
+        return None
+    fallback = endpoint_for(local)
+    same = (fallback.base_url.rstrip("/"), fallback.model) == (endpoint.base_url.rstrip("/"), endpoint.model)
+    return None if same else fallback
 
 
 def is_ollama(endpoint: Endpoint, timeout: float = 3.0) -> bool:
@@ -262,8 +297,15 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
         streamed["text"] = ""
         print(f"  · {line}", flush=True)
 
+    def on_refusal() -> Endpoint | None:
+        local = refusal_fallback(endpoint, ws.repo_root)
+        log(f"{endpoint.model} refused; retrying on the local {local.model}, which keeps the conversation"
+            if local else f"{endpoint.model} refused, and no local model is served to retry on")
+        return local
+
     loop = NativeAgent(
-        Client(endpoint), toolbox, permissions, system, config=config, transcript=transcript,
+        Client(endpoint, fallback=on_refusal), toolbox, permissions,
+        system, config=config, transcript=transcript,
         on_status=lambda s: db.set_status(agent_id, s),
         inbox=lambda: _drain(db, agent_id),
         log=log, on_text=show,

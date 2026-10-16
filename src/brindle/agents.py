@@ -26,7 +26,7 @@ from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
-from brindle.profiles import load_profile, missing_add_dirs
+from brindle.profiles import load_profile, local_fallback, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, signed_out, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
@@ -336,6 +336,9 @@ def spawn(
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
     profile = load_profile(profile_name, ws.repo_root)
+    hosted = local_fallback(profile, ws.repo_root)   # its local model isn't up
+    if hosted:
+        profile_name, profile = hosted, load_profile(hosted, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
@@ -1462,7 +1465,9 @@ def one_line(db: DB, message_id: int, body: str, sender_id: str | None) -> str:
         who = f"{sender.profile} {sender_id}" if sender else sender_id
     else:
         who = "brindle"
-    head = first_line(body, 300)
+    # A stuck-worker notice (cull.note_stuck) carries the prompt it waits on in
+    # its first line, which has to arrive whole.
+    head = first_line(body, 1500 if "has been waiting on a prompt for" in body[:200] else 300)
     if not sender_id:
         head = head.removeprefix("[brindle] ")  # the sender tag already says it
     return (f"[{who}] {head} "
@@ -2275,14 +2280,12 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 def _local_reviewer_available() -> bool:
     """Whether the built-in ``reviewer-local`` profile's model is served
     right now. Any failure counts as not available."""
-    try:
-        from brindle.native import runner
+    from brindle.native import runner
 
-        endpoint = runner.endpoint_for(load_profile("reviewer-local"))
-        ok, detail = runner.probe(endpoint, timeout=1.0)
+    try:
+        return runner.served(load_profile("reviewer-local"))
     except Exception:
         return False
-    return bool(ok) and "is available" in detail
 
 
 def _review_kill_switch(ws: Workspace) -> None:
@@ -2399,30 +2402,45 @@ def expected_check_wait(db: DB, ws: Workspace, cfg: RepoConfig) -> float | None:
     return total if cfg.checks else None
 
 
+MOVED_RETRIES = 2   # check runs a branch that keeps moving under them gets again (review_after_checks)
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
     Meant to run from a detached process, which outlives the call that
-    started it. Gives up quietly when the branch moves on (the new commit
-    gets its own review), the workspace is gone, or a reviewer is already at
-    work on this commit. Raises ``AgentError`` when the reviewer can't
+    started it. Gives up quietly when the workspace is gone, a reviewer is
+    already at work on this commit, or the branch moves on to a commit a new
+    report hands to a run of its own. A piped branch that moves on without
+    a new report (its worker committed again, or merged its moved base in)
+    is checked again on its new head, up to ``MOVED_RETRIES`` times, and then
+    goes to the supervisor. Raises ``AgentError`` when the reviewer can't
     start."""
-    from brindle import gates
+    from brindle import gates, pipeline
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
-    sha = gates.head(ws)
-    if _live_reviewer(db, ws, sha, profile):
-        return None
-    try:
-        summary = gates.check_summary(db, ws, cfg, cancel=lambda: gates.head(ws) != sha)
-    except gates.Abandoned:
-        return None
-    except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
-        summary = f"(running the checks crashed: {e})"
-    if db.get_workspace(ws.id) is None or gates.head(ws) != sha:
+    since = pipeline.review_claim(db, ws)
+    for _attempt in range(MOVED_RETRIES + 1):
+        sha = gates.head(ws)
+        if _live_reviewer(db, ws, sha, profile):
+            return None
+        try:
+            summary = gates.check_summary(db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha)
+        except gates.Abandoned:
+            summary = None
+        except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
+            summary = f"(running the checks crashed: {e})"
+        if db.get_workspace(ws.id) is None:
+            return None
+        if gates.head(ws) == sha:
+            break
+        if not pipeline.still_claimed(db, ws, since):
+            return None
+    else:
+        pipeline.on_moved_during_checks(db, ws)
         return None
     caller = db.get_agent(caller_id) if caller_id else None
     text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
