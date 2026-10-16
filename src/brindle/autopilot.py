@@ -1926,8 +1926,22 @@ NO_CHECKS = """- This repo has no `checks` in .brindle/config.json, so nothing v
 
 SAFE_ALLOW = re.compile(r"[A-Za-z0-9_./ =,@+-]+")   # no wildcard, quote, $, &, redirect or newline
 EXEC_BINARIES = {"curl", "wget", "bash", "sh", "zsh", "eval", "exec", "rm", "sudo", "ssh", "nc",
-                 "env", "xargs", "node", "perl", "ruby"}
-EXEC_FLAGS = {"-c", "-e"}   # python -c style inline code
+                 "env", "xargs", "node", "perl", "ruby", "timeout", "nice", "nohup", "command",
+                 "npx", "uv", "make", "docker", "busybox", "time", "stdbuf"}   # wrappers run their argv
+INTERPRETER = re.compile(r"python[0-9.]*$|pypy[0-9.]*$")
+
+
+def _runs_arbitrary(c: str) -> bool:
+    """True when the command's program is not a plain tool: a path, a wrapper or
+    shell, or an interpreter running anything but a ``-m`` module."""
+    argv = c.split()
+    prog = argv[0]
+    name = prog.rsplit("/", 1)[-1] if "/" not in prog else None
+    if name is None or name in EXEC_BINARIES:
+        return True
+    if INTERPRETER.match(name):
+        return argv[1:2] != ["-m"]
+    return False
 
 
 def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
@@ -1946,8 +1960,7 @@ def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
         return text
     commands = [c.strip() for check in checks for c in re.split(r"&&|\|\||;|\|", check)]
     unsafe = [c for c in commands if c and (
-        not SAFE_ALLOW.fullmatch(c) or c.split()[0] in EXEC_BINARIES
-        or (c.split()[0].startswith("python") and EXEC_FLAGS & set(c.split()[1:2])))]
+        not SAFE_ALLOW.fullmatch(c) or _runs_arbitrary(c))]
     if unsafe:
         return (f"{text} Did not allow any commands: {unsafe[0]!r} has a wildcard, substitution, "
                 "redirect or a binary that runs arbitrary code. The user can add rules themselves.")
