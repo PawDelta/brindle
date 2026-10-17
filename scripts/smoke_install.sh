@@ -22,12 +22,13 @@ USER smoke
 WORKDIR /home/smoke
 EOF
 
-# The checkout is mounted read-only and copied (tracked files only), so the
-# build can't write into it and uncommitted junk can't hide a problem.
+# The tracked files of the checkout are streamed in as a tar (a worktree's .git
+# points outside any mount), so the build can't write into the checkout and
+# untracked junk can't hide a problem.
 LOG="$(mktemp "${TMPDIR:-/tmp}/brindle-smoke.XXXXXX")" || exit 1
-docker run --rm -v "$ROOT:/checkout:ro" "$IMAGE" bash -c '
+git -C "$ROOT" ls-files -z | COPYFILE_DISABLE=1 tar -C "$ROOT" --no-xattrs --null -T - -cf - | docker run --rm -i "$IMAGE" bash -c '
   set -u
-  mkdir src && git -C /checkout ls-files -z | (cd /checkout && xargs -0 cp --parents -t /home/smoke/src) || exit 90
+  mkdir src && tar -x -C src || exit 90
   BRINDLE_SOURCE=/home/smoke/src sh src/scripts/install.sh || { echo "SMOKE: install.sh failed"; exit 91; }
   export PATH="$HOME/.local/bin:$PATH"
   echo "== brindle --version"
@@ -37,7 +38,7 @@ docker run --rm -v "$ROOT:/checkout:ro" "$IMAGE" bash -c '
   echo "SMOKE: doctor exit $rc"
   [ "$rc" -le 1 ] || exit 93
 ' 2>&1 | tee "$LOG"
-status=${PIPESTATUS[0]}
+status=${PIPESTATUS[2]}   # docker run: after git ls-files and tar
 
 if grep -q "Traceback (most recent call last)" "$LOG"; then
   echo "smoke_install: FAIL: a command printed a Python traceback" >&2
