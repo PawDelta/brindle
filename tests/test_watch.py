@@ -56,13 +56,31 @@ class _Screen:
         return "".join(self.cells.get((y, x), (" ", 0))[0] for x in range(self.w)).rstrip()
 
 
-STYLES = {"accent": 1, "bold": 2, "dim": 3, "coat": 4, "streak": 5}
+STYLES = {"accent": 1, "bold": 2, "dim": 3, "strand_o": 4, "strand_p": 5,
+          "strand_g": 6, "strand_b": 7}
 
 
 def test_logo_fits_narrow_panes():
     for w in range(3, 30):
         watch._draw_logo(_Screen(w), w, STYLES)
         watch._draw_compact_logo(_Screen(w), w, STYLES)
+
+
+def test_header_leaves_the_braid_cells_to_the_image_or_draws_the_lens():
+    # No sixel (braid=0), or too narrow for the name beside the image: the lens,
+    # in the same three rows, with the name beside it.
+    for w, braid in ((30, 0), (14, 8)):
+        screen = _Screen(w)
+        assert watch._draw_logo(screen, w, STYLES, braid) == watch._header_rows(18, w, braid) == 4
+        assert "╭" in screen.row(0) and "┿" in screen.row(1) and "╰" in screen.row(2)
+    screen = _Screen(30)
+    watch._draw_logo(screen, 30, STYLES, 0)
+    assert screen.row(1).index("brindle") == screen.row(2).index("v") == 10
+    screen = _Screen(30)
+    assert watch._draw_logo(screen, 30, STYLES, braid=8) == watch._header_rows(18, 30, 8) == 4
+    assert not [cell for cell in screen.cells if cell[0] < 3 and cell[1] <= 8]
+    assert screen.row(1).index("brindle") == screen.row(2).index("v") == 10
+    assert screen.row(3).lstrip().startswith("─")
 
 
 def test_errors_go_to_a_log_file_not_over_the_screen(brindle_home, capsys):
@@ -84,3 +102,17 @@ def test_errors_go_to_a_log_file_not_over_the_screen(brindle_home, capsys):
         root.handlers[:], root.level = handlers, level
     assert "TypeError: boom" in (brindle_home / "watch.log").read_text()
     assert "boom" not in capsys.readouterr().err
+
+
+def test_light_background_picks_the_light_palette(monkeypatch):
+    pairs = []
+    monkeypatch.setattr(watch.curses, "has_colors", lambda: True)
+    monkeypatch.setattr(watch.curses, "use_default_colors", lambda: None)
+    monkeypatch.setattr(watch.curses, "COLORS", 256, raising=False)
+    monkeypatch.setattr(watch.curses, "init_pair", lambda i, fg, bg: pairs.append(fg))
+    monkeypatch.setattr(watch.curses, "color_pair", lambda i: i)
+    watch._styles((250, 250, 250))
+    assert pairs[0] == watch.PALETTE_256_LIGHT["accent"]
+    pairs.clear()
+    watch._styles(None)
+    assert pairs[0] == watch.PALETTE_256["accent"]
