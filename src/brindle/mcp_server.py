@@ -1025,6 +1025,9 @@ async def add_checks(checks: list[str], ctx: Context) -> str:
     cleaned = [c.strip() for c in checks if c.strip()]
     if not cleaned:
         return "Give at least one check command."
+    if any(not c.isprintable() or len(c) > 500 for c in cleaned):
+        # A newline or invisible character could fake lines in brindle's dialog.
+        return "Each check must be one line of printable text, at most 500 characters."
     text, rules = autopilot.propose_checks(db, found[0], cleaned)
     try:
         answer = await ctx.elicit(text, _ApproveChecksAndRules if rules else _ApproveChecks)
