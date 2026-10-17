@@ -47,17 +47,12 @@ def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
 
 
 def test_wsl_ignores_a_windows_shim_and_doctor_asks_for_a_linux_install(tmp_path, monkeypatch):
-    shim = tmp_path / "mnt" / "c" / "bin"
-    shim.mkdir(parents=True)
-    exe = shim / "codex"
-    exe.write_text("#!/bin/sh\n")
-    exe.chmod(0o755)
     monkeypatch.setattr(providers, "CODEX_BUNDLED", str(tmp_path / "none"))
     monkeypatch.delenv("BRINDLE_CODEX_BIN", raising=False)
-    monkeypatch.setenv("PATH", str(shim))
     monkeypatch.setattr("shutil.which", lambda name, **kw: f"/mnt/c/bin/{name}")
     monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
     assert providers.codex_binary() == "codex"
+    assert providers.unusable("codex")   # the bare name isn't found again as the shim
     c = doctor._tool("codex", False, "why", install="npm i")
     assert "Windows" in c.detail and "Linux" in c.detail
     monkeypatch.delenv("WSL_DISTRO_NAME")

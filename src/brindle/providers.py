@@ -1229,7 +1229,7 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
               "antigravity": antigravity.binary}.get(provider)
     if binary:
         exe = binary()
-        if not (shutil.which(exe) or os.path.isfile(exe)):
+        if not (which_cli(exe) or os.path.isfile(exe)):
             return f"{exe} isn't installed"
     return signed_out(provider, env)
 

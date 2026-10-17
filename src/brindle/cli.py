@@ -474,14 +474,12 @@ def _trust_codex_hook(repo_root: str) -> None:
     hook if it isn't yet (or brindle moved), and say so in one line, so Codex
     workers follow the policy from their first launch. A trust the person
     removed stays removed; `brindle doctor` points at it."""
-    import shutil
-
     from brindle import codex_hook
-    from brindle.providers import codex_binary
+    from brindle.providers import codex_binary, which_cli
 
     try:
         binary = codex_binary()
-        if not codex_hook.policy_on(repo_root) or not (shutil.which(binary) or os.path.isfile(binary)):
+        if not codex_hook.policy_on(repo_root) or not (which_cli(binary) or os.path.isfile(binary)):
             return
         command = codex_hook.hook_command()
         before = codex_hook.status(command)

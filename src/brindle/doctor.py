@@ -40,9 +40,10 @@ def _tool(name: str, required: bool, why: str, version_args: list[str] | None = 
 
     path = which_cli(name)
     if not path:
-        if shutil.which(name):
+        windows = shutil.which(name)
+        if windows:
             return Check(FAIL if required else WARN, name,
-                         f"only a Windows install was found ({shutil.which(name)}): WSL needs a "
+                         f"only a Windows install was found ({windows}): WSL needs a "
                          f"Linux install. Install: {install or 'the Linux version of ' + name}")
         level = FAIL if required else WARN
         return Check(level, name, f"not found: {why}." + (f" Install: {install}" if install else ""))
@@ -611,7 +612,9 @@ def codex_hook_checks(repo_root: str) -> list[Check]:
     if not codex_hook.policy_on(repo_root):
         return []
     exe = providers.codex_binary()
-    if not (shutil.which(exe) or os.path.isfile(exe)):
+    from brindle.providers import which_cli
+
+    if not (which_cli(exe) or os.path.isfile(exe)):
         return []
     state = codex_hook.status()
     if state == codex_hook.TRUSTED:
