@@ -232,9 +232,11 @@ def windows(session: str) -> list[str]:
 # The brindle window as pawdelta.com/brindle draws it (Brindle palette, night):
 # a dark brown ground, brindle-brown and fawn accents, warm grey text.
 THEME = {
-    "bg": "#17130f", "bg2": "#1f1a15", "line": "#2f2821",
+    # The website's shell colours (pawdelta.com/brindle): its terminal blocks stay dark in both themes.
+    # bg is the site's #0c0c0e nudged to a colour sixel percentages hit exactly (the logo image).
+    "bg": "#0d0d0f", "bg2": "#16161a", "line": "#242427",
     "accent": "#8a5a2b", "accent_light": "#d7af87",
-    "text": "#ece4d9", "muted": "#8f8173", "muted2": "#c4b8aa",
+    "text": "#eee6dc", "muted": "#8b7d6f", "muted2": "#b9ab9b",
 }
 
 

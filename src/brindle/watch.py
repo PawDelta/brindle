@@ -16,7 +16,8 @@ import textwrap
 import time
 from dataclasses import dataclass, field
 
-from brindle import agents, airgap, pricing, sidebar_follow, tmux, upgrade, view, watch_costs
+import brindle
+from brindle import agents, airgap, pricing, sidebar_follow, sidebar_logo, tmux, upgrade, view, watch_costs
 from brindle.db import DB
 
 RESTART = "restart"      # what _loop returns when brindle was upgraded under it
@@ -679,44 +680,54 @@ def _next_needing(state: NavState, lines: list[Line]) -> None:
     state.follow = True
 
 
-# The site's brindle window (pawdelta.com/brindle, Brindle palette) as
-# xterm-256 colours (closest matches): a fawn accent, sage for idle, lavender
-# for working, coral for needs you, warm grey for secondary text.
+# The website's colours as xterm-256 colours (closest matches), one set per
+# terminal background: a fawn accent, lavender for working, green for idle /
+# done, sap orange for needs you.
 PALETTE_256 = {
-    "accent": 180,    # ~#d7af87 fawn
-    "busy": 147,      # ~#afafff lavender: working
-    "ok": 108,        # ~#87af87 sage: idle / done
-    "alert": 209,     # ~#ff875f coral: needs you
-    "bad": 131,       # ~#af5f5f brick: stopped
-    "dim": 245,       # ~#8a8a8a warm grey
-    "coat": 180,      # ~#d7af87 fawn: the paw's coat
-    "streak": 94,     # ~#875f00 dark brown: the paw's brindle streaks
-    "text": 254,      # ~#e4e4e4
-    "select_bg": 236, # ~#303030 subtle row highlight
+    "accent": 180,    # fawn
+    "busy": 140,      # lavender: working
+    "ok": 78,         # green: idle / done
+    "alert": 173,     # sap orange: needs you
+    "bad": 167,       # stopped
+    "dim": 245,
+    "strand_o": 173, "strand_p": 141, "strand_g": 72, "strand_b": 137,  # the text lens
+    "text": 254,
+    "select_bg": 234, # subtle row highlight
+}
+PALETTE_256_LIGHT = {
+    **PALETTE_256,
+    "accent": 94, "busy": 61, "ok": 29, "alert": 130, "bad": 160,
+    "strand_o": 130, "strand_p": 61, "strand_g": 29, "strand_b": 94,
+    "dim": 243, "text": 234, "select_bg": 255,
 }
 
 
-def _styles() -> dict[str, int]:
+def _styles(bg: tuple[int, int, int] | None = None) -> dict[str, int]:
+    """Curses attributes by role; bg is the terminal background, dark if unknown."""
     attrs = {"normal": curses.A_NORMAL, "bold": curses.A_BOLD, "dim": curses.A_DIM,
              "accent": curses.A_BOLD, "select": curses.A_REVERSE, "bar": curses.A_BOLD}
     if not curses.has_colors():
         attrs.update(busy=curses.A_NORMAL, ok=curses.A_NORMAL,
-                     alert=curses.A_BOLD, bad=curses.A_DIM)
+                     alert=curses.A_BOLD, bad=curses.A_DIM, strand_o=curses.A_NORMAL,
+                     strand_p=curses.A_NORMAL, strand_g=curses.A_NORMAL, strand_b=curses.A_NORMAL)
         return attrs
     curses.use_default_colors()
     if curses.COLORS >= 256:
-        p = PALETTE_256
+        light = bg is not None and sidebar_logo.theme(bg) == "light"
+        p = PALETTE_256_LIGHT if light else PALETTE_256
         pairs = [("accent", p["accent"], -1), ("busy", p["busy"], -1), ("ok", p["ok"], -1),
                  ("alert", p["alert"], -1), ("bad", p["bad"], -1), ("dim", p["dim"], -1),
                  ("normal", p["text"], -1), ("select", p["text"], p["select_bg"]),
-                 ("coat", p["coat"], -1), ("streak", p["streak"], -1),
+                 ("strand_o", p["strand_o"], -1), ("strand_p", p["strand_p"], -1),
+                 ("strand_g", p["strand_g"], -1), ("strand_b", p["strand_b"], -1),
                  ("bar", p["accent"], p["select_bg"])]
     else:
         pairs = [("accent", curses.COLOR_GREEN, -1), ("busy", curses.COLOR_MAGENTA, -1),
                  ("ok", curses.COLOR_GREEN, -1), ("alert", curses.COLOR_YELLOW, -1),
                  ("bad", curses.COLOR_RED, -1), ("dim", -1, -1), ("normal", -1, -1),
                  ("select", curses.COLOR_WHITE, curses.COLOR_BLACK),
-                 ("coat", curses.COLOR_YELLOW, -1), ("streak", curses.COLOR_RED, -1),
+                 ("strand_o", curses.COLOR_YELLOW, -1), ("strand_p", curses.COLOR_MAGENTA, -1),
+                 ("strand_g", curses.COLOR_GREEN, -1), ("strand_b", curses.COLOR_RED, -1),
                  ("bar", curses.COLOR_GREEN, curses.COLOR_BLACK)]
     for i, (name, fg, bg) in enumerate(pairs, start=1):
         curses.init_pair(i, fg, bg)
@@ -768,55 +779,56 @@ def _peek(stdscr, agent: dict, styles: dict[str, int]) -> None:
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
 
 
-# The paw as pixels, one cell wide and two tall: X is a toe, P the pad, . empty.
-PAW = [
-    "...XX.XX...",
-    "...XX.XX...",
-    "XX.......XX",
-    "XX..PPP..XX",
-    "...PPPPP...",
-    "..PPPPPPP..",
-    "..PPPPPPP..",
-    "...PP.PP...",
+# The lens as text, for terminals that can't show the braid image: three rows,
+# each a (text, style) run list, 8 columns wide.
+LENS_WIDTH = 8
+LENS = [
+    [("  ╭──╮", "strand_o")],
+    [("━━", "strand_b"), ("┿━━┿", "strand_p"), ("━━", "strand_g")],
+    [("  ╰──╯", "strand_g")],
 ]
-HALF_BLOCKS = {(False, False): " ", (True, False): "▀", (False, True): "▄", (True, True): "█"}
-WORDMARK_ROW = 2  # the wordmark sits beside this terminal row of the paw
+COMPACT_LOGO = [("━", "strand_b"), ("Θ", "strand_o"), ("━", "strand_g")]  # for one-line headers
 
 
-def _paw_row(y: int) -> str:
-    """Terminal row y of the paw: pixel rows 2y and 2y+1 as half blocks."""
-    top, bottom = PAW[2 * y], PAW[2 * y + 1]
-    return "".join(HALF_BLOCKS[(t != ".", b != ".")] for t, b in zip(top, bottom))
+def _braid_fits(w: int, braid: int) -> bool:
+    """Whether the name fits beside a lens or braid image `braid` cells wide."""
+    return 0 < braid and 2 + braid + len("brindle") < w - 1
 
 
-LOGO = [(_paw_row(y), "brindle" if y == WORDMARK_ROW else "") for y in range(len(PAW) // 2)]
-COMPACT_LOGO = "▀▄▀"  # two toes over the pad, for one-line headers
+def _header_rows(h: int, w: int, braid: int) -> int:
+    """The first row below the header: see _draw_logo."""
+    return 2 if h < 18 else sidebar_logo.ROWS + 1
 
 
-def _coat(x: int, y: int) -> str:
-    """Brindle: a fawn coat, with dark stripes down every other column of the pad."""
-    pad = "P" in (PAW[2 * y][x], PAW[2 * y + 1][x])
-    return "streak" if pad and x % 2 == 1 else "coat"
-
-
-def _draw_logo(stdscr, w: int, styles: dict[str, int]) -> int:
-    """The paw-and-wordmark header. Returns the first free row."""
+def _draw_logo(stdscr, w: int, styles: dict[str, int], braid: int = 0) -> int:
+    """The header. `braid` is the width in cells of the braid image the caller
+    puts over rows 0-2 from column 1 (0: none): its cells are left alone. Without
+    it, or when the name wouldn't fit beside it, the text lens is drawn instead.
+    The name and version go beside either. Returns the first free row."""
     clock = time.strftime("%H:%M")
-    for y, (paw, word) in enumerate(LOGO):
-        for x, ch in enumerate(paw):
-            if ch != " " and x < w - 2:
-                stdscr.addstr(y, 1 + x, ch, styles.get(_coat(x, y), styles["accent"]))
-        if word and w > len(paw) + len(word) + 4:
-            stdscr.addnstr(y, 3 + len(paw), word, len(word), styles["bold"])
-    if w > len(clock) + 16:
+    if not _braid_fits(w, braid):
+        braid = 0
+        for y, runs in enumerate(LENS):
+            x = 1
+            for text, style in runs:
+                if x < w - 2:
+                    stdscr.addnstr(y, x, text, w - 2 - x, styles[style])
+                x += len(text)
+    rows, x = sidebar_logo.ROWS, 2 + (braid or LENS_WIDTH)
+    if x < w - 1:
+        stdscr.addnstr(1, x, "brindle", w - 1 - x, styles["bold"])
+        stdscr.addnstr(2, x, f"v{brindle.__version__}", w - 1 - x, styles["dim"])
+    if w > len(clock) + 16 and w - 1 - len(clock) > 1 + braid:
         stdscr.addnstr(0, w - 1 - len(clock), clock, len(clock), styles["dim"])
-    stdscr.addnstr(len(LOGO), 1, "─" * max(0, w - 3), w - 2, styles["dim"])
-    return len(LOGO) + 1
+    stdscr.addnstr(rows, 1, "─" * max(0, w - 3), w - 2, styles["dim"])
+    return rows + 1
 
 
 def _draw_compact_logo(stdscr, w: int, styles: dict[str, int]) -> int:
     """One-line header for short panes."""
-    stdscr.addnstr(0, 1, COMPACT_LOGO, w - 2, styles.get("coat", styles["accent"]))
+    for x, (text, style) in enumerate(COMPACT_LOGO, start=1):
+        if x < w - 2:
+            stdscr.addnstr(0, x, text, w - 2 - x, styles[style])
     if w > 6:
         stdscr.addnstr(0, 5, "brindle", w - 6, styles["bold"])
     stdscr.addnstr(1, 1, "─" * max(0, w - 3), w - 2, styles["dim"])
@@ -846,12 +858,13 @@ def _start_status():
         return None
 
 
-def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
+def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
+          logo: sidebar_logo.Braid | None = None) -> str | None:
     install = upgrade.InstallWatch()
     # The session this sidebar belongs to: quitting the sidebar quits it.
     own_root = agents.sidebar_root(os.environ.get("TMUX_PANE")) if sidebar else None
     curses.curs_set(0)
-    styles = _styles()
+    styles = _styles(logo.bg if logo is not None else None)
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
     try:
         curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON4_PRESSED | wheel_down_mask())
@@ -863,6 +876,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
     pilot: dict | None = None
     stale = True
     armed: tuple[str, float] | None = None
+    shown: tuple | None = None  # the braid image last sent, by pane size and sixel
     notice, notice_until = "", 0.0
     culled_at = homed_at = 0.0
     feed = watch_costs.Feed(repo_root)
@@ -904,6 +918,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
             except Exception:  # noqa: BLE001 - never let a move take the sidebar down
                 pass
         h, w = stdscr.getmaxyx()
+        # The braid image's sixel and width in cells, when the terminal shows it.
+        braid = (logo.image() if logo is not None and h >= 18 else None) or ("", 0)
         width = max(1, w - 2)  # text starts at column 1, after the selection bar
         snap_changed = stale
         if stale:
@@ -932,7 +948,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
         if state.notice:
             notice, notice_until, state.notice = state.notice, time.time() + CLOSE_CONFIRM_SECONDS, ""
 
-        top = (len(LOGO) + 1) if h >= 18 else 2
+        top = _header_rows(h, w, braid[1])
         bottom = [Line(t, "dim") for t in _wrap(notice, width, "")] \
             if notice and time.time() < notice_until else []
         # The key hint only when it leaves room for a few rows; the filter always.
@@ -949,7 +965,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
         offset = state.offset
         content_top = top + (1 if show_above else 0)
         stdscr.erase()
-        _draw_logo(stdscr, w, styles) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
+        _draw_logo(stdscr, w, styles, braid[1]) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
         page = lines[offset:offset + visible]
         for y, (i, ln) in enumerate(enumerate(page, start=offset), start=content_top):
             attr = styles.get(ln.style, curses.A_NORMAL)
@@ -969,8 +985,16 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
         for y, ln in enumerate(bottom, start=h - len(bottom)):
             stdscr.addnstr(y, 1, ln.text, w - 2, styles.get(ln.style, curses.A_NORMAL))
         stdscr.refresh()
+        # The image goes over the cells _draw_logo left blank, once: again only
+        # when something may have written over them (a resize, a clear, a peek).
+        image = (h, w, braid[0]) if h >= 18 and _braid_fits(w, braid[1]) else None
+        if image is not None and image != shown:
+            sidebar_logo.show(1, braid[0])
+        shown = image
 
         key = stdscr.getch()
+        if key == curses.KEY_RESIZE:
+            shown = None
         if key != -1 or any(a["status"] in ("processing", "starting") for ws in snap
                             for a in ws["agents"]):
             from brindle.pro import status as org_status
@@ -1007,10 +1031,10 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> str | None:
         elif action == "attach" and selected is not None:
             _attach(lines[selected].agent, lines[selected].workspace, db)
             stdscr.clear()
-            stale = True
+            stale, shown = True, None
         elif action == "peek" and selected is not None:
             _peek(stdscr, lines[selected].agent, styles)
-            stale = True
+            stale, shown = True, None
         elif action == "close" and selected is not None:
             agent = lines[selected].agent
             now = time.time()
@@ -1037,7 +1061,11 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
     _log_to_file()
-    if curses.wrapper(_loop, repo_root, sidebar) == RESTART:
+    try:
+        logo = sidebar_logo.probe()  # asks the terminal, so before curses reads its input
+    except Exception:  # noqa: BLE001 - no braid image is the paw header, never a crash
+        logo = None
+    if curses.wrapper(_loop, repo_root, sidebar, logo) == RESTART:
         # Run again from the upgraded install, in this same pane (curses.wrapper
         # has put the terminal back); returning would count as quitting the sidebar.
         upgrade.reexec()
