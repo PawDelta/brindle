@@ -46,6 +46,10 @@ class Braid:
             return None
         return sixel(theme(self.bg), self.bg, *cell)
 
+    def recheck(self) -> None:
+        """Look again on the next image() call: a terminal just started showing it."""
+        self._checked = -RECHECK_SECONDS
+
 
 def probe(fd_in: int = 0, fd_out: int = 1) -> Braid | None:
     """The braid for this terminal, None outside tmux. Asks the terminal its
@@ -99,6 +103,12 @@ def _tmux_format(fmt: str) -> str:
                               capture_output=True, text=True, timeout=2).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def viewer() -> str:
+    """The tty of the terminal showing this pane, "" while none is."""
+    # Without a client of its own, tmux names whichever client is most recent.
+    return _tmux_format("#{?session_attached,#{client_tty},}")
 
 
 def _shows_sixel() -> bool:

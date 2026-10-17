@@ -253,11 +253,14 @@ def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(db, monkeypatch)
     monkeypatch.setattr(watch.view, "autopilot_entry", lambda *a, **k: None)
     monkeypatch.setattr(watch.watch_costs, "local", lambda *a, **k: watch.watch_costs.Local())
     monkeypatch.setattr(watch.watch_costs, "Feed", lambda root: types.SimpleNamespace(get=lambda: None))
+    # Shown by no terminal, then by one (a session switch): that redraws it all.
+    viewers = iter(["", "/dev/ttys001"])
+    monkeypatch.setattr(watch.sidebar_logo, "viewer", lambda: next(viewers))
 
     class Screen:
         """A 12-row pane: a wheel-down, then `q`. Records each frame's text."""
         def __init__(self):
-            self.keys, self.frames = [curses.KEY_MOUSE, ord("q")], [[]]
+            self.keys, self.frames, self.clears = [curses.KEY_MOUSE, ord("q")], [[]], 0
         def getmaxyx(self):
             return 12, 30
         def getch(self):
@@ -268,9 +271,12 @@ def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(db, monkeypatch)
         def timeout(self, ms): pass
         def erase(self): pass
         def refresh(self): pass
+        def clear(self):
+            self.clears += 1
 
     screen = Screen()
     watch._loop(screen, None)
+    assert screen.clears == 2
     # The wheel-down scrolls the top section (Costs) off the pane.
     assert "▾ Costs" in screen.frames[0]
     assert "▾ Costs" not in screen.frames[1]
