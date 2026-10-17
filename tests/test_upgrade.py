@@ -76,6 +76,7 @@ def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatc
     assert len(attempts) == 3
 
 
+@pytest.mark.variant("real incident: a same-version uv reinstall hardlinks the cached file, so sidebars never restarted")
 def test_sidebar_notices_an_upgrade_that_relinks_the_same_cached_files(monkeypatch, tmp_path):
     """Reinstalling the same build links the same cached file: its inode, mtime
     and size don't change, only the package directory is made again."""
