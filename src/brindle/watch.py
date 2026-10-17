@@ -1079,10 +1079,9 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
     _log_to_file()
-    try:
-        logo = sidebar_logo.probe()  # asks the terminal, so before curses reads its input
-    except Exception:  # noqa: BLE001 - no braid image is the paw header, never a crash
-        logo = None
+    # shortcut: the text logo everywhere; the braid image (sidebar_logo.probe())
+    # broke the sidebar in iTerm2 after a session switch. Bring it back once fixed.
+    logo = None
     if curses.wrapper(_loop, repo_root, sidebar, logo) == RESTART:
         # Run again from the upgraded install, in this same pane (curses.wrapper
         # has put the terminal back); returning would count as quitting the sidebar.
