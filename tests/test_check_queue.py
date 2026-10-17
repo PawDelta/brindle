@@ -87,6 +87,7 @@ def test_at_most_limit_runs_hold_a_slot_at_once(brindle_home, monkeypatch, limit
     assert meter.peak == limit
 
 
+@pytest.mark.variant("regression for #169: main's fixed default of 2 fails it")
 def test_an_unset_check_concurrency_follows_the_host_size(repo, brindle_home, monkeypatch):
     # #169: with no check_concurrency in any config, a small host gets fewer slots than a big one
     from brindle import config

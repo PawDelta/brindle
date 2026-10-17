@@ -181,6 +181,7 @@ def test_a_slow_merge_neither_holds_up_the_reviewer_nor_is_cut_off_by_its_retry(
     assert closed == ["rev0"] and len(runs) == 1
 
 
+@pytest.mark.variant("regression for #172: main blocks the verdict on the merge lock")
 def test_a_verdict_is_recorded_at_once_while_a_merge_holds_the_branch(db, approved, monkeypatch):
     """#172: a merge holds the branch's lock while the repo's checks run. A
     reviewer's submit_review waited on it, so the call hung and the verdict
