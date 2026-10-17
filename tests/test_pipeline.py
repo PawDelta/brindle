@@ -1,16 +1,19 @@
 """The pipeline doesn't stall on a review: a reviewer that stops without a
 verdict gets one fallback, and a review summary whose supervisor-action
 section is negated isn't an escalation."""
+import contextlib
 import json
 import os
 import shutil
+import signal
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, gates, pipeline, workspaces
+from brindle import agents, autopilot, cull, gates, pipeline, procs, providers, workspaces
 from brindle.config import RepoConfig
 from test_merge_order import add
 from test_pipeline_idempotent import drain
@@ -235,6 +238,62 @@ def test_a_reported_branch_that_moves_during_its_checks_is_not_dropped(db, repo,
     else:
         assert spawned == [] and db.get_agent("w1").pipeline is None
         assert any("needs you" in b and "`feat`" in b for b in drain(db))
+
+
+def _reported(db, repo, reviewing_since=None):
+    """A piped worker that reported on `feat`, in a repo with checks."""
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(
+        json.dumps({"checks": ["true"], "review_profile": "reviewer"}))
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    add(db, ws, "w1", "assign", parent="boss", result="done")
+    if reviewing_since is not None:
+        db.update_agent("w1", pipeline="reviewing", reviewing_since=reviewing_since)
+    return ws
+
+
+def test_issue190_the_check_run_before_a_review_outlives_the_reporting_worker(db, repo, monkeypatch):
+    """#190: the run that checks a reported branch and then starts its
+    reviewer was a child of the reporting worker's MCP server. Stopping an
+    agent stops every process descended from it (brindle.procs), so a worker
+    closed once it went idle took the run with it, its checks still queued or
+    running (for long, under load), and no reviewer ever started."""
+    ws = _reported(db, repo)
+    marker = f"issue190-{ws.id}"
+    monkeypatch.setattr(providers, "brindle_invocation",
+                        lambda: [sys.executable, "-c", "import time; time.sleep(60)", marker])
+    assert pipeline.on_report(db, db.get_agent("w1"), ws, "done")
+    deadline, helper = time.time() + 10, None
+    while helper is None and time.time() < deadline:
+        helper = next((p.pid for p in procs.table().values() if marker in p.text), None)
+    assert helper is not None
+    try:
+        assert helper not in procs.descendants([os.getpid()])
+    finally:
+        os.kill(helper, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("check_run", ["gone", "at work"])
+def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, repo, monkeypatch, check_run):
+    """#186: a reported branch sat with no check run, no reviewer and no
+    verdict until the 30-minute reminder asked the supervisor to call
+    request_review, which then always worked. The sweep starts it again
+    itself, once per report, and never while its check run is still at work
+    (queued for a slot, say)."""
+    ws = _reported(db, repo, reviewing_since=time.time() - pipeline.RESTART_REVIEW_AFTER - 60)
+    launched, told = [], []
+    monkeypatch.setattr(agents, "_detach", launched.append)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append(body))
+    with contextlib.ExitStack() as stack:
+        if check_run == "at work":   # in a process of its own, in production
+            stack.enter_context(pipeline.review_run(ws.id))
+        cull.note_reported_stuck(db, time.time(), {})
+        cull.note_reported_stuck(db, time.time(), {})
+    runs = [argv for argv in launched if "_review-after-checks" in argv]
+    assert len(runs) == (1 if check_run == "gone" else 0) and told == []
+    assert db.get_agent("w1").pipeline == "reviewing"
 
 
 @pytest.mark.parametrize("summary", [
