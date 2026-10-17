@@ -111,7 +111,7 @@ def test_watch_sidebar_flag_reaches_the_loop(db, repo, monkeypatch):
     import sys
 
     seen = {}
-    monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar: seen.setdefault("sidebar", sidebar))
+    monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar, *_: seen.setdefault("sidebar", sidebar))
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(agents, "dismiss_sidebar", lambda *a: None)
     monkeypatch.chdir(repo)
