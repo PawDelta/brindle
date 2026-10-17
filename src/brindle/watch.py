@@ -880,7 +880,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
     shown: tuple | None = None  # the braid image last sent, by pane size and sixel
     seen_by: str | None = None  # the tty of the terminal showing this pane
     notice, notice_until = "", 0.0
-    culled_at = homed_at = 0.0
+    culled_at = homed_at = viewed_at = 0.0
     feed = watch_costs.Feed(repo_root)
     spend = watch_costs.Local()
     spend_at = 0.0
@@ -921,12 +921,16 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 pass
         # A terminal newly showing this pane (a session switch, a new session's
         # first attach) gets a blank pane from iTerm2 until it's all redrawn.
-        if (viewer := sidebar_logo.viewer()) != seen_by:
-            seen_by = viewer
-            stdscr.clear()
-            shown = None
-            if logo is not None:
-                logo.recheck()
+        # Once per refresh, not per key: each look is a tmux call, and a mouse
+        # wheel sends a burst of keys.
+        if time.time() - viewed_at >= REFRESH_SECONDS:
+            viewed_at = time.time()
+            if (viewer := sidebar_logo.viewer()) != seen_by:
+                seen_by = viewer
+                stdscr.clear()
+                shown = None
+                if logo is not None:
+                    logo.recheck()
         h, w = stdscr.getmaxyx()
         # The braid image's sixel and width in cells, when the terminal shows it.
         braid = (logo.image() if logo is not None and h >= 18 else None) or ("", 0)
