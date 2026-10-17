@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, cli, cull, pool, procs, sessions, tmux, workspaces
+from brindle import agents, cli, cull, pool, procs, providers, sessions, tmux, workspaces
 from brindle.db import Agent
 from brindle.providers import ClaudeCode, trust_folder
 
@@ -79,6 +79,9 @@ def detached(monkeypatch):
     `_pool-fill`) instead of starting them; every other process runs."""
     started: list[list[str]] = []
     real = subprocess.Popen
+    # Run from a checkout nested in a brindle worktree dir, brindle_invocation
+    # picks the installed `brindle` instead of this interpreter.
+    monkeypatch.setattr(providers, "_in_worktree", lambda path: False)
 
     def popen(args, *a, **k):
         if isinstance(args, list) and args[1:4] == ["-P", "-m", "brindle"] and str(args[4]).startswith("_"):
