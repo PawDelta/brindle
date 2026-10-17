@@ -50,17 +50,14 @@ async def preloaded(_server):
     yield {}
 
 
-def _stamp() -> tuple[int, ...] | None:
+def _stamp() -> tuple[int, int, int] | None:
     """The installed ``brindle/__init__.py``'s identity: an upgrade writes a
-    new file (a new inode, mtime or size). A reinstall of the same build links
-    the very same cached file, so the package directory's identity counts too:
-    it is deleted and made again. None while it's missing mid-upgrade."""
+    new file (a new inode, mtime or size). None while it's missing mid-upgrade."""
     try:
         st = os.stat(brindle.__file__)
-        parent = os.stat(os.path.dirname(brindle.__file__))
     except OSError:
         return None
-    return (st.st_ino, st.st_mtime_ns, st.st_size, parent.st_ino, parent.st_ctime_ns)
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
 class InstallWatch:

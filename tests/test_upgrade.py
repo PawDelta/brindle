@@ -76,24 +76,6 @@ def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatc
     assert len(attempts) == 3
 
 
-def test_sidebar_notices_an_upgrade_that_relinks_the_same_cached_files(monkeypatch, tmp_path):
-    """Reinstalling the same build links the same cached file: its inode, mtime
-    and size don't change, only the package directory is made again."""
-    cache = tmp_path / "cache.py"
-    cache.write_text("")
-    pkg = tmp_path / "brindle"
-    pkg.mkdir()
-    (pkg / "__init__.py").hardlink_to(cache)
-    monkeypatch.setattr(brindle, "__file__", str(pkg / "__init__.py"))
-    watch_ = upgrade.InstallWatch()
-
-    (pkg / "__init__.py").unlink()
-    pkg.rmdir()
-    pkg.mkdir()
-    (pkg / "__init__.py").hardlink_to(cache)
-    assert watch_.changed()
-
-
 @pytest.mark.variant("a module hijack attempt; what it guards runs in the child process")
 def test_a_brindle_package_in_the_cwd_is_not_what_brindle_runs_again(monkeypatch, tmp_path):
     """A sidebar re-execs, and hooks run brindle, from inside a worktree: a
