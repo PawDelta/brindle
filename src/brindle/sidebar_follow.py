@@ -85,6 +85,14 @@ def _note_sidebar_move(why: str, pane: str, target_pane: str) -> None:
         pass
 
 
+def _repaint(pane: str) -> None:
+    """Have the sidebar redraw itself in full (Ctrl-L, see watch._loop): after a
+    client switches sessions, iTerm2 shows the pane mostly blank and without the
+    braid image until the sidebar writes it all out again."""
+    with contextlib.suppress(tmux.TmuxError):
+        tmux.send_keys(pane, "C-l")
+
+
 def _sidebar_position(ws: Workspace) -> str:
     from brindle.config import load_repo_config
 
@@ -202,6 +210,7 @@ def sidebar_follow(db: DB, session: str) -> None:
     if sidebar and sidebar != SIDEBAR_DISMISSED:
         pane_window, pane_tag = tmux.pane_window_tag(sidebar, SIDEBAR_TAG)
         if pane_window == window and pane_tag == root_id:
+            _repaint(sidebar)
             return
 
     with _sidebar_lock(root_id):
@@ -224,6 +233,7 @@ def sidebar_follow(db: DB, session: str) -> None:
                 _create_sidebar(db, root_id, root_ws, target_pane)
             return
         if tmux.pane_window(sidebar) == window:
+            _repaint(sidebar)
             return
         if not tmux.session_attached(session):
             home = tmux.pane_session(sidebar)
@@ -236,3 +246,4 @@ def sidebar_follow(db: DB, session: str) -> None:
         _note_sidebar_move(f"follow {session}", sidebar, target_pane)
         tmux.move_pane(sidebar, target_pane, SIDEBAR_COLUMNS,
                        _sidebar_position(root_ws) if root_ws else "left")
+        _repaint(sidebar)

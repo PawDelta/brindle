@@ -66,6 +66,8 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
         return reported_window, reported_tag
 
     monkeypatch.setattr(sidebar_follow.tmux, "pane_window_tag", pane_window_tag)
+    sent = []
+    monkeypatch.setattr(sidebar_follow.tmux, "send_keys", lambda pane, *keys: sent.append((pane, keys)))
     monkeypatch.setattr(sidebar_follow, "_sidebar_lock", lambda root_id: (_ for _ in ()).throw(
         AssertionError("slow path reached")))
     monkeypatch.setattr(sidebar_follow.tmux, "window_alive", lambda *a: (_ for _ in ()).throw(
@@ -75,6 +77,8 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
 
     if should_skip:
         sidebar_follow.sidebar_follow(FakeDB(), "session")
+        # A session switch leaves iTerm2 showing a blank sidebar: it must redraw.
+        assert sent == [("%sidebar", ("C-l",))]
     else:
         with pytest.raises(AssertionError, match="slow path reached"):
             sidebar_follow.sidebar_follow(FakeDB(), "session")

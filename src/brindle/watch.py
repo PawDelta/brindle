@@ -22,6 +22,7 @@ from brindle.db import DB
 
 RESTART = "restart"      # what _loop returns when brindle was upgraded under it
 REFRESH_SECONDS = 2.0
+REPAINT = 12  # Ctrl-L: redraw everything; the follow hook sends it after a session switch
 # How often a running dashboard culls leftover processes and stale workers
 # (see brindle.cull), on a thread of its own so the screen never waits on it.
 CULL_SECONDS = 60.0
@@ -877,6 +878,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
     stale = True
     armed: tuple[str, float] | None = None
     shown: tuple | None = None  # the braid image last sent, by pane size and sixel
+    seen_by: str | None = None  # the tty of the terminal showing this pane
     notice, notice_until = "", 0.0
     culled_at = homed_at = 0.0
     feed = watch_costs.Feed(repo_root)
@@ -917,6 +919,14 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 agents.sidebar_come_home(db, own_root, os.environ.get("TMUX_PANE"))
             except Exception:  # noqa: BLE001 - never let a move take the sidebar down
                 pass
+        # A terminal newly showing this pane (a session switch, a new session's
+        # first attach) gets a blank pane from iTerm2 until it's all redrawn.
+        if (viewer := sidebar_logo.viewer()) != seen_by:
+            seen_by = viewer
+            stdscr.clear()
+            shown = None
+            if logo is not None:
+                logo.recheck()
         h, w = stdscr.getmaxyx()
         # The braid image's sixel and width in cells, when the terminal shows it.
         braid = (logo.image() if logo is not None and h >= 18 else None) or ("", 0)
@@ -1000,6 +1010,10 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
             from brindle.pro import status as org_status
 
             org_status.touch()          # keeps the org status poll at its 60s pace
+        if key == REPAINT:
+            stdscr.clear()
+            shown = None
+            continue
         if key == curses.KEY_MOUSE:
             try:
                 _, mx, my, _, bstate = curses.getmouse()
