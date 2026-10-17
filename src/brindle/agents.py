@@ -1908,12 +1908,17 @@ def _detach(args: list[str]) -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+# A shell that starts the command after it in the background and exits, so the
+# command is nobody's child (see _detach_orphan).
+ORPHANED = ["/bin/sh", "-c", '"$@" </dev/null >/dev/null 2>&1 &', "sh"]
+
+
 def _detach_orphan(args: list[str]) -> None:
     """Start a brindle helper that outlives this process and its agent: a
     shell starts it in the background and exits, so it is nobody's child.
     Stopping an agent stops every process descended from its MCP server
     (brindle.procs), a helper ``_detach`` started there included."""
-    subprocess.run(["/bin/sh", "-c", '"$@" </dev/null >/dev/null 2>&1 &', "sh", *args],
+    subprocess.run([*ORPHANED, *args],
                    start_new_session=True, stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
@@ -2386,7 +2391,9 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
         argv += ["--profile", profile]
     if focus:
         argv += ["--focus", focus]
-    _detach(argv)
+    # Nobody's child: the worker reporting here may be closed while the checks
+    # still run, and stopping it would stop this run too, so no reviewer (#190).
+    _detach([*ORPHANED, *argv])
     return None
 
 
@@ -2417,34 +2424,36 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     a new report (its worker committed again, or merged its moved base in)
     is checked again on its new head, up to ``MOVED_RETRIES`` times, and then
     goes to the supervisor. Raises ``AgentError`` when the reviewer can't
-    start."""
+    start. Holds ``pipeline.review_run`` throughout, so the sweep can tell
+    this run at work (queued for a slot, say) from one that died."""
     from brindle import gates, pipeline
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
-    since = pipeline.review_claim(db, ws)
-    for _attempt in range(MOVED_RETRIES + 1):
-        sha = gates.head(ws)
-        if _live_reviewer(db, ws, sha, profile):
+    with pipeline.review_run(ws.id):
+        since = pipeline.review_claim(db, ws)
+        for _attempt in range(MOVED_RETRIES + 1):
+            sha = gates.head(ws)
+            if _live_reviewer(db, ws, sha, profile):
+                return None
+            try:
+                summary = gates.check_summary(db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha)
+            except gates.Abandoned:
+                summary = None
+            except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
+                summary = f"(running the checks crashed: {e})"
+            if db.get_workspace(ws.id) is None:
+                return None
+            if gates.head(ws) == sha:
+                break
+            if not pipeline.still_claimed(db, ws, since):
+                return None
+        else:
+            pipeline.on_moved_during_checks(db, ws)
             return None
-        try:
-            summary = gates.check_summary(db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha)
-        except gates.Abandoned:
-            summary = None
-        except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
-            summary = f"(running the checks crashed: {e})"
-        if db.get_workspace(ws.id) is None:
-            return None
-        if gates.head(ws) == sha:
-            break
-        if not pipeline.still_claimed(db, ws, since):
-            return None
-    else:
-        pipeline.on_moved_during_checks(db, ws)
-        return None
-    caller = db.get_agent(caller_id) if caller_id else None
-    text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
-    return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
+        caller = db.get_agent(caller_id) if caller_id else None
+        text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
+        return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
 
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
