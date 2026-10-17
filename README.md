@@ -531,7 +531,7 @@ Autopilot, merge gates and cleanup:
 | `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
-| `check_concurrency` | `4` | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
+| `check_concurrency` | half the logical cores, at least 2, at most 6 and 2 GB of RAM per run | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
 | `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` before handing it to you; `true` turns it on for a cloud account, `false` off |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
@@ -1813,6 +1813,13 @@ in the same checkout keeps it running for the new one.
 
 Then a supervisor can `assign` a task to `developer-local`, or the repo config
 can make the free model the reviewer: `"review_profile": "reviewer-local"`.
+When the local model isn't served (Ollama isn't running, or the model isn't
+pulled), the worker starts as the profile's `fallback:` instead, and is recorded
+as that profile: `developer-light` (Haiku) for `developer-local`, `reviewer` for
+`reviewer-local`. A native worker on a hosted model that refuses a request
+retries it on `developer-local`'s model, when that is served on this machine or
+the private network, and keeps the rest of the conversation there; the transcript
+records which model gave each reply.
 Other endpoints, same fields:
 
 | Backend | `api` | `base_url` | Notes |

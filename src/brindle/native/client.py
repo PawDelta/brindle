@@ -150,12 +150,18 @@ class ClientError(Exception):
         self.body = body
 
 
+# A model declining the request: Anthropic's stop_reason, OpenAI's finish_reason.
+REFUSALS = ("refusal", "content_filter")
+
+
 class Client:
     def __init__(self, endpoint: Endpoint, sleep=time.sleep,
-                 on_text: Callable[[str], None] | None = None):
+                 on_text: Callable[[str], None] | None = None,
+                 fallback: Callable[[], Endpoint | None] | None = None):
         self.endpoint = endpoint
         self._sleep = sleep
         self.on_text = on_text
+        self.fallback = fallback  # finds a local model to ask when the endpoint's model refuses
 
     # -- the one public call ------------------------------------------------
 
@@ -164,7 +170,21 @@ class Client:
         """One model call. With an ``on_text`` (here or on the client) the
         reply is streamed and each text delta is handed to it as it arrives;
         the Reply is the same either way. An endpoint that refuses the
-        stream request with an HTTP error is asked again without streaming."""
+        stream request with an HTTP error is asked again without streaming.
+        A reply that refuses the request (see REFUSALS) is asked again of
+        the endpoint ``fallback`` finds, if it finds one, and every later
+        call goes there too: the conversation now holds the request the
+        first model refused. The Reply's ``model`` says which model answered."""
+        reply = self._complete(system, messages, tools, on_text)
+        if reply.stop_reason in REFUSALS and self.fallback is not None:
+            other, self.fallback = self.fallback(), None
+            if other is not None:
+                self.endpoint = other
+                reply = self._complete(system, messages, tools, on_text)
+        return reply
+
+    def _complete(self, system: str | None, messages: list[dict], tools: list[ToolSpec],
+                  on_text: Callable[[str], None] | None = None) -> Reply:
         on_text = on_text or self.on_text
         anthropic = self.endpoint.api == "anthropic"
         payload = (self._anthropic_request if anthropic else self._openai_request)(system, messages, tools)

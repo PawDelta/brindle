@@ -1001,6 +1001,25 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
 
 
 @mcp.tool()
+def add_checks(checks: list[str], allow: bool = False) -> str:
+    """Autopilot first-run setup: record the check commands the user approved in
+    .brindle/config.json. With allow=true (they accepted that in the same
+    question), also add one Bash allow rule per command to
+    .claude/settings.local.json."""
+    db = DB()
+    caller, _ = _caller(db)
+    found = _session(db)
+    if isinstance(found, str):
+        return found
+    if caller and caller.id != found[0]:
+        return "Not authorized: only the supervisor (session root) can add checks."
+    cleaned = [c.strip() for c in checks if c.strip()]
+    if not cleaned:
+        return "Give at least one check command."
+    return autopilot.add_checks(found[1].repo_root, cleaned, allow)
+
+
+@mcp.tool()
 def handover(to: str, note: str | None = None) -> str:
     """Hand this session over to a new supervisor on another branch or
     worktree (`to`: a branch name, or a worktree path). The goal and milestones,

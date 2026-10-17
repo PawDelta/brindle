@@ -2,12 +2,27 @@
 policy refetch when policy_version moves, and what lands on disk."""
 import json
 
+import pytest
+
 from org_status_fixtures import ORG, control, ent, notice, org, poller  # noqa: F401
 
 from brindle import airgap
 from brindle.pro import status
 
 NOW = 1_000_000.0
+
+
+@pytest.mark.variant("regression for #94: main gives both machines one session id")
+def test_machines_with_one_hostname_get_distinct_stable_session_ids(monkeypatch, tmp_path):
+    """(#94) A hostname alone named two machines the same."""
+    monkeypatch.setattr(status.socket, "gethostname", lambda: "MacBook Pro")
+    ids = []
+    for home in ("a", "b"):
+        monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / home))
+        ids.append(status.session_id())
+        assert status.session_id() == ids[-1]
+    assert ids[0] != ids[1]
+    assert all(i.startswith("MacBook-Pro-") for i in ids)
 
 
 # -- pacing -------------------------------------------------------------------------------------

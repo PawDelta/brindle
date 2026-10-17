@@ -5,7 +5,7 @@ import sys
 import pytest
 
 import brindle
-from brindle import git, workspaces
+from brindle import git, providers, workspaces
 from brindle.config import load_repo_config
 
 from conftest import sh
@@ -23,6 +23,18 @@ def test_failed_setup_keeps_workspace(db, repo):
     assert created.setup and not created.setup.ok
     assert "never" not in created.setup.log
     assert db.get_workspace(created.workspace.id)
+
+
+@pytest.mark.parametrize("configured", [None, "trees", "../elsewhere"])
+def test_new_worktrees_go_under_the_repo_and_stay_out_of_git_status(db, repo, configured):
+    if configured:
+        write_config(repo, worktree_root=configured)
+    ws = workspaces.create(db, str(repo), "feat/x").workspace
+    root = configured or ".brindle/worktrees"
+    assert os.path.realpath(ws.path) == os.path.realpath(repo / root / "feat" / "x")
+    assert "feat" not in sh("git status --porcelain --untracked-files=all", repo)
+    # Still one of brindle's own worktrees (trusted), unlike the main checkout.
+    assert providers._in_worktree(ws.path) and not providers._in_worktree(str(repo / "app.py"))
 
 
 def test_local_config_wraps_shared(repo):

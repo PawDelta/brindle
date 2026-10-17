@@ -803,6 +803,21 @@ def session_pane_ids(session: str) -> list[str]:
     return proc.stdout.split() if proc.returncode == 0 else []
 
 
+def session_panes(session: str) -> list[tuple[int, str]]:
+    """``(pid, current folder)`` of every pane of ``session``; the folder is
+    empty when tmux can't say (the process's folder was deleted, say)."""
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F",
+                 "#{pane_pid}\t#{pane_current_path}", check=False)
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        pid, _, path = line.partition("\t")
+        if pid.isdigit():
+            out.append((int(pid), path.strip()))
+    return out
+
+
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"}
 
 

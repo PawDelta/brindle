@@ -128,12 +128,18 @@ class Profile:
     # The model runs on this machine or the private network: air-gap mode (brindle.airgap)
     # lets this profile run even when its endpoint can't be checked (e.g. a hostname).
     local: bool = False
+    # ``fallback: <profile>, ...``: for a native profile, what runs instead when
+    # its model isn't served right now (see local_fallback).
+    fallback: list[str] = field(default_factory=list)
     # Extra environment for the agent's process, from ``env.NAME: value`` lines.
     env: dict[str, str] = field(default_factory=dict)
     # --add-dir. Full tool access, not read access: edits and Bash reach these too,
     # and Claude Code loads any CLAUDE.md it finds in them. Added to the repo's own
     # add_dirs rather than replacing it; see load_profile.
     add_dirs: list[str] | None = None
+    # The repo's ``worker_extra_read_dirs``, resolved: read-only access (Claude
+    # Code ``Read(//dir/**)`` allow rules), set by load_profile, not the profile file.
+    read_dirs: list[str] | None = None
     # Additional profile-local deny rules (JSON array of "KIND MATCH_TYPE MATCH").
     permission_denies: list[str] = field(default_factory=list)
     permission_denies_errors: list[str] = field(default_factory=list)
@@ -309,6 +315,7 @@ def _build(meta: dict[str, str], body: str, fallback_name: str) -> Profile:
         api_key_env=meta.get("api_key_env") or None,
         context_tokens=_int(meta.get("context_tokens")),
         local=_flag(meta.get("local")),
+        fallback=_list(meta.get("fallback")) or [],
         env={k[4:]: v for k, v in meta.items() if k.startswith("env.") and k[4:]},
         write_scope=_list(meta.get("write_scope")),
         read_scope=_list(meta.get("read_scope")),
@@ -343,7 +350,7 @@ def _with_repo_add_dirs(profile: Profile, repo_root: str | None) -> Profile:
 
     Entries are resolved against the repo root rather than passed through, because
     a worktree is the process's working directory and a relative path would
-    otherwise mean ``~/.brindle/worktrees/<repo>/<branch>/<path>``. A leading ``~``
+    otherwise mean ``<repo>/.brindle/worktrees/<branch>/<path>``. A leading ``~``
     is expanded first, since nothing downstream runs a shell that would.
     Checking that they exist is left to launch (see ``missing_add_dirs``): this
     runs every time a profile is loaded, several times per launch and on every
@@ -372,7 +379,15 @@ def _with_repo_add_dirs(profile: Profile, repo_root: str | None) -> Profile:
         resolved = str(path if path.is_absolute() else (root / path).resolve())
         if resolved not in merged:
             merged.append(resolved)
-    return replace(profile, add_dirs=merged or None)
+    read_dirs: list[str] = []
+    for entry in load_repo_config(repo_root).worker_extra_read_dirs:
+        entry = str(entry).strip()
+        if entry:
+            path = Path(entry).expanduser()
+            resolved = str(path if path.is_absolute() else (root / path).resolve())
+            if resolved not in read_dirs:
+                read_dirs.append(resolved)
+    return replace(profile, add_dirs=merged or None, read_dirs=read_dirs or None)
 
 
 def missing_add_dirs(profile: Profile) -> list[str]:
@@ -496,6 +511,31 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
     find this same file, permissions and all. Raises KeyError when there is
     no such profile (or no such parent) and ProfileError on an extends cycle."""
     return _with_repo_add_dirs(_load(name, repo_root), repo_root)
+
+
+def local_fallback(profile: Profile, repo_root: str | None = None) -> str | None:
+    """When ``profile`` is a native profile on this machine whose model isn't
+    served right now (Ollama isn't running, or the model isn't pulled), the
+    first of its ``fallback`` profiles that loads; the worker then runs, and
+    is recorded, as that profile. None otherwise: a hosted endpoint (say a
+    profile that extends developer-local onto OpenRouter) is never swapped."""
+    from brindle import airgap
+
+    if profile.provider != "native" or not profile.fallback:
+        return None
+    if not (profile.local or airgap.is_local_url(profile.base_url)):
+        return None
+    from brindle.native import runner
+
+    if runner.served(profile):
+        return None
+    for other in profile.fallback:
+        try:
+            load_profile(other, repo_root)
+        except (KeyError, ProfileError):
+            continue
+        return other
+    return None
 
 
 # -- rule packs ---------------------------------------------------------------

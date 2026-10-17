@@ -210,6 +210,13 @@ def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch):
     cull.note_stuck(db, time.time(), {})
     assert "Bash: make deploy" in sent[0] and "Only the user can answer it" in sent[0]
 
+    # The supervisor reads a message's first line: the prompt itself is in it.
+    prompt = "x/results resolves through a symlink to /repo/results, outside the allowed working directories"
+    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: f"Bash command\n{prompt}\nDo you want to proceed?")
+    db.update_agent(a.id, stuck_noted=None)
+    cull.note_stuck(db, time.time(), {})
+    assert prompt in agents.one_line(db, 1, sent[1], a.id)
+
 
 # -- the CLI ----------------------------------------------------------------------------------
 

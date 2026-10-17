@@ -11,6 +11,7 @@ import pytest
 
 from conftest import sh
 from brindle import agents, autopilot, gates, pipeline, workspaces
+from brindle.config import RepoConfig
 from test_merge_order import add
 from test_pipeline_idempotent import drain
 
@@ -31,6 +32,8 @@ def test_reviewer_without_verdict_gets_fallback(db, repo, monkeypatch):
         add(db, ws, "rev1", "review", profile, parent=caller.id)
 
     monkeypatch.setattr(agents, "request_review", fallback)
+    # A second review's verdict on the same commit isn't rev0's (#172).
+    db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
     agents.tell_parent_unreported(db, db.get_agent("rev0"))
     assert started == ["reviewer"]
@@ -199,6 +202,39 @@ def test_reviewer_stopping_on_a_deleted_worktree_tells_the_supervisor(db, repo, 
     assert agents.tell_parent_unreported(db, db.get_agent("rev0"))
     assert db.get_agent("w1").pipeline is None
     assert any(f"worktree {ws.path} no longer exists" in b for b in drain(db))
+
+
+@pytest.mark.parametrize("moves", [1, 99])
+def test_a_reported_branch_that_moves_during_its_checks_is_not_dropped(db, repo, monkeypatch, moves):
+    """#168: the base moved and the branch took new commits while its checks
+    ran, with no new report to start another run. The branch is checked
+    again on its new head, or, if it keeps moving, handed to the supervisor."""
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
+    db.update_agent("w1", reviewing_since=time.time())
+    runs = []
+
+    def moving(db_, ws_, cfg, cancel=None):
+        runs.append(1)
+        if len(runs) <= moves:
+            (repo / f"base{len(runs)}.py").write_text("z = 3\n")
+            sh(f"git add -A && git commit -qm base{len(runs)}", repo)
+            sh("git merge -q --no-edit main", Path(ws.path))
+            raise gates.Abandoned("moved")
+        return "PASS `suite`"
+
+    monkeypatch.setattr(gates, "check_summary", moving)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    spawned = []
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, prof, **kw: spawned.append(kw["review_sha"]))
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"]))
+    if moves == 1:
+        assert spawned == [gates.head(ws)] and db.get_agent("w1").pipeline == "reviewing"
+    else:
+        assert spawned == [] and db.get_agent("w1").pipeline is None
+        assert any("needs you" in b and "`feat`" in b for b in drain(db))
 
 
 @pytest.mark.parametrize("summary", [

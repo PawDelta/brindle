@@ -12,9 +12,10 @@ With ``pipeline`` on (the default), brindle runs those stages itself:
 2. The reviewer approves: the branch is ready. brindle merges every ready
    branch of the same base (through the same gates ``merge_workspace``
    uses), the one whose hunks overlap the others' least first and the rest
-   synced onto the new tip in turn, removes each worktree, and sends the
-   supervisor one message per branch: merged, with the worker's report and
-   the review.
+   synced onto the new tip in turn, removes each worktree (not one whose
+   worker took on more since its report, or with uncommitted changes), and
+   sends the supervisor one message per branch: merged, with the worker's
+   report and the review.
    The reviewer requests changes: brindle sends the findings straight to the
    worker, which fixes them and reports again, back to step 1; after
    ``review_rounds`` rounds it hands the findings to the supervisor instead.
@@ -275,6 +276,8 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   "changes, so it can't be reviewed or merged. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
+    # Before the check run starts: it reads this report's claim (see review_claim).
+    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
     try:
         second = second_profile(db, cfg, worker, ws)
         # With a second review both calls carry a concrete profile, so the
@@ -297,8 +300,36 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   f"start ({e}). Review it yourself with workspace_diff, then merge_workspace. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
-    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
     return True
+
+
+def review_claim(db: DB, ws: Workspace) -> float | None:
+    """Which report the review of ``ws`` now starting is for: its piped
+    worker's ``reviewing_since``, or None when the branch isn't in review."""
+    worker = piped_worker(db, ws)
+    return worker.reviewing_since if worker is not None and worker.pipeline == "reviewing" else None
+
+
+def still_claimed(db: DB, ws: Workspace, since: float | None) -> bool:
+    """Whether ``ws``'s branch is still in review for the report ``since``
+    (see ``review_claim``): False once a newer report took it over (that one
+    has a check run of its own), its review was settled, or it isn't piped."""
+    return since is not None and review_claim(db, ws) == since
+
+
+def on_moved_during_checks(db: DB, ws: Workspace) -> None:
+    """A reported branch kept getting new commits, with no new report, while
+    its checks ran (#168): hand it to the supervisor rather than leave it in
+    review with nobody reviewing it."""
+    worker = piped_worker(db, ws)
+    if worker is None:
+        return
+    db.update_agent(worker.id, pipeline=None)
+    _escalate(db, ws, worker)
+    _tell(db, worker.parent_id,
+          f"[brindle pipeline] `{ws.branch}` kept getting new commits while its checks ran, with "
+          "no new report, so it hasn't been reviewed. This needs you: once it settles, "
+          f"request_review(\"{ws.id}\"), then merge_workspace(\"{ws.id}\").", worker.id)
 
 
 # -- stage 2: the review came in ---------------------------------------------------
@@ -803,6 +834,14 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         keep = reviewer if reviewer is not None and reviewer.workspace_id == ws.id else None
         if keep is not None:
             db.set_status(keep.id, "done")
+        in_use = _still_in_use(db, ws)
+        if in_use:
+            _tell(db, parent_id,
+                  agents.condense(
+                      f"[brindle pipeline] {text} Kept the worktree and its worker: {in_use}. "
+                      f"Its next report merges again. Worker: {agents.first_line(report)}",
+                      f"Worker's report:\n{report}", verdict), worker.id)
+            return text
         _tell(db, parent_id,
               agents.condense(
                   f"[brindle pipeline] {text} Removing the worktree. Worker: "
@@ -995,6 +1034,29 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
           f"({resolver.id}, {profile}) is resolving the conflict in its worktree; the branch is "
           "reviewed and checked again before it merges. Nothing to do unless that fails.",
           worker.id)
+
+
+def _still_in_use(db: DB, ws: Workspace) -> str | None:
+    """Why ``ws`` must outlive the merge of its branch (#170): a worker there
+    took on more since its report (a turn that started after it, or messages
+    it hasn't taken yet), or the worktree holds uncommitted changes. None
+    when it can be removed."""
+    for a in db.list_agents(ws.id):
+        if a.mode not in WORKER_MODES or not agents.is_alive(a):
+            continue
+        if db.pending_count(a.id):
+            return f"{a.id} has messages it hasn't taken yet"
+        a = agents.reconcile(db, a, samples=1)
+        if a.status in ("processing", "waiting") and a.reviewing_since is not None \
+                and (a.status_since or 0) > a.reviewing_since:
+            return f"{a.id} is at work again since its report"
+    try:
+        dirty = git.dirty_files(ws.path)
+    except git.GitError:
+        dirty = []
+    if dirty:
+        return "it has uncommitted changes (" + ", ".join(dirty[:8]) + (" ..." if len(dirty) > 8 else "") + ")"
+    return None
 
 
 def _remove(db: DB, ws: Workspace, keep: Agent | None = None) -> str:

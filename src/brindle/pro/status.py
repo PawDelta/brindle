@@ -34,6 +34,7 @@ import logging
 import socket
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 
 from brindle import airgap
@@ -321,10 +322,24 @@ def ack(control: dict, stopped: int, client=None, store=None) -> bool:
 
 
 def session_id() -> str:
-    """This machine as the backend's receipts name a session (``[A-Za-z0-9_-]{1,64}``)."""
+    """This machine as the backend's receipts name a session (``[A-Za-z0-9_-]{1,64}``):
+    the hostname plus a random suffix kept in this install's private dir, since
+    two machines can share a hostname."""
     name = "".join(c if c.isascii() and (c.isalnum() or c in "_-") else "-"
-                   for c in socket.gethostname())[:64]
-    return name or "brindle"
+                   for c in socket.gethostname())[:54] or "brindle"
+    path = private_dir() / "machine-id"
+    try:
+        raw = read_private(path, 64)
+    except Exception:  # noqa: BLE001 - unreadable: use a fresh one below
+        raw = None
+    suffix = raw.decode("ascii", "ignore").strip() if raw else ""
+    if not (len(suffix) == 8 and suffix.isalnum()):
+        suffix = uuid.uuid4().hex[:8]
+        try:
+            write_private(path, suffix.encode())
+        except Exception:  # noqa: BLE001 - read-only home: still unique for this run
+            pass
+    return f"{name}-{suffix}"
 
 
 # -- polling ------------------------------------------------------------------------------------
