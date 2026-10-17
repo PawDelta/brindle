@@ -19,9 +19,12 @@ import importlib
 import os
 import pkgutil
 import sys
+import time
 from contextlib import asynccontextmanager
 
 import brindle
+
+REEXEC_WAIT_SECONDS = 120.0   # how long a sidebar waits for an upgrade to finish installing
 
 
 def preload() -> None:
@@ -47,14 +50,17 @@ async def preloaded(_server):
     yield {}
 
 
-def _stamp() -> tuple[int, int, int] | None:
+def _stamp() -> tuple[int, ...] | None:
     """The installed ``brindle/__init__.py``'s identity: an upgrade writes a
-    new file (a new inode, mtime or size). None while it's missing mid-upgrade."""
+    new file (a new inode, mtime or size). A reinstall of the same build links
+    the very same cached file, so the package directory's identity counts too:
+    it is deleted and made again. None while it's missing mid-upgrade."""
     try:
         st = os.stat(brindle.__file__)
+        parent = os.stat(os.path.dirname(brindle.__file__))
     except OSError:
         return None
-    return (st.st_ino, st.st_mtime_ns, st.st_size)
+    return (st.st_ino, st.st_mtime_ns, st.st_size, parent.st_ino, parent.st_ctime_ns)
 
 
 class InstallWatch:
@@ -80,4 +86,14 @@ def reexec() -> None:
     argv = [*brindle_invocation(), *sys.argv[1:]]
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execv(argv[0], argv)
+    # An upgrade deletes the old environment before the new one is in place, so
+    # the exec fails until the install is complete: wait for it, don't exit.
+    deadline = time.monotonic() + REEXEC_WAIT_SECONDS
+    while True:
+        try:
+            os.execv(argv[0], argv)
+            return      # only a fake returns
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)

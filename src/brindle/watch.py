@@ -880,7 +880,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
     shown: tuple | None = None  # the braid image last sent, by pane size and sixel
     seen_by: str | None = None  # the tty of the terminal showing this pane
     notice, notice_until = "", 0.0
-    culled_at = homed_at = 0.0
+    culled_at = homed_at = viewed_at = 0.0
     feed = watch_costs.Feed(repo_root)
     spend = watch_costs.Local()
     spend_at = 0.0
@@ -921,12 +921,16 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 pass
         # A terminal newly showing this pane (a session switch, a new session's
         # first attach) gets a blank pane from iTerm2 until it's all redrawn.
-        if (viewer := sidebar_logo.viewer()) != seen_by:
-            seen_by = viewer
-            stdscr.clear()
-            shown = None
-            if logo is not None:
-                logo.recheck()
+        # Once per refresh, not per key: each look is a tmux call, and a mouse
+        # wheel sends a burst of keys.
+        if time.time() - viewed_at >= REFRESH_SECONDS:
+            viewed_at = time.time()
+            if (viewer := sidebar_logo.viewer()) != seen_by:
+                seen_by = viewer
+                stdscr.clear()
+                shown = None
+                if logo is not None:
+                    logo.recheck()
         h, w = stdscr.getmaxyx()
         # The braid image's sixel and width in cells, when the terminal shows it.
         braid = (logo.image() if logo is not None and h >= 18 else None) or ("", 0)
@@ -1075,10 +1079,9 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
     _log_to_file()
-    try:
-        logo = sidebar_logo.probe()  # asks the terminal, so before curses reads its input
-    except Exception:  # noqa: BLE001 - no braid image is the paw header, never a crash
-        logo = None
+    # shortcut: the text logo everywhere; the braid image (sidebar_logo.probe())
+    # broke the sidebar in iTerm2 after a session switch. Bring it back once fixed.
+    logo = None
     if curses.wrapper(_loop, repo_root, sidebar, logo) == RESTART:
         # Run again from the upgraded install, in this same pane (curses.wrapper
         # has put the terminal back); returning would count as quitting the sidebar.
