@@ -36,8 +36,15 @@ def _version(cmd: list[str]) -> str | None:
 
 def _tool(name: str, required: bool, why: str, version_args: list[str] | None = None,
           install: str = "") -> Check:
-    path = shutil.which(name)
+    from brindle.providers import which_cli
+
+    path = which_cli(name)
     if not path:
+        windows = shutil.which(name)
+        if windows:
+            return Check(FAIL if required else WARN, name,
+                         f"only a Windows install was found ({windows}): WSL needs a "
+                         f"Linux install. Install: {install or 'the Linux version of ' + name}")
         level = FAIL if required else WARN
         return Check(level, name, f"not found: {why}." + (f" Install: {install}" if install else ""))
     version = _version([path, *(version_args or ["--version"])]) or ""
@@ -65,7 +72,7 @@ def preflight(provider: str) -> list[str]:
               "antigravity": antigravity.binary}.get(provider)
     if binary:
         exe = binary()
-        if not (shutil.which(exe) or os.path.isfile(exe)):
+        if not (providers.which_cli(exe) or os.path.isfile(exe)):
             name, how = CLI_INSTALL[provider]
             problems.append(f"{name} (`{exe}`) isn't on PATH: the chat runs on it. Install: {how}")
         else:
@@ -84,7 +91,7 @@ def signin_providers() -> list[str]:
     out = []
     for provider in CLI_INSTALL:
         exe = binaries[provider]()
-        if shutil.which(exe) or os.path.isfile(exe):
+        if providers.which_cli(exe) or os.path.isfile(exe):
             out.append(provider)
     return out
 
@@ -605,7 +612,9 @@ def codex_hook_checks(repo_root: str) -> list[Check]:
     if not codex_hook.policy_on(repo_root):
         return []
     exe = providers.codex_binary()
-    if not (shutil.which(exe) or os.path.isfile(exe)):
+    from brindle.providers import which_cli
+
+    if not (which_cli(exe) or os.path.isfile(exe)):
         return []
     state = codex_hook.status()
     if state == codex_hook.TRUSTED:
