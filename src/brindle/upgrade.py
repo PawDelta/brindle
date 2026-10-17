@@ -19,9 +19,12 @@ import importlib
 import os
 import pkgutil
 import sys
+import time
 from contextlib import asynccontextmanager
 
 import brindle
+
+REEXEC_WAIT_SECONDS = 120.0   # how long a sidebar waits for an upgrade to finish installing
 
 
 def preload() -> None:
@@ -80,4 +83,14 @@ def reexec() -> None:
     argv = [*brindle_invocation(), *sys.argv[1:]]
     sys.stdout.flush()
     sys.stderr.flush()
-    os.execv(argv[0], argv)
+    # An upgrade deletes the old environment before the new one is in place, so
+    # the exec fails until the install is complete: wait for it, don't exit.
+    deadline = time.monotonic() + REEXEC_WAIT_SECONDS
+    while True:
+        try:
+            os.execv(argv[0], argv)
+            return      # only a fake returns
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)

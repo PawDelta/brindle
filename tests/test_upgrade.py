@@ -57,6 +57,25 @@ def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
     assert execs == [["/venv/bin/brindle", "watch", "--sidebar"]]
 
 
+def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatch):
+    """uv removes the old venv before the new one is in place: an exec in that
+    window fails, and the sidebar must wait for it rather than die with its pane."""
+    monkeypatch.setattr(upgrade.sys, "argv", ["brindle", "watch", "--sidebar"])
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: ["/venv/bin/brindle"])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    attempts = []
+
+    def execv(path, argv):
+        attempts.append(argv)
+        if len(attempts) < 3:
+            raise FileNotFoundError(path)
+
+    monkeypatch.setattr(upgrade.os, "execv", execv)
+
+    upgrade.reexec()
+    assert len(attempts) == 3
+
+
 @pytest.mark.variant("a module hijack attempt; what it guards runs in the child process")
 def test_a_brindle_package_in_the_cwd_is_not_what_brindle_runs_again(monkeypatch, tmp_path):
     """A sidebar re-execs, and hooks run brindle, from inside a worktree: a
