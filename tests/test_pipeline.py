@@ -254,6 +254,7 @@ def _reported(db, repo, reviewing_since=None):
     return ws
 
 
+@pytest.mark.variant("live incident #190: what changed is the process tree, which coverage doesn't see")
 def test_issue190_the_check_run_before_a_review_outlives_the_reporting_worker(db, repo, monkeypatch):
     """#190: the run that checks a reported branch and then starts its
     reviewer was a child of the reporting worker's MCP server. Stopping an
