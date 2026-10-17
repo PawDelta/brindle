@@ -35,6 +35,7 @@ class _App(typer.Typer):
 
 
 SUPERVISOR_FLAGS = ("-s", "--supervisor")
+_group_supervisor: Optional[str] = None      # -s given before the subcommand (set by default())
 
 
 def _bare_supervisor_flag(args: list[str], commands) -> list[str]:
@@ -44,6 +45,11 @@ def _bare_supervisor_flag(args: list[str], commands) -> list[str]:
     value."""
     from brindle.picker import PICK
 
+    split = []
+    for a in args:
+        # Click would read "-s=codex" as the value "=codex".
+        split += ["-s", a[3:]] if a.startswith("-s=") else [a]
+    args = split
     out = []
     for i, a in enumerate(args):
         out.append(a)
@@ -306,7 +312,18 @@ def start(
     from brindle.config import load_repo_config
     from brindle import scratch
 
-    provider = provider or provider_alias
+    from brindle import picker
+    from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS, get_provider
+
+    provider = provider or provider_alias or _group_supervisor
+    if provider and provider != picker.PICK:
+        if provider in NOT_SUPERVISOR:
+            _fail(f"the {provider} provider can't run the supervisor; use one of: "
+                  f"{', '.join(SUPERVISOR_PROVIDERS)}")
+        try:
+            get_provider(provider)
+        except KeyError as e:
+            _fail(str(e).strip("'\""))
     db = DB()
     if branch or worktree:
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
@@ -314,7 +331,7 @@ def start(
         ws = _here_or_scratch(db, reuse_scratch=False)
         running = _running_session(db, ws)
         if running and attach and sys.stdin.isatty():
-            choice = _ask_about_running(running)
+            choice = _ask_about_running(running, provider)
             if choice == "o":
                 _attach(ws, running.tmux_window)
                 return
@@ -343,11 +360,6 @@ def start(
         except git.GitError:
             pass
 
-    from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
-
-    if provider and provider in NOT_SUPERVISOR:
-        _fail(f"the {provider} provider can't run the supervisor; use one of: "
-              f"{', '.join(SUPERVISOR_PROVIDERS)}")
     provider = _resolve_supervisor(ws.repo_root, provider, yes=yes, demo=demo)
     _preflight(agents.SUPERVISOR, provider, ws.repo_root)
     _trust_codex_hook(ws.repo_root)
@@ -560,12 +572,21 @@ def _running_session(db: DB, ws: Workspace):
     return live[0] if live else None
 
 
-def _ask_about_running(running) -> str:
+def _ask_about_running(running, wanted: Optional[str] = None) -> str:
+    """Open, branch off or pause the session running here. ``wanted`` is the
+    CLI asked for with -s: when the running session is on another one,
+    opening it wouldn't give that, so the default is to start fresh."""
     import click
 
+    from brindle import picker
+
+    differs = bool(wanted) and wanted != picker.PICK and wanted != running.provider
     typer.echo(f"A brindle session is already running here ({running.id}).")
+    if differs:
+        typer.echo(f"It runs on {running.provider}, not {wanted}; opening it keeps {running.provider}.")
     typer.echo("  [o] open it   [n] new session in its own worktree   [p] pause it and start fresh")
-    return typer.prompt("Which", type=click.Choice(["o", "n", "p"]), default="o", show_choices=False)
+    return typer.prompt("Which", type=click.Choice(["o", "n", "p"]), default="p" if differs else "o",
+                        show_choices=False)
 
 
 def _session_worktree(db: DB, ws: Workspace) -> Workspace:
@@ -872,6 +893,8 @@ def default(
 ) -> None:
     """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
     provider = provider or provider_alias
+    global _group_supervisor
+    _group_supervisor = provider if ctx.invoked_subcommand else None   # `-s codex start`
     if show_version:
         from brindle import __version__
 
@@ -886,6 +909,9 @@ def default(
             legacy_root = None
         legacy.warn_once(legacy_root)
         if cont:
+            if provider:
+                _fail("--continue resumes the session on the CLI it had; drop -s, "
+                      "or run `brindle -s <cli>` to start fresh")
             continue_cmd(session_id=None, attach=True)
         else:
             start(prompt=None, provider=provider, attach=True, watch=True,
