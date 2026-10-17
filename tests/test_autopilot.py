@@ -93,6 +93,19 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     assert autopilot.on_stop(db, agent, {}) is not None
 
 
+def test_no_nudge_while_brindle_asks_the_user_to_approve_checks(db, root, monkeypatch):
+    # (#126) brindle's own dialog is waiting on the user: nothing to push the supervisor on.
+    agent, _ = root
+    with_goal(db)
+    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
+    autopilot.propose_checks(db, "boss", ["pytest -q"])
+    assert autopilot.on_stop(db, agent, {}) is None
+    # A proposal whose dialog never closed (the server died) stops holding it.
+    later = time.time() + autopilot.PROPOSAL_TTL
+    monkeypatch.setattr(autopilot.time, "time", lambda: later)
+    assert autopilot.on_stop(db, agent, {}) is not None
+
+
 def test_add_checks_also_allows_their_commands_in_one_step(repo):
     # (#126) One approval writes the check and a narrow allow rule per command.
     (repo / ".claude").mkdir()
