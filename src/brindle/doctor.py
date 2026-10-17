@@ -36,8 +36,14 @@ def _version(cmd: list[str]) -> str | None:
 
 def _tool(name: str, required: bool, why: str, version_args: list[str] | None = None,
           install: str = "") -> Check:
-    path = shutil.which(name)
+    from brindle.providers import which_cli
+
+    path = which_cli(name)
     if not path:
+        if shutil.which(name):
+            return Check(FAIL if required else WARN, name,
+                         f"only a Windows install was found ({shutil.which(name)}): WSL needs a "
+                         f"Linux install. Install: {install or 'the Linux version of ' + name}")
         level = FAIL if required else WARN
         return Check(level, name, f"not found: {why}." + (f" Install: {install}" if install else ""))
     version = _version([path, *(version_args or ["--version"])]) or ""
@@ -65,7 +71,7 @@ def preflight(provider: str) -> list[str]:
               "antigravity": antigravity.binary}.get(provider)
     if binary:
         exe = binary()
-        if not (shutil.which(exe) or os.path.isfile(exe)):
+        if not (providers.which_cli(exe) or os.path.isfile(exe)):
             name, how = CLI_INSTALL[provider]
             problems.append(f"{name} (`{exe}`) isn't on PATH: the chat runs on it. Install: {how}")
         else:
@@ -84,7 +90,7 @@ def signin_providers() -> list[str]:
     out = []
     for provider in CLI_INSTALL:
         exe = binaries[provider]()
-        if shutil.which(exe) or os.path.isfile(exe):
+        if providers.which_cli(exe) or os.path.isfile(exe):
             out.append(provider)
     return out
 
