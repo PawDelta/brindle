@@ -8,7 +8,8 @@ import json
 import os
 import time
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
+from pydantic import BaseModel, Field
 
 from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
@@ -1000,12 +1001,20 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     return f"{text}\n\n{note}" if note else text
 
 
+class _ApproveChecks(BaseModel):
+    add_checks: bool = Field(True, description="Run these checks before every merge")
+
+
+class _ApproveChecksAndRules(_ApproveChecks):
+    allow_commands: bool = Field(False, description="Also allow their commands without a prompt")
+
+
 @mcp.tool()
-def add_checks(checks: list[str], allow: bool = False) -> str:
-    """Autopilot first-run setup: record the check commands the user approved in
-    .brindle/config.json. With allow=true (they accepted that in the same
-    question), also add one Bash allow rule per command to
-    .claude/settings.local.json."""
+async def add_checks(checks: list[str], ctx: Context) -> str:
+    """Autopilot first-run setup: propose check commands for
+    .brindle/config.json. brindle asks the user in its own dialog whether to
+    add them (and to allow their commands in .claude/settings.local.json) and
+    writes only what they accept; don't ask them yourself."""
     db = DB()
     caller, _ = _caller(db)
     found = _session(db)
@@ -1016,6 +1025,17 @@ def add_checks(checks: list[str], allow: bool = False) -> str:
     cleaned = [c.strip() for c in checks if c.strip()]
     if not cleaned:
         return "Give at least one check command."
+    text, rules = autopilot.propose_checks(db, found[0], cleaned)
+    try:
+        answer = await ctx.elicit(text, _ApproveChecksAndRules if rules else _ApproveChecks)
+    except Exception:  # noqa: BLE001 - a client that can't show the dialog
+        return ("brindle couldn't show its approval dialog in this client. Ask the user to add "
+                "the check to `checks` in .brindle/config.json themselves.")
+    finally:
+        db.update_autopilot(found[0], proposal=None)
+    if answer.action != "accept" or not answer.data.add_checks:
+        return "The user didn't approve these checks: nothing was written."
+    allow = bool(rules) and getattr(answer.data, "allow_commands", False)
     return autopilot.add_checks(found[1].repo_root, cleaned, allow)
 
 

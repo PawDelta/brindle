@@ -1818,6 +1818,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
 
     if login_pause.paused(db, agent.id):
         return None  # only the person can renew the login; a nudge would just fail
+    if proposing(ap):
+        return None  # brindle's own dialog is asking the user to approve checks
     if ap.state == "auditing":
         if ap.auditor_id:
             auditor = db.get_agent(ap.auditor_id)
@@ -1916,12 +1918,15 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
 
 
 NO_CHECKS = """- This repo has no `checks` in .brindle/config.json, so nothing verifies a
-  branch before it merges. Before the first `assign`, propose a check command
-  to the user{suggestion}. In that same question offer to allow its individual
-  commands in .claude/settings.local.json, so they answer once. When they
-  agree, call `add_checks` (allow=true if they accepted the permissions) and
-  commit .brindle/config.json.
+  branch before it merges. Before the first `assign`, call `add_checks` with
+  the check command you propose{suggestion}. brindle itself asks the user to
+  approve it (and to allow its commands in .claude/settings.local.json) and
+  writes what they accept; don't ask them yourself. Then commit
+  .brindle/config.json.
 """
+
+
+PROPOSAL_TTL = 30 * 60   # seconds a check proposal may hold autopilot (see proposing)
 
 
 SAFE_ALLOW = re.compile(r"[A-Za-z0-9_./ =,@+-]+")   # no wildcard, quote, $, &, redirect or newline
@@ -1952,6 +1957,44 @@ def _runs_arbitrary(c: str) -> bool:
     return argv[1:2] != ["-m"] or argv[2:3] == [] or argv[2] not in CHECK_MODULES
 
 
+def allow_rules(checks: list[str]) -> tuple[list[str], str | None]:
+    """One narrow Bash allow rule per command in ``checks``, or none and why."""
+    commands = [c.strip() for check in checks for c in re.split(r"&&|\|\||;|\|", check)]
+    unsafe = [c for c in commands if c and (
+        not SAFE_ALLOW.fullmatch(c) or _runs_arbitrary(c))]
+    if unsafe:
+        return [], (f"{unsafe[0]!r} has a wildcard, substitution, redirect or a binary "
+                    "that runs arbitrary code")
+    return list(dict.fromkeys(f"Bash({c})" for c in commands if c)), None
+
+
+def propose_checks(db: DB, root_id: str, checks: list[str]) -> tuple[str, list[str]]:
+    """Record ``checks`` as awaiting the user's answer in brindle's dialog (no
+    nudge meanwhile, see on_stop). Returns the dialog's text and the allow
+    rules it offers."""
+    rules, refusal = allow_rules(checks)
+    db.update_autopilot(root_id, proposal=json.dumps(
+        {"checks": checks, "rules": rules, "at": time.time()}))
+    text = ("brindle: run these checks on every branch before it merges "
+            "(saved to .brindle/config.json)?\n" + "\n".join(f"  {c}" for c in checks))
+    if rules:
+        text += ("\n\nAlso allow their commands without a permission prompt "
+                 "(.claude/settings.local.json):\n" + "\n".join(f"  {r}" for r in rules))
+    else:
+        text += f"\n\nbrindle won't offer to allow their commands: {refusal}."
+    return text, rules
+
+
+def proposing(ap: Autopilot) -> bool:
+    """A check proposal is waiting on the user. One older than PROPOSAL_TTL
+    is a dialog whose server died: it no longer holds autopilot."""
+    try:
+        at = float(json.loads(ap.proposal or "{}").get("at") or 0)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return time.time() - at < PROPOSAL_TTL
+
+
 def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     """Add approved ``checks`` to .brindle/config.json and, with ``allow``, one
     narrow Bash allow rule per command in them to .claude/settings.local.json."""
@@ -1966,17 +2009,14 @@ def add_checks(repo_root: str, checks: list[str], allow: bool = False) -> str:
     text = f"Added {len(checks)} check(s) to {path}."
     if not allow:
         return text
-    commands = [c.strip() for check in checks for c in re.split(r"&&|\|\||;|\|", check)]
-    unsafe = [c for c in commands if c and (
-        not SAFE_ALLOW.fullmatch(c) or _runs_arbitrary(c))]
-    if unsafe:
-        return (f"{text} Did not allow any commands: {unsafe[0]!r} has a wildcard, substitution, "
-                "redirect or a binary that runs arbitrary code. The user can add rules themselves.")
+    rules, refusal = allow_rules(checks)
+    if refusal:
+        return f"{text} Did not allow any commands: {refusal}. The user can add rules themselves."
     settings_path = root / ".claude" / "settings.local.json"
     settings = _read_json(settings_path)
     perms = settings.setdefault("permissions", {})
     allowed = perms.setdefault("allow", [])
-    for rule in (f"Bash({c})" for c in commands if c):
+    for rule in rules:
         if rule not in allowed:
             allowed.append(rule)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
