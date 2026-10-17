@@ -38,6 +38,7 @@ MODEL = "haiku"
 MAX_CALLS = 3     # model calls per launch, across after_launch and sweeps
 MAX_MOVES = 12    # arrow keys per launch before giving up on finding the option
 CALL_TIMEOUT = 60.0
+BRIEF_LINE = 12   # shortest screen line taken as part of the pasted brief
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 CURSOR = "❯›>▸→"
@@ -50,7 +51,8 @@ TOOL_PERMISSION = re.compile(r"(?i)requesting permission for|run this command\?|
 NUMBERED = re.compile(rf"^\s*(?:[{CURSOR}]\s*)?\d+[.)]\s+\S")
 HINT = re.compile(r"(?i)\benter to (?:confirm|continue|select|proceed)\b|\bpress enter\b")
 # A CLI's own input box and footer: the CLI is ready (or busy), not asking.
-INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt", re.I)
+INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt"
+                       r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
 # Only the person answers these, whatever the model makes of them: their
 # accounts and data, and anything that widens what the agent may run (a
 # project's MCP servers or hooks, skipping permission checks, installing).
@@ -370,7 +372,20 @@ class Startup:
                     seen = (seen + " " + part).strip() if part else seen
                     j += 1
                 return "\n".join(lines[j:])
-        return screen
+        return self._without_brief_lines(screen)
+
+    def _without_brief_lines(self, screen: str) -> str:
+        """``screen`` without the lines that are a piece of the brief: a long
+        brief has scrolled its first line off the capture, leaving only its
+        tail, whose words (a numbered list, "press enter") read as a prompt."""
+        if not self.brief:
+            return screen
+        keep = []
+        for line in screen.splitlines():
+            text = " ".join(re.sub(rf"^\s*[{CURSOR}]", "", plain(line)).split())
+            if not (len(text) >= BRIEF_LINE and text in self.brief):
+                keep.append(line)
+        return "\n".join(keep)
 
     def _spend_call(self) -> bool:
         """Count one model call against the launch's budget; False when it's spent."""

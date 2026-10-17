@@ -176,6 +176,35 @@ def test_the_delivered_brief_is_never_the_prompt(db, launch, monkeypatch):
     assert db.get_agent("w1").status != "waiting"
 
 
+def test_brief_not_prompt_when_its_start_has_scrolled_off(db, launch, monkeypatch):
+    # Only the tail of a long brief is on screen: a numbered list, "press
+    # enter" and key/budget words, with no first line to match it by.
+    from brindle import launch_health
+
+    brief = ("Intro paragraph that is long enough to scroll off the capture. "
+             "Steps: 1. Run the unit tests first 2. Fix any failures you find 3. Press Enter to confirm each "
+             "fix, mind the API key and token budget. Before you finish, check your work against the task.")
+    launch(TRUST, ["Not now", "Allow this folder"], {"kind": "trust", "option": "Allow this folder"},
+           provider="claude", status="processing")
+    db.update_agent("w1", task="review")
+    launch_health.prepare(db, db.get_agent("w1"), "fp", submitted_prompt=brief)
+    screen = ("  Steps:\n"
+              "  1. Run the unit tests first\n"
+              "❯ 2. Fix any failures you find\n"
+              "  3. Press Enter to confirm each fix, mind the API key and token budget.\n"
+              "  Before you finish, check your work against the task.\n")
+    monkeypatch.setattr(tmux, "capture", lambda target, **k: screen)
+    prompt_answer.finish_launch(db, db.get_agent("w1"))
+    assert db.pending_count("boss") == 0
+    assert db.get_agent("w1").status != "waiting"
+
+
+def test_brief_not_prompt_while_a_spinner_shows():
+    screen = ("  1. Run the unit tests first\n❯ 2. Fix any failures you find\n\n"
+              "✳ Clauding… (1m 37s)\n\n❯ \n")
+    assert not prompt_answer.looks_like_prompt(screen)
+
+
 @pytest.mark.variant("race: the selection moves during the model call; the only test of the re-capture")
 def test_selection_is_checked_on_the_pane_as_it_is_after_the_model_call(db, launch):
     # The selection moved from Dark to Light while the model was deciding Dark.
