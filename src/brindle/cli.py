@@ -313,12 +313,17 @@ def start(
     from brindle import scratch
 
     from brindle import picker
-    from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS
+    from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS, get_provider
 
     provider = provider or provider_alias or _group_supervisor
-    if provider and provider != picker.PICK and provider not in SUPERVISOR_PROVIDERS:
-        why = "can't run the supervisor" if provider in NOT_SUPERVISOR else "isn't a supervisor CLI"
-        _fail(f"the {provider} provider {why}; use one of: {', '.join(SUPERVISOR_PROVIDERS)}")
+    if provider and provider != picker.PICK:
+        if provider in NOT_SUPERVISOR:
+            _fail(f"the {provider} provider can't run the supervisor; use one of: "
+                  f"{', '.join(SUPERVISOR_PROVIDERS)}")
+        try:
+            get_provider(provider)
+        except KeyError as e:
+            _fail(str(e).strip("'\""))
     db = DB()
     if branch or worktree:
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
