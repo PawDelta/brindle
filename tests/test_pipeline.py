@@ -265,14 +265,16 @@ def test_issue190_the_check_run_before_a_review_outlives_the_reporting_worker(db
     monkeypatch.setattr(providers, "brindle_invocation",
                         lambda: [sys.executable, "-c", "import time; time.sleep(60)", marker])
     assert pipeline.on_report(db, db.get_agent("w1"), ws, "done")
-    deadline, helper = time.time() + 10, None
-    while helper is None and time.time() < deadline:
-        helper = next((p.pid for p in procs.table().values() if marker in p.text), None)
-    assert helper is not None
+    deadline, helper, ours = time.time() + 10, None, True
+    while ours and time.time() < deadline:   # its shell exits at once, or never was
+        table = procs.table()
+        helper = next((p.pid for p in table.values() if marker in p.text and "sh -c" not in p.text), helper)
+        ours = helper is None or helper in procs.descendants([os.getpid()], table)
     try:
-        assert helper not in procs.descendants([os.getpid()])
+        assert helper is not None and not ours
     finally:
-        os.kill(helper, signal.SIGKILL)
+        if helper is not None:
+            os.kill(helper, signal.SIGKILL)
 
 
 @pytest.mark.parametrize("check_run", ["gone", "at work"])
