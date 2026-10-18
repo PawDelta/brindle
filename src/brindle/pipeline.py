@@ -311,9 +311,35 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
     # Before the check run starts: it reads this report's claim (see review_claim).
-    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
+    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time(), merge_failed=None)
     _start_review(db, cfg, parent, worker, ws, result)
     return True
+
+
+def review_state(db: DB, ws: Workspace) -> str | None:
+    """#186: where the branch in ``ws`` stands in review, so silence can be
+    told apart: ``checks running``, ``reviewer running (id)``, nothing at
+    work on a branch in review, the latest verdict and its commit, or
+    ``merge failed: why``. None when the branch has no worker, is merged, or
+    has not been through review."""
+    worker = piped_worker(db, ws)
+    if worker is None or db.merged_sha(ws.id):
+        return None
+    if worker.merge_failed and not worker.pipeline:
+        why = " ".join(worker.merge_failed.split())
+        return "merge failed: " + (why if len(why) <= 200 else why[:199] + "…")
+    if worker.pipeline == "reviewing":
+        if review_running(ws.id):
+            return "checks running"
+        for a in db.list_agents(ws.id):
+            if a.mode == "review" and a.status != "done" and a.result is None \
+                    and a.dismissed_at is None:
+                return f"reviewer running ({a.id})"
+        return "waiting for review: nothing is checking or reviewing it"
+    review = db.last_review(ws.id)
+    if review is None:
+        return None
+    return f"{'approved' if review.approved else 'changes requested'} at {review.sha[:8]}"
 
 
 def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Workspace,
@@ -923,7 +949,7 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
             return text   # the worker moved on meanwhile (a new report): its new state stands
         if text.startswith("Not merged. ") and _retry_on_heavy(db, worker, ws, cfg, text, report):
             return text   # the checks failed: a stronger model gets one go at it
-        db.update_agent(worker.id, pipeline=None)
+        db.update_agent(worker.id, pipeline=None, merge_failed=text)
         _escalate(db, ws, worker)
         _tell(db, parent_id,
               agents.condense(

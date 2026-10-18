@@ -296,6 +296,39 @@ def test_approval_of_an_older_commit_keeps_the_goal_open(db, root, repo, monkeyp
     assert db.get_autopilot("boss").state == "auditing"   # the new commit gets its own audit
 
 
+@pytest.mark.parametrize("launch", ["starting", "failed"])
+def test_auditor_grace_keeps_an_auditor_whose_window_is_not_up_yet(db, root, repo, monkeypatch, launch):
+    """Live incident: on_stop took an auditor still starting (spawned, its
+    window not recorded yet) for dead and forgot it, so its APPROVED review
+    never reached the audit. One whose launch is known to have failed is
+    still let go."""
+    agent, ws = root
+    with_goal(db)
+    (repo / "api.txt").write_text("")
+    (repo / "ui.txt").write_text("")
+    commit_all(repo)
+    autopilot.check_milestones(db, "boss", ws)
+
+    def spawn(db_, ws_, profile, **kw):
+        auditor = add_agent(db_, ws_, "audit1", mode="review", parent="boss")
+        db_.update_agent("audit1", tmux_window="", status=launch)   # as spawn leaves it until the window opens
+        return auditor
+
+    monkeypatch.setattr(agents, "spawn", spawn)
+    autopilot.start_audit(db, "boss", ws)
+    monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
+    monkeypatch.setattr(autopilot, "over_limit", lambda *a: False)
+    autopilot.on_stop(db, agent, {})
+    if launch == "failed":
+        assert db.get_autopilot("boss").auditor_id is None
+        return
+    assert db.get_autopilot("boss").auditor_id == "audit1"
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "close_later", lambda *a, **k: None)
+    agents.submit_review(db, "audit1", True, "all there")
+    assert db.get_autopilot("boss").state == "done"
+
+
 def test_single_check_rechecks_all_before_declaring_done(db, root, repo):
     _, ws = root
     with_goal(db)

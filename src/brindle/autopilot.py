@@ -1823,9 +1823,10 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if ap.state == "auditing":
         if ap.auditor_id:
             auditor = db.get_agent(ap.auditor_id)
-            if auditor is None or auditor.status in ("paused", "done") or not agents.is_alive(auditor) or auditor.result is not None:
-                # Auditor was spawned but is no longer running (dead or crashed without verdict).
-                # Reset state to running so autopilot can recover.
+            if auditor is None or auditor.status in ("paused", "done") or not agents.alive_or_starting(auditor) \
+                    or auditor.result is not None:
+                # Auditor was spawned but is no longer running (dead or crashed without verdict;
+                # one still starting isn't). Reset state to running so autopilot can recover.
                 db.update_autopilot(agent.id, state="running", auditor_id=None)
                 ap = db.get_autopilot(agent.id)
             else:

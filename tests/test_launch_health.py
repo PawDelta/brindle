@@ -233,6 +233,14 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     ws = workspaces.adopt_root(db, str(repo))
     # A session still running here, which start must pause first.
     old = agents.spawn(db, ws, "supervisor", provider_name="shell")
+    calls: list[list[str]] = []
+    real = subprocess.run
+
+    def counted(args, *a, **k):
+        calls.append(list(args))
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", counted)
     try:
         t0 = time.monotonic()
         cli.start(prompt=None, provider="shell", attach=False,
@@ -244,6 +252,23 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     assert db.get_agent(old.id).status == "paused"
     # Retention and culling went to the detached helper instead.
     assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
+    # Each subprocess start waits on costs wall time: about 30 now, 83 before.
+    assert len(calls) <= 40, calls
+    assert len([c for c in calls if "window-style" in " ".join(c)]) == 1   # one batched tmux call
+    assert not any("ls-remote" in c for c in calls)     # no network probe for the default branch
+
+
+def test_tmux_batch_falls_back_to_one_by_one_when_a_command_is_rejected(monkeypatch):
+    """An older tmux rejecting one option must not drop the ones after it."""
+    seen = []
+
+    def fake(*args, check=True):
+        seen.append(list(args))
+        return SimpleNamespace(returncode=1 if ";" in args else 0)
+
+    monkeypatch.setattr(tmux, "_tmux", fake)
+    tmux._tmux_batch([["set-option", "a", "1"], ["set-option", "b", "2"]])
+    assert seen[1:] == [["set-option", "a", "1"], ["set-option", "b", "2"]]
 
 
 # -- a prompt is visible: 'waiting', and its supervisor is told once -----------------

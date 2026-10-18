@@ -329,7 +329,7 @@ async def handoff(
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
-        warning = tasks.overlap_warning(db, ws, files)
+        warning = tasks.overlap_warning(db, ws, files, task)
         if warning and load_repo_config(ws.repo_root).overlap == "block":
             return (f"Not started: this task {warning}. Two workers editing the same files "
                     "end in conflicts. Fold it into that worker's task (send_message), or pass "
@@ -458,7 +458,7 @@ async def assign(
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
-        warning = tasks.overlap_warning(db, ws, files)
+        warning = tasks.overlap_warning(db, ws, files, task)
         if warning and load_repo_config(ws.repo_root).overlap == "block":
             return (f"Not started: this task {warning}. Two workers editing the same files "
                     "end in conflicts. Fold it into that worker's task (send_message), or pass "
@@ -619,6 +619,8 @@ def list_agents(repo: str | None = None) -> str:
     def render(repo_root: str) -> str:
         lines = []
         for ws in db.find_workspaces(repo_root):
+            state = pipeline.review_state(db, ws)
+            piped = pipeline.piped_worker(db, ws) if state else None
             for a in db.list_agents(ws.id):
                 me = " (you)" if caller and a.id == caller.id else ""
                 parent = f" parent={a.parent_id}" if a.parent_id else ""
@@ -632,6 +634,7 @@ def list_agents(repo: str | None = None) -> str:
                 lines.append(
                     f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
                     f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}"
+                    + (f" review={state}" if piped is not None and a.id == piped.id else "")
                 )
         return "\n".join(lines) or "No agents."
 

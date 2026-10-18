@@ -131,6 +131,30 @@ def _aws(env: Mapping[str, str], home: Path, now: float) -> LoginStatus:
     return _from_expiry(expires, refresh, now, "no AWS SSO login found for this profile")
 
 
+def run_bounded(argv: list[str], *, capture_output: bool = True, text: bool = True,
+                timeout: float = CLI_TIMEOUT, env=None) -> subprocess.CompletedProcess:
+    """``subprocess.run`` for a cloud CLI that leaves nothing behind: the CLI
+    gets no terminal and its own process group, and a timeout ends the whole
+    group (gcloud is a wrapper around python, which may hold a local auth
+    server and its port), not just the wrapper."""
+    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=text, env=env,
+                          start_new_session=True) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            raise      # Popen's exit reaps the wrapper
+        try:    # a server the CLI left running (trade-off: the group id could in theory
+            os.killpg(proc.pid, signal.SIGKILL)    # be reused once the group is empty)
+        except OSError:
+            pass
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def _full_env(env: Mapping[str, str] | None) -> dict[str, str] | None:
     """The environment for a CLI call: the supplied one over the ambient one,
     or None (inherit) when the caller supplied none."""
@@ -203,7 +227,7 @@ def _google(run, env, now: float, expiry) -> LoginStatus:
 
 def status(provider: str | None = None, *, env: Mapping[str, str] | None = None,
            home: str | Path | None = None, now: float | None = None,
-           run=subprocess.run, expiry=tokeninfo_expiry) -> LoginStatus:
+           run=run_bounded, expiry=tokeninfo_expiry) -> LoginStatus:
     """The login state for ``provider`` (bedrock, vertex or foundry; by default
     the one the environment's ``CLAUDE_CODE_USE_*`` flag selects)."""
     supplied = env
@@ -222,7 +246,7 @@ def status(provider: str | None = None, *, env: Mapping[str, str] | None = None,
 
 def refresh(provider: str | None = None, *, env: Mapping[str, str] | None = None,
             home: str | Path | None = None, now: float | None = None,
-            run=subprocess.run, expiry=tokeninfo_expiry) -> LoginStatus:
+            run=run_bounded, expiry=tokeninfo_expiry) -> LoginStatus:
     """Renew the login without the person where the CLI can, and return the
     status after. Asking gcloud or az for an access token (as ``status`` does)
     renews it from the stored refresh token; the AWS CLI renews an SSO token
@@ -417,8 +441,8 @@ def _dead_at(last: dict, running: bool, now: float) -> float | None:
 
 def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None,
             home: str | Path | None = None, now: float | None = None,
-            last_input: float | None = None, run=subprocess.run, expiry=tokeninfo_expiry,
-            popen=None, kill=None, platform: str | None = None) -> str:
+            last_input: float | None = None, run=run_bounded, expiry=tokeninfo_expiry,
+            popen=None, kill=None, platform: str | None = None, which=None) -> str:
     """Open the browser sign-in a lapsed login needs: one tab machine-wide,
     when the person is there to use it.
 
@@ -454,10 +478,17 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
         last = lg.read()
         running = not _locked(fd)
         this_lapse = last.get("lapse") == lg.fingerprint() and "opened_at" in last
+        ended = False
         if this_lapse:
             dead_at = _dead_at(last, running, now)
             if dead_at is None:
                 return "waiting"
+            if running and isinstance(last.get("pid"), int):
+                try:    # past TAB_LIFE its code is useless: don't leave its auth server up
+                    (kill or _end_signin)(last["pid"])
+                except OSError:
+                    pass
+                ended = True
             if not running and "dead_at" not in last:
                 lg.write({**last, "dead_at": dead_at})   # we hold the lock
             floor = float(last["opened_at"]) + REOPEN_FLOOR
@@ -470,7 +501,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
         if not s.expired or not s.refresh_cmd:
             return "no lapse"
         if running:     # a dead tab, or one left from an earlier lapse: end it, take its lock
-            if isinstance(last.get("pid"), int):
+            if isinstance(last.get("pid"), int) and not ended:
                 try:
                     (kill or _end_signin)(last["pid"])
                 except OSError:
@@ -480,13 +511,20 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
                 if time.monotonic() > deadline:
                     return "waiting"
                 time.sleep(0.1)
+        child_env = _full_env(env)
         if not _browser_here(lg.env, sys.platform if platform is None else platform):
-            return "manual"
+            # WSL2 has no Linux browser, but the Windows one can open the URL.
+            from brindle import providers
+
+            opener = None if lg.env.get("SSH_CONNECTION") or lg.env.get("SSH_TTY") else providers.windows_browser(which)
+            if not opener:
+                return "manual"
+            child_env = {**(os.environ if child_env is None else child_env), "BROWSER": opener}
         try:
             # The child inherits the locked descriptor: the lock is held until
             # the sign-in exits, however long the person takes.
             proc = (popen or subprocess.Popen)(
-                shlex.split(s.refresh_cmd), env=_full_env(env), stdin=subprocess.DEVNULL,
+                shlex.split(s.refresh_cmd), env=child_env, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True, pass_fds=(fd,))
         except OSError:

@@ -183,13 +183,14 @@ def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch, lates
     from brindle import updates
 
     monkeypatch.setattr(updates, "newer_version", lambda **kw: latest)
-    opts = {}
-    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: opts.__setitem__(a[3], a[4]) if (
-        a[0] == "set-option" and len(a) == 5 and a[1] == "-t") else type(
-            "P", (), {"stdout": "", "returncode": 0})())
+    batches = []
+    monkeypatch.setattr(tmux, "_tmux_batch", batches.append)
+    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: type(
+        "P", (), {"stdout": "", "returncode": 0})())
     monkeypatch.setattr(tmux, "set_follow_hooks", lambda s: None)
     monkeypatch.setattr(tmux, "bind_session_keys", lambda s: None)
     tmux.apply_theme("s1")
+    opts = {c[3]: c[4] for c in batches[0] if c[:2] == ["set-option", "-t"]}
     left = opts["status-left"]
     assert left.count(tmux.__version__) == 1
     if latest:

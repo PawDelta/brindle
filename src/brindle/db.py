@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS agents (
     reopened_at REAL,              -- when a dead reviewer's session was reopened once (pipeline.on_reviewer_unreported)
     hooks_off TEXT,                -- why its CLI runs none of brindle's hooks, shown on its sidebar row (agents.screen_status)
     reviewing_since REAL,          -- when its last report put its branch in review (pipeline.on_report)
-    review_restarted REAL          -- the wait in review whose dead check run was started again (pipeline.restart_review)
+    review_restarted REAL,         -- the wait in review whose dead check run was started again (pipeline.restart_review)
+    merge_failed TEXT              -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -466,6 +467,7 @@ class Agent:
     hooks_off: str | None = None       # why its CLI runs none of brindle's hooks (agents.screen_status)
     reviewing_since: float | None = None   # when its last report put its branch in review (pipeline.on_report)
     review_restarted: float | None = None  # the wait in review whose review was started again (pipeline.restart_review)
+    merge_failed: str | None = None        # why the pipeline couldn't merge its approved branch (pipeline.review_state)
 
 
 @dataclass
@@ -714,7 +716,8 @@ class DB:
         for col, kind in (("plan_first", "INTEGER"), ("plan_state", "TEXT"),
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
-                          ("reviewing_since", "REAL"), ("review_restarted", "REAL")):
+                          ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
+                          ("merge_failed", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}

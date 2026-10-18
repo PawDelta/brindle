@@ -66,6 +66,19 @@ def test_supervisor_sign_in_installs_opens_login_and_verifies(monkeypatch):
     assert ok and ran == [["npm", "install"], [ran[1][0], "login"]]
 
 
+@pytest.mark.parametrize("opener, shown", [("wslview", {"BROWSER": "wslview"}), (None, None)])
+def test_wsl_browser_sign_in_points_the_login_at_the_windows_browser(monkeypatch, opener, shown):
+    for var in ("DISPLAY", "WAYLAND_DISPLAY", "BROWSER"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("brindle.providers.windows_browser", lambda which=None: opener)
+    monkeypatch.setattr(doctor, "signin_providers", lambda: ["codex"])
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["codex"])
+    seen = []
+    assert picker.sign_in("codex", run=lambda argv, **kw: seen.append(kw.get("env")) or (0, ""),
+                          confirm=lambda *a, **kw: True, echo=lambda s: None)
+    assert (seen[0] and {"BROWSER": seen[0]["BROWSER"]}) == shown
+
+
 def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), allowed=None, ci=False):
     for var in ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD", "JENKINS_URL", "BRINDLE_CI"):
         monkeypatch.delenv(var, raising=False)

@@ -94,7 +94,7 @@ def w(db, monkeypatch):
     return world
 
 
-def test_undetermined_never_pauses_and_warns_once(w):
+def test_undetermined_not_repeated_never_pauses_and_warns_once(w):
     w.agent("c1")
     w.claude = UNKNOWN
     signin_pause.run(w.db)
@@ -106,9 +106,16 @@ def test_undetermined_never_pauses_and_warns_once(w):
     signin_pause.run(w.db)
     assert sum("can't be verified" in b for _, b in w.messages) == 1
     w.claude = OK
-    signin_pause.run(w.db)
+    for _ in range(signin_pause.SETTLED_SWEEPS):
+        signin_pause.run(w.db)
     w.claude = UNKNOWN          # a new spell of it warns again
     signin_pause.run(w.db)
+    assert sum("can't be verified" in b for _, b in w.messages) == 2
+    for _ in range(3):      # a check flapping under load (times out every other sweep) stays quiet
+        w.claude = OK
+        signin_pause.run(w.db)
+        w.claude = UNKNOWN
+        signin_pause.run(w.db)
     assert sum("can't be verified" in b for _, b in w.messages) == 2
 
 

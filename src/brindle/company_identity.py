@@ -43,6 +43,7 @@ CACHE_SECONDS = 30.0
 LAUNCH_CACHE_SECONDS = 300.0
 LAUNCH_CACHE_FILE = "identity-launch-cache.json"
 PROBE_TIMEOUT = 20.0
+RETRY_FACTOR = 3
 PERSONAL_PLANS = ("free", "pro", "max")
 
 # Under an enforced company identity (Enterprise), what can pick the account a
@@ -251,6 +252,8 @@ def _probe(argv: list[str], cache: bool = True) -> tuple[int, str] | None:
     if hit and now - hit[0] < CACHE_SECONDS:
         return hit[1]
     code, out = company_login.run_cmd(argv, PROBE_TIMEOUT)
+    if code == 124:     # a healthy CLI can miss the timeout on a loaded machine: once more, longer
+        code, out = company_login.run_cmd(argv, PROBE_TIMEOUT * RETRY_FACTOR)
     if code in (124, 127):
         return None
     _cache[key] = (now, (code, out))
@@ -279,7 +282,7 @@ class Identity:
 
 
 def _unknown(provider: str, tool: str, why: str = "", exe: str = "") -> Identity:
-    install = company_login.INSTALL.get(tool)
+    install = company_login.install_hint(tool) if tool in company_login.INSTALL else None
     if why:
         return Identity(provider, f"{tool}: {why}", determined=False)
     if company_login.which(exe or tool):

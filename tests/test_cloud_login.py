@@ -2,7 +2,10 @@
 
 import hashlib
 import json
+import os
+import signal
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -145,8 +148,61 @@ def test_signed_out_never_prompts(provider, stderr, tmp_path):
     assert how == "no lapse"
 
 
+@pytest.mark.parametrize("have, opener", [
+    ({"wslview"}, "wslview"),                           # wslu installed: it picks the Windows browser
+    ({"explorer.exe", "cmd.exe"}, "explorer.exe"),      # else the Windows PATH's explorer
+    ({"cmd.exe"}, "cmd.exe /c start"),
+    (set(), None),                                      # nothing to open it with: print the URL
+])
+def test_wsl_browser_signin_opens_the_windows_browser(have, opener, tmp_path, monkeypatch):
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("brindle.providers.is_wsl", lambda: True)
+    env = {"CLOUDSDK_CONFIG": str(tmp_path / "gcloud")}     # no DISPLAY / WAYLAND_DISPLAY, as on WSL2
+    opened = []
+    how = cloud_login.sign_in(
+        "vertex", env=env, home=tmp_path, now=NOW, last_input=NOW, platform="linux",
+        run=lambda cmd, **kw: SimpleNamespace(returncode=1, stdout="", stderr=VERTEX_ERROR),
+        which=lambda name: f"/bin/{name}" if name in have else None,
+        popen=lambda cmd, **kw: opened.append(kw["env"].get("BROWSER")) or SimpleNamespace(pid=1))
+    assert (how, opened) == (("opened", [opener]) if opener else ("manual", []))
+
+
 def test_google_timeout_is_a_failed_login_not_an_exception(tmp_path):
     def slow(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
 
     assert not cloud_login.status("vertex", home=tmp_path, run=slow).ok
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypatch):
+    # gcloud is a wrapper script around python: killing only the wrapper on a
+    # timeout leaves the python process (and any local auth server) running.
+    pidfile = tmp_path / "child.pid"
+    gcloud = tmp_path / "bin" / "gcloud"
+    gcloud.parent.mkdir()
+    gcloud.write_text(f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}.tmp\n"
+                      f"mv {pidfile}.tmp {pidfile}\nwait\n")
+    gcloud.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{gcloud.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(cloud_login, "CLI_TIMEOUT", 2.0)   # room for a loaded machine to start the script
+    try:
+        s = cloud_login.status("vertex", home=tmp_path)
+        pid = int(pidfile.read_text())
+        deadline = time.monotonic() + 3
+        while _alive(pid) and time.monotonic() < deadline:
+            pass    # the group was killed before status returned; init reaps the orphan
+        assert not s.ok and not _alive(pid)
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
