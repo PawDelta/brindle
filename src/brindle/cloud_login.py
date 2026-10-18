@@ -519,7 +519,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
             opener = None if lg.env.get("SSH_CONNECTION") or lg.env.get("SSH_TTY") else providers.windows_browser(which)
             if not opener:
                 return "manual"
-            child_env = {**os.environ, **(env or {}), "BROWSER": opener}
+            child_env = {**(os.environ if child_env is None else child_env), "BROWSER": opener}
         try:
             # The child inherits the locked descriptor: the lock is held until
             # the sign-in exits, however long the person takes.

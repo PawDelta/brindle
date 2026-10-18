@@ -261,7 +261,7 @@ def _wsl_browser_env() -> dict[str, str] | None:
     prints its URL, which is then the person's to open."""
     from brindle import providers
 
-    if os.environ.get("BROWSER") or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+    if any(os.environ.get(v) for v in ("BROWSER", "DISPLAY", "WAYLAND_DISPLAY", "SSH_CONNECTION", "SSH_TTY")):
         return None
     opener = providers.windows_browser()
     return {**os.environ, "BROWSER": opener} if opener else None

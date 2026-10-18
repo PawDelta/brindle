@@ -593,3 +593,11 @@ def test_install_hint_gives_linux_alternatives_only_on_linux(monkeypatch, tool, 
     hint = company_login.install_hint(tool)
     assert company_login.INSTALL[tool] in hint
     assert (wanted in hint) if wanted else hint == company_login.INSTALL[tool]
+
+
+def test_wsl_browser_interactive_login_gets_its_env(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(company_login.subprocess, "run",
+                        lambda argv, **kw: seen.update(kw) or type("P", (), {"returncode": 0})())
+    assert company_login.run_cmd(["codex", "login"], interactive=True, env={"BROWSER": "wslview"}) == (0, "")
+    assert seen["env"] == {"BROWSER": "wslview"}

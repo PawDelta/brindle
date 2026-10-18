@@ -44,10 +44,10 @@ INSTALL = {
 # command brindle itself runs.
 NPM_PREFIX_NOTE = "on Linux, if that fails with EACCES: `npm config set prefix ~/.local`, then retry (no sudo)"
 INSTALL_LINUX = {
-    "aws": "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html "
+    "aws": "Linux: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html "
            "(or `sudo snap install aws-cli --classic`)",
-    "gcloud": "`sudo snap install google-cloud-cli --classic` (or https://cloud.google.com/sdk/docs/install)",
-    "az": "`curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash` "
+    "gcloud": "Linux: `sudo snap install google-cloud-cli --classic` (or https://cloud.google.com/sdk/docs/install)",
+    "az": "Linux: `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash` "
           "(https://learn.microsoft.com/cli/azure/install-azure-cli-linux)",
     "claude": NPM_PREFIX_NOTE,
     "codex": NPM_PREFIX_NOTE,
@@ -58,8 +58,7 @@ def install_hint(tool: str) -> str:
     """How to install ``tool``, with the Linux alternative appended on Linux."""
     hint = INSTALL[tool]
     if sys.platform.startswith("linux"):
-        alt = INSTALL_LINUX[tool]
-        hint += f"  [{alt}]" if alt is NPM_PREFIX_NOTE else f"  [Linux: {alt}]"
+        hint += f"  [{INSTALL_LINUX[tool]}]"
     return hint
 
 
@@ -74,7 +73,7 @@ def run_cmd(argv: list[str], timeout: float = CHECK_TIMEOUT, interactive: bool =
     can't run or times out is returncode 127 or 124."""
     try:
         if interactive:
-            proc = subprocess.run(argv, timeout=timeout, check=False)
+            proc = subprocess.run(argv, timeout=timeout, check=False, env=env)
             return proc.returncode, ""
         # Never hand a probe the terminal: `claude` turns newline translation
         # back on when it exits, which shifts the curses sidebar's drawing.
