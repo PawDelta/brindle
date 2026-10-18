@@ -333,7 +333,7 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
 
 def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Report:
     r = Report()
-    dirty = git.dirty_files(ws.path)
+    dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
     if dirty:
         shown = ", ".join(dirty[:8]) + (" ..." if len(dirty) > 8 else "")
         return r.fail(f"{ws.name} has uncommitted changes ({shown}). The worker must commit them first.")
