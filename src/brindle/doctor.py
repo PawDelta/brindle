@@ -52,8 +52,10 @@ def _tool(name: str, required: bool, why: str, version_args: list[str] | None = 
 
 
 CLI_INSTALL = {
-    "claude": ("Claude Code", "npm install -g @anthropic-ai/claude-code (or see https://code.claude.com)"),
-    "codex": ("Codex", "npm install -g @openai/codex"),
+    "claude": ("Claude Code", "npm install -g @anthropic-ai/claude-code (or see https://code.claude.com; "
+                              "on Linux, EACCES means set a user prefix first: `npm config set prefix ~/.local`)"),
+    "codex": ("Codex", "npm install -g @openai/codex (on Linux, EACCES means set a user prefix first: "
+                       "`npm config set prefix ~/.local`)"),
     "antigravity": ("Google Antigravity", "see https://antigravity.google"),
 }
 

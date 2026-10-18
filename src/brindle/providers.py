@@ -852,6 +852,21 @@ def is_wsl() -> bool:
         return False
 
 
+def windows_browser(which=None) -> str | None:
+    """Under WSL, the command that opens a URL in the Windows browser (WSL2
+    usually has no Linux one): wslview, else explorer.exe, else `cmd.exe /c
+    start`. None off WSL or when none of them is on PATH."""
+    import shutil
+
+    if not is_wsl():
+        return None
+    which = which or shutil.which
+    for opener in ("wslview", "explorer.exe"):
+        if which(opener):
+            return opener
+    return "cmd.exe /c start" if which("cmd.exe") else None
+
+
 def which_cli(name: str) -> str | None:
     """shutil.which, but under WSL a bare name found under /mnt/<drive>/ (a
     Windows shim: it reads %USERPROFILE%, not ~, and can't take Linux paths)

@@ -282,7 +282,7 @@ class Identity:
 
 
 def _unknown(provider: str, tool: str, why: str = "", exe: str = "") -> Identity:
-    install = company_login.INSTALL.get(tool)
+    install = company_login.install_hint(tool) if tool in company_login.INSTALL else None
     if why:
         return Identity(provider, f"{tool}: {why}", determined=False)
     if company_login.which(exe or tool):
