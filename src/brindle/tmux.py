@@ -90,6 +90,19 @@ def _tmux(*args: str, input: str | None = None, check: bool = True,
     return proc
 
 
+def _tmux_batch(cmds: list[list[str]]) -> None:
+    """Run several tmux commands in one process (``cmd ; cmd``) instead of one
+    process each. Best effort like ``check=False``; tmux stops at a failing one."""
+    args: list[str] = []
+    for cmd in cmds:
+        if args:
+            args.append(";")
+        # an argument ending in ";" would read as a separator: escape it
+        args.extend(a[:-1] + "\\;" if a.endswith(";") and not a.endswith("\\;") else a for a in cmd)
+    if args:
+        _tmux(*args, check=False)
+
+
 def has_session(session: str) -> bool:
     return _tmux("has-session", "-t", f"={session}", check=False).returncode == 0
 
@@ -279,16 +292,16 @@ def apply_theme(session: str) -> None:
     }
     # Lets Claude Code notice when its pane gains or loses focus (it asks for
     # this). Server-wide in tmux, and harmless for other sessions.
-    _tmux("set-option", "-s", "focus-events", "on", check=False)
+    cmds = [["set-option", "-s", "focus-events", "on"]]
     # set-option doesn't accept the "=name" exact-match form other commands do.
-    for key, value in opts.items():
-        _tmux("set-option", "-t", session, key, value, check=False)
+    cmds += [["set-option", "-t", session, key, value] for key, value in opts.items()]
+    # window options: set on every window of the session
+    wins = _tmux("list-windows", "-t", f"={session}", "-F", "#{window_id}", check=False).stdout.split()
     for key in ("window-style", "window-active-style", "pane-border-style",
                 "pane-active-border-style", "pane-border-lines", "mode-style",
                 "window-status-format", "window-status-current-format"):
-        # window options: set on every window of the session
-        for win in _tmux("list-windows", "-t", f"={session}", "-F", "#{window_id}", check=False).stdout.split():
-            _tmux("set-option", "-w", "-t", win, key, opts[key], check=False)
+        cmds += [["set-option", "-w", "-t", win, key, opts[key]] for win in wins]
+    _tmux_batch(cmds)
     set_follow_hooks(session)
     bind_session_keys(session)
 
@@ -314,8 +327,8 @@ def set_follow_hooks(session: str) -> None:
 
     cmd = " ".join(shlex.quote(a) for a in [*brindle_invocation(), "_sidebar-follow", session])
     shell = f"{cmd} >/dev/null 2>&1 || true"
-    for hook in FOLLOW_HOOKS:
-        _tmux("set-hook", "-t", session, hook, f"run-shell -b {shlex.quote(shell)}", check=False)
+    _tmux_batch([["set-hook", "-t", session, hook, f"run-shell -b {shlex.quote(shell)}"]
+                 for hook in FOLLOW_HOOKS])
 
 
 SIDEBAR_BOTTOM_LINES = 12
@@ -663,24 +676,24 @@ def bind_session_keys(session: str) -> None:
     server-wide in tmux, so every binding is guarded on the ``@brindle`` session
     option set here and falls back to tmux's own default for any other
     session: only brindle's sessions behave differently."""
-    _tmux("set-option", "-t", session, "@brindle", "1", check=False)
+    cmds = [["set-option", "-t", session, "@brindle", "1"]]
     clip = clipboard_command()
     for table in ("copy-mode", "copy-mode-vi"):
         default = "send-keys -X copy-pipe-and-cancel"
         ours = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)} ; {COPIED_NOTICE}" if clip else default
-        _tmux("bind-key", "-T", table, "MouseDragEnd1Pane",
-              "if-shell", "-F", "#{@brindle}", ours, default, check=False)
+        cmds.append(["bind-key", "-T", table, "MouseDragEnd1Pane",
+                     "if-shell", "-F", "#{@brindle}", ours, default])
         # A drag that ends outside the pane (or any other way tmux misses the
         # release) leaves a chat pane in copy mode, where C-c only cancels the
         # mode: the chat never saw it, so Ctrl+C looked dead. In a chat pane
         # it leaves copy mode and passes the key on, as the person meant it.
-        _tmux("bind-key", "-T", table, "C-c", "if-shell", "-F", CHAT_PANE,
-              "send-keys -X cancel ; send-keys C-c", "send-keys -X cancel", check=False)
+        cmds.append(["bind-key", "-T", table, "C-c", "if-shell", "-F", CHAT_PANE,
+                     "send-keys -X cancel ; send-keys C-c", "send-keys -X cancel"])
     # The mouse stays tmux's in a chat pane (see chat_mouse_bindings), even
     # when the chat asks to track it.
     for key, ours in chat_mouse_bindings(clip).items():
-        _tmux("bind-key", "-T", "root", key,
-              "if-shell", "-F", "-t", "=", CHAT_PANE, ours, _DEFAULT_MOUSE[key], check=False)
+        cmds.append(["bind-key", "-T", "root", key,
+                     "if-shell", "-F", "-t", "=", CHAT_PANE, ours, _DEFAULT_MOUSE[key]])
     # prefix S: hide/show the sidebar (unbound in stock tmux); if this window
     # has none (it lives in another session), pull it here instead.
     from brindle.providers import brindle_invocation
@@ -691,7 +704,8 @@ def bind_session_keys(session: str) -> None:
     has_sidebar = HAS_SIDEBAR_SHELL
     unzoomed = f"if-shell {shlex.quote(has_sidebar)} {shlex.quote(hide)} {shlex.quote(pull)}"
     toggle = f"if-shell -F '#{{window_zoomed_flag}}' 'resize-pane -Z' {shlex.quote(unzoomed)}"
-    _tmux("bind-key", "S", "if-shell", "-F", "#{@brindle}", toggle, "", check=False)
+    cmds.append(["bind-key", "S", "if-shell", "-F", "#{@brindle}", toggle, ""])
+    _tmux_batch(cmds)
 
 
 # The default server's socket name: the one `tmux` without -L uses. It holds

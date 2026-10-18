@@ -246,6 +246,33 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
 
 
+def test_brindle_start_sync_work_is_bounded(db, repo, monkeypatch, detached, slow_background):
+    """Every subprocess `brindle start` waits on costs wall time (tens of ms
+    each, seconds under load): it used to run ~80, mostly one tmux process per
+    styling option."""
+    monkeypatch.chdir(repo)
+    ws = workspaces.adopt_root(db, str(repo))
+    agents.spawn(db, ws, "supervisor", provider_name="shell")
+    calls: list[list[str]] = []
+    real = subprocess.run
+
+    def counted(args, *a, **k):
+        calls.append(list(args))
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", counted)
+    try:
+        cli.start(prompt=None, provider="shell", attach=False,
+                  watch=False, autopilot=False, branch=None, worktree=None)
+    finally:
+        tmux.kill_session(ws.tmux_session)
+    styling = [c for c in calls if "window-style" in " ".join(c)]
+    assert len(calls) <= 40, calls
+    assert len(styling) == 1  # the session's styling goes in one batched tmux call
+    # The network probe for the default branch is skipped.
+    assert not any("ls-remote" in c for c in calls)
+
+
 # -- a prompt is visible: 'waiting', and its supervisor is told once -----------------
 
 
