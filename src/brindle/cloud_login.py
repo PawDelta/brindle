@@ -148,8 +148,8 @@ def run_bounded(argv: list[str], *, capture_output: bool = True, text: bool = Tr
             except OSError:
                 proc.kill()
             raise      # Popen's exit reaps the wrapper
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)    # a server the CLI left running
+        try:    # a server the CLI left running (trade-off: the group id could in theory
+            os.killpg(proc.pid, signal.SIGKILL)    # be reused once the group is empty)
         except OSError:
             pass
         return subprocess.CompletedProcess(argv, proc.returncode, out, err)

@@ -169,16 +169,17 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
     pidfile = tmp_path / "child.pid"
     gcloud = tmp_path / "bin" / "gcloud"
     gcloud.parent.mkdir()
-    gcloud.write_text(f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\nwait\n")
+    gcloud.write_text(f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}.tmp\n"
+                      f"mv {pidfile}.tmp {pidfile}\nwait\n")
     gcloud.chmod(0o755)
     monkeypatch.setenv("PATH", f"{gcloud.parent}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setattr(cloud_login, "CLI_TIMEOUT", 0.5)
+    monkeypatch.setattr(cloud_login, "CLI_TIMEOUT", 2.0)   # room for a loaded machine to start the script
     try:
         s = cloud_login.status("vertex", home=tmp_path)
         pid = int(pidfile.read_text())
         deadline = time.monotonic() + 3
         while _alive(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
+            pass    # the group was killed before status returned; init reaps the orphan
         assert not s.ok and not _alive(pid)
     finally:
         if pidfile.exists():
