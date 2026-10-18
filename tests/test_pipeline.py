@@ -306,3 +306,44 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
 ])
 def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
+
+
+def test_issue186_review_state_tells_silence_apart(db, repo, monkeypatch):
+    """Where a reported branch is in review shows in list_agents and the sidebar."""
+    from brindle import mcp_server, view, watch
+
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True}))
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    (Path(ws.path) / "new.py").write_text("x = 1\n")
+    sh("git add new.py && git commit -qm work", Path(ws.path))
+    add(db, ws, "w1", "assign", parent="boss", status="done", result="added new.py")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    sha = gates.head(ws)[:8]
+    assert pipeline.review_state(db, ws) is None
+
+    db.update_agent("w1", pipeline="reviewing")
+    assert "nothing" in pipeline.review_state(db, ws)
+    with pipeline.review_run(ws.id):
+        assert pipeline.review_state(db, ws) == "checks running"
+    add(db, ws, "rev0", "review", "reviewer", parent="boss", status="processing")
+    assert pipeline.review_state(db, ws) == "reviewer running (rev0)"
+    [line] = [x for x in mcp_server.list_agents().splitlines() if x.startswith("w1 ")]
+    assert "review=reviewer running (rev0)" in line
+
+    db.set_status("rev0", "done")
+    db.add_review(ws.id, gates.head(ws), "rev0", False, "no")
+    db.update_agent("w1", pipeline=None)
+    assert pipeline.review_state(db, ws) == f"changes requested at {sha}"
+    db.add_review(ws.id, gates.head(ws), "rev0", True, "lgtm")
+    assert pipeline.review_state(db, ws) == f"approved at {sha}"
+
+    db.update_agent("w1", merge_failed="check `pytest` failed:\nboom\n" + "x" * 300)
+    state = pipeline.review_state(db, ws)
+    assert state.startswith("merge failed: check `pytest` failed: boom x") and len(state) < 230
+    [entry] = [e for e in view.snapshot(db, ws.repo_root, panes={}) if e["id"] == ws.id]
+    assert entry["review_state"] == state
+    [w1] = [a for a in entry["agents"] if a["id"] == "w1"]
+    assert watch.awaiting_review(w1, entry) == state

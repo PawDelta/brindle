@@ -7,7 +7,7 @@ import logging
 import os
 import time
 
-from brindle import agents, git, identity_lock, status_cache, tmux
+from brindle import agents, git, identity_lock, pipeline, status_cache, tmux
 from brindle import usage as usage_mod
 from brindle.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 
@@ -281,6 +281,7 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
         review = db.last_review(ws.id)
         # The latest reviewer verdict, so the sidebar can flag rows that need you.
         entry["review"] = None if review is None else ("approved" if review.approved else "changes")
+        entry["review_state"] = pipeline.review_state(db, ws)
         entry["autopilot"], entry["asking"] = _autopilot_flags(db, shown)
         out.append(entry)
     return out

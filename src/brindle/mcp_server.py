@@ -619,6 +619,8 @@ def list_agents(repo: str | None = None) -> str:
     def render(repo_root: str) -> str:
         lines = []
         for ws in db.find_workspaces(repo_root):
+            state = pipeline.review_state(db, ws)
+            piped = pipeline.piped_worker(db, ws) if state else None
             for a in db.list_agents(ws.id):
                 me = " (you)" if caller and a.id == caller.id else ""
                 parent = f" parent={a.parent_id}" if a.parent_id else ""
@@ -632,6 +634,7 @@ def list_agents(repo: str | None = None) -> str:
                 lines.append(
                     f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
                     f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}"
+                    + (f" review={state}" if piped is not None and a.id == piped.id else "")
                 )
         return "\n".join(lines) or "No agents."
 
