@@ -93,6 +93,7 @@ def detached(monkeypatch):
         return real(args, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(agents, "_detach", lambda argv: started.append([str(x) for x in argv]))
     return started
 
 

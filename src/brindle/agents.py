@@ -1903,16 +1903,12 @@ def warm_checks(ws: Workspace) -> None:
 
 
 def _detach(args: list[str]) -> None:
-    """Start a brindle helper that outlives this process."""
-    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def _detach_orphan(args: list[str]) -> None:
     """Start a brindle helper that outlives this process and its agent: a
     shell starts it in the background and exits, so it is nobody's child.
     Stopping an agent stops every process descended from its MCP server
-    (brindle.procs), a helper ``_detach`` started there included."""
+    (brindle.procs): a review's check run started as a child of the worker
+    that reported was stopped with it when the worker was closed, still
+    waiting for a check slot, and the branch was never reviewed (#190)."""
     subprocess.run(["/bin/sh", "-c", '"$@" </dev/null >/dev/null 2>&1 &', "sh", *args],
                    start_new_session=True, stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
@@ -2028,7 +2024,7 @@ def finish_review_later(reviewer_id: str, ws_id: str) -> None:
     queued tasks it starts and the supervisor's notice half way."""
     from brindle.providers import brindle_invocation
 
-    _detach_orphan([*brindle_invocation(), "_finish-review", reviewer_id, ws_id])
+    _detach([*brindle_invocation(), "_finish-review", reviewer_id, ws_id])
 
 
 def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:

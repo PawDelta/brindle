@@ -279,18 +279,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     # Before the check run starts: it reads this report's claim (see review_claim).
     db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
     try:
-        second = second_profile(db, cfg, worker, ws)
-        # With a second review both calls carry a concrete profile, so the
-        # reviewer dedupe compares profiles and neither can swallow the other.
-        first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
-        started = agents.start_review(db, parent, ws, first, None, cfg)   # with checks: after they finish
-        if second:
-            try:
-                agents.start_review(db, parent, ws, second, None, cfg)
-            except agents.AgentError:
-                if started is not None:
-                    agents.close(db, started.id)   # don't leave a lone first review running
-                raise
+        _start_reviews(db, cfg, parent, worker, ws)
     except agents.AgentError as e:
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
@@ -300,6 +289,39 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   f"start ({e}). Review it yourself with workspace_diff, then merge_workspace. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
+    return True
+
+
+def _start_reviews(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Workspace) -> None:
+    """Start the review(s) of ``worker``'s branch (with checks: after they
+    finish). Raises ``AgentError`` when a reviewer can't start."""
+    second = second_profile(db, cfg, worker, ws)
+    # With a second review both calls carry a concrete profile, so the
+    # reviewer dedupe compares profiles and neither can swallow the other.
+    first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
+    started = agents.start_review(db, parent, ws, first, None, cfg)   # with checks: after they finish
+    if second:
+        try:
+            agents.start_review(db, parent, ws, second, None, cfg)
+        except agents.AgentError:
+            if started is not None:
+                agents.close(db, started.id)   # don't leave a lone first review running
+            raise
+
+
+def restart_review(db: DB, worker: Agent, ws: Workspace) -> bool:
+    """Start the review of a branch the pipeline still holds in review
+    although nothing is reviewing it (its check run was stopped, say), for
+    the report that put it there. Returns False when the branch isn't
+    piped; raises ``AgentError`` when no reviewer can start."""
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except ValueError:
+        return False
+    parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+    if parent is None or worker.pipeline != "reviewing" or not enabled(cfg, worker, ws):
+        return False
+    _start_reviews(db, cfg, parent, worker, ws)
     return True
 
 
