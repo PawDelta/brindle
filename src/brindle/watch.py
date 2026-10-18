@@ -111,6 +111,9 @@ def awaiting_review(agent: dict, ws: dict) -> str | None:
     """How a worker that reported and hasn't been approved yet reads, or None."""
     if (agent.get("mode") in WORKERS and agent.get("reported")
             and agent["status"] not in ("processing", "starting")):
+        state = ws.get("review_state")   # where it is in review (pipeline.review_state)
+        if state and not state.startswith("approved"):
+            return state
         return {"approved": None, "changes": "changes requested"}.get(ws.get("review"), "to review")
     return None
 

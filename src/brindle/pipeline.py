@@ -326,7 +326,8 @@ def review_state(db: DB, ws: Workspace) -> str | None:
     if worker is None or db.merged_sha(ws.id):
         return None
     if worker.merge_failed and not worker.pipeline:
-        return "merge failed: " + " ".join(worker.merge_failed.split())
+        why = " ".join(worker.merge_failed.split())
+        return "merge failed: " + (why if len(why) <= 200 else why[:199] + "…")
     if worker.pipeline == "reviewing":
         if review_running(ws.id):
             return "checks running"
