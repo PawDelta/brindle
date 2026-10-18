@@ -110,7 +110,9 @@ def binary() -> str:
     explicit = os.environ.get("BRINDLE_AGY_BIN")
     if explicit:
         return explicit
-    return shutil.which("agy") or (BUNDLED if os.path.exists(BUNDLED) else "agy")
+    from brindle.providers import which_cli
+
+    return which_cli("agy") or (BUNDLED if os.path.exists(BUNDLED) else "agy")
 
 
 def tool_names() -> list[str]:
