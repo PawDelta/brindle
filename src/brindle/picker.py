@@ -14,6 +14,7 @@ offered.
 
 from __future__ import annotations
 
+import os
 import shlex
 import sys
 from dataclasses import dataclass, field
@@ -254,6 +255,18 @@ def _login_command(provider: str) -> list[str]:
     return [antigravity.binary()]      # agy signs in on its first screen
 
 
+def _wsl_browser_env() -> dict[str, str] | None:
+    """Under WSL with no Linux browser, an environment that opens a sign-in in
+    the Windows browser; None (inherit) otherwise. Without any opener the CLI
+    prints its URL, which is then the person's to open."""
+    from brindle import providers
+
+    if any(os.environ.get(v) for v in ("BROWSER", "DISPLAY", "WAYLAND_DISPLAY", "SSH_CONNECTION", "SSH_TTY")):
+        return None
+    opener = providers.windows_browser()
+    return {**os.environ, "BROWSER": opener} if opener else None
+
+
 def sign_in(provider: str, *, run=None, confirm: Callable[..., bool] = typer.confirm,
             echo: Callable[..., None] = typer.echo) -> bool:
     """Get ``provider``'s CLI ready to run a chat: install it if it's missing
@@ -276,7 +289,7 @@ def sign_in(provider: str, *, run=None, confirm: Callable[..., bool] = typer.con
             echo(f"✗ installing {name} failed; run `{cmd}` yourself, then pick it again.")
             return False
     echo(f"Opening {name}'s sign-in; come back here when you're done.")
-    run(_login_command(provider), timeout=LOGIN_TIMEOUT, interactive=True)
+    run(_login_command(provider), timeout=LOGIN_TIMEOUT, interactive=True, env=_wsl_browser_env())
     if provider in doctor.signed_in_providers():
         echo(f"✓ {name} is signed in.")
         return True

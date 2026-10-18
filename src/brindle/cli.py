@@ -341,21 +341,23 @@ def start(
 
     if not branch and not worktree and not scratch.is_scratch(ws.path):
         curr_b = git.current_branch(ws.path)
+        default_b = git.default_branch(ws.repo_root) if curr_b else None
         if curr_b and git.merged_into_default(ws.repo_root, curr_b):
-            default_b = git.default_branch(ws.repo_root)
             typer.secho(f"! Branch '{curr_b}' is already merged into '{default_b}'.", fg="yellow")
             try:
                 if not git.dirty_files(ws.path):
                     git.run(["checkout", default_b], ws.path)
                     ws = workspaces.refresh_branch(db, ws)
+                    curr_b = default_b
                     typer.secho(f"✓ Switched to '{default_b}'.", fg="green")
             except Exception:
                 pass
-        elif curr_b and git.upstream_gone(ws.path, curr_b):
+        elif curr_b != default_b and git.upstream_gone(ws.path, curr_b):
+            # (the default branch is left out: a network probe for the common case)
             typer.secho(f"! Branch '{curr_b}' was deleted on origin but has unmerged changes.", fg="yellow")
         try:
-            if curr_b and git.current_branch(ws.path) == git.default_branch(ws.repo_root):
-                if warning := git.fast_forward(ws.path, git.current_branch(ws.path)):
+            if curr_b and curr_b == default_b:
+                if warning := git.fast_forward(ws.path, curr_b):
                     typer.secho(f"! {warning}", fg="yellow")
         except git.GitError:
             pass

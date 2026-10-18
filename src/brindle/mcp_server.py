@@ -329,7 +329,7 @@ async def handoff(
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
-        warning = tasks.overlap_warning(db, ws, files)
+        warning = tasks.overlap_warning(db, ws, files, task)
         if warning and load_repo_config(ws.repo_root).overlap == "block":
             return (f"Not started: this task {warning}. Two workers editing the same files "
                     "end in conflicts. Fold it into that worker's task (send_message), or pass "
@@ -458,7 +458,7 @@ async def assign(
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
-        warning = tasks.overlap_warning(db, ws, files)
+        warning = tasks.overlap_warning(db, ws, files, task)
         if warning and load_repo_config(ws.repo_root).overlap == "block":
             return (f"Not started: this task {warning}. Two workers editing the same files "
                     "end in conflicts. Fold it into that worker's task (send_message), or pass "
