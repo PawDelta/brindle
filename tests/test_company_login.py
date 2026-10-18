@@ -581,3 +581,23 @@ def test_logout_and_a_signed_out_doctor_fix_remove_the_federation_directory(aws_
     monkeypatch.setattr(license, "current", lambda **k: (_ for _ in ()).throw(license.LicenseError("signed out")))
     doctor.fix(lambda p: False)
     assert cloud_credential.org_ids() == [] and "brindle-acme" not in aws_config.read_text()
+
+
+@pytest.mark.parametrize("tool, platform, wanted", [
+    ("codex", "linux", "EACCES"),
+    ("az", "linux", "InstallAzureCLIDeb"),
+    ("az", "darwin", None),
+])
+def test_install_hint_gives_linux_alternatives_only_on_linux(monkeypatch, tool, platform, wanted):
+    monkeypatch.setattr(sys, "platform", platform)
+    hint = company_login.install_hint(tool)
+    assert company_login.INSTALL[tool] in hint
+    assert (wanted in hint) if wanted else hint == company_login.INSTALL[tool]
+
+
+def test_wsl_browser_interactive_login_gets_its_env(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(company_login.subprocess, "run",
+                        lambda argv, **kw: seen.update(kw) or type("P", (), {"returncode": 0})())
+    assert company_login.run_cmd(["codex", "login"], interactive=True, env={"BROWSER": "wslview"}) == (0, "")
+    assert seen["env"] == {"BROWSER": "wslview"}
