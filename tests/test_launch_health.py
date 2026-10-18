@@ -246,6 +246,19 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
 
 
+def test_tmux_batch_falls_back_to_one_by_one_when_a_command_is_rejected(monkeypatch):
+    """An older tmux rejecting one option must not drop the ones after it."""
+    seen = []
+
+    def fake(*args, check=True):
+        seen.append(list(args))
+        return SimpleNamespace(returncode=1 if ";" in args else 0)
+
+    monkeypatch.setattr(tmux, "_tmux", fake)
+    tmux._tmux_batch([["set-option", "a", "1"], ["set-option", "b", "2"]])
+    assert seen[1:] == [["set-option", "a", "1"], ["set-option", "b", "2"]]
+
+
 def test_brindle_start_sync_work_is_bounded(db, repo, monkeypatch, detached, slow_background):
     """Every subprocess `brindle start` waits on costs wall time (tens of ms
     each, seconds under load): it used to run ~80, mostly one tmux process per
@@ -267,7 +280,7 @@ def test_brindle_start_sync_work_is_bounded(db, repo, monkeypatch, detached, slo
     finally:
         tmux.kill_session(ws.tmux_session)
     styling = [c for c in calls if "window-style" in " ".join(c)]
-    assert len(calls) <= 40, calls
+    assert len(calls) <= 40, calls  # about 30 now, 83 before
     assert len(styling) == 1  # the session's styling goes in one batched tmux call
     # The network probe for the default branch is skipped.
     assert not any("ls-remote" in c for c in calls)

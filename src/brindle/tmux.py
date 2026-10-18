@@ -92,15 +92,18 @@ def _tmux(*args: str, input: str | None = None, check: bool = True,
 
 def _tmux_batch(cmds: list[list[str]]) -> None:
     """Run several tmux commands in one process (``cmd ; cmd``) instead of one
-    process each. Best effort like ``check=False``; tmux stops at a failing one."""
+    process each. Best effort like ``check=False``. tmux stops a sequence at the
+    first command it rejects (an option an older tmux lacks), so on failure each
+    command is run on its own and only the rejected ones are skipped."""
     args: list[str] = []
     for cmd in cmds:
         if args:
             args.append(";")
         # an argument ending in ";" would read as a separator: escape it
         args.extend(a[:-1] + "\\;" if a.endswith(";") and not a.endswith("\\;") else a for a in cmd)
-    if args:
-        _tmux(*args, check=False)
+    if args and _tmux(*args, check=False).returncode != 0:
+        for cmd in cmds:
+            _tmux(*cmd, check=False)
 
 
 def has_session(session: str) -> bool:
