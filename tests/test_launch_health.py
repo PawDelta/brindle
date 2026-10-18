@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, cli, cull, pool, procs, sessions, tmux, workspaces
+from brindle import agents, cli, cull, pool, procs, providers, sessions, tmux, workspaces
 from brindle.db import Agent
 from brindle.providers import ClaudeCode, trust_folder
 
@@ -97,6 +97,9 @@ def detached(monkeypatch):
         return real(args, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(agents, "_detach", lambda argv: started.append([str(x) for x in argv]))
+    # In a brindle worktree the invocation is the installed `brindle`, not `-P -m brindle`.
+    monkeypatch.setattr(providers, "brindle_invocation", lambda: [sys.executable, "-P", "-m", "brindle"])
     return started
 
 
