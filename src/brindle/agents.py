@@ -1980,6 +1980,13 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
     root_id = autopilot.root_of(db, caller.id) if caller else None
     ap = db.get_autopilot(root_id) if root_id else None
     is_auditor = bool(ap and ap.auditor_id == caller_id)
+    root = db.get_agent(root_id) if root_id else None
+    if (ap and caller and not is_auditor and ap.audit_sha and ap.audit_ok is None
+            and not ap.auditor_id and caller.mode == "review" and caller.parent_id == root_id
+            and root and caller.workspace_id == root.workspace_id):
+        # on_stop forgot the auditor while it was still starting (its window
+        # wasn't up yet): it is still the audit that began at audit_sha.
+        is_auditor = True
     if not caller or (caller.mode != "review" and not is_auditor) or ws is None:
         return "Only a reviewer started with request_review can submit a review."
     if is_auditor:   # the completion audit, not a branch review
