@@ -197,12 +197,9 @@ def test_brief_not_prompt_when_its_start_has_scrolled_off(db, launch, monkeypatc
     prompt_answer.finish_launch(db, db.get_agent("w1"))
     assert db.pending_count("boss") == 0
     assert db.get_agent("w1").status != "waiting"
-
-
-def test_brief_not_prompt_while_a_spinner_shows():
-    screen = ("  1. Run the unit tests first\n❯ 2. Fix any failures you find\n\n"
-              "✳ Clauding… (1m 37s)\n\n❯ \n")
-    assert not prompt_answer.looks_like_prompt(screen)
+    # The same menu-like lines above a busy spinner are a working agent, not a prompt.
+    assert not prompt_answer.looks_like_prompt(
+        "  1. Run the unit tests first\n❯ 2. Fix any failures you find\n\n✳ Clauding… (1m 37s)\n\n❯ \n")
 
 
 @pytest.mark.variant("race: the selection moves during the model call; the only test of the re-capture")
