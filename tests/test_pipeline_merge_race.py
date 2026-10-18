@@ -12,6 +12,7 @@ from brindle.db import DB
 from test_pipeline_idempotent import approved  # noqa: F401 - fixture
 
 
+@pytest.mark.variant("race from a live incident (#197): two merges into one base; the only test of the ordering")
 def test_a_merge_waits_for_another_merge_into_the_same_base(db, repo, monkeypatch):
     """#197: the supervisor's merge_workspace of one branch ran its gates while
     the pipeline merged another into the same base, and git then failed with
