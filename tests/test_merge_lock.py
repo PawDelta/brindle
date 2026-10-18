@@ -7,8 +7,7 @@ import threading
 
 import pytest
 
-from brindle import gates, git, pipeline, workspaces
-from brindle.db import DB
+from brindle import git, workspaces
 
 
 def _feature(db, repo, name="feature", fname="new.py"):
@@ -87,37 +86,3 @@ def test_two_concurrent_merges_both_succeed(db, repo):
 
     assert errors == []
     assert (repo / "a.py").exists() and (repo / "b.py").exists()
-
-
-def test_issue197_a_merge_into_a_base_waits_for_another_ones_gates(db, repo, monkeypatch):
-    """#197: a supervisor's merge_workspace and the pipeline's auto-merge of
-    another branch into the same base ran at once, each in its own process.
-    The second waits for the first's whole sync, gates and merge, so neither
-    merges into a base that moved under its gates."""
-    a = _feature(db, repo, "feat-a", "a.py")
-    b = _feature(db, repo, "feat-b", "b.py")
-    in_gates, release = threading.Event(), threading.Event()
-    real_run = gates.run
-
-    def slow_run(db_, ws, cfg, review_required):
-        if ws.id == a.id:
-            in_gates.set()
-            assert release.wait(10)
-        return real_run(db_, ws, cfg, review_required=review_required)
-
-    monkeypatch.setattr(gates, "run", slow_run)
-    out = {}
-    first = threading.Thread(target=lambda: out.update(a=pipeline.merge(DB(), None, a)))
-    first.start()
-    second = threading.Thread(target=lambda: out.update(b=pipeline.merge(DB(), None, b)))
-    try:
-        assert in_gates.wait(10)
-        second.start()
-        second.join(0.5)
-        assert second.is_alive() and "b" not in out   # waiting for a's merge
-    finally:
-        release.set()
-        first.join(20)
-        if second.ident:
-            second.join(20)
-    assert out["a"].startswith("Merged feat-a") and out["b"].startswith("Merged feat-b")

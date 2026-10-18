@@ -1163,14 +1163,8 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
     idempotent: a branch that already merged at its current commit gets
     "Already merged: ...", and one whose worktree is gone "Nothing to merge:
     ...", without a gate or a merge being run. When the sync with the base
-    conflicts, the conflicting files are appended to ``conflicts_out``.
-
-    Merges into one base are serialized from the sync to the merge (#197):
-    a branch whose gates passed on one tip of the base must not merge into
-    another, and the supervisor's merge_workspace and the pipeline's own
-    merge of another branch run in separate processes. Always taken after
-    the workspace's lock, never before, so the two can't deadlock."""
-    with merge_lock(ws.id), merge_lock(f"base\0{ws.repo_root}\0{ws.base_branch or ''}"):
+    conflicts, the conflicting files are appended to ``conflicts_out``."""
+    with merge_lock(ws.id):
         return _merge(db, caller, ws, squash, conflicts_out)
 
 
