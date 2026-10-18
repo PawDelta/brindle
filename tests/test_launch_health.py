@@ -79,6 +79,10 @@ def detached(monkeypatch):
     `_pool-fill`) instead of starting them; every other process runs."""
     started: list[list[str]] = []
     real = subprocess.Popen
+    # Run from a worktree venv, brindle_invocation() returns the installed
+    # `brindle` instead, which the match below wouldn't record.
+    from brindle import providers
+    monkeypatch.setattr(providers, "brindle_invocation", lambda: [sys.executable, "-P", "-m", "brindle"])
 
     def popen(args, *a, **k):
         if isinstance(args, list) and args[1:4] == ["-P", "-m", "brindle"] and str(args[4]).startswith("_"):

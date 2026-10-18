@@ -95,18 +95,37 @@ def merge_lock(ws_id: str):
     gates and the merge, one of them in a worktree the other is removing. A
     lock file under the brindle home, so it holds across processes and is given
     back if its holder dies; re-entrant within a thread."""
+    with _reentrant_lock("merge-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16]):
+        yield
+
+
+@contextmanager
+def base_lock(repo_root: str, base: str | None):
+    """Hold the base branch ``base`` of ``repo_root`` for one merge into it,
+    from the sync with it through the gates to the merge (#197). Branch locks
+    alone let the supervisor's merge_workspace of one branch and the
+    pipeline's merge of another into the same base overlap, and git then
+    fails on the other's MERGE_HEAD. Taken after the branch's merge_lock,
+    never before it."""
+    key = hashlib.sha1(f"{repo_root}\0{base or ''}".encode()).hexdigest()[:16]
+    with _reentrant_lock("base-" + key):
+        yield
+
+
+@contextmanager
+def _reentrant_lock(name: str):
     held = getattr(_held, "ids", None)
     if held is None:
         held = _held.ids = set()
-    if ws_id in held:
+    if name in held:
         yield
         return
-    with _file_lock("merge-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16]):
-        held.add(ws_id)
+    with _file_lock(name):
+        held.add(name)
         try:
             yield
         finally:
-            held.discard(ws_id)
+            held.discard(name)
 
 
 def _settled(db: DB, ws: Workspace) -> str | None:
@@ -267,7 +286,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if parent is None:
         return False
-    if git.dirty_files(ws.path):
+    if git.dirty_files(ws.path, tracked_only=True):   # untracked scratch files don't travel with the branch
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent.id,
@@ -840,10 +859,11 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
     reviewed_by = review.reviewer_id if review and review.reviewer_id else (reviewer.id if reviewer else "?")
     verdict = f"Review ({reviewed_by}): approved.\n{review.summary or ''}" if review else ""
     conflicting: list[str] = []
-    try:
-        text = merge(db, parent, ws, conflicts_out=conflicting)
-    except workspaces.WorkspaceError as e:   # one branch's trouble mustn't stall the others
-        text = f"Not merged: {e}"
+    text = _try_merge(db, parent, ws, conflicting)
+    if text.startswith("Not merged. "):
+        # A gate failed on an approved branch. That has been a flaky check
+        # often enough (#186) to try once more before anyone is asked.
+        text = _try_merge(db, parent, ws, conflicting)
     if text.startswith((ALREADY_MERGED, GONE)):
         if db.get_agent(worker.id):
             db.update_agent(worker.id, pipeline=None)   # reported when it merged; nothing to add
@@ -884,13 +904,24 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
             return text   # the checks failed: a stronger model gets one go at it
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
+        # The supervisor sees the first line: it carries the action, and the
+        # whole failure follows in the details rather than being cut short.
         _tell(db, parent_id,
               agents.condense(
-                  f"[brindle pipeline] `{ws.branch}` was approved but couldn't be merged: "
-                  f"{text}\nThis needs you: fix it (or have the worker fix it with send_message), "
-                  f"then merge_workspace(\"{ws.id}\"). Worker: {agents.first_line(report)}",
+                  f"[brindle pipeline] `{ws.branch}` was approved but couldn't be merged "
+                  f"({agents.first_line(text)}). This needs you: fix it (or have the worker fix it "
+                  f"with send_message), then merge_workspace(\"{ws.id}\"). "
+                  f"Worker: {agents.first_line(report)}",
+                  f"Why it wasn't merged:\n{text}",
                   f"Worker's report:\n{report}"), worker.id)
     return text
+
+
+def _try_merge(db: DB, parent: Agent | None, ws: Workspace, conflicting: list[str]) -> str:
+    try:
+        return merge(db, parent, ws, conflicts_out=conflicting)
+    except workspaces.WorkspaceError as e:   # one branch's trouble mustn't stall the others
+        return f"Not merged: {e}"
 
 
 def resolution_task(ws: Workspace, files: list[str], cfg: RepoConfig) -> str:
@@ -1122,8 +1153,9 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
     idempotent: a branch that already merged at its current commit gets
     "Already merged: ...", and one whose worktree is gone "Nothing to merge:
     ...", without a gate or a merge being run. When the sync with the base
-    conflicts, the conflicting files are appended to ``conflicts_out``."""
-    with merge_lock(ws.id):
+    conflicts, the conflicting files are appended to ``conflicts_out``.
+    One merge into a base at a time (see ``base_lock``)."""
+    with merge_lock(ws.id), base_lock(ws.repo_root, ws.base_branch):
         return _merge(db, caller, ws, squash, conflicts_out)
 
 
