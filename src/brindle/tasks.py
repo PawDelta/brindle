@@ -172,7 +172,7 @@ def conflict_forecast(db: DB, ws: Workspace, worker: Agent) -> list[tuple[Agent,
     for _t, other, other_ws in running_tasks(db, ws.repo_root):
         if other.id == worker.id or other_ws is None or other_ws.id == ws.id:
             continue
-        if other_ws.kind != "worktree" or other_ws.base_branch != ws.base_branch:
+        if other_ws.kind != "worktree":
             continue
         shared = conflicts.shared_files(mine, _changed_files(other_ws))
         if shared:
