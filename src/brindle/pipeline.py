@@ -267,7 +267,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if parent is None:
         return False
-    if git.dirty_files(ws.path):
+    if git.dirty_files(ws.path, tracked_only=True):   # untracked scratch files don't travel with the branch
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
         _tell(db, parent.id,
