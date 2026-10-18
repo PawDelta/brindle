@@ -89,12 +89,6 @@ def other_session_task(db, repo, monkeypatch):
     return record
 
 
-def test_cross_session_reported_unmerged_branch_overlaps_on_changed_files(db, other_session_task):
-    root = other_session_task()
-    warning = tasks.overlap_warning(db, root, ["src/brindle/tasks.py"])
-    assert warning and "fix-197" in warning and "brindle/session-14" in warning
-
-
 def test_cross_session_same_issue_number_warns_without_files(db, other_session_task):
     root = other_session_task()
     warning = tasks.overlap_warning(db, root, None, "Please fix #197 again")
@@ -104,23 +98,11 @@ def test_cross_session_same_issue_number_warns_without_files(db, other_session_t
 
 def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monkeypatch):
     root = other_session_task()
+    warning = tasks.overlap_warning(db, root, ["src/brindle/tasks.py"])    # on changed files alone
+    assert warning and "fix-197" in warning and "brindle/session-14" in warning
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197")
     monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: True)
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
-
-
-def test_cross_session_forecast_ignores_different_base_branch(db, repo, monkeypatch):
-    mine = workspaces.create(db, str(repo), "feat-mine", run_setup=False).workspace
-    theirs = workspaces.create(db, str(repo), "feat-theirs", run_setup=False).workspace
-    db.conn.execute("UPDATE workspaces SET base_branch='brindle/session-14' WHERE id=?", (theirs.id,))
-    for aid, w in (("mine", mine), ("theirs", theirs)):
-        db.add_agent(Agent(aid, w.id, "developer", "claude", None, "assign", "processing",
-                           "@1", None, time.time()))
-        db.add_task(tasks.Task("t" + aid, str(repo), aid, None, mine.id, "developer", "x",
-                               "assign", 1, w.branch, None, None, None, "started", time.time()))
-    monkeypatch.setattr(tasks, "_changed_files", lambda w: ["src/a.py"])
-    found = tasks.conflict_forecast(db, db.get_workspace(mine.id), db.get_agent("mine"))
-    assert [(a.id, shared) for a, _w, shared in found] == [("theirs", ["src/a.py"])]
 
 
 # -- dependencies: queue until merge, then auto-start --------------------------

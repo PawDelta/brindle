@@ -233,6 +233,14 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     ws = workspaces.adopt_root(db, str(repo))
     # A session still running here, which start must pause first.
     old = agents.spawn(db, ws, "supervisor", provider_name="shell")
+    calls: list[list[str]] = []
+    real = subprocess.run
+
+    def counted(args, *a, **k):
+        calls.append(list(args))
+        return real(args, *a, **k)
+
+    monkeypatch.setattr(subprocess, "run", counted)
     try:
         t0 = time.monotonic()
         cli.start(prompt=None, provider="shell", attach=False,
@@ -244,6 +252,10 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     assert db.get_agent(old.id).status == "paused"
     # Retention and culling went to the detached helper instead.
     assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
+    # Each subprocess start waits on costs wall time: about 30 now, 83 before.
+    assert len(calls) <= 40, calls
+    assert len([c for c in calls if "window-style" in " ".join(c)]) == 1   # one batched tmux call
+    assert not any("ls-remote" in c for c in calls)     # no network probe for the default branch
 
 
 def test_tmux_batch_falls_back_to_one_by_one_when_a_command_is_rejected(monkeypatch):
@@ -257,33 +269,6 @@ def test_tmux_batch_falls_back_to_one_by_one_when_a_command_is_rejected(monkeypa
     monkeypatch.setattr(tmux, "_tmux", fake)
     tmux._tmux_batch([["set-option", "a", "1"], ["set-option", "b", "2"]])
     assert seen[1:] == [["set-option", "a", "1"], ["set-option", "b", "2"]]
-
-
-def test_brindle_start_sync_work_is_bounded(db, repo, monkeypatch, detached, slow_background):
-    """Every subprocess `brindle start` waits on costs wall time (tens of ms
-    each, seconds under load): it used to run ~80, mostly one tmux process per
-    styling option."""
-    monkeypatch.chdir(repo)
-    ws = workspaces.adopt_root(db, str(repo))
-    agents.spawn(db, ws, "supervisor", provider_name="shell")
-    calls: list[list[str]] = []
-    real = subprocess.run
-
-    def counted(args, *a, **k):
-        calls.append(list(args))
-        return real(args, *a, **k)
-
-    monkeypatch.setattr(subprocess, "run", counted)
-    try:
-        cli.start(prompt=None, provider="shell", attach=False,
-                  watch=False, autopilot=False, branch=None, worktree=None)
-    finally:
-        tmux.kill_session(ws.tmux_session)
-    styling = [c for c in calls if "window-style" in " ".join(c)]
-    assert len(calls) <= 40, calls  # about 30 now, 83 before
-    assert len(styling) == 1  # the session's styling goes in one batched tmux call
-    # The network probe for the default branch is skipped.
-    assert not any("ls-remote" in c for c in calls)
 
 
 # -- a prompt is visible: 'waiting', and its supervisor is told once -----------------
