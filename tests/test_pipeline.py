@@ -299,6 +299,21 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
+def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monkeypatch):
+    """Live incident: three reviewers on one branch. Check runs for a branch
+    don't wait on each other (pipeline.review_run), so a second one reached
+    the reviewer dedupe while the first run's reviewer was being spawned,
+    its window not recorded yet, took it for dead and started another."""
+    ws = _reported(db, repo, reviewing_since=time.time())
+    add(db, ws, "r1", "review", "reviewer", parent="boss", status="starting")
+    db.update_agent("r1", tmux_window="", review_sha=gates.head(ws))
+    spawned = []
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: spawned.append(k))
+    agents.review_after_checks(db, "boss", ws)
+    agents.request_review(db, db.get_agent("boss"), ws)
+    assert spawned == []
+
+
 @pytest.mark.parametrize("summary", [
     "Needs supervisor action: None — all fixable by the worker.",
     pytest.param("Needs supervisor action: No items.",
