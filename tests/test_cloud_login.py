@@ -2,7 +2,10 @@
 
 import hashlib
 import json
+import os
+import signal
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -150,3 +153,56 @@ def test_google_timeout_is_a_failed_login_not_an_exception(tmp_path):
         raise subprocess.TimeoutExpired(cmd, 1)
 
     assert not cloud_login.status("vertex", home=tmp_path, run=slow).ok
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypatch):
+    # gcloud is a wrapper script around python: killing only the wrapper on a
+    # timeout leaves the python process (and any local auth server) running.
+    pidfile = tmp_path / "child.pid"
+    gcloud = tmp_path / "bin" / "gcloud"
+    gcloud.parent.mkdir()
+    gcloud.write_text(f"#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\necho $! > {pidfile}\nwait\n")
+    gcloud.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{gcloud.parent}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(cloud_login, "CLI_TIMEOUT", 0.5)
+    try:
+        s = cloud_login.status("vertex", home=tmp_path)
+        pid = int(pidfile.read_text())
+        deadline = time.monotonic() + 3
+        while _alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not s.ok and not _alive(pid)
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+
+def test_issue189_a_stale_signin_is_ended_even_when_nobody_is_there(tmp_path, monkeypatch):
+    # An ignored `gcloud auth application-default login` holds its local auth
+    # server (and a port) until something ends it: past TAB_LIFE it is ended on
+    # the next sweep, not only when a person types and a new tab is wanted.
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
+    env = {"CLOUDSDK_CONFIG": str(tmp_path / "gcloud")}
+    lg = cloud_login._login("vertex", env, tmp_path)
+    lg.lock.parent.mkdir(parents=True)
+    fd = os.open(lg.lock, os.O_RDWR | os.O_CREAT)
+    assert cloud_login._locked(fd)      # the login still runs: it holds the lock
+    lg.write({"lapse": lg.fingerprint(), "pid": 4242, "opened_at": NOW - cloud_login.TAB_LIFE - 1})
+    ended = []
+    try:
+        cloud_login.sign_in("vertex", env=env, home=tmp_path, now=NOW, last_input=None,
+                            kill=ended.append, popen=lambda *a, **k: pytest.fail("opened a sign-in"))
+    finally:
+        os.close(fd)
+    assert ended == [4242]
