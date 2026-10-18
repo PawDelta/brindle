@@ -119,6 +119,20 @@ def test_a_probe_is_cached_within_one_run(monkeypatch):
     assert fake.count("claude", "auth", "status") == 1
 
 
+def test_a_timed_out_probe_is_retried_with_a_longer_timeout_before_undetermined(monkeypatch):
+    # Under machine load a healthy `claude auth status` can miss the usual timeout.
+    fake = Fake(monkeypatch)
+    answers = iter([(124, "timed out"), CLAUDE_OK])
+    fake.run = lambda argv, timeout=30.0, **kw: (fake.calls.append((tuple(argv), False, timeout)),
+                                                  next(answers))[1]
+    monkeypatch.setattr(company_login, "run_cmd", fake.run)
+    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG))
+    got = company_identity.claude_identity(ORG, claude_setup("subscription", org_id=CLAUDE_ORG))
+    assert got.determined and CLAUDE_ORG in got.ident
+    first, second = (c[2] for c in fake.calls)
+    assert second > first
+
+
 # -- mismatches ----------------------------------------------------------------------------
 
 def test_other_claude_org_warns_with_the_fix(monkeypatch):

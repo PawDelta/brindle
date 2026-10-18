@@ -43,6 +43,7 @@ from brindle import agents, company_identity, company_login, config
 log = logging.getLogger(__name__)
 
 INTERVAL = 30.0
+SETTLED_SWEEPS = 10     # determined answers in a row (~5 minutes) that end a spell of "can't verify"
 STATE_FILE = "signin-pause.json"
 NAMES = {"claude": "Claude", "codex": "Codex"}
 CLOUD_ROUTES = ("bedrock", "vertex", "foundry")
@@ -81,7 +82,7 @@ def _load() -> dict:
     except (OSError, ValueError):
         got = {}
     got = got if isinstance(got, dict) else {}
-    for key in ("paused", "identity", "different", "warned"):
+    for key in ("paused", "identity", "different", "warned", "settled"):
         if not isinstance(got.get(key), dict):
             got[key] = {}
     return got
@@ -258,9 +259,14 @@ def _unwarn(state, provider: str, prefix: str) -> None:
 def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str]:
     name = NAMES[provider]
     if res.kind == "undetermined":
+        state["settled"][provider] = 0
         return _warn_once(db, state, provider, "undetermined",
                           f"{name}'s sign-in can't be verified ({res.line}); agents keep running.", running)
-    _unwarn(state, provider, "undetermined")
+    # A check that times out every other sweep under load is one spell, not a new
+    # one each time: the warning rearms only after the check has held for a while.
+    settled = state["settled"][provider] = int(state["settled"].get(provider) or 0) + 1
+    if settled >= SETTLED_SWEEPS:
+        _unwarn(state, provider, "undetermined")
     if res.kind == "signed_out":
         return _pause(db, state, provider, running, f"{name} signed out",
                       f"{name} is signed out. Run `brindle login` or `brindle doctor --fix` "
