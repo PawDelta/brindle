@@ -57,15 +57,19 @@ def helpers(monkeypatch):
     """brindle's detached helpers (_flush, _after-launch, _launch-health) aren't started; git
     and everything else runs as usual. Returns their command lines."""
     started = []
-    real = subprocess.Popen
+    real, real_detach = subprocess.Popen, agents._detach
 
-    def popen(argv, *a, **k):
+    def helper(argv):
         if isinstance(argv, list) and any(x in argv for x in ("_flush", "_after-launch", "_launch-health")):
             started.append(argv)
-            return None
-        return real(argv, *a, **k)
+            return True
+        return False
+
+    def popen(argv, *a, **k):
+        return None if helper(argv) else real(argv, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(agents, "_detach", lambda argv: helper(argv) or real_detach(argv))
     return started
 
 
