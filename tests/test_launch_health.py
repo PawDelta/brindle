@@ -79,10 +79,9 @@ def detached(monkeypatch):
     `_pool-fill`) instead of starting them; every other process runs."""
     started: list[list[str]] = []
     real = subprocess.Popen
-    # Run from a worktree venv, brindle_invocation() returns the installed
-    # `brindle` instead, which the match below wouldn't record.
-    from brindle import providers
-    monkeypatch.setattr(providers, "brindle_invocation", lambda: [sys.executable, "-P", "-m", "brindle"])
+    # Run from a checkout nested in a brindle worktree dir, brindle_invocation
+    # picks the installed `brindle` instead of this interpreter.
+    monkeypatch.setattr(providers, "_in_worktree", lambda path: False)
 
     def popen(args, *a, **k):
         if isinstance(args, list) and args[1:4] == ["-P", "-m", "brindle"] and str(args[4]).startswith("_"):
@@ -97,9 +96,6 @@ def detached(monkeypatch):
         return real(args, *a, **k)
 
     monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(agents, "_detach", lambda argv: started.append([str(x) for x in argv]))
-    # In a brindle worktree the invocation is the installed `brindle`, not `-P -m brindle`.
-    monkeypatch.setattr(providers, "brindle_invocation", lambda: [sys.executable, "-P", "-m", "brindle"])
     return started
 
 

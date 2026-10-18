@@ -432,7 +432,8 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
     whose work went nowhere: its branch waits in the pipeline for a review no
     reviewer is doing (none running, no verdict for its commit) for
     UNPICKED_AFTER seconds, or twice the repo's checks if they take longer
-    (brindle starts that review again itself, and says so);
+    (once nothing checks it either, the review is first started again: see
+    pipeline.restart_review);
     or it's sitting idle with brindle messages it hasn't taken for
     UNDELIVERED_AFTER seconds. Nobody else would notice either: the
     supervisor waits for a message that never comes."""
@@ -468,25 +469,19 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
             # later reviewer's start (a fallback review, say).
             reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
             since = max([a.reviewing_since] + [r.created_at for r in reviewers])
-            if (now - since < max(UNPICKED_AFTER, 2 * wait) or db.latest_review(ws.id, head)
+            if (now - since < pipeline.RESTART_REVIEW_AFTER or db.latest_review(ws.id, head)
                     or any(r.dismissed_at is None and r.status not in ("paused", "done")
-                           and agents.is_alive(r, panes) for r in reviewers)
-                    or a.stuck_noted == since):
+                           and agents.is_alive(r, panes) for r in reviewers)):
+                continue
+            # Its check run died (#186, #190): start it again before asking anyone.
+            if pipeline.restart_review(db, a, ws, since):
+                done.append(f"restarted the review of `{ws.branch}`, which nothing was working on")
+                continue
+            if now - since < max(UNPICKED_AFTER, 2 * wait):
                 continue
             body = (f"Worker {a.id} reported on {where}, and for {int((now - since) // 60)} min no "
-                    f"reviewer has been running and its commit {head[:8]} has had no verdict. ")
-            # Nothing is at work on it (its check run was stopped, say): start
-            # the review again rather than wait on the supervisor.
-            try:
-                restarted = pipeline.restart_review(db, a, ws)
-            except agents.AgentError as e:
-                restarted, body = False, body + f"brindle couldn't start it again ({e}). "
-            if restarted:
-                db.update_agent(a.id, stuck_noted=since)   # once a spell, even if the notice fails
-                body += (f"brindle has started its checks and review again; if no verdict comes, "
-                         f"call request_review(\"{ws.id}\").")
-            else:
-                body += f"Call request_review(\"{ws.id}\") to get it reviewed."
+                    f"reviewer has been running and its commit {head[:8]} has had no verdict. Call "
+                    f"request_review(\"{ws.id}\") to get it reviewed.")
         else:
             continue
         if a.stuck_noted == since:

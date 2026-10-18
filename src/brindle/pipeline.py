@@ -128,6 +128,40 @@ def _reentrant_lock(name: str):
             held.discard(name)
 
 
+def _review_run_file(ws_id: str):
+    from brindle.config import brindle_home
+
+    lock_dir = brindle_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / ("review-run-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16] + ".lock")
+
+
+@contextmanager
+def review_run(ws_id: str):
+    """Held by each run that checks workspace ``ws_id`` and then starts its
+    reviewer (``agents.review_after_checks``), for as long as it lives. Shared:
+    two such runs (a second review, a newer report) don't wait on each other.
+    The lock goes with a run that dies, so ``review_running`` tells a run
+    that is at work from one that is gone."""
+    with open(_review_run_file(ws_id), "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def review_running(ws_id: str) -> bool:
+    """Whether a run holds ``review_run`` for workspace ``ws_id`` right now."""
+    with open(_review_run_file(ws_id), "w") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return False
+
+
 def _settled(db: DB, ws: Workspace) -> str | None:
     """Why no gate or merge may run on ``ws`` any more: it is gone (removed,
     or being removed), or its branch already merged at its current commit.
@@ -297,6 +331,14 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
         return True
     # Before the check run starts: it reads this report's claim (see review_claim).
     db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time())
+    _start_review(db, cfg, parent, worker, ws, result)
+    return True
+
+
+def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Workspace,
+                  result: str) -> None:
+    """Start the review(s) of ``worker``'s reported branch; when no reviewer
+    can start, hand the branch to the supervisor."""
     try:
         _start_reviews(db, cfg, parent, worker, ws)
     except agents.AgentError as e:
@@ -307,7 +349,28 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   f"[brindle pipeline] {worker.id} reported on `{ws.branch}`, but no reviewer could "
                   f"start ({e}). Review it yourself with workspace_diff, then merge_workspace. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
-        return True
+
+
+RESTART_REVIEW_AFTER = 120.0   # seconds a reported branch may wait with nothing checking or reviewing it
+
+
+def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
+    """#186/#190: ``worker`` reported and its branch has waited in review
+    since ``since`` with nothing at work on it: no check run (stopped with
+    its worker, or crashed), no reviewer, no verdict. The caller has seen to
+    the last two. Start the review again, once per such wait, unless a check
+    run for it is still at work. Returns whether it was started."""
+    if worker.review_restarted == since or review_running(ws.id):
+        return False
+    try:
+        cfg = load_repo_config(ws.repo_root)
+    except ValueError:
+        return False
+    parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+    if parent is None or not enabled(cfg, worker, ws):
+        return False
+    db.update_agent(worker.id, review_restarted=since)
+    _start_review(db, cfg, parent, worker, ws, worker.result or "")
     return True
 
 

@@ -40,6 +40,8 @@ fi
 
 spec="brindle"
 [ -n "${BRINDLE_VERSION:-}" ] && spec="brindle==$BRINDLE_VERSION"
+# BRINDLE_SOURCE=/path/to/checkout installs that instead of PyPI (scripts/smoke_install.sh).
+[ -n "${BRINDLE_SOURCE:-}" ] && spec="$BRINDLE_SOURCE"
 step "installing $spec"
 uv tool install --upgrade --python '>=3.11' "$spec"
 

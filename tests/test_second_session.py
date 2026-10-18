@@ -30,7 +30,7 @@ def _start(**kw):
 
 def test_open_attaches_to_the_running_session(db, running, monkeypatch):
     seen = []
-    monkeypatch.setattr(cli, "_ask_about_running", lambda a: "o")
+    monkeypatch.setattr(cli, "_ask_about_running", lambda a, w=None: "o")
     monkeypatch.setattr(cli, "_attach", lambda ws, window=None: seen.append((ws.id, window)))
     monkeypatch.setattr(agents, "spawn", lambda *a, **k: pytest.fail("must not start another"))
     _start()
@@ -51,7 +51,7 @@ def test_any_number_of_sessions_each_get_their_own_worktree(db, running, monkeyp
         **vars(cli.subprocess), "Popen": lambda argv, **kw: upgrades.append(argv)}))
     monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
     spawned = []
-    monkeypatch.setattr(cli, "_ask_about_running", lambda a: "n")
+    monkeypatch.setattr(cli, "_ask_about_running", lambda a, w=None: "n")
     monkeypatch.setattr(cli, "_attach", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_cull_detached", lambda *a: None)
     monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)

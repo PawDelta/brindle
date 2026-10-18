@@ -46,6 +46,20 @@ def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
     assert "sk-profile-secret" not in doctor.render(doctor.signin_checks(str(repo)))
 
 
+def test_wsl_ignores_a_windows_shim_and_doctor_asks_for_a_linux_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(providers, "CODEX_BUNDLED", str(tmp_path / "none"))
+    monkeypatch.delenv("BRINDLE_CODEX_BIN", raising=False)
+    monkeypatch.setattr("shutil.which", lambda name, **kw: f"/mnt/c/bin/{name}")
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    assert providers.codex_binary() == "codex"
+    assert providers.unusable("codex")   # the bare name isn't found again as the shim
+    c = doctor._tool("codex", False, "why", install="npm i")
+    assert "Windows" in c.detail and "Linux" in c.detail
+    monkeypatch.delenv("WSL_DISTRO_NAME")
+    monkeypatch.setattr(providers, "is_wsl", lambda: False)
+    assert providers.codex_binary() == "/mnt/c/bin/codex"
+
+
 def test_doctor_names_the_env_key_never_its_value(installed, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-value")
     c = lines()["Codex sign-in"]
