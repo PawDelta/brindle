@@ -253,7 +253,8 @@ def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(db, monkeypatch)
     monkeypatch.setattr(watch.view, "autopilot_entry", lambda *a, **k: None)
     monkeypatch.setattr(watch.watch_costs, "local", lambda *a, **k: watch.watch_costs.Local())
     monkeypatch.setattr(watch.watch_costs, "Feed", lambda root: types.SimpleNamespace(get=lambda: None))
-    # Shown by no terminal, then by one (a session switch): that redraws it all.
+    # A wheel tick must not ask tmux who shows the pane again (a subprocess per
+    # tick made scrolling lag): only the first pass looks, and redraws it all.
     viewers = iter(["", "/dev/ttys001"])
     monkeypatch.setattr(watch.sidebar_logo, "viewer", lambda: next(viewers))
 
@@ -276,7 +277,7 @@ def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(db, monkeypatch)
 
     screen = Screen()
     watch._loop(screen, None)
-    assert screen.clears == 2
+    assert screen.clears == 1
     # The wheel-down scrolls the top section (Costs) off the pane.
     assert "▾ Costs" in screen.frames[0]
     assert "▾ Costs" not in screen.frames[1]
