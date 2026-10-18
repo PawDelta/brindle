@@ -442,7 +442,7 @@ def _dead_at(last: dict, running: bool, now: float) -> float | None:
 def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None,
             home: str | Path | None = None, now: float | None = None,
             last_input: float | None = None, run=run_bounded, expiry=tokeninfo_expiry,
-            popen=None, kill=None, platform: str | None = None) -> str:
+            popen=None, kill=None, platform: str | None = None, which=None) -> str:
     """Open the browser sign-in a lapsed login needs: one tab machine-wide,
     when the person is there to use it.
 
@@ -511,13 +511,20 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
                 if time.monotonic() > deadline:
                     return "waiting"
                 time.sleep(0.1)
+        child_env = _full_env(env)
         if not _browser_here(lg.env, sys.platform if platform is None else platform):
-            return "manual"
+            # WSL2 has no Linux browser, but the Windows one can open the URL.
+            from brindle import providers
+
+            opener = None if lg.env.get("SSH_CONNECTION") or lg.env.get("SSH_TTY") else providers.windows_browser(which)
+            if not opener:
+                return "manual"
+            child_env = {**os.environ, **(env or {}), "BROWSER": opener}
         try:
             # The child inherits the locked descriptor: the lock is held until
             # the sign-in exits, however long the person takes.
             proc = (popen or subprocess.Popen)(
-                shlex.split(s.refresh_cmd), env=_full_env(env), stdin=subprocess.DEVNULL,
+                shlex.split(s.refresh_cmd), env=child_env, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True, pass_fds=(fd,))
         except OSError:

@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -37,6 +38,29 @@ INSTALL = {
     "claude": "npm install -g @anthropic-ai/claude-code",
     "codex": "npm install -g @openai/codex",
 }
+
+# What to do instead on Linux (and WSL), where there is no brew and a global
+# npm install into a root-owned prefix fails with EACCES. INSTALL stays the
+# command brindle itself runs.
+NPM_PREFIX_NOTE = "on Linux, if that fails with EACCES: `npm config set prefix ~/.local`, then retry (no sudo)"
+INSTALL_LINUX = {
+    "aws": "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html "
+           "(or `sudo snap install aws-cli --classic`)",
+    "gcloud": "`sudo snap install google-cloud-cli --classic` (or https://cloud.google.com/sdk/docs/install)",
+    "az": "`curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash` "
+          "(https://learn.microsoft.com/cli/azure/install-azure-cli-linux)",
+    "claude": NPM_PREFIX_NOTE,
+    "codex": NPM_PREFIX_NOTE,
+}
+
+
+def install_hint(tool: str) -> str:
+    """How to install ``tool``, with the Linux alternative appended on Linux."""
+    hint = INSTALL[tool]
+    if sys.platform.startswith("linux"):
+        alt = INSTALL_LINUX[tool]
+        hint += f"  [{alt}]" if alt is NPM_PREFIX_NOTE else f"  [Linux: {alt}]"
+    return hint
 
 
 def which(name: str) -> str | None:
@@ -274,7 +298,7 @@ class Login:
     def _need(self, tool: str) -> bool:
         if which(tool):
             return True
-        self.say(f"{tool} isn't installed; install it with: {INSTALL[tool]}")
+        self.say(f"{tool} isn't installed; install it with: {install_hint(tool)}")
         return False
 
     def _ensure(self, tool: str, check: list[str], login: list[str], what: str) -> bool:
@@ -402,7 +426,7 @@ class Login:
         binary = which("claude")
         env = {**os.environ, **claude_env(self.org_id, c)}
         if models and not binary:
-            self.say(f"claude isn't installed; couldn't check model access (install: {INSTALL['claude']})")
+            self.say(f"claude isn't installed; couldn't check model access (install: {install_hint('claude')})")
             return False
         # Probe from an empty directory: a repo's own .claude settings and hooks
         # must not run while we sign in.

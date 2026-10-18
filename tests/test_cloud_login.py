@@ -148,6 +148,25 @@ def test_signed_out_never_prompts(provider, stderr, tmp_path):
     assert how == "no lapse"
 
 
+@pytest.mark.parametrize("have, opener", [
+    ({"wslview"}, "wslview"),                           # wslu installed: it picks the Windows browser
+    ({"explorer.exe", "cmd.exe"}, "explorer.exe"),      # else the Windows PATH's explorer
+    ({"cmd.exe"}, "cmd.exe /c start"),
+    (set(), None),                                      # nothing to open it with: print the URL
+])
+def test_wsl_browser_signin_opens_the_windows_browser(have, opener, tmp_path, monkeypatch):
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("brindle.providers.is_wsl", lambda: True)
+    env = {"CLOUDSDK_CONFIG": str(tmp_path / "gcloud")}     # no DISPLAY / WAYLAND_DISPLAY, as on WSL2
+    opened = []
+    how = cloud_login.sign_in(
+        "vertex", env=env, home=tmp_path, now=NOW, last_input=NOW, platform="linux",
+        run=lambda cmd, **kw: SimpleNamespace(returncode=1, stdout="", stderr=VERTEX_ERROR),
+        which=lambda name: f"/bin/{name}" if name in have else None,
+        popen=lambda cmd, **kw: opened.append(kw["env"].get("BROWSER")) or SimpleNamespace(pid=1))
+    assert (how, opened) == (("opened", [opener]) if opener else ("manual", []))
+
+
 def test_google_timeout_is_a_failed_login_not_an_exception(tmp_path):
     def slow(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
