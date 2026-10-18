@@ -1358,6 +1358,24 @@ def is_alive(agent: Agent, panes: dict[str, bool] | None = None) -> bool:
     return tmux.window_alive(agent.tmux_window, server=agent.tmux_server or None)
 
 
+LAUNCH_GRACE = 60.0   # seconds a just-spawned agent may go without a window before it counts as dead
+
+
+def alive_or_starting(agent: Agent) -> bool:
+    """``is_alive``, or still being launched: spawn records the agent before
+    its window opens (the launch's checks can take seconds), so one with no
+    window yet is starting, not dead, for LAUNCH_GRACE seconds. A launch known
+    to have failed ends that: spawn deletes the row of one that raised, and
+    launch_health marks one whose CLI died at startup "failed". For the
+    checks that would replace the agent (start another reviewer, forget an
+    auditor), not for ones that talk to its pane."""
+    if is_alive(agent):
+        return True
+    return (runs_process(agent) and not agent.tmux_window and agent.result is None
+            and agent.status not in ("paused", "done", "failed")
+            and time.time() - agent.created_at < LAUNCH_GRACE)
+
+
 def server_of(agent: Agent) -> str | None:
     """The tmux server ``agent``'s window is on (a private socket name, or
     None for the default server), for the ``server`` argument of tmux calls
@@ -1980,13 +1998,6 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
     root_id = autopilot.root_of(db, caller.id) if caller else None
     ap = db.get_autopilot(root_id) if root_id else None
     is_auditor = bool(ap and ap.auditor_id == caller_id)
-    root = db.get_agent(root_id) if root_id else None
-    if (ap and caller and not is_auditor and ap.audit_sha and ap.audit_ok is None
-            and not ap.auditor_id and caller.mode == "review" and caller.parent_id == root_id
-            and root and caller.workspace_id == root.workspace_id):
-        # on_stop forgot the auditor while it was still starting (its window
-        # wasn't up yet): it is still the audit that began at audit_sha.
-        is_auditor = True
     if not caller or (caller.mode != "review" and not is_auditor) or ws is None:
         return "Only a reviewer started with request_review can submit a review."
     if is_auditor:   # the completion audit, not a branch review
@@ -2362,7 +2373,7 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
     ``profile``, only one running that profile (a second review by another
     profile is not a duplicate)."""
     for a in db.list_agents(ws.id):
-        if a.mode == "review" and a.result is None and is_alive(a) and a.review_sha == sha \
+        if a.mode == "review" and a.result is None and alive_or_starting(a) and a.review_sha == sha \
                 and (profile is None or a.profile == profile):
             return a
     return None
@@ -2485,7 +2496,7 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     cfg = cfg or load_repo_config(ws.repo_root)
     sha = gates.head(ws)
     for old in db.list_agents(ws.id):
-        if old.mode != "review" or old.result is not None or not is_alive(old):
+        if old.mode != "review" or old.result is not None or not alive_or_starting(old):
             continue
         if old.unreported_noted:
             continue   # it stopped without a verdict: not the reviewer of anything

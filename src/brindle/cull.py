@@ -49,7 +49,7 @@ from brindle.db import DB, Agent, Workspace
 from brindle.pro import route_health
 
 # An agent this new may not have its window recorded yet.
-LAUNCH_GRACE = 60.0
+LAUNCH_GRACE = agents.LAUNCH_GRACE
 # How long a message waits for its normal delivery (a hook, the start-up
 # flush) before a sweep retries it.
 FLUSH_RETRY_AFTER = 30.0
