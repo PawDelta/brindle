@@ -15,6 +15,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import re
 import time
 from pathlib import PurePath
 
@@ -91,22 +92,68 @@ def running_tasks(db: DB, repo_root: str) -> list[tuple[Task, Agent, Workspace |
     return out
 
 
-def overlap_warning(db: DB, ws: Workspace, files: list[str] | None) -> str | None:
+def _issue_numbers(text: str | None) -> set[str]:
+    return set(re.findall(r"#(\d+)", text or ""))
+
+
+def _reported_unmerged(db: DB, repo_root: str) -> list[tuple[Task, Agent, Workspace]]:
+    """Started tasks in ``repo_root``, from any session, whose worker has
+    reported but whose branch isn't merged into the repo's default branch yet:
+    the work still exists and will land later."""
+    out = []
+    for t in db.list_tasks(repo_root, state="started"):
+        agent = db.get_agent(t.agent_id) if t.agent_id else None
+        if agent is None or agent.result is None:
+            continue
+        other_ws = db.get_workspace(agent.workspace_id)
+        if other_ws is None or other_ws.kind != "worktree":
+            continue
+        if git.merged_into_default(repo_root, other_ws.branch):
+            continue
+        out.append((t, agent, other_ws))
+    return out
+
+
+def _where(other_ws: Workspace | None) -> str:
+    if other_ws is None:
+        return "?"
+    session = f", session {other_ws.base_branch}" if other_ws.base_branch else ""
+    return f"{other_ws.branch}{session}"
+
+
+def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
+                    task_text: str | None = None) -> str | None:
     """A warning if ``files`` overlaps another active task's declared or
-    actually-changed files, or None. Still starts the worker regardless: this
-    is informational, not a block."""
-    if not files:
+    actually-changed files, or None. Also covers tasks from other sessions
+    whose worker has reported but whose branch isn't merged yet, and a task
+    text naming the same issue (#NNN) as one of them. Still starts the worker
+    regardless: this is informational, not a block."""
+    if files:
+        for t, _agent, other_ws in running_tasks(db, ws.repo_root):
+            candidates = list(_loads(t.files))
+            if other_ws:
+                candidates += _changed_files(other_ws)
+            for mine in files:
+                for theirs in candidates:
+                    if _glob_match(mine, theirs):
+                        branch = other_ws.branch if other_ws else "?"
+                        return (f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
+                                "consider depends_on or merging first")
+    mine_issues = _issue_numbers(task_text)
+    if not files and not mine_issues:
         return None
-    for t, _agent, other_ws in running_tasks(db, ws.repo_root):
-        candidates = list(_loads(t.files))
-        if other_ws:
-            candidates += _changed_files(other_ws)
-        for mine in files:
+    for t, _agent, other_ws in _reported_unmerged(db, ws.repo_root):
+        where = f"{t.agent_id} ({_where(other_ws)})"
+        candidates = _loads(t.files) + _changed_files(other_ws)
+        for mine in files or []:
             for theirs in candidates:
                 if _glob_match(mine, theirs):
-                    branch = other_ws.branch if other_ws else "?"
-                    return (f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
+                    return (f"overlaps with {where}, reported but not yet merged, on {theirs}; "
                             "consider depends_on or merging first")
+        shared = mine_issues & _issue_numbers(t.task_text)
+        if shared:
+            return (f"names issue #{min(shared, key=int)} like {where}, reported but not yet "
+                    "merged; check it isn't already fixed there")
     return None
 
 

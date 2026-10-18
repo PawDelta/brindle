@@ -61,11 +61,51 @@ def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
     db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "idle", "@0", None,
                        time.time()))
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(tasks, "overlap_warning", lambda db_, ws_, files: "overlaps with w0 (feat/a) on ledger.py")
+    monkeypatch.setattr(tasks, "overlap_warning", lambda db_, ws_, files, text=None: "overlaps with w0 (feat/a) on ledger.py")
     delegated = []
     monkeypatch.setattr(agents, "delegate", lambda *a, **k: delegated.append(a))
     out = asyncio.run(mcp_server.assign("developer", "do it", files=["ledger.py"]))
     assert out.startswith("Not started") and "depends_on" in out and delegated == []
+
+
+@pytest.fixture
+def other_session_task(db, repo, monkeypatch):
+    """A reported worker on another session's base branch whose branch isn't
+    merged yet; returns a function to record its task."""
+    root = workspaces.adopt_root(db, str(repo))
+    other_ws = workspaces.create(db, str(repo), "fix-197", run_setup=False).workspace
+    db.add_agent(Agent("w197", other_ws.id, "developer", "claude", None, "assign", "done",
+                       "@1", "fixed it", time.time()))
+    monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: False)
+    monkeypatch.setattr(tasks, "_changed_files", lambda w: ["src/brindle/tasks.py"])
+    db.conn.execute("UPDATE workspaces SET base_branch='brindle/session-14' WHERE id=?", (other_ws.id,))
+
+    def record(text="fix #197 overlap", files=None):
+        db.add_task(tasks.Task("t197", str(repo), "w197", None, root.id, "developer", text,
+                               "assign", 1, other_ws.branch, None, tasks._dumps(files), None,
+                               "started", time.time()))
+        return root
+
+    return record
+
+
+def test_cross_session_reported_unmerged_branch_overlaps_on_changed_files(db, other_session_task):
+    root = other_session_task()
+    warning = tasks.overlap_warning(db, root, ["src/brindle/tasks.py"])
+    assert warning and "fix-197" in warning and "brindle/session-14" in warning
+
+
+def test_cross_session_same_issue_number_warns_without_files(db, other_session_task):
+    root = other_session_task()
+    warning = tasks.overlap_warning(db, root, None, "Please fix #197 again")
+    assert warning and "#197" in warning and "fix-197" in warning
+    assert tasks.overlap_warning(db, root, None, "Fix #198") is None
+
+
+def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monkeypatch):
+    root = other_session_task()
+    monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: True)
+    assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
 
 
 # -- dependencies: queue until merge, then auto-start --------------------------
