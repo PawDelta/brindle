@@ -94,7 +94,7 @@ def w(db, monkeypatch):
     return world
 
 
-def test_undetermined_never_pauses_and_warns_once(w):
+def test_undetermined_not_repeated_never_pauses_and_warns_once(w):
     w.agent("c1")
     w.claude = UNKNOWN
     signin_pause.run(w.db)
@@ -111,18 +111,12 @@ def test_undetermined_never_pauses_and_warns_once(w):
     w.claude = UNKNOWN          # a new spell of it warns again
     signin_pause.run(w.db)
     assert sum("can't be verified" in b for _, b in w.messages) == 2
-
-
-def test_undetermined_not_repeated_when_the_check_flaps_under_load(w):
-    # Under machine load the CLI's check times out every other sweep: the
-    # in-between answers are fine, but the same warning came back each minute.
-    w.agent("c1")
-    for _ in range(6):
-        w.claude = UNKNOWN
-        signin_pause.run(w.db)
+    for _ in range(3):      # a check flapping under load (times out every other sweep) stays quiet
         w.claude = OK
         signin_pause.run(w.db)
-    assert sum("can't be verified" in b for _, b in w.messages) == 1
+        w.claude = UNKNOWN
+        signin_pause.run(w.db)
+    assert sum("can't be verified" in b for _, b in w.messages) == 2
 
 
 def test_an_org_route_not_in_use_checks_the_persons_own_signin(w, monkeypatch):

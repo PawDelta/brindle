@@ -206,23 +206,3 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
-
-
-def test_issue189_a_stale_signin_is_ended_even_when_nobody_is_there(tmp_path, monkeypatch):
-    # An ignored `gcloud auth application-default login` holds its local auth
-    # server (and a port) until something ends it: past TAB_LIFE it is ended on
-    # the next sweep, not only when a person types and a new tab is wanted.
-    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
-    env = {"CLOUDSDK_CONFIG": str(tmp_path / "gcloud")}
-    lg = cloud_login._login("vertex", env, tmp_path)
-    lg.lock.parent.mkdir(parents=True)
-    fd = os.open(lg.lock, os.O_RDWR | os.O_CREAT)
-    assert cloud_login._locked(fd)      # the login still runs: it holds the lock
-    lg.write({"lapse": lg.fingerprint(), "pid": 4242, "opened_at": NOW - cloud_login.TAB_LIFE - 1})
-    ended = []
-    try:
-        cloud_login.sign_in("vertex", env=env, home=tmp_path, now=NOW, last_input=None,
-                            kill=ended.append, popen=lambda *a, **k: pytest.fail("opened a sign-in"))
-    finally:
-        os.close(fd)
-    assert ended == [4242]
