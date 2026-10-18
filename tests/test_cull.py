@@ -404,7 +404,13 @@ def test_sweep_on_another_server_never_judges_a_row_without_a_server(db, ws, pro
     p = launch_as("abc12345")
     proc_cleanup.append(p)
     monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    # The row's own (default) server would be the user's real tmux: stand in
+    # for it, and record that it was the server asked.
+    asked = []
+    monkeypatch.setattr(tmux, "window_alive",
+                        lambda target, server=None: asked.append(server) or False)
     assert cull.sweep(db) == []
+    assert asked and set(asked) == {None}
     time.sleep(0.5)
     assert alive(p.pid)
     assert db.get_agent("abc12345").status == "processing"

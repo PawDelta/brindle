@@ -841,14 +841,35 @@ class ClaudeCode(Provider):
 CODEX_BUNDLED = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
 
 
-def codex_binary() -> str:
-    """BRINDLE_CODEX_BIN, else `codex` on PATH, else the ChatGPT app's copy."""
+def is_wsl() -> bool:
+    """Running under WSL, which appends the Windows PATH to the Linux one."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def which_cli(name: str) -> str | None:
+    """shutil.which, but under WSL a bare name found under /mnt/<drive>/ (a
+    Windows shim: it reads %USERPROFILE%, not ~, and can't take Linux paths)
+    doesn't count: only a Linux install does."""
     import shutil
 
+    found = shutil.which(name)
+    if found and os.sep not in name and found.startswith("/mnt/") and is_wsl():
+        return None
+    return found
+
+
+def codex_binary() -> str:
+    """BRINDLE_CODEX_BIN, else `codex` on PATH, else the ChatGPT app's copy."""
     explicit = os.environ.get("BRINDLE_CODEX_BIN")
     if explicit:
         return explicit
-    return shutil.which("codex") or (CODEX_BUNDLED if os.path.exists(CODEX_BUNDLED) else "codex")
+    return which_cli("codex") or (CODEX_BUNDLED if os.path.exists(CODEX_BUNDLED) else "codex")
 
 
 
@@ -1208,7 +1229,7 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
               "antigravity": antigravity.binary}.get(provider)
     if binary:
         exe = binary()
-        if not (shutil.which(exe) or os.path.isfile(exe)):
+        if not (which_cli(exe) or os.path.isfile(exe)):
             return f"{exe} isn't installed"
     return signed_out(provider, env)
 

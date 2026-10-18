@@ -109,6 +109,9 @@ def test_supervisor_launch_resolution(monkeypatch, kw, got, asked, remembered):
     (["-s"], picker.PICK),
     (["start", "-s", "--no-attach"], picker.PICK),
     (["-s", "codex"], "codex"),
+    (["-s=codex"], "codex"),
+    (["-s", "codex", "start", "--no-attach"], "codex"),
+    (["-s", "codex", "supervisor", "--no-attach"], "codex"),
 ])
 def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, value):
     monkeypatch.chdir(repo)
@@ -122,6 +125,39 @@ def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, va
     result = CliRunner().invoke(cli.app, argv)
     assert result.exit_code == 0, result.output
     assert seen == [value]
+
+
+@pytest.mark.parametrize("wanted, default", [
+    (None, "o"), ("claude", "o"), (picker.PICK, "o"),
+    ("codex", "p"),                       # the running session is on another CLI
+])
+def test_running_session_on_another_cli_is_not_the_default(monkeypatch, wanted, default):
+    seen = {}
+    monkeypatch.setattr(typer, "prompt", lambda *a, **kw: seen.update(kw) or "o")
+    cli._ask_about_running(SimpleNamespace(id="a1", provider="claude"), wanted)
+    assert seen["default"] == default
+
+
+def test_supervisor_flag_reaches_the_running_session_question(db, repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(cli, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True)))
+    monkeypatch.setattr(cli, "_running_session", lambda db, ws: SimpleNamespace(id="a1", provider="claude"))
+    asked = []
+
+    def ask(running, wanted=None):
+        asked.append(wanted)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli, "_ask_about_running", ask)
+    CliRunner().invoke(cli.app, ["-s", "codex"])
+    assert asked == ["codex"]
+
+
+@pytest.mark.parametrize("argv", [["-s", "gemini"], ["start", "-s", "gemini"], ["-c", "-s", "codex"]])
+def test_supervisor_flag_that_cannot_be_honoured_fails_cleanly(db, repo, monkeypatch, argv):
+    monkeypatch.chdir(repo)
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
 
 
 def _workers(acc, keys, **kw):
