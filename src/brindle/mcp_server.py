@@ -777,11 +777,8 @@ def kb_search(query: str, sources: list[str] | None = None, k: int = 8) -> str:
     matched = [d for d in knowledge.decisions(db, key)
                if any(t in f"{d['topic']} {d['body']} {d['rationale']}".lower() for t in terms)]
     out = [f"Decision {_decision_line(d)}" for d in matched]
-    for h in hits:
-        stale = " STALE" if kb.is_stale(h) else ""
-        out.append(f"{h['heading_path'] or h['title']} ({h['url']}, updated {h['updated'] or 'unknown'}{stale})"
-                   f"\n{h['text']}")
-    return "\n\n".join(out) or "Nothing found."
+    out.append(knowledge._chunks_block(hits, None)[0])   # fenced as untrusted data, like a brief's
+    return "\n\n".join(o for o in out if o) or "Nothing found."
 
 
 @mcp.tool()

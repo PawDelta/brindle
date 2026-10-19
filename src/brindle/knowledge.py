@@ -354,24 +354,26 @@ def _entry(n: int, h: dict) -> str:
     from brindle import kb
 
     text = h["text"][:ENTRY_CHARS]
-    for marker in _FENCE:   # a chunk can't close the fence early
-        text = text.replace(marker, marker.replace("=", "-"))
     stale = ", STALE: not updated for over %d days" % kb.STALE_DAYS if kb.is_stale(h) else ""
-    head = _one_line(f"[{n}] {h['heading_path'] or h['title'] or ''} ({h['url']}, updated {h['updated'] or 'unknown'}{stale})",
+    # The document's file name, not its title: a title is never scanned.
+    head = _one_line(f"[{n}] {h['heading_path'] or h['external_id']} ({h['url']}, updated {h['updated'] or 'unknown'}{stale})",
                      400)
-    return f"{head}\n{text}"
+    entry = f"{head}\n{text}"
+    for marker in _FENCE:   # nothing in an entry, header included, can close the fence early
+        entry = entry.replace(marker, marker.replace("=", "-"))
+    return entry
 
 
-def _chunks_block(hits: list[dict]) -> tuple[str, list[dict]]:
+def _chunks_block(hits: list[dict], budget: int | None = CHUNK_BUDGET) -> tuple[str, list[dict]]:
     """The fenced block for as many of ``hits`` (best first) as fit
-    CHUNK_BUDGET, and those it holds."""
+    ``budget`` tokens (all, with none), and those it holds."""
     from brindle.assembler import estimate_tokens
 
     used = estimate_tokens("\n".join([_CHUNKS_HEADER, *_FENCE]))
     entries, kept = [], []
     for h in hits:
         entry = _entry(len(kept) + 1, h)
-        if used + estimate_tokens(entry) + 1 > CHUNK_BUDGET:
+        if budget is not None and used + estimate_tokens(entry) + 1 > budget:
             continue
         entries.append(entry)
         kept.append(h)
