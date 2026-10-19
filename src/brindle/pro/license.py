@@ -72,6 +72,7 @@ PAID_STATUSES = frozenset({"active", "trialing", "past_due"})
 LEEWAY = 60                   # clock skew tolerated on exp / iat
 MAX_TOKEN_BYTES = 8192
 REFRESH_WHEN_LEFT = 0.25      # refresh once less than this share of lifetime remains
+MAX_AGE = 600                 # seconds: the sweep refetches an older entitlement (plan and policy changes)
 _REQUIRED = ("iss", "aud", "sub", "org_id", "plan", "status", "features", "seats", "iat", "exp",
              "kid", "jti", "token_use")
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -276,9 +277,10 @@ def paid(token: str | None) -> bool:
     return c.get("plan") != "free" and c.get("status") in PAID_STATUSES
 
 
-def needs_refresh(ent: Entitlement, now: float | None = None) -> bool:
+def needs_refresh(ent: Entitlement, now: float | None = None, max_age: float | None = None) -> bool:
     now = time.time() if now is None else now
-    return ent.in_grace or (ent.exp - now) < REFRESH_WHEN_LEFT * (ent.exp - ent.iat)
+    return (ent.in_grace or (ent.exp - now) < REFRESH_WHEN_LEFT * (ent.exp - ent.iat)
+            or (max_age is not None and now - ent.iat > max_age))
 
 
 # -- the offline license --------------------------------------------------------------------
@@ -372,15 +374,17 @@ def clear_cache() -> None:
         hook()
 
 
-def current(*, refresh: bool = True, now: float | None = None, store=None, client=None) -> Entitlement:
+def current(*, refresh: bool = True, now: float | None = None, store=None, client=None,
+            max_age: float | None = None) -> Entitlement:
     """The entitlement from the stored credentials, fetching a new one (and
     rotating the refresh token if needed) when it is expired or near expiry
-    (``refresh``). Offline, an expired entitlement is used within its grace.
-    Raises :class:`LicenseError` when there is none."""
+    (``refresh``), or was issued more than ``max_age`` seconds ago. Offline,
+    a stored entitlement is used within its grace. Raises
+    :class:`LicenseError` when there is none."""
     global _cache
     now = time.time() if now is None else now
     default = store is None and client is None
-    if default and _cache and _cache[0] > now:
+    if default and _cache and _cache[0] > now and (max_age is None or now - _cache[1].iat <= max_age):
         return _cache[1]
     from brindle import airgap
     from brindle.pro import auth, credentials
@@ -418,7 +422,7 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     except LicenseError:
         if not refresh:
             raise
-    if refresh and (ent is None or needs_refresh(ent, now)) and creds.get("refresh_token"):
+    if refresh and (ent is None or needs_refresh(ent, now, max_age)) and creds.get("refresh_token"):
         try:
             ent = auth.refresh(client or auth.Client(issuer), store, creds, now=now)
         except auth.AuthError as e:

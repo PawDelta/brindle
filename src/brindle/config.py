@@ -391,6 +391,22 @@ def set_user(key: str, value: object) -> Path:
     return path
 
 
+def forget_user(key: str) -> bool:
+    """Remove one key from ``~/.brindle/config.json``; True once it's gone.
+    Only for a setting an org applied that its fresh setup no longer has
+    (``company_login.clear_env(stale=True)``): removing it only stops it
+    being applied, so unlike :func:`set_user` this also runs in an agent's
+    CLI call (``brindle doctor`` from a session)."""
+    path = user_config_path()
+    data = _read_json(path)
+    if key not in data:
+        return False
+    del data[key]
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _sync_setting(key)
+    return key not in _read_json(path)
+
+
 def _sync_setting(key: str) -> None:
     """Push a changed user-wide setting to brindle Pro (settings sync) when
     entitled; never raises, never waits more than a few seconds."""
