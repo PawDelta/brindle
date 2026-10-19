@@ -78,13 +78,20 @@ export const Brindle = async ({ client }) => {
     // An approval is tied to this exact call, never installed as a wildcard.
     "tool.execute.before": async (input, output) => {
       const id = key(input.sessionID, input.callID)
+      for (const [cached, approval] of approvals) {
+        if (approval.expires <= Date.now()) approvals.delete(cached)
+      }
       approvals.delete(id)
       if (!policy && input.tool !== "bash") return
       const out = await send("opencode-pre-tool", { session_id: input.sessionID, tool: input.tool, args: output.args })
       let answer = null
       try { answer = JSON.parse(out) } catch {}
       if (answer && answer.decision === "deny") throw new Error(answer.reason || "denied by brindle's permission policy")
-      if (answer && answer.decision === "allow") approvals.set(id, output.args.command)
+      if (input.tool === "bash" && typeof input.sessionID === "string" && input.sessionID
+          && typeof input.callID === "string" && input.callID
+          && answer?.decision === "allow" && typeof output.args.command === "string") {
+        approvals.set(id, { command: output.args.command, expires: Date.now() + 30000 })
+      }
       else if (dontAsk && /git (?:-C |branch --list )/.test(output.args.command || "")) {
         throw new Error("read-only git request could not be approved")
       }
@@ -102,7 +109,9 @@ export const Brindle = async ({ client }) => {
       const p = event.properties || {}
       if (event.type === "permission.asked" && p.permission === "bash" && p.tool) {
         const id = key(p.sessionID, p.tool.callID)
-        if (approvals.has(id) && approvals.get(id) === p.metadata?.command) {
+        const approval = approvals.get(id)
+        if (approval && approval.expires <= Date.now()) approvals.delete(id)
+        else if (approval && approval.command === p.metadata?.command) {
           approvals.delete(id)
           try {
             const response = await client.postSessionIdPermissionsPermissionId({

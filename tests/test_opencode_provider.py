@@ -2,6 +2,8 @@ import dataclasses
 import fnmatch
 import json
 import os
+import shutil
+import subprocess
 import time
 
 import pytest
@@ -82,11 +84,17 @@ def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(bri
                  marks=pytest.mark.variant("unquoted patterns could expand into option-like filenames")),
     ("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
      ["git -C /otherworktree status"], "allow"),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ("git -C /otherworktree status", "git -C /otherworktree checkout status file"), "ask",
+                 marks=pytest.mark.variant("same callID with changed command must still prompt; approvals expire and are single-use")),
     pytest.param("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
                  ["git -C /worktree status", "git push origin main"], "deny",
                  marks=pytest.mark.variant("a compound command must not hide a write after a permitted read")),
 ])
 def test_permission_mode_and_model_map_onto_opencode(brindle_home, tmp_path, mode, model, perm, flags, patterns, decision):
+    plugin_case = isinstance(patterns, tuple)
+    requested = patterns[1] if plugin_case else ""
+    patterns = [patterns[0]] if plugin_case else patterns
     cwd = tmp_path / "repo" / "supervisor"
     target = tmp_path / "repo" / ".brindle" / "worktrees" / "created-later"
     for directory in (cwd, target, tmp_path / "cache", tmp_path / "read only", tmp_path / "outside"):
@@ -98,6 +106,7 @@ def test_permission_mode_and_model_map_onto_opencode(brindle_home, tmp_path, mod
                     "/escaped": str(escaped)}
     for original, replacement in replacements.items():
         patterns = [command.replace(original, replacement) for command in patterns]
+        requested = requested.replace(original, replacement)
     profile = dataclasses.replace(load_profile("supervisor"), permission_mode=mode, model=model,
                                   add_dirs=[str(tmp_path / "cache"), str(tmp_path / "read only"), "/unsafe*"])
     argv = OpenCode().command(LaunchContext("o1", profile, None, cwd=str(cwd)))
@@ -114,6 +123,48 @@ def test_permission_mode_and_model_map_onto_opencode(brindle_home, tmp_path, mod
                           if fnmatch.fnmatchcase(command, pattern)) for command in patterns]
         if opencode.readonly_git(profile, "; ".join(patterns), str(cwd), str(tmp_path / "repo")):
             decisions = ["allow"]
+        if plugin_case:
+            # Execute the real JS hooks with in-memory IPC/client fakes; no
+            # OpenCode process, tmux, shell commands, or timing sleeps.
+            node = shutil.which("node")
+            if not node:
+                pytest.skip("Node is required to execute the OpenCode plugin")
+            program = """
+import { EventEmitter } from 'node:events';
+let input = ''; for await (const chunk of process.stdin) input += chunk;
+const {source, command, requested} = JSON.parse(input);
+globalThis.fakeSpawn = () => {
+  const p = new EventEmitter(); p.stdout = new EventEmitter();
+  p.stdin = {end() {queueMicrotask(() => {
+    p.stdout.emit('data', JSON.stringify({decision: 'allow'})); p.emit('close');
+  })}}; return p;
+};
+process.env.BRINDLE_AGENT_ID = 'test'; process.env.BRINDLE_OPENCODE_POLICY = '';
+process.env.OPENCODE_CONFIG_CONTENT = '{}';
+let clock = 1000; Date.now = () => clock;
+const {Brindle} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const replies = [], counts = [];
+const hooks = await Brindle({client: {postSessionIdPermissionsPermissionId: async r => {replies.push(r); return {}}}});
+const before = () => hooks['tool.execute.before']({sessionID:'s', callID:'c', tool:'bash'}, {args:{command}});
+const asked = async (changes = {}) => {
+  const {sessionID = 's', callID = 'c', permission = 'bash', text = command} = changes;
+  await hooks.event({event:{type:'permission.asked', properties:{id:'p', sessionID,
+    permission, tool:{callID}, metadata:{command:text}}}}); counts.push(replies.length);
+};
+await before();
+await asked({text:requested}); await asked({sessionID:'other'});
+await asked({callID:'other'}); await asked({permission:'edit'});
+await asked(); await asked();
+await before(); clock += 60000; await asked();
+console.log(JSON.stringify([counts, replies.map(r => r.body.response)]));
+"""
+            source = opencode.PLUGIN.replace('import { spawn } from "node:child_process"',
+                                            'const spawn = globalThis.fakeSpawn').replace("__BRINDLE__", '["fake"]')
+            result = subprocess.run([node, "--input-type=module", "-e", program],
+                                    input=json.dumps({"source": source, "command": patterns[0], "requested": requested}),
+                                    text=True, capture_output=True, check=True, timeout=10)
+            assert json.loads(result.stdout) == [[0, 0, 0, 0, 1, 1, 1], ["once"]]
+            decisions = ["ask"]  # the changed command received no approval
         assert ("deny" if "deny" in decisions else "ask" if "ask" in decisions else "allow") == decision
 
 
