@@ -446,6 +446,32 @@ def test_a_failing_policy_keeps_the_stored_env(monkeypatch):
                         lambda *a, **k: type("P", (), {"agent_setup": None})())
     assert company_login.apply_current(print) is None
     assert company_login.stored_env() == {}
+    # An agent_setup that no longer has a Claude route (the owner removed it) clears it too.
+    go(claude("bedrock", aws=AWS))
+    monkeypatch.setattr(team_policy, "current_policy", lambda *a, **k: type(
+        "P", (), {"agent_setup": AgentSetup(codex=CodexSetup(route="api_key"))})())
+    company_login.apply_current(print)
+    assert company_login.stored_env() == {}
+
+
+def test_the_sweep_refetches_the_entitlement_and_drops_a_removed_claude_route(current_org, monkeypatch):
+    # Live incident: the org owner removed the Claude route, but the stored
+    # route env kept reaching Claude panes, since nothing refetched the entitlement.
+    from brindle.pro import license
+
+    Fake(monkeypatch)
+    go(claude("bedrock", aws=AWS))
+    asked = []
+
+    def current(**kw):
+        asked.append(kw.get("max_age"))
+        return _Ent(ORG)
+    monkeypatch.setattr(license, "current", current)
+    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, claude("bedrock", aws=AWS)))
+    assert company_login.sync() == [] and company_login.stored_env()
+    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, AgentSetup()))
+    assert company_login.sync() and company_login.stored_env() == {}
+    assert license.MAX_AGE in asked
 
 
 def test_pinned_models_without_the_claude_binary_are_not_ready(monkeypatch):

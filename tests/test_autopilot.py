@@ -482,6 +482,21 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root):
     assert db.get_autopilot("boss").state == "running"
 
 
+def test_open_question_reminder_sent_through_the_inbox_is_not_repeated(db, root, monkeypatch):
+    # Live incident: the reminder of an open question went out through the
+    # inbox in its one-line form, its prompt-submit counted as the user
+    # speaking, and that re-armed the reminder about once a minute.
+    agent, _ = root
+    with_goal(db)
+    monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
+    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
+    autopilot.user_spoke(db, agent)
+    sent = agents._stop_decision(db, agent, {}, via_inbox=True)
+    assert sent and "Waiting on the user for" not in sent["reason"]  # the one-line form
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": sent["reason"]})
+    assert autopilot.on_stop(db, agent, {}) is None
+
+
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     agent, ws = root
     with_goal(db)

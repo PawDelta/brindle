@@ -1233,15 +1233,17 @@ class DB:
             return cur.rowcount
 
     def recently_delivered(self, agent_id: str, body: str, within: float = 120.0) -> bool:
-        """Whether ``body`` is a message brindle delivered to the agent just now."""
+        """Whether ``body`` is a message brindle delivered to the agent just now,
+        whole or as its one line (agents.one_line), which names its id."""
         want = body.strip()
         if not want:
             return False
         rows = self.conn.execute(
-            "SELECT body FROM inbox WHERE agent_id=? AND delivered_at > ?",
+            "SELECT id, body FROM inbox WHERE agent_id=? AND delivered_at > ?",
             (agent_id, time.time() - within),
         )
-        return any(r[0].strip() == want for r in rows)
+        return any(r[1].strip() == want
+                   or want.endswith(f"(full text: read_messages(message_id={r[0]}))") for r in rows)
 
     def delivered_since(self, agent_id: str, since: float) -> bool:
         """Whether brindle delivered any message to the agent after ``since``."""

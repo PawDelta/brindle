@@ -554,15 +554,16 @@ def route_in_use(org_id: str, setup) -> bool:
     return isinstance(got, dict) and got.get("org") == org_id
 
 
-def org_setup(repo_root: str | None = None, store=None, client=None):
+def org_setup(repo_root: str | None = None, store=None, client=None, max_age: float | None = None):
     """(org id, AgentSetup) for the signed-in org; personal policies supply
     only federated Claude setup. None when there is no applicable setup;
-    ``UNAVAILABLE`` when it couldn't be had, which says nothing about the setup."""
+    ``UNAVAILABLE`` when it couldn't be had, which says nothing about the setup.
+    ``max_age``: refetch an entitlement older than that (``license.current``)."""
     from brindle.pro import credentials, license, team_policy
 
     try:
         store = store or credentials.default_store()
-        ent = license.current(store=store, client=client)
+        ent = license.current(store=store, client=client, max_age=max_age)
         personal = team_policy.FEATURE not in ent.features
         if personal and (ent.policy_version <= 0 or (store.load() or {}).get("org_id")
                          or ent.plan in ("team", "enterprise")):
@@ -612,8 +613,9 @@ def apply_current(say: Callable[[str], None], repo_root: str | None = None, stor
     With no org setup, the person's own self-serve setup applies, or is offered
     (``ask``; see ``self_serve``). An org's setup always wins over it."""
     from brindle import self_serve
+    from brindle.pro import license
 
-    got = org_setup(repo_root, store, client)
+    got = org_setup(repo_root, store, client, max_age=license.MAX_AGE)
     if got is UNAVAILABLE:
         if _logged_in(store, client):
             return None     # an org whose policy we couldn't read: leave everything as it is
@@ -624,7 +626,35 @@ def apply_current(say: Callable[[str], None], repo_root: str | None = None, stor
         # the signed-in org has no agent_setup: its federation files go, other member orgs' stay
         clear_federation(keep=_other_orgs(store, client))
         return self_serve.run(say, repo_root, ask, info)
+    if got[1].claude is None:
+        clear_env()         # the org's setup has no Claude route (any more): panes get none
     return apply(got[0], got[1], say, repo_root, store=store, client=client)
+
+
+def sync(store=None, client=None) -> list[str]:
+    """Cull-pass step: refetch an entitlement older than ``license.MAX_AGE``,
+    so a plan's new features and a changed org policy reach this machine,
+    and stop giving Claude panes the stored org route env once the org's
+    setup has no Claude route. Offline or signed out, nothing changes (the
+    stored entitlement keeps its grace). Returns what it did; never raises."""
+    from brindle import airgap
+    from brindle.pro import license
+
+    if airgap.enabled():
+        return []
+    try:
+        license.current(store=store, client=client, max_age=license.MAX_AGE)
+        got = config.user_settings().get(ENV_KEY)
+    except Exception:  # noqa: BLE001 - signed out, offline, unreadable: leave things as they are
+        log.debug("couldn't refresh the entitlement", exc_info=True)
+        return []
+    if not isinstance(got, dict) or got.get("self_serve"):
+        return []           # no org route stored (a self-serve one is the person's own)
+    setup = org_setup(store=store, client=client)
+    if setup is UNAVAILABLE or (setup is not None and setup[1].claude is not None):
+        return []
+    clear_env()
+    return ["stopped applying the org's Claude route: its agent setup no longer has one"]
 
 
 __all__ = ["apply", "apply_current", "claude_env", "stored_env", "write_aws_profile"]
