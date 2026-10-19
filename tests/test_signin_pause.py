@@ -375,3 +375,29 @@ def test_adopt_never_raises(w, monkeypatch):
     monkeypatch.setattr(signin_pause, "_load", lambda: 1 / 0)
     assert signin_pause.adopt(OK.ident) == []
     assert signin_pause.adopt("") == []
+
+
+def test_the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login):
+    from brindle import identity_lock
+
+    w.claude = PERSONAL
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    brindle_login["in"], w.claude = True, UNKNOWN   # signed in, but its check couldn't tell who
+    company_login.Login("acme", None, lambda line: None)._adopt()
+    assert signin_pause._load()["unowned"] == ["c1"]
+    signin_pause.run(w.db)                          # still undetermined: nothing adopted
+    assert signin_pause._load()["unowned"] == ["c1"]
+    w.claude = WRONG                                # a mismatch with the policy never adopts
+    signin_pause.run(w.db)
+    assert signin_pause.recorded_identity("c1") == PERSONAL.ident
+    brindle_login["in"], w.claude = False, OK       # nor does a clear identity with no brindle login
+    signin_pause.run(w.db)
+    assert signin_pause._load()["unowned"] == ["c1"]
+    brindle_login["in"] = True                      # the next sweep with a login adopts it
+    signin_pause.run(w.db)
+    assert signin_pause._load()["unowned"] == []
+    assert signin_pause.recorded_identity("c1") == OK.ident
+    assert identity_lock.locked_by("c1") is None
+    w.claude = OTHER_ORG
+    assert identity_lock.locked_by("c1") == OK.ident

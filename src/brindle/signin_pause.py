@@ -186,6 +186,16 @@ def _record(state: dict, agent_id: str, ident: str, signed_in: bool | None = Non
         state["unowned"].append(agent_id)
 
 
+def _adopt_into(state: dict, ident: str, signed_in: bool = True) -> list[str]:
+    """``adopt`` on a loaded ``state``; the caller saves it."""
+    ids = list(state["unowned"])
+    for aid in ids:
+        state["identity"][aid] = ident
+    if signed_in:
+        state["unowned"] = []
+    return ids
+
+
 def adopt(ident: str, signed_in: bool = True) -> list[str]:
     """Give the agents recorded while no one was signed in to brindle to
     ``ident``, the Claude identity of the account that just signed in, so they
@@ -197,14 +207,9 @@ def adopt(ident: str, signed_in: bool = True) -> list[str]:
         if not isinstance(ident, str) or not ident:
             return []
         state = _load()
-        ids = list(state["unowned"])
-        if not ids:
-            return []
-        for aid in ids:
-            state["identity"][aid] = ident
-        if signed_in:
-            state["unowned"] = []
-        _save(state)
+        ids = _adopt_into(state, ident, signed_in)
+        if ids:
+            _save(state)
         return ids
     except Exception:  # noqa: BLE001 - a sign-in never fails over this
         return []
@@ -325,6 +330,13 @@ def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str
                 if signed_in is None:
                     signed_in = _brindle_signed_in()
                 _record(state, a.id, res.ident, signed_in)
+        if provider == "claude" and state["unowned"]:
+            # The sign-in's own adopt can miss (its check undetermined): the
+            # first clear identity under a brindle login adopts them instead.
+            if signed_in is None:
+                signed_in = _brindle_signed_in()
+            if signed_in:
+                _adopt_into(state, res.ident)
     if res.problem and enforce:
         return _pause(db, state, provider, running, f"{name} signed in as the wrong identity",
                       f"{name}'s sign-in doesn't match the org policy ({res.problem}) and the policy "
