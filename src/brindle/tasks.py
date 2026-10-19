@@ -237,9 +237,13 @@ def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str) -> None:
     """Tell both sessions' supervisors about a cross-session clash, each
     naming the other session's goal line. ``outcome`` says what happened to
     the new task (queued, refused, started with a warning)."""
-    from brindle import gates
+    from brindle import gates, knowledge
     if not clash.holder_root:
         return
+    # The event a repo's coordinator wakes on (brindle.coordinator).
+    knowledge.note(db, caller_root, knowledge.CLASH,
+                   {"warning": clash.warning, "holder": clash.holder,
+                    "holder_root": clash.holder_root, "outcome": outcome})
     what = clash.warning.split(";")[0]
     for to, other in ((caller_root, clash.holder_root), (clash.holder_root, caller_root)):
         goal = _goal_line(db, other)
@@ -416,7 +420,7 @@ def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
     than one dependency path) is a no-op the second time. Returns the ids
     cancelled, the task first."""
     t = db.get_task(task_id)
-    if t is None or t.state != "pending":
+    if t is None or t.state not in QUEUED:
         return []
     cancelled = [t.id]
     db.update_task(t.id, state="cancelled")
@@ -427,7 +431,7 @@ def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
             )
         except agents.AgentError:
             pass
-    for dependent in db.list_tasks(state="pending"):   # any repo of the session may wait on it
+    for dependent in queued(db):   # any repo of the session may wait on it
         if any(_refers_to(d, t, dependent.repo_root) for d in _loads(dependent.depends_on)):
             cancelled += _cancel(
                 db, dependent.id, f"its dependency {t.id} ({t.branch or t.id}) was cancelled")
@@ -449,13 +453,53 @@ def cancel(db: DB, caller: Agent | None, task_id: str, reason: str = "") -> str:
         mine = autopilot.root_of(db, t.caller_id) == caller.id
     if not mine:
         raise ValueError(f"Task {task_id} isn't yours to cancel: only its caller or its session root can.")
-    if t.state != "pending":
+    if t.state not in QUEUED:
         raise ValueError(f"Task {task_id} is {t.state}, not queued: only a pending task can be cancelled.")
     ids = _cancel(db, t.id, reason or "cancelled by its caller")
     text = f"Cancelled task {ids[0]}."
     if len(ids) > 1:
         text += f" Also cancelled its dependents: {', '.join(ids[1:])}."
     return text
+
+
+# -- holds (brindle.coordinator) ---------------------------------------------------
+
+# A queued task: 'pending' starts once its dependencies merge; 'held' (by the
+# coordinator) waits until it is released, whatever has merged.
+QUEUED = ("pending", "held")
+
+
+def queued(db: DB, repo_root: str | None = None) -> list[Task]:
+    """Pending and held tasks, oldest first."""
+    return sorted(db.list_tasks(repo_root, state="pending") + db.list_tasks(repo_root, state="held"),
+                  key=lambda t: t.created_at)
+
+
+def move(db: DB, task_id: str, from_state: str, to_state: str) -> bool:
+    """Move a task from ``from_state`` to ``to_state`` atomically; False if
+    it was no longer in ``from_state`` (started, cancelled, held already)."""
+    with db.tx() as c:
+        return c.execute("UPDATE tasks SET state=? WHERE id=? AND state=?",
+                         (to_state, task_id, from_state)).rowcount == 1
+
+
+def set_dependencies(db: DB, task_id: str, depends_on: list[str], expect: list[str]) -> bool:
+    """Replace a queued task's ``depends_on`` with ``depends_on`` if it is
+    still ``expect`` and the task hasn't started; False otherwise."""
+    with db.tx() as c:
+        row = c.execute("SELECT state, depends_on FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None or row["state"] not in QUEUED or _loads(row["depends_on"]) != expect:
+            return False
+        c.execute("UPDATE tasks SET depends_on=? WHERE id=?", (_dumps(depends_on), task_id))
+        return True
+
+
+def known_dependency(db: DB, repo_root: str, dep: str) -> bool:
+    """Whether ``dep`` names an agent or a branch brindle knows in
+    ``repo_root``: a typo would leave a task waiting for good."""
+    return (db.get_agent(dep) is not None
+            or any(w.branch == dep for w in db.find_workspaces(repo_root))
+            or any(t.branch == dep for t in db.list_tasks(repo_root)))
 
 
 # -- queueing and starting -------------------------------------------------------
@@ -651,7 +695,7 @@ def on_removed_unmerged(db: DB, ws: Workspace) -> None:
     worker = agents.workspace_worker(db, ws)
     dep_ref = worker.id if worker else ws.branch
     worker_id = worker.id if worker else None
-    for t in db.list_tasks(state="pending"):
+    for t in queued(db):
         if any(_dep_matches(d, ws, worker_id) and (d == worker_id or t.repo_root == ws.repo_root)
                for d in _loads(t.depends_on)):
             _cancel(db, t.id, f"it was waiting on {dep_ref}, which was removed unmerged.")
@@ -742,11 +786,11 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
 
 
 def list_text(db: DB, repo_root: str, full: bool = False) -> str:
-    """Pending and cancelled tasks: started ones already show in list_agents.
-    ``full`` adds each one's brief and done_when."""
+    """Pending, held and cancelled tasks: started ones already show in
+    list_agents. ``full`` adds each one's brief and done_when."""
     lines = []
     for t in db.list_tasks(repo_root):
-        if t.state not in ("pending", "cancelled"):
+        if t.state not in (*QUEUED, "cancelled"):
             continue
         deps = _loads(t.depends_on)
         parts = [t.id, t.state, t.profile, f"branch={t.branch or '(auto)'}"]

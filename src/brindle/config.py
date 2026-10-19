@@ -137,6 +137,7 @@ class RepoConfig:
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.
     overlap: str | None = None
+    coordinator: bool = False          # wake a coordinator above this repo's sessions on events (brindle Pro; see brindle.coordinator)
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
     protected_paths: list[str] = field(default_factory=list)
@@ -281,7 +282,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
-                "review_rounds", "fable_escalation", "goal_audit", "overlap", "local_models", "merge_into",
+                "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile"):

@@ -9,9 +9,10 @@ import os
 import time
 
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, autopilot, codex_hook, coordinator, cost_estimate, git, history, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
@@ -21,7 +22,28 @@ MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
 LAST_ACTIVITY_TAIL_BYTES = 65_536
 
-mcp = MCPServer(
+def _calling_agent() -> Agent | None:
+    agent_id = os.environ.get("BRINDLE_AGENT_ID")
+    return DB().get_agent(agent_id) if agent_id else None
+
+
+class _Server(MCPServer):
+    """Refuses, before any tool runs, a tool its caller's role may not call
+    (coordinator.refusal), and leaves it out of the caller's tool list: the
+    coordinator's allowlist is enforced here, never left to its prompt."""
+
+    async def call_tool(self, name, arguments, context=None):
+        refused = coordinator.refusal(_calling_agent(), name)
+        if refused:
+            raise ToolError(refused)
+        return await super().call_tool(name, arguments, context)
+
+    async def list_tools(self):
+        agent = _calling_agent()
+        return [t for t in await super().list_tools() if coordinator.refusal(agent, t.name) is None]
+
+
+mcp = _Server(
     "brindle",
     instructions=(
         "brindle runs other coding agents for you, each on its own git branch in its own "
@@ -611,6 +633,8 @@ def report_result(result: str) -> str:
     caller, _ = _caller(db)
     if not caller:
         return "Not running as a brindle agent; nothing to report to."
+    if coordinator.is_coordinator(caller):
+        return coordinator.finish(db, caller, result)
     return agents.report_result(db, caller.id, result)
 
 
@@ -817,6 +841,62 @@ def cancel_task(task_id: str, reason: str = "") -> str:
         return tasks.cancel(db, caller, task_id, reason)
     except ValueError as e:
         return f"Error: {e}"
+
+
+def _coordinate(act) -> str:
+    """``act(db, coordinator_agent)`` for the coordinator's tools: refused
+    for any other caller, or without the brindle Pro feature."""
+    db = DB()
+    caller, _ = _caller(db)
+    if not coordinator.is_coordinator(caller):
+        return "Not done: only the repo's coordinator has this tool."
+    try:
+        coordinator.require()
+        return act(db, caller)
+    except coordinator.CoordinatorError as e:
+        return f"Not done: {e}"
+
+
+@mcp.tool()
+def hold_task(task_id: str, reason: str) -> str:
+    """Coordinator: hold a queued (pending) task from any session in this
+    repo, so it doesn't start when its dependencies merge, until
+    release_task. A task that has started can't be held: advise its
+    supervisor instead. reason: shown to the task's supervisor."""
+    return _coordinate(lambda db, me: coordinator.hold_task(db, me, task_id, reason))
+
+
+@mcp.tool()
+def release_task(task_id: str, reason: str) -> str:
+    """Coordinator: release a held task; it starts once its dependencies
+    are merged. reason: shown to the task's supervisor."""
+    return _coordinate(lambda db, me: coordinator.release_task(db, me, task_id, reason))
+
+
+@mcp.tool()
+def reorder_queue(task_id: str, after: list[str], reason: str) -> str:
+    """Coordinator: make a queued task also wait for ``after`` (agent ids or
+    branch names, such as another session's worker on the same files), so it
+    starts from that work once merged. reason: shown to its supervisor."""
+    return _coordinate(lambda db, me: coordinator.reorder_queue(db, me, task_id, after, reason))
+
+
+@mcp.tool()
+def advise(session: str, message: str) -> str:
+    """Coordinator: send a message to the supervisor of session ``session``
+    in this repo, the only way to raise something about running work."""
+    return _coordinate(lambda db, me: coordinator.advise(db, me, session, message))
+
+
+@mcp.tool()
+def propose_decision(topic: str, decision: str, rationale: str,
+                     paths: list[str] | None = None) -> str:
+    """Coordinator: propose a decision for this repo (paths: the globs it
+    covers, default the whole repo). It binds nobody until a supervisor
+    records it with record_decision; sessions whose running work it covers
+    are told."""
+    return _coordinate(lambda db, me: coordinator.propose_decision(db, me, topic, decision,
+                                                                   rationale, paths))
 
 
 @mcp.tool()

@@ -1444,6 +1444,35 @@ def decisions_export(path: Optional[Path] = typer.Argument(None, help="A file to
         typer.echo(f"wrote {path}")
 
 
+# -- brindle coordinator (brindle Pro; see brindle.coordinator) ------------------------------
+
+coordinator_app = typer.Typer(no_args_is_help=True, help="The coordinator above this repo's sessions.")
+app.add_typer(coordinator_app, name="coordinator")
+
+
+@coordinator_app.command("undo")
+def coordinator_undo(event: str = typer.Argument(..., help="The event id (or its first characters) from the notice.")) -> None:
+    """Put back what one coordinator action changed in this repo's queue."""
+    from brindle import coordinator
+
+    _, key = _kb_repo()
+    try:
+        typer.echo(coordinator.undo(DB(), key, event))
+    except coordinator.CoordinatorError as e:
+        _fail(str(e))
+
+
+@coordinator_app.command("stop")
+def coordinator_stop() -> None:
+    """Kill switch: close any running coordinator and turn it off for this checkout."""
+    from brindle import coordinator
+
+    repo_root, _ = _kb_repo()
+    closed = coordinator.stop(DB(), repo_root)
+    done = f"Closed {', '.join(closed)}" if closed else "No coordinator was running"
+    typer.echo(f'{done}; the coordinator is off here ("coordinator": false in .brindle/config.local.json).')
+
+
 @permissions_app.command("list")
 def permissions_list() -> None:
     """Every rule in force (built-in, this repo's denies, yours and learned), with its source."""
