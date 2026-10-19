@@ -189,9 +189,9 @@ def _repoint_orphaned_tasks(db: DB, root_id: str) -> None:
 
 
 def _forget(db: DB, s: Session) -> None:
-    """Drop a session: its records, and any of its workers' worktrees that are
-    clean and not used by anything else. Branches and dirty worktrees stay."""
-    worker_workspaces = {}
+    """Drop a session: its records, and any of its worktrees that are clean and
+    not used by anything else. Branches and dirty worktrees stay."""
+    worktrees = {}
     panes = tmux.list_panes()
     owners = agents.pane_owners(db, panes)
     for a in s.members:
@@ -205,18 +205,17 @@ def _forget(db: DB, s: Session) -> None:
         if (a.tmux_window and agents.same_server(a, panes) and agents.is_alive(a, panes)
                 and agents.owns_pane(db, a, owners)):
             tmux.kill_window(a.tmux_window)
-        if a.id != s.root.id:
-            ws = db.get_workspace(a.workspace_id)
-            if ws and ws.kind == "worktree":
-                worker_workspaces[ws.id] = ws
+        ws = db.get_workspace(a.workspace_id)
+        if ws and ws.kind == "worktree":
+            worktrees[ws.id] = ws
     member_ids = {a.id for a in s.members}
-    for ws in worker_workspaces.values():
+    for ws in worktrees.values():
         if any(a.id not in member_ids for a in db.list_agents(ws.id)):
             continue  # someone else still works here
         if os.path.isdir(ws.path) and git.dirty_files(ws.path):
             continue  # uncommitted work: keep it, quietly
         try:
-            workspaces.remove(db, ws, force=False)
+            workspaces.remove(db, ws, force=False, delete_branch=False)
         except (workspaces.WorkspaceError, git.GitError):
             pass
     if not history.archive(db, None, [a for a in s.members if db.get_agent(a.id)],

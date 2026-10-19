@@ -19,13 +19,19 @@ def root(db, repo):
     return workspaces.adopt_root(db, str(repo))
 
 
-def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches(db, root, repo):
+@pytest.mark.parametrize("own_dirty", [False, True])
+def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches_and_own_worktree(
+    db, root, repo, own_dirty
+):
+    own = workspaces.create(db, str(repo), "brindle/session-1").workspace
     clean = workspaces.create(db, str(repo), "clean-work").workspace
     dirty = workspaces.create(db, str(repo), "dirty-work").workspace
     open(os.path.join(clean.path, "done.txt"), "w").write("x")
     git.commit_all(clean.path, "finished")
     open(os.path.join(dirty.path, "wip.txt"), "w").write("x")  # uncommitted
-    add(db, root, "boss", since=1)
+    if own_dirty:
+        open(os.path.join(own.path, "wip.txt"), "w").write("x")
+    add(db, own, "boss", since=1)
     add(db, clean, "w1", mode="assign", parent="boss", result="ok")
     add(db, dirty, "w2", mode="assign", parent="boss")
     for i in range(3):
@@ -34,7 +40,9 @@ def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches(db, ro
     sessions.enforce(db, root.repo_root, now=200)
     assert db.get_agent("boss") is None and db.get_agent("w1") is None
     assert not os.path.exists(clean.path) and os.path.exists(dirty.path)
+    assert os.path.exists(own.path) == own_dirty and os.path.exists(root.path)
     assert git.branch_exists(str(repo), "clean-work") and git.branch_exists(str(repo), "dirty-work")
+    assert git.branch_exists(str(repo), "brindle/session-1")
     assert git.out(["log", "-1", "--format=%s", "main"], str(repo)) == "init"  # nothing merged
 
 
