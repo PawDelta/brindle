@@ -2152,6 +2152,15 @@ def kill(db: DB, agent_id: str) -> None:
     _note_reviewer_end(db, agent)
     _stop(db, agent)
     db.delete_agent(agent.id)
+    forget_files(agent)
+
+
+def forget_files(agent: Agent) -> None:
+    """Files brindle keeps outside the DB for a removed agent."""
+    if agent.provider == "opencode":
+        from brindle import opencode
+
+        opencode.remove_instructions(agent.id)
 
 
 def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
@@ -2806,6 +2815,17 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
             return permissions.codex_output(decision)
+        if provider == "opencode":
+            # Asked before every tool call, not only those OpenCode would prompt
+            # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
+            req = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
+            if req is None:
+                return None
+            decision = permissions.decide(req, checks=cfg.checks, rules=[*permissions.all_rules(ws.repo_root), *profile_rules])
+            if decision.decision != "deny":
+                return None
+            _record_permission(db, agent, ws, req.summary(), f"deny: {decision.reason}")
+            return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
             return None

@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import os
 import time
 
 import pytest
@@ -87,6 +88,31 @@ def test_plugin_events_drive_status_and_the_end_of_a_turn(db, ws, monkeypatch):
     hook("opencode-stop", {"session_id": "ses_a", "error": "APIError: 429 rate limit exceeded"})
     assert quota.get("opencode").limited_until > time.time()
     assert opencode.hook_main(db, None, "opencode-stop", "not json") == ""
+
+
+def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brindle_home, monkeypatch):
+    from brindle.config import set_local
+
+    add_agent(db, ws)
+    pre = lambda tool, args: opencode.hook_main(  # noqa: E731
+        db, "o1", "opencode-pre-tool", json.dumps({"session_id": "ses_a", "tool": tool, "args": args}))
+    denied = {"tool": "bash", "args": {"command": "git push origin main"}}
+    assert pre(**denied) == ""   # policy off: OpenCode's own rules apply
+    set_local(ws.repo_root, "permission_policy", "on")
+    answer = json.loads(pre(**denied))
+    assert answer["decision"] == "deny" and answer["reason"].startswith("brindle:")
+    assert json.loads(pre("read", {"filePath": "~/.ssh/id_rsa"}))["decision"] == "deny"
+    assert pre("bash", {"command": "git status"}) == ""   # allow and ask leave the call to OpenCode
+    # The plugin is only told to ask while the policy is on.
+    monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/bin/opencode")
+    argv = OpenCode().command(LaunchContext("o1", load_profile("developer-opencode"), None, cwd=ws.path))
+    assert "BRINDLE_OPENCODE_POLICY=1" in argv
+    # The instructions file goes when the agent does.
+    path = opencode.write_instructions("o1", "x")
+    from brindle import agents
+
+    agents.forget_files(db.get_agent("o1"))
+    assert not os.path.exists(path)
 
 
 def test_installed_opencode_is_ready_to_supervise_without_a_sign_in(monkeypatch):

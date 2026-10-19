@@ -344,6 +344,43 @@ def codex_output(decision: Decision) -> dict | None:
     return None
 
 
+# -- providers: OpenCode -----------------------------------------------------------------------
+#
+# brindle's OpenCode plugin (brindle.opencode) asks for a decision from its
+# tool.execute.before hook, which runs for every tool call: {tool, args}.
+# Only a deny is acted on (the hook throws); allow and ask leave the call to
+# OpenCode's own permission config.
+
+OPENCODE_KINDS = {
+    "read": "read", "glob": "read", "grep": "read", "list": "read",
+    "write": "write", "edit": "edit", "patch": "edit", "multiedit": "edit",
+    "bash": "bash", "webfetch": "fetch",
+}
+
+
+def from_opencode(payload: dict, worktree: str = "", repo_root: str = "") -> Request | None:
+    """The plugin's {tool, args} as a Request; None when it names no tool."""
+    tool = payload.get("tool")
+    if not isinstance(tool, str) or not tool:
+        return None
+    args = payload.get("args")
+    args = args if isinstance(args, dict) else {}
+    cwd = str(payload.get("cwd") or worktree or "")
+    kind = OPENCODE_KINDS.get(tool, "other")
+    command = path = url = None
+    if kind == "bash":
+        command = args.get("command") if isinstance(args.get("command"), str) else None
+    elif kind in PATH_KINDS:
+        raw = args.get("filePath") or args.get("path")
+        if raw is None and tool in ("glob", "grep", "list"):
+            raw = cwd  # searches the working directory
+        if isinstance(raw, str) and raw:
+            path = _abs_path(raw, cwd)
+    elif kind == "fetch":
+        url = args.get("url") if isinstance(args.get("url"), str) else None
+    return Request("opencode", kind, tool, cwd, worktree, repo_root, command, path, url)
+
+
 # -- providers: Antigravity (agy) --------------------------------------------------------------
 #
 # agy's PreToolUse hook gets {toolCall: {name, args}, stepIdx, conversationId,

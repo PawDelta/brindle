@@ -1606,9 +1606,15 @@ events, so a worker's status never depends on reading its screen.
 | `permission_mode` | `bypassPermissions`: everything runs. `dontAsk`: only `allowed_tools` commands run, edits and web fetches are refused. `acceptEdits`/`auto`: edits run. `plan`: OpenCode's `plan` agent. Unset: edits ask too. |
 | `add_dirs`, `worker_extra_read_dirs` | Allowed as external directories. |
 
-`effort` isn't passed (OpenCode's terminal UI has no flag for it), and brindle's
-repo-wide `permission_policy` doesn't apply to OpenCode agents yet: their
-permissions are the profile's, as above.
+A `dontAsk` OpenCode worker (the built-in reviewer, for one) can't read outside
+its worktree or its `add_dirs`: with nobody to ask, anything else is refused.
+
+`effort` isn't passed (OpenCode's terminal UI has no flag for it). With
+`permission_policy` on, brindle's plugin also asks brindle before every tool
+call and stops the ones the policy denies (as for Claude Code and Codex
+workers); calls the policy allows or asks about are left to the profile's
+permissions above, so the policy can narrow what an OpenCode worker does but
+never widens it.
 
 ### Cheap workers
 
