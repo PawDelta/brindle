@@ -9,6 +9,7 @@ nothing ever types into a terminal while the agent is mid-turn.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -866,8 +867,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             providers.set_agy_gemini()
         except (OSError, ValueError) as e:
             raise AgentError(f"couldn't set Antigravity to the company Gemini route in its settings.json: {e}") from e
+    mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
+        "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
+        (ws.id, agent.review_sha)).fetchone())
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
-                                          mode=agent.mode, plan_first=bool(agent.plan_first)))
+                                          mode=agent.mode, plan_first=bool(agent.plan_first),
+                                          mcp_recovery=mcp_recovery))
     if prompt or db.pending_count(agent.id):
         _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
                               submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
@@ -2402,9 +2407,11 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
     """The reviewer still at work on ``ws`` at ``sha``, if any. With
     ``profile``, only one running that profile (a second review by another
     profile is not a duplicate)."""
+    from brindle import launch_health
+
     for a in db.list_agents(ws.id):
         if a.mode == "review" and a.result is None and alive_or_starting(a) and a.review_sha == sha \
-                and (profile is None or a.profile == profile):
+                and (profile is None or a.profile == profile) and not launch_health.has_mcp_failure(db, a, ws):
             return a
     return None
 
@@ -2504,9 +2511,26 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
         return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
 
 
+def review_dispatch_lock(workspace_id: str):
+    """Share the dispatch lock with recovery's read of the failed agent."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(workspace_id.encode()).hexdigest()[:16])
+
+
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
                    check_summary: str | None = None) -> Agent:
+    """Start or reuse a review, replacing an MCP-broken reviewer once."""
+    # Serialize hook recovery with explicit requests, including the interval
+    # between stopping the broken reviewer and publishing its replacement.
+    with review_dispatch_lock(ws.id):
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary)
+
+
+def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
+                    focus: str | None, cfg: RepoConfig | None,
+                    check_summary: str | None) -> Agent:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -2518,14 +2542,20 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     workspace already has a review at an earlier commit, the reviewer is
     pointed at just what changed since then, when that's a plain diff (see
     ``is_linear_since``)."""
-    from brindle import gates
+    from brindle import gates, launch_health
     from brindle.config import load_repo_config
 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
     sha = gates.head(ws)
+    failed = None
     for old in db.list_agents(ws.id):
+        if (old.mode == "review" and old.result is None and old.review_sha == sha
+                and (profile is None or old.profile == profile)
+                and launch_health.has_mcp_failure(db, old, ws)):
+            failed = old
+            continue
         if old.mode != "review" or old.result is not None or not alive_or_starting(old):
             continue
         if old.unreported_noted:
@@ -2535,6 +2565,8 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
                 continue   # another profile's review of this commit (a second review): keep both
             return old   # one reviewer per workspace and commit
         close(db, old.id)   # a new commit replaces the reviewer of the old one
+    if failed:
+        return launch_health.retry_reviewer(db, failed, ws)
     worker = workspace_worker(db, ws)
     profile = _review_profile(db, ws, profile, cfg)
 

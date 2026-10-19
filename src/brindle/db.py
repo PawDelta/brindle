@@ -401,6 +401,13 @@ CREATE TABLE IF NOT EXISTS launch_health (
     outcome TEXT,
     launched_at REAL
 );
+-- A failed MCP connection gets one fresh reviewer per workspace/commit,
+-- even after the original agent's record is removed.
+CREATE TABLE IF NOT EXISTS review_mcp_retries (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, sha)
+);
 -- A launch whose CLI hasn't shown its input box yet, and the model calls
 -- spent reading its startup prompts (brindle.prompt_answer).
 CREATE TABLE IF NOT EXISTS startup_prompts (
