@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 
 import pytest
 
@@ -106,3 +107,23 @@ def test_refresh_rewrites_a_stale_cache(repo, monkeypatch):
     monkeypatch.setattr(catalog, "_download", lambda: {"x": {"api": "http://h/v1", "models": {"m": {}}}})
     assert catalog.refresh() is True
     assert catalog.resolve("x/m").base_url == "http://h/v1"
+
+
+def test_a_second_refresh_waits_for_the_one_in_flight(repo, monkeypatch):
+    os.utime(catalog.cache_path(), (0, 0))
+    started, release, fetches = threading.Event(), threading.Event(), []
+
+    def slow_fetch():
+        fetches.append(1)
+        started.set()
+        release.wait(5)
+        return CATALOG
+
+    monkeypatch.setattr(catalog, "_download", slow_fetch)
+    catalog.refresh_async()
+    assert started.wait(5)
+    catalog.refresh_async()                     # in flight: no second download
+    release.set()
+    assert catalog._refreshing.acquire(timeout=5)   # the first one finished
+    catalog._refreshing.release()
+    assert len(fetches) == 1

@@ -62,6 +62,9 @@ def _download(timeout: float = 15.0) -> dict:
     return data
 
 
+_refreshing = threading.Lock()      # held while a background refresh runs
+
+
 def _fresh() -> bool:
     try:
         return time.time() - cache_path().stat().st_mtime < TTL
@@ -98,10 +101,22 @@ def refresh() -> bool:
 
 
 def refresh_async() -> None:
-    """:func:`refresh` on a background thread, when the cache is missing or stale."""
-    if airgap.enabled() or _fresh():
+    """:func:`refresh` on a background thread, when the cache is missing or
+    stale. At most one runs per process: a call while one is in flight does nothing."""
+    if airgap.enabled() or _fresh() or not _refreshing.acquire(blocking=False):
         return
-    threading.Thread(target=refresh, name="models-catalog", daemon=True).start()
+
+    def run() -> None:
+        try:
+            refresh()
+        finally:
+            _refreshing.release()
+
+    try:
+        threading.Thread(target=run, name="models-catalog", daemon=True).start()
+    except BaseException:
+        _refreshing.release()
+        raise
 
 
 def resolve(spec: str, catalog: dict | None = None) -> Resolved:
