@@ -724,7 +724,9 @@ def record_decision(topic: str, decision: str, rationale: str, paths: list[str] 
     db = DB()
     caller, here = _caller(db)
     root_id = _root_id(db, caller)
-    if caller is None or caller.id != root_id:   # workers read decisions, never write them
+    # Workers read decisions, never write them; a worker whose parent is gone
+    # is still a worker.
+    if caller is None or caller.parent_id or caller.id != root_id:
         return "Not recorded: only a session's supervisor can record decisions."
     key = knowledge.repo_key(here.repo_root)
     try:

@@ -300,8 +300,13 @@ def notify_decision(db: DB, repo_root: str, d: dict, author_root: str | None) ->
 
 
 def _line(d: dict) -> str:
-    why = f" Why: {d['rationale']}" if d["rationale"] else ""
-    return f"{d['topic']}: {d['body']}{why} (decision {d['id'][:8]})"
+    """One decision for a notice or brief, its supervisor-written fields
+    quoted so none of them reads as brindle's own text."""
+    def q(text: str) -> str:
+        return json.dumps(text, ensure_ascii=False)
+
+    why = f" Why: {q(d['rationale'])}" if d["rationale"] else ""
+    return f"{q(d['topic'])}: {q(d['body'])}{why} (decision {d['id'][:8]})"
 
 
 def _decisions_block(ds: list[dict]) -> str:

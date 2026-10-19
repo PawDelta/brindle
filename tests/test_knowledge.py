@@ -119,8 +119,11 @@ def test_decision_notifies_matching_session(db, repo, monkeypatch):
             db.add_task(Task(f"t-{root}", ws.repo_root, f"w-{root}", root, ws.id, "developer", "do",
                              "assign", True, f"feat-{root}", None, f'["{file}"]', None, "started",
                              time.time(), time.time()))
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "w-near")    # a worker may not record one
-    mcp_server.record_decision("parsing", "eager", "", ["src/x.py"])
+    db.add_agent(Agent("orphan", ws.id, "developer", "claude", "gone", "assign", "processing", "",
+                       None, time.time()))
+    for worker in ("w-near", "orphan"):    # a worker may not record one, even if its parent is gone
+        monkeypatch.setenv("BRINDLE_AGENT_ID", worker)
+        mcp_server.record_decision("parsing", "eager", "", ["src/x.py"])
     assert knowledge.decisions(db, knowledge.repo_key(repo)) == []
     monkeypatch.setenv("BRINDLE_AGENT_ID", "me")
 
