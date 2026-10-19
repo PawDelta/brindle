@@ -416,7 +416,8 @@ CREATE TABLE IF NOT EXISTS agent_reported_spend (
     updated_at REAL NOT NULL
 );
 -- The shared knowledge layer (brindle.knowledge owns these). kb_events is the
--- append-only source of truth; intents is a projection rebuilt from it.
+-- append-only source of truth; intents and decisions are projections rebuilt
+-- from it.
 CREATE TABLE IF NOT EXISTS kb_events (
     id TEXT PRIMARY KEY,
     repo_key TEXT NOT NULL,
@@ -437,6 +438,22 @@ CREATE TABLE IF NOT EXISTS intents (
     updated_at REAL NOT NULL,
     PRIMARY KEY (session_root, repo_key)
 );
+-- Shared decisions, a projection of decision events: scope is a JSON list of
+-- path globs ([] for the whole repo); a superseded row keeps its text.
+CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    body TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('proposed', 'accepted', 'superseded')),
+    author_session TEXT,
+    link TEXT,
+    supersedes TEXT,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_repo ON decisions(repo_key, status);
 CREATE TABLE IF NOT EXISTS context_receipts (
     task_id TEXT NOT NULL,
     item_kind TEXT NOT NULL,

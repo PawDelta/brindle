@@ -560,7 +560,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         db, caller, caller_ws, profile, task.task_text, task.mode,
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
-        start=_holder_start(db, caller_ws, _loads(task.depends_on)),
+        start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
     )
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     savings.attach_agent(db, task.id, worker.id)

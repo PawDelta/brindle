@@ -381,7 +381,7 @@ async def handoff(
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
-                done_when=done_when, plan_first=plan_first,
+                done_when=done_when, plan_first=plan_first, files=files,
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
@@ -513,7 +513,7 @@ async def assign(
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
-                done_when=done_when, plan_first=plan_first,
+                done_when=done_when, plan_first=plan_first, files=files,
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
@@ -705,6 +705,56 @@ def who_is_working(paths: list[str] | None = None, query: str | None = None) -> 
         + (", ".join(dict.fromkeys([*s["paths"], *(f for fs, _ in s["running"] for f in fs)]))
            or f'{len(s["running"])} worker(s) running')
         for s in found) or "No other sessions match."
+
+
+def _decision_line(d: dict) -> str:
+    why = f" Why: {d['rationale']}" if d["rationale"] else ""
+    return (f"{d['id'][:8]} [{', '.join(d['scope']) or 'whole repo'}] {d['topic']}: {d['body']}{why}")
+
+
+@mcp.tool()
+def record_decision(topic: str, decision: str, rationale: str, paths: list[str] | None = None,
+                    supersedes: str | None = None) -> str:
+    """Record a durable decision about this system (a fact such as "config
+    secrets live in the OS keychain", not a working rule) for every session
+    in this repo. paths: the globs it covers (default: the whole repo).
+    Refused when an accepted decision on the same topic covers overlapping
+    paths, unless supersedes names that decision's id. Workers whose files it
+    covers get it in their brief; sessions running such work are told."""
+    db = DB()
+    caller, here = _caller(db)
+    root_id = _root_id(db, caller)
+    # Workers read decisions, never write them; a worker whose parent is gone
+    # is still a worker.
+    if caller is None or caller.parent_id or caller.id != root_id:
+        return "Not recorded: only a session's supervisor can record decisions."
+    key = knowledge.repo_key(here.repo_root)
+    try:
+        made, existing = knowledge.record_decision(db, key, topic, decision, rationale, paths,
+                                                   supersedes=supersedes, session=root_id)
+    except ValueError as e:
+        return str(e)
+    if made is None:
+        return ("Not recorded: an accepted decision on this topic already covers these paths:\n"
+                f"{_decision_line(existing)}\nPass supersedes={existing['id'][:8]} to replace it.")
+    told = knowledge.notify_decision(db, here.repo_root, made, root_id)
+    text = f"Recorded decision {made['id'][:8]}."
+    if made["supersedes"]:
+        text += f" It supersedes {made['supersedes'][:8]}."
+    if told:
+        text += f" Told session(s) {', '.join(told)}, whose running work it covers."
+    return text
+
+
+@mcp.tool()
+def decisions(paths: list[str] | None = None, query: str | None = None) -> str:
+    """The accepted decisions for this repo. paths (globs ok): only those
+    covering matching files; query: only those whose topic, text or rationale
+    contain that text."""
+    db = DB()
+    _caller_agent, here = _caller(db)
+    found = knowledge.decisions(db, knowledge.repo_key(here.repo_root), paths, query)
+    return "\n".join(_decision_line(d) for d in found) or "No decisions match."
 
 
 @mcp.tool()
