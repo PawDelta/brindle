@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle import agents, git, history, pool, scratch, tmux, workspaces
+from brindle import agents, git, history, knowledge, pool, scratch, tmux, workspaces
 from brindle.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -224,6 +224,7 @@ def _forget(db: DB, s: Session) -> None:
         return  # kept for a later try
     from brindle import autopilot as pilot
     pilot.remove_goals_file(db, s.root.id)   # the session's own goal file goes with it
+    knowledge.note(db, s.root.id, knowledge.END)
     for a in s.members:
         agents._note_reviewer_end(db, a)
         db.delete_agent(a.id)
