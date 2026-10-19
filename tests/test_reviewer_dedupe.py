@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, gates, launch_health, tmux, workspaces
+from brindle import agents, cli, gates, launch_health, pipeline, tmux, workspaces
+from brindle.config import RepoConfig
 from brindle.db import Agent, Workspace
 from brindle.profiles import Profile
 
@@ -81,6 +82,55 @@ def test_new_commit_replaces_the_old_reviewer(db, ws, monkeypatch):
     assert new.id != old.id
     assert len(started) == 2
     assert db.get_agent(old.id).status == "done"
+
+
+@pytest.mark.parametrize("supersede", ["before checks", "during checks"])
+def test_queued_reports_only_dispatch_the_latest_review(db, ws, boss, monkeypatch, supersede):
+    from test_merge_order import add
+
+    cfg = RepoConfig(checks=["suite"], review=True, review_profile="reviewer")
+    add(db, ws, "worker", "assign", parent=boss.id, result="done")
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda _: cfg)
+    monkeypatch.setattr("brindle.config.load_repo_config", lambda _: cfg)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    queued = []
+    monkeypatch.setattr(agents, "_detach", queued.append)
+    started = fake_spawn(monkeypatch)
+    checked = []
+
+    def report():
+        assert pipeline.on_report(db, db.get_agent("worker"), ws, "done")
+
+    def finish(argv):
+        options = dict(zip(argv[argv.index(ws.id) + 1::2], argv[argv.index(ws.id) + 2::2]))
+        cli.review_after_checks_cmd(ws.id, options.get("--caller"), options.get("--profile"),
+                                    options.get("--focus"), options.get("--request-id"))
+
+    def checks(*args, **kwargs):
+        checked.append(gates.head(ws))
+        if supersede == "during checks" and len(checked) == 1:
+            report()
+            assert kwargs["cancel"]()
+        return "PASS"
+
+    monkeypatch.setattr(gates, "check_summary", checks)
+    report()
+    (Path(ws.path) / "more.py").write_text("y = 2\n")
+    sh("git add -A && git commit -qm more", Path(ws.path))
+    report()
+    # The obsolete helper starts late, after the newer report has taken over.
+    finish(queued[0])
+    assert started == [] and checked == []
+    finish(queued[1])
+    if supersede == "during checks":
+        assert started == []
+        finish(queued[2])
+    assert len(started) == 1 and set(checked) == {gates.head(ws)}
+    # Repeated reports and delayed helpers must respect the live reviewer.
+    report()
+    finish(queued[1])
+    assert agents.request_review(db, boss, ws).id == started[0].id
+    assert len(queued) == (3 if supersede == "during checks" else 2) and len(started) == 1
 
 
 @pytest.fixture
