@@ -663,12 +663,6 @@ def test_signing_in_adopts_the_agents_launched_while_signed_out(monkeypatch):
     assert identity_lock.locked_by("c1") is None
     now["ident"] = "claude org Other (org-2)"     # a different account signs in: locked
     assert identity_lock.locked_by("c1") == "claude org Acme (org-1)"
-
-
-def test_a_sign_in_never_fails_over_adopting(monkeypatch):
-    from brindle import signin_pause
-
+    # A failing check never fails the sign-in over adopting.
     monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: 1 / 0)
-    setup, check, _ = ROUTES["subscription"]
-    Fake(monkeypatch, {check: (0, f"logged in to {UUID}")})
     assert go(setup)[0]

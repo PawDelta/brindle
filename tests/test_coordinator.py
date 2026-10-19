@@ -32,7 +32,7 @@ def _task(db, ws, task_id, state, depends_on=None, agent=None):
                      json.dumps(depends_on) if depends_on else None, state, time.time()))
 
 
-def test_hold_task_only_pending_and_allowlisted(db, repo, monkeypatch):
+def _hold_task_only_pending_and_allowlisted(db, repo, monkeypatch):
     ws = _repo_with_sessions(db, repo, monkeypatch)
     _task(db, ws, "queued", "pending", ["w-b"])
     _task(db, ws, "running", "started", agent="w-b")
@@ -59,7 +59,7 @@ def test_hold_task_only_pending_and_allowlisted(db, repo, monkeypatch):
     assert db.get_task("queued").state == "held"
 
 
-def test_events_wake_one_coordinator(db, repo, monkeypatch):
+def _events_wake_one_coordinator(db, repo, monkeypatch):
     _repo_with_sessions(db, repo, monkeypatch, coord=False)
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps({"coordinator": True}))
@@ -104,7 +104,7 @@ def test_events_wake_one_coordinator(db, repo, monkeypatch):
     assert started == ["c0", "c1", "c2"] and db.get_agent("c2").status == "done"
 
 
-def test_undo_restores_queue(db, repo, monkeypatch):
+def _undo_restores_queue(db, repo, monkeypatch):
     ws = _repo_with_sessions(db, repo, monkeypatch)
     _task(db, ws, "queued", "pending", ["w-b"])
     monkeypatch.setenv("BRINDLE_AGENT_ID", "coord")
@@ -120,3 +120,10 @@ def test_undo_restores_queue(db, repo, monkeypatch):
     t = db.get_task("queued")
     assert (t.state, tasks._loads(t.depends_on)) == ("pending", ["w-b"])
     assert CliRunner().invoke(cli.app, ["coordinator", "undo", events[0][0][:8]]).exit_code != 0
+
+
+@pytest.mark.parametrize("scenario", [
+    _hold_task_only_pending_and_allowlisted, _events_wake_one_coordinator, _undo_restores_queue,
+], ids=lambda f: f.__name__.strip("_"))
+def test_coordinator_scenarios(scenario, db, repo, monkeypatch):
+    scenario(db, repo, monkeypatch)

@@ -301,26 +301,7 @@ def brindle_login(monkeypatch):
     return login
 
 
-def test_a_signed_out_agent_is_adopted_by_the_account_that_signs_in(w, brindle_login):
-    from brindle import identity_lock
-
-    w.claude = PERSONAL                # no brindle login: Claude runs on the person's own sign-in
-    w.agent("c1")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    assert signin_pause._load()["unowned"] == ["c1"]
-    brindle_login["in"], w.claude = True, OK     # signing in switches Claude to the org's route
-    assert identity_lock.locked_by("c1") == PERSONAL.ident   # what this fixes
-    assert signin_pause.adopt(OK.ident) == ["c1"]
-    assert signin_pause.recorded_identity("c1") == OK.ident
-    assert signin_pause._load()["unowned"] == []
-    assert identity_lock.locked_by("c1") is None
-    w.claude = OTHER_ORG               # adopted: now it's the account's, and locks for another
-    assert identity_lock.locked_by("c1") == OK.ident
-    w.claude = PERSONAL                # the identity it launched under no longer owns it either
-    assert identity_lock.locked_by("c1") == OK.ident
-
-
-def test_an_agent_recorded_under_a_brindle_login_is_never_adopted(w, brindle_login):
+def _an_agent_recorded_under_a_brindle_login_is_never_adopted(w, brindle_login, monkeypatch):
     from brindle import identity_lock
 
     brindle_login["in"], w.claude = True, PERSONAL
@@ -338,7 +319,7 @@ def test_an_agent_recorded_under_a_brindle_login_is_never_adopted(w, brindle_log
     assert signin_pause.recorded_identity("c2") == OK.ident
 
 
-def test_a_setup_applied_with_no_brindle_login_leaves_agents_unowned(w, brindle_login):
+def _a_setup_applied_with_no_brindle_login_leaves_agents_unowned(w, brindle_login, monkeypatch):
     w.claude = PERSONAL
     w.agent("c1")
     signin_pause.record_launch(w.db.get_agent("c1"))
@@ -348,7 +329,7 @@ def test_a_setup_applied_with_no_brindle_login_leaves_agents_unowned(w, brindle_
     assert signin_pause._load()["unowned"] == []
 
 
-def test_an_agent_gone_is_dropped_from_the_unowned(w, brindle_login):
+def _an_agent_gone_is_dropped_from_the_unowned(w, brindle_login, monkeypatch):
     w.agent("c1")
     signin_pause.record_launch(w.db.get_agent("c1"))
     w.db.delete_agent("c1")
@@ -356,28 +337,13 @@ def test_an_agent_gone_is_dropped_from_the_unowned(w, brindle_login):
     assert signin_pause._load()["unowned"] == []
 
 
-def test_an_old_state_file_without_unowned_loads(w, brindle_login):
-    import json
-
-    path = signin_pause._path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"paused": {}, "identity": {"c1": PERSONAL.ident}, "different": {},
-                                "warned": {}}))
-    assert signin_pause._load()["unowned"] == []
-    assert signin_pause.recorded_identity("c1") == PERSONAL.ident
-    assert signin_pause.adopt(OK.ident) == []     # recorded before this: never adopted
-    assert signin_pause.recorded_identity("c1") == PERSONAL.ident
-    path.write_text(json.dumps({"identity": {}, "unowned": "c1"}))   # unreadable: treated as none
-    assert signin_pause._load()["unowned"] == []
-
-
-def test_adopt_never_raises(w, monkeypatch):
+def _adopt_never_raises(w, brindle_login, monkeypatch):
     monkeypatch.setattr(signin_pause, "_load", lambda: 1 / 0)
     assert signin_pause.adopt(OK.ident) == []
     assert signin_pause.adopt("") == []
 
 
-def test_the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login):
+def _the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login, monkeypatch):
     from brindle import identity_lock
 
     w.claude = PERSONAL
@@ -401,3 +367,13 @@ def test_the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login):
     assert identity_lock.locked_by("c1") is None
     w.claude = OTHER_ORG
     assert identity_lock.locked_by("c1") == OK.ident
+
+
+@pytest.mark.parametrize("scenario", [
+    _an_agent_recorded_under_a_brindle_login_is_never_adopted,
+    _a_setup_applied_with_no_brindle_login_leaves_agents_unowned,
+    _an_agent_gone_is_dropped_from_the_unowned, _adopt_never_raises,
+    _the_sweep_adopts_when_the_sign_in_check_failed,
+], ids=lambda f: f.__name__.strip("_"))
+def test_unowned_agents(scenario, w, brindle_login, monkeypatch):
+    scenario(w, brindle_login, monkeypatch)

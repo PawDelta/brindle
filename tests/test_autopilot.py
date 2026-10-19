@@ -471,7 +471,8 @@ def test_status_line_passes_through_the_persons_own(tmp_path, monkeypatch):
     assert status_line(payload) == "mine"
 
 
-def test_delivered_worker_result_is_not_the_user_replying(db, root):
+def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch):
+    agent, _ = root
     with_goal(db)
     autopilot.need_user(db, "boss", "Postgres or SQLite?")
     db.enqueue("boss", "Assigned task finished.", "w1")
@@ -481,33 +482,16 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root):
     agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "SQLite"})
     assert db.get_autopilot("boss").state == "running"
 
-
-def test_open_question_reminder_sent_through_the_inbox_is_not_repeated(db, root, monkeypatch):
     # Live incident: the reminder of an open question went out through the
-    # inbox in its one-line form, its prompt-submit counted as the user
-    # speaking, and that re-armed the reminder about once a minute.
-    agent, _ = root
-    with_goal(db)
+    # inbox, its prompt-submit counted as the user speaking, and that re-armed
+    # the reminder about once a minute. Wrapped, or as the unread-mail
+    # reminder (never recorded as delivered), it must not re-arm either.
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
     autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
     autopilot.user_spoke(db, agent)
     sent = agents._stop_decision(db, agent, {}, via_inbox=True)
     assert sent
-    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": sent["reason"]})
-    assert autopilot.on_stop(db, agent, {}) is None
-
-
-def test_open_question_reminder_arriving_wrapped_is_not_the_user_speaking(db, root, monkeypatch):
-    # The inbox can hand the reminder back to the prompt hook wrapped, or the
-    # unread-mail reminder (never recorded as delivered) can: neither re-arms.
-    agent, _ = root
-    with_goal(db)
-    monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    autopilot.user_spoke(db, agent)
-    sent = agents._stop_decision(db, agent, {}, via_inbox=True)
-    assert sent
-    for prompt in (f"<message>{sent['reason']}</message>",
+    for prompt in (sent["reason"], f"<message>{sent['reason']}</message>",
                    "[brindle autopilot] You have unread messages. Call read_messages before you stop."):
         agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
         assert autopilot.on_stop(db, agent, {}) is None
