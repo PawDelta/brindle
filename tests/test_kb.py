@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from brindle import kb
+from brindle import agents, codemap, kb, knowledge, mcp_server, workspaces
 from brindle.cli import app
 
 spec =importlib.util.spec_from_file_location(
@@ -167,6 +167,65 @@ def test_code_links_from_graph(db, tmp_path):
     (docs / "a.md").write_text("# A\n\nCall `merge_workspace` again.\n")
     kb.sync(db, source)   # no graph: no links, no error
     assert db.conn.execute("SELECT count(*) FROM kb_links").fetchone()[0] == 0
+
+
+def test_brief_injects_linked_chunk_with_receipt(db, repo, tmp_path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "merging.md").write_text("# Merging\n\nCall `merge_workspace` to land a branch.\n")
+    (docs / "old.md").write_text("# Old\n\nThe zebra notes are ancient.\n")
+    for n in range(4):   # more matching text than the cap lets in
+        (docs / f"zebra{n}.md").write_text(f"# Zebra {n}\n\n" + ("zebra stripes " * 150 + "\n\n") * 3)
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"nodes": [{"id": "n1", "label": "merge_workspace()", "source_file": "src/git.py"}]}))
+    key = knowledge.repo_key(repo)
+    source = kb.add_source(db, key, kb.FOLDER, str(docs))
+    kb.sync(db, source, graph)
+    db.conn.execute("UPDATE kb_docs SET updated_at = 1000 WHERE external_id = 'old.md'")
+    db.conn.commit()
+    linked = db.conn.execute("SELECT chunk_id FROM kb_links").fetchone()[0]
+    ws = workspaces.adopt_root(db, str(repo))
+    launched = []
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(kw["prompt"]))
+    monkeypatch.setattr(codemap, "graph_path", lambda target: graph)
+
+    worker = agents.spawn(db, ws, "developer", prompt="Tidy the zebra notes", mode="assign", files=["src/git.py"])
+
+    brief = launched[0]
+    block = brief[brief.index(knowledge._FENCE[0]):brief.index(knowledge._FENCE[1])]
+    assert "Call `merge_workspace` to land a branch." in block
+    assert "STALE" in block.split("old.md")[1].split("\n")[0]
+    assert "STALE" not in block.split("merging.md")[1].split("\n")[0]
+    assert block.index("merging.md") < block.index("zebra0.md") and "untrusted DATA" in brief
+    assert len(block) // 4 <= knowledge.CHUNK_BUDGET
+    receipt = knowledge.receipt(db, worker.id)
+    assert receipt[0][:2] == (knowledge.CHUNK_ITEM, linked)
+    assert len(receipt) == block.count("\n[") and 1 < len(receipt) < 6   # the cap kept some out
+
+    db.conn.execute("DELETE FROM kb_links")   # a re-sync meanwhile can't change what a restart replays
+    (docs / "merging.md").write_text("# Merging\n\nNow different.\n")
+    kb.sync(db, source)
+    db.set_status(worker.id, "paused")
+    agents.resume(db, worker.id)
+
+    assert "Call `merge_workspace` to land a branch." not in launched[1] and "zebra0.md" in launched[1]
+
+
+def test_kb_search_tool_returns_chunks_and_decisions(db, repo, tmp_path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "ops.md").write_text("# Ops\n\nRoll out the canary first.\n")
+    key = knowledge.repo_key(repo)
+    source = kb.add_source(db, key, kb.FOLDER, str(docs))
+    kb.sync(db, source)
+    knowledge.record_decision(db, key, "canary", "always canary first", "less risk")
+    monkeypatch.chdir(repo)
+
+    out = mcp_server.kb_search("canary", sources=[str(docs)])
+
+    assert "always canary first" in out and "Roll out the canary first." in out and "ops.md" in out
+    assert "No source" in mcp_server.kb_search("canary", sources=["nope"])
 
 
 COMMENT = "instruction in an HTML comment"

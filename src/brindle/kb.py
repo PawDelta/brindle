@@ -39,6 +39,8 @@ BATCH = 50
 TARGET_TOKENS = 500
 MAX_TOKENS = 1000
 REDACTED = "[redacted]"
+# A document not updated for this long is labelled stale in a brief.
+STALE_DAYS = 180
 
 # Secret-shaped values as documents hold them: provider key and token formats,
 # private key blocks, a secret-named setting given a value with a digit in it,
@@ -406,7 +408,7 @@ def search(db: DB, repo_key: str, query: str, sources: list[str] | None = None,
     if not terms or k < 1 or sources == []:
         return []
     match = " OR ".join(f'"{t}"' for t in terms)
-    sql = ("SELECT c.id AS chunk_id, c.heading_path, c.text, d.url, d.title, d.updated_at"
+    sql = ("SELECT c.id AS chunk_id, c.heading_path, c.text, d.url, d.title, d.updated_at, d.external_id"
            " FROM kb_fts JOIN kb_chunks c ON c.rowid = kb_fts.rowid JOIN kb_docs d ON d.id = c.doc_id"
            " JOIN kb_sources s ON s.id = d.source_id"
            " WHERE kb_fts MATCH ? AND s.repo_key = ? AND c.quarantined IS NULL AND NOT d.tombstoned")
@@ -415,10 +417,89 @@ def search(db: DB, repo_key: str, query: str, sources: list[str] | None = None,
         sql += f" AND s.id IN ({','.join('?' * len(sources))})"
         args += sources
     rows = db.conn.execute(sql + " ORDER BY kb_fts.rank LIMIT ?", (*args, k)).fetchall()
-    return [{"chunk_id": r["chunk_id"], "heading_path": r["heading_path"], "text": r["text"],
-             "url": r["url"], "title": r["title"],
-             "updated": time.strftime("%Y-%m-%d", time.localtime(r["updated_at"])) if r["updated_at"] else None}
-            for r in rows]
+    return [_hit(r) for r in rows]
+
+
+def _hit(r) -> dict:
+    return {"chunk_id": r["chunk_id"], "heading_path": r["heading_path"], "text": r["text"],
+            "url": r["url"], "title": r["title"], "updated_at": r["updated_at"], "external_id": r["external_id"],
+            "updated": time.strftime("%Y-%m-%d", time.localtime(r["updated_at"])) if r["updated_at"] else None}
+
+
+def is_stale(hit: dict, now: float | None = None) -> bool:
+    """Whether a hit's document was last updated more than STALE_DAYS ago."""
+    return bool(hit.get("updated_at")) and (now or time.time()) - hit["updated_at"] > STALE_DAYS * 86400
+
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def graph_file_nodes(graph: Path | None) -> dict[str, list[str]]:
+    """The graphify graph's node ids by the source file they come from; empty
+    without a readable graph."""
+    if graph is None:
+        return {}
+    try:
+        nodes = json.loads(Path(graph).read_text()).get("nodes", [])
+    except (OSError, ValueError, AttributeError):
+        return {}
+    by_file: dict[str, list[str]] = {}
+    for node in nodes:
+        if isinstance(node, dict) and node.get("id") is not None and node.get("source_file"):
+            by_file.setdefault(str(node["source_file"]), []).append(str(node["id"]))
+    return by_file
+
+
+def _chunks_where(db: DB, repo_key: str, where: str, args: list) -> list[dict]:
+    rows = db.conn.execute(
+        "SELECT DISTINCT c.id AS chunk_id, c.heading_path, c.text, d.url, d.title, d.updated_at, d.external_id,"
+        " c.rowid AS r"
+        " FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id JOIN kb_sources s ON s.id = d.source_id"
+        f" WHERE s.repo_key = ? AND c.quarantined IS NULL AND NOT d.tombstoned AND {where} ORDER BY r",
+        [repo_key, *args]).fetchall()
+    return [_hit(r) for r in rows]
+
+
+def linked_to_files(db: DB, repo_key: str, files: list[str], graph: Path | None) -> list[dict]:
+    """The chunks with a ``kb_links`` row to a graph node defined in one of
+    ``files`` (globs allowed); none without a graph."""
+    from fnmatch import fnmatch
+
+    by_file = graph_file_nodes(graph)
+    nodes = [n for f, ns in by_file.items() if any(f == p or fnmatch(f, p) for p in files) for n in ns]
+    if not nodes:
+        return []
+    return _chunks_where(db, repo_key,
+                         f"c.id IN (SELECT chunk_id FROM kb_links WHERE node_id IN ({','.join('?' * len(nodes))}))",
+                         nodes)
+
+
+def hop(db: DB, repo_key: str, chunk_ids: list[str], graph: Path | None = None) -> list[dict]:
+    """One hop out from ``chunk_ids``: other chunks linked to a node they link
+    to, or (with ``graph``) to a node a graphify edge joins to one."""
+    if not chunk_ids:
+        return []
+    marks = ",".join("?" * len(chunk_ids))
+    nodes = {r[0] for r in db.conn.execute(f"SELECT node_id FROM kb_links WHERE chunk_id IN ({marks})", chunk_ids)}
+    if graph is not None and nodes:
+        try:
+            edges = json.loads(Path(graph).read_text()).get("links", [])
+        except (OSError, ValueError, AttributeError):
+            edges = []
+        for e in edges:
+            if isinstance(e, dict):
+                if e.get("source") in nodes:
+                    nodes.add(e.get("target"))
+                elif e.get("target") in nodes:
+                    nodes.add(e.get("source"))
+    nodes = sorted(str(n) for n in nodes if n is not None)
+    if not nodes:
+        return []
+    found = _chunks_where(db, repo_key,
+                          f"c.id IN (SELECT chunk_id FROM kb_links WHERE node_id IN ({','.join('?' * len(nodes))}))",
+                          nodes)
+    return [h for h in found if h["chunk_id"] not in set(chunk_ids)]
 
 
 def sync(db: DB, source_id: str, graph: Path | None = None) -> dict[str, int]:
