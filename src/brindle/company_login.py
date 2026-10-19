@@ -239,16 +239,23 @@ def store_env(org_id: str, env: dict[str, str], self_serve: bool = False) -> Non
     config.set_user(ENV_KEY, got if env else None)
 
 
-def clear_env(force: bool = False) -> None:
+def clear_env(force: bool = False, stale: bool = False) -> bool:
     """Forget the stored env (logout, or an org with no agent_setup), so a
     stale route can't keep sending panes to the previous org's backend. A
-    self-serve env (the person's own choice, not an org's) stays unless ``force``."""
+    self-serve env (the person's own choice, not an org's) stays unless ``force``.
+    ``stale``: the org's fresh setup has no Claude route, so the env goes
+    even from inside a brindle session (``config.forget_user``). True when
+    it was removed."""
     try:
         got = config.user_settings().get(ENV_KEY)
-        if got is not None and (force or not (isinstance(got, dict) and got.get("self_serve"))):
-            config.set_user(ENV_KEY, None)
+        if got is None or (not force and isinstance(got, dict) and got.get("self_serve")):
+            return False
+        if stale:
+            return config.forget_user(ENV_KEY)
+        config.set_user(ENV_KEY, None)
+        return config.user_settings().get(ENV_KEY) is None
     except (OSError, ValueError):
-        pass
+        return False
 
 
 def _current_org() -> str | None:
@@ -622,12 +629,12 @@ def apply_current(say: Callable[[str], None], repo_root: str | None = None, stor
         clear_federation()  # signed out: no federated credential outlives the sign-in
         return self_serve.run(say, repo_root, ask, info)
     if got is None:
-        clear_env()
+        clear_env(stale=True)
         # the signed-in org has no agent_setup: its federation files go, other member orgs' stay
         clear_federation(keep=_other_orgs(store, client))
         return self_serve.run(say, repo_root, ask, info)
     if got[1].claude is None:
-        clear_env()         # the org's setup has no Claude route (any more): panes get none
+        clear_env(stale=True)   # the org's setup has no Claude route (any more): panes get none
     return apply(got[0], got[1], say, repo_root, store=store, client=client)
 
 
@@ -653,7 +660,8 @@ def sync(store=None, client=None) -> list[str]:
     setup = org_setup(store=store, client=client)
     if setup is UNAVAILABLE or (setup is not None and setup[1].claude is not None):
         return []
-    clear_env()
+    if not clear_env(stale=True):
+        return []
     return ["stopped applying the org's Claude route: its agent setup no longer has one"]
 
 

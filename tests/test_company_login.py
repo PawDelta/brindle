@@ -5,6 +5,8 @@ import json
 import os
 import shlex
 import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -12,6 +14,8 @@ from typer.testing import CliRunner
 from brindle import agents, cli, cloud_credential, company_login, workspaces
 from brindle.db import Agent
 from brindle.pro import account as pro_account
+from brindle.pro.license import current as REAL_CURRENT
+from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # noqa: F401 - fixtures
 from brindle.pro.team_policy import (AgentSetup, AwsFederation, AwsSetup, AzureFederation, AzureSetup,
                                      ClaudeSetup, CodexSetup, GatewaySetup, GcpFederation, GcpSetup, ModelsSetup)
 
@@ -448,30 +452,37 @@ def test_a_failing_policy_keeps_the_stored_env(monkeypatch):
     assert company_login.stored_env() == {}
     # An agent_setup that no longer has a Claude route (the owner removed it) clears it too.
     go(claude("bedrock", aws=AWS))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")      # `brindle doctor` from a session
     monkeypatch.setattr(team_policy, "current_policy", lambda *a, **k: type(
         "P", (), {"agent_setup": AgentSetup(codex=CodexSetup(route="api_key"))})())
     company_login.apply_current(print)
     assert company_login.stored_env() == {}
 
 
-def test_the_sweep_refetches_the_entitlement_and_drops_a_removed_claude_route(current_org, monkeypatch):
-    # Live incident: the org owner removed the Claude route, but the stored
-    # route env kept reaching Claude panes, since nothing refetched the entitlement.
-    from brindle.pro import license
+def test_the_sweep_refetches_the_entitlement_and_drops_a_removed_claude_route(backend, signing_key, monkeypatch):
+    # Live incident: the org owner removed the Claude route, but only an
+    # entitlement near expiry was refetched, so its old policy version kept
+    # the route, and its env kept reaching Claude panes, even after a
+    # `brindle doctor` from a session (where settings writes are refused).
+    from brindle.pro import auth, credentials, license, team_policy
 
+    monkeypatch.setattr(license, "current", REAL_CURRENT)
     Fake(monkeypatch)
     go(claude("bedrock", aws=AWS))
-    asked = []
-
-    def current(**kw):
-        asked.append(kw.get("max_age"))
-        return _Ent(ORG)
-    monkeypatch.setattr(license, "current", current)
-    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, claude("bedrock", aws=AWS)))
-    assert company_login.sync() == [] and company_login.stored_env()
-    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, AgentSetup()))
-    assert company_login.sync() and company_login.stored_env() == {}
-    assert license.MAX_AGE in asked
+    now = time.time()
+    store = credentials.default_store()
+    store.save({**backend.issue(), "access_expires_at": now + 900, "base_url": BASE,
+                "entitlement": sign(signing_key, claims(org_id=ORG, features=["team"], policy_version=1,
+                                                        iat=int(now - 1200), exp=int(now + 3 * 3600)))})
+    backend.routes["GET /entitlement"] = [(200, {"entitlement": sign(signing_key, claims(
+        org_id=ORG, features=["team"], policy_version=2))})]
+    monkeypatch.setattr(team_policy, "current_policy", lambda ent, *a, **k: SimpleNamespace(
+        agent_setup=claude("bedrock", aws=AWS) if ent.policy_version < 2 else AgentSetup()))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    assert company_login.stored_env()
+    assert company_login.sync(store=store, client=auth.Client(BASE, backend))
+    assert company_login.stored_env() == {}
+    assert company_login.ENV_KEY not in company_login.config.user_settings()
 
 
 def test_pinned_models_without_the_claude_binary_are_not_ready(monkeypatch):

@@ -238,16 +238,6 @@ def test_expired_past_grace_offline_asks_only_subscribers_to_log_in(backend, tok
         license.current(store=store, client=client(backend))
 
 
-def test_an_entitlement_older_than_max_age_is_refetched(backend, token):
-    # Live incident: a feature added to the plan on the server stayed missing,
-    # since only an entitlement near its expiry was ever refetched.
-    now = time.time()
-    store = logged_in(backend, token(features=["learning"], iat=int(now - 1200), exp=int(now + 3 * 3600)))
-    assert "autopilot" not in license.current(store=store, client=client(backend)).features
-    ent = license.current(store=store, client=client(backend), max_age=license.MAX_AGE)
-    assert "autopilot" in ent.features
-
-
 def test_a_cancelled_subscription_is_announced_once(backend, token):
     now = time.time()
     store = logged_in(backend, token(iat=int(now - 2 * DAY), exp=int(now - DAY)), access_valid=False)
