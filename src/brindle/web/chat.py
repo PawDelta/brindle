@@ -3,6 +3,7 @@ text only, no tool traffic) and a way to send it a message as the person."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -57,9 +58,7 @@ def _read_items(agent: Agent) -> tuple[list, object]:
     if agent.provider != "claude" or not path or not Path(path).is_file():
         return [], _claude_message
     raw = Path(path).read_text(encoding="utf-8", errors="replace")
-    lines = raw.split("\n")
-    if lines and not raw.endswith("\n"):
-        lines.pop()  # a line still being written: next poll
+    lines = raw.split("\n")[:-1]  # only complete lines; a partial tail waits for next poll
     items = []
     for line in lines:
         try:
@@ -69,13 +68,32 @@ def _read_items(agent: Agent) -> tuple[list, object]:
     return items, _claude_message
 
 
-def transcript(agent: Agent, after: int = 0) -> dict:
-    """Messages after raw entry ``after`` and the cursor to pass next time."""
+def _generation(items: list) -> str:
+    """Hash of the first kept message after the task/summary header, so a
+    context fold (which replaces the middle with a summary) changes it."""
+    start = 3 if len(items) > 2 and isinstance(items[1], dict) and items[1].get("summary") else 1
+    head = items[1:start + 1]
+    if not head:
+        return "0"
+    raw = json.dumps(head, sort_keys=True, default=str).encode()
+    return hashlib.sha1(raw).hexdigest()[:12]
+
+
+def transcript(agent: Agent, after: int | str = 0) -> dict:
+    """Messages after cursor ``after`` and the cursor to pass next time.
+    When ``after``'s generation doesn't match (e.g. a native conversation
+    folded), returns ``reset=True`` and a recent snapshot."""
     items, parse = _read_items(agent)
-    cursor = len(items)
-    after = min(max(after, 0), cursor)
-    messages = [m for m in map(parse, items[after:]) if m]
-    return {"messages": messages[-MAX_MESSAGES:], "cursor": cursor}
+    gen = _generation(items)
+    given_gen, sep, count_s = str(after or 0).rpartition(":")
+    count = int(count_s or 0)
+    folded = len(items) > 2 and isinstance(items[1], dict) and bool(items[1].get("summary"))
+    mismatch = count < 0 or count > len(items) or (
+        bool(sep) and given_gen != gen and not (given_gen == "0" and count <= 1 and not folded)
+    )
+    start = 0 if mismatch else count
+    messages = [m for m in map(parse, items[start:]) if m]
+    return {"messages": messages[-MAX_MESSAGES:], "cursor": f"{gen}:{len(items)}", "reset": mismatch}
 
 
 @route("GET", "/api/agents/{id}/transcript")
@@ -84,10 +102,9 @@ def api_transcript(req: Request) -> Response:
     if agent is None:
         return json_response({"error": "no such agent"}, 404)
     try:
-        after = int(req.query.get("after") or 0)
+        return json_response(transcript(agent, req.query.get("after") or 0))
     except ValueError:
         return json_response({"error": "bad cursor"}, 400)
-    return json_response(transcript(agent, after))
 
 
 @route("POST", "/api/agents/{id}/message")

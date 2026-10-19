@@ -94,7 +94,7 @@ function render(snap) {
 
 // -- chat: pick an agent (the supervisor by default), read it, message it ----
 
-const chat = { agent: null, cursor: 0, busy: false };
+const chat = { agent: null, cursor: 0, busy: false, sending: false };
 
 function updateChatAgents(snap) {
   const select = document.getElementById("chat-agent");
@@ -124,15 +124,16 @@ async function pollChat() {
   if (!id || chat.busy) return;
   chat.busy = true;
   try {
-    const resp = await fetch("api/agents/" + encodeURIComponent(id) + "/transcript?after=" + chat.cursor,
+    const resp = await fetch("api/agents/" + encodeURIComponent(id) + "/transcript?after=" + encodeURIComponent(chat.cursor),
       { credentials: "same-origin" });
     if (!resp.ok || id !== chat.agent) return;
     const data = await resp.json();
     const log = document.getElementById("chat-log");
     const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+    if (data.reset) log.replaceChildren();
     for (const m of data.messages) log.append(el("div", { class: "msg " + m.role }, m.text));
     chat.cursor = data.cursor;
-    if (data.messages.length && atEnd) log.scrollTop = log.scrollHeight;
+    if ((data.messages.length || data.reset) && atEnd) log.scrollTop = log.scrollHeight;
   } catch (e) {
     // the main poll shows connection errors
   } finally {
@@ -145,7 +146,8 @@ async function sendChat(event) {
   const box = document.getElementById("chat-text");
   const note = document.getElementById("chat-note");
   const text = box.value.trim();
-  if (!text || !chat.agent) return;
+  if (!text || !chat.agent || chat.sending) return;
+  chat.sending = true;
   try {
     const resp = await fetch("api/agents/" + encodeURIComponent(chat.agent) + "/message", {
       method: "POST", credentials: "same-origin",
@@ -159,6 +161,8 @@ async function sendChat(event) {
     pollChat();
   } catch (e) {
     note.textContent = String(e.message || e);
+  } finally {
+    chat.sending = false;
   }
 }
 
