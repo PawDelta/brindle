@@ -678,7 +678,7 @@ def set_goal(db: DB, root_id: str, goal: str,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
 
 
-CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy"}
+CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", "opencode": "opencode"}
 
 
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,

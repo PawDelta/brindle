@@ -1253,7 +1253,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         if ws is None or not os.path.isdir(ws.path):
             continue
         provider = get_provider(a.provider)
-        ref = a.session_ref if provider.name in ("claude", "antigravity", "native") and a.session_ref else None
+        ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
         if ref:

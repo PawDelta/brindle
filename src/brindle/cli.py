@@ -222,7 +222,7 @@ def new(
     no_agent: bool = typer.Option(False, "--no-agent", help="Only create the worktree; start no supervisor."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the supervisor."),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Don't fetch the base branch first."),
     no_setup: bool = typer.Option(False, "--no-setup", help="Skip setup commands."),
@@ -292,7 +292,7 @@ def new(
 def start(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
@@ -921,7 +921,7 @@ def default(
     cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="Start with autopilot on or off (default: on, or `autopilot` in .brindle/config.json)."),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
@@ -958,7 +958,7 @@ def default(
 def supervisor(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
@@ -2901,6 +2901,11 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         from brindle import antigravity
 
         typer.echo(antigravity.hook_main(DB(), event, sys.stdin.read()))
+        return
+    if event.startswith("opencode-"):
+        from brindle import opencode
+
+        opencode.hook_main(DB(), agent or os.environ.get("BRINDLE_AGENT_ID"), event, sys.stdin.read())
         return
     # --agent is baked into the hook command at launch; the environment is
     # only a fallback for sessions launched by an older brindle (and may be stale).
