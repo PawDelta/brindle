@@ -17,6 +17,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from pathlib import PurePath
 
 from brindle import agents, conflicts, git, savings
@@ -121,11 +122,34 @@ def _where(other_ws: Workspace | None) -> str:
     return f"{other_ws.branch}{session}"
 
 
-def _intent_overlap(db: DB, ws: Workspace, files: list[str]) -> str | None:
-    """A warning if ``files`` matches a live intent another session announced
+@dataclass
+class Clash:
+    """What a new task's ``files`` (or issue number) collides with: the
+    ``warning`` text, the worker holding the files (None for an intent, which
+    has no worker to wait for) and whether it belongs to another session."""
+    warning: str
+    holder: str | None = None
+    holder_root: str | None = None
+    cross_session: bool = False
+
+
+def _own_roots(db: DB, ws: Workspace, caller_id: str | None) -> set[str]:
+    from brindle import autopilot
+    if caller_id:
+        return {autopilot.root_of(db, caller_id)}
+    return {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)}
+
+
+def _held(db: DB, own: set[str], warning: str, holder: str | None) -> Clash:
+    from brindle import autopilot
+    root = autopilot.root_of(db, holder) if holder else None
+    return Clash(warning, holder, root, root is not None and root not in own)
+
+
+def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Clash | None:
+    """A clash if ``files`` matches a live intent another session announced
     for this repo, naming that session and its goal line."""
-    from brindle import autopilot, knowledge
-    own = {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)}
+    from brindle import knowledge
     for intent in knowledge.intents(db, knowledge.repo_key(ws.repo_root)):
         if intent["status"] != "live" or intent["session_root"] in own:
             continue
@@ -133,19 +157,22 @@ def _intent_overlap(db: DB, ws: Workspace, files: list[str]) -> str | None:
             for theirs in intent["paths"]:
                 if _glob_match(mine, theirs):
                     goal = intent["summary"].strip().splitlines()[0] if intent["summary"].strip() else ""
-                    return (f"overlaps with session {intent['session_root']}'s intent on {theirs}"
-                            + (f" ({goal})" if goal else "")
-                            + "; consider depends_on or merging first")
+                    return Clash(f"overlaps with session {intent['session_root']}'s intent on {theirs}"
+                                 + (f" ({goal})" if goal else "")
+                                 + "; consider depends_on or merging first",
+                                 None, intent["session_root"], True)
     return None
 
 
-def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
-                    task_text: str | None = None) -> str | None:
-    """A warning if ``files`` overlaps another active task's declared or
-    actually-changed files, or None. Also covers tasks from other sessions
-    whose worker has reported but whose branch isn't merged yet, and a task
-    text naming the same issue (#NNN) as one of them. Still starts the worker
-    regardless: this is informational, not a block."""
+def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
+               caller_id: str | None = None) -> Clash | None:
+    """What ``files`` overlaps: another active task's declared or
+    actually-changed files, a task from another session whose worker has
+    reported but whose branch isn't merged yet, a task text naming the same
+    issue (#NNN) as one of those, or another session's live intent. A task is
+    another session's when its root differs from ``caller_id``'s (without
+    one: from the roots of ``ws``'s agents)."""
+    own = _own_roots(db, ws, caller_id)
     if files:
         for t, _agent, other_ws in running_tasks(db, ws.repo_root):
             candidates = list(_loads(t.files))
@@ -155,12 +182,12 @@ def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
                 for theirs in candidates:
                     if _glob_match(mine, theirs):
                         branch = other_ws.branch if other_ws else "?"
-                        return (f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
-                                "consider depends_on or merging first")
+                        return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
+                                     "consider depends_on or merging first", t.agent_id)
     if files:
-        warning = _intent_overlap(db, ws, files)
-        if warning:
-            return warning
+        clash = _intent_overlap(db, ws, files, own)
+        if clash:
+            return clash
     mine_issues = _issue_numbers(task_text)
     if not files and not mine_issues:
         return None
@@ -170,13 +197,60 @@ def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
         for mine in files or []:
             for theirs in candidates:
                 if _glob_match(mine, theirs):
-                    return (f"overlaps with {where}, reported but not yet merged, on {theirs}; "
-                            "consider depends_on or merging first")
+                    return _held(db, own, f"overlaps with {where}, reported but not yet merged, on {theirs}; "
+                                 "consider depends_on or merging first", t.agent_id)
         shared = mine_issues & _issue_numbers(t.task_text)
         if shared:
-            return (f"names issue #{min(shared, key=int)} like {where}, reported but not yet "
-                    "merged; check it isn't already fixed there")
+            return _held(db, own, f"names issue #{min(shared, key=int)} like {where}, reported but not yet "
+                         "merged; check it isn't already fixed there", t.agent_id)
     return None
+
+
+def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
+                    task_text: str | None = None) -> str | None:
+    """``find_clash``'s warning text, or None."""
+    clash = find_clash(db, ws, files, task_text)
+    return clash.warning if clash else None
+
+
+def overlap_mode(setting: str | None, cross_session: bool) -> str:
+    """How a clash is handled: the repo's ``overlap`` setting ("block", "warn"
+    or "queue") when it has one; unset, "block" within a session and "queue"
+    behind another session's task, whose work is never cancelled or replaced."""
+    if setting in ("block", "warn", "queue"):
+        return setting
+    return "queue" if cross_session else "block"
+
+
+def _goal_line(db: DB, root_id: str) -> str:
+    """A session's goal line: its autopilot goal, else its live intent."""
+    pilot = db.get_autopilot(root_id)
+    text = pilot.goal if pilot and pilot.goal else ""
+    if not text:
+        row = db.conn.execute("SELECT summary FROM intents WHERE session_root = ? AND status = 'live' "
+                              "ORDER BY updated_at DESC", (root_id,)).fetchone()
+        text = row["summary"] if row else ""
+    return text.strip().splitlines()[0] if text.strip() else ""
+
+
+def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str) -> None:
+    """Tell both sessions' supervisors about a cross-session clash, each
+    naming the other session's goal line. ``outcome`` says what happened to
+    the new task (queued, refused, started with a warning)."""
+    from brindle import gates
+    if not clash.holder_root:
+        return
+    what = clash.warning.split(";")[0]
+    for to, other in ((caller_root, clash.holder_root), (clash.holder_root, caller_root)):
+        goal = _goal_line(db, other)
+        who = f"session {other}" + (f" (goal: {goal})" if goal else "")
+        if to == caller_root:
+            text = f"[brindle] Your new task {what}, held by {who}: {outcome}."
+        else:
+            text = (f"[brindle] A new task from {who} {what}, your session's work: "
+                    f"{outcome}. Your work is not changed.")
+        if db.get_agent(to):
+            gates.tell(db, to, text)
 
 
 # -- predicted conflicts between running branches -------------------------------
@@ -426,9 +500,34 @@ def record_started(
     return t
 
 
+def pending_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str) -> Task | None:
+    """A task ``caller_id`` already queued in ``repo_root`` with the same brief,
+    so a second assign of it leaves the first in place instead of adding one."""
+    return next((t for t in db.list_tasks(repo_root, state="pending")
+                 if t.caller_id == caller_id and t.task_text == task_text), None)
+
+
+def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str]) -> str | None:
+    """The commit a queued task's branch must start from: a dependency's
+    merge commit that ``caller_ws``'s branch lacks, as when the holder merged
+    into another session's branch; None to start from the caller's branch."""
+    for dep in depends_on:
+        agent = db.get_agent(dep)
+        dep_ws = db.get_workspace(agent.workspace_id) if agent else None
+        if dep_ws is None or dep_ws.repo_root != caller_ws.repo_root:
+            continue
+        sha = db.merged_sha(dep_ws.id)
+        if not sha or not git.ok(["cat-file", "-e", f"{sha}^{{commit}}"], caller_ws.path):
+            continue   # no merge record, or its commit is gone
+        if not git.ok(["merge-base", "--is-ancestor", sha, caller_ws.branch], caller_ws.path):
+            return sha
+    return None
+
+
 def start_queued(db: DB, task: Task) -> Agent:
     """Start a queued task now that its dependencies are met, cutting its
-    branch from the caller workspace's current (updated) base."""
+    branch from the caller workspace's current (updated) base, or from a
+    dependency's merge commit that base lacks (``_holder_start``)."""
     from brindle.config import load_repo_config
 
     caller_ws = db.get_workspace(task.caller_ws_id)
@@ -461,6 +560,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         db, caller, caller_ws, profile, task.task_text, task.mode,
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
+        start=_holder_start(db, caller_ws, _loads(task.depends_on)),
     )
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     savings.attach_agent(db, task.id, worker.id)
@@ -595,7 +695,8 @@ def _matches(glob: str, path: str) -> bool:
 
 
 def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: list[str] | None,
-                 depends_on: list[str] | None, overlap: str) -> str:
+                 depends_on: list[str] | None, overlap: str | None,
+                 caller_id: str | None = None) -> str:
     """What ``assign``/``handoff`` would do, without doing it: the profile, the
     files each glob matches in ``ws``'s checked-out branch, overlaps with
     active workers, and whether it would queue."""
@@ -613,10 +714,14 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
                              "so overlap detection won't cover it")
     else:
         lines.append("files: none declared, so overlap detection won't cover this task")
-    warning = overlap_warning(db, ws, files)
-    if warning:
-        lines.append(f"overlap: this task {warning} ({'refused' if overlap == 'block' else 'warned'} "
-                     f"by the repo's overlap setting)")
+    clash = find_clash(db, ws, files, caller_id=caller_id)
+    warning = clash.warning if clash else None
+    mode = overlap_mode(overlap, clash.cross_session) if clash else "warn"
+    if mode == "queue" and not (clash and clash.holder):
+        mode = "warn"
+    if clash:
+        done = {"block": "refused", "warn": "warned", "queue": "queued"}[mode]
+        lines.append(f"overlap: this task {warning} ({done} by the repo's overlap setting)")
     else:
         lines.append("overlap: none")
     try:
@@ -627,8 +732,10 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
         if unmet:
             lines.append(f"queue: would queue until {', '.join(unmet)} merge"
                          f"{'s' if len(unmet) == 1 else ''}")
-        elif warning and overlap == "block":
+        elif mode == "block":
             lines.append("queue: would not start (overlap)")
+        elif mode == "queue":
+            lines.append(f"queue: would queue until {clash.holder} merges")
         else:
             lines.append("queue: would start now")
     return "\n".join(lines)

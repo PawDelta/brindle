@@ -2174,12 +2174,14 @@ def delegate(
     branch: str | None = None,
     done_when: str | None = None,
     plan_first: bool | None = None,
+    start: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker. ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit. With ``isolate``, the worker gets a new worktree whose
     branch starts from the caller's current branch, so it sees the caller's
-    committed work, and nobody edits the same files. Refuses beyond the
-    repo's ``max_agents`` workers running at once."""
+    committed work, and nobody edits the same files; ``start`` names another
+    commit to start it from (it still merges into the caller's branch).
+    Refuses beyond the repo's ``max_agents`` workers running at once."""
     from brindle import autopilot as pilot
     from brindle import repos
     from brindle.config import load_repo_config
@@ -2210,7 +2212,7 @@ def delegate(
         merge_into = load_repo_config(caller_ws.repo_root).merge_into
         base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
         branch = branch or _branch_from_task(profile, task, new_id()[:4])
-        start = base if git.branch_exists(caller_ws.repo_root, base) else "HEAD"
+        start = start or (base if git.branch_exists(caller_ws.repo_root, base) else "HEAD")
         created = workspaces.create(
             db, caller_ws.path, branch, base, fetch=False, start=start,
             reuse_registered=True,

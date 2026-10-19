@@ -134,7 +134,9 @@ class RepoConfig:
     # --dangerously-skip-permissions and brindle's hook allows or denies every
     # call (see brindle.antigravity). "prompt" (default): agy asks as usual.
     agy_approvals: str = "prompt"
-    overlap: str = "block"           # a task whose files overlap a running one: "block" or "warn"
+    # A task whose files overlap a running one: "block", "warn" or "queue" (wait
+    # for it to merge). None: block within a session, queue behind another session's.
+    overlap: str | None = None
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
     protected_paths: list[str] = field(default_factory=list)

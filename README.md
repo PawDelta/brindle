@@ -257,7 +257,7 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    they keep going until it's met. `assign`/`handoff` take `files` (the
    paths/globs a task expects to touch, checked for overlap against other
    active workers' declared and actually-changed files; refused by default,
-   a warning with `"overlap": "warn"`) and `depends_on` (earlier tasks, by agent id or branch, that must
+   queued behind another session's task, a warning with `"overlap": "warn"`) and `depends_on` (earlier tasks, by agent id or branch, that must
    merge first): a task with unmet dependencies is queued instead of started,
    and starts automatically, cut from the updated base, once
    `merge_workspace` resolves them. `list_tasks` shows what's queued.
@@ -546,7 +546,7 @@ Autopilot, merge gates and cleanup:
 | `agy_approvals` | `"prompt"` | `"brindle"`: with the policy on, Antigravity workers run without approval prompts and brindle's hook allows or denies every call (see "Antigravity" under "Permission policy") |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
-| `overlap` | `"block"` | a task whose `files` overlap a running task's is refused (`"warn"` starts it with a warning) |
+| `overlap` | unset | a task whose `files` overlap a running task's: `"block"` refuses it, `"warn"` starts it with a warning, `"queue"` queues it until that task merges. Unset, it is refused within a session and queued behind another session's task (both sessions' supervisors are told; the other session's work is never cancelled), and the queued task starts from that task's merge commit |
 | `protected_paths` | `[]` | paths or globs (`"migrations/"`, `"*.lock"`) whose merge conflicts brindle never hands to a worker to resolve: the branch waits for you instead (see "Conflict-aware merging") |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 | `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
