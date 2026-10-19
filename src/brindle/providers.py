@@ -166,6 +166,10 @@ class Provider:
         screen state worth reading here)."""
         return None
 
+    def clear_input(self, target: str, *, server) -> None:
+        """Discard a multiline draft before retrying a worker's first brief."""
+        tmux.send_keys(target, "C-c", server=server)
+
 
 # Why an agent should act on the messages brindle types into its chat,
 # without widening what it trusts: only the typed lead line (tmux.paste)
@@ -801,20 +805,19 @@ class ClaudeCode(Provider):
             return "background"
         if not interactive:
             return None
-        styled_lines = screen.rstrip().splitlines()[-25:]
-        candidates = [ln for ln in styled_lines if self.INPUT_LINE.match(self._strip_ansi(ln))]
+        styled_lines = screen.rstrip().splitlines()
+        candidates = [i for i, ln in enumerate(styled_lines) if self.INPUT_LINE.match(self._strip_ansi(ln))]
         if not candidates:
             return None
-        styled_line = candidates[-1]
-        plain_line = self._strip_ansi(styled_line)
-        m = self.INPUT_LINE.match(plain_line)
-        if not (m and m.group(1).strip()):
-            return None
-        idx = styled_line.find("❯")
-        styled_tail = styled_line[idx + 1:] if idx != -1 else styled_line
-        if self._is_placeholder_text(styled_tail):
-            return None
-        return "typing"
+        start = candidates[-1]
+        for i, line in enumerate(styled_lines[start:]):
+            plain = self._strip_ansi(line)
+            if i and (self.BORDER.match(plain) or self.INPUT_FOOTER.search(plain)):
+                break
+            text = line[line.find("❯") + 1:] if not i else line
+            if self._strip_ansi(text).strip() and not self._is_placeholder_text(text):
+                return "typing"
+        return None
 
     def after_launch(self, target: str) -> bool:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks
@@ -833,6 +836,8 @@ class ClaudeCode(Provider):
                 screen = tmux.capture(target, lines=60)
             except tmux.TmuxError:
                 return False
+            if prompts.draft(screen):
+                return True  # let delivery verification clear a partial brief
             if not self.TRUST_DIALOG.search(screen):
                 asking = not self.INPUT_FOOTER.search(screen) and prompt_answer.looks_like_prompt(screen)
                 answer = prompts.step(screen) if asking else ""
@@ -1272,6 +1277,9 @@ class Codex(Provider):
     uses_hooks = True
     announces_turns = False
     announces_start = False
+    # The MCP connection alone can take 120s under load. The launch observer
+    # must not abandon readiness before that connection has had its budget.
+    STARTUP_SECONDS = 150
     # Codex's approval prompts: run a command, make edits, grant permissions,
     # send input to a terminal. Nothing else on its screen asks this way.
     APPROVAL = re.compile(r"Would you like to (?:run the following command|make the following edits"
@@ -1377,6 +1385,10 @@ class Codex(Provider):
         from brindle import codex_hook
 
         argv += codex_hook.launch_flags(ctx.cwd)
+        if ctx.mode in ("handoff", "handoff_detached", "assign", "review"):
+            # Supported by Codex 0.162.1. Workers cannot act on an update
+            # notice; omit this extra startup UI from automated launches.
+            argv += ["-c", "check_for_update_on_startup=false"]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
@@ -1421,7 +1433,7 @@ class Codex(Provider):
         from brindle import prompt_answer
 
         prompts = prompt_answer.Startup(target, permission=self.tool_permission)
-        deadline = time.time() + 30
+        deadline = time.time() + self.STARTUP_SECONDS
         while time.time() < deadline:
             time.sleep(0.5)
             try:
@@ -1524,14 +1536,17 @@ class Antigravity(Provider):
     def paste_blocked(self, screen: str, interactive: bool) -> str | None:
         if not interactive:
             return None
-        styled_lines = screen.rstrip().splitlines()[-25:]
-        candidates = [ln for ln in styled_lines if self.INPUT_LINE.match(self._strip_ansi(ln))]
+        styled_lines = screen.rstrip().splitlines()
+        candidates = [i for i, ln in enumerate(styled_lines) if self.INPUT_LINE.match(self._strip_ansi(ln))]
         if not candidates:
             return None
-        plain_line = self._strip_ansi(candidates[-1])
-        m = self.INPUT_LINE.match(plain_line)
-        if m and m.group(1).strip() and not self.MODE_HINT.match(m.group(1).strip()):
-            return "typing"
+        for i, line in enumerate(styled_lines[candidates[-1]:]):
+            text = self._strip_ansi(line)
+            if i and (self.READY.search(text) or re.fullmatch(r"[\s─━╭╮╰╯│]+", text)):
+                break
+            text = self.INPUT_LINE.sub(r"\1", text) if not i else text
+            if text.strip() and not self.MODE_HINT.match(text.strip()):
+                return "typing"
         return None
 
     def after_launch(self, target: str) -> bool:

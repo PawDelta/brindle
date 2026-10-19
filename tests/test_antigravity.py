@@ -165,6 +165,7 @@ def test_paste_blocked():
     # User has typed something -> typing
     assert p.paste_blocked("> hello world\n───\n? for shortcuts", interactive=True) == "typing"
     assert p.paste_blocked("  >  typing... \n───\n? for shortcuts", interactive=True) == "typing"
+    assert p.paste_blocked(">\n" + "continued draft\n" * 40 + "───\n? for shortcuts", interactive=True) == "typing"
     
     # Text with ANSI escape codes
     ansi_empty = "\x1b[38;5;232m>\x1b[0m "
