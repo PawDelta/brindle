@@ -73,7 +73,7 @@ export const Brindle = async () => {
     // brindle's permission_policy: asked before every tool call; only a deny
     // stops it (anything else, or a failure, is left to OpenCode's own rules).
     "tool.execute.before": async (input, output) => {
-      if (!policy || !mine(input.sessionID)) return
+      if (!policy) return   // subagent sessions are policed too: they run in this worktree
       const out = await send("opencode-pre-tool", { session_id: input.sessionID, tool: input.tool, args: output.args })
       let answer = null
       try { answer = JSON.parse(out) } catch {}
