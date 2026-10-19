@@ -89,6 +89,7 @@ class Chunk:
     heading_path: str
     text: str
     lines: range   # the document lines the chunk was cut from
+    heading_lines: tuple[int, ...] = ()   # the document lines of its heading path's headings
 
 
 @dataclass
@@ -143,20 +144,24 @@ def chunk_markdown(text: str) -> list[Chunk]:
     return chunks
 
 
-def _emit(section: _Section, path: list[str], out: list[Chunk]) -> None:
-    path = [*path, section.title] if section.title else path
+def _emit(section: _Section, path: list[tuple[str, int]], out: list[Chunk]) -> None:
+    """Chunk ``section``; ``path`` is its ancestors' (heading, document line)."""
+    path = [*path, (section.title, section.start)] if section.title else path
     own = "".join(section.lines[1 if section.title else 0:]).strip()
     if not own and len(section.children) == 1:   # a title over one section: name the chunk by both
         _emit(section.children[0], path, out)
         return
-    heading_path = " > ".join(path)
+    heading_path = " > ".join(title for title, _ in path)
+    heading_lines = tuple(n for _, n in path)
     whole = section.text().strip("\n")
     if _tokens(whole) <= MAX_TOKENS:
         if whole.strip():
-            out.append(Chunk(heading_path, whole, range(section.start, section.start + section.size())))
+            out.append(Chunk(heading_path, whole, range(section.start, section.start + section.size()),
+                             heading_lines))
         return
     if own:
-        out += [Chunk(heading_path, piece, lines) for piece, lines in _pieces(section.lines, section.start)]
+        out += [Chunk(heading_path, piece, lines, heading_lines)
+                for piece, lines in _pieces(section.lines, section.start)]
     for child in section.children:
         _emit(child, path, out)
 
@@ -206,16 +211,17 @@ def scan_document(text: str) -> list[tuple[Chunk, str | None]]:
     """``text``'s chunks, each with why it is quarantined or None. The
     signatures are found in the whole document, not chunk by chunk, so a chunk
     boundary cutting through one (an HTML comment spanning headings, say) never
-    hides it: every chunk cut from a signature's lines is quarantined. A chunk's
-    heading path is read too, as its ancestors' headings are not in its text."""
+    hides it: every chunk cut from a signature's lines, or whose heading path
+    takes a heading from them (a ``#`` line inside a hidden comment), is
+    quarantined."""
     text = _normalized(text)
     starts = [0, *(m.end() for m in re.finditer("\n", text))]
     flagged: dict[int, str] = {}
     for reason, start, end in _signatures(text):
         for n in range(bisect.bisect_right(starts, start) - 1, bisect.bisect_right(starts, max(start, end - 1))):
             flagged.setdefault(n, reason)
-    return [(chunk, next((flagged[n] for n in chunk.lines if n in flagged), None)
-             or quarantine_reason(chunk.heading_path)) for chunk in chunk_markdown(text)]
+    return [(chunk, next((flagged[n] for n in (*chunk.heading_lines, *chunk.lines) if n in flagged), None))
+            for chunk in chunk_markdown(text)]
 
 
 def chunk_id(source_id: str, external_id: str, heading_path: str, repeat: int = 0) -> str:
