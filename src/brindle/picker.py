@@ -155,6 +155,10 @@ def pick_row(title: str, rows: list[str], actions: dict[str, str], *, key: Calla
     """A list of ``rows`` to choose from. Returns ``("enter", i)`` for Enter on
     the highlighted row or a number, ``(letter, i)`` for one of ``actions``
     (letter -> what it does) on the highlighted row, or None on cancel."""
+    import unicodedata
+
+    # Row text comes from prompts and branch names: no escape sequences on the terminal.
+    rows = ["".join(c if unicodedata.category(c)[0] != "C" else " " for c in r) for r in rows]
     raw = key is None and raw_keys()
     if key is None:
         key = read_key if raw else (lambda: typer.prompt("Pick", default="", show_default=False).strip().lower())
