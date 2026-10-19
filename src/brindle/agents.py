@@ -22,7 +22,7 @@ import uuid
 from types import SimpleNamespace
 
 from brindle import cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
-from brindle.assembler import OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
+from brindle.assembler import DECISIONS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
@@ -287,15 +287,17 @@ plan is approved; if it comes back with feedback, revise it and call
 
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
-                           provider, headless: bool, plan_first: bool = False) -> str:
+                           provider, headless: bool, plan_first: bool = False,
+                           decisions: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
-    ``task`` plus its finish line, the WORKER_FOOTER reminder to report, and
-    (for an interactive Claude worker with a finish line) the ``/goal``
-    wrapper. Used at spawn time, and again by ``resume`` to rebuild it when a
-    paused worker's CLI session can't be resumed and must restart fresh."""
+    ``task``, the ``decisions`` block that covers its files, its finish line,
+    the WORKER_FOOTER reminder to report, and (for an interactive Claude
+    worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
+    again by ``resume`` to rebuild it (decisions from the brief's receipt)
+    when a paused worker's CLI session can't be resumed and must restart fresh."""
     from brindle import autopilot as pilot
 
-    prompt = task
+    prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions)])
     if done_when:
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
@@ -327,9 +329,11 @@ def spawn(
     plan_first: bool = False,
     review_sha: str | None = None,
     claim_goals: bool = True,
+    files: list[str] | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
-    finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
+    finish line run it as a Claude Code ``/goal``; their brief carries the
+    accepted decisions covering ``files``. With ``autopilot``, the
     agent is a session root that drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
@@ -368,7 +372,8 @@ def spawn(
         prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
-                                        plan_first=plan_first)
+                                        plan_first=plan_first,
+                                        decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files))
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
@@ -1252,7 +1257,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
             # it gets decorated a second time here; harmless, if redundant.
             prompt = decorate_worker_prompt(
                 a.task, a.id, ws, a.done_when, provider, bool(a.headless),
-                plan_first=bool(a.plan_first) and a.plan_state != "approved") + RESUME_NOTE
+                plan_first=bool(a.plan_first) and a.plan_state != "approved",
+                decisions=knowledge.replay_decisions(db, a.id)) + RESUME_NOTE
         else:
             prompt = (a.task + RESUME_NOTE) if a.task else None
         if a.dismissed_at is not None:
@@ -2179,9 +2185,11 @@ def delegate(
     done_when: str | None = None,
     plan_first: bool | None = None,
     start: str | None = None,
+    files: list[str] | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker. ``plan_first`` (None: the repo's ``plan_first`` config)
-    makes it get a plan approved before it may edit. With ``isolate``, the worker gets a new worktree whose
+    makes it get a plan approved before it may edit; ``files`` picks the
+    decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
     branch starts from the caller's current branch, so it sees the caller's
     committed work, and nobody edits the same files; ``start`` names another
     commit to start it from (it still merges into the caller's branch).
@@ -2231,7 +2239,7 @@ def delegate(
     # the new pane for up to 30 seconds.
     agent = spawn(
         db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
-        done_when=done_when, background_setup=True, plan_first=bool(plan_first),
+        done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
     )
     from brindle import events
 

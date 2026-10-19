@@ -1424,6 +1424,26 @@ def kb_remove(source: str = typer.Argument(..., help="A source id or folder.")) 
     typer.echo("removed")
 
 
+# -- brindle decisions (shared decisions; see brindle.knowledge) -------------------------------
+
+decisions_app = typer.Typer(no_args_is_help=True, help="Decisions the sessions in this repo have recorded.")
+app.add_typer(decisions_app, name="decisions")
+
+
+@decisions_app.command("export")
+def decisions_export(path: Optional[Path] = typer.Argument(None, help="A file to write; default stdout.")) -> None:
+    """Write this repo's accepted decisions as Markdown."""
+    from brindle import knowledge
+
+    _, key = _kb_repo()
+    text = knowledge.export_markdown(DB(), key)
+    if path is None:
+        typer.echo(text)
+    else:
+        path.expanduser().write_text(text)
+        typer.echo(f"wrote {path}")
+
+
 @permissions_app.command("list")
 def permissions_list() -> None:
     """Every rule in force (built-in, this repo's denies, yours and learned), with its source."""
