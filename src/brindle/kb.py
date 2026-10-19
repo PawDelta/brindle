@@ -27,6 +27,7 @@ SOURCE_ADD = "source_add"
 SOURCE_REMOVE = "source_remove"
 FOLDER = "folder"
 DOC_SUFFIXES = (".md", ".markdown", ".txt")
+MAX_DOC_BYTES = 5_000_000
 # Documents per transaction.
 BATCH = 50
 # Chunk sizes in tokens, estimated at four characters a token: a heading's
@@ -69,11 +70,12 @@ _ADDRESSED = re.compile(
     rf"|\bif\s+you\s+are\s+an?\s+{_AI}\b|\b(?:dear|attention|hey|hello|note\s+to(?:\s+the)?)\s+{_AI}\s*[,:!]"
     rf"|\b{_AI}\s+(?:reading|processing|summari[sz]ing|parsing)\s+this\b"
     r"|<\|im_start\|>|<\|(?:system|user|assistant)\|>|\[/?INST\]|<<SYS>>", re.IGNORECASE)
-# An HTML comment (which a rendered page hides) that gives an instruction: it
-# opens with a verb an agent could act on, or tells "you" what to do.
-_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
+# An HTML comment (which a rendered page hides; one never closed runs to the
+# end) that gives an instruction: a line of it opens with a verb an agent could
+# act on, or it tells "you" what to do.
+_COMMENT = re.compile(r"<!--(.*?)(?:-->|\Z)", re.DOTALL)
 _INSTRUCTION = re.compile(
-    r"^\W*(?:ignore|disregard|forget|run|execute|send|email|post|upload|delete|remove|reveal"
+    r"(?m)^\W*(?:ignore|disregard|forget|run|execute|send|email|post|upload|delete|remove|reveal"
     r"|print|output|include|insert|tell|say|respond|reply|answer|write|call|fetch|open|visit"
     r"|approve|merge|push|commit|install|add|use|always|never|do\s+not|don't)\b"
     r"|\byou\s+(?:must|should|need\s+to|have\s+to|are\s+to|will|shall)\b", re.IGNORECASE)
@@ -102,17 +104,38 @@ def _tokens(text: str) -> int:
     return len(text) // 4
 
 
+class _Blocks:
+    """Whether a Markdown line is inside a code fence or an HTML comment, which
+    a chunk boundary never splits: a comment's hidden text stays in one chunk
+    for quarantine_reason to read whole."""
+
+    def __init__(self) -> None:
+        self.fenced = self.comment = False
+
+    @property
+    def open(self) -> bool:
+        return self.fenced or self.comment
+
+    def step(self, line: str) -> bool:
+        """Move past ``line``; returns whether it started inside a block."""
+        inside = self.open
+        if not self.comment and line.lstrip().startswith(("```", "~~~")):
+            self.fenced = not self.fenced
+        elif not self.fenced:
+            for token in re.findall(r"<!--|-->", line):
+                self.comment = token == "<!--" if not self.comment else token != "-->"
+        return inside
+
+
 def chunk_markdown(text: str) -> list[Chunk]:
-    """Split a Markdown document by heading (``#`` lines in code fences are not
-    headings). Each chunk carries its heading path, ``"Title > Section"``; text
-    before the first heading has the empty path."""
+    """Split a Markdown document by heading (``#`` lines in code fences and
+    HTML comments are not headings). Each chunk carries its heading path,
+    ``"Title > Section"``; text before the first heading has the empty path."""
     root = _Section(0, "", [])
     stack = [root]
-    fenced = False
+    blocks = _Blocks()
     for line in text.splitlines():
-        if line.lstrip().startswith(("```", "~~~")):
-            fenced = not fenced
-        heading = None if fenced else _HEADING.match(line)
+        heading = None if blocks.step(line) else _HEADING.match(line)
         if heading:
             level = len(heading.group(1))
             while stack[-1].level >= level:
@@ -146,16 +169,15 @@ def _emit(section: _Section, path: list[str], out: list[Chunk]) -> None:
 
 
 def _pieces(lines: list[str]) -> list[str]:
-    """``lines`` cut at blank lines outside code fences into pieces of about
-    TARGET_TOKENS."""
+    """``lines`` cut at blank lines outside code fences and HTML comments into
+    pieces of about TARGET_TOKENS."""
     pieces: list[str] = []
     current: list[str] = []
-    fenced = False
+    blocks = _Blocks()
     for line in lines:
-        if line.lstrip().startswith(("```", "~~~")):
-            fenced = not fenced
+        blocks.step(line)
         current.append(line)
-        if not fenced and not line.strip() and _tokens("\n".join(current)) >= TARGET_TOKENS:
+        if not blocks.open and not line.strip() and _tokens("\n".join(current)) >= TARGET_TOKENS:
             pieces.append("\n".join(current).strip("\n"))
             current = []
     if "".join(current).strip():
@@ -178,7 +200,7 @@ def quarantine_reason(text: str) -> str | None:
         return "hidden text"
     if _ADDRESSED.search(text):
         return "addressed to an AI"
-    if any(_INSTRUCTION.search(c.strip()) for c in _COMMENT.findall(text)):
+    if any(_INSTRUCTION.search(c) for c in _COMMENT.findall(text)):
         return "instruction in an HTML comment"
     return None
 
@@ -243,12 +265,15 @@ class _Doc:
 
 def _folder_paths(root: Path) -> list[tuple[str, Path]]:
     """The documents under ``root`` as (external id, path), leaving out
-    anything in a dot-directory or dot-file."""
+    anything in a dot-directory or dot-file, symlinks, anything that resolves
+    outside ``root`` and files over MAX_DOC_BYTES."""
+    root = root.resolve()
     out = []
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
         if (path.suffix.lower() in DOC_SUFFIXES and not any(p.startswith(".") for p in rel.parts)
-                and path.is_file()):
+                and not path.is_symlink() and path.resolve().is_relative_to(root) and path.is_file()
+                and path.stat().st_size <= MAX_DOC_BYTES):
             out.append((rel.as_posix(), path))
     return out
 
@@ -258,20 +283,23 @@ def _read(external_id: str, path: Path) -> _Doc:
     text = raw.decode("utf-8-sig", errors="replace")
     title = next((m.group(2) for m in map(_HEADING.match, text.splitlines()) if m and len(m.group(1)) == 1),
                  path.stem)
+    title = redact(title)
     return _Doc(external_id, path.resolve().as_uri(), title, path.stat().st_mtime,
                 hashlib.sha256(raw).hexdigest(), text)
 
 
 def _scanned(source_id: str, doc: _Doc) -> list[tuple[str, str, str, str | None]]:
-    """``doc``'s chunks as (id, heading path, redacted text, quarantine reason)."""
+    """``doc``'s chunks as (id, redacted heading path, redacted text, quarantine
+    reason). The reason reads the heading path too: a chunk's text holds only
+    its own heading, not its ancestors'."""
     seen: dict[str, int] = {}
     rows = []
     for chunk in chunk_markdown(doc.text):
         repeat = seen.get(chunk.heading_path, 0)
         seen[chunk.heading_path] = repeat + 1
-        text = redact(chunk.text)
+        heading_path, text = redact(chunk.heading_path), redact(chunk.text)
         rows.append((chunk_id(source_id, doc.external_id, chunk.heading_path, repeat),
-                     chunk.heading_path, text, quarantine_reason(text)))
+                     heading_path, text, quarantine_reason(f"{heading_path}\n{text}")))
     return rows
 
 
