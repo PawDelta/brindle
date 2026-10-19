@@ -577,7 +577,7 @@ class ClaudeCode(Provider):
             # report_result/submit_review. --settings env is applied before MCP
             # servers connect. Not agents.agent_env: that feeds the launch
             # fingerprint and would reset stored refusals.
-            "env": {"MCP_TIMEOUT": os.environ.get("MCP_TIMEOUT", "120000")},
+            "env": {"MCP_TIMEOUT": os.environ.get("MCP_TIMEOUT", "180000")},
             # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
             # application-default login`) whenever its own ADC probe fails, once
             # per process: across a session's many panes that opens a Google

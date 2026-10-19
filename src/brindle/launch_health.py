@@ -446,8 +446,41 @@ def mcp_failed(worktree: str, session_id: str, launched_at: float) -> bool:
     return False
 
 
+def has_mcp_failure(db, agent, ws) -> bool:
+    """A recorded failure survives closing the agent; also check fresh logs."""
+    row = db.conn.execute("SELECT outcome, launched_at FROM launch_health WHERE agent_id=?",
+                          (agent.id,)).fetchone()
+    return bool(row and (row["outcome"] == "mcp-failed" or (
+        agent.provider == "claude" and agent.session_ref and row["launched_at"] is not None
+        and mcp_failed(ws.path, agent.session_ref, row["launched_at"]))))
+
+
+def retry_reviewer(db, agent, ws):
+    """Called under the review dispatch lock, after checking for live work."""
+    from brindle import agents
+
+    db.conn.execute("UPDATE launch_health SET outcome='mcp-failed' WHERE agent_id=?", (agent.id,))
+    claimed = db.conn.execute("INSERT OR IGNORE INTO review_mcp_retries (workspace_id, sha) VALUES (?,?)",
+                              (ws.id, agent.review_sha)).rowcount
+    agents.close(db, agent.id)
+    if not claimed:
+        raise agents.AgentError(
+            f"Reviewer {agent.id}'s brindle MCP connection failed at {agent.review_sha[:8]}; "
+            "the one automatic retry for this commit has been used. The reviewer was stopped. "
+            "Check the MCP startup logs and CLI installation; automatic recovery is exhausted.")
+    try:
+        # Preserve the exact task (focus and check results included), profile,
+        # parent and commit, but start a new conversation and MCP connection.
+        return agents.spawn(db, ws, agent.profile, prompt=agent.task, parent_id=agent.parent_id,
+                            mode="review", background_setup=True, review_sha=agent.review_sha)
+    except Exception as exc:
+        raise agents.AgentError(
+            f"Reviewer {agent.id} was stopped after its brindle MCP connection failed; "
+            f"the automatic retry could not start ({type(exc).__name__}). Check launch configuration.") from exc
+
+
 def check_mcp(db, agent) -> None:
-    """From the tool-done hook: tell the supervisor once if the agent has no brindle tools."""
+    """From tool-done: recover reviewers, or tell the supervisor once."""
     from brindle import agents
 
     if agent.provider != "claude" or not agent.session_ref or not agent.parent_id:
@@ -462,9 +495,39 @@ def check_mcp(db, agent) -> None:
     if not db.conn.execute("UPDATE launch_health SET outcome='mcp-failed' WHERE agent_id=? "
                            "AND (outcome IS NULL OR outcome='pending')", (agent.id,)).rowcount:
         return
+    if agent.mode == "review" and agent.review_sha:
+        from brindle.providers import brindle_invocation
+
+        # Stopping the pane also kills its hook. This helper must outlive it.
+        agents._detach_orphan([*brindle_invocation(), "_recover-reviewer", agent.id])
+        return
     body = (f"Worker {agent.id} launch health: its brindle MCP server failed to connect, so it has no "
-            "report_result/submit_review tools and cannot finish. Restart it with `brindle continue "
-            f"{agent.id}` or remove its workspace.")
+            "report_result tools and cannot finish. Stop it with `brindle agent kill "
+            f"{agent.id}`, then assign a fresh worker in its workspace.")
+    try:
+        agents.send_message(db, agent.parent_id, body)
+    except agents.AgentError:
+        db.enqueue(agent.parent_id, body, None)
+
+
+def recover_reviewer(db, agent_id: str) -> None:
+    """Detached from the broken CLI; request_review serializes replacement."""
+    from brindle import agents, gates
+
+    agent = db.get_agent(agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if not agent or not ws or agent.result is not None or not has_mcp_failure(db, agent, ws):
+        return
+    if gates.head(ws) != agent.review_sha:
+        agents.close(db, agent.id)
+        body = (f"Reviewer {agent.id}'s brindle MCP connection failed and it was stopped. "
+                "The branch has moved; request a review of its current commit.")
+    else:
+        try:
+            agents.request_review(db, db.get_agent(agent.parent_id), ws, agent.profile)
+            return
+        except agents.AgentError as exc:
+            body = str(exc)
     try:
         agents.send_message(db, agent.parent_id, body)
     except agents.AgentError:

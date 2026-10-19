@@ -3010,6 +3010,13 @@ def launch_health_cmd(agent_id: str, startup: bool = typer.Option(False),
     launch_health.inspect(db, agent_id, wait=not startup, token=token)
 
 
+@app.command("_recover-reviewer", hidden=True)
+def recover_reviewer_cmd(agent_id: str) -> None:
+    from brindle import launch_health
+
+    launch_health.recover_reviewer(_helper_db(), agent_id)
+
+
 @app.command("_headless", hidden=True)
 def headless_cmd(agent_id: str, resume: Optional[str] = typer.Option(None)) -> None:
     """A headless worker's pane: runs its `claude -p` turns (agents.run_headless)."""
