@@ -151,10 +151,11 @@ def pick_supervisor(acc, current: str | None = None, *, signed_in: list[str] | N
 
 
 def pick_row(title: str, rows: list[str], actions: dict[str, str], *, key: Callable[[], str] | None = None,
-             echo: Callable[..., None] = typer.echo) -> tuple[str, int] | None:
+             echo: Callable[..., None] = typer.echo, at: int = 0) -> tuple[str, int] | None:
     """A list of ``rows`` to choose from. Returns ``("enter", i)`` for Enter on
     the highlighted row or a number, ``(letter, i)`` for one of ``actions``
-    (letter -> what it does) on the highlighted row, or None on cancel."""
+    (letter -> what it does) on the highlighted row, or None on cancel.
+    ``at`` is the row highlighted to begin with."""
     import unicodedata
 
     # Row text comes from prompts and branch names: no escape sequences on the terminal.
@@ -162,7 +163,7 @@ def pick_row(title: str, rows: list[str], actions: dict[str, str], *, key: Calla
     raw = key is None and raw_keys()
     if key is None:
         key = read_key if raw else (lambda: typer.prompt("Pick", default="", show_default=False).strip().lower())
-    at, shown = 0, 0
+    shown = 0
     while True:
         if raw and shown:
             echo(f"\x1b[{shown}F\x1b[J", nl=False)
