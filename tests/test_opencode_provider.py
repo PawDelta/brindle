@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from brindle import antigravity, opencode, workspaces
+from brindle import antigravity, opencode, permissions, pipeline, workspaces
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import DELIVERY_NOTE, LaunchContext, OpenCode, brindle_invocation
@@ -103,15 +103,19 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     assert answer["decision"] == "deny" and answer["reason"].startswith("brindle:")
     assert json.loads(pre("read", {"filePath": "~/.ssh/id_rsa"}))["decision"] == "deny"
     assert pre("bash", {"command": "git status"}) == ""   # allow and ask leave the call to OpenCode
+    # A denied part of a compound command, and a denied file in an apply_patch (GPT-5 models).
+    permissions.add_rule("bash", "make secret", "deny")
+    permissions.add_rule("edit", "*/locked.txt", "deny", "glob")
+    assert json.loads(pre("bash", {"command": "cd sub && make secret"}))["decision"] == "deny"
+    patch = "*** Begin Patch\n*** Add File: ok.txt\n+a\n*** Update File: sub/locked.txt\n+b\n*** End Patch"
+    assert json.loads(pre("apply_patch", {"patchText": patch}))["decision"] == "deny"
     # The plugin is only told to ask while the policy is on.
     monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/bin/opencode")
     argv = OpenCode().command(LaunchContext("o1", load_profile("developer-opencode"), None, cwd=ws.path))
     assert "BRINDLE_OPENCODE_POLICY=1" in argv
-    # The instructions file goes when the agent does.
+    # The instructions file goes when the agent's workspace does.
     path = opencode.write_instructions("o1", "x")
-    from brindle import agents
-
-    agents.forget_files(db.get_agent("o1"))
+    pipeline.on_workspace_cleanup(db, ws)
     assert not os.path.exists(path)
 
 

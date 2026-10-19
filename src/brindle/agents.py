@@ -411,6 +411,7 @@ def spawn(
                 background_setup=background_setup, model_checked=True)
     except Exception:
         db.delete_agent(agent_id)
+        forget_files(agent)
         raise
     return agent
 
@@ -2818,12 +2819,17 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
             # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
-            req = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
-            if req is None:
+            reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
+            if not reqs:
                 return None
-            decision = permissions.decide(req, checks=cfg.checks, rules=[*permissions.all_rules(ws.repo_root), *profile_rules])
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            if decision.decision == "ask" and len(reqs) == 1:
+                # A deny on one part of a compound command (cd x && <denied>) still denies.
+                decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
             if decision.decision != "deny":
                 return None
+            req = reqs[0]
             _record_permission(db, agent, ws, req.summary(), f"deny: {decision.reason}")
             return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)

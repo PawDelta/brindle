@@ -304,15 +304,20 @@ def from_codex(payload: dict, worktree: str = "", repo_root: str = "") -> list[R
         patch = command
         if isinstance(ti, dict) and isinstance(ti.get("command"), list) and ti["command"]:
             patch = ti["command"][-1] if isinstance(ti["command"][-1], str) else None
-        files = [(CODEX_PATCH_KINDS[m.group(1)], m.group(2)) for m in CODEX_PATCH_FILE.finditer(patch or "")]
-        files += [("write", m.group(1)) for m in CODEX_PATCH_MOVE.finditer(patch or "")]
-        out = list(dict.fromkeys((k, _abs_path(f, cwd)) for k, f in files))
-        reqs = [Request(kind=k, path=path, **base) for k, path in out]
-        if not files or not _codex_patch_accounted(patch or ""):
-            # An unknown file prevents allow, but must not erase a known deny.
-            reqs.append(Request(kind="edit", **base))
-        return reqs
+        return _patch_requests(patch, cwd, base)
     return [Request(kind="other", **base)]
+
+
+def _patch_requests(patch: str | None, cwd: str, base: dict) -> list[Request]:
+    """One Request per file an apply_patch touches."""
+    files = [(CODEX_PATCH_KINDS[m.group(1)], m.group(2)) for m in CODEX_PATCH_FILE.finditer(patch or "")]
+    files += [("write", m.group(1)) for m in CODEX_PATCH_MOVE.finditer(patch or "")]
+    out = list(dict.fromkeys((k, _abs_path(f, cwd)) for k, f in files))
+    reqs = [Request(kind=k, path=path, **base) for k, path in out]
+    if not files or not _codex_patch_accounted(patch or ""):
+        # An unknown file prevents allow, but must not erase a known deny.
+        reqs.append(Request(kind="edit", **base))
+    return reqs
 
 
 def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
@@ -358,14 +363,19 @@ OPENCODE_KINDS = {
 }
 
 
-def from_opencode(payload: dict, worktree: str = "", repo_root: str = "") -> Request | None:
-    """The plugin's {tool, args} as a Request; None when it names no tool."""
+def from_opencode(payload: dict, worktree: str = "", repo_root: str = "") -> list[Request] | None:
+    """The plugin's {tool, args} as Requests (one per file an ``apply_patch``
+    touches); None when it names no tool."""
     tool = payload.get("tool")
     if not isinstance(tool, str) or not tool:
         return None
     args = payload.get("args")
     args = args if isinstance(args, dict) else {}
     cwd = str(payload.get("cwd") or worktree or "")
+    if tool == "apply_patch":   # what OpenCode gives GPT-5/Codex models in place of edit and write
+        patch = args.get("patchText") if isinstance(args.get("patchText"), str) else None
+        return _patch_requests(patch, cwd, dict(provider="opencode", tool=tool, cwd=cwd,
+                                                worktree=worktree, repo_root=repo_root))
     kind = OPENCODE_KINDS.get(tool, "other")
     command = path = url = None
     if kind == "bash":
@@ -378,7 +388,7 @@ def from_opencode(payload: dict, worktree: str = "", repo_root: str = "") -> Req
             path = _abs_path(raw, cwd)
     elif kind == "fetch":
         url = args.get("url") if isinstance(args.get("url"), str) else None
-    return Request("opencode", kind, tool, cwd, worktree, repo_root, command, path, url)
+    return [Request("opencode", kind, tool, cwd, worktree, repo_root, command, path, url)]
 
 
 # -- providers: Antigravity (agy) --------------------------------------------------------------
