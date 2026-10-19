@@ -289,48 +289,57 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
         agents.handle_hook(db, agent_id, "tool-done", base)
         return None
     if event == "agy-stop":
-        error = str(payload.get("error") or "")
-        if error:
-            limited = bool(LIMIT_ERROR.search(error))
-            autherr = bool(AUTH_ERROR.search(error))
-            if limited:
-                from brindle import quota
-                from brindle.config import RepoConfig, load_repo_config
-
-                ws = db.get_workspace(agent.workspace_id)
-                quota.record_limit("antigravity", load_repo_config(ws.repo_root) if ws else RepoConfig())
-            error_type = "rate_limit" if limited else ("auth" if autherr else "error")
-            agents.handle_hook(db, agent_id, "stop-failure",
-                               {**base, "error_type": error_type, "error": error})
-            failed = db.get_agent(agent_id)
-            if failed is not None and failed.status != "failed":   # not a sign-in problem
-                db.update_agent(agent_id, stop_blocked=0)
-                if db.pending_count(agent_id):
-                    _flush_soon(agent_id)
-                _tell_parent_stopped_on_error(db, failed, error_type)
-            return None
-        if db.pending_count(agent_id):
-            # A new turn, not a continuation: only then does agy give the
-            # agent its MCP tools.
-            db.update_agent(agent_id, stop_blocked=0)
-            db.set_status(agent_id, "idle")
-            _flush_soon(agent_id)
-            return None
-        out = agents.handle_hook(db, agent_id, "stop",
-                                 {**base, "stop_hook_active": bool(agent.stop_blocked)})
-        if out and out.get("decision") == "block":
-            # Typed in as a new turn too: a turn the Stop hook continues has
-            # no MCP tools, so the agent couldn't call report_result in it.
-            # stop_blocked stays set through that turn (see agy-pre-invocation),
-            # so the reminder is sent once.
-            db.update_agent(agent_id, stop_blocked=1)
-            db.enqueue(agent_id, out["reason"], None)
-            db.set_status(agent_id, "idle")
-            _flush_soon(agent_id)
-            return None
-        db.update_agent(agent_id, stop_blocked=0)
-        return None
+        end_turn(db, agent, base, str(payload.get("error") or ""))
     return None
+
+
+def end_turn(db, agent, base: dict, error: str, provider: str = "antigravity") -> None:
+    """A turn ended (agy's Stop; OpenCode's session.idle, see brindle.opencode),
+    on ``error`` if it isn't empty. Neither can continue a turn the way
+    Claude Code's Stop hook does, so whatever brindle has to say next is typed
+    in as a new turn."""
+    from brindle import agents
+
+    agent_id = agent.id
+    if error:
+        limited = bool(LIMIT_ERROR.search(error))
+        autherr = bool(AUTH_ERROR.search(error))
+        if limited:
+            from brindle import quota
+            from brindle.config import RepoConfig, load_repo_config
+
+            ws = db.get_workspace(agent.workspace_id)
+            quota.record_limit(provider, load_repo_config(ws.repo_root) if ws else RepoConfig())
+        error_type = "rate_limit" if limited else ("auth" if autherr else "error")
+        agents.handle_hook(db, agent_id, "stop-failure",
+                           {**base, "error_type": error_type, "error": error})
+        failed = db.get_agent(agent_id)
+        if failed is not None and failed.status != "failed":   # not a sign-in problem
+            db.update_agent(agent_id, stop_blocked=0)
+            if db.pending_count(agent_id):
+                _flush_soon(agent_id)
+            _tell_parent_stopped_on_error(db, failed, error_type)
+        return
+    if db.pending_count(agent_id):
+        # A new turn, not a continuation: only then does agy give the
+        # agent its MCP tools.
+        db.update_agent(agent_id, stop_blocked=0)
+        db.set_status(agent_id, "idle")
+        _flush_soon(agent_id)
+        return
+    out = agents.handle_hook(db, agent_id, "stop",
+                             {**base, "stop_hook_active": bool(agent.stop_blocked)})
+    if out and out.get("decision") == "block":
+        # Typed in as a new turn too: a turn the Stop hook continues has
+        # no MCP tools, so the agent couldn't call report_result in it.
+        # stop_blocked stays set through that turn (see agy-pre-invocation),
+        # so the reminder is sent once.
+        db.update_agent(agent_id, stop_blocked=1)
+        db.enqueue(agent_id, out["reason"], None)
+        db.set_status(agent_id, "idle")
+        _flush_soon(agent_id)
+        return
+    db.update_agent(agent_id, stop_blocked=0)
 
 
 def _tell_parent_stopped_on_error(db, agent, error_type: str) -> None:

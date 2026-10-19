@@ -927,6 +927,25 @@ def test_old_launch_cannot_bind_replacement_pane(db, health):
     assert row["pane"] == "" and started == []
 
 
+@pytest.mark.variant("incident: retry inherits MCP_TIMEOUT from the failed Claude process under load")
+@pytest.mark.parametrize("inherited,extended", [("120000", True), ("600000", False)])
+def test_mcp_retry_extends_inherited_startup_budget(db, root, launches, detached, monkeypatch,
+                                                  inherited, extended):
+    from brindle import launch_health
+
+    boss, ws = root
+    monkeypatch.setenv("MCP_TIMEOUT", inherited)
+    monkeypatch.setattr(launch_health, "mcp_failed", lambda *a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "close", lambda db, aid: db.update_agent(aid, status="done"))
+    first = agents.request_review(db, boss, ws, "reviewer")
+    db.update_agent(first.id, session_ref="failed-session")
+    retry = agents.request_review(db, boss, ws, "reviewer")
+    budgets = [int(json.loads(flag(argv, "--settings"))["env"]["MCP_TIMEOUT"]) for argv in launches]
+    assert retry.id != first.id
+    assert budgets[-1] > budgets[0] if extended else budgets[-1] == budgets[0]
+
+
 @pytest.mark.parametrize("stamp,sid,outcome", [
     ("1970-01-01T00-01-40-800Z", "sess-1", "mcp-failed"),     # same second as the launch
     ("1970-01-01T00-01-40-800Z", "other-session", None),      # another session's failure

@@ -57,6 +57,7 @@ CLI_INSTALL = {
     "codex": ("Codex", "npm install -g @openai/codex (on Linux, EACCES means set a user prefix first: "
                        "`npm config set prefix ~/.local`)"),
     "antigravity": ("Google Antigravity", "see https://antigravity.google"),
+    "opencode": ("OpenCode", "npm install -g opencode-ai (or see https://opencode.ai)"),
 }
 
 
@@ -64,14 +65,14 @@ def preflight(provider: str) -> list[str]:
     """What stops a chat on ``provider`` from starting at all, as lines to
     print, so a first run fails before anything launches instead of leaving
     an empty tmux window. Empty when it can start."""
-    from brindle import antigravity, providers
+    from brindle import antigravity, opencode, providers
 
     problems = []
     if not shutil.which("tmux"):
         problems.append("tmux isn't installed: brindle runs every agent in a tmux window. "
                         "Install: brew install tmux (Debian/Ubuntu: sudo apt install tmux)")
     binary = {"claude": providers.claude_binary, "codex": providers.codex_binary,
-              "antigravity": antigravity.binary}.get(provider)
+              "antigravity": antigravity.binary, "opencode": opencode.binary}.get(provider)
     if binary:
         exe = binary()
         if not (providers.which_cli(exe) or os.path.isfile(exe)):
@@ -86,10 +87,10 @@ def preflight(provider: str) -> list[str]:
 
 def signin_providers() -> list[str]:
     """The provider CLIs installed here, in CLI_INSTALL order."""
-    from brindle import antigravity, providers
+    from brindle import antigravity, opencode, providers
 
     binaries = {"claude": providers.claude_binary, "codex": providers.codex_binary,
-                "antigravity": antigravity.binary}
+                "antigravity": antigravity.binary, "opencode": opencode.binary}
     out = []
     for provider in CLI_INSTALL:
         exe = binaries[provider]()
@@ -298,6 +299,8 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(_tool("codex", False, "only needed for Codex agents (reviewer-codex)",
                      install=CLI_INSTALL["codex"][1]))
     out.append(_tool("agy", False, "only needed for Google Antigravity agents"))
+    out.append(_tool("opencode", False, "only needed for OpenCode agents (developer-opencode, reviewer-opencode)",
+                     install=CLI_INSTALL["opencode"][1]))
     out.extend(signin_checks(repo_root))
     out.extend(credential_checks())
     from brindle import company_identity

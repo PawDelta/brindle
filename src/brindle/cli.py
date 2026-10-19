@@ -222,7 +222,7 @@ def new(
     no_agent: bool = typer.Option(False, "--no-agent", help="Only create the worktree; start no supervisor."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the supervisor."),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Don't fetch the base branch first."),
     no_setup: bool = typer.Option(False, "--no-setup", help="Skip setup commands."),
@@ -292,7 +292,7 @@ def new(
 def start(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
@@ -921,7 +921,7 @@ def default(
     cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="Start with autopilot on or off (default: on, or `autopilot` in .brindle/config.json)."),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
@@ -958,7 +958,7 @@ def default(
 def supervisor(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
@@ -2928,6 +2928,13 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
 
         typer.echo(antigravity.hook_main(DB(), event, sys.stdin.read()))
         return
+    if event.startswith("opencode-"):
+        from brindle import opencode
+
+        out = opencode.hook_main(DB(), agent or os.environ.get("BRINDLE_AGENT_ID"), event, sys.stdin.read())
+        if out:
+            typer.echo(out)
+        return
     # --agent is baked into the hook command at launch; the environment is
     # only a fallback for sessions launched by an older brindle (and may be stale).
     # Codex's permission hook is the same command for every agent (so one
@@ -3008,6 +3015,13 @@ def launch_health_cmd(agent_id: str, startup: bool = typer.Option(False),
         if row is None or row["delivered_at"] is not None:
             return  # the task-delivery helper owns the real five-second follow-up
     launch_health.inspect(db, agent_id, wait=not startup, token=token)
+
+
+@app.command("_recover-reviewer", hidden=True)
+def recover_reviewer_cmd(agent_id: str) -> None:
+    from brindle import launch_health
+
+    launch_health.recover_reviewer(_helper_db(), agent_id)
 
 
 @app.command("_headless", hidden=True)
@@ -3162,7 +3176,8 @@ def flush_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
 @app.command("_review-after-checks", hidden=True)
 def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Option(None, "--caller"),
                             profile: Optional[str] = typer.Option(None, "--profile"),
-                            focus: Optional[str] = typer.Option(None, "--focus")) -> None:
+                            focus: Optional[str] = typer.Option(None, "--focus"),
+                            request_id: Annotated[Optional[str], typer.Option("--request-id")] = None) -> None:
     """Run a repo's checks, then start the reviewer with their results in its
     prompt. Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
@@ -3174,7 +3189,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
     if ws is None:
         return
     try:
-        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root))
+        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root),
+                                   request_id=request_id)
     except (agents.AgentError, ValueError) as e:
         from brindle import pipeline
 
