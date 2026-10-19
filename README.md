@@ -1971,6 +1971,14 @@ Other endpoints, same fields:
 | DeepSeek | anthropic | `https://api.deepseek.com/anthropic` | paid; `api_key_env: DEEPSEEK_API_KEY` |
 | Anthropic | anthropic | `https://api.anthropic.com` | `api_key_env: ANTHROPIC_API_KEY` |
 
+Or name any [Models.dev](https://models.dev) model as `model: <provider>/<model>`
+(say `nano-gpt/deepseek/deepseek-v3`) and leave out `base_url`: brindle fills in
+`base_url`, `api`, `api_key_env` and `context_tokens` from the catalog, and
+anything you set in the profile wins. The catalog is cached in
+`~/.brindle/models-catalog.json` for a day. It is never fetched in air-gap mode
+or offline; brindle uses the cached copy, and says so if there isn't one. A profile
+with its own `base_url` is left alone, so OpenRouter-style ids still work.
+
 What to expect: a 30B-class local model does well on small, well-specified
 tasks (the kind brindle hands out: one change, the test named up front) and on
 reviews of modest diffs, and less well on long multi-step work. The native
