@@ -866,8 +866,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             providers.set_agy_gemini()
         except (OSError, ValueError) as e:
             raise AgentError(f"couldn't set Antigravity to the company Gemini route in its settings.json: {e}") from e
+    mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
+        "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
+        (ws.id, agent.review_sha)).fetchone())
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
-                                          mode=agent.mode, plan_first=bool(agent.plan_first)))
+                                          mode=agent.mode, plan_first=bool(agent.plan_first),
+                                          mcp_recovery=mcp_recovery))
     if prompt or db.pending_count(agent.id):
         _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
                               submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))

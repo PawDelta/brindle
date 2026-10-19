@@ -84,6 +84,7 @@ class LaunchContext:
     session_id: str | None = None  # a new session's id, for CLIs that let brindle choose it
     mode: str | None = None     # the agent's mode ('interactive', 'handoff', 'assign', ...)
     plan_first: bool = False    # its edits are gated on plan approval (the hook watches edit tools too)
+    mcp_recovery: bool = False  # a fresh reviewer after a failed MCP connection
 
 
 class Provider:
@@ -523,6 +524,16 @@ class ClaudeCode(Provider):
                                  [*brindle_invocation(), "_hook", event, "--agent", agent_id])
         return [{"hooks": [{"type": "command", "command": cmd}]}]
 
+    @staticmethod
+    def _mcp_timeout(ctx: LaunchContext) -> str:
+        # Claude Code 2.1.303's stdio connect/initialize reads MCP_TIMEOUT (ms).
+        timeout = os.environ.get("MCP_TIMEOUT", "180000")
+        if ctx.mcp_recovery:
+            # A hook inherits the failed CLI's settings.env. Do not let that
+            # old allowance override the retry's longer startup budget.
+            return str(max(300000, int(timeout))) if timeout.isdecimal() else "300000"
+        return timeout
+
     def command(self, ctx: LaunchContext) -> list[str]:
         settings = {
             "hooks": {
@@ -577,7 +588,7 @@ class ClaudeCode(Provider):
             # report_result/submit_review. --settings env is applied before MCP
             # servers connect. Not agents.agent_env: that feeds the launch
             # fingerprint and would reset stored refusals.
-            "env": {"MCP_TIMEOUT": os.environ.get("MCP_TIMEOUT", "180000")},
+            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx)},
             # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
             # application-default login`) whenever its own ADC probe fails, once
             # per process: across a session's many panes that opens a Google
