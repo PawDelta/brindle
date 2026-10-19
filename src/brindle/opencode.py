@@ -14,6 +14,9 @@ without writing anything into the worktree:
   file OpenCode adds to its system prompt.
 - ``permission``: the profile's permission_mode and allowed_tools, in
   OpenCode's terms (see permission_config).
+- With ``permission_policy`` on, the plugin's ``tool.execute.before`` hook
+  asks ``brindle _hook opencode-pre-tool`` and throws on a deny (the launch
+  sets ``BRINDLE_OPENCODE_POLICY=1``).
 
 OpenCode's events, mapped onto brindle's hooks (agents.handle_hook):
 - ``chat.message`` (a prompt is sent): ``prompt-submit``.
@@ -38,7 +41,8 @@ import time
 from pathlib import Path
 
 INSTALLER = os.path.expanduser("~/.opencode/bin/opencode")   # where opencode.ai/install puts it
-EVENTS = ("opencode-prompt", "opencode-permission", "opencode-permission-replied", "opencode-stop")
+EVENTS = ("opencode-prompt", "opencode-permission", "opencode-permission-replied", "opencode-stop",
+          "opencode-pre-tool")
 
 PLUGIN = """\
 // brindle's OpenCode plugin: tells brindle what this agent is doing.
@@ -54,15 +58,27 @@ export const Brindle = async () => {
   let error = null
   const send = (event, payload) => new Promise((resolve) => {
     try {
+      let out = ""
       const p = spawn(BRINDLE[0], [...BRINDLE.slice(1), "_hook", event, "--agent", agent],
-                      { stdio: ["pipe", "ignore", "ignore"] })
-      p.on("error", () => resolve())
-      p.on("close", () => resolve())
+                      { stdio: ["pipe", "pipe", "ignore"] })
+      p.stdout.on("data", (d) => { out += d })
+      p.on("error", () => resolve(""))
+      p.on("close", () => resolve(out))
       p.stdin.end(JSON.stringify(payload))
-    } catch { resolve() }
+    } catch { resolve("") }
   })
   const mine = (id) => typeof id === "string" && !children.has(id)
+  const policy = process.env.BRINDLE_OPENCODE_POLICY === "1"
   return {
+    // brindle's permission_policy: asked before every tool call; only a deny
+    // stops it (anything else, or a failure, is left to OpenCode's own rules).
+    "tool.execute.before": async (input, output) => {
+      if (!policy) return   // subagent sessions are policed too: they run in this worktree
+      const out = await send("opencode-pre-tool", { session_id: input.sessionID, tool: input.tool, args: output.args })
+      let answer = null
+      try { answer = JSON.parse(out) } catch {}
+      if (answer && answer.decision === "deny") throw new Error(answer.reason || "denied by brindle's permission policy")
+    },
     "chat.message": async (input, output) => {
       if (!mine(input.sessionID)) return
       error = null
@@ -127,6 +143,10 @@ def write_plugin() -> str:
 
 def write_instructions(agent_id: str, text: str) -> str:
     return _write(home() / "instructions" / f"{agent_id}.md", text)
+
+
+def remove_instructions(agent_id: str) -> None:
+    (home() / "instructions" / f"{agent_id}.md").unlink(missing_ok=True)
 
 
 # Claude Code's model names, for a profile written for it. OpenCode wants provider/model.
@@ -243,16 +263,33 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
         antigravity.end_turn(db, agent, base, str(payload.get("error") or ""), provider="opencode")
 
 
+def pre_tool(db, agent_id: str, payload: dict) -> str:
+    """brindle's permission policy for one tool call: JSON with a deny, else nothing."""
+    from brindle import agents
+
+    agent = db.get_agent(agent_id)
+    answer = agents.permission_request_decision(db, agent, payload, provider="opencode") if agent else None
+    return json.dumps(answer) if answer else ""
+
+
 def hook_main(db, agent_id: str | None, event: str, stdin_text: str) -> str:
-    """``brindle _hook opencode-<event>``: the plugin ignores the answer."""
-    if not agent_id:
+    """``brindle _hook opencode-<event>``: what it prints is only read for
+    ``opencode-pre-tool`` (a deny); the plugin ignores the rest."""
+    if not agent_id or event not in EVENTS:
         return ""
     try:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    payload = payload if isinstance(payload, dict) else {}
+    if event == "opencode-pre-tool":
+        try:
+            return pre_tool(db, agent_id, payload)
+        except Exception as e:  # no answer means OpenCode's own rules apply
+            print(f"brindle hook {event}: {e}", file=sys.stderr)
+            return ""
     try:
-        handle_hook(db, agent_id, event, payload if isinstance(payload, dict) else {})
+        handle_hook(db, agent_id, event, payload)
     except Exception as e:  # never break the person's OpenCode session over brindle
         print(f"brindle hook {event}: {e}", file=sys.stderr)
     return ""

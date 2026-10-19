@@ -251,6 +251,7 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
     merged = bool(db.merged_sha(ws.id))
     worker = agents.workspace_worker(db, ws)
     for a in db.list_agents(ws.id):
+        agents.forget_files(a)   # the agent rows go with the workspace
         if a.mode == "review" and a.result is None:
             learning.note_reviewer(db, cfg, a, ws, worker=worker)
         elif (a.mode in ("handoff", "handoff_detached", "assign")

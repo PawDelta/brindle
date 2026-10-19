@@ -1581,7 +1581,12 @@ class OpenCode(Provider):
         # OpenCode takes brindle's MCP server, plugin, instructions and
         # permissions from the environment (see brindle.opencode), and
         # merges them over the person's own config.
-        argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(opencode.config(ctx)), opencode.binary()]
+        argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(opencode.config(ctx))]
+        from brindle.codex_hook import policy_on
+
+        if policy_on(ctx.cwd):   # the plugin asks brindle before each tool call
+            argv.append("BRINDLE_OPENCODE_POLICY=1")
+        argv.append(opencode.binary())
         model = opencode.model_arg(ctx.profile.model)
         if model:
             argv += ["--model", model]

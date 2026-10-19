@@ -161,7 +161,97 @@ function render(snap) {
   document.getElementById("goal").replaceChildren(goalBlock(snap.autopilot));
   document.getElementById("updated").textContent =
     "updated " + new Date(snap.now * 1000).toLocaleTimeString();
+  updateChatAgents(snap);
 }
+
+// -- chat: pick an agent (the supervisor by default), read it, message it ----
+
+const chat = { agent: null, cursor: 0, gen: 0, busy: false, sending: false };
+
+function updateChatAgents(snap) {
+  const select = document.getElementById("chat-agent");
+  const agents = snap.workspaces.flatMap(ws => ws.agents);
+  const key = agents.map(a => a.id + a.profile).join();
+  if (select.dataset.key === key) return;
+  select.dataset.key = key;
+  select.replaceChildren(...agents.map(a =>
+    el("option", { value: a.id }, a.id + " · " + a.profile
+      + (a.id === snap.root_id ? " (supervisor)" : ""))));
+  const keep = agents.some(a => a.id === chat.agent);
+  const pick = keep ? chat.agent
+    : (agents.find(a => a.id === snap.root_id) || agents[0] || {}).id || null;
+  select.value = pick || "";
+  if (pick !== chat.agent) switchChatAgent(pick);
+}
+
+function switchChatAgent(id) {
+  chat.agent = id;
+  chat.cursor = 0;
+  chat.gen += 1;
+  chat.busy = false;
+  document.getElementById("chat-log").replaceChildren();
+  pollChat();
+}
+
+async function pollChat() {
+  const id = chat.agent, gen = chat.gen;
+  if (!id || chat.busy) return;
+  chat.busy = true;
+  try {
+    const resp = await fetch("api/agents/" + encodeURIComponent(id) + "/transcript?after=" + encodeURIComponent(chat.cursor),
+      { credentials: "same-origin" });
+    if (!resp.ok || gen !== chat.gen || id !== chat.agent) return;
+    const data = await resp.json();
+    if (gen !== chat.gen || id !== chat.agent) return;
+    const log = document.getElementById("chat-log");
+    const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+    if (data.reset) log.replaceChildren();
+    for (const m of data.messages) log.append(el("div", { class: "msg " + m.role }, m.text));
+    chat.cursor = data.cursor;
+    if ((data.messages.length || data.reset) && atEnd) log.scrollTop = log.scrollHeight;
+  } catch (e) {
+    // the main poll shows connection errors
+  } finally {
+    if (gen === chat.gen) chat.busy = false;
+  }
+}
+
+async function sendChat(event) {
+  event.preventDefault();
+  const box = document.getElementById("chat-text");
+  const note = document.getElementById("chat-note");
+  const raw = box.value;
+  const text = raw.trim();
+  const id = chat.agent, gen = chat.gen;
+  if (!text || !id || chat.sending) return;
+  chat.sending = true;
+  try {
+    const resp = await fetch("api/agents/" + encodeURIComponent(id) + "/message", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "HTTP " + resp.status);
+    if (box.value === raw && chat.agent === id && chat.gen === gen) box.value = "";
+    note.textContent = data.status;
+    pollChat();
+  } catch (e) {
+    note.textContent = String(e.message || e);
+  } finally {
+    chat.sending = false;
+  }
+}
+
+document.getElementById("chat-agent").addEventListener("change", e => switchChatAgent(e.target.value));
+document.getElementById("chat-form").addEventListener("submit", sendChat);
+document.getElementById("chat-text").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    document.getElementById("chat-form").requestSubmit();
+  }
+});
+setInterval(pollChat, POLL_MS);
 
 async function poll() {
   const error = document.getElementById("error");
