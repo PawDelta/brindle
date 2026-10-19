@@ -48,6 +48,8 @@ def fake_ollama(monkeypatch):
     monkeypatch.setattr("brindle.native.runner.probe", probe)
     monkeypatch.setattr(serve.shutil, "which", lambda name: "/opt/homebrew/bin/ollama" if name == "ollama" else None)
     monkeypatch.setattr(serve.subprocess, "Popen", FakePopen)
+    # Popen is patched process-wide, so knowledge.repo_key's `git config` would hit FakePopen.
+    monkeypatch.setattr("brindle.knowledge.repo_key", lambda root: str(root))
     monkeypatch.setattr(serve, "warm", lambda server, model, timeout=0: state["warmed"].append((server.host, model)) or True)
     monkeypatch.setattr(serve.time, "sleep", lambda s: None)
     return state
