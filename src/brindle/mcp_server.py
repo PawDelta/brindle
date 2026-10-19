@@ -224,6 +224,47 @@ def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
     return f"Worker {worker.id} finished.\n\n{result}{tail}"
 
 
+def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
+                 isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
+                 depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
+                 decision: dict, why: list[str]) -> tuple[str | None, str | None]:
+    """Handle a new task's overlap with running work by the repo's ``overlap``
+    setting (``tasks.overlap_mode``): (a reply to return instead of starting,
+    a warning for the started reply). Queueing waits on the holder's worker;
+    a second identical assign leaves the queued task in place. Another
+    session's work is never cancelled or replaced: both supervisors are told."""
+    clash = tasks.find_clash(db, ws, files, task, caller.id)
+    if clash is None:
+        return None, None
+    how = tasks.overlap_mode(load_repo_config(ws.repo_root).overlap, clash.cross_session)
+    if how == "queue" and not clash.holder:   # an intent has no worker to wait for
+        how = "warn"
+    reply = None
+    if how == "queue":
+        existing = tasks.pending_duplicate(db, caller.id, ws.repo_root, task)
+        if existing:
+            return f"Already queued as task {existing.id}; left it in place.", None
+        t = tasks.enqueue(
+            db, caller, ws, profile, task, mode, isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=[*(depends_on or []), clash.holder],
+            plan_first=plan_first, weight=weight,
+        )
+        savings.record(db, ws.repo_root, decision, task_id=t.id)
+        outcome = f"queued as task {t.id} until {clash.holder} merges"
+        reply = _remind_goal(db, caller, f"Queued task {t.id} until {clash.holder} merges: this task "
+                             f"{clash.warning}." + "".join(f"\nprofile: {w}" for w in why))
+    elif how == "block":
+        outcome = "refused"
+        reply = (f"Not started: this task {clash.warning}. Two workers editing the same files "
+                 "end in conflicts. Fold it into that worker's task (send_message), or pass "
+                 "depends_on so it starts once that branch has merged.")
+    else:
+        outcome = "allowed to start with a warning"
+    if clash.cross_session:
+        tasks.notify_clash(db, autopilot.root_of(db, caller.id), clash, outcome)
+    return reply, clash.warning
+
+
 def _start_failure(profile: str, e: Exception) -> str:
     """The reply when a worker couldn't be started. Returned rather than
     raised: an exception with no message reaches the supervisor as a bare
@@ -282,7 +323,9 @@ async def handoff(
 
     files: paths/globs this task expects to touch. If they overlap another
     active worker's declared or actually-changed files, the task isn't
-    started (the repo's `overlap` setting can make that a warning instead). depends_on: agent ids or branch
+    started; if the other worker is another session's, the task is queued
+    until it merges instead, and both supervisors are told (the repo's
+    `overlap` setting, "block", "warn" or "queue", overrides both). depends_on: agent ids or branch
     names of earlier tasks that must be merged into your branch first; if any
     aren't yet, this task is queued instead of starting, and started
     automatically (cut from your branch as it stands then) once
@@ -313,7 +356,7 @@ async def handoff(
             return refused
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
-                                      load_repo_config(ws.repo_root).overlap)
+                                      load_repo_config(ws.repo_root).overlap, caller.id)
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
@@ -329,11 +372,12 @@ async def handoff(
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
-        warning = tasks.overlap_warning(db, ws, files, task)
-        if warning and load_repo_config(ws.repo_root).overlap == "block":
-            return (f"Not started: this task {warning}. Two workers editing the same files "
-                    "end in conflicts. Fold it into that worker's task (send_message), or pass "
-                    "depends_on so it starts once that branch has merged.")
+        reply, warning = _route_clash(
+            db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+            weight=effective_weight, decision=decision, why=why)
+        if reply:
+            return reply
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
@@ -411,7 +455,9 @@ async def assign(
 
     files: paths/globs this task expects to touch. If they overlap another
     active worker's declared or actually-changed files, the task isn't
-    started (the repo's `overlap` setting can make that a warning instead). depends_on: agent ids or branch
+    started; if the other worker is another session's, the task is queued
+    until it merges instead, and both supervisors are told (the repo's
+    `overlap` setting, "block", "warn" or "queue", overrides both). depends_on: agent ids or branch
     names of earlier tasks that must be merged into your branch first; if any
     aren't yet, this task is queued instead of starting, and started
     automatically (cut from your branch as it stands then) once
@@ -442,7 +488,7 @@ async def assign(
             return refused
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
-                                      load_repo_config(ws.repo_root).overlap)
+                                      load_repo_config(ws.repo_root).overlap, caller.id)
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
@@ -458,11 +504,12 @@ async def assign(
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
-        warning = tasks.overlap_warning(db, ws, files, task)
-        if warning and load_repo_config(ws.repo_root).overlap == "block":
-            return (f"Not started: this task {warning}. Two workers editing the same files "
-                    "end in conflicts. Fold it into that worker's task (send_message), or pass "
-                    "depends_on so it starts once that branch has merged.")
+        reply, warning = _route_clash(
+            db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+            weight=effective_weight, decision=decision, why=why)
+        if reply:
+            return reply
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
