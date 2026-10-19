@@ -11,6 +11,15 @@ from brindle.db import Agent
 from conftest import sh
 
 
+@pytest.mark.variant("guards the suite against launching the real agent CLI")
+@pytest.mark.parametrize("argv", [["claude", "--version"], ["/usr/bin/env", "codex"]])
+def test_unmocked_agent_cli_launch_raises(argv):
+    import subprocess
+
+    with pytest.raises(AssertionError, match="test_unmocked_agent_cli_launch_raises"):
+        subprocess.Popen(argv)
+
+
 @pytest.mark.parametrize("command", [[], ["new", "feat/provider"], ["start"], ["supervisor"]])
 @pytest.mark.parametrize("flag", [
     "--supervisor",
@@ -70,7 +79,7 @@ def test_version_flag_prints_the_installed_version():
     assert __version__ != "unknown"
 
 
-def test_continue_from_inside_session(db, repo, monkeypatch):
+def test_continue_from_inside_session(db, repo, monkeypatch, fake_agent_cli):
     ws = workspaces.adopt_root(db, str(repo))
     caller = agents.spawn(db, ws, "developer", mode="interactive")
     target = agents.spawn(db, ws, "developer", mode="interactive")

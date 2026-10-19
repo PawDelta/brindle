@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -146,23 +147,47 @@ def pytest_runtest_teardown(item, nextitem):
 
 @pytest.fixture(autouse=True)
 def no_real_agent_cli(tmp_path, monkeypatch):
-    """A test must never start the real claude/codex in a tmux pane: it would
-    outlive the run as an orphan (ppid 1). Their pane commands run an inert stub
-    instead, which the private tmux server's teardown kills. A fake binary a
-    test puts under its own tmp_path is left alone."""
+    """A test must never start the real claude/codex, in a tmux pane (it would
+    outlive the run as an orphan) or as a subprocess: any process launch whose
+    argv names one that doesn't resolve under the test's tmp_path raises. A test
+    that needs a live agent pane uses the fake_agent_cli fixture."""
     from brindle import tmux
 
-    real = tmux.new_window
+    def check(args):
+        argv = [args] if isinstance(args, (str, os.PathLike)) else list(args)
+        for part in map(os.fspath, argv):
+            if os.path.basename(part) in ("claude", "codex"):
+                found = shutil.which(part) or part
+                if not os.path.abspath(found).startswith(str(tmp_path)):
+                    raise AssertionError(
+                        f"{os.environ.get('PYTEST_CURRENT_TEST')} would launch the real {part!r}: {argv[:6]}; "
+                        "use the fake_agent_cli fixture")
+
+    real_init, real_window = subprocess.Popen.__init__, tmux.new_window
+
+    def guarded_init(self, args, *a, **kw):
+        check(args)
+        real_init(self, args, *a, **kw)
+
+    # tmux windows run their command from a script, so its argv is checked here.
+    def guarded_window(session, name, cwd, command, *a, **kw):
+        check(command)
+        return real_window(session, name, cwd, command, *a, **kw)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded_init)
+    monkeypatch.setattr(tmux, "new_window", guarded_window)
+
+
+@pytest.fixture
+def fake_agent_cli(tmp_path, monkeypatch):
+    """BRINDLE_CLAUDE_BIN and BRINDLE_CODEX_BIN point at a stub that just sleeps,
+    for tests that need an agent's pane to be live; the private tmux server's
+    teardown kills it."""
     stub = tmp_path / "agent-cli-stub"
     stub.write_text("#!/bin/sh\nexec sleep 600\n")
     stub.chmod(0o755)
-
-    def guarded(session, name, cwd, command, *args, **kwargs):
-        command = [str(stub) if os.path.basename(p) in ("claude", "codex") and not p.startswith(str(tmp_path))
-                   else p for p in command]
-        return real(session, name, cwd, command, *args, **kwargs)
-
-    monkeypatch.setattr(tmux, "new_window", guarded)
+    monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(stub))
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", str(stub))
 
 
 @pytest.fixture(autouse=True)
@@ -172,6 +197,8 @@ def no_signed_in_providers(monkeypatch):
     from brindle import doctor
 
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
+    # And no `<cli> --version` run of whatever claude/codex the machine has.
+    monkeypatch.setattr(doctor, "_version", lambda argv: "")
 
 
 @pytest.fixture(autouse=True)
