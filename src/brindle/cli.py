@@ -105,6 +105,13 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
             tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
         if window:
             tmux.select_window(window)
+        if not sys.stdin.isatty():
+            # A script or a chat's `!` has no terminal of its own. From a pane
+            # of this server, switching "our" client would move the person's
+            # real terminal into the new session; attaching would just fail.
+            typer.echo(f"No terminal here; run `brindle attach {ws.name}` in one "
+                       f"(tmux session {ws.tmux_session}).")
+            return
         if tmux.inside_this_server():
             # From inside one of this server's panes (TMUX set, or only
             # TMUX_PANE left after `env -u TMUX brindle`): switch the client
