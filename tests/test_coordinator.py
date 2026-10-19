@@ -49,6 +49,13 @@ def test_hold_task_only_pending_and_allowlisted(db, repo, monkeypatch):
     monkeypatch.setenv("BRINDLE_AGENT_ID", "a")                     # not a supervisor's tool
     with pytest.raises(ToolError):
         asyncio.run(mcp_server.mcp.call_tool("release_task", {"task_id": "queued", "reason": "x"}))
+    # Nor a worker a supervisor put on the coordinator profile.
+    with pytest.raises(agents.AgentError):
+        agents.spawn(db, ws, coordinator.PROFILE, prompt="hold b's work", mode="assign")
+    db.add_agent(Agent("posing", ws.id, coordinator.PROFILE, "claude", "a", "assign", "processing",
+                       "", None, time.time()))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "posing")
+    mcp_server.release_task("queued", "x")
     assert db.get_task("queued").state == "held"
 
 

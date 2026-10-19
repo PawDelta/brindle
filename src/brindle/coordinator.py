@@ -55,13 +55,17 @@ class CoordinatorError(ValueError):
 
 
 def is_coordinator(agent: Agent | None) -> bool:
-    return agent is not None and (agent.mode == MODE or agent.profile == PROFILE)
+    """Whether ``agent`` is a coordinator :func:`wake` started: only those
+    may act. By mode alone, never by profile, so a worker a supervisor
+    started on the coordinator profile gets no say over other sessions."""
+    return agent is not None and agent.mode == MODE and agent.parent_id is None
 
 
 def refusal(agent: Agent | None, tool: str) -> str | None:
-    """Why ``agent`` may not call ``tool``, or None: the coordinator only
-    :data:`TOOLS`, everyone else none of its :data:`ACTIONS`."""
-    if is_coordinator(agent):
+    """Why ``agent`` may not call ``tool``, or None: the coordinator (and
+    anything on its profile) only :data:`TOOLS`, everyone else none of its
+    :data:`ACTIONS`."""
+    if is_coordinator(agent) or (agent is not None and agent.profile == PROFILE):
         if tool not in TOOLS:
             return (f"The coordinator may not call {tool}: only {', '.join(sorted(TOOLS))}. "
                     "For running work, advise its supervisor.")
