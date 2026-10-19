@@ -34,6 +34,11 @@ END = "end"
 DECISION = "decision"
 # A brief's receipt names its decisions by this item kind.
 DECISION_ITEM = "decision"
+# A clash event records a cross-session clash at assign (tasks.notify_clash).
+CLASH = "clash"
+# A coordinator event records one of its actions, a wake or an undo
+# (brindle.coordinator); no projection reads it.
+COORDINATOR = "coordinator"
 
 
 def repo_key(repo_root: str | Path) -> str:
@@ -270,6 +275,26 @@ def record_decision(db: DB, repo_key: str, topic: str, body: str, rationale: str
                 "link": link, "supersedes": old["id"] if old else None},
                actor=session, session=session)
     return get_decision(db, decision_id), None
+
+
+def propose_decision(db: DB, repo_key: str, topic: str, body: str, rationale: str = "",
+                     paths: list[str] | None = None, *, actor: str | None = None) -> dict:
+    """Record a decision with status ``proposed``: no brief carries it and it
+    blocks nothing until a supervisor records it with :func:`record_decision`."""
+    decision_id = uuid.uuid4().hex
+    append(db, repo_key, DECISION,
+           {"id": decision_id, "topic": _one_line(topic, 120), "body": _one_line(body, 2000),
+            "rationale": _one_line(rationale, 2000),
+            "scope": [p for p in (_one_line(p, 200) for p in paths or []) if p],
+            "status": "proposed"}, actor=actor)
+    return get_decision(db, decision_id)
+
+
+def withdraw_proposal(db: DB, d: dict) -> None:
+    """Mark proposed decision ``d`` withdrawn (a new event, so the log keeps both)."""
+    append(db, d["repo_key"], DECISION,
+           {"id": d["id"], "topic": d["topic"], "body": d["body"], "rationale": d["rationale"],
+            "scope": d["scope"], "status": "withdrawn"}, session=d["author_session"])
 
 
 def sessions_touching(db: DB, repo_root: str, scope: list[str]) -> list[str]:

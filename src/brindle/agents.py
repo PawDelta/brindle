@@ -342,6 +342,10 @@ def spawn(
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
     profile = load_profile(profile_name, ws.repo_root)
+    if (profile.name == "coordinator") != (mode == "coordinator"):
+        # Only the sweep starts a coordinator (brindle.coordinator.wake).
+        raise AgentError("the coordinator profile only runs as the repo's coordinator, which "
+                         "brindle starts itself; pick another profile")
     hosted = local_fallback(profile, ws.repo_root)   # its local model isn't up
     if hosted:
         profile_name, profile = hosted, load_profile(hosted, ws.repo_root)

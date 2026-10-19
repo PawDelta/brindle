@@ -183,6 +183,15 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         except Exception:
             pass
 
+    # 1h. Repos with the coordinator on (brindle Pro): wake one where
+    # something it watches has happened and none is running.
+    from brindle import coordinator
+
+    try:
+        done.extend(coordinator.wake(db, now))
+    except Exception:  # noqa: BLE001 - coordination must never stop the sweep
+        coordinator.log.exception("brindle: coordinator wake failed")
+
     # 2. Workers nobody needs any more.
     limits: dict[str, float] = {}
     for a in db.list_agents():
