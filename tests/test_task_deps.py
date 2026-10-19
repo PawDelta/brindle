@@ -56,6 +56,20 @@ def test_overlap_warning_matches_recursive_globs(db, repo, boss):
     assert "Warning" in out_b
 
 
+def test_overlap_warning_names_other_session_intent(db, repo, boss):
+    from brindle import knowledge
+    key = knowledge.repo_key(repo)
+    knowledge.append(db, key, knowledge.INTENT, {"summary": "rework x\nmore", "paths": ["src/x.py"]},
+                     session="sessB")
+    warning = tasks.overlap_warning(db, boss, ["src/x.py"])
+    assert "sessB" in warning and "rework x" in warning and "more" not in warning
+    assert tasks.overlap_warning(db, boss, ["src/y.py"]) is None
+    knowledge.append(db, key, knowledge.INTENT, {"summary": "mine", "paths": ["src/y.py"]}, session="boss")
+    assert tasks.overlap_warning(db, boss, ["src/y.py"]) is None    # same session: ignored
+    knowledge.append(db, key, knowledge.PAUSE, {}, session="sessB")
+    assert tasks.overlap_warning(db, boss, ["src/x.py"]) is None    # paused intents don't warn
+
+
 def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
     root = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "idle", "@0", None,
