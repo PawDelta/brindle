@@ -30,12 +30,27 @@ def _start(**kw):
 
 def test_open_attaches_to_the_running_session(db, running, monkeypatch):
     seen = []
-    monkeypatch.setattr(cli, "_ask_about_running", lambda a, w=None: "o")
+    monkeypatch.setattr(cli, "_ask_about_running", lambda live, w=None: ("o", live[0]))
     monkeypatch.setattr(cli, "_attach", lambda ws, window=None: seen.append((ws.id, window)))
     monkeypatch.setattr(agents, "spawn", lambda *a, **k: pytest.fail("must not start another"))
     _start()
     assert seen == [(running.id, "%5")]
     assert db.get_agent("sup1").status == "idle"            # not paused
+
+
+def test_start_picker_attaches_chosen_session(db, running, repo, monkeypatch):
+    from brindle import picker
+
+    other = workspaces.create(db, str(repo), "brindle/session-2", apply_prefix=False).workspace
+    db.add_agent(Agent("sup2", other.id, "supervisor", "claude", None, "interactive", "idle", "%7", None,
+                       time.time() + 10))
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("sup1", "sup2"))
+    monkeypatch.setattr(picker, "pick_row", lambda title, rows, actions, **kw: ("enter", 1))   # newest first: sup1
+    seen = []
+    monkeypatch.setattr(cli, "_attach", lambda ws, window=None: seen.append((ws.id, window)))
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: pytest.fail("must not start another"))
+    _start()
+    assert seen == [(running.id, "%5")]
 
 
 def test_any_number_of_sessions_each_get_their_own_worktree(db, running, monkeypatch):
@@ -51,7 +66,7 @@ def test_any_number_of_sessions_each_get_their_own_worktree(db, running, monkeyp
         **vars(cli.subprocess), "Popen": lambda argv, **kw: upgrades.append(argv)}))
     monkeypatch.setattr(cli, "_settings_sync_detached", lambda: None)
     spawned = []
-    monkeypatch.setattr(cli, "_ask_about_running", lambda a, w=None: "n")
+    monkeypatch.setattr(cli, "_ask_about_running", lambda live, w=None: ("n", live[0]))
     monkeypatch.setattr(cli, "_attach", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_cull_detached", lambda *a: None)
     monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)

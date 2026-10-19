@@ -55,6 +55,48 @@ def paused(db: DB, repo_root: str) -> list[Session]:
     return sorted(out, key=lambda s: s.paused_at, reverse=True)
 
 
+@dataclass
+class LiveSession:
+    root: Agent
+    workspace: Workspace          # where the chat runs (the checkout or a brindle/session-N worktree)
+    goal: str                     # one line: the autopilot goal, else the start prompt
+    workers: int                  # workers of this session that are running
+
+    @property
+    def branch(self) -> str:
+        return self.workspace.branch or ""
+
+    @property
+    def age(self) -> float:
+        return time.time() - self.root.created_at
+
+
+def goal_line(db: DB, root: Agent) -> str:
+    """The session's goal on one line, trimmed for a list."""
+    ap = db.get_autopilot(root.id)
+    text = (ap.goal if ap and ap.goal else root.task) or ""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return line if len(line) <= 60 else line[:59] + "…"
+
+
+def live(db: DB, repo_root: str) -> list[LiveSession]:
+    """Live interactive sessions in every workspace of ``repo_root`` (the
+    checkout and its ``brindle/session-N`` worktrees), newest first. An agent
+    whose recorded pane id a newer agent has since taken (tmux reuses ids)
+    isn't live: that pane is the newer agent's."""
+    owners = agents.pane_owners(db)
+    out = []
+    for ws in db.find_workspaces(repo_root):
+        for a in db.list_agents(ws.id):
+            if (a.mode == "interactive" and a.status not in ("paused", "done")
+                    and agents.is_alive(a) and agents.owns_pane(db, a, owners)):
+                running = [m for m in agents.tree(db, a.id)[1:]
+                           if m.mode != "interactive" and m.status not in ("paused", "done", "failed")
+                           and agents.is_alive(m)]
+                out.append(LiveSession(a, ws, goal_line(db, a), len(running)))
+    return sorted(out, key=lambda s: s.root.created_at, reverse=True)
+
+
 HANDOVER = (
     "[brindle handover] You are taking over supervising this work from {old}, which ran on branch "
     "{branch}. The goal and milestones, the workers below and any queued tasks are now yours; "

@@ -329,15 +329,23 @@ def start(
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
     else:
         ws = _here_or_scratch(db, reuse_scratch=False)
-        running = _running_session(db, ws)
-        if running and attach and sys.stdin.isatty():
-            choice = _ask_about_running(running, provider)
+        from brindle import sessions
+
+        live = sessions.live(db, ws.repo_root)
+        if live and attach and not yes and sys.stdin.isatty():
+            got = _ask_about_running(live, provider)
+            if got is None:
+                raise typer.Exit(0)
+            choice, picked = got
             if choice == "o":
-                _attach(ws, running.tmux_window)
+                _attach(picked.workspace, picked.root.tmux_window)
                 return
             if choice == "n":
                 ws = _run(_session_worktree, db, ws)
                 typer.echo(f"✓ new session in its own worktree: {ws.path} ({ws.branch})")
+            elif picked.workspace.id != ws.id:
+                agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
+                typer.echo(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")
 
     if not branch and not worktree and not scratch.is_scratch(ws.path):
         curr_b = git.current_branch(ws.path)
@@ -559,13 +567,10 @@ def _say_autopilot(db: DB, root_id: str) -> None:
 
 
 def _live_sessions(db: DB, ws: Workspace) -> list:
-    """The live sessions (interactive agents) in this checkout. An agent whose
-    recorded pane id a newer agent has since taken (tmux reuses ids) isn't
-    live: that pane is the newer agent's."""
-    owners = agents.pane_owners(db)
-    return [a for a in db.list_agents(ws.id)
-            if a.mode == "interactive" and a.status not in ("paused", "done")
-            and agents.is_alive(a) and agents.owns_pane(db, a, owners)]
+    """The live sessions (interactive agents) in this checkout."""
+    from brindle import sessions
+
+    return [s.root for s in sessions.live(db, ws.repo_root) if s.workspace.id == ws.id]
 
 
 def _running_session(db: DB, ws: Workspace):
@@ -574,21 +579,35 @@ def _running_session(db: DB, ws: Workspace):
     return live[0] if live else None
 
 
-def _ask_about_running(running, wanted: Optional[str] = None) -> str:
-    """Open, branch off or pause the session running here. ``wanted`` is the
-    CLI asked for with -s: when the running session is on another one,
-    opening it wouldn't give that, so the default is to start fresh."""
-    import click
-
+def _ask_about_running(live: list, wanted: Optional[str] = None):
+    """Pick among the repo's live sessions (any worktree): open one, start a
+    new session in its own worktree, or pause one and start fresh. Returns
+    ``(choice, session)`` with choice "o", "n" or "p", or None when cancelled.
+    ``wanted`` is the CLI asked for with -s: Enter on a session that runs on
+    another one starts fresh instead, since opening it wouldn't give that."""
     from brindle import picker
 
-    differs = bool(wanted) and wanted != picker.PICK and wanted != running.provider
-    typer.echo(f"A brindle session is already running here ({running.id}).")
-    if differs:
-        typer.echo(f"It runs on {running.provider}, not {wanted}; opening it keeps {running.provider}.")
-    typer.echo("  [o] open it   [n] new session in its own worktree   [p] pause it and start fresh")
-    return typer.prompt("Which", type=click.Choice(["o", "n", "p"]), default="p" if differs else "o",
-                        show_choices=False)
+    rows = [f"{s.root.id}  {s.goal or '(no goal yet)'}  {s.branch}  {_ago(s.age)}"
+            + (f"  {s.workers} worker(s) running" if s.workers else "") for s in live]
+    differs = [bool(wanted) and wanted != picker.PICK and wanted != s.root.provider for s in live]
+    got = picker.pick_row("Sessions running in this repo:", rows,
+                          {"o": "open", "n": "new session in its own worktree", "p": "pause it and start fresh"})
+    if got is None:
+        return None
+    k, i = got
+    if k == "enter":
+        k = "p" if differs[i] else "o"
+    return k, live[i]
+
+
+def _ask_about_paused(db: DB, available: list):
+    """Pick the paused session to resume (newest first); None to cancel."""
+    from brindle import picker, sessions
+
+    rows = [f"{s.root.id}  {sessions.goal_line(db, s.root) or '(no goal yet)'}  "
+            + _describe(s).split("  ", 1)[1] for s in available]
+    got = picker.pick_row("Paused sessions:", rows, {})
+    return None if got is None else available[got[1]]
 
 
 def _session_worktree(db: DB, ws: Workspace) -> Workspace:
@@ -723,6 +742,10 @@ def continue_cmd(
             _fail(f"no single paused session matches {session_id!r}. Available:\n  "
                   + "\n  ".join(_describe(s) for s in available))
         chosen = matches[0]
+    elif len(available) > 1 and attach and sys.stdin.isatty():
+        chosen = _ask_about_paused(db, available)
+        if chosen is None:
+            raise typer.Exit(0)
     else:
         chosen = available[0]
     others = [s for s in available if s.root.id != chosen.root.id]
