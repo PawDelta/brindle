@@ -3,6 +3,9 @@
 "use strict";
 
 const POLL_MS = 2000;
+let selectedWorkspace = null;
+let diffRequest = 0;
+let lastDiff = "";
 
 // The token came in the URL once; the server has set a cookie, so drop it
 // from the address bar and history.
@@ -48,13 +51,82 @@ function workspaceBlock(ws) {
   if (ws.dirty) git.push(ws.dirty + " dirty");
   const block = el("div", { class: "ws", "data-workspace": ws.id },
     el("div", { class: "ws-head" },
-      el("strong", {}, ws.name),
+      workspaceButton(ws),
       el("span", { class: "mono dim" }, ws.branch || ""),
       ws.base_branch ? el("span", { class: "dim" }, "→ " + ws.base_branch) : null,
       git.length ? el("span", { class: "dim" }, git.join(" ")) : null,
       ws.review_state ? el("span", { class: "dim" }, ws.review_state) : null));
   for (const a of ws.agents) block.append(agentRow(a));
   return block;
+}
+
+function workspaceButton(ws) {
+  const button = el("button", { class: "ws-select", type: "button",
+    "aria-pressed": String(selectedWorkspace === ws.id) }, ws.name);
+  button.addEventListener("click", () => {
+    selectedWorkspace = ws.id;
+    document.querySelectorAll(".ws-select").forEach(b => b.setAttribute("aria-pressed", "false"));
+    button.setAttribute("aria-pressed", "true");
+    loadDiff();
+  });
+  return button;
+}
+
+function diffBlock(data) {
+  const commit = sha => (sha || "").slice(0, 8) + (sha === data.sha ? " · HEAD" : " · older commit");
+  const reviews = el("div", {}, el("h3", {}, "Reviews"));
+  for (const r of data.reviews) {
+    reviews.append(el("p", {},
+      el("span", { class: "status " + (r.approved ? "s-ok" : "s-bad") },
+        r.approved ? "Approved" : "Changes requested"),
+      " · " + (r.reviewer_id || "reviewer") + " · " + commit(r.sha),
+      r.summary ? el("pre", { class: "mono" }, r.summary) : null));
+  }
+  if (!data.reviews.length) reviews.append(el("p", { class: "dim" }, "No reviews recorded."));
+  const checks = el("div", {}, el("h3", {}, "Checks"));
+  for (const c of data.checks) {
+    checks.append(el("details", {}, el("summary", {},
+      el("span", { class: "status " + (c.ok ? "s-ok" : "s-bad") }, c.ok ? "Passed" : "Failed"),
+      " · " + c.command + " · " + commit(c.sha)),
+      el("pre", { class: "mono" }, c.output || "No output.")));
+  }
+  if (!data.checks.length) checks.append(el("p", { class: "dim" }, "No checks recorded."));
+  return el("div", {},
+    el("p", {}, el("strong", {}, data.name), " → " + data.base),
+    el("pre", { class: "mono" }, data.stat || "No changes."),
+    data.stat_truncated ? el("p", { class: "dim" }, "Stat truncated.") : null,
+    el("details", { "data-diff-patch": "" }, el("summary", {}, "Full diff"),
+      el("pre", { class: "mono" }, data.diff || "No changes."),
+      data.truncated ? el("p", { class: "dim" }, "Diff truncated; inspect the workspace for the rest.") : null),
+    el("p", { class: "dim" }, "Reviews and checks apply to the recorded commit; uncommitted edits have not been verified."),
+    reviews, checks);
+}
+
+async function loadDiff(refresh = false) {
+  const panel = document.getElementById("diff");
+  const workspace = selectedWorkspace;
+  const serial = ++diffRequest;
+  const expanded = refresh && panel.querySelector("[data-diff-patch]")?.open;
+  if (!refresh) {
+    panel.textContent = "Loading…";
+    lastDiff = "";
+  }
+  try {
+    const resp = await fetch("api/workspaces/" + encodeURIComponent(workspace) + "/diff",
+      { credentials: "same-origin" });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "HTTP " + resp.status);
+    if (serial === diffRequest && JSON.stringify(data) !== lastDiff) {
+      lastDiff = JSON.stringify(data);
+      panel.replaceChildren(diffBlock(data));
+      if (expanded) panel.querySelector("[data-diff-patch]").open = true;
+    }
+  } catch (e) {
+    if (serial === diffRequest) {
+      lastDiff = "";
+      panel.textContent = String(e.message || e);
+    }
+  }
 }
 
 function goalBlock(pilot) {
@@ -97,6 +169,7 @@ async function poll() {
     const resp = await fetch("api/snapshot", { credentials: "same-origin" });
     if (!resp.ok) throw new Error(resp.status === 403 ? "not authorized: reopen the link brindle printed" : "HTTP " + resp.status);
     render(await resp.json());
+    if (selectedWorkspace) await loadDiff(true);
     error.textContent = "";
   } catch (e) {
     error.textContent = String(e.message || e);
