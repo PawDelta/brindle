@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import bisect
 import hashlib
+import json
 import re
 import time
 import uuid
@@ -82,6 +83,8 @@ _INSTRUCTION = re.compile(
     r"|\byou\s+(?:must|should|need\s+to|have\s+to|are\s+to|will|shall)\b", re.IGNORECASE)
 
 _HEADING = re.compile(r"(#{1,6})\s+(.*\S)\s*$")
+_CODE_SPAN = re.compile(r"`([^`\n]+)`")
+_IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
 
 
 @dataclass
@@ -328,7 +331,36 @@ def _drop_chunks(c, doc_id: int) -> None:
     c.execute("DELETE FROM kb_chunks WHERE doc_id = ?", (doc_id,))
 
 
-def _index(c, source_id: str, doc: _Doc, chunks) -> None:
+def graph_names(graph: Path | None) -> dict[str, list[str]]:
+    """The graphify graph's node ids by name (its label without call
+    parentheses or a leading dot); empty without a readable graph."""
+    if graph is None:
+        return {}
+    try:
+        nodes = json.loads(Path(graph).read_text()).get("nodes", [])
+    except (OSError, ValueError, AttributeError):
+        return {}
+    names: dict[str, list[str]] = {}
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("id") is None:
+            continue
+        name = str(node.get("label") or node["id"]).removesuffix("()").lstrip(".")
+        names.setdefault(name, []).append(str(node["id"]))
+    return names
+
+
+def code_links(text: str, names: dict[str, list[str]]) -> list[tuple[str, str]]:
+    """(symbol, node id) for each identifier in ``text``'s code spans that names
+    a graph node."""
+    links: dict[tuple[str, str], None] = {}
+    for span in _CODE_SPAN.findall(text):
+        for symbol in _IDENTIFIER.findall(span):
+            for node_id in names.get(symbol, ()):
+                links[symbol, node_id] = None
+    return list(links)
+
+
+def _index(c, source_id: str, doc: _Doc, chunks, names: dict[str, list[str]]) -> None:
     doc_id = c.execute(
         "INSERT INTO kb_docs (source_id, external_id, url, title, updated_at, content_hash, tombstoned)"
         " VALUES (?, ?, ?, ?, ?, ?, 0) ON CONFLICT (source_id, external_id) DO UPDATE SET"
@@ -342,12 +374,59 @@ def _index(c, source_id: str, doc: _Doc, chunks) -> None:
         if quarantined is None:
             c.execute("INSERT INTO kb_fts (rowid, text, heading_path, chunk_id) VALUES (?, ?, ?, ?)",
                       (rowid, text, heading_path, cid))
+            for symbol, node_id in code_links(text, names):
+                c.execute("INSERT OR IGNORE INTO kb_links (chunk_id, symbol, node_id) VALUES (?, ?, ?)",
+                          (cid, symbol, node_id))
 
 
-def sync(db: DB, source_id: str) -> dict[str, int]:
+def sources(db: DB, repo_key: str) -> list[dict]:
+    """``repo_key``'s sources, oldest first, each with its live document count."""
+    return [dict(r) for r in db.conn.execute(
+        "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned)"
+        " AS docs FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at", (repo_key,))]
+
+
+def find_source(db: DB, repo_key: str, ref: str) -> str:
+    """The id of ``repo_key``'s source named by an id (or a unique prefix of
+    one) or a folder path; KeyError when none or several match."""
+    scope = str(Path(ref).expanduser().resolve())
+    found = [s["id"] for s in sources(db, repo_key) if s["id"].startswith(ref) or s["scope"] == scope]
+    if len(found) != 1:
+        raise KeyError(ref)
+    return found[0]
+
+
+def search(db: DB, repo_key: str, query: str, sources: list[str] | None = None,
+           k: int = 8) -> list[dict]:
+    """The best ``k`` chunks for ``query`` by full-text rank, among the
+    non-quarantined chunks of ``repo_key``'s sources (only ``sources``, source
+    ids, when given). Each hit has its chunk id, heading path, text, source link
+    and updated date."""
+    terms = re.findall(r"\w+", query)
+    if not terms or k < 1 or sources == []:
+        return []
+    match = " OR ".join(f'"{t}"' for t in terms)
+    sql = ("SELECT c.id AS chunk_id, c.heading_path, c.text, d.url, d.title, d.updated_at"
+           " FROM kb_fts JOIN kb_chunks c ON c.rowid = kb_fts.rowid JOIN kb_docs d ON d.id = c.doc_id"
+           " JOIN kb_sources s ON s.id = d.source_id"
+           " WHERE kb_fts MATCH ? AND s.repo_key = ? AND c.quarantined IS NULL AND NOT d.tombstoned")
+    args: list = [match, repo_key]
+    if sources is not None:
+        sql += f" AND s.id IN ({','.join('?' * len(sources))})"
+        args += sources
+    rows = db.conn.execute(sql + " ORDER BY kb_fts.rank LIMIT ?", (*args, k)).fetchall()
+    return [{"chunk_id": r["chunk_id"], "heading_path": r["heading_path"], "text": r["text"],
+             "url": r["url"], "title": r["title"],
+             "updated": time.strftime("%Y-%m-%d", time.localtime(r["updated_at"])) if r["updated_at"] else None}
+            for r in rows]
+
+
+def sync(db: DB, source_id: str, graph: Path | None = None) -> dict[str, int]:
     """Bring an indexed source's documents up to date: (re)index the new and
     changed ones and tombstone the ones it no longer has, committing per BATCH
-    documents. Returns how many were indexed, unchanged and tombstoned."""
+    documents. Code-formatted identifiers that name a node of the repo's
+    ``graph`` (codemap.graph_path) become ``kb_links``; without one, none do.
+    Returns how many were indexed, unchanged and tombstoned."""
     src = db.conn.execute("SELECT * FROM kb_sources WHERE id = ?", (source_id,)).fetchone()
     if src is None:
         raise KeyError(source_id)
@@ -360,11 +439,12 @@ def sync(db: DB, source_id: str) -> dict[str, int]:
     paths = _folder_paths(Path(src["scope"]))
     counts = {"indexed": 0, "unchanged": 0, "tombstoned": 0}
     batch: list[tuple[_Doc, list]] = []
+    names = graph_names(graph)
 
     def flush() -> None:
         with db.tx() as c:
             for doc, chunks in batch:
-                _index(c, source_id, doc, chunks)
+                _index(c, source_id, doc, chunks, names)
         counts["indexed"] += len(batch)
         batch.clear()
 

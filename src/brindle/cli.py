@@ -1347,6 +1347,83 @@ def _here_repo() -> str | None:
         return None
 
 
+# -- brindle kb (knowledge sources; see brindle.kb) --------------------------------------------
+
+kb_app = typer.Typer(no_args_is_help=True, help="Knowledge sources agents can search for this repo.")
+kb_add_app = typer.Typer(no_args_is_help=True, help="Add a knowledge source.")
+kb_app.add_typer(kb_add_app, name="add")
+app.add_typer(kb_app, name="kb")
+
+
+def _kb_repo() -> tuple[str, str]:
+    from brindle import knowledge
+
+    repo_root = _here_repo()
+    if repo_root is None:
+        _fail("not in a git repo")
+    return repo_root, knowledge.repo_key(repo_root)
+
+
+@kb_add_app.command("folder")
+def kb_add_folder(path: Path = typer.Argument(..., help="A folder of Markdown or text documents.")) -> None:
+    """Add a folder as a source; `brindle kb sync` indexes it."""
+    from brindle import kb
+
+    if not path.expanduser().is_dir():
+        _fail(f"not a folder: {path}")
+    _, key = _kb_repo()
+    source = kb.add_source(DB(), key, kb.FOLDER, str(path))
+    typer.echo(f"added {source[:8]}: run `brindle kb sync` to index it")
+
+
+@kb_app.command("list")
+def kb_list() -> None:
+    """This repo's sources and how many documents each holds."""
+    from brindle import kb
+
+    _, key = _kb_repo()
+    rows = kb.sources(DB(), key)
+    for s in rows:
+        typer.echo(f"{s['id'][:8]}  {s['kind']}  {s['mode']}  {s['docs']} docs  {s['scope']}")
+    if not rows:
+        typer.echo("no sources: add one with `brindle kb add folder <path>`")
+
+
+@kb_app.command("sync")
+def kb_sync(source: Optional[str] = typer.Argument(None, help="A source id or folder; default every indexed source.")) -> None:
+    """Index new and changed documents and drop the ones that are gone."""
+    from brindle import codemap, kb
+
+    db = DB()
+    repo_root, key = _kb_repo()
+    try:
+        ids = [kb.find_source(db, key, source)] if source else [
+            s["id"] for s in kb.sources(db, key) if s["mode"] == "indexed"]
+    except KeyError:
+        _fail(f"no such source: {source}")
+    graph = codemap.graph_path(repo_root)
+    for source_id in ids:
+        try:
+            counts = kb.sync(db, source_id, graph)
+        except ValueError as e:
+            _fail(str(e))
+        typer.echo(f"{source_id[:8]}: " + ", ".join(f"{n} {what}" for what, n in counts.items()))
+
+
+@kb_app.command("remove")
+def kb_remove(source: str = typer.Argument(..., help="A source id or folder.")) -> None:
+    """Remove a source with everything indexed from it."""
+    from brindle import kb
+
+    db = DB()
+    _, key = _kb_repo()
+    try:
+        kb.remove_source(db, kb.find_source(db, key, source))
+    except KeyError:
+        _fail(f"no such source: {source}")
+    typer.echo("removed")
+
+
 @permissions_app.command("list")
 def permissions_list() -> None:
     """Every rule in force (built-in, this repo's denies, yours and learned), with its source."""
