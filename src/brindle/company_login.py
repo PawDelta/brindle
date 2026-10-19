@@ -327,7 +327,22 @@ class Login:
             clear_env(force=True)
             return False
         store_env(self.org_id, claude_env(self.org_id, c), self.self_serve)
+        self._adopt()
         return self._model_check(c)
+
+    def _adopt(self) -> None:
+        """Agents launched while no one was signed in to brindle become the
+        account's that signed in now, under the Claude identity its route
+        gives (``signin_pause.adopt``), instead of locking. Never raises."""
+        try:
+            from brindle import signin_pause
+
+            got = signin_pause.check("claude", cache=False)
+            if got is None or got[0].kind != "ok" or not got[0].ident or got[0].problem:
+                return
+            signin_pause.adopt(got[0].ident, signed_in=_logged_in(self.store, self.client))
+        except Exception:  # noqa: BLE001 - a sign-in never fails over this
+            log.debug("couldn't adopt the signed-out agents", exc_info=True)
 
     def _federated_signin(self, c) -> bool:
         """Write the cloud's hook (no cloud CLI, no cloud login) and prove it

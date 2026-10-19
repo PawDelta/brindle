@@ -601,3 +601,37 @@ def test_wsl_browser_interactive_login_gets_its_env(monkeypatch):
                         lambda argv, **kw: seen.update(kw) or type("P", (), {"returncode": 0})())
     assert company_login.run_cmd(["codex", "login"], interactive=True, env={"BROWSER": "wslview"}) == (0, "")
     assert seen["env"] == {"BROWSER": "wslview"}
+
+
+# -- agents launched while signed out of brindle --------------------------------------------------
+
+
+def test_signing_in_adopts_the_agents_launched_while_signed_out(monkeypatch):
+    from brindle import identity_lock, signin_pause
+
+    now = {"ident": "claude org Me (org-9)", "in": False}
+    monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: (
+        signin_pause.Check("ok", ident=now["ident"]), False))
+    monkeypatch.setattr(company_login, "_logged_in", lambda store=None, client=None: now["in"])
+    signin_pause.record_launch(Agent("c1", "ws", "developer", "claude", "chat", "assign", "processing",
+                                     "", None, 0.0))
+    now["in"] = True                   # `brindle login`: Claude moves to the org's route
+    stored = []
+    monkeypatch.setattr(company_login, "store_env", lambda *a: (
+        stored.append(a), now.update(ident="claude org Acme (org-1)")))
+    setup, check, _ = ROUTES["subscription"]
+    Fake(monkeypatch, {check: (0, f"logged in to {UUID}")})
+    assert go(setup)[0] and stored
+    assert signin_pause.recorded_identity("c1") == "claude org Acme (org-1)"
+    assert identity_lock.locked_by("c1") is None
+    now["ident"] = "claude org Other (org-2)"     # a different account signs in: locked
+    assert identity_lock.locked_by("c1") == "claude org Acme (org-1)"
+
+
+def test_a_sign_in_never_fails_over_adopting(monkeypatch):
+    from brindle import signin_pause
+
+    monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: 1 / 0)
+    setup, check, _ = ROUTES["subscription"]
+    Fake(monkeypatch, {check: (0, f"logged in to {UUID}")})
+    assert go(setup)[0]

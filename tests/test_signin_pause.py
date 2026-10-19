@@ -286,3 +286,92 @@ def test_unrecorded_agent_with_nothing_known_never_auto_resumes_and_resumes_by_h
     signin_pause.run(w.db)
     assert signin_pause.paused_for_signin() == {}
     assert signin_pause.checks() == []
+
+
+# -- agents launched while no one is signed in to brindle ----------------------------------------
+
+OTHER_ORG = Identity("claude", "Claude: org Other", ident="claude org Other (org-2)")
+
+
+@pytest.fixture
+def brindle_login(monkeypatch):
+    """Whether someone is signed in to brindle: ``login["in"]``."""
+    login = {"in": False}
+    monkeypatch.setattr(company_login, "_logged_in", lambda store=None, client=None: login["in"])
+    return login
+
+
+def test_a_signed_out_agent_is_adopted_by_the_account_that_signs_in(w, brindle_login):
+    from brindle import identity_lock
+
+    w.claude = PERSONAL                # no brindle login: Claude runs on the person's own sign-in
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    assert signin_pause._load()["unowned"] == ["c1"]
+    brindle_login["in"], w.claude = True, OK     # signing in switches Claude to the org's route
+    assert identity_lock.locked_by("c1") == PERSONAL.ident   # what this fixes
+    assert signin_pause.adopt(OK.ident) == ["c1"]
+    assert signin_pause.recorded_identity("c1") == OK.ident
+    assert signin_pause._load()["unowned"] == []
+    assert identity_lock.locked_by("c1") is None
+    w.claude = OTHER_ORG               # adopted: now it's the account's, and locks for another
+    assert identity_lock.locked_by("c1") == OK.ident
+    w.claude = PERSONAL                # the identity it launched under no longer owns it either
+    assert identity_lock.locked_by("c1") == OK.ident
+
+
+def test_an_agent_recorded_under_a_brindle_login_is_never_adopted(w, brindle_login):
+    from brindle import identity_lock
+
+    brindle_login["in"], w.claude = True, PERSONAL
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    brindle_login["in"] = False
+    w.agent("c2")
+    signin_pause.run(w.db)             # the sweep records c2 too: no login, so unowned
+    assert signin_pause._load()["unowned"] == ["c2"]
+    brindle_login["in"], w.claude = True, OK
+    assert signin_pause.adopt(OK.ident) == ["c2"]
+    assert identity_lock.locked_by("c1") == PERSONAL.ident   # stays locked exactly as before
+    assert identity_lock.locked_by("c2") is None
+    assert signin_pause.adopt(OTHER_ORG.ident) == []          # adopted once, not by each sign-in
+    assert signin_pause.recorded_identity("c2") == OK.ident
+
+
+def test_a_setup_applied_with_no_brindle_login_leaves_agents_unowned(w, brindle_login):
+    w.claude = PERSONAL
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    assert signin_pause.adopt(OK.ident, signed_in=False) == ["c1"]
+    assert signin_pause.recorded_identity("c1") == OK.ident
+    assert signin_pause.adopt(OTHER_ORG.ident) == ["c1"]     # the brindle sign-in still adopts it
+    assert signin_pause._load()["unowned"] == []
+
+
+def test_an_agent_gone_is_dropped_from_the_unowned(w, brindle_login):
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    w.db.delete_agent("c1")
+    signin_pause.run(w.db)
+    assert signin_pause._load()["unowned"] == []
+
+
+def test_an_old_state_file_without_unowned_loads(w, brindle_login):
+    import json
+
+    path = signin_pause._path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"paused": {}, "identity": {"c1": PERSONAL.ident}, "different": {},
+                                "warned": {}}))
+    assert signin_pause._load()["unowned"] == []
+    assert signin_pause.recorded_identity("c1") == PERSONAL.ident
+    assert signin_pause.adopt(OK.ident) == []     # recorded before this: never adopted
+    assert signin_pause.recorded_identity("c1") == PERSONAL.ident
+    path.write_text(json.dumps({"identity": {}, "unowned": "c1"}))   # unreadable: treated as none
+    assert signin_pause._load()["unowned"] == []
+
+
+def test_adopt_never_raises(w, monkeypatch):
+    monkeypatch.setattr(signin_pause, "_load", lambda: 1 / 0)
+    assert signin_pause.adopt(OK.ident) == []
+    assert signin_pause.adopt("") == []
