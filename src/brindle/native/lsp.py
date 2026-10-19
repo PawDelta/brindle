@@ -44,6 +44,7 @@ class Client:
         self.timeout = timeout
         self.root = root
         self.messages: queue.Queue = queue.Queue()
+        self.failure: Exception | None = None
         self.serial = 0
         self.documents: dict[str, tuple[int, str]] = {}
         self.diagnostics: dict[str, list[dict]] = {}
@@ -84,6 +85,7 @@ class Client:
                 body = self.proc.stdout.read(size)
                 self.messages.put(json.loads(body))
         except (OSError, ValueError, KeyError, EOFError) as e:
+            self.failure = e
             self.messages.put(e)
 
     def _send(self, message: dict) -> None:
@@ -165,6 +167,8 @@ class Client:
     def diagnose(self, uri: str) -> list[dict]:
         if self.capabilities.get("diagnosticProvider") is not None:
             return self.request("textDocument/diagnostic", {"textDocument": {"uri": uri}}).get("items", [])
+        # Push-only servers may never publish for a clean file. Bound the wait,
+        # but don't treat silence as proof that the document has no diagnostics.
         deadline = time.monotonic() + self.timeout
         while uri not in self.diagnostics:
             self._receive(deadline)
@@ -233,18 +237,23 @@ class LSP:
                 raise PermissionError("LSP path is outside your read scope")
         return path
 
-    def run(self, operation: str, args: dict) -> str:
+    def run(self, operation: str, args: dict, *, implicit: bool = False) -> str:
+        """Implicit file-tool checks stay silent when no server can run.
+        Explicit LSP tools explain why language information isn't available."""
         path = self._path(str(args.get("path") or ""))
         if self.read_scope:
-            return "LSP unavailable: workspace indexing cannot enforce this profile's read scope."
+            return "" if implicit else "LSP unavailable: workspace indexing cannot enforce this profile's read scope."
         spec = SERVERS.get(path.suffix.lower())
         if spec is None:
-            return f"LSP unavailable: no server configured for {path.suffix or 'this file type'}."
+            return "" if implicit else f"LSP unavailable: no server configured for {path.suffix or 'this file type'}."
         language, candidates = spec
         command = next((cmd for cmd in candidates if shutil.which(cmd[0])), None)
         if command is None:
-            return f"LSP unavailable: install {' or '.join(cmd[0] for cmd in candidates)} on PATH."
+            return "" if implicit else f"LSP unavailable: install {' or '.join(cmd[0] for cmd in candidates)} on PATH."
         try:
+            existing = self.clients.get(command)
+            if existing and (existing.failure is not None or existing.proc.poll() is not None):
+                self.clients.pop(command).close()
             if command not in self.clients:
                 self.clients[command] = Client(command, self.root, self.timeout)
             client = self.clients[command]

@@ -143,11 +143,22 @@ def test_missing_server_and_read_scope(tmp_path, server, monkeypatch):
     with monkeypatch.context() as missing, lsp.LSP(str(tmp_path)) as pool:
         missing.setattr(lsp.shutil, "which", lambda name: None)
         box = Toolbox().add(*core_tools(str(tmp_path), lsp=pool))
+        plain = Toolbox().add(*core_tools(str(tmp_path)))
+        for path in ("a.md", "a.py"):
+            (tmp_path / path).write_text("broken")
+            # Compare with ordinary tools: LSP unavailability adds no output.
+            assert box.call("Read", {"path": path}) == plain.call("Read", {"path": path})
+            args = {"path": path, "content": "broken"}
+            assert box.call("Write", args) == plain.call("Write", args)
+            args = {"path": path, "old_string": "broken", "new_string": "fixed"}
+            result = box.call("Edit", args)
+            (tmp_path / path).write_text("broken")
+            assert result == plain.call("Edit", args)
         for name, args in (("Diagnostics", {"path": "a.py"}),
                            ("Write", {"path": "new.py", "content": "x"}),
                            ("Diagnostics", {"path": "unknown.xyz"})):
             result = box.call(name, args)
-            assert not result.is_error and len(result.content.splitlines()) <= 2
+            assert not result.is_error and len(result.content.splitlines()) == 1
         assert not pool.clients
         assert box.call("Diagnostics", {"path": "../secret.py"}).is_error
     # The server would index the whole workspace, even for an in-scope query.
@@ -156,6 +167,10 @@ def test_missing_server_and_read_scope(tmp_path, server, monkeypatch):
     (tmp_path / "allowed" / "link.py").symlink_to(tmp_path / "a.py")
     with lsp.LSP(str(tmp_path), read_scope=["allowed/*"]) as pool:
         box = Toolbox().add(*core_tools(str(tmp_path), read_scope=["allowed/*"], lsp=pool))
+        plain = Toolbox().add(*core_tools(str(tmp_path), read_scope=["allowed/*"]))
+        assert box.call("Read", {"path": "allowed/a.py"}) == plain.call("Read", {"path": "allowed/a.py"})
+        args = {"path": "allowed/a.py", "content": "broken"}
+        assert box.call("Write", args) == plain.call("Write", args)
         assert box.call("Diagnostics", {"path": "a.py"}).is_error
         assert box.call("Diagnostics", {"path": "allowed/link.py"}).is_error
         assert not box.call("Diagnostics", {"path": "allowed/a.py"}).is_error
@@ -171,6 +186,13 @@ def test_server_failure_preserves_write_and_reaps_process(tmp_path, server, fail
         result = box.call("Write", {"path": "a.py", "content": "broken"})
         assert not result.is_error and (tmp_path / "a.py").read_text() == "broken"
         client = next(iter(pool.clients.values()))
+        if failure == "exit-early":
+            client.proc.wait(timeout=3)
+            (tmp_path / failure).unlink()
+            # Real dispatch must replace a dead connection and receive fresh diagnostics.
+            recovered = box.call("Diagnostics", {"path": "a.py"})
+            assert not recovered.is_error and "a.py:1:1: error: undefined café" in recovered.content
+            assert next(iter(pool.clients.values())) is not client
     assert client.proc.poll() is not None and not client.reader.is_alive()
 
 

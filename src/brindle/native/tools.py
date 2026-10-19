@@ -128,7 +128,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | N
             return ""
         # A successful write stays successful even if a server fails.
         try:
-            result = lsp.run(operation, {"path": str(path)})
+            result = lsp.run(operation, {"path": str(path)}, implicit=True)
             return f"\n{result}" if result else ""
         except Exception as e:
             return f"\nLSP unavailable: {type(e).__name__}."

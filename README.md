@@ -1861,8 +1861,9 @@ JS/TS: `typescript-language-server`; Go: `gopls`; Rust: `rust-analyzer`; C/C++:
 `clangd`; Ruby: `ruby-lsp`; Lua: `lua-language-server`). Servers use the worktree
 as their root and stop with the worker. `Diagnostics`, `Definition`, and
 `References` provide code information; diagnostics also follow successful Edit
-and Write calls. Navigation takes 1-based lines and character columns. Missing
-servers produce a short note. Profiles with a narrowed read scope skip language
+and Write calls. Navigation takes 1-based lines and character columns. Explicit
+LSP tools report missing servers; ordinary file tools stay silent when no server
+can run. Profiles with a narrowed read scope skip language
 servers because workspace indexing cannot enforce that boundary.
 
 ```markdown
