@@ -497,6 +497,22 @@ def test_open_question_reminder_sent_through_the_inbox_is_not_repeated(db, root,
     assert autopilot.on_stop(db, agent, {}) is None
 
 
+def test_open_question_reminder_arriving_wrapped_is_not_the_user_speaking(db, root, monkeypatch):
+    # The inbox can hand the reminder back to the prompt hook wrapped, or the
+    # unread-mail reminder (never recorded as delivered) can: neither re-arms.
+    agent, _ = root
+    with_goal(db)
+    monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
+    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
+    autopilot.user_spoke(db, agent)
+    sent = agents._stop_decision(db, agent, {}, via_inbox=True)
+    assert sent
+    for prompt in (f"<message>{sent['reason']}</message>",
+                   "[brindle autopilot] You have unread messages. Call read_messages before you stop."):
+        agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
+        assert autopilot.on_stop(db, agent, {}) is None
+
+
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     agent, ws = root
     with_goal(db)

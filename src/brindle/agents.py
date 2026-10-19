@@ -2998,7 +2998,11 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))
-        if agent.mode == "interactive" and not db.recently_delivered(agent_id, prompt):
+        # brindle's own reminders also arrive as prompts, possibly wrapped or
+        # sent without being recorded as delivered (the unread-mail one): any
+        # prompt carrying brindle's tag is not the user speaking.
+        if (agent.mode == "interactive" and "[brindle" not in prompt
+                and not db.recently_delivered(agent_id, prompt)):
             from brindle import autopilot as pilot
 
             pilot.user_spoke(db, agent)
