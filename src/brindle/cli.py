@@ -2995,7 +2995,7 @@ def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -
             agents.ready(db, agent_id)
             # Carry the observed launch token into the delivery CAS.
             a._launch_health_token = token
-            launch_health.accepted(db, a)
+            launch_health.verify_delivery(db, a)
         else:
             prompt_answer.report_blocked(db, a)
         launch_health.inspect(db, agent_id, wait=False, token=token)

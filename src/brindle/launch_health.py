@@ -136,10 +136,91 @@ def _followup(agent_id: str, token: str) -> None:
 
 
 def accepted(db, agent) -> None:
-    """An argv task reaches the CLI only after startup/trust or prompt-submit."""
-    row = db.conn.execute("SELECT argv_task FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
-    if row and row["argv_task"]:
-        delivered(db, agent)
+    """A turn hook confirms acceptance, including a pasted first task."""
+    delivered(db, agent)
+
+
+def verify_delivery(db, agent, text: str | None = None, baseline: str = "", lead: str | None = None) -> None:
+    """Verify the first TUI turn; retry once, without appending to a draft.
+
+    Readiness and our own 'processing' claim are not evidence of acceptance.
+    Claim the observation so concurrent after-launch/flush helpers cannot
+    retry the same brief. Launch tokens fence every wait and mutation.
+    """
+    from brindle import agents
+    from brindle.providers import get_provider
+
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+    if not row or (text is None and not row["argv_task"]):
+        return
+    expected = getattr(agent, "_launch_health_token", None)
+    token = row["token"] if expected is None else expected
+    if not db.conn.execute("UPDATE launch_health SET verifying=1 WHERE agent_id=? AND token=? "
+                           "AND verifying=0 AND delivered_at IS NULL AND outcome IS NULL",
+                           (agent.id, token)).rowcount:
+        return
+    agent._launch_health_token = token
+    text = text if text is not None else row["submitted_prompt"] or agent.task
+    provider = get_provider(agent.provider)
+
+    def pending():
+        latest = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+        fresh = db.get_agent(agent.id)
+        if (not latest or latest["token"] != token or latest["outcome"]
+                or latest["delivered_at"] is not None or not fresh or fresh.result is not None
+                or fresh.status in ("paused", "done", "failed") or fresh.tmux_window != row["pane"]
+                or not agents.owns_pane(db, fresh)):
+            return None
+        return fresh
+
+    for attempt in range(2):
+        for tick in range(11):
+            fresh = pending()
+            if fresh is None:
+                return
+            screen = capture(fresh)
+            if (provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing"
+                    or failure(screen, baseline=baseline, task=agent.task or "",
+                               submitted_prompt=text, provider=agent.provider)):
+                delivered(db, agent, baseline)
+                return
+            if tick < 10:
+                time.sleep(0.5)
+        if attempt == 0:
+            # Never clear a menu, a permission dialog or a different session.
+            draft = provider.paste_blocked(screen, True) == "typing"
+            if (not provider.input_ready(screen) and not draft
+                    or provider.tool_permission(screen) or provider.paste_blocked(screen, False)):
+                break
+            if draft:
+                provider.clear_input(fresh.tmux_window, server=agents.server_of(fresh))
+                # Clearing is a TUI event too. Do not append a duplicate to
+                # a frozen partial composer if it never handles that event.
+                for _ in range(10):
+                    time.sleep(0.5)
+                    fresh = pending()
+                    if fresh is None:
+                        return
+                    screen = capture(fresh)
+                    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+                        delivered(db, agent, baseline)
+                        return
+                    if provider.input_ready(screen) and not provider.paste_blocked(screen, True):
+                        break
+                else:
+                    break
+            tmux.paste(fresh.tmux_window, text, lead=lead, server=agents.server_of(fresh))
+    if not db.conn.execute("UPDATE launch_health SET outcome='delivery-failed' WHERE agent_id=? AND token=? "
+                           "AND delivered_at IS NULL AND outcome IS NULL", (agent.id, token)).rowcount:
+        return
+    db.update_agent(agent.id, status="failed")
+    body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
+            "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
+            "Check its pane and restart the worker; this is not a startup prompt.")
+    try:
+        agents.send_message(db, agent.parent_id, body)
+    except agents.AgentError:
+        db.enqueue(agent.parent_id, body, None)
 
 
 def helper_token(agent) -> list[str]:
@@ -152,13 +233,13 @@ def current(db, agent_id: str, token: str | None) -> bool:
     return token is None or bool(row and row["token"] == token)
 
 
-def delivered(db, agent, baseline: str = "") -> None:
+def delivered(db, agent, baseline: str | None = None) -> None:
     """Called only after delivery of the real task, once per launch."""
     row = db.conn.execute("SELECT token FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     expected = getattr(agent, "_launch_health_token", None)
     if row is None or (expected is not None and expected != row["token"]):
         return
-    changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=? "
+    changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=COALESCE(?,baseline) "
                               "WHERE agent_id=? AND delivered_at IS NULL AND token=? AND outcome IS NULL "
                               "AND EXISTS (SELECT 1 FROM agents WHERE id=? AND result IS NULL "
                               "AND status NOT IN ('paused','done')) RETURNING pane",
@@ -176,23 +257,32 @@ def capture(agent) -> str:
         return ""
 
 
-def before_delivery(db, agent) -> str:
+def before_delivery(db, agent, text: str | None = None) -> str:
     row = db.conn.execute("SELECT token, delivered_at, pane FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     # Bind this delivery before capture/paste/IPC can race with a resume,
     # including the absence of a launch observation at this point.
     agent._launch_health_token = row["token"] if row else ""
     if not row or row["delivered_at"] is not None:
         return ""
+    if text is not None:
+        # Publish what the startup observer must recognize before the paste
+        # can become visible, including briefs delivered from the queue.
+        db.conn.execute("UPDATE launch_health SET submitted_prompt=? WHERE agent_id=? AND token=? "
+                        "AND delivered_at IS NULL AND outcome IS NULL", (text, agent.id, row["token"]))
     if row["pane"]:
         # A runner may have loaded its Agent before publication, including
         # the previous tmux server. Refresh that metadata along with the pane.
         published = db.get_agent(agent.id)
-        return capture(replace(published, tmux_window=row["pane"])) if published else ""
-    if os.environ.get("BRINDLE_AGENT_ID") == agent.id and os.environ.get("TMUX_PANE"):
+        baseline = capture(replace(published, tmux_window=row["pane"])) if published else ""
+    elif os.environ.get("BRINDLE_AGENT_ID") == agent.id and os.environ.get("TMUX_PANE"):
         # The runner is already inside the new pane, but its launcher has not
         # published that pane yet. Never capture the old resumed pane.
-        return capture(replace(agent, tmux_window=os.environ["TMUX_PANE"], tmux_server=tmux.current_server()))
-    return ""
+        baseline = capture(replace(agent, tmux_window=os.environ["TMUX_PANE"], tmux_server=tmux.current_server()))
+    else:
+        baseline = ""
+    db.conn.execute("UPDATE launch_health SET baseline=? WHERE agent_id=? AND token=? AND delivered_at IS NULL",
+                    (baseline, agent.id, row["token"]))
+    return baseline
 
 
 def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",

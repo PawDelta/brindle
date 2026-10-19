@@ -325,7 +325,7 @@ def finish_launch(db, agent) -> bool:
         return False
     settled(db, agent)
     agents.ready(db, agent.id)
-    launch_health.accepted(db, agent)
+    launch_health.verify_delivery(db, agent)
     return True
 
 
@@ -421,6 +421,14 @@ class Startup:
         """Act on one capture of the pane: "answering" (a key went in),
         "blocked" (only the person can answer it; see take_blocked), or ""
         (nothing to answer)."""
+        # A half-rendered first brief has no footer yet. Its remaining
+        # instructions can look like a menu even after _past_brief removes
+        # the recognized prefix. It is still a draft, not a startup dialog.
+        for line in screen.splitlines() if self.brief else ():
+            match = re.match(rf"^\s*[{CURSOR}]\s+(.+)", plain(line))
+            text = " ".join(match[1].split()) if match else ""
+            if len(text) >= 20 and self.brief.startswith(text):
+                return ""
         screen = self._past_brief(screen)
         if self.permission(screen) or not looks_like_prompt(screen):
             return ""

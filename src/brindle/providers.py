@@ -166,6 +166,10 @@ class Provider:
         screen state worth reading here)."""
         return None
 
+    def clear_input(self, target: str, *, server) -> None:
+        """Discard a multiline draft before retrying a worker's first brief."""
+        tmux.send_keys(target, "C-c", server=server)
+
 
 # Why an agent should act on the messages brindle types into its chat,
 # without widening what it trusts: only the typed lead line (tmux.paste)

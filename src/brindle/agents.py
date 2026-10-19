@@ -1773,10 +1773,10 @@ def flush(db: DB, agent_id: str) -> bool:
         return False
     agent = db.get_agent(agent_id)
     assert agent is not None
-    baseline = launch_health.before_delivery(db, agent)
+    baseline = launch_health.before_delivery(db, agent, msg.body)
     tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
                server=server_of(agent))
-    launch_health.delivered(db, agent, baseline)
+    launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
     return True
 
 
@@ -2994,6 +2994,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     from brindle import prompt_answer
 
     prompt_answer.settled(db, agent)
+    if event in ("pre-tool", "tool-done", "stop", "codex-notify"):
+        from brindle import launch_health
+        launch_health.accepted(db, agent)
     if event == "codex-permission-request":
         # Session/status writes are bookkeeping, never prerequisites for
         # returning a policy decision (especially a deny).

@@ -856,17 +856,68 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    pasted, cleared = [], []
+    def paste(*args, **kwargs):
+        pasted.append(args[1])
+        monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE + "\nesc to interrupt")
+    monkeypatch.setattr(tmux, "paste", paste)
+    monkeypatch.setattr(tmux, "send_keys", lambda *args, **kwargs: cleared.append(args[1:]))
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task",
                      parent_id=boss.id, mode="assign", background_setup=True)
     cli.after_launch_cmd(a.id, token=a._launch_health_token)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
-    assert row["delivered_at"] == 100.5 and row["outcome"] is None
+    assert row["delivered_at"] > 100.5 and row["outcome"] is None
+    assert len(pasted) == 1 and not cleared
     assert len([cmd for cmd in detached if "_launch-health" in cmd and "--startup" not in cmd]) == 1
     assert sum("real task" in arg for arg in launches[-1]) == 1
     monkeypatch.setattr(lh, "capture", lambda a: "■ unexpected status 403 Forbidden\n" + CODEX_EMPTY_PANE)
     assert lh.inspect(db, a.id, token=a._launch_health_token) == "failed"
-    assert sleeps == [0.5, 5.0] and now[0] == 105.5
+    assert now[0] >= row["delivered_at"] + 5
     assert len(reports) == 1 and model_access.refused(a.profile, fp=row["fingerprint"]) == lh.AUTH
+
+
+@pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])
+def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, started, clears):
+    from brindle import prompt_answer
+    lh, a, _, _, _, reports = health
+    db.update_agent(a.id, provider="claude", status="idle",
+                    task="Implement a feature with these constraints.\nWorker restrictions:\n1. Work only here and nowhere else.")
+    a = db.get_agent(a.id)
+    db.enqueue(a.id, a.task, None)
+    old_error = "● API Error: 401 invalid API key\n"
+    screen = old_error + "❯ Implement a feature with these constraints.\nWorker restrictions:\n1. Work only here\nPress Enter to continue"
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
+    pastes, keys = [], []
+    def paste(*args, **kwargs):
+        pastes.append(args[1])
+        if len(pastes) == 1:
+            assert prompt_answer.Startup(a.tmux_window, ask=lambda _: pytest.fail("draft classified as prompt")).step(screen) == ""
+        if len(pastes) == 2:
+            # A second flush cannot replace or duplicate this delivery.
+            lh.verify_delivery(db, a, a.task)
+            db.enqueue(a.id, "followup", None)
+            assert not agents.flush(db, a.id)
+            if started:
+                agents.handle_hook(db, a.id, "prompt-submit", {"prompt": a.task})
+    monkeypatch.setattr(tmux, "paste", paste)
+    def clear(*args, **kwargs):
+        nonlocal screen
+        keys.append(args[1:])
+        if clears:
+            screen = old_error + "❯\n? for shortcuts"
+    monkeypatch.setattr(tmux, "send_keys", clear)
+    prompt_answer.bind(db, a)
+    assert agents.flush(db, a.id)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert len(pastes) == (2 if clears else 1) and keys
+    assert (row["delivered_at"] is not None) == started
+    assert (row["outcome"] == "delivery-failed") == (not started)
+    assert len(reports) == (0 if started else 1)
+    assert db.get_agent(a.id).status == ("processing" if started else "failed")
+    if started:
+        assert lh.inspect(db, a.id) == "pending" and reports == []
 
 
 def test_resumed_startup_failure_observes_new_pane_before_delivery(db, health, monkeypatch):
