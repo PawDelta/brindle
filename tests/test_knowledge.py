@@ -1,6 +1,6 @@
 import time
 
-from brindle import agents, autopilot, knowledge, mcp_server, sessions, workspaces
+from brindle import agents, autopilot, coordinator, knowledge, mcp_server, sessions, workspaces
 from brindle.db import Agent, Task
 
 
@@ -74,6 +74,13 @@ def test_other_sessions_block_and_who_is_working(db, repo, monkeypatch):
     assert mcp_server.who_is_working(paths=["src/x.py"]).count("session ") == 1
     assert "tasked" in mcp_server.who_is_working(paths=["src/x.py"])
     assert "intent" in mcp_server.who_is_working(query="a.py")
+
+    # The coordinator, which has no session, sees a paused session's running worker.
+    db.add_agent(Agent("coord", ws.id, coordinator.PROFILE, "claude", None, coordinator.MODE,
+                       "processing", "", None, time.time()))
+    db.set_status("tasked", "paused")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "coord")
+    assert "session tasked" in mcp_server.who_is_working(paths=["src/x.py"])
 
 
 def test_overlapping_decision_needs_supersede(db, repo, monkeypatch):

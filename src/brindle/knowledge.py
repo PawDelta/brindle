@@ -138,10 +138,13 @@ def intents(db: DB, repo_key: str) -> list[dict]:
 
 
 def other_sessions(db: DB, repo_key: str, root_id: str) -> list[dict]:
-    """Live sessions in ``root_id``'s repo other than ``root_id`` that have a
-    live intent or a running task, newest first. Each is ``{session, goal, age,
-    branch, paths, running}`` where ``running`` lists ``(files, branch)`` per
-    running task and ``paths`` is the announced intent's paths."""
+    """Sessions in ``root_id``'s repo other than ``root_id`` that have a live
+    intent (from a live session) or a running task (whatever the state of its
+    session root, which may be paused), newest first. ``root_id`` may be an
+    agent with no session of its own, such as the coordinator. Each is
+    ``{session, goal, age, branch, paths, running}`` where ``running`` lists
+    ``(files, branch)`` per running task and ``paths`` is the announced
+    intent's paths."""
     from brindle import autopilot, sessions, tasks
 
     root = db.get_agent(root_id)
@@ -153,15 +156,21 @@ def other_sessions(db: DB, repo_key: str, root_id: str) -> list[dict]:
     for task, agent, task_ws in tasks.running_tasks(db, ws.repo_root):
         running.setdefault(autopilot.root_of(db, agent.id), []).append(
             (json.loads(task.files) if task.files else [], task_ws.branch if task_ws else ""))
+    shown = {s.root.id: s for s in sessions.live(db, ws.repo_root)}
     out = []
-    for s in sessions.live(db, ws.repo_root):
-        sid = s.root.id
+    for sid in dict.fromkeys([*shown, *running]):
         if sid == root_id or (sid not in live and sid not in running):
             continue
-        out.append({"session": sid, "goal": s.goal, "age": s.age, "branch": s.branch,
+        s, agent = shown.get(sid), db.get_agent(sid)
+        if agent is None:
+            continue
+        agent_ws = s.workspace if s else db.get_workspace(agent.workspace_id)
+        out.append({"session": sid, "goal": s.goal if s else sessions.goal_line(db, agent),
+                    "age": time.time() - agent.created_at,
+                    "branch": (agent_ws.branch or "") if agent_ws else "",
                     "paths": live[sid]["paths"] if sid in live else [],
                     "running": running.get(sid, [])})
-    return out
+    return sorted(out, key=lambda s: s["age"])
 
 
 def _age(seconds: float) -> str:
