@@ -415,6 +415,35 @@ CREATE TABLE IF NOT EXISTS agent_reported_spend (
     reported_usd REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+-- The shared knowledge layer (brindle.knowledge owns these). kb_events is the
+-- append-only source of truth; intents is a projection rebuilt from it.
+CREATE TABLE IF NOT EXISTS kb_events (
+    id TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    actor TEXT,
+    session TEXT,
+    machine TEXT,
+    ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kb_events_repo ON kb_events(repo_key, ts);
+CREATE TABLE IF NOT EXISTS intents (
+    session_root TEXT NOT NULL,
+    repo_key TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    paths TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (session_root, repo_key)
+);
+CREATE TABLE IF NOT EXISTS context_receipts (
+    task_id TEXT NOT NULL,
+    item_kind TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    PRIMARY KEY (task_id, item_kind, item_id)
+);
 """
 
 
