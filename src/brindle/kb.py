@@ -13,6 +13,7 @@ database lock for long: run it in its own process, never inside an MCP tool call
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import re
 import time
@@ -87,60 +88,52 @@ _HEADING = re.compile(r"(#{1,6})\s+(.*\S)\s*$")
 class Chunk:
     heading_path: str
     text: str
+    lines: range   # the document lines the chunk was cut from
 
 
 @dataclass
 class _Section:
     level: int
     title: str
+    start: int   # the document line of its first line
     lines: list[str]
     children: list[_Section] = field(default_factory=list)
 
     def text(self) -> str:
         return "\n".join([*self.lines, *(c.text() for c in self.children)])
 
+    def size(self) -> int:
+        return len(self.lines) + sum(c.size() for c in self.children)
+
 
 def _tokens(text: str) -> int:
     return len(text) // 4
 
 
-class _Blocks:
-    """Whether a Markdown line is inside a code fence or an HTML comment, which
-    a chunk boundary never splits: a comment's hidden text stays in one chunk
-    for quarantine_reason to read whole."""
+def _normalized(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
-    def __init__(self) -> None:
-        self.fenced = self.comment = False
 
-    @property
-    def open(self) -> bool:
-        return self.fenced or self.comment
-
-    def step(self, line: str) -> bool:
-        """Move past ``line``; returns whether it started inside a block."""
-        inside = self.open
-        if not self.comment and line.lstrip().startswith(("```", "~~~")):
-            self.fenced = not self.fenced
-        elif not self.fenced:
-            for token in re.findall(r"<!--|-->", line):
-                self.comment = token == "<!--" if not self.comment else token != "-->"
-        return inside
+def _fence(line: str, fenced: bool) -> bool:
+    """Whether a code fence is open after ``line``."""
+    return not fenced if line.lstrip().startswith(("```", "~~~")) else fenced
 
 
 def chunk_markdown(text: str) -> list[Chunk]:
-    """Split a Markdown document by heading (``#`` lines in code fences and
-    HTML comments are not headings). Each chunk carries its heading path,
-    ``"Title > Section"``; text before the first heading has the empty path."""
-    root = _Section(0, "", [])
+    """Split a Markdown document by heading (``#`` lines in code fences are not
+    headings). Each chunk carries its heading path, ``"Title > Section"``; text
+    before the first heading has the empty path."""
+    root = _Section(0, "", 0, [])
     stack = [root]
-    blocks = _Blocks()
-    for line in text.splitlines():
-        heading = None if blocks.step(line) else _HEADING.match(line)
+    fenced = False
+    for n, line in enumerate(_normalized(text).split("\n")):
+        heading = None if fenced else _HEADING.match(line)
+        fenced = _fence(line, fenced)
         if heading:
             level = len(heading.group(1))
             while stack[-1].level >= level:
                 stack.pop()
-            section = _Section(level, heading.group(2), [line])
+            section = _Section(level, heading.group(2), n, [line])
             stack[-1].children.append(section)
             stack.append(section)
         else:
@@ -160,28 +153,27 @@ def _emit(section: _Section, path: list[str], out: list[Chunk]) -> None:
     whole = section.text().strip("\n")
     if _tokens(whole) <= MAX_TOKENS:
         if whole.strip():
-            out.append(Chunk(heading_path, whole))
+            out.append(Chunk(heading_path, whole, range(section.start, section.start + section.size())))
         return
     if own:
-        out += [Chunk(heading_path, piece) for piece in _pieces(section.lines)]
+        out += [Chunk(heading_path, piece, lines) for piece, lines in _pieces(section.lines, section.start)]
     for child in section.children:
         _emit(child, path, out)
 
 
-def _pieces(lines: list[str]) -> list[str]:
-    """``lines`` cut at blank lines outside code fences and HTML comments into
-    pieces of about TARGET_TOKENS."""
-    pieces: list[str] = []
-    current: list[str] = []
-    blocks = _Blocks()
-    for line in lines:
-        blocks.step(line)
-        current.append(line)
-        if not blocks.open and not line.strip() and _tokens("\n".join(current)) >= TARGET_TOKENS:
-            pieces.append("\n".join(current).strip("\n"))
-            current = []
-    if "".join(current).strip():
-        pieces.append("\n".join(current).strip("\n"))
+def _pieces(lines: list[str], start: int) -> list[tuple[str, range]]:
+    """``lines`` (from document line ``start``) cut at blank lines outside code
+    fences into pieces of about TARGET_TOKENS, each with its document lines."""
+    pieces: list[tuple[str, range]] = []
+    first = 0
+    fenced = False
+    for i, line in enumerate(lines):
+        fenced = _fence(line, fenced)
+        if not fenced and not line.strip() and _tokens("\n".join(lines[first:i + 1])) >= TARGET_TOKENS:
+            pieces.append(("\n".join(lines[first:i + 1]).strip("\n"), range(start + first, start + i + 1)))
+            first = i + 1
+    if "".join(lines[first:]).strip():
+        pieces.append(("\n".join(lines[first:]).strip("\n"), range(start + first, start + len(lines))))
     return pieces
 
 
@@ -193,16 +185,37 @@ def redact(text: str) -> str:
     return text
 
 
+def _signatures(text: str):
+    """Each injection signature in ``text``: (reason, start, end) offsets."""
+    for m in _HIDDEN.finditer(text):
+        yield "hidden text", m.start(), m.end()
+    for m in _ADDRESSED.finditer(text):
+        yield "addressed to an AI", m.start(), m.end()
+    for m in _COMMENT.finditer(text):
+        if _INSTRUCTION.search(m.group(1)):
+            yield "instruction in an HTML comment", m.start(), m.end()
+
+
 def quarantine_reason(text: str) -> str | None:
     """Why ``text`` must not reach an agent, or None: hidden text, text
     addressed to an AI, or an instruction in an HTML comment."""
-    if _HIDDEN.search(text):
-        return "hidden text"
-    if _ADDRESSED.search(text):
-        return "addressed to an AI"
-    if any(_INSTRUCTION.search(c) for c in _COMMENT.findall(text)):
-        return "instruction in an HTML comment"
-    return None
+    return next((reason for reason, _, _ in _signatures(text)), None)
+
+
+def scan_document(text: str) -> list[tuple[Chunk, str | None]]:
+    """``text``'s chunks, each with why it is quarantined or None. The
+    signatures are found in the whole document, not chunk by chunk, so a chunk
+    boundary cutting through one (an HTML comment spanning headings, say) never
+    hides it: every chunk cut from a signature's lines is quarantined. A chunk's
+    heading path is read too, as its ancestors' headings are not in its text."""
+    text = _normalized(text)
+    starts = [0, *(m.end() for m in re.finditer("\n", text))]
+    flagged: dict[int, str] = {}
+    for reason, start, end in _signatures(text):
+        for n in range(bisect.bisect_right(starts, start) - 1, bisect.bisect_right(starts, max(start, end - 1))):
+            flagged.setdefault(n, reason)
+    return [(chunk, next((flagged[n] for n in chunk.lines if n in flagged), None)
+             or quarantine_reason(chunk.heading_path)) for chunk in chunk_markdown(text)]
 
 
 def chunk_id(source_id: str, external_id: str, heading_path: str, repeat: int = 0) -> str:
@@ -290,16 +303,14 @@ def _read(external_id: str, path: Path) -> _Doc:
 
 def _scanned(source_id: str, doc: _Doc) -> list[tuple[str, str, str, str | None]]:
     """``doc``'s chunks as (id, redacted heading path, redacted text, quarantine
-    reason). The reason reads the heading path too: a chunk's text holds only
-    its own heading, not its ancestors'."""
+    reason)."""
     seen: dict[str, int] = {}
     rows = []
-    for chunk in chunk_markdown(doc.text):
+    for chunk, reason in scan_document(doc.text):
         repeat = seen.get(chunk.heading_path, 0)
         seen[chunk.heading_path] = repeat + 1
-        heading_path, text = redact(chunk.heading_path), redact(chunk.text)
         rows.append((chunk_id(source_id, doc.external_id, chunk.heading_path, repeat),
-                     heading_path, text, quarantine_reason(f"{heading_path}\n{text}")))
+                     redact(chunk.heading_path), redact(chunk.text), reason))
     return rows
 
 
