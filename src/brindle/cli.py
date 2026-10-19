@@ -1481,6 +1481,20 @@ def coordinator_undo(event: str = typer.Argument(..., help="The event id (or its
         _fail(str(e))
 
 
+@coordinator_app.command("log")
+def coordinator_log(limit: int = typer.Option(20, "--limit", "-n", help="How many to show.")) -> None:
+    """Recent coordinator actions and reports in this repo, newest first."""
+    from brindle import coordinator
+
+    _, key = _kb_repo()
+    rows = coordinator.recent(DB(), key, limit)
+    for e in rows:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(e["ts"]))
+        typer.echo(f"{when}  {e['id'][:8]}  {coordinator.describe(e)}")
+    if not rows:
+        typer.echo("The coordinator hasn't acted in this repo yet.")
+
+
 @coordinator_app.command("stop")
 def coordinator_stop() -> None:
     """Kill switch: close any running coordinator and turn it off for this checkout."""

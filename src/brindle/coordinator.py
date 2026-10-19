@@ -44,6 +44,12 @@ QUEUED_TOO_LONG = 20 * 60
 # A coordinator idle this long without reporting is closed, so the next
 # event can wake a new one.
 IDLE_AFTER = 10 * 60
+# One still at work this long after it started, in any status (stuck on
+# endless API retries, say), is closed and what it was woken for is given to
+# the next one.
+LIFETIME = 15 * 60
+# How many of its earlier actions and reports a coordinator's brief recalls.
+RECALL = 8
 # What undo can put back; advice can't be unsent.
 UNDOABLE = ("hold_task", "release_task", "reorder_queue", "propose_decision")
 PRO_MESSAGE = ("The coordinator is a brindle Pro feature: `brindle account login` with a Pro "
@@ -227,7 +233,17 @@ def propose_decision(db: DB, coord: Agent, topic: str, decision: str, rationale:
 
 
 def finish(db: DB, coord: Agent, result: str) -> str:
-    """The coordinator's report: it is done until the next wake."""
+    """The coordinator's report: it is done until the next wake. Kept as a
+    ``report`` event, which the next wake's brief recalls, and in history,
+    since the agent itself is closed."""
+    from brindle import history
+
+    ws = _home(db, coord)
+    knowledge.append(db, knowledge.repo_key(ws.repo_root), knowledge.COORDINATOR,
+                     {"action": "report", "text": knowledge._one_line(result or "", 2000)},
+                     actor=coord.id)
+    history.record_safely(db, ws.repo_root, "coordinator", agent=coord, with_usage=True,
+                          branch=ws.branch, task=coord.task, result=result)
     db.set_result(coord.id, result)
     db.set_status(coord.id, "done")
     agents.close_later(coord.id)
@@ -299,7 +315,9 @@ def _roots_by_key(db: DB) -> dict[str, list[str]]:
 
 def running(db: DB, roots: list[str], now: float | None = None) -> list[Agent]:
     """Coordinators still at work in ``roots``. One idle past IDLE_AFTER
-    without reporting is closed and not counted."""
+    without reporting, or alive past LIFETIME in any status, is closed and
+    not counted; for the latter, what it was woken for is given back so the
+    next sweep wakes a fresh one."""
     now = time.time() if now is None else now
     found = []
     for root in roots:
@@ -308,24 +326,44 @@ def running(db: DB, roots: list[str], now: float | None = None) -> list[Agent]:
                 if (a.mode != MODE or a.status in ("paused", "done")
                         or a.dismissed_at is not None):
                     continue
-                if a.status == "idle" and now - (a.status_since or a.created_at) > IDLE_AFTER:
+                hung = now - a.created_at > LIFETIME
+                if hung or (a.status == "idle"
+                            and now - (a.status_since or a.created_at) > IDLE_AFTER):
                     try:
                         agents.close(db, a.id)
                     except agents.AgentError:
                         pass
+                    if hung:
+                        _give_back(db, knowledge.repo_key(ws.repo_root), expired=a.id)
                     continue
                 found.append(a)
     return found
 
 
-def _mark(c, repo_key: str) -> tuple[int, int, list[str]]:
-    """The last wake's ``(rowid, events seen through, tasks flagged)``."""
+def _last_wake(c, repo_key: str) -> tuple[int, dict]:
+    """The last wake event's ``(rowid, payload)``, or ``(0, {})``."""
     for row in c.execute("SELECT rowid, payload FROM kb_events WHERE repo_key = ? AND kind = ?"
                          " ORDER BY rowid DESC", (repo_key, knowledge.COORDINATOR)):
         p = json.loads(row["payload"])
         if p.get("action") == "wake":
-            return row["rowid"], p.get("through", 0), p.get("tasks", [])
-    return 0, 0, []
+            return row["rowid"], p
+    return 0, {}
+
+
+def _mark(c, repo_key: str) -> tuple[int, int, list[str]]:
+    """The last wake's ``(rowid, events seen through, tasks flagged)``."""
+    rowid, p = _last_wake(c, repo_key)
+    return rowid, p.get("through", 0), p.get("tasks", [])
+
+
+def _give_back(db: DB, repo_key: str, **why) -> None:
+    """Move the mark back to where it was before the last wake, so the next
+    sweep wakes a coordinator again for what that wake claimed."""
+    _, p = _last_wake(db.conn, repo_key)
+    if "before" in p:
+        through, flagged = p["before"]
+        knowledge.append(db, repo_key, knowledge.COORDINATOR,
+                         {"action": "wake", "through": through, "tasks": flagged, **why})
 
 
 def unseen(db: DB, repo_key: str, roots: list[str], now: float) -> tuple[list, list[Task], int, list[str]]:
@@ -348,7 +386,40 @@ def _q(text: str) -> str:
     return json.dumps(knowledge._one_line(text or "", 200), ensure_ascii=False)
 
 
-def brief(events, stale: list[Task]) -> str:
+def recent(db: DB, repo_key: str, limit: int) -> list:
+    """The last ``limit`` coordinator events of ``repo_key`` worth recalling,
+    newest first: actions, reports, undos, stops and wakes that failed or
+    expired (not the plain wake marks)."""
+    out = []
+    for row in db.conn.execute("SELECT * FROM kb_events WHERE repo_key = ? AND kind = ?"
+                               " ORDER BY rowid DESC", (repo_key, knowledge.COORDINATOR)):
+        p = json.loads(row["payload"])
+        if p.get("action") == "wake" and not (p.get("expired") or p.get("failed")):
+            continue
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def describe(event) -> str:
+    """One line for a coordinator event, its own text quoted."""
+    p = json.loads(event["payload"])
+    action = p.get("action", "")
+    if action == "report":
+        return f"report: {_q(p.get('text', ''))}"
+    if action == "undo":
+        return f"a person undid {str(p.get('undoes', ''))[:8]}"
+    if action == "stop":
+        return "a person stopped the coordinator"
+    if action == "wake":
+        return (f"coordinator {p['expired']} ran past {LIFETIME // 60} min and was closed"
+                if p.get("expired") else f"couldn't start: {_q(p.get('failed', ''))}")
+    target = p.get("task") or p.get("to") or str(p.get("decision", ""))[:8]
+    return f"{action} {target}: {_q(p.get('reason', ''))}"
+
+
+def brief(events, stale: list[Task], recalled=()) -> str:
     lines = []
     for e in events:
         p = json.loads(e["payload"])
@@ -364,8 +435,10 @@ def brief(events, stale: list[Task]) -> str:
         deps = ", ".join(tasks._loads(t.depends_on)) or "nothing"
         lines.append(f"- task {t.id} has been queued {int((time.time() - t.created_at) // 60)} min,"
                      f" waiting on {deps}")
+    memory = "".join(f"\n- {describe(e)}" for e in reversed(recalled))
     return ("You were woken by what happened in this repo since the last coordinator looked:\n"
             + "\n".join(lines[:40])
+            + (f"\n\nWhat earlier coordinators here did, oldest first:{memory}" if memory else "")
             + "\n\nLook at list_tasks and who_is_working, act only where it helps, then call "
               "report_result with what you did.")
 
@@ -390,14 +463,14 @@ def wake(db: DB, now: float | None = None) -> list[str]:
             if _mark(c, key)[0] != mark[0]:
                 continue    # another sweep claimed these
             knowledge._write(c, key, knowledge.COORDINATOR,
-                             {"action": "wake", "through": last, "tasks": flagged})
+                             {"action": "wake", "through": last, "tasks": flagged,
+                              "before": [mark[1], mark[2]]})
         try:
             agent = agents.spawn(db, repos.target_workspace(db, roots[0]), PROFILE,
-                                 prompt=brief(events, stale), mode=MODE, background_setup=True)
+                                 prompt=brief(events, stale, recent(db, key, RECALL)),
+                                 mode=MODE, background_setup=True)
         except Exception as e:  # noqa: BLE001 - give the events back for the next sweep
-            knowledge.append(db, key, knowledge.COORDINATOR,
-                             {"action": "wake", "through": mark[1], "tasks": mark[2],
-                              "failed": str(e)[:300]})
+            _give_back(db, key, failed=str(e)[:300])
             done.append(f"couldn't start the coordinator for {key}: {e}")
             continue
         done.append(f"woke coordinator {agent.id} for {key} "
