@@ -22,7 +22,7 @@ import uuid
 from types import SimpleNamespace
 
 from brindle import cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
-from brindle.assembler import DECISIONS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
+from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
@@ -288,7 +288,7 @@ plan is approved; if it comes back with feedback, revise it and call
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
                            provider, headless: bool, plan_first: bool = False,
-                           decisions: str = "") -> str:
+                           decisions: str = "", chunks: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
@@ -297,7 +297,8 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     when a paused worker's CLI session can't be resumed and must restart fresh."""
     from brindle import autopilot as pilot
 
-    prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions)])
+    prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions),
+                       Block(DOCUMENT_CHUNKS, chunks)])
     if done_when:
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
@@ -375,9 +376,12 @@ def spawn(
         full = f"{profile.prompt.strip()}\n\n{rules}".strip() if rules else profile.prompt
         prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
+        from brindle import codemap
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
                                         plan_first=plan_first,
-                                        decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files))
+                                        decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
+                                        chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
+                                                                      codemap.graph_path(ws)))
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
@@ -1262,7 +1266,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
             prompt = decorate_worker_prompt(
                 a.task, a.id, ws, a.done_when, provider, bool(a.headless),
                 plan_first=bool(a.plan_first) and a.plan_state != "approved",
-                decisions=knowledge.replay_decisions(db, a.id)) + RESUME_NOTE
+                decisions=knowledge.replay_decisions(db, a.id),
+                chunks=knowledge.replay_chunks(db, a.id)) + RESUME_NOTE
         else:
             prompt = (a.task + RESUME_NOTE) if a.task else None
         if a.dismissed_at is not None:
