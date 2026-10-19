@@ -2998,16 +2998,19 @@ def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -
             launch_health.verify_delivery(db, a)
         else:
             prompt_answer.report_blocked(db, a)
-        launch_health.inspect(db, agent_id, wait=False, token=token)
+            launch_health.inspect(db, agent_id, wait=False, token=token)
 
 
 @app.command("_launch-health", hidden=True)
 def launch_health_cmd(agent_id: str, startup: bool = typer.Option(False),
-                      token: Optional[str] = typer.Option(None)) -> None:
+                      token: Optional[str] = typer.Option(None), verify: bool = False) -> None:
     from brindle import launch_health
 
     db = _helper_db()
     if not launch_health.current(db, agent_id, token):
+        return
+    if verify:
+        launch_health.verify_pending(db, agent_id, token)
         return
     if startup:
         time.sleep(launch_health.FOLLOWUP_SECONDS)

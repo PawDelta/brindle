@@ -1773,10 +1773,13 @@ def flush(db: DB, agent_id: str) -> bool:
         return False
     agent = db.get_agent(agent_id)
     assert agent is not None
-    baseline = launch_health.before_delivery(db, agent, msg.body)
+    from brindle import antigravity
+    warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
+    baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
     tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
                server=server_of(agent))
-    launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
+    if not warmup:
+        launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
     return True
 
 

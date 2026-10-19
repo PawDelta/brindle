@@ -123,6 +123,33 @@ def _tail(screen: str, n: int = 25) -> list[str]:
     return [ln.rstrip() for ln in plain(screen).rstrip().splitlines()][-n:]
 
 
+def brief_draft(screen: str, brief: str) -> bool:
+    """Recognize a known brief in the composer, including a scrolled tail.
+
+    A returned empty composer supersedes transcript text. Without a prompt
+    marker, require both a matching last line and substantial matching text;
+    a generic 'Worker restrictions:' title alone is not enough evidence.
+    """
+    brief = " ".join((brief or "").split())
+    if not brief:
+        return False
+    lines = plain(screen).splitlines()
+    cursors = [i for i, line in enumerate(lines) if re.match(rf"^\s*[{CURSOR}]", line)]
+    if cursors:
+        lines = lines[cursors[-1]:]
+        lines[0] = re.sub(rf"^\s*[{CURSOR}]\s*", "", lines[0])
+        lines[0] = re.sub(r"^brindle delivered this message(?: from [^:]+)?:\s*", "", lines[0])
+    end = next((i for i, line in enumerate(lines) if INPUT_BOX.search(line)), len(lines))
+    parts = [" ".join(line.split()) for line in lines[:end]
+             if line.strip() and not re.fullmatch(r"[\s─━╭╮╰╯│]+", line)]
+    if not parts:
+        return False
+    if cursors and len(parts[0]) >= 20 and brief.startswith(parts[0]):
+        return True
+    return (len(parts[-1]) >= BRIEF_LINE and parts[-1] in brief
+            and sum(len(part) for part in parts if part in brief) >= 60)
+
+
 def looks_like_prompt(screen: str) -> bool:
     """Whether the bottom of ``screen`` is a menu or question waiting for an
     answer: a selected menu line next to another option, or an "Enter to
@@ -374,6 +401,9 @@ class Startup:
                 return "\n".join(lines[j:])
         return self._without_brief_lines(screen)
 
+    def draft(self, screen: str) -> bool:
+        return brief_draft(screen, self.brief)
+
     def _without_brief_lines(self, screen: str) -> str:
         """``screen`` without the lines that are a piece of the brief: a long
         brief has scrolled its first line off the capture, leaving only its
@@ -424,11 +454,8 @@ class Startup:
         # A half-rendered first brief has no footer yet. Its remaining
         # instructions can look like a menu even after _past_brief removes
         # the recognized prefix. It is still a draft, not a startup dialog.
-        for line in screen.splitlines() if self.brief else ():
-            match = re.match(rf"^\s*[{CURSOR}]\s+(.+)", plain(line))
-            text = " ".join(match[1].split()) if match else ""
-            if len(text) >= 20 and self.brief.startswith(text):
-                return ""
+        if self.draft(screen):
+            return ""
         screen = self._past_brief(screen)
         if self.permission(screen) or not looks_like_prompt(screen):
             return ""

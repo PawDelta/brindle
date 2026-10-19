@@ -398,6 +398,7 @@ CREATE TABLE IF NOT EXISTS launch_health (
     submitted_prompt TEXT NOT NULL DEFAULT '',
     delivered_at REAL,
     verifying INTEGER NOT NULL DEFAULT 0,
+    delivery_lead TEXT,
     baseline TEXT NOT NULL DEFAULT '',
     outcome TEXT,
     launched_at REAL
@@ -886,6 +887,8 @@ class DB:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN launched_at REAL")
         if "verifying" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN verifying INTEGER NOT NULL DEFAULT 0")
+        if "delivery_lead" not in health_cols:
+            self.conn.execute("ALTER TABLE launch_health ADD COLUMN delivery_lead TEXT")
         try:   # only brindle.kb needs FTS5: a SQLite built without it still opens
             self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
                               "text, heading_path, chunk_id UNINDEXED)")

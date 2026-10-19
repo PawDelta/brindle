@@ -141,30 +141,51 @@ def _followup(agent_id: str, token: str) -> None:
 
 def accepted(db, agent) -> None:
     """A turn hook confirms acceptance, including a pasted first task."""
-    delivered(db, agent)
+    row = db.conn.execute("SELECT argv_task, submitted_prompt FROM launch_health WHERE agent_id=?",
+                          (agent.id,)).fetchone()
+    if row and (row["argv_task"] or row["submitted_prompt"]):
+        delivered(db, agent)
 
 
-def verify_delivery(db, agent, text: str | None = None, baseline: str = "", lead: str | None = None) -> None:
-    """Verify the first TUI turn; retry once, without appending to a draft.
-
-    Readiness and our own 'processing' claim are not evidence of acceptance.
-    Claim the observation so concurrent after-launch/flush helpers cannot
-    retry the same brief. Launch tokens fence every wait and mutation.
-    """
+def verify_delivery(db, agent, text: str | None = None, baseline: str | None = None,
+                    lead: str | None = None) -> None:
+    """Schedule one verification without blocking the caller or a sweep."""
     from brindle import agents
-    from brindle.providers import get_provider
+    from brindle.providers import brindle_invocation
 
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     if not row or (text is None and not row["argv_task"]):
         return
     expected = getattr(agent, "_launch_health_token", None)
     token = row["token"] if expected is None else expected
-    if not db.conn.execute("UPDATE launch_health SET verifying=1 WHERE agent_id=? AND token=? "
+    lead = lead if lead is not None else agents.message_lead(db, agent, None)
+    if not db.conn.execute("UPDATE launch_health SET verifying=1, delivery_lead=?, baseline=COALESCE(?,baseline), "
+                           "submitted_prompt=COALESCE(?,submitted_prompt) "
+                           "WHERE agent_id=? AND token=? "
                            "AND verifying=0 AND delivered_at IS NULL AND outcome IS NULL",
-                           (agent.id, token)).rowcount:
+                           (lead, baseline, text, agent.id, token)).rowcount:
+        return
+    agents._detach([*brindle_invocation(), "_launch-health", agent.id, "--token", token, "--verify"])
+
+
+def verify_pending(db, agent_id: str, token: str | None) -> None:
+    """Detached turn observation; retry once, fenced to this launch.
+
+    State 1 is scheduled, 2 is running. A duplicate helper cannot take over
+    an existing observation, clear its input or submit another copy.
+    """
+    from brindle import agents
+    from brindle.providers import get_provider
+
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
+    agent = db.get_agent(agent_id)
+    if not row or not agent or token != row["token"]:
+        return
+    if not db.conn.execute("UPDATE launch_health SET verifying=2 WHERE agent_id=? AND token=? "
+                           "AND verifying=1 AND delivered_at IS NULL AND outcome IS NULL", (agent_id, token)).rowcount:
         return
     agent._launch_health_token = token
-    text = text if text is not None else row["submitted_prompt"] or agent.task
+    text, baseline, lead = row["submitted_prompt"] or agent.task, row["baseline"], row["delivery_lead"]
     provider = get_provider(agent.provider)
 
     def pending():
@@ -194,7 +215,8 @@ def verify_delivery(db, agent, text: str | None = None, baseline: str = "", lead
             time.sleep(0.5)
         if attempt == 0:
             # Never clear a menu, a permission dialog or a different session.
-            draft = provider.paste_blocked(screen, True) == "typing"
+            from brindle.prompt_answer import brief_draft
+            draft = provider.paste_blocked(screen, True) == "typing" or brief_draft(screen, text)
             if (not provider.input_ready(screen) and not draft
                     or provider.tool_permission(screen) or provider.paste_blocked(screen, False)):
                 break
@@ -258,7 +280,7 @@ def capture(agent) -> str:
     from brindle import agents
 
     try:
-        return tmux.capture(agent.tmux_window, lines=80, server=agents.server_of(agent))
+        return tmux.capture(agent.tmux_window, lines=80, escapes=True, server=agents.server_of(agent))
     except tmux.TmuxError:
         return ""
 
@@ -301,7 +323,7 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
 def _failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",
              provider: str | None = None):
     """(the cause, the provider's error block it was read from, or "")."""
-    old = {line.strip() for line in baseline.splitlines()}
+    old = {line.strip() for line in re.sub(r"\x1b\[[0-9;]*m", "", baseline).splitlines()}
     text = re.sub(r"\x1b\[[0-9;]*m", "", screen)
     lines = text.splitlines()
     has_codex_ui = provider in (None, "codex") and bool(re.search(r"OpenAI Codex|\b\d+% context left", text))
