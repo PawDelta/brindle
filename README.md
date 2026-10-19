@@ -368,6 +368,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle login` | the same as `brindle account login`; when your org's policy has an `agent_setup` block it also signs you in to the Claude and Codex route the company chose (AWS SSO profile, `gcloud`, `az`, `claude auth login`, `codex login`), stores the Claude Code environment for brindle's panes in `~/.brindle/config.json`, and checks the pinned models. `brindle doctor --fix` does the same |
 | `brindle audit verify\|export\|pubkey\|ship\|prune` | the local tamper-evident audit log, and shipping it to your SIEM (brindle Enterprise; see "Audit log" below) |
 | `brindle watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks, `x` closes |
+| `brindle web [--port N] [--no-open]` | this session in your browser (see "Web UI") |
 | `brindle sidebar` | bring this session's sidebar into the tmux session you're in (also `Ctrl-b S` in a window without one); restarts it if it was closed |
 | `brindle attach / cd / open [WS]` | tmux session (at the agent waiting on you, else the busiest or newest) / path / editor |
 | `brindle status / diff [--stat] [WS]` | compared with the base branch (committed + uncommitted) |
@@ -389,6 +390,21 @@ your own status line prints, so what you see doesn't change.
 | `brindle mcp` | the MCP server agents talk to (launched for them; you don't run it) |
 
 With no `WS` argument, commands act on the workspace you're in.
+
+### Web UI
+
+`brindle web` serves the current session to your browser: workspaces, agents
+and their status, and the goal's milestones with each one's last check. Run
+it from a terminal in the session's tmux session to show that session's
+goal; elsewhere it shows the newest autopilot session
+in the repo. The page refreshes itself every couple of seconds.
+
+It listens on `127.0.0.1` only, on a free port (or `--port N`), and prints a
+link with a random token, `http://127.0.0.1:PORT/?token=...`, which it also
+opens. The token is new each run and is needed on every request (the first
+one sets a cookie, so the page drops it from the address bar). Requests
+naming another host, or changing anything from another site's page, are
+refused. Ctrl-C stops it.
 
 ### Agent tools
 

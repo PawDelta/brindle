@@ -330,6 +330,7 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
     ms = db.milestones(root.id)
     w = autopilot.work_state(db, root.id) if any(m.status == "failed" for m in ms) else None
     return {
+        "root_id": root.id,
         "enabled": bool(ap.enabled),
         "goal": ap.goal,
         "state": ap.state,
