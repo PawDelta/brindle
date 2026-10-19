@@ -1,4 +1,5 @@
 import dataclasses
+import fnmatch
 import json
 import os
 import time
@@ -40,16 +41,31 @@ def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(bri
     assert cfg["permission"]["edit"] == cfg["permission"]["webfetch"] == "deny"
 
 
-@pytest.mark.parametrize("mode, model, perm, flags", [
-    ("bypassPermissions", "opencode/big-pickle", {"bash": "allow", "edit": "allow"}, ["--model", "opencode/big-pickle"]),
-    ("plan", "claude-sonnet-4-5", {"edit": "allow", "*": "ask"}, ["--model", "anthropic/claude-sonnet-4-5", "--agent", "plan"]),
-    (None, "gpt-5.1", {"edit": "ask", "*": "ask"}, ["--model", "openai/gpt-5.1"]),
-    ("auto", "local-model", {"edit": "allow", "*": "ask"}, ["--model", "local-model"]),
+@pytest.mark.parametrize("mode, model, perm, flags, patterns, decision", [
+    ("bypassPermissions", "opencode/big-pickle", {"bash": "allow", "edit": "allow"}, ["--model", "opencode/big-pickle"], ["git push"], "allow"),
+    ("plan", "claude-sonnet-4-5", {"edit": "allow", "*": "ask"}, ["--model", "anthropic/claude-sonnet-4-5", "--agent", "plan"], ["git status"], "allow"),
+    (None, "gpt-5.1", {"edit": "ask", "*": "ask"}, ["--model", "openai/gpt-5.1"], ["git status --short --branch", "git branch -a", "git log --oneline -3"], "allow"),
+    ("auto", "local-model", {"edit": "allow", "*": "ask"}, ["--model", "local-model"], ["git -C /worktree status --short --branch", "ls /shared/cache"], "allow"),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C . log --oneline -3", "git -C /shared/cache diff", "git -C . stash list"], "allow",
+                 marks=pytest.mark.variant("relative -C and profile directory from the supervisor incident")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C '/read only' status", 'git -C "/read only" diff'], "allow",
+                 marks=pytest.mark.variant("quoted directory spellings must retain literal argument boundaries")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C /unsafe/path status"], "ask",
+                 marks=pytest.mark.variant("a glob in a configured directory must not allow arbitrary paths")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C /worktree checkout status file"], "ask",
+                 marks=pytest.mark.variant("bypass attempt against a wildcard in the -C path")),
+    pytest.param("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
+                 ["git -C /worktree status", "git push origin main"], "deny",
+                 marks=pytest.mark.variant("a compound command must not hide a write after a permitted read")),
 ])
-def test_permission_mode_and_model_map_onto_opencode(brindle_home, mode, model, perm, flags):
+def test_permission_mode_and_model_map_onto_opencode(brindle_home, mode, model, perm, flags, patterns, decision):
     profile = dataclasses.replace(load_profile("developer"), permission_mode=mode, model=model,
-                                  add_dirs=["/shared/cache/"])
-    argv = OpenCode().command(LaunchContext("o1", profile, None))
+                                  add_dirs=["/shared/cache/"], read_dirs=["/read only", "/unsafe*"])
+    argv = OpenCode().command(LaunchContext("o1", profile, None, cwd="/worktree"))
     got = _config(argv)["permission"]
     assert argv[3:] == flags
     assert got["edit"] == perm["edit"]
@@ -57,7 +73,13 @@ def test_permission_mode_and_model_map_onto_opencode(brindle_home, mode, model, 
         assert got["bash"] == got["external_directory"] == "allow"
     else:
         assert got["bash"]["*"] == perm["*"] and got["bash"]["uv run *"] == "allow"
-        assert got["external_directory"] == {"*": "ask", "/shared/cache/*": "allow"}
+        assert got["external_directory"] == {"*": perm["*"], "/shared/cache/*": "allow",
+                                              "/read only/*": "allow", "/unsafe*/*": "allow"}
+        # OpenCode 1.19.3 emits one pattern per simple command in ; / && lists,
+        # retaining git's -C option. The last matching rule wins for each one.
+        decisions = [next(action for pattern, action in reversed(got["bash"].items())
+                          if fnmatch.fnmatchcase(command, pattern)) for command in patterns]
+        assert ("deny" if "deny" in decisions else "ask" if "ask" in decisions else "allow") == decision
 
 
 def add_agent(db, ws, mode="assign", status="processing", profile="developer-opencode"):

@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -167,28 +168,51 @@ def model_arg(model: str | None) -> str | None:
 _BASH_RULE = re.compile(r"^Bash\((.+)\)$")
 
 
-def _bash_patterns(allowed_tools: list[str] | None) -> list[str]:
+def _bash_patterns(allowed_tools: list[str] | None, directories: list[str] | None = None) -> list[str]:
     """Claude Code's ``Bash(git diff:*)`` rules as OpenCode bash patterns
-    (``git diff`` and ``git diff *``)."""
+    (``git diff`` and ``git diff *``).
+
+    OpenCode checks each simple command in a compound shell command, so
+    separators need no extra patterns. It retains ``git -C <directory>``.
+    Spell those directories out: ``git -C * diff *`` could also approve
+    ``git -C . checkout diff file`` because its wildcard spans arguments.
+    """
+    paths = []
+    for directory in [".", *(directories or [])]:
+        # OpenCode has no escaping for glob metacharacters. Leave unusual
+        # paths asking rather than turning a literal directory into a glob.
+        if not directory or any(c in directory for c in "*?\\\n\r"):
+            continue
+        directory = directory.rstrip("/") or "/"
+        paths.append(shlex.quote(directory))
+        if "'" not in directory:
+            paths.append(f"'{directory}'")
+        if "$" not in directory and "`" not in directory:
+            paths.append(json.dumps(directory, ensure_ascii=False))
     out: list[str] = []
     for rule in allowed_tools or []:
         m = _BASH_RULE.match(rule.strip())
         if not m:
             continue
         command = m.group(1).strip()
-        if command.endswith(":*"):
-            prefix = command[:-2].strip()
-            out += [prefix, f"{prefix} *"]
-        else:
-            out.append(command)
+        commands = [command]
+        if command.startswith("git "):
+            commands += [f"git -C {directory} {command[4:]}" for directory in paths]
+        for command in commands:
+            if command.endswith(":*"):
+                prefix = command[:-2].strip()
+                out += [prefix, f"{prefix} *"]
+            else:
+                out.append(command)
     return list(dict.fromkeys(out))
 
 
-def permission_config(profile) -> dict:
+def permission_config(profile, cwd: str | None = None) -> dict:
     """The profile's permission_mode and allowed_tools as OpenCode's
     ``permission`` block. OpenCode takes the last rule that matches, so the
     catch-all comes first. Reads, searches and brindle's MCP tools are left at
-    OpenCode's default (allow).
+    OpenCode's default (allow). ``git -C`` variants cover the launch directory,
+    ``.`` and explicit profile directories; unknown paths still ask (or deny).
 
     - ``bypassPermissions``: everything allowed.
     - ``dontAsk`` (nobody watches, e.g. a reviewer): only allowed_tools'
@@ -201,12 +225,13 @@ def permission_config(profile) -> dict:
     if mode == "bypassPermissions":
         return {"edit": "allow", "bash": "allow", "webfetch": "allow", "external_directory": "allow"}
     fallback = "deny" if mode == "dontAsk" else "ask"
-    bash = {"*": fallback, **{p: "allow" for p in _bash_patterns(profile.allowed_tools)}}
+    dirs = [*(profile.add_dirs or []), *(profile.read_dirs or [])]
+    bash_dirs = [*dirs, *([cwd] if cwd else [])]
+    bash = {"*": fallback, **{p: "allow" for p in _bash_patterns(profile.allowed_tools, bash_dirs)}}
     edit = "allow" if mode in ("acceptEdits", "auto", "plan") else fallback
     perm: dict = {"edit": edit, "bash": bash}
     if mode == "dontAsk":
         perm["webfetch"] = "deny"
-    dirs = [*(profile.add_dirs or []), *(profile.read_dirs or [])]
     if dirs:
         perm["external_directory"] = {"*": fallback, **{f"{d.rstrip('/')}/*": "allow" for d in dirs}}
     return perm
@@ -225,7 +250,7 @@ def config(ctx) -> dict:
                             "timeout": 120000}},
         "plugin": [Path(write_plugin()).as_uri()],
         "instructions": [write_instructions(ctx.agent_id, instructions)],
-        "permission": permission_config(ctx.profile),
+        "permission": permission_config(ctx.profile, ctx.cwd),
         # brindle's panes are one agent each: an update prompt nobody answers helps no one.
         "autoupdate": False,
     }
