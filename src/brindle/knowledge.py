@@ -23,6 +23,9 @@ from brindle.pro.orgkey import GIT_TIMEOUT, normalize_remote
 # it live; a pause event marks that session's intent paused.
 INTENT = "intent"
 PAUSE = "pause"
+# A resume event makes a paused intent live again; an end event drops it.
+RESUME = "resume"
+END = "end"
 
 
 def repo_key(repo_root: str | Path) -> str:
@@ -75,6 +78,22 @@ def _apply(c, event) -> None:
         c.execute("UPDATE intents SET status = 'paused', updated_at = ?"
                   " WHERE session_root = ? AND repo_key = ?",
                   (event["ts"], event["session"], event["repo_key"]))
+    elif event["kind"] == RESUME:
+        c.execute("UPDATE intents SET status = 'live', updated_at = ?"
+                  " WHERE session_root = ? AND repo_key = ?",
+                  (event["ts"], event["session"], event["repo_key"]))
+    elif event["kind"] == END:
+        c.execute("DELETE FROM intents WHERE session_root = ? AND repo_key = ?",
+                  (event["session"], event["repo_key"]))
+
+
+def note(db: DB, root_id: str, kind: str, payload: dict | None = None) -> None:
+    """Record an event for session root ``root_id`` in its workspace's repo.
+    Does nothing for a session whose root or workspace is gone."""
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if ws is not None:
+        append(db, repo_key(ws.repo_root), kind, payload or {}, session=root_id)
 
 
 def intents(db: DB, repo_key: str) -> list[dict]:

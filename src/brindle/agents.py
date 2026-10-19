@@ -21,7 +21,7 @@ import time
 import uuid
 from types import SimpleNamespace
 
-from brindle import cloud_credential, company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
+from brindle import cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
 from brindle.assembler import TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
@@ -1153,6 +1153,7 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
             tmux.kill_session(session)
     if stop_local_models:
         _stop_local_models(db)
+    knowledge.note(db, root_id, knowledge.PAUSE)
     return paused
 
 
@@ -1258,6 +1259,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         _launch(db, a, ws, prompt=prompt, resume=ref,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
+    if any(a.id == root_id for a in resumed):
+        knowledge.note(db, root_id, knowledge.RESUME)
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:
