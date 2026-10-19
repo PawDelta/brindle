@@ -40,6 +40,13 @@
                 margin: 4px 0 0; padding: 6px; background: var(--bg); border-radius: 4px; }
   .panel-slot:empty::before { content: "Coming soon."; color: var(--dim); }
   #error { color: var(--bad); }
+  #chat-agent { width: 100%; margin-bottom: 8px; }
+  #chat-log { max-height: 320px; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+  .msg { white-space: pre-wrap; word-break: break-word; padding: 6px 8px; border-radius: 6px;
+         background: var(--bg); max-width: 92%; }
+  .msg.user { align-self: flex-end; border: 1px solid var(--line); }
+  #chat-form { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; flex-wrap: wrap; }
+  #chat-text { flex: 1 1 200px; font: inherit; }
 </style>
 </head>
 <body>
@@ -61,7 +68,15 @@
   <!-- Chat panel: filled by web/chat.py's routes and its own script. -->
   <section id="chat-panel">
     <h2>Chat</h2>
-    <div id="chat" class="panel-slot" data-panel="chat"></div>
+    <div id="chat" data-panel="chat">
+      <select id="chat-agent" aria-label="Agent to chat with"></select>
+      <div id="chat-log" aria-live="polite"></div>
+      <form id="chat-form">
+        <textarea id="chat-text" rows="2" placeholder="Message this agent (Enter sends, Shift+Enter for a new line)"></textarea>
+        <button type="submit">Send</button>
+        <span id="chat-note" class="dim"></span>
+      </form>
+    </div>
   </section>
   <!-- Diff panel: filled by web/diff.py's routes and its own script. -->
   <section id="diff-panel">
