@@ -14,9 +14,9 @@ without writing anything into the worktree:
   file OpenCode adds to its system prompt.
 - ``permission``: the profile's permission_mode and allowed_tools, in
   OpenCode's terms (see permission_config).
-- With ``permission_policy`` on, the plugin's ``tool.execute.before`` hook
-  asks ``brindle _hook opencode-pre-tool`` and throws on a deny (the launch
-  sets ``BRINDLE_OPENCODE_POLICY=1``).
+- The plugin's ``tool.execute.before`` hook validates scoped read-only git
+  calls. With ``permission_policy`` on it also checks all other tools and
+  throws on a deny (the launch sets ``BRINDLE_OPENCODE_POLICY=1``).
 
 OpenCode's events, mapped onto brindle's hooks (agents.handle_hook):
 - ``chat.message`` (a prompt is sent): ``prompt-submit``.
@@ -52,10 +52,12 @@ import { spawn } from "node:child_process"
 
 const BRINDLE = __BRINDLE__
 
-export const Brindle = async () => {
+export const Brindle = async ({ client }) => {
   const agent = process.env.BRINDLE_AGENT_ID
   if (!agent) return {}   // OpenCode running outside brindle
   const children = new Set()
+  const approvals = new Map()
+  const key = (session, call) => JSON.stringify([session, call])
   let error = null
   const send = (event, payload) => new Promise((resolve) => {
     try {
@@ -70,15 +72,25 @@ export const Brindle = async () => {
   })
   const mine = (id) => typeof id === "string" && !children.has(id)
   const policy = process.env.BRINDLE_OPENCODE_POLICY === "1"
+  const dontAsk = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || "{}").permission?.bash?.["*"] === "deny"
   return {
-    // brindle's permission_policy: asked before every tool call; only a deny
-    // stops it (anything else, or a failure, is left to OpenCode's own rules).
+    // Bash also checks scoped read-only git commands when the policy is off.
+    // An approval is tied to this exact call, never installed as a wildcard.
     "tool.execute.before": async (input, output) => {
-      if (!policy) return   // subagent sessions are policed too: they run in this worktree
+      const id = key(input.sessionID, input.callID)
+      approvals.delete(id)
+      if (!policy && input.tool !== "bash") return
       const out = await send("opencode-pre-tool", { session_id: input.sessionID, tool: input.tool, args: output.args })
       let answer = null
       try { answer = JSON.parse(out) } catch {}
       if (answer && answer.decision === "deny") throw new Error(answer.reason || "denied by brindle's permission policy")
+      if (answer && answer.decision === "allow") approvals.set(id, output.args.command)
+      else if (dontAsk && /git (?:-C |branch --list )/.test(output.args.command || "")) {
+        throw new Error("read-only git request could not be approved")
+      }
+    },
+    "tool.execute.after": async (input) => {
+      approvals.delete(key(input.sessionID, input.callID))
     },
     "chat.message": async (input, output) => {
       if (!mine(input.sessionID)) return
@@ -88,6 +100,23 @@ export const Brindle = async () => {
     },
     event: async ({ event }) => {
       const p = event.properties || {}
+      if (event.type === "permission.asked" && p.permission === "bash" && p.tool) {
+        const id = key(p.sessionID, p.tool.callID)
+        if (approvals.has(id) && approvals.get(id) === p.metadata?.command) {
+          approvals.delete(id)
+          try {
+            const response = await client.postSessionIdPermissionsPermissionId({
+              path: { id: p.sessionID, permissionID: p.id }, body: { response: "once" }
+            })
+            if (!response.error) return
+          } catch {}   // failure leaves OpenCode's normal prompt in place
+        }
+      }
+      if (event.type === "session.idle" || event.type === "session.error") {
+        for (const id of approvals.keys()) {
+          if (JSON.parse(id)[0] === p.sessionID) approvals.delete(id)
+        }
+      }
       if (event.type === "session.created" && p.info && p.info.parentID) {
         children.add(p.info.id)
         return
@@ -168,51 +197,93 @@ def model_arg(model: str | None) -> str | None:
 _BASH_RULE = re.compile(r"^Bash\((.+)\)$")
 
 
-def _bash_patterns(allowed_tools: list[str] | None, directories: list[str] | None = None) -> list[str]:
+def _bash_patterns(allowed_tools: list[str] | None) -> list[str]:
     """Claude Code's ``Bash(git diff:*)`` rules as OpenCode bash patterns
     (``git diff`` and ``git diff *``).
 
     OpenCode checks each simple command in a compound shell command, so
     separators need no extra patterns. It retains ``git -C <directory>``.
-    Spell those directories out: ``git -C * diff *`` could also approve
+    Validate those calls in the plugin: ``git -C * diff *`` could also approve
     ``git -C . checkout diff file`` because its wildcard spans arguments.
     """
-    paths = []
-    for directory in [".", *(directories or [])]:
-        # OpenCode has no escaping for glob metacharacters. Leave unusual
-        # paths asking rather than turning a literal directory into a glob.
-        if not directory or any(c in directory for c in "*?\\\n\r"):
-            continue
-        directory = directory.rstrip("/") or "/"
-        paths.append(shlex.quote(directory))
-        if "'" not in directory:
-            paths.append(f"'{directory}'")
-        if "$" not in directory and "`" not in directory:
-            paths.append(json.dumps(directory, ensure_ascii=False))
     out: list[str] = []
     for rule in allowed_tools or []:
         m = _BASH_RULE.match(rule.strip())
         if not m:
             continue
         command = m.group(1).strip()
-        commands = [command]
-        if command.startswith("git "):
-            commands += [f"git -C {directory} {command[4:]}" for directory in paths]
-        for command in commands:
-            if command.endswith(":*"):
-                prefix = command[:-2].strip()
-                out += [prefix, f"{prefix} *"]
-            else:
-                out.append(command)
+        if command.endswith(":*"):
+            prefix = command[:-2].strip()
+            out += [prefix, f"{prefix} *"]
+        else:
+            out.append(command)
     return list(dict.fromkeys(out))
 
 
-def permission_config(profile, cwd: str | None = None) -> dict:
+def readonly_git(profile, command: str, cwd: str, repo_root: str, *, workdir: str | None = None) -> bool:
+    """A scoped read-only git request the plugin can approve for one call.
+
+    Resolve paths at dispatch time so worktrees created after launch work too.
+    Reuse the native shell parser to reject substitutions, writes through
+    redirections, and unsupported syntax rather than guessing at shell text.
+    """
+    from brindle.native.permissions import Permissions, _simple_commands, uncovered_part
+    from brindle.permissions import GIT_UNSAFE_OPTIONS
+
+    if "`" in command or "$(" in command:
+        return False
+    parts = _simple_commands(command)
+    if not parts:
+        return False
+    # The native parser preserves argument boundaries but drops quotes. Refuse
+    # unquoted globs: shell expansion could introduce options we never checked.
+    try:
+        raw = shlex.shlex(command, posix=False, punctuation_chars=True)
+        expands = any(any(c in token for c in "*?[") and token[0] not in "\"'" for token in raw)
+    except ValueError:
+        return False
+    if expands:
+        return False
+    specs = [spec for name, spec in Permissions(profile.permission_mode, profile.allowed_tools).rules
+             if name == "Bash" and spec]
+    roots = [Path(cwd).resolve(), *((Path(cwd) / d).resolve() for d in profile.add_dirs or [])]
+    roots.append(Path(repo_root).resolve() / ".brindle" / "worktrees")
+    here = (Path(cwd) / (workdir or ".")).resolve()
+    if not any(here.is_relative_to(root) for root in roots):
+        return False
+    dynamic = False
+    for words, _ in parts:
+        if words[:2] == ["git", "-C"]:
+            if len(words) < 4 or not words[2] or any(c in words[2] for c in "*?["):
+                return False
+            target = (here / words[2]).resolve()
+            if not target.is_dir() or not any(target.is_relative_to(root) for root in roots):
+                return False
+            words = ["git", *words[3:]]
+            dynamic = True
+        if words[0] == "git":
+            if len(words) < 2 or any(arg.startswith((*GIT_UNSAFE_OPTIONS, "--textconv")) for arg in words[2:]):
+                return False
+            if words[1] == "branch":
+                if words[2:3] == ["--list"] and all(not arg.startswith("-") for arg in words[3:]):
+                    words = words[:3]  # patterns cannot change the listing action
+                    dynamic = True
+                elif words[2:] not in ([], ["-a"], ["-v"], ["-vv"]):
+                    return False
+            elif words[1] not in ("status", "diff", "log", "show", "ls-files") and words[1:3] != ["stash", "list"]:
+                return False
+        elif words[0] not in ("ls", "pwd", "cat", "tail", "head", "grep", "wc"):
+            return False
+        if uncovered_part(specs, shlex.join(words)) is not None:
+            return False
+    return dynamic
+
+
+def permission_config(profile) -> dict:
     """The profile's permission_mode and allowed_tools as OpenCode's
     ``permission`` block. OpenCode takes the last rule that matches, so the
     catch-all comes first. Reads, searches and brindle's MCP tools are left at
-    OpenCode's default (allow). ``git -C`` variants cover the launch directory,
-    ``.`` and explicit profile directories; unknown paths still ask (or deny).
+    OpenCode's default (allow). The plugin validates scoped ``git -C`` reads.
 
     - ``bypassPermissions``: everything allowed.
     - ``dontAsk`` (nobody watches, e.g. a reviewer): only allowed_tools'
@@ -226,8 +297,10 @@ def permission_config(profile, cwd: str | None = None) -> dict:
         return {"edit": "allow", "bash": "allow", "webfetch": "allow", "external_directory": "allow"}
     fallback = "deny" if mode == "dontAsk" else "ask"
     dirs = [*(profile.add_dirs or []), *(profile.read_dirs or [])]
-    bash_dirs = [*dirs, *([cwd] if cwd else [])]
-    bash = {"*": fallback, **{p: "allow" for p in _bash_patterns(profile.allowed_tools, bash_dirs)}}
+    # Ask is only transport for the plugin's per-call reply, never an allow.
+    # For dontAsk, the pre-tool hook refuses unapproved dynamic requests.
+    bash = {"*": fallback, "git -C *": "ask", "git branch --list *": "ask",
+            **{p: "allow" for p in _bash_patterns(profile.allowed_tools)}}
     edit = "allow" if mode in ("acceptEdits", "auto", "plan") else fallback
     perm: dict = {"edit": edit, "bash": bash}
     if mode == "dontAsk":
@@ -250,7 +323,7 @@ def config(ctx) -> dict:
                             "timeout": 120000}},
         "plugin": [Path(write_plugin()).as_uri()],
         "instructions": [write_instructions(ctx.agent_id, instructions)],
-        "permission": permission_config(ctx.profile, ctx.cwd),
+        "permission": permission_config(ctx.profile),
         # brindle's panes are one agent each: an update prompt nobody answers helps no one.
         "autoupdate": False,
     }
@@ -289,17 +362,43 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
 
 
 def pre_tool(db, agent_id: str, payload: dict) -> str:
-    """brindle's permission policy for one tool call: JSON with a deny, else nothing."""
+    """Policy denials win; scoped read-only git commands get one-call approval."""
     from brindle import agents
 
     agent = db.get_agent(agent_id)
     answer = agents.permission_request_decision(db, agent, payload, provider="opencode") if agent else None
+    if answer or not agent or payload.get("tool") != "bash":
+        return json.dumps(answer) if answer else ""
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is None:
+        return ""
+    from brindle.profiles import load_profile
+
+    profile = load_profile(agent.profile, ws.repo_root)
+    args = payload.get("args") or {}
+    command = str(args.get("command") or "")
+    if readonly_git(profile, command, ws.path, ws.repo_root, workdir=args.get("workdir")):
+        # Apply policy to normalized subcommands too: spelling a denied
+        # `git status` as `git -C <worktree> status` must not bypass it.
+        from brindle.native.permissions import _simple_commands
+
+        for words, _ in _simple_commands(command) or []:
+            if words[:2] == ["git", "-C"]:
+                words = ["git", *words[3:]]
+            normalized = {**payload, "args": {**args, "command": shlex.join(words)}}
+            denied = agents.permission_request_decision(db, agent, normalized, provider="opencode")
+            if denied:
+                return json.dumps(denied)
+        answer = {"decision": "allow"}
+    elif profile.permission_mode == "dontAsk" and (
+            "git -C " in command or "git branch --list " in command):
+        answer = {"decision": "deny", "reason": "command is not an allowed read-only git request"}
     return json.dumps(answer) if answer else ""
 
 
 def hook_main(db, agent_id: str | None, event: str, stdin_text: str) -> str:
     """``brindle _hook opencode-<event>``: what it prints is only read for
-    ``opencode-pre-tool`` (a deny); the plugin ignores the rest."""
+    ``opencode-pre-tool`` (a per-call decision); the plugin ignores the rest."""
     if not agent_id or event not in EVENTS:
         return ""
     try:

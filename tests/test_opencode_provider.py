@@ -58,14 +58,49 @@ def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(bri
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ["git -C /worktree checkout status file"], "ask",
                  marks=pytest.mark.variant("bypass attempt against a wildcard in the -C path")),
+    (None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+     ["git -C /otherworktree status --short", "ls /worktree"], "allow"),
+    (None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+     ["git branch --list 'fix/*'", "git branch -v", "git branch -vv", "git branch"], "allow"),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C /otherworktree branch --list --no-list -D victim"], "ask",
+                 marks=pytest.mark.variant("branch listing options must not be cancelled into a write")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C /otherworktree diff --output=/worktree/out"], "ask",
+                 marks=pytest.mark.variant("a read-only subcommand can still write through its options")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C /otherworktree status > /worktree/out"], "ask",
+                 marks=pytest.mark.variant("a shell redirection must not turn an approved read into a write")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git -C /escaped status"], "ask",
+                 marks=pytest.mark.variant("a symlink under worktrees must not approve a path outside the scope")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git branch --list `pwd`"], "ask",
+                 marks=pytest.mark.variant("branch patterns must not hide command substitution")),
+    pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
+                 ["git branch --list fix/*"], "ask",
+                 marks=pytest.mark.variant("unquoted patterns could expand into option-like filenames")),
+    ("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
+     ["git -C /otherworktree status"], "allow"),
     pytest.param("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
                  ["git -C /worktree status", "git push origin main"], "deny",
                  marks=pytest.mark.variant("a compound command must not hide a write after a permitted read")),
 ])
-def test_permission_mode_and_model_map_onto_opencode(brindle_home, mode, model, perm, flags, patterns, decision):
-    profile = dataclasses.replace(load_profile("developer"), permission_mode=mode, model=model,
-                                  add_dirs=["/shared/cache/"], read_dirs=["/read only", "/unsafe*"])
-    argv = OpenCode().command(LaunchContext("o1", profile, None, cwd="/worktree"))
+def test_permission_mode_and_model_map_onto_opencode(brindle_home, tmp_path, mode, model, perm, flags, patterns, decision):
+    cwd = tmp_path / "repo" / "supervisor"
+    target = tmp_path / "repo" / ".brindle" / "worktrees" / "created-later"
+    for directory in (cwd, target, tmp_path / "cache", tmp_path / "read only", tmp_path / "outside"):
+        directory.mkdir(parents=True, exist_ok=True)
+    escaped = target.parent / "escaped"
+    escaped.symlink_to(tmp_path / "outside", target_is_directory=True)
+    replacements = {"/worktree": str(cwd), "/otherworktree": str(target),
+                    "/shared/cache": str(tmp_path / "cache"), "/read only": str(tmp_path / "read only"),
+                    "/escaped": str(escaped)}
+    for original, replacement in replacements.items():
+        patterns = [command.replace(original, replacement) for command in patterns]
+    profile = dataclasses.replace(load_profile("supervisor"), permission_mode=mode, model=model,
+                                  add_dirs=[str(tmp_path / "cache"), str(tmp_path / "read only"), "/unsafe*"])
+    argv = OpenCode().command(LaunchContext("o1", profile, None, cwd=str(cwd)))
     got = _config(argv)["permission"]
     assert argv[3:] == flags
     assert got["edit"] == perm["edit"]
@@ -73,12 +108,12 @@ def test_permission_mode_and_model_map_onto_opencode(brindle_home, mode, model, 
         assert got["bash"] == got["external_directory"] == "allow"
     else:
         assert got["bash"]["*"] == perm["*"] and got["bash"]["uv run *"] == "allow"
-        assert got["external_directory"] == {"*": perm["*"], "/shared/cache/*": "allow",
-                                              "/read only/*": "allow", "/unsafe*/*": "allow"}
         # OpenCode 1.19.3 emits one pattern per simple command in ; / && lists,
         # retaining git's -C option. The last matching rule wins for each one.
         decisions = [next(action for pattern, action in reversed(got["bash"].items())
                           if fnmatch.fnmatchcase(command, pattern)) for command in patterns]
+        if opencode.readonly_git(profile, "; ".join(patterns), str(cwd), str(tmp_path / "repo")):
+            decisions = ["allow"]
         assert ("deny" if "deny" in decisions else "ask" if "ask" in decisions else "allow") == decision
 
 
@@ -115,7 +150,7 @@ def test_plugin_events_drive_status_and_the_end_of_a_turn(db, ws, monkeypatch):
 def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brindle_home, monkeypatch):
     from brindle.config import set_local
 
-    add_agent(db, ws)
+    add_agent(db, ws, profile="supervisor")
     pre = lambda tool, args: opencode.hook_main(  # noqa: E731
         db, "o1", "opencode-pre-tool", json.dumps({"session_id": "ses_a", "tool": tool, "args": args}))
     denied = {"tool": "bash", "args": {"command": "git push origin main"}}
@@ -125,6 +160,15 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     assert answer["decision"] == "deny" and answer["reason"].startswith("brindle:")
     assert json.loads(pre("read", {"filePath": "~/.ssh/id_rsa"}))["decision"] == "deny"
     assert pre("bash", {"command": "git status"}) == ""   # allow and ask leave the call to OpenCode
+    target = os.path.join(ws.repo_root, ".brindle", "worktrees", "created-after-launch")
+    os.makedirs(target)
+    assert json.loads(pre("bash", {"command": f"git -C {target} status; ls"}))["decision"] == "allow"
+    assert pre("bash", {"command": f"git -C {target} branch -D victim"}) == ""
+    db.update_agent("o1", profile="reviewer-opencode")
+    assert json.loads(pre("bash", {"command": f"git -C {target} status"}))["decision"] == "allow"
+    assert json.loads(pre("bash", {"command": f"ls; git -C {target} checkout status file"}))["decision"] == "deny"
+    permissions.add_rule("bash", "git status", "deny")
+    assert json.loads(pre("bash", {"command": f"git -C {target} status"}))["decision"] == "deny"
     # A denied part of a compound command, and a denied file in an apply_patch (GPT-5 models).
     permissions.add_rule("bash", "make secret", "deny")
     permissions.add_rule("edit", "*/locked.txt", "deny", "glob")
