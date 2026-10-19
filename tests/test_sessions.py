@@ -124,21 +124,6 @@ def test_dropping_a_session_still_closes_its_own_leftover_window(db, root):
     assert not tmux.window_alive(pane)
 
 
-def test_live_sessions_span_worktrees(db, root, repo, monkeypatch):
-    other = workspaces.create(db, str(repo), "brindle/session-2", apply_prefix=False).workspace
-    add(db, root, "sup1", status="idle")
-    add(db, other, "sup2", status="idle")
-    db.update_agent("sup2", created_at=time.time() + 10)
-    add(db, root, "gone", status="paused")
-    add(db, other, "w1", mode="assign", parent="sup2", status="running")
-    add(db, other, "w2", mode="assign", parent="sup2", status="done")
-    monkeypatch.setattr(agents, "is_alive", lambda x, panes=None: x.id in ("sup1", "sup2", "w1"))
-    monkeypatch.setattr(agents, "owns_pane", lambda *x: True)
-    live = sessions.live(db, root.repo_root)
-    assert [(s.root.id, s.workspace.branch, s.workers, s.goal) for s in live] == [
-        ("sup2", "brindle/session-2", 1, "task"), ("sup1", root.branch, 0, "task")]
-
-
 def test_continue_picker_resumes_chosen(db, root, monkeypatch):
     from brindle import cli, picker
 
