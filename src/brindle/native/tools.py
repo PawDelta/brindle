@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from brindle.native.client import ToolSpec
+from brindle.native.lsp import LSP
 
 MAX_OUTPUT = 30_000       # characters of any tool result kept for the model
 MAX_MATCHES = 200
@@ -81,7 +82,7 @@ def clip(text: str, limit: int) -> str:
 # -- the core tools -----------------------------------------------------------
 
 def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | None = None,
-               read_scope: list[str] | None = None) -> list[Tool]:
+               read_scope: list[str] | None = None, lsp: LSP | None = None) -> list[Tool]:
     """The file and shell tools, confined to ``cwd``. ``write_scope`` and
     ``read_scope`` (a profile's guardrails, brindle Pro; see
     brindle.guardrails) narrow the file tools further: Write and Edit refuse
@@ -122,6 +123,16 @@ def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | N
             raise PermissionError(f"{raw} is outside your write scope ({', '.join(write_scope)})")
         return path
 
+    def language_result(path: Path, operation: str = "diagnostics") -> str:
+        if lsp is None or not readable(path):
+            return ""
+        # A successful write stays successful even if a server fails.
+        try:
+            result = lsp.run(operation, {"path": str(path)}, implicit=True)
+            return f"\n{result}" if result else ""
+        except Exception as e:
+            return f"\nLSP unavailable: {type(e).__name__}."
+
     def read(args: dict) -> ToolResult:
         path = resolve(str(args.get("path") or ""))
         if not readable(path):
@@ -141,7 +152,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | N
         body = "\n".join(f"{i:6d}\t{line}" for i, line in enumerate(chunk, offset))
         if offset - 1 + limit < len(lines):
             body += f"\n[{len(lines) - (offset - 1 + limit)} more lines; read with offset={offset + limit}]"
-        return ToolResult(body or "(empty file)")
+        return ToolResult((body or "(empty file)") + language_result(path, "open"))
 
     def write(args: dict) -> ToolResult:
         path = writable(str(args.get("path") or ""))
@@ -155,7 +166,8 @@ def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | N
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         seen.add(path)
-        return ToolResult(f"{'updated' if existed else 'created'} {args.get('path')} ({len(content.splitlines())} lines)")
+        return ToolResult(f"{'updated' if existed else 'created'} {args.get('path')} ({len(content.splitlines())} lines)"
+                          + language_result(path))
 
     def edit(args: dict) -> ToolResult:
         path = writable(str(args.get("path") or ""))
@@ -180,7 +192,8 @@ def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | N
         if old == new:
             return ToolResult("old_string and new_string are the same", True)
         path.write_text(text.replace(old, new), encoding="utf-8")
-        return ToolResult(f"edited {args.get('path')}: {count} replacement{'s' if count > 1 else ''}")
+        return ToolResult(f"edited {args.get('path')}: {count} replacement{'s' if count > 1 else ''}"
+                          + language_result(path))
 
     def glob_(args: dict) -> ToolResult:
         pattern = str(args.get("pattern") or "**/*")
@@ -272,7 +285,25 @@ def core_tools(cwd: str, bash_timeout: float = 300.0, write_scope: list[str] | N
                  "command": {"type": "string"},
                  "timeout": {"type": "number", "description": "Seconds (default and cap: the worker's limit)"}},
               "required": ["command"]}, bash),
-    ]
+    ] + (lsp_tools(lsp) if lsp else [])
+
+
+def lsp_tools(lsp: LSP) -> list[Tool]:
+    tools = []
+    for name, operation in (("Diagnostics", "diagnostics"), ("Definition", "definition"),
+                            ("References", "references")):
+        properties = {"path": {"type": "string"}}
+        required = ["path"]
+        if operation != "diagnostics":
+            properties.update({
+                "line": {"type": "integer", "description": "1-based line", "minimum": 1},
+                "column": {"type": "integer", "description": "1-based character column", "minimum": 1},
+            })
+            required += ["line", "column"]
+        tools.append(Tool(name, f"Language-server {operation} for a file in the working directory.",
+                          {"type": "object", "properties": properties, "required": required},
+                          lambda args, op=operation: ToolResult(lsp.run(op, args))))
+    return tools
 
 
 def _near_miss(text: str, old: str) -> str | None:

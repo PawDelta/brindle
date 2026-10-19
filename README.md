@@ -1871,6 +1871,17 @@ No hooks, no screen scraping, and messages sent to the worker arrive between
 its model calls. It works with any OpenAI-compatible chat-completions endpoint
 or Anthropic Messages endpoint.
 
+The native worker automatically starts language servers found on `PATH` when it
+first reads or changes a supported file (Python: `pyright-langserver` or `pylsp`;
+JS/TS: `typescript-language-server`; Go: `gopls`; Rust: `rust-analyzer`; C/C++:
+`clangd`; Ruby: `ruby-lsp`; Lua: `lua-language-server`). Servers use the worktree
+as their root and stop with the worker. `Diagnostics`, `Definition`, and
+`References` provide code information; diagnostics also follow successful Edit
+and Write calls. Navigation takes 1-based lines and character columns. Explicit
+LSP tools report missing servers; ordinary file tools stay silent when no server
+can run. Profiles with a narrowed read scope skip language
+servers because workspace indexing cannot enforce that boundary.
+
 ```markdown
 ---
 name: developer-local
