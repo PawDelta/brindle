@@ -162,7 +162,7 @@ and you're back at your prompt. The whole session is paused: its
 workers stop too, and everything is kept (branches, worktrees,
 queued messages, and each agent's Claude conversation). `brindle continue` (or
 `brindle -c`) picks up the most recent paused session and lists the others by id
-(`brindle continue <id>`). Plain `brindle` always starts fresh. If a session is still running in that folder, it asks first: open that one, start the new one in its own worktree (branch `brindle/session-N`, cut from what you have checked out, so they run at once without sharing files), or pause it and start fresh. There's no limit: each further `brindle` there can start another session in its own worktree (`brindle/session-2`, `-3`, ...). Without a terminal to ask in, it pauses the old one. `brindle sessions` lists
+(`brindle continue <id>`). Plain `brindle` always starts fresh. If a session is still running in that folder, it asks first: open that one, start the new one in its own worktree (branch `brindle/session-N`, cut from what you have checked out, so they run at once without sharing files), or pause it and start fresh. There's no limit: each further `brindle` there can start another session in its own worktree (`brindle/session-2`, `-3`, ...). Without a terminal to ask in, it pauses the old one. When sessions are running in the repo, in any of its worktrees, that question is a list: one row each with the session's id, goal, branch, age and running workers. Pick one to open it, `n` for a new session in its own worktree, or `p` to pause the picked one and start fresh. With two or more paused sessions, `brindle -c` lists them newest first (Enter resumes the newest). `brindle sessions` lists
 what's paused. brindle keeps the newest 3 paused sessions per repo for up to 7 days;
 cleanup never merges anything or deletes an unmerged branch, and worktrees with uncommitted
 changes are kept.
@@ -382,6 +382,9 @@ your own status line prints, so what you see doesn't change.
 | `brindle profile new/lint/show` | write a profile file, check every profile (extends chains, rule packs, patterns), or print one as brindle resolves it |
 | `brindle rules suggest/accept/reject` | (brindle Pro) rules suggested from review findings that keep recurring; accept one into `.brindle/rules/learned.md`, or reject it for good |
 | `brindle agent turns AGENT` / `brindle agent rewind AGENT --to N [--profile P] [--note "..."]` | a worker's worktree is snapshotted after every turn that changed files; rewind puts it back as it was after turn N and starts a fresh session there, briefed on the task, turns 1..N and your note (any provider, Codex included). Supervisors have the `agent_turns` and `rewind_agent` tools |
+| `brindle kb add folder PATH` / `kb list` / `kb sync [SOURCE]` / `kb remove SOURCE` | the documents agents can search for this repo (see "Shared knowledge across sessions") |
+| `brindle decisions export [FILE]` | this repo's accepted decisions as Markdown (stdout by default) |
+| `brindle coordinator log [-n N]` / `undo ID` / `stop` | Pro: what the coordinator did, put one action back, or switch it off (see "The coordinator") |
 | `brindle setup [WS]` | re-run the repo's setup commands in a workspace |
 | `brindle mcp` | the MCP server agents talk to (launched for them; you don't run it) |
 
@@ -410,6 +413,9 @@ knowing them helps when you tell the supervisor how to work.
 | `complete_subagent` | supervisor | record the result of a `subagent`-profile task |
 | `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
 | `record_audit_decision` | supervisor | record acceptance of an audit finding with rationale so subsequent audits respect it |
+| `who_is_working` | supervisor | other sessions in this repo: their goals and running tasks, optionally only those matching `paths` or a `query` |
+| `record_decision` / `decisions` | supervisor (`decisions` also workers) | record a durable decision about the system / list the accepted ones that apply |
+| `kb_search` | supervisor, worker | search the repo's knowledge base and accepted decisions |
 | `need_user` | supervisor | ask you a question (a decision, a denied action, a stalled external job such as a CI run no runner picks up); only the steps that depend on it wait, the rest keeps going; `answered=true` once you've replied |
 | `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
 | `handover` | supervisor | hand the session to a new supervisor on another branch or worktree, with a note |
@@ -479,6 +485,84 @@ profile you name yourself is never second-guessed. Running workers are
 reported to the supervisor at 80% of `task_usd` and again at 100%; set
 `"stop": true` to close a worker at 100% instead of only warning. Without the
 Pro `cost` feature budgets do nothing.
+
+## Shared knowledge across sessions
+
+Sessions on one repo share a small store in `~/.brindle/brindle.db`, keyed by
+the repo's remote (two clones of one repo share it). It holds what each session
+plans, the decisions you've recorded and the documents you've added. Nothing
+leaves your machine.
+
+### Other sessions
+
+Each session announces what it's working on when its supervisor sets a goal.
+When a new task's `files` overlap another session's running task, brindle
+never touches that session's work: the task is queued (the default; see
+`overlap` in the repo config), both supervisors get a notice naming the other
+session's goal, and the task starts, cut from the commit holding that session's
+merge, once it merges. Each supervisor also sees an "Other sessions in this
+repo" summary, and the `who_is_working` tool lists their goals and running
+tasks, optionally only those matching some paths. A paused session's goal
+stays visible, marked paused, until retention drops it.
+
+### Decisions
+
+A decision is a fact about the system ("config secrets live in the OS
+keychain"), not a working rule; those stay in learned rules. A supervisor
+records one with `record_decision` (topic, decision, rationale, optional path
+globs) and reads them with `decisions`. Recording one that overlaps an accepted
+decision on the same topic is refused and shows the existing one: it has to
+name it as superseded, so two sessions can't quietly contradict each other.
+Supervisors whose running tasks touch the paths are told. Accepted decisions
+whose paths match a task's `files` go into that worker's brief, and a resumed
+worker gets the brief it started with.
+
+```sh
+brindle decisions export                 # accepted decisions as Markdown on stdout
+brindle decisions export DECISIONS.md    # or into a file you can commit
+```
+
+### Knowledge base
+
+Add the documents a person reads first (ADRs, runbooks, design notes) and
+agents can search them:
+
+```sh
+brindle kb add folder docs/              # Markdown and text files, indexed now
+brindle kb list                          # sources, documents, quarantined chunks
+brindle kb sync                          # pick up changed files, drop deleted ones
+brindle kb remove docs/                  # the source and everything indexed from it
+```
+
+Supervisors and workers search with `kb_search`, which returns the matching
+passages with their source and date, beside the accepted decisions. When
+brindle starts a worker it also searches with the task and its `files` and
+puts the best few passages (about 1,500 tokens) in the brief, under a header
+that marks them as untrusted reference data, never instructions, and labelled
+stale when old. Passages that name functions or classes in the repo's code
+graph come first for tasks touching those files.
+
+Text is checked as it's indexed: strings that look like secrets are redacted,
+and passages that address an AI, hide text or hold instructions in HTML
+comments are quarantined and never returned. Review before merge is unchanged
+for work that used them. The index lives under `~/.brindle`, never in the repo.
+
+### The coordinator (Pro)
+
+Set `"coordinator": true` in `.brindle/config.json` and brindle runs one cheap
+agent per repo above the supervisors. It wakes on events only (a new goal, a
+clash notice, a decision, a task queued over 20 minutes), within your budget.
+It may message supervisors, hold, release or reorder queued tasks from any
+session, and propose decisions; you still accept those. It never cancels or
+pauses running work, merges, accepts a decision or edits code: for running work
+it can only ask the owning supervisor. Every action is logged with its reason
+and shown to the supervisors it affects.
+
+```sh
+brindle coordinator log                  # recent actions and reports, newest first
+brindle coordinator undo 3f9c2a1b        # put one action back (the id is in the notice)
+brindle coordinator stop                 # close it and turn it off for this checkout
+```
 
 ## Provider quota
 
