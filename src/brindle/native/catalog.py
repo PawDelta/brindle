@@ -4,13 +4,15 @@ that name their model as ``model: <provider>/<model>``.
 The catalog is cached in ``~/.brindle/models-catalog.json`` and refetched
 once it is older than ``TTL``, in the background: loading a profile never
 touches the network. Air-gap mode never fetches. The cache is used however
-old, and without one the error says so. :func:`resolve` fills the endpoint fields a profile didn't
+old; with none, the first fetch is synchronous and short. :func:`resolve` fills the endpoint fields a profile didn't
 set itself from the entry.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import time
 import urllib.error
@@ -23,6 +25,7 @@ from brindle.config import brindle_home
 
 URL = "https://models.dev/api.json"
 TTL = 24 * 3600
+COLD_TIMEOUT = 5.0      # seconds to wait for the first fetch, when there is no cache
 CACHE_NAME = "models-catalog.json"
 # Providers the catalog lists without an ``api`` URL: their own SDK knows it.
 DEFAULT_BASE_URLS = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com/v1"}
@@ -73,37 +76,54 @@ def _fresh() -> bool:
 
 
 def load() -> dict:
-    """The cached catalog, however old. Never touches the network (profiles
-    load often); :func:`refresh_async` and :func:`refresh` keep the cache up."""
+    """The cached catalog, however old; a stale one is only refreshed in the
+    background (:func:`refresh_async`). With no cache at all, fetch it now
+    with a short timeout, and raise CatalogError when that fails."""
     cached = _read_cache()
     if cached is None:
         if airgap.enabled():
             raise CatalogError(f"air-gap mode ({airgap.source()}): the Models.dev catalog isn't fetched and "
                                f"there is no cached copy; copy models.dev/api.json to {cache_path()}")
-        raise CatalogError(f"the Models.dev catalog isn't cached yet ({cache_path()}); it is being "
-                           "fetched in the background, so try again in a moment")
+        if not refresh(timeout=COLD_TIMEOUT):
+            raise CatalogError(f"the Models.dev catalog isn't cached and {URL} is unavailable "
+                               "(offline?); try again when online")
+        cached = _read_cache()
+        if cached is None:
+            raise CatalogError(f"the Models.dev catalog couldn't be read back from {cache_path()}")
     return cached
 
 
-def refresh() -> bool:
+def refresh(timeout: float = 15.0) -> bool:
     """Download the catalog into the cache unless it is fresh or air-gap mode
     is on. Whether the cache was updated; a failure leaves the old cache."""
     if airgap.enabled() or _fresh():
         return False
+    tmp = None
     try:
-        data = _download()
+        data = _download(timeout)
         path = cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data), encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=CACHE_NAME + ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+        tmp = None
     except (OSError, ValueError):   # URLError and timeouts are OSErrors
         return False
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return True
 
 
 def refresh_async() -> None:
-    """:func:`refresh` on a background thread, when the cache is missing or
-    stale. At most one runs per process: a call while one is in flight does nothing."""
-    if airgap.enabled() or _fresh() or not _refreshing.acquire(blocking=False):
+    """:func:`refresh` on a background thread, when a stale cache exists (a
+    missing one is fetched by :func:`load`). At most one runs per process: a
+    call while one is in flight does nothing."""
+    if airgap.enabled() or _fresh() or not cache_path().exists() or not _refreshing.acquire(blocking=False):
         return
 
     def run() -> None:
@@ -119,20 +139,21 @@ def refresh_async() -> None:
         raise
 
 
-def resolve(spec: str, catalog: dict | None = None) -> Resolved:
+def resolve(spec: str, catalog: dict | None = None, base_url: str | None = None) -> Resolved:
     """The endpoint for ``spec`` (``<provider>/<model>``, split at the first
-    slash). Raises CatalogError when the catalog can't be had or doesn't list it."""
+    slash). Raises CatalogError when the catalog can't be had or doesn't list it.
+    With ``base_url`` the caller keeps its own URL, so the entry needs none."""
     provider_id, _, model_id = spec.partition("/")
     if not provider_id or not model_id:
         raise CatalogError(f"model {spec!r} isn't of the form <provider>/<model>")
     catalog = load() if catalog is None else catalog
     try:
-        return _resolve(spec, provider_id, model_id, catalog)
+        return _resolve(spec, provider_id, model_id, catalog, base_url)
     except (AttributeError, TypeError, KeyError, IndexError) as e:
         raise CatalogError(f"Models.dev entry for {spec!r} is malformed ({e!r})") from e
 
 
-def _resolve(spec: str, provider_id: str, model_id: str, catalog: dict) -> Resolved:
+def _resolve(spec: str, provider_id: str, model_id: str, catalog: dict, own_url: str | None) -> Resolved:
     provider = catalog.get(provider_id)
     if not isinstance(provider, dict):
         raise CatalogError(f"Models.dev lists no provider {provider_id!r} (model {spec!r})")
@@ -140,7 +161,7 @@ def _resolve(spec: str, provider_id: str, model_id: str, catalog: dict) -> Resol
     entry = models.get(model_id)
     if not isinstance(entry, dict):
         raise CatalogError(f"Models.dev lists no model {model_id!r} for provider {provider_id!r}")
-    base_url = provider.get("api") or DEFAULT_BASE_URLS.get(provider_id)
+    base_url = own_url or provider.get("api") or DEFAULT_BASE_URLS.get(provider_id)
     if not base_url:
         raise CatalogError(f"Models.dev gives no API URL for provider {provider_id!r}; set base_url")
     api = "anthropic" if "anthropic" in str(provider.get("npm") or "") else "openai"

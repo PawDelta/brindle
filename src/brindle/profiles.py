@@ -514,19 +514,21 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
 
 
 def _with_catalog_model(profile: Profile) -> Profile:
-    """A native profile with ``model: <provider>/<model>`` and no ``base_url``
-    names a Models.dev model: fill in its endpoint from the catalog (see
-    brindle.native.catalog). Fields the profile sets itself win. A profile
-    with a ``base_url`` is left alone: its slash is part of the model id
-    (OpenRouter's ``qwen/qwen3-coder``)."""
-    if profile.provider != "native" or profile.base_url or "/" not in (profile.model or ""):
+    """A native profile with ``model: <provider>/<model>`` names a Models.dev
+    model: fill in its endpoint from the catalog (see brindle.native.catalog).
+    Fields the profile sets itself win, an explicit ``base_url`` included. With
+    a ``base_url``, an id the catalog doesn't know is left alone: its slash is
+    part of the model id (OpenRouter's ``qwen/qwen3-coder``)."""
+    if profile.provider != "native" or "/" not in (profile.model or ""):
         return profile
     from brindle.native import catalog
 
-    catalog.refresh_async()      # background; resolving below reads the cache only
+    catalog.refresh_async()      # background, for a stale cache only
     try:
-        found = catalog.resolve(profile.model)
+        found = catalog.resolve(profile.model, base_url=profile.base_url)
     except catalog.CatalogError as e:
+        if profile.base_url:
+            return profile
         raise ProfileError(f"profile {profile.name!r}: {e}") from e
     resolved = replace(
         profile, model=found.model, base_url=found.base_url,

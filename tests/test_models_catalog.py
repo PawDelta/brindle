@@ -59,9 +59,12 @@ def test_fields_the_profile_sets_win(repo):
     assert (p.api, p.api_key_env, p.context_tokens) == ("anthropic", "MY_KEY", 32000)
 
 
-def test_an_explicit_base_url_keeps_the_slash_in_the_model(repo):
-    p = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: https://openrouter.ai/api/v1\n")
-    assert (p.model, p.base_url) == ("nano-gpt/deepseek/deepseek-v3", "https://openrouter.ai/api/v1")
+def test_an_explicit_base_url_still_resolves_a_known_model(repo):
+    p = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: https://proxy.example/v1\n")
+    assert (p.model, p.base_url, p.api_key_env, p.context_tokens) == (
+        "deepseek/deepseek-v3", "https://proxy.example/v1", "NANO_GPT_API_KEY", 120000)
+    raw = write_profile(repo, "qwen/qwen3-coder", "base_url: https://openrouter.ai/api/v1\n")
+    assert (raw.model, raw.base_url) == ("qwen/qwen3-coder", "https://openrouter.ai/api/v1")
 
 
 def test_an_unlisted_or_malformed_model_is_an_error(repo):
@@ -96,24 +99,57 @@ def test_loading_a_profile_never_downloads(repo, monkeypatch):
     monkeypatch.setattr(catalog, "refresh_async", lambda: kicked.append(1))
     os.utime(catalog.cache_path(), (0, 0))
     assert write_profile(repo, "anthropic/claude-x").api == "anthropic"
+    assert len(kicked) == 1
+
+
+def test_a_cold_cache_fetches_synchronously_then_resolves(repo, monkeypatch):
+    timeouts = []
+
+    def fetch(timeout):
+        timeouts.append(timeout)
+        return CATALOG
+
+    monkeypatch.setattr(catalog, "_download", fetch)
     catalog.cache_path().unlink()
-    with pytest.raises(ProfileError, match="isn't cached yet"):
+    assert write_profile(repo, "anthropic/claude-x").api == "anthropic"
+    assert timeouts == [catalog.COLD_TIMEOUT]
+    assert catalog.cache_path().exists()
+
+    def offline(timeout):
+        raise OSError("offline")
+
+    monkeypatch.setattr(catalog, "_download", offline)
+    catalog.cache_path().unlink()
+    with pytest.raises(ProfileError, match="unavailable"):
         write_profile(repo, "anthropic/claude-x")
-    assert len(kicked) == 2
 
 
 def test_refresh_rewrites_a_stale_cache(repo, monkeypatch):
     os.utime(catalog.cache_path(), (0, 0))
-    monkeypatch.setattr(catalog, "_download", lambda: {"x": {"api": "http://h/v1", "models": {"m": {}}}})
+    monkeypatch.setattr(catalog, "_download", lambda timeout: {"x": {"api": "http://h/v1", "models": {"m": {}}}})
     assert catalog.refresh() is True
     assert catalog.resolve("x/m").base_url == "http://h/v1"
+
+
+def test_a_failed_cache_write_keeps_the_old_cache(repo, monkeypatch):
+    def fail(src, dst):
+        raise OSError("disk full")
+
+    cache = catalog.cache_path()
+    before = cache.read_text()
+    os.utime(cache, (0, 0))
+    monkeypatch.setattr(catalog, "_download", lambda timeout: {"x": {}})
+    monkeypatch.setattr(os, "replace", fail)
+    assert catalog.refresh() is False
+    assert cache.read_text() == before
+    assert [p.name for p in cache.parent.iterdir()] == [catalog.CACHE_NAME]
 
 
 def test_a_second_refresh_waits_for_the_one_in_flight(repo, monkeypatch):
     os.utime(catalog.cache_path(), (0, 0))
     started, release, fetches = threading.Event(), threading.Event(), []
 
-    def slow_fetch():
+    def slow_fetch(timeout):
         fetches.append(1)
         started.set()
         release.wait(5)
