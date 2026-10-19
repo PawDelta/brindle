@@ -178,7 +178,7 @@ def test_set_alert_writes_a_session_option(monkeypatch):
     assert "a##b" in seen[2][4]
 
 
-@pytest.mark.parametrize("latest", [None, "0.4.0"])
+@pytest.mark.parametrize("latest", [None, "99.0.0"])
 def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch, latest):
     from brindle import updates
 
