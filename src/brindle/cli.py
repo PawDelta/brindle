@@ -2931,7 +2931,9 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
     if event.startswith("opencode-"):
         from brindle import opencode
 
-        opencode.hook_main(DB(), agent or os.environ.get("BRINDLE_AGENT_ID"), event, sys.stdin.read())
+        out = opencode.hook_main(DB(), agent or os.environ.get("BRINDLE_AGENT_ID"), event, sys.stdin.read())
+        if out:
+            typer.echo(out)
         return
     # --agent is baked into the hook command at launch; the environment is
     # only a fallback for sessions launched by an older brindle (and may be stale).
