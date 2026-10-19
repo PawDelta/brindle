@@ -286,3 +286,94 @@ def test_unrecorded_agent_with_nothing_known_never_auto_resumes_and_resumes_by_h
     signin_pause.run(w.db)
     assert signin_pause.paused_for_signin() == {}
     assert signin_pause.checks() == []
+
+
+# -- agents launched while no one is signed in to brindle ----------------------------------------
+
+OTHER_ORG = Identity("claude", "Claude: org Other", ident="claude org Other (org-2)")
+
+
+@pytest.fixture
+def brindle_login(monkeypatch):
+    """Whether someone is signed in to brindle: ``login["in"]``."""
+    login = {"in": False}
+    monkeypatch.setattr(company_login, "_logged_in", lambda store=None, client=None: login["in"])
+    return login
+
+
+def _an_agent_recorded_under_a_brindle_login_is_never_adopted(w, brindle_login, monkeypatch):
+    from brindle import identity_lock
+
+    brindle_login["in"], w.claude = True, PERSONAL
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    brindle_login["in"] = False
+    w.agent("c2")
+    signin_pause.run(w.db)             # the sweep records c2 too: no login, so unowned
+    assert signin_pause._load()["unowned"] == ["c2"]
+    brindle_login["in"], w.claude = True, OK
+    assert signin_pause.adopt(OK.ident) == ["c2"]
+    assert identity_lock.locked_by("c1") == PERSONAL.ident   # stays locked exactly as before
+    assert identity_lock.locked_by("c2") is None
+    assert signin_pause.adopt(OTHER_ORG.ident) == []          # adopted once, not by each sign-in
+    assert signin_pause.recorded_identity("c2") == OK.ident
+
+
+def _a_setup_applied_with_no_brindle_login_leaves_agents_unowned(w, brindle_login, monkeypatch):
+    w.claude = PERSONAL
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    assert signin_pause.adopt(OK.ident, signed_in=False) == ["c1"]
+    assert signin_pause.recorded_identity("c1") == OK.ident
+    assert signin_pause.adopt(OTHER_ORG.ident) == ["c1"]     # the brindle sign-in still adopts it
+    assert signin_pause._load()["unowned"] == []
+
+
+def _an_agent_gone_is_dropped_from_the_unowned(w, brindle_login, monkeypatch):
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    w.db.delete_agent("c1")
+    signin_pause.run(w.db)
+    assert signin_pause._load()["unowned"] == []
+
+
+def _adopt_never_raises(w, brindle_login, monkeypatch):
+    monkeypatch.setattr(signin_pause, "_load", lambda: 1 / 0)
+    assert signin_pause.adopt(OK.ident) == []
+    assert signin_pause.adopt("") == []
+
+
+def _the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login, monkeypatch):
+    from brindle import identity_lock
+
+    w.claude = PERSONAL
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    brindle_login["in"], w.claude = True, UNKNOWN   # signed in, but its check couldn't tell who
+    company_login.Login("acme", None, lambda line: None)._adopt()
+    assert signin_pause._load()["unowned"] == ["c1"]
+    signin_pause.run(w.db)                          # still undetermined: nothing adopted
+    assert signin_pause._load()["unowned"] == ["c1"]
+    w.claude = WRONG                                # a mismatch with the policy never adopts
+    signin_pause.run(w.db)
+    assert signin_pause.recorded_identity("c1") == PERSONAL.ident
+    brindle_login["in"], w.claude = False, OK       # nor does a clear identity with no brindle login
+    signin_pause.run(w.db)
+    assert signin_pause._load()["unowned"] == ["c1"]
+    brindle_login["in"] = True                      # the next sweep with a login adopts it
+    signin_pause.run(w.db)
+    assert signin_pause._load()["unowned"] == []
+    assert signin_pause.recorded_identity("c1") == OK.ident
+    assert identity_lock.locked_by("c1") is None
+    w.claude = OTHER_ORG
+    assert identity_lock.locked_by("c1") == OK.ident
+
+
+@pytest.mark.parametrize("scenario", [
+    _an_agent_recorded_under_a_brindle_login_is_never_adopted,
+    _a_setup_applied_with_no_brindle_login_leaves_agents_unowned,
+    _an_agent_gone_is_dropped_from_the_unowned, _adopt_never_raises,
+    _the_sweep_adopts_when_the_sign_in_check_failed,
+], ids=lambda f: f.__name__.strip("_"))
+def test_unowned_agents(scenario, w, brindle_login, monkeypatch):
+    scenario(w, brindle_login, monkeypatch)

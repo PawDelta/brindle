@@ -5,6 +5,8 @@ import json
 import os
 import shlex
 import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -12,6 +14,8 @@ from typer.testing import CliRunner
 from brindle import agents, cli, cloud_credential, company_login, workspaces
 from brindle.db import Agent
 from brindle.pro import account as pro_account
+from brindle.pro.license import current as REAL_CURRENT
+from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # noqa: F401 - fixtures
 from brindle.pro.team_policy import (AgentSetup, AwsFederation, AwsSetup, AzureFederation, AzureSetup,
                                      ClaudeSetup, CodexSetup, GatewaySetup, GcpFederation, GcpSetup, ModelsSetup)
 
@@ -446,6 +450,39 @@ def test_a_failing_policy_keeps_the_stored_env(monkeypatch):
                         lambda *a, **k: type("P", (), {"agent_setup": None})())
     assert company_login.apply_current(print) is None
     assert company_login.stored_env() == {}
+    # An agent_setup that no longer has a Claude route (the owner removed it) clears it too.
+    go(claude("bedrock", aws=AWS))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")      # `brindle doctor` from a session
+    monkeypatch.setattr(team_policy, "current_policy", lambda *a, **k: type(
+        "P", (), {"agent_setup": AgentSetup(codex=CodexSetup(route="api_key"))})())
+    company_login.apply_current(print)
+    assert company_login.stored_env() == {}
+
+
+def test_the_sweep_refetches_the_entitlement_and_drops_a_removed_claude_route(backend, signing_key, monkeypatch):
+    # Live incident: the org owner removed the Claude route, but only an
+    # entitlement near expiry was refetched, so its old policy version kept
+    # the route, and its env kept reaching Claude panes, even after a
+    # `brindle doctor` from a session (where settings writes are refused).
+    from brindle.pro import auth, credentials, license, team_policy
+
+    monkeypatch.setattr(license, "current", REAL_CURRENT)
+    Fake(monkeypatch)
+    go(claude("bedrock", aws=AWS))
+    now = time.time()
+    store = credentials.default_store()
+    store.save({**backend.issue(), "access_expires_at": now + 900, "base_url": BASE,
+                "entitlement": sign(signing_key, claims(org_id=ORG, features=["team"], policy_version=1,
+                                                        iat=int(now - 1200), exp=int(now + 3 * 3600)))})
+    backend.routes["GET /entitlement"] = [(200, {"entitlement": sign(signing_key, claims(
+        org_id=ORG, features=["team"], policy_version=2))})]
+    monkeypatch.setattr(team_policy, "current_policy", lambda ent, *a, **k: SimpleNamespace(
+        agent_setup=claude("bedrock", aws=AWS) if ent.policy_version < 2 else AgentSetup()))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    assert company_login.stored_env()
+    assert company_login.sync(store=store, client=auth.Client(BASE, backend))
+    assert company_login.stored_env() == {}
+    assert company_login.ENV_KEY not in company_login.config.user_settings()
 
 
 def test_pinned_models_without_the_claude_binary_are_not_ready(monkeypatch):
@@ -601,3 +638,31 @@ def test_wsl_browser_interactive_login_gets_its_env(monkeypatch):
                         lambda argv, **kw: seen.update(kw) or type("P", (), {"returncode": 0})())
     assert company_login.run_cmd(["codex", "login"], interactive=True, env={"BROWSER": "wslview"}) == (0, "")
     assert seen["env"] == {"BROWSER": "wslview"}
+
+
+# -- agents launched while signed out of brindle --------------------------------------------------
+
+
+def test_signing_in_adopts_the_agents_launched_while_signed_out(monkeypatch):
+    from brindle import identity_lock, signin_pause
+
+    now = {"ident": "claude org Me (org-9)", "in": False}
+    monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: (
+        signin_pause.Check("ok", ident=now["ident"]), False))
+    monkeypatch.setattr(company_login, "_logged_in", lambda store=None, client=None: now["in"])
+    signin_pause.record_launch(Agent("c1", "ws", "developer", "claude", "chat", "assign", "processing",
+                                     "", None, 0.0))
+    now["in"] = True                   # `brindle login`: Claude moves to the org's route
+    stored = []
+    monkeypatch.setattr(company_login, "store_env", lambda *a: (
+        stored.append(a), now.update(ident="claude org Acme (org-1)")))
+    setup, check, _ = ROUTES["subscription"]
+    Fake(monkeypatch, {check: (0, f"logged in to {UUID}")})
+    assert go(setup)[0] and stored
+    assert signin_pause.recorded_identity("c1") == "claude org Acme (org-1)"
+    assert identity_lock.locked_by("c1") is None
+    now["ident"] = "claude org Other (org-2)"     # a different account signs in: locked
+    assert identity_lock.locked_by("c1") == "claude org Acme (org-1)"
+    # A failing check never fails the sign-in over adopting.
+    monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: 1 / 0)
+    assert go(setup)[0]

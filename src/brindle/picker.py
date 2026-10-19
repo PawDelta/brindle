@@ -150,6 +150,44 @@ def pick_supervisor(acc, current: str | None = None, *, signed_in: list[str] | N
         shown = 0      # the setup printed below the list: draw it afresh
 
 
+def pick_row(title: str, rows: list[str], actions: dict[str, str], *, key: Callable[[], str] | None = None,
+             echo: Callable[..., None] = typer.echo, at: int = 0) -> tuple[str, int] | None:
+    """A list of ``rows`` to choose from. Returns ``("enter", i)`` for Enter on
+    the highlighted row or a number, ``(letter, i)`` for one of ``actions``
+    (letter -> what it does) on the highlighted row, or None on cancel.
+    ``at`` is the row highlighted to begin with."""
+    import unicodedata
+
+    # Row text comes from prompts and branch names: no escape sequences on the terminal.
+    rows = ["".join(c if unicodedata.category(c)[0] != "C" else " " for c in r) for r in rows]
+    raw = key is None and raw_keys()
+    if key is None:
+        key = read_key if raw else (lambda: typer.prompt("Pick", default="", show_default=False).strip().lower())
+    shown = 0
+    while True:
+        if raw and shown:
+            echo(f"\x1b[{shown}F\x1b[J", nl=False)
+        lines = [title] + [f" {'>' if raw and i == at else ' '} {i + 1}) {r}" for i, r in enumerate(rows)]
+        hints = ["↑/↓ or a number, Enter to open" if raw else "a number or Enter to open"]
+        hints += [f"{k} {what}" for k, what in actions.items()] + ["q cancel"]
+        lines.append("  " + " · ".join(hints))
+        echo("\n".join(lines))
+        shown = len(lines)
+        k = key()
+        if k == "up":
+            at = (at - 1) % len(rows)
+        elif k == "down":
+            at = (at + 1) % len(rows)
+        elif k == "enter" or (k == "" and not raw):
+            return "enter", at
+        elif k.isdigit() and 1 <= int(k) <= len(rows):
+            return "enter", int(k) - 1
+        elif k in actions:
+            return k, at
+        elif k in ("q", "quit"):
+            return None
+
+
 def _setup_worker_model(m, *, is_ready, cli_setup, local_setup, read_secret, echo) -> bool:
     """Make ``m`` ready to run if it isn't: sign its CLI in, set Ollama up
     with the model, or take and check an API key. True when it can run."""

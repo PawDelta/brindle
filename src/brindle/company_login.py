@@ -239,16 +239,23 @@ def store_env(org_id: str, env: dict[str, str], self_serve: bool = False) -> Non
     config.set_user(ENV_KEY, got if env else None)
 
 
-def clear_env(force: bool = False) -> None:
+def clear_env(force: bool = False, stale: bool = False) -> bool:
     """Forget the stored env (logout, or an org with no agent_setup), so a
     stale route can't keep sending panes to the previous org's backend. A
-    self-serve env (the person's own choice, not an org's) stays unless ``force``."""
+    self-serve env (the person's own choice, not an org's) stays unless ``force``.
+    ``stale``: the org's fresh setup has no Claude route, so the env goes
+    even from inside a brindle session (``config.forget_user``). True when
+    it was removed."""
     try:
         got = config.user_settings().get(ENV_KEY)
-        if got is not None and (force or not (isinstance(got, dict) and got.get("self_serve"))):
-            config.set_user(ENV_KEY, None)
+        if got is None or (not force and isinstance(got, dict) and got.get("self_serve")):
+            return False
+        if stale:
+            return config.forget_user(ENV_KEY)
+        config.set_user(ENV_KEY, None)
+        return config.user_settings().get(ENV_KEY) is None
     except (OSError, ValueError):
-        pass
+        return False
 
 
 def _current_org() -> str | None:
@@ -327,7 +334,22 @@ class Login:
             clear_env(force=True)
             return False
         store_env(self.org_id, claude_env(self.org_id, c), self.self_serve)
+        self._adopt()
         return self._model_check(c)
+
+    def _adopt(self) -> None:
+        """Agents launched while no one was signed in to brindle become the
+        account's that signed in now, under the Claude identity its route
+        gives (``signin_pause.adopt``), instead of locking. Never raises."""
+        try:
+            from brindle import signin_pause
+
+            got = signin_pause.check("claude", cache=False)
+            if got is None or got[0].kind != "ok" or not got[0].ident or got[0].problem:
+                return
+            signin_pause.adopt(got[0].ident, signed_in=_logged_in(self.store, self.client))
+        except Exception:  # noqa: BLE001 - a sign-in never fails over this
+            log.debug("couldn't adopt the signed-out agents", exc_info=True)
 
     def _federated_signin(self, c) -> bool:
         """Write the cloud's hook (no cloud CLI, no cloud login) and prove it
@@ -539,15 +561,16 @@ def route_in_use(org_id: str, setup) -> bool:
     return isinstance(got, dict) and got.get("org") == org_id
 
 
-def org_setup(repo_root: str | None = None, store=None, client=None):
+def org_setup(repo_root: str | None = None, store=None, client=None, max_age: float | None = None):
     """(org id, AgentSetup) for the signed-in org; personal policies supply
     only federated Claude setup. None when there is no applicable setup;
-    ``UNAVAILABLE`` when it couldn't be had, which says nothing about the setup."""
+    ``UNAVAILABLE`` when it couldn't be had, which says nothing about the setup.
+    ``max_age``: refetch an entitlement older than that (``license.current``)."""
     from brindle.pro import credentials, license, team_policy
 
     try:
         store = store or credentials.default_store()
-        ent = license.current(store=store, client=client)
+        ent = license.current(store=store, client=client, max_age=max_age)
         personal = team_policy.FEATURE not in ent.features
         if personal and (ent.policy_version <= 0 or (store.load() or {}).get("org_id")
                          or ent.plan in ("team", "enterprise")):
@@ -597,19 +620,49 @@ def apply_current(say: Callable[[str], None], repo_root: str | None = None, stor
     With no org setup, the person's own self-serve setup applies, or is offered
     (``ask``; see ``self_serve``). An org's setup always wins over it."""
     from brindle import self_serve
+    from brindle.pro import license
 
-    got = org_setup(repo_root, store, client)
+    got = org_setup(repo_root, store, client, max_age=license.MAX_AGE)
     if got is UNAVAILABLE:
         if _logged_in(store, client):
             return None     # an org whose policy we couldn't read: leave everything as it is
         clear_federation()  # signed out: no federated credential outlives the sign-in
         return self_serve.run(say, repo_root, ask, info)
     if got is None:
-        clear_env()
+        clear_env(stale=True)
         # the signed-in org has no agent_setup: its federation files go, other member orgs' stay
         clear_federation(keep=_other_orgs(store, client))
         return self_serve.run(say, repo_root, ask, info)
+    if got[1].claude is None:
+        clear_env(stale=True)   # the org's setup has no Claude route (any more): panes get none
     return apply(got[0], got[1], say, repo_root, store=store, client=client)
+
+
+def sync(store=None, client=None) -> list[str]:
+    """Cull-pass step: refetch an entitlement older than ``license.MAX_AGE``,
+    so a plan's new features and a changed org policy reach this machine,
+    and stop giving Claude panes the stored org route env once the org's
+    setup has no Claude route. Offline or signed out, nothing changes (the
+    stored entitlement keeps its grace). Returns what it did; never raises."""
+    from brindle import airgap
+    from brindle.pro import license
+
+    if airgap.enabled():
+        return []
+    try:
+        license.current(store=store, client=client, max_age=license.MAX_AGE)
+        got = config.user_settings().get(ENV_KEY)
+    except Exception:  # noqa: BLE001 - signed out, offline, unreadable: leave things as they are
+        log.debug("couldn't refresh the entitlement", exc_info=True)
+        return []
+    if not isinstance(got, dict) or got.get("self_serve"):
+        return []           # no org route stored (a self-serve one is the person's own)
+    setup = org_setup(store=store, client=client)
+    if setup is UNAVAILABLE or (setup is not None and setup[1].claude is not None):
+        return []
+    if not clear_env(stale=True):
+        return []
+    return ["stopped applying the org's Claude route: its agent setup no longer has one"]
 
 
 __all__ = ["apply", "apply_current", "claude_env", "stored_env", "write_aws_profile"]

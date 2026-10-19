@@ -160,6 +160,13 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     done.extend(cost_centers.poll(only_due=True, now=now))
 
+    # 1e'. Plan and org setup changes made on the server (brindle Pro): refetch
+    # an entitlement older than a few minutes; a removed Claude route stops
+    # reaching panes. Before 1f, which checks sign-ins against that route.
+    from brindle import company_login
+
+    done.extend(company_login.sync())
+
     # 1f. Agents whose provider's sign-in is gone (or wrong): pause them, and
     # resume them once it's valid again.
     from brindle import signin_pause
@@ -182,6 +189,15 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             done.extend(events.emit_periodic_cost(cfg, r))
         except Exception:
             pass
+
+    # 1h. Repos with the coordinator on (brindle Pro): wake one where
+    # something it watches has happened and none is running.
+    from brindle import coordinator
+
+    try:
+        done.extend(coordinator.wake(db, now))
+    except Exception:  # noqa: BLE001 - coordination must never stop the sweep
+        coordinator.log.exception("brindle: coordinator wake failed")
 
     # 2. Workers nobody needs any more.
     limits: dict[str, float] = {}

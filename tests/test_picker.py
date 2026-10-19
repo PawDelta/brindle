@@ -145,19 +145,22 @@ def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, va
     ("codex", "p"),                       # the running session is on another CLI
 ])
 def test_running_session_on_another_cli_is_not_the_default(monkeypatch, wanted, default):
-    seen = {}
-    monkeypatch.setattr(typer, "prompt", lambda *a, **kw: seen.update(kw) or "o")
-    cli._ask_about_running(SimpleNamespace(id="a1", provider="claude"), wanted)
-    assert seen["default"] == default
+    monkeypatch.setattr(picker, "pick_row", lambda *a, **kw: ("enter", 0))
+    live = SimpleNamespace(root=SimpleNamespace(id="a1", provider="claude"), goal="", branch="main",
+                           age=60, workers=0, workspace=SimpleNamespace(id="w1"))
+    assert cli._ask_about_running([live], wanted) == (default, live)
 
 
 def test_supervisor_flag_reaches_the_running_session_question(db, repo, monkeypatch):
+    from brindle import sessions
+
     monkeypatch.chdir(repo)
     monkeypatch.setattr(cli, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True)))
-    monkeypatch.setattr(cli, "_running_session", lambda db, ws: SimpleNamespace(id="a1", provider="claude"))
+    monkeypatch.setattr(sessions, "live", lambda db, root: [SimpleNamespace(
+        root=SimpleNamespace(id="a1", provider="claude"))])
     asked = []
 
-    def ask(running, wanted=None):
+    def ask(live, wanted=None, **kw):
         asked.append(wanted)
         raise typer.Exit(0)
 

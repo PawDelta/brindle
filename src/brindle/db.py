@@ -415,6 +415,97 @@ CREATE TABLE IF NOT EXISTS agent_reported_spend (
     reported_usd REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+-- The shared knowledge layer (brindle.knowledge owns these). kb_events is the
+-- append-only source of truth; intents and decisions are projections rebuilt
+-- from it.
+CREATE TABLE IF NOT EXISTS kb_events (
+    id TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    actor TEXT,
+    session TEXT,
+    machine TEXT,
+    ts REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kb_events_repo ON kb_events(repo_key, ts);
+CREATE TABLE IF NOT EXISTS intents (
+    session_root TEXT NOT NULL,
+    repo_key TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    paths TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (session_root, repo_key)
+);
+-- Shared decisions, a projection of decision events: scope is a JSON list of
+-- path globs ([] for the whole repo); a superseded row keeps its text.
+CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL,
+    topic TEXT NOT NULL,
+    body TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('proposed', 'accepted', 'superseded')),
+    author_session TEXT,
+    link TEXT,
+    supersedes TEXT,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_repo ON decisions(repo_key, status);
+CREATE TABLE IF NOT EXISTS context_receipts (
+    task_id TEXT NOT NULL,
+    item_kind TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    PRIMARY KEY (task_id, item_kind, item_id)
+);
+-- Knowledge sources and their indexed documents (brindle.kb owns these; the
+-- kb_fts full-text table is made in DB._migrate, as SQLite may lack FTS5).
+CREATE TABLE IF NOT EXISTS kb_sources (
+    id TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'indexed' CHECK (mode IN ('indexed', 'federated')),
+    visibility TEXT NOT NULL DEFAULT 'repo' CHECK (visibility IN ('repo', 'personal', 'org')),
+    credential_name TEXT,
+    retention_days INTEGER,
+    sync_cursor TEXT,
+    added_at REAL NOT NULL,
+    UNIQUE (repo_key, kind, scope)
+);
+CREATE TABLE IF NOT EXISTS kb_docs (
+    id INTEGER PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    external_id TEXT NOT NULL,
+    url TEXT,
+    title TEXT,
+    updated_at REAL,
+    content_hash TEXT NOT NULL,
+    tombstoned INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (source_id, external_id)
+);
+CREATE TABLE IF NOT EXISTS kb_chunks (
+    id TEXT PRIMARY KEY,
+    doc_id INTEGER NOT NULL REFERENCES kb_docs(id) ON DELETE CASCADE,
+    heading_path TEXT NOT NULL,
+    text TEXT NOT NULL,
+    quarantined TEXT
+);
+CREATE INDEX IF NOT EXISTS kb_chunks_doc ON kb_chunks(doc_id);
+CREATE TABLE IF NOT EXISTS kb_links (
+    chunk_id TEXT NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,
+    symbol TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, node_id)
+);
+CREATE TABLE IF NOT EXISTS kb_embeddings (
+    chunk_id TEXT PRIMARY KEY REFERENCES kb_chunks(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    vector BLOB NOT NULL
+);
 """
 
 
@@ -785,6 +876,11 @@ class DB:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN submitted_prompt TEXT NOT NULL DEFAULT ''")
         if "launched_at" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN launched_at REAL")
+        try:   # only brindle.kb needs FTS5: a SQLite built without it still opens
+            self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5("
+                              "text, heading_path, chunk_id UNINDEXED)")
+        except sqlite3.OperationalError:
+            pass
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -1137,15 +1233,17 @@ class DB:
             return cur.rowcount
 
     def recently_delivered(self, agent_id: str, body: str, within: float = 120.0) -> bool:
-        """Whether ``body`` is a message brindle delivered to the agent just now."""
+        """Whether ``body`` is a message brindle delivered to the agent just now,
+        whole or as its one line (agents.one_line), which names its id."""
         want = body.strip()
         if not want:
             return False
         rows = self.conn.execute(
-            "SELECT body FROM inbox WHERE agent_id=? AND delivered_at > ?",
+            "SELECT id, body FROM inbox WHERE agent_id=? AND delivered_at > ?",
             (agent_id, time.time() - within),
         )
-        return any(r[0].strip() == want for r in rows)
+        return any(r[1].strip() == want
+                   or want.endswith(f"(full text: read_messages(message_id={r[0]}))") for r in rows)
 
     def delivered_since(self, agent_id: str, since: float) -> bool:
         """Whether brindle delivered any message to the agent after ``since``."""

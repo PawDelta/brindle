@@ -471,7 +471,8 @@ def test_status_line_passes_through_the_persons_own(tmp_path, monkeypatch):
     assert status_line(payload) == "mine"
 
 
-def test_delivered_worker_result_is_not_the_user_replying(db, root):
+def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch):
+    agent, _ = root
     with_goal(db)
     autopilot.need_user(db, "boss", "Postgres or SQLite?")
     db.enqueue("boss", "Assigned task finished.", "w1")
@@ -480,6 +481,20 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root):
     assert db.get_autopilot("boss").state == "blocked"
     agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "SQLite"})
     assert db.get_autopilot("boss").state == "running"
+
+    # Live incident: the reminder of an open question went out through the
+    # inbox, its prompt-submit counted as the user speaking, and that re-armed
+    # the reminder about once a minute. Wrapped, or as the unread-mail
+    # reminder (never recorded as delivered), it must not re-arm either.
+    monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
+    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
+    autopilot.user_spoke(db, agent)
+    sent = agents._stop_decision(db, agent, {}, via_inbox=True)
+    assert sent
+    for prompt in (sent["reason"], f"<message>{sent['reason']}</message>",
+                   "[brindle autopilot] You have unread messages. Call read_messages before you stop."):
+        agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
+        assert autopilot.on_stop(db, agent, {}) is None
 
 
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):

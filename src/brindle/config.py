@@ -134,7 +134,10 @@ class RepoConfig:
     # --dangerously-skip-permissions and brindle's hook allows or denies every
     # call (see brindle.antigravity). "prompt" (default): agy asks as usual.
     agy_approvals: str = "prompt"
-    overlap: str = "block"           # a task whose files overlap a running one: "block" or "warn"
+    # A task whose files overlap a running one: "block", "warn" or "queue" (wait
+    # for it to merge). None: block within a session, queue behind another session's.
+    overlap: str | None = None
+    coordinator: bool = False          # wake a coordinator above this repo's sessions on events (brindle Pro; see brindle.coordinator)
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
     protected_paths: list[str] = field(default_factory=list)
@@ -279,7 +282,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
-                "review_rounds", "fable_escalation", "goal_audit", "overlap", "local_models", "merge_into",
+                "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile"):
@@ -386,6 +389,22 @@ def set_user(key: str, value: object) -> Path:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     _sync_setting(key)
     return path
+
+
+def forget_user(key: str) -> bool:
+    """Remove one key from ``~/.brindle/config.json``; True once it's gone.
+    Only for a setting an org applied that its fresh setup no longer has
+    (``company_login.clear_env(stale=True)``): removing it only stops it
+    being applied, so unlike :func:`set_user` this also runs in an agent's
+    CLI call (``brindle doctor`` from a session)."""
+    path = user_config_path()
+    data = _read_json(path)
+    if key not in data:
+        return False
+    del data[key]
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _sync_setting(key)
+    return key not in _read_json(path)
 
 
 def _sync_setting(key: str) -> None:

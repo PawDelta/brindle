@@ -56,12 +56,27 @@ def test_overlap_warning_matches_recursive_globs(db, repo, boss):
     assert "Warning" in out_b
 
 
+def test_overlap_warning_names_other_session_intent(db, repo, boss):
+    from brindle import knowledge
+    key = knowledge.repo_key(repo)
+    knowledge.append(db, key, knowledge.INTENT, {"summary": "rework x\nmore", "paths": ["src/x.py"]},
+                     session="sessB")
+    warning = tasks.overlap_warning(db, boss, ["src/x.py"])
+    assert "sessB" in warning and "rework x" in warning and "more" not in warning
+    assert tasks.overlap_warning(db, boss, ["src/y.py"]) is None
+    knowledge.append(db, key, knowledge.INTENT, {"summary": "mine", "paths": ["src/y.py"]}, session="boss")
+    assert tasks.overlap_warning(db, boss, ["src/y.py"]) is None    # same session: ignored
+    knowledge.append(db, key, knowledge.PAUSE, {}, session="sessB")
+    assert tasks.overlap_warning(db, boss, ["src/x.py"]) is None    # paused intents don't warn
+
+
 def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
     root = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "idle", "@0", None,
                        time.time()))
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(tasks, "overlap_warning", lambda db_, ws_, files, text=None: "overlaps with w0 (feat/a) on ledger.py")
+    monkeypatch.setattr(tasks, "find_clash", lambda db_, ws_, files, text=None, caller_id=None:
+                        tasks.Clash("overlaps with w0 (feat/a) on ledger.py", "w0", "boss"))
     delegated = []
     monkeypatch.setattr(agents, "delegate", lambda *a, **k: delegated.append(a))
     out = asyncio.run(mcp_server.assign("developer", "do it", files=["ledger.py"]))
@@ -103,6 +118,62 @@ def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monke
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197")
     monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: True)
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
+
+
+@pytest.fixture
+def two_sessions(db, repo, monkeypatch):
+    """Roots A (main checkout) and B (its own session branch) on one repo,
+    overlap unset; B's worker runs on src/x.py. Returns B's worker id."""
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    root_a = workspaces.adopt_root(db, str(repo))
+    root_b = workspaces.create(db, str(repo), "session-b", run_setup=False).workspace
+    for name, ws in (("rootA", root_a), ("rootB", root_b)):
+        db.add_agent(Agent(name, ws.id, "supervisor", "claude", None, "interactive", "processing",
+                           "@0", None, time.time()))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "rootB")
+    b = started_worker_id(asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b",
+                                                        files=["src/x.py"])))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "rootA")
+    return b
+
+
+def test_cross_session_clash_queues_and_notifies(db, repo, two_sessions):
+    b = two_sessions
+    out = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["src/x.py"]))
+    assert out.startswith("Queued task") and b in out, out
+    [pending] = db.list_tasks(str(repo), state="pending")
+    assert tasks._loads(pending.depends_on) == [b]
+    for root in ("rootA", "rootB"):
+        assert "src/x.py" in full_text(db, root, db.pop_pending(root).body)
+    # A second trigger leaves the queued task and B's running work in place.
+    again = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["src/x.py"]))
+    assert pending.id in again
+    assert [t.id for t in db.list_tasks(str(repo), state="pending")] == [pending.id]
+    assert db.get_agent(b).status == "processing"
+    assert [t.agent_id for t in db.list_tasks(str(repo), state="started")] == [b]
+
+
+def test_queued_task_starts_from_holder_merge(db, repo, two_sessions, monkeypatch):
+    b = two_sessions
+    asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["src/x.py"]))
+    ws_b = db.get_workspace(db.get_agent(b).workspace_id)
+    (Path(ws_b.path) / "src").mkdir()
+    commit_file(Path(ws_b.path), "src/x.py")
+    starts = []
+    real = agents.delegate
+
+    def recording(*a, start=None, **k):
+        starts.append(start)
+        return real(*a, start=start, **k)
+
+    monkeypatch.setattr(agents, "delegate", recording)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "rootB")
+    out = asyncio.run(mcp_server.merge_workspace(ws_b.id))
+    assert out.startswith("Merged"), out
+    assert starts == [db.merged_sha(ws_b.id)]
+    [a_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-a"]
+    assert a_task.state == "started"
 
 
 # -- dependencies: queue until merge, then auto-start --------------------------

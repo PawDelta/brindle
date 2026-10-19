@@ -111,7 +111,8 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
             # there. Never attach a second client from within the server's
             # own pane, which hung the whole server once (see
             # tmux.inside_this_server).
-            tmux.switch_client(window or f"={ws.tmux_session}")
+            if not tmux.switch_client(window or f"={ws.tmux_session}"):
+                typer.echo(f"No terminal is attached here; run `brindle attach {ws.name}` in one.")
             return
     except tmux.TmuxError as e:
         _fail(str(e))
@@ -329,15 +330,23 @@ def start(
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
     else:
         ws = _here_or_scratch(db, reuse_scratch=False)
-        running = _running_session(db, ws)
-        if running and attach and sys.stdin.isatty():
-            choice = _ask_about_running(running, provider)
+        from brindle import sessions
+
+        live = sessions.live(db, ws.repo_root)
+        if live and attach and not yes and sys.stdin.isatty():
+            got = _ask_about_running(live, provider, here=ws.id)
+            if got is None:
+                raise typer.Exit(0)
+            choice, picked = got
             if choice == "o":
-                _attach(ws, running.tmux_window)
+                _attach(picked.workspace, picked.root.tmux_window)
                 return
             if choice == "n":
                 ws = _run(_session_worktree, db, ws)
                 typer.echo(f"✓ new session in its own worktree: {ws.path} ({ws.branch})")
+            elif picked.workspace.id != ws.id:
+                agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
+                typer.echo(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")
 
     if not branch and not worktree and not scratch.is_scratch(ws.path):
         curr_b = git.current_branch(ws.path)
@@ -559,13 +568,10 @@ def _say_autopilot(db: DB, root_id: str) -> None:
 
 
 def _live_sessions(db: DB, ws: Workspace) -> list:
-    """The live sessions (interactive agents) in this checkout. An agent whose
-    recorded pane id a newer agent has since taken (tmux reuses ids) isn't
-    live: that pane is the newer agent's."""
-    owners = agents.pane_owners(db)
-    return [a for a in db.list_agents(ws.id)
-            if a.mode == "interactive" and a.status not in ("paused", "done")
-            and agents.is_alive(a) and agents.owns_pane(db, a, owners)]
+    """The live sessions (interactive agents) in this checkout."""
+    from brindle import sessions
+
+    return [s.root for s in sessions.live(db, ws.repo_root) if s.workspace.id == ws.id]
 
 
 def _running_session(db: DB, ws: Workspace):
@@ -574,21 +580,45 @@ def _running_session(db: DB, ws: Workspace):
     return live[0] if live else None
 
 
-def _ask_about_running(running, wanted: Optional[str] = None) -> str:
-    """Open, branch off or pause the session running here. ``wanted`` is the
-    CLI asked for with -s: when the running session is on another one,
-    opening it wouldn't give that, so the default is to start fresh."""
-    import click
-
+def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[str] = None):
+    """Pick among the repo's live sessions (any worktree): open one, start a
+    new session in its own worktree, or pause one and start fresh. Returns
+    ``(choice, session)`` with choice "o", "n" or "p", or None when cancelled.
+    ``wanted`` is the CLI asked for with -s: Enter on a session that runs on
+    another one starts fresh instead, since opening it wouldn't give that.
+    ``here`` is the current checkout's workspace id: its session starts highlighted."""
     from brindle import picker
 
-    differs = bool(wanted) and wanted != picker.PICK and wanted != running.provider
-    typer.echo(f"A brindle session is already running here ({running.id}).")
-    if differs:
-        typer.echo(f"It runs on {running.provider}, not {wanted}; opening it keeps {running.provider}.")
-    typer.echo("  [o] open it   [n] new session in its own worktree   [p] pause it and start fresh")
-    return typer.prompt("Which", type=click.Choice(["o", "n", "p"]), default="p" if differs else "o",
-                        show_choices=False)
+    rows = [f"{s.root.id}  {s.goal or '(no goal yet)'}  {s.branch}  {_ago(s.age)}"
+            + (f"  {s.workers} worker(s) running" if s.workers else "") for s in live]
+    differs = [bool(wanted) and wanted != picker.PICK and wanted != s.root.provider for s in live]
+    got = picker.pick_row("Sessions running in this repo:", rows,
+                          {"o": "open", "n": "new session in its own worktree", "p": "pause it and start fresh"},
+                          at=next((i for i, s in enumerate(live) if s.workspace.id == here), 0))
+    if got is None:
+        return None
+    k, i = got
+    if k == "enter":
+        k = "p" if differs[i] else "o"
+    return k, live[i]
+
+
+def _ask_about_paused(db: DB, available: list):
+    """Pick the paused session to resume (newest first); None to cancel."""
+    from brindle import picker
+
+    rows = []
+    for s in available:
+        ap = db.get_autopilot(s.root.id)
+        goal = next((ln.strip() for ln in (ap.goal if ap and ap.goal else "").splitlines() if ln.strip()), "")
+        goal = goal if len(goal) <= 60 else goal[:59] + "…"
+        workers = s.members[1:]
+        running = sum(1 for m in workers if m.status == "running")
+        branches = ", ".join(s.branches[:3]) + (" …" if len(s.branches) > 3 else "")
+        rows.append(f"{s.root.id}  {goal or '(no goal yet)'}  paused {_ago(time.time() - s.paused_at)} ago  "
+                    f"{branches or '-'}  {running}/{len(workers)} workers")
+    got = picker.pick_row("Paused sessions:", rows, {})
+    return None if got is None else available[got[1]]
 
 
 def _session_worktree(db: DB, ws: Workspace) -> Workspace:
@@ -723,6 +753,10 @@ def continue_cmd(
             _fail(f"no single paused session matches {session_id!r}. Available:\n  "
                   + "\n  ".join(_describe(s) for s in available))
         chosen = matches[0]
+    elif len(available) > 1 and attach and sys.stdin.isatty():
+        chosen = _ask_about_paused(db, available)
+        if chosen is None:
+            raise typer.Exit(0)
     else:
         chosen = available[0]
     others = [s for s in available if s.root.id != chosen.root.id]
@@ -1322,6 +1356,155 @@ def _here_repo() -> str | None:
         return git.main_repo_root(os.getcwd())
     except git.GitError:
         return None
+
+
+# -- brindle kb (knowledge sources; see brindle.kb) --------------------------------------------
+
+kb_app = typer.Typer(no_args_is_help=True, help="Knowledge sources agents can search for this repo.")
+kb_add_app = typer.Typer(no_args_is_help=True, help="Add a knowledge source.")
+kb_app.add_typer(kb_add_app, name="add")
+app.add_typer(kb_app, name="kb")
+
+
+def _kb_repo() -> tuple[str, str]:
+    from brindle import knowledge
+
+    repo_root = _here_repo()
+    if repo_root is None:
+        _fail("not in a git repo")
+    return repo_root, knowledge.repo_key(repo_root)
+
+
+@kb_add_app.command("folder")
+def kb_add_folder(path: Path = typer.Argument(..., help="A folder of Markdown or text documents.")) -> None:
+    """Add a folder as a source and index it."""
+    from brindle import kb
+
+    if not path.expanduser().is_dir():
+        _fail(f"not a folder: {path}")
+    db = DB()
+    repo_root, key = _kb_repo()
+    source = kb.add_source(db, key, kb.FOLDER, str(path))
+    typer.echo(f"added {source[:8]}")
+    _kb_sync_sources(db, repo_root, [source])
+
+
+@kb_app.command("list")
+def kb_list() -> None:
+    """This repo's sources and how many documents each holds."""
+    from brindle import kb
+
+    _, key = _kb_repo()
+    rows = kb.sources(DB(), key)
+    for s in rows:
+        typer.echo(f"{s['id'][:8]}  {s['kind']}  {s['mode']}  {s['docs']} docs  "
+                   f"{s['quarantined']} quarantined  {s['scope']}")
+    if not rows:
+        typer.echo("no sources: add one with `brindle kb add folder <path>`")
+
+
+@kb_app.command("sync")
+def kb_sync(source: Optional[str] = typer.Argument(None, help="A source id or folder; default every indexed source.")) -> None:
+    """Index new and changed documents and drop the ones that are gone."""
+    from brindle import kb
+
+    db = DB()
+    repo_root, key = _kb_repo()
+    try:
+        ids = [kb.find_source(db, key, source)] if source else [
+            s["id"] for s in kb.sources(db, key) if s["mode"] == "indexed"]
+    except KeyError:
+        _fail(f"no such source: {source}")
+    _kb_sync_sources(db, repo_root, ids)
+
+
+def _kb_sync_sources(db: DB, repo_root: str, ids: list[str]) -> None:
+    from brindle import codemap, kb
+
+    graph = codemap.graph_path(repo_root)
+    for source_id in ids:
+        try:
+            counts = kb.sync(db, source_id, graph)
+        except ValueError as e:
+            _fail(str(e))
+        typer.echo(f"{source_id[:8]}: " + ", ".join(f"{n} {what}" for what, n in counts.items()))
+
+
+@kb_app.command("remove")
+def kb_remove(source: str = typer.Argument(..., help="A source id or folder.")) -> None:
+    """Remove a source with everything indexed from it."""
+    from brindle import kb
+
+    db = DB()
+    _, key = _kb_repo()
+    try:
+        kb.remove_source(db, kb.find_source(db, key, source))
+    except KeyError:
+        _fail(f"no such source: {source}")
+    typer.echo("removed")
+
+
+# -- brindle decisions (shared decisions; see brindle.knowledge) -------------------------------
+
+decisions_app = typer.Typer(no_args_is_help=True, help="Decisions the sessions in this repo have recorded.")
+app.add_typer(decisions_app, name="decisions")
+
+
+@decisions_app.command("export")
+def decisions_export(path: Optional[Path] = typer.Argument(None, help="A file to write; default stdout.")) -> None:
+    """Write this repo's accepted decisions as Markdown."""
+    from brindle import knowledge
+
+    _, key = _kb_repo()
+    text = knowledge.export_markdown(DB(), key)
+    if path is None:
+        typer.echo(text)
+    else:
+        path.expanduser().write_text(text)
+        typer.echo(f"wrote {path}")
+
+
+# -- brindle coordinator (brindle Pro; see brindle.coordinator) ------------------------------
+
+coordinator_app = typer.Typer(no_args_is_help=True, help="The coordinator above this repo's sessions.")
+app.add_typer(coordinator_app, name="coordinator")
+
+
+@coordinator_app.command("undo")
+def coordinator_undo(event: str = typer.Argument(..., help="The event id (or its first characters) from the notice.")) -> None:
+    """Put back what one coordinator action changed in this repo's queue."""
+    from brindle import coordinator
+
+    _, key = _kb_repo()
+    try:
+        typer.echo(coordinator.undo(DB(), key, event))
+    except coordinator.CoordinatorError as e:
+        _fail(str(e))
+
+
+@coordinator_app.command("log")
+def coordinator_log(limit: int = typer.Option(20, "--limit", "-n", help="How many to show.")) -> None:
+    """Recent coordinator actions and reports in this repo, newest first."""
+    from brindle import coordinator
+
+    _, key = _kb_repo()
+    rows = coordinator.recent(DB(), key, limit)
+    for e in rows:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(e["ts"]))
+        typer.echo(f"{when}  {e['id'][:8]}  {coordinator.describe(e)}")
+    if not rows:
+        typer.echo("The coordinator hasn't acted in this repo yet.")
+
+
+@coordinator_app.command("stop")
+def coordinator_stop() -> None:
+    """Kill switch: close any running coordinator and turn it off for this checkout."""
+    from brindle import coordinator
+
+    repo_root, _ = _kb_repo()
+    closed = coordinator.stop(DB(), repo_root)
+    done = f"Closed {', '.join(closed)}" if closed else "No coordinator was running"
+    typer.echo(f'{done}; the coordinator is off here ("coordinator": false in .brindle/config.local.json).')
 
 
 @permissions_app.command("list")

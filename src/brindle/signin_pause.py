@@ -25,8 +25,10 @@ status``). Antigravity and gateway routes can't be verified and are skipped.
   account.
 
 State is ``$BRINDLE_HOME/signin-pause.json`` (0600): which agents were paused
-and why, the identity each launched under, and the warnings already given (so
-another sweeping process doesn't repeat one). Identities are ids (Claude org,
+and why, the identity each launched under, which of those were recorded while
+no one was signed in to brindle (``unowned``: the account that signs in next
+adopts them, see ``adopt``), and the warnings already given (so another
+sweeping process doesn't repeat one). Identities are ids (Claude org,
 AWS account and role, GCP project, Azure subscription), never tokens.
 """
 
@@ -85,6 +87,8 @@ def _load() -> dict:
     for key in ("paused", "identity", "different", "warned", "settled"):
         if not isinstance(got.get(key), dict):
             got[key] = {}
+    unowned = got.get("unowned")   # missing from state files written before it existed
+    got["unowned"] = sorted({a for a in unowned if isinstance(a, str)}) if isinstance(unowned, list) else []
     return got
 
 
@@ -164,6 +168,53 @@ def recorded_identity(agent_id: str) -> str | None:
     return got if isinstance(got, str) and got else None
 
 
+def _brindle_signed_in() -> bool:
+    """Whether someone is signed in to brindle now. Never raises: unknown is no."""
+    try:
+        return company_login._logged_in()
+    except Exception:  # noqa: BLE001 - an unreadable login is no login
+        return False
+
+
+def _record(state: dict, agent_id: str, ident: str, signed_in: bool | None = None) -> None:
+    """Record ``ident`` as ``agent_id``'s; with no brindle login it's unowned,
+    for the account that signs in next to adopt (``adopt``)."""
+    state["identity"][agent_id] = ident
+    if signed_in is None:
+        signed_in = _brindle_signed_in()
+    if not signed_in and agent_id not in state["unowned"]:
+        state["unowned"].append(agent_id)
+
+
+def _adopt_into(state: dict, ident: str, signed_in: bool = True) -> list[str]:
+    """``adopt`` on a loaded ``state``; the caller saves it."""
+    ids = list(state["unowned"])
+    for aid in ids:
+        state["identity"][aid] = ident
+    if signed_in:
+        state["unowned"] = []
+    return ids
+
+
+def adopt(ident: str, signed_in: bool = True) -> list[str]:
+    """Give the agents recorded while no one was signed in to brindle to
+    ``ident``, the Claude identity of the account that just signed in, so they
+    aren't locked to the identity they happened to launch under. Once adopted
+    they're that account's: they lock when another identity signs in, like any
+    other. ``signed_in`` False (a setup applied with no brindle login) moves
+    them to ``ident`` but leaves them unowned. Returns the ids. Never raises."""
+    try:
+        if not isinstance(ident, str) or not ident:
+            return []
+        state = _load()
+        ids = _adopt_into(state, ident, signed_in)
+        if ids:
+            _save(state)
+        return ids
+    except Exception:  # noqa: BLE001 - a sign-in never fails over this
+        return []
+
+
 def record_launch(agent) -> None:
     """Remember the identity ``agent`` launches under, so a later sign-in as
     someone else never resumes its conversation. Never raises."""
@@ -175,7 +226,7 @@ def record_launch(agent) -> None:
             return
         state = _load()
         if agent.id not in state["identity"]:   # a resume keeps the identity it first ran under
-            state["identity"][agent.id] = got[0].ident
+            _record(state, agent.id, got[0].ident)
             _save(state)
     except Exception:  # noqa: BLE001 - a launch never fails over this
         pass
@@ -222,6 +273,7 @@ def run(db) -> list[str]:
     for aid in list(state["identity"]):
         if db.get_agent(aid) is None:
             state["identity"].pop(aid)
+    state["unowned"] = [aid for aid in state["unowned"] if aid in state["identity"]]
     running = _running(db)
     done: list[str] = []
     wanted = set(running) | {e["provider"] for e in state["paused"].values()}
@@ -272,9 +324,19 @@ def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str
                       f"{name} is signed out. Run `brindle login` or `brindle doctor --fix` "
                       "(or the CLI's own login) and they resume on their own.")
     if res.ident and not res.problem:
+        signed_in = None
         for a in running:   # launched before identities were recorded; never under a mismatch
             if a.id not in state["identity"]:
-                state["identity"][a.id] = res.ident
+                if signed_in is None:
+                    signed_in = _brindle_signed_in()
+                _record(state, a.id, res.ident, signed_in)
+        if provider == "claude" and state["unowned"]:
+            # The sign-in's own adopt can miss (its check undetermined): the
+            # first clear identity under a brindle login adopts them instead.
+            if signed_in is None:
+                signed_in = _brindle_signed_in()
+            if signed_in:
+                _adopt_into(state, res.ident)
     if res.problem and enforce:
         return _pause(db, state, provider, running, f"{name} signed in as the wrong identity",
                       f"{name}'s sign-in doesn't match the org policy ({res.problem}) and the policy "

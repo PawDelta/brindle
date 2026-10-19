@@ -21,7 +21,8 @@ import time
 import uuid
 from types import SimpleNamespace
 
-from brindle import cloud_credential, company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
+from brindle import cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
+from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
@@ -286,15 +287,18 @@ plan is approved; if it comes back with feedback, revise it and call
 
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
-                           provider, headless: bool, plan_first: bool = False) -> str:
+                           provider, headless: bool, plan_first: bool = False,
+                           decisions: str = "", chunks: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
-    ``task`` plus its finish line, the WORKER_FOOTER reminder to report, and
-    (for an interactive Claude worker with a finish line) the ``/goal``
-    wrapper. Used at spawn time, and again by ``resume`` to rebuild it when a
-    paused worker's CLI session can't be resumed and must restart fresh."""
+    ``task``, the ``decisions`` block that covers its files, its finish line,
+    the WORKER_FOOTER reminder to report, and (for an interactive Claude
+    worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
+    again by ``resume`` to rebuild it (decisions from the brief's receipt)
+    when a paused worker's CLI session can't be resumed and must restart fresh."""
     from brindle import autopilot as pilot
 
-    prompt = task
+    prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions),
+                       Block(DOCUMENT_CHUNKS, chunks)])
     if done_when:
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
@@ -326,9 +330,11 @@ def spawn(
     plan_first: bool = False,
     review_sha: str | None = None,
     claim_goals: bool = True,
+    files: list[str] | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
-    finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
+    finish line run it as a Claude Code ``/goal``; their brief carries the
+    accepted decisions covering ``files``. With ``autopilot``, the
     agent is a session root that drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
@@ -336,6 +342,10 @@ def spawn(
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
     profile = load_profile(profile_name, ws.repo_root)
+    if (profile.name == "coordinator") != (mode == "coordinator"):
+        # Only the sweep starts a coordinator (brindle.coordinator.wake).
+        raise AgentError("the coordinator profile only runs as the repo's coordinator, which "
+                         "brindle starts itself; pick another profile")
     hosted = local_fallback(profile, ws.repo_root)   # its local model isn't up
     if hosted:
         profile_name, profile = hosted, load_profile(hosted, ws.repo_root)
@@ -366,8 +376,12 @@ def spawn(
         full = f"{profile.prompt.strip()}\n\n{rules}".strip() if rules else profile.prompt
         prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
+        from brindle import codemap
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
-                                        plan_first=plan_first)
+                                        plan_first=plan_first,
+                                        decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
+                                        chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
+                                                                      codemap.graph_path(ws)))
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
@@ -448,8 +462,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.
-    rules = "\n\n".join(p for p in (rules_prompt(load_rule_packs(profile, ws.repo_root)),
-                                    guardrails.scope_prompt(profile)) if p)
+    rules = assemble([Block(TASK_AND_RULES, rules_prompt(load_rule_packs(profile, ws.repo_root))),
+                      Block(TASK_AND_RULES, guardrails.scope_prompt(profile))])
     if rules:
         profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{rules}".strip())
     cfg = load_repo_config(ws.repo_root)
@@ -462,15 +476,12 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if agent.mode == "interactive":
         from brindle import codemap, repos
 
-        note = codemap.guidance(ws)
-        if note:
-            profile = replace(profile, prompt=f"{profile.prompt}\n\n{note}".strip())
         repo_map = codemap.supervisor_map(ws) if autopilot_on or agent.profile == "supervisor" else None
-        if repo_map:
-            profile = replace(profile, prompt=f"{profile.prompt}\n\n{repo_map}".strip())
-        attached = repos.guidance(db, agent.id)   # a session root's attached repos
-        if attached:
-            profile = replace(profile, prompt=f"{profile.prompt}\n\n{attached}".strip())
+        extra = assemble([Block(TASK_AND_RULES, (text or "").rstrip()) for text in (
+            codemap.guidance(ws), repo_map, repos.guidance(db, agent.id))]   # attached repos: a session root's
+            + [Block(OTHER_SESSIONS, knowledge.other_sessions_block(db, knowledge.repo_key(ws.repo_root), agent.id))])
+        if extra:
+            profile = replace(profile, prompt=f"{profile.prompt}\n\n{extra}".strip())
     if agent.headless:
         profile = replace(profile, headless=True)
     # An org's managed models (Enterprise): a profile pointing elsewhere is
@@ -1156,6 +1167,7 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
             tmux.kill_session(session)
     if stop_local_models:
         _stop_local_models(db)
+    knowledge.note(db, root_id, knowledge.PAUSE)
     return paused
 
 
@@ -1253,7 +1265,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
             # it gets decorated a second time here; harmless, if redundant.
             prompt = decorate_worker_prompt(
                 a.task, a.id, ws, a.done_when, provider, bool(a.headless),
-                plan_first=bool(a.plan_first) and a.plan_state != "approved") + RESUME_NOTE
+                plan_first=bool(a.plan_first) and a.plan_state != "approved",
+                decisions=knowledge.replay_decisions(db, a.id),
+                chunks=knowledge.replay_chunks(db, a.id)) + RESUME_NOTE
         else:
             prompt = (a.task + RESUME_NOTE) if a.task else None
         if a.dismissed_at is not None:
@@ -1261,6 +1275,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         _launch(db, a, ws, prompt=prompt, resume=ref,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
+    if any(a.id == root_id for a in resumed):
+        knowledge.note(db, root_id, knowledge.RESUME)
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:
@@ -2177,12 +2193,16 @@ def delegate(
     branch: str | None = None,
     done_when: str | None = None,
     plan_first: bool | None = None,
+    start: str | None = None,
+    files: list[str] | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker. ``plan_first`` (None: the repo's ``plan_first`` config)
-    makes it get a plan approved before it may edit. With ``isolate``, the worker gets a new worktree whose
+    makes it get a plan approved before it may edit; ``files`` picks the
+    decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
     branch starts from the caller's current branch, so it sees the caller's
-    committed work, and nobody edits the same files. Refuses beyond the
-    repo's ``max_agents`` workers running at once."""
+    committed work, and nobody edits the same files; ``start`` names another
+    commit to start it from (it still merges into the caller's branch).
+    Refuses beyond the repo's ``max_agents`` workers running at once."""
     from brindle import autopilot as pilot
     from brindle import repos
     from brindle.config import load_repo_config
@@ -2213,7 +2233,7 @@ def delegate(
         merge_into = load_repo_config(caller_ws.repo_root).merge_into
         base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
         branch = branch or _branch_from_task(profile, task, new_id()[:4])
-        start = base if git.branch_exists(caller_ws.repo_root, base) else "HEAD"
+        start = start or (base if git.branch_exists(caller_ws.repo_root, base) else "HEAD")
         created = workspaces.create(
             db, caller_ws.path, branch, base, fetch=False, start=start,
             reuse_registered=True,
@@ -2228,7 +2248,7 @@ def delegate(
     # the new pane for up to 30 seconds.
     agent = spawn(
         db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
-        done_when=done_when, background_setup=True, plan_first=bool(plan_first),
+        done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
     )
     from brindle import events
 
@@ -2978,7 +2998,11 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))
-        if agent.mode == "interactive" and not db.recently_delivered(agent_id, prompt):
+        # brindle's own reminders also arrive as prompts, possibly wrapped or
+        # sent without being recorded as delivered (the unread-mail one): any
+        # prompt carrying brindle's tag is not the user speaking.
+        if (agent.mode == "interactive" and "[brindle" not in prompt
+                and not db.recently_delivered(agent_id, prompt)):
             from brindle import autopilot as pilot
 
             pilot.user_spoke(db, agent)
