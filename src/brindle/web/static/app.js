@@ -94,7 +94,7 @@ function render(snap) {
 
 // -- chat: pick an agent (the supervisor by default), read it, message it ----
 
-const chat = { agent: null, cursor: 0, busy: false, sending: false };
+const chat = { agent: null, cursor: 0, gen: 0, busy: false, sending: false };
 
 function updateChatAgents(snap) {
   const select = document.getElementById("chat-agent");
@@ -115,19 +115,22 @@ function updateChatAgents(snap) {
 function switchChatAgent(id) {
   chat.agent = id;
   chat.cursor = 0;
+  chat.gen += 1;
+  chat.busy = false;
   document.getElementById("chat-log").replaceChildren();
   pollChat();
 }
 
 async function pollChat() {
-  const id = chat.agent;
+  const id = chat.agent, gen = chat.gen;
   if (!id || chat.busy) return;
   chat.busy = true;
   try {
     const resp = await fetch("api/agents/" + encodeURIComponent(id) + "/transcript?after=" + encodeURIComponent(chat.cursor),
       { credentials: "same-origin" });
-    if (!resp.ok || id !== chat.agent) return;
+    if (!resp.ok || gen !== chat.gen || id !== chat.agent) return;
     const data = await resp.json();
+    if (gen !== chat.gen || id !== chat.agent) return;
     const log = document.getElementById("chat-log");
     const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
     if (data.reset) log.replaceChildren();
@@ -137,7 +140,7 @@ async function pollChat() {
   } catch (e) {
     // the main poll shows connection errors
   } finally {
-    chat.busy = false;
+    if (gen === chat.gen) chat.busy = false;
   }
 }
 
@@ -145,18 +148,20 @@ async function sendChat(event) {
   event.preventDefault();
   const box = document.getElementById("chat-text");
   const note = document.getElementById("chat-note");
-  const text = box.value.trim();
-  if (!text || !chat.agent || chat.sending) return;
+  const raw = box.value;
+  const text = raw.trim();
+  const id = chat.agent, gen = chat.gen;
+  if (!text || !id || chat.sending) return;
   chat.sending = true;
   try {
-    const resp = await fetch("api/agents/" + encodeURIComponent(chat.agent) + "/message", {
+    const resp = await fetch("api/agents/" + encodeURIComponent(id) + "/message", {
       method: "POST", credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || "HTTP " + resp.status);
-    box.value = "";
+    if (box.value === raw && chat.agent === id && chat.gen === gen) box.value = "";
     note.textContent = data.status;
     pollChat();
   } catch (e) {
