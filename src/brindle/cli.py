@@ -333,7 +333,7 @@ def start(
 
         live = sessions.live(db, ws.repo_root)
         if live and attach and not yes and sys.stdin.isatty():
-            got = _ask_about_running(live, provider)
+            got = _ask_about_running(live, provider, here=ws.id)
             if got is None:
                 raise typer.Exit(0)
             choice, picked = got
@@ -579,19 +579,21 @@ def _running_session(db: DB, ws: Workspace):
     return live[0] if live else None
 
 
-def _ask_about_running(live: list, wanted: Optional[str] = None):
+def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[str] = None):
     """Pick among the repo's live sessions (any worktree): open one, start a
     new session in its own worktree, or pause one and start fresh. Returns
     ``(choice, session)`` with choice "o", "n" or "p", or None when cancelled.
     ``wanted`` is the CLI asked for with -s: Enter on a session that runs on
-    another one starts fresh instead, since opening it wouldn't give that."""
+    another one starts fresh instead, since opening it wouldn't give that.
+    ``here`` is the current checkout's workspace id: its session starts highlighted."""
     from brindle import picker
 
     rows = [f"{s.root.id}  {s.goal or '(no goal yet)'}  {s.branch}  {_ago(s.age)}"
             + (f"  {s.workers} worker(s) running" if s.workers else "") for s in live]
     differs = [bool(wanted) and wanted != picker.PICK and wanted != s.root.provider for s in live]
     got = picker.pick_row("Sessions running in this repo:", rows,
-                          {"o": "open", "n": "new session in its own worktree", "p": "pause it and start fresh"})
+                          {"o": "open", "n": "new session in its own worktree", "p": "pause it and start fresh"},
+                          at=next((i for i, s in enumerate(live) if s.workspace.id == here), 0))
     if got is None:
         return None
     k, i = got
@@ -602,10 +604,18 @@ def _ask_about_running(live: list, wanted: Optional[str] = None):
 
 def _ask_about_paused(db: DB, available: list):
     """Pick the paused session to resume (newest first); None to cancel."""
-    from brindle import picker, sessions
+    from brindle import picker
 
-    rows = [f"{s.root.id}  {sessions.goal_line(db, s.root) or '(no goal yet)'}  "
-            + _describe(s).split("  ", 1)[1] for s in available]
+    rows = []
+    for s in available:
+        ap = db.get_autopilot(s.root.id)
+        goal = next((ln.strip() for ln in (ap.goal if ap and ap.goal else "").splitlines() if ln.strip()), "")
+        goal = goal if len(goal) <= 60 else goal[:59] + "…"
+        workers = s.members[1:]
+        running = sum(1 for m in workers if m.status == "running")
+        branches = ", ".join(s.branches[:3]) + (" …" if len(s.branches) > 3 else "")
+        rows.append(f"{s.root.id}  {goal or '(no goal yet)'}  paused {_ago(time.time() - s.paused_at)} ago  "
+                    f"{branches or '-'}  {running}/{len(workers)} workers")
     got = picker.pick_row("Paused sessions:", rows, {})
     return None if got is None else available[got[1]]
 
@@ -1366,14 +1376,16 @@ def _kb_repo() -> tuple[str, str]:
 
 @kb_add_app.command("folder")
 def kb_add_folder(path: Path = typer.Argument(..., help="A folder of Markdown or text documents.")) -> None:
-    """Add a folder as a source; `brindle kb sync` indexes it."""
+    """Add a folder as a source and index it."""
     from brindle import kb
 
     if not path.expanduser().is_dir():
         _fail(f"not a folder: {path}")
-    _, key = _kb_repo()
-    source = kb.add_source(DB(), key, kb.FOLDER, str(path))
-    typer.echo(f"added {source[:8]}: run `brindle kb sync` to index it")
+    db = DB()
+    repo_root, key = _kb_repo()
+    source = kb.add_source(db, key, kb.FOLDER, str(path))
+    typer.echo(f"added {source[:8]}")
+    _kb_sync_sources(db, repo_root, [source])
 
 
 @kb_app.command("list")
@@ -1384,7 +1396,8 @@ def kb_list() -> None:
     _, key = _kb_repo()
     rows = kb.sources(DB(), key)
     for s in rows:
-        typer.echo(f"{s['id'][:8]}  {s['kind']}  {s['mode']}  {s['docs']} docs  {s['scope']}")
+        typer.echo(f"{s['id'][:8]}  {s['kind']}  {s['mode']}  {s['docs']} docs  "
+                   f"{s['quarantined']} quarantined  {s['scope']}")
     if not rows:
         typer.echo("no sources: add one with `brindle kb add folder <path>`")
 
@@ -1392,7 +1405,7 @@ def kb_list() -> None:
 @kb_app.command("sync")
 def kb_sync(source: Optional[str] = typer.Argument(None, help="A source id or folder; default every indexed source.")) -> None:
     """Index new and changed documents and drop the ones that are gone."""
-    from brindle import codemap, kb
+    from brindle import kb
 
     db = DB()
     repo_root, key = _kb_repo()
@@ -1401,6 +1414,12 @@ def kb_sync(source: Optional[str] = typer.Argument(None, help="A source id or fo
             s["id"] for s in kb.sources(db, key) if s["mode"] == "indexed"]
     except KeyError:
         _fail(f"no such source: {source}")
+    _kb_sync_sources(db, repo_root, ids)
+
+
+def _kb_sync_sources(db: DB, repo_root: str, ids: list[str]) -> None:
+    from brindle import codemap, kb
+
     graph = codemap.graph_path(repo_root)
     for source_id in ids:
         try:

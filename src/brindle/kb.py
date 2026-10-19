@@ -382,10 +382,13 @@ def _index(c, source_id: str, doc: _Doc, chunks, names: dict[str, list[str]]) ->
 
 
 def sources(db: DB, repo_key: str) -> list[dict]:
-    """``repo_key``'s sources, oldest first, each with its live document count."""
+    """``repo_key``'s sources, oldest first, each with its live document count
+    and the number of its live documents' quarantined chunks."""
     return [dict(r) for r in db.conn.execute(
-        "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned)"
-        " AS docs FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at", (repo_key,))]
+        "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned) AS docs,"
+        " (SELECT count(*) FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id WHERE d.source_id = s.id"
+        " AND NOT d.tombstoned AND c.quarantined IS NOT NULL) AS quarantined"
+        " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at", (repo_key,))]
 
 
 def find_source(db: DB, repo_key: str, ref: str) -> str:

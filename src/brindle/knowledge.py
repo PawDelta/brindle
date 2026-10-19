@@ -176,7 +176,8 @@ def other_sessions_block(db: DB, repo_key: str, root_id: str, cap_tokens: int = 
         files = list(s["paths"]) + [f for fs, _ in s["running"] for f in fs]
         working = f" - running {', '.join(dict.fromkeys(files))}" if files else (
             f" - {len(s['running'])} worker(s) running" if s["running"] else "")
-        lines.append(f'session {s["session"][:4]} ({_age(s["age"])}): goal "{s["goal"]}"{working}')
+        goal = f'goal "{s["goal"]}"' if s["goal"] else "no goal yet"
+        lines.append(f'session {s["session"][:4]} ({_age(s["age"])}): {goal}{working}')
     if not lines:
         return ""
     text = "Other sessions in this repo:\n" + "\n".join(lines)

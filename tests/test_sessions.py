@@ -146,7 +146,8 @@ def test_continue_picker_resumes_chosen(db, root, monkeypatch):
     add(db, root, "old", since=100)
     resumed = []
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(picker, "pick_row", lambda title, rows, actions, **kw: ("enter", 1))
+    shown = []
+    monkeypatch.setattr(picker, "pick_row", lambda title, rows, actions, **kw: shown.extend(rows) or ("enter", 1))
     monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(rid) or [])
     monkeypatch.setattr(agents, "is_alive", lambda *a, **k: False)
     monkeypatch.setattr(cli, "_check_updates", lambda *a: None)
@@ -155,6 +156,7 @@ def test_continue_picker_resumes_chosen(db, root, monkeypatch):
     monkeypatch.chdir(root.path)
     cli.continue_cmd(session_id=None, attach=True)
     assert resumed == ["old"]
+    assert all("(no goal yet)" in r and "0/0 workers" in r and "task" not in r for r in shown)
 
 
 def test_sessions_cmd_lists_a_session_with_workers(db, root, repo, monkeypatch):

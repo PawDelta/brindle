@@ -67,6 +67,9 @@ def test_other_sessions_block_and_who_is_working(db, repo, monkeypatch):
     assert "goal of intent" in block and "goal of tasked" in block
     assert "goal of neither" not in block and "goal of me" not in block
 
+    db.update_agent("intent", task="")
+    assert 'goal ""' not in knowledge.other_sessions_block(db, key, "me")
+
     monkeypatch.setenv("BRINDLE_AGENT_ID", "me")
     assert mcp_server.who_is_working(paths=["src/x.py"]).count("session ") == 1
     assert "tasked" in mcp_server.who_is_working(paths=["src/x.py"])
