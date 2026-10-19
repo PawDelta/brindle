@@ -44,7 +44,7 @@ RESULT_CHARS = 2000
 CAP_PER_REPO = 5000
 
 KINDS = ("worker_result", "review", "merge", "check", "milestone", "permission", "learned_rules",
-         "escape", "graph_query", "archived")
+         "escape", "graph_query", "archived", "coordinator")
 
 # Agent columns left out of the archive: live plumbing, and the inbox token,
 # which is a credential.

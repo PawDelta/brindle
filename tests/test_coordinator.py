@@ -63,17 +63,19 @@ def test_events_wake_one_coordinator(db, repo, monkeypatch):
     _repo_with_sessions(db, repo, monkeypatch, coord=False)
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps({"coordinator": True}))
-    started = []
+    started, prompts = [], []
 
     def spawn(db, ws, profile, *, prompt, mode, **kw):
         a = Agent(f"c{len(started)}", ws.id, profile, "claude", None, mode, "processing", "",
                   None, time.time())
         db.add_agent(a)
         started.append(a.id)
+        prompts.append(prompt)
         return a
 
     monkeypatch.setattr(agents, "spawn", spawn)
     monkeypatch.setattr(agents, "close", lambda db, aid, panes=None: db.set_status(aid, "done"))
+    monkeypatch.setattr(agents, "close_later", lambda aid, delay=5.0: None)
     key = knowledge.repo_key(repo)
     for s in ("a", "b"):
         knowledge.append(db, key, knowledge.INTENT, {"summary": s, "paths": ["src/x.py"]}, session=s)
@@ -83,11 +85,23 @@ def test_events_wake_one_coordinator(db, repo, monkeypatch):
     knowledge.append(db, key, knowledge.INTENT, {"summary": "a2", "paths": []}, session="a")
     coordinator.wake(db)                                          # one is running: none starts
     assert started == ["c0"]
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "c0")
+    mcp_server.report_result("nothing to do yet")
+    coordinator.wake(db)                    # reported: the next one remembers its report
+
+    # Hung past its lifetime (still "processing"): closed, and what it was
+    # woken for goes to a fresh one.
+    coordinator.wake(db, now=time.time() + coordinator.LIFETIME + 1)
+    assert started == ["c0", "c1", "c2"] and db.get_agent("c1").status == "done"
+    assert '"a2"' in prompts[2] and "nothing to do yet" in prompts[1]
 
     monkeypatch.chdir(repo)
+    log = CliRunner().invoke(cli.app, ["coordinator", "log"])
+    assert "nothing to do yet" in log.output
+    assert [h.result for h in db.list_history(kind="coordinator")] == ["nothing to do yet"]
     assert CliRunner().invoke(cli.app, ["coordinator", "stop"]).exit_code == 0
     coordinator.wake(db)                                          # the unseen event stays unwoken
-    assert started == ["c0"] and db.get_agent("c0").status == "done"
+    assert started == ["c0", "c1", "c2"] and db.get_agent("c2").status == "done"
 
 
 def test_undo_restores_queue(db, repo, monkeypatch):
