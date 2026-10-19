@@ -68,7 +68,7 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     assert "SCOPE EXCEPTION: Do not refactor legacy database connector." in prompt   # past 2000 chars
 
 
-def test_submit_review_succeeds_for_completion_auditor(db, ws, monkeypatch):
+def test_submit_review_succeeds_for_completion_auditor(db, ws, monkeypatch, fake_agent_cli):
     """The one test here that launches for real: an autopilot supervisor with
     a task and its auditor, two Claude processes on a fresh tmux server."""
     server = f"brindle-test-{os.getpid()}-audit"

@@ -215,7 +215,7 @@ def _usage_line(msg_id, n):
                   "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}) + "\n"
 
 
-def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, monkeypatch):
+def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, monkeypatch, fake_agent_cli):
     from brindle import git
 
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
@@ -257,7 +257,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
 # -- /clear and other transcript resets ---------------------------------------
 
 
-def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db, repo, tmp_path, monkeypatch):
+def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db, repo, tmp_path, monkeypatch, fake_agent_cli):
     """After /clear, Claude Code writes a brand-new transcript file. Even
     though it can grow past the size of the old one, its usage has nothing
     to do with the agent's previous mark: the whole thing is new."""

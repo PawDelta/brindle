@@ -5,6 +5,8 @@ from brindle.config import RepoConfig
 from brindle.db import Workspace, Task
 from brindle import agents
 
+pytestmark = pytest.mark.usefixtures("fake_agent_cli")
+
 
 def test_max_weight_ceiling_caps_heavy_to_medium(db, repo, monkeypatch):
     cfg = RepoConfig(max_weight="medium")
