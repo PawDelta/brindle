@@ -22,7 +22,7 @@ import uuid
 from types import SimpleNamespace
 
 from brindle import cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
-from brindle.assembler import TASK_AND_RULES, Block, assemble
+from brindle.assembler import OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
@@ -465,7 +465,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
 
         repo_map = codemap.supervisor_map(ws) if autopilot_on or agent.profile == "supervisor" else None
         extra = assemble([Block(TASK_AND_RULES, (text or "").rstrip()) for text in (
-            codemap.guidance(ws), repo_map, repos.guidance(db, agent.id))])   # attached repos: a session root's
+            codemap.guidance(ws), repo_map, repos.guidance(db, agent.id))]   # attached repos: a session root's
+            + [Block(OTHER_SESSIONS, knowledge.other_sessions_block(db, knowledge.repo_key(ws.repo_root), agent.id))])
         if extra:
             profile = replace(profile, prompt=f"{profile.prompt}\n\n{extra}".strip())
     if agent.headless:

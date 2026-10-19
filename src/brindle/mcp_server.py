@@ -11,7 +11,7 @@ import time
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import BaseModel, Field
 
-from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, autopilot, codex_hook, cost_estimate, git, history, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
@@ -686,6 +686,25 @@ def list_agents(repo: str | None = None) -> str:
         return "\n".join(lines) or "No agents."
 
     return _per_repo(db, caller, here, repo, render)
+
+
+@mcp.tool()
+def who_is_working(paths: list[str] | None = None, query: str | None = None) -> str:
+    """List the other sessions in this repo with a live intent or running
+    tasks: their goal and the files they are working on. paths (globs ok):
+    only sessions working on matching files; query: only sessions whose goal
+    or files contain that text."""
+    db = DB()
+    caller, here = _caller(db)
+    root_id = _root_id(db, caller)
+    if root_id is None:
+        return "Not running as a brindle agent."
+    found = knowledge.who_is_working(db, knowledge.repo_key(here.repo_root), root_id, paths, query)
+    return "\n".join(
+        f'session {s["session"]} ({s["branch"]}): goal "{s["goal"]}" - '
+        + (", ".join(dict.fromkeys([*s["paths"], *(f for fs, _ in s["running"] for f in fs)]))
+           or f'{len(s["running"])} worker(s) running')
+        for s in found) or "No other sessions match."
 
 
 @mcp.tool()

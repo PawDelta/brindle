@@ -103,6 +103,70 @@ def intents(db: DB, repo_key: str) -> list[dict]:
     return [{**dict(r), "paths": json.loads(r["paths"])} for r in rows]
 
 
+def other_sessions(db: DB, repo_key: str, root_id: str) -> list[dict]:
+    """Live sessions in ``root_id``'s repo other than ``root_id`` that have a
+    live intent or a running task, newest first. Each is ``{session, goal, age,
+    branch, paths, running}`` where ``running`` lists ``(files, branch)`` per
+    running task and ``paths`` is the announced intent's paths."""
+    from brindle import autopilot, sessions, tasks
+
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if ws is None:
+        return []
+    live = {i["session_root"]: i for i in intents(db, repo_key) if i["status"] == "live"}
+    running: dict[str, list[tuple[list[str], str]]] = {}
+    for task, agent, task_ws in tasks.running_tasks(db, ws.repo_root):
+        running.setdefault(autopilot.root_of(db, agent.id), []).append(
+            (json.loads(task.files) if task.files else [], task_ws.branch if task_ws else ""))
+    out = []
+    for s in sessions.live(db, ws.repo_root):
+        sid = s.root.id
+        if sid == root_id or (sid not in live and sid not in running):
+            continue
+        out.append({"session": sid, "goal": s.goal, "age": s.age, "branch": s.branch,
+                    "paths": live[sid]["paths"] if sid in live else [],
+                    "running": running.get(sid, [])})
+    return out
+
+
+def _age(seconds: float) -> str:
+    return f"{int(seconds // 3600)}h" if seconds >= 3600 else f"{int(seconds // 60)}m"
+
+
+def other_sessions_block(db: DB, repo_key: str, root_id: str, cap_tokens: int = 600) -> str:
+    """The "Other sessions in this repo" text for a supervisor's context, one
+    line per session, cut to about ``cap_tokens`` tokens."""
+    lines = []
+    for s in other_sessions(db, repo_key, root_id):
+        files = list(s["paths"]) + [f for fs, _ in s["running"] for f in fs]
+        working = f" - running {', '.join(dict.fromkeys(files))}" if files else (
+            f" - {len(s['running'])} worker(s) running" if s["running"] else "")
+        lines.append(f'session {s["session"][:4]} ({_age(s["age"])}): goal "{s["goal"]}"{working}')
+    if not lines:
+        return ""
+    text = "Other sessions in this repo:\n" + "\n".join(lines)
+    return text if len(text) <= cap_tokens * 4 else text[:cap_tokens * 4 - 1] + "…"
+
+
+def who_is_working(db: DB, repo_key: str, root_id: str, paths: list[str] | None = None,
+                   query: str | None = None) -> list[dict]:
+    """:func:`other_sessions` narrowed to those whose intent or running-task
+    files overlap ``paths`` (globs allowed), or whose goal or files contain
+    ``query``; with neither, all of them."""
+    from brindle import tasks
+
+    out = []
+    for s in other_sessions(db, repo_key, root_id):
+        files = list(s["paths"]) + [f for fs, _ in s["running"] for f in fs]
+        if paths and not any(tasks._glob_match(p, f) for p in paths for f in files):
+            continue
+        if query and not any(query.lower() in t.lower() for t in [s["goal"], *files]):
+            continue
+        out.append(s)
+    return out
+
+
 def record_receipt(db: DB, task_id: str, items) -> None:
     """Record what a task's brief contained: ``(item_kind, item_id, content_hash)``
     triples."""
