@@ -30,6 +30,11 @@
   .ws { padding: 8px 0; border-top: 1px solid var(--line); }
   .ws:first-of-type { border-top: 0; }
   .ws-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+  .ws-select { font: inherit; font-weight: 600; color: inherit; background: transparent;
+               border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+  .ws-select[aria-pressed="true"] { color: var(--busy); }
+  #diff pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 400px; overflow: auto; }
+  #diff h3 { font-size: 13px; margin-bottom: 4px; }
   .agent { display: flex; gap: 8px; padding: 2px 0 2px 14px; flex-wrap: wrap; }
   .status { font-weight: 600; }
   .s-ok { color: var(--ok); } .s-busy { color: var(--busy); }
@@ -81,7 +86,7 @@
   <!-- Diff panel: filled by web/diff.py's routes and its own script. -->
   <section id="diff-panel">
     <h2>Diff</h2>
-    <div id="diff" class="panel-slot" data-panel="diff"></div>
+    <div id="diff" data-panel="diff" aria-live="polite">Select a workspace to see its changes, reviews and checks.</div>
   </section>
 </main>
 <script src="app.js"></script>
