@@ -724,6 +724,8 @@ def record_decision(topic: str, decision: str, rationale: str, paths: list[str] 
     db = DB()
     caller, here = _caller(db)
     root_id = _root_id(db, caller)
+    if caller is None or caller.id != root_id:   # workers read decisions, never write them
+        return "Not recorded: only a session's supervisor can record decisions."
     key = knowledge.repo_key(here.repo_root)
     try:
         made, existing = knowledge.record_decision(db, key, topic, decision, rationale, paths,

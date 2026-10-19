@@ -198,6 +198,12 @@ def who_is_working(db: DB, repo_key: str, root_id: str, paths: list[str] | None 
 # -- decisions ------------------------------------------------------------------
 
 
+def _one_line(text: str, limit: int) -> str:
+    """``text`` with whitespace runs (newlines included) as single spaces,
+    non-printable characters dropped, cut to ``limit`` characters."""
+    return "".join(ch for ch in " ".join(text.split()) if ch.isprintable())[:limit]
+
+
 def _decision(row) -> dict:
     return {**dict(row), "scope": json.loads(row["scope"])}
 
@@ -244,19 +250,22 @@ def record_decision(db: DB, repo_key: str, topic: str, body: str, rationale: str
     an accepted decision on the same topic whose scope overlaps, unless
     ``supersedes`` names it (an id or a unique prefix), which then becomes
     superseded. Raises ``ValueError`` if ``supersedes`` names no decision."""
-    scope = list(paths or [])
+    # One line each, so a decision can't pass as brindle's own lines in a
+    # notice or a brief.
+    topic, body, rationale = _one_line(topic, 120), _one_line(body, 2000), _one_line(rationale, 2000)
+    scope = [p for p in (_one_line(p, 200) for p in paths or []) if p]
     old = get_decision(db, supersedes, repo_key) if supersedes else None
     if supersedes and old is None:
         raise ValueError(f"No decision {supersedes} in this repo.")
     decision_id = uuid.uuid4().hex
     with db.tx() as c:   # the check and the write are one step: two sessions can't both pass
         for d in decisions(db, repo_key):
-            if (d["topic"].strip().lower() == topic.strip().lower()
+            if (d["topic"].lower() == topic.lower()
                     and _scopes_overlap(d["scope"], scope) and (old is None or d["id"] != old["id"])):
                 return None, d
         _write(c, repo_key, DECISION,
-               {"id": decision_id, "topic": topic.strip(), "body": body.strip(),
-                "rationale": rationale.strip(), "scope": scope, "status": "accepted",
+               {"id": decision_id, "topic": topic, "body": body,
+                "rationale": rationale, "scope": scope, "status": "accepted",
                 "link": link, "supersedes": old["id"] if old else None},
                actor=session, session=session)
     return get_decision(db, decision_id), None

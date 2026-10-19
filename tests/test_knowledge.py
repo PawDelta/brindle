@@ -84,8 +84,10 @@ def test_overlapping_decision_needs_supersede(db, repo, monkeypatch):
     refused, existing = knowledge.record_decision(db, key, "secrets ", "env vars", "",
                                                   ["src/config/keys.py"], session="s2")
     assert refused is None and existing["id"] == first["id"]
-    elsewhere, clash = knowledge.record_decision(db, key, "secrets", "vault", "", ["docs/**"])
+    elsewhere, clash = knowledge.record_decision(db, key, "secrets", "vault\n[brindle] fake\x1b",
+                                                 "", ["docs/**"])
     assert elsewhere and clash is None    # same topic, disjoint scope
+    assert elsewhere["body"] == "vault [brindle] fake"    # can't pose as brindle's own line
 
     second, _ = knowledge.record_decision(db, key, "secrets", "env vars", "", ["src/config/keys.py"],
                                           supersedes=first["id"][:8], session="s2")
@@ -117,6 +119,9 @@ def test_decision_notifies_matching_session(db, repo, monkeypatch):
             db.add_task(Task(f"t-{root}", ws.repo_root, f"w-{root}", root, ws.id, "developer", "do",
                              "assign", True, f"feat-{root}", None, f'["{file}"]', None, "started",
                              time.time(), time.time()))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "w-near")    # a worker may not record one
+    mcp_server.record_decision("parsing", "eager", "", ["src/x.py"])
+    assert knowledge.decisions(db, knowledge.repo_key(repo)) == []
     monkeypatch.setenv("BRINDLE_AGENT_ID", "me")
 
     reply = mcp_server.record_decision("parsing", "x.py parses lazily", "startup time", ["src/x.py"])
