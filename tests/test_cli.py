@@ -12,10 +12,17 @@ from conftest import sh
 
 
 @pytest.mark.variant("guards the suite against launching the real agent CLI")
-@pytest.mark.parametrize("argv", [["claude", "--version"], ["/usr/bin/env", "codex"]])
-def test_unmocked_agent_cli_launch_raises(argv):
+@pytest.mark.parametrize("argv, override", [
+    (["claude", "--version"], None),
+    (["/usr/bin/env", "-u", "X", "A=b", "--", "codex"], None),
+    (["/usr/bin/true"], "/usr/bin/true"),
+    (["brindle", "_headless", "abc"], "/usr/bin/true"),
+])
+def test_unmocked_agent_cli_launch_raises(argv, override, monkeypatch):
     import subprocess
 
+    if override:
+        monkeypatch.setenv("BRINDLE_CLAUDE_BIN", override)
     with pytest.raises(AssertionError, match="test_unmocked_agent_cli_launch_raises"):
         subprocess.Popen(argv)
 
