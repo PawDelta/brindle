@@ -523,6 +523,7 @@ def _with_catalog_model(profile: Profile) -> Profile:
         return profile
     from brindle.native import catalog
 
+    catalog.refresh_async()      # background; resolving below reads the cache only
     try:
         found = catalog.resolve(profile.model)
     except catalog.CatalogError as e:

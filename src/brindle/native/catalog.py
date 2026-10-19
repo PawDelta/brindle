@@ -2,15 +2,16 @@
 that name their model as ``model: <provider>/<model>``.
 
 The catalog is cached in ``~/.brindle/models-catalog.json`` and refetched
-once it is older than ``TTL``. It is never fetched in air-gap mode or when
-the network is down: the cache is used (however old), and without one the
-error says so. :func:`resolve` fills the endpoint fields a profile didn't
+once it is older than ``TTL``, in the background: loading a profile never
+touches the network. Air-gap mode never fetches. The cache is used however
+old, and without one the error says so. :func:`resolve` fills the endpoint fields a profile didn't
 set itself from the entry.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -61,34 +62,46 @@ def _download(timeout: float = 15.0) -> dict:
     return data
 
 
+def _fresh() -> bool:
+    try:
+        return time.time() - cache_path().stat().st_mtime < TTL
+    except OSError:
+        return False
+
+
 def load() -> dict:
-    """The catalog: the fresh cache, else a download (written to the cache),
-    else the stale cache. Never downloads in air-gap mode."""
-    path = cache_path()
+    """The cached catalog, however old. Never touches the network (profiles
+    load often); :func:`refresh_async` and :func:`refresh` keep the cache up."""
     cached = _read_cache()
-    if cached is not None:
-        try:
-            fresh = time.time() - path.stat().st_mtime < TTL
-        except OSError:
-            fresh = False
-        if fresh or airgap.enabled():
-            return cached
-    if airgap.enabled():
-        raise CatalogError(f"air-gap mode ({airgap.source()}): the Models.dev catalog isn't fetched and "
-                           f"there is no cached copy at {path}; copy models.dev/api.json there")
+    if cached is None:
+        if airgap.enabled():
+            raise CatalogError(f"air-gap mode ({airgap.source()}): the Models.dev catalog isn't fetched and "
+                               f"there is no cached copy; copy models.dev/api.json to {cache_path()}")
+        raise CatalogError(f"the Models.dev catalog isn't cached yet ({cache_path()}); it is being "
+                           "fetched in the background, so try again in a moment")
+    return cached
+
+
+def refresh() -> bool:
+    """Download the catalog into the cache unless it is fresh or air-gap mode
+    is on. Whether the cache was updated; a failure leaves the old cache."""
+    if airgap.enabled() or _fresh():
+        return False
     try:
         data = _download()
-    except (OSError, ValueError) as e:   # URLError and timeouts are OSErrors
-        if cached is not None:
-            return cached
-        raise CatalogError(f"couldn't fetch the Models.dev catalog ({getattr(e, 'reason', e)}) and "
-                           f"there is no cached copy at {path}") from e
-    try:
+        path = cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data), encoding="utf-8")
-    except OSError:
-        pass
-    return data
+    except (OSError, ValueError):   # URLError and timeouts are OSErrors
+        return False
+    return True
+
+
+def refresh_async() -> None:
+    """:func:`refresh` on a background thread, when the cache is missing or stale."""
+    if airgap.enabled() or _fresh():
+        return
+    threading.Thread(target=refresh, name="models-catalog", daemon=True).start()
 
 
 def resolve(spec: str, catalog: dict | None = None) -> Resolved:
@@ -98,6 +111,13 @@ def resolve(spec: str, catalog: dict | None = None) -> Resolved:
     if not provider_id or not model_id:
         raise CatalogError(f"model {spec!r} isn't of the form <provider>/<model>")
     catalog = load() if catalog is None else catalog
+    try:
+        return _resolve(spec, provider_id, model_id, catalog)
+    except (AttributeError, TypeError, KeyError, IndexError) as e:
+        raise CatalogError(f"Models.dev entry for {spec!r} is malformed ({e!r})") from e
+
+
+def _resolve(spec: str, provider_id: str, model_id: str, catalog: dict) -> Resolved:
     provider = catalog.get(provider_id)
     if not isinstance(provider, dict):
         raise CatalogError(f"Models.dev lists no provider {provider_id!r} (model {spec!r})")
@@ -110,6 +130,8 @@ def resolve(spec: str, catalog: dict | None = None) -> Resolved:
         raise CatalogError(f"Models.dev gives no API URL for provider {provider_id!r}; set base_url")
     api = "anthropic" if "anthropic" in str(provider.get("npm") or "") else "openai"
     env = provider.get("env") or []
+    if not isinstance(env, list):
+        raise TypeError("env is not a list")
     limit = entry.get("limit") or {}
     context = limit.get("context")
     tokens = None

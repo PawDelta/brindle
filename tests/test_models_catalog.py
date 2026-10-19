@@ -1,6 +1,7 @@
 """Native profiles that name a Models.dev model (``model: <provider>/<model>``)."""
 
 import json
+import os
 
 import pytest
 
@@ -62,9 +63,12 @@ def test_an_explicit_base_url_keeps_the_slash_in_the_model(repo):
     assert (p.model, p.base_url) == ("nano-gpt/deepseek/deepseek-v3", "https://openrouter.ai/api/v1")
 
 
-def test_an_unlisted_model_is_a_profile_error(repo):
+def test_an_unlisted_or_malformed_model_is_an_error(repo):
     with pytest.raises(ProfileError, match="no model 'nope'"):
         write_profile(repo, "anthropic/nope")
+    bad = {"p": {"api": "http://h", "env": "KEY", "models": {"m": {"limit": 5}}}}
+    with pytest.raises(catalog.CatalogError, match="malformed"):
+        catalog.resolve("p/m", bad)
 
 
 def test_air_gap_never_fetches_and_uses_the_stale_cache(repo, monkeypatch):
@@ -74,30 +78,31 @@ def test_air_gap_never_fetches_and_uses_the_stale_cache(repo, monkeypatch):
     monkeypatch.setattr(catalog, "_download", no_network)
     monkeypatch.setenv(airgap.ENV, "1")
     cache = catalog.cache_path()
-    import os
     os.utime(cache, (0, 0))                      # long past the TTL
     assert write_profile(repo, "anthropic/claude-x").api == "anthropic"
+    assert catalog.refresh() is False
     cache.unlink()
     with pytest.raises(ProfileError, match="air-gap"):
         write_profile(repo, "anthropic/claude-x")
 
 
-def test_offline_uses_the_stale_cache_else_errors(repo, monkeypatch):
-    def offline(*a, **k):
-        raise OSError("down")
+def test_loading_a_profile_never_downloads(repo, monkeypatch):
+    def no_network(*a, **k):
+        raise AssertionError("downloaded while loading a profile")
 
-    monkeypatch.setattr(catalog, "_download", offline)
-    import os
+    monkeypatch.setattr(catalog, "_download", no_network)
+    kicked = []
+    monkeypatch.setattr(catalog, "refresh_async", lambda: kicked.append(1))
     os.utime(catalog.cache_path(), (0, 0))
     assert write_profile(repo, "anthropic/claude-x").api == "anthropic"
     catalog.cache_path().unlink()
-    with pytest.raises(ProfileError, match="couldn't fetch"):
+    with pytest.raises(ProfileError, match="isn't cached yet"):
         write_profile(repo, "anthropic/claude-x")
+    assert len(kicked) == 2
 
 
-def test_a_stale_cache_is_refetched_and_rewritten(repo, monkeypatch):
-    import os
+def test_refresh_rewrites_a_stale_cache(repo, monkeypatch):
     os.utime(catalog.cache_path(), (0, 0))
     monkeypatch.setattr(catalog, "_download", lambda: {"x": {"api": "http://h/v1", "models": {"m": {}}}})
+    assert catalog.refresh() is True
     assert catalog.resolve("x/m").base_url == "http://h/v1"
-    assert "x" in json.loads(catalog.cache_path().read_text())
