@@ -18,7 +18,7 @@ from __future__ import annotations
 import fnmatch
 import re
 
-READ_ONLY = {"Read", "Glob", "Grep"}
+READ_ONLY = {"Read", "Glob", "Grep", "Diagnostics", "Definition", "References"}
 # brindle's own tools, as the native loop names them (the MCP server's names
 # are the same, prefixed mcp__brindle__).
 BRINDLE_TOOLS = {"report_result", "submit_review", "send_message", "workspace_diff"}

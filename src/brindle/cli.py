@@ -2340,6 +2340,32 @@ def watch(
         agents.dismiss_sidebar(DB(), os.environ.get("TMUX_PANE"))
 
 
+@app.command("web")
+def web_cmd(
+    port: int = typer.Option(0, "--port", help="Port to listen on (default: any free one)."),
+    no_open: bool = typer.Option(False, "--no-open", help="Print the link without opening a browser."),
+) -> None:
+    """This session in your browser, on 127.0.0.1 only: agents, workspaces and milestones.
+
+    The link it prints carries a one-off token; anyone without it is refused."""
+    from brindle import sidebar_follow
+    from brindle.web import server
+
+    try:
+        repo_root = git.main_repo_root(os.getcwd())
+    except git.GitError:
+        repo_root = None
+    db = DB()
+    session = tmux.current_session()
+    root_id = sidebar_follow.root_for_session(db, session) if session else None
+    try:
+        web = server.make_server(repo_root, root_id, port)
+    except OSError as e:
+        _fail(f"can't listen on 127.0.0.1:{port}: {e.strerror or e}")
+    typer.echo(f"brindle web: {web.url}  (Ctrl-C to stop)")
+    server.serve(web, open_browser=not no_open)
+
+
 @app.command()
 def close(
     agent_id: Optional[str] = typer.Argument(None, help="Agent to close (an unambiguous prefix works)."),
