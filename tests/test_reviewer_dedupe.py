@@ -107,8 +107,13 @@ def mcp_review(db, tmp_path, monkeypatch):
     return ws, boss, started, reports, arm
 
 
-@pytest.mark.parametrize("trigger", ["hook", "request"])
-def test_mcp_failure_replaces_reviewer_once_per_commit(db, mcp_review, monkeypatch, trigger):
+@pytest.mark.parametrize("trigger,outcome", [
+    ("hook", "failed"),
+    ("request", "failed"),
+    pytest.param("hook", "completed", marks=pytest.mark.variant(
+        "a delayed recovery helper races with replacement completion")),
+])
+def test_mcp_failure_replaces_reviewer_once_per_commit(db, mcp_review, monkeypatch, trigger, outcome):
     ws, boss, started, reports, arm = mcp_review
     old = arm(agents.request_review(db, boss, ws, "reviewer"))
     if trigger == "hook":
@@ -121,6 +126,15 @@ def test_mcp_failure_replaces_reviewer_once_per_commit(db, mcp_review, monkeypat
     launch_health.recover_reviewer(db, old.id)  # a queued helper lost to an explicit request
     assert agents.request_review(db, boss, ws, "reviewer").id == new.id
     assert len(started) == 2
+
+    if outcome == "completed":
+        monkeypatch.setattr(agents, "finish_review_later", lambda *a: None)
+        agents.submit_review(db, new.id, True, "review complete")
+        launch_health.recover_reviewer(db, old.id)
+        assert len(started) == 2 and reports == []
+        requested = agents.request_review(db, boss, ws, "reviewer")
+        assert requested.id not in (old.id, new.id) and len(started) == 3
+        return
 
     launch_health.check_mcp(db, arm(new))
     launch_health.check_mcp(db, db.get_agent(new.id))

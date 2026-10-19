@@ -471,12 +471,16 @@ def retry_reviewer(db, agent, ws):
     try:
         # Preserve the exact task (focus and check results included), profile,
         # parent and commit, but start a new conversation and MCP connection.
-        return agents.spawn(db, ws, agent.profile, prompt=agent.task, parent_id=agent.parent_id,
-                            mode="review", background_setup=True, review_sha=agent.review_sha)
+        replacement = agents.spawn(db, ws, agent.profile, prompt=agent.task, parent_id=agent.parent_id,
+                                   mode="review", background_setup=True, review_sha=agent.review_sha)
     except Exception as exc:
         raise agents.AgentError(
             f"Reviewer {agent.id} was stopped after its brindle MCP connection failed; "
             f"the automatic retry could not start ({type(exc).__name__}). Check launch configuration.") from exc
+    # This attempt is over once a replacement exists. Keep its failure log for
+    # diagnostics, but never let it compete with later reviews or helpers.
+    db.set_result(agent.id, f"Superseded by reviewer {replacement.id} after MCP startup failed.")
+    return replacement
 
 
 def check_mcp(db, agent) -> None:
@@ -511,7 +515,17 @@ def check_mcp(db, agent) -> None:
 
 
 def recover_reviewer(db, agent_id: str) -> None:
-    """Detached from the broken CLI; request_review serializes replacement."""
+    """Read recovery state under the same lock as replacement publication."""
+    from brindle import agents
+
+    agent = db.get_agent(agent_id)
+    if agent:
+        with agents.review_dispatch_lock(agent.workspace_id):
+            _recover_reviewer(db, agent_id)
+
+
+def _recover_reviewer(db, agent_id: str) -> None:
+    """Detached from the broken CLI; refresh state after acquiring the lock."""
     from brindle import agents, gates
 
     agent = db.get_agent(agent_id)

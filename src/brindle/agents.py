@@ -2501,15 +2501,20 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
         return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
 
 
+def review_dispatch_lock(workspace_id: str):
+    """Share the dispatch lock with recovery's read of the failed agent."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(workspace_id.encode()).hexdigest()[:16])
+
+
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
                    check_summary: str | None = None) -> Agent:
     """Start or reuse a review, replacing an MCP-broken reviewer once."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
-    from brindle import pipeline
-
-    with pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(ws.id.encode()).hexdigest()[:16]):
+    with review_dispatch_lock(ws.id):
         return _request_review(db, caller, ws, profile, focus, cfg, check_summary)
 
 
