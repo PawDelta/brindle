@@ -220,8 +220,10 @@ def scan_document(text: str) -> list[tuple[Chunk, str | None]]:
     for reason, start, end in _signatures(text):
         for n in range(bisect.bisect_right(starts, start) - 1, bisect.bisect_right(starts, max(start, end - 1))):
             flagged.setdefault(n, reason)
-    return [(chunk, next((flagged[n] for n in (*chunk.heading_lines, *chunk.lines) if n in flagged), None))
-            for chunk in chunk_markdown(text)]
+    # The joined heading path is read on its own too, so this whole-document
+    # pass only ever adds quarantines.
+    return [(chunk, next((flagged[n] for n in (*chunk.heading_lines, *chunk.lines) if n in flagged), None)
+             or quarantine_reason(chunk.heading_path)) for chunk in chunk_markdown(text)]
 
 
 def chunk_id(source_id: str, external_id: str, heading_path: str, repeat: int = 0) -> str:
