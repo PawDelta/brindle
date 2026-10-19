@@ -22,6 +22,7 @@ import uuid
 from types import SimpleNamespace
 
 from brindle import cloud_credential, company_identity, company_login, git, keystore, pane_auth, providers, secrets, tmux, workspaces
+from brindle.assembler import TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
@@ -448,8 +449,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.
-    rules = "\n\n".join(p for p in (rules_prompt(load_rule_packs(profile, ws.repo_root)),
-                                    guardrails.scope_prompt(profile)) if p)
+    rules = assemble([Block(TASK_AND_RULES, rules_prompt(load_rule_packs(profile, ws.repo_root))),
+                      Block(TASK_AND_RULES, guardrails.scope_prompt(profile))])
     if rules:
         profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{rules}".strip())
     cfg = load_repo_config(ws.repo_root)
@@ -462,15 +463,11 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if agent.mode == "interactive":
         from brindle import codemap, repos
 
-        note = codemap.guidance(ws)
-        if note:
-            profile = replace(profile, prompt=f"{profile.prompt}\n\n{note}".strip())
         repo_map = codemap.supervisor_map(ws) if autopilot_on or agent.profile == "supervisor" else None
-        if repo_map:
-            profile = replace(profile, prompt=f"{profile.prompt}\n\n{repo_map}".strip())
-        attached = repos.guidance(db, agent.id)   # a session root's attached repos
-        if attached:
-            profile = replace(profile, prompt=f"{profile.prompt}\n\n{attached}".strip())
+        extra = assemble([Block(TASK_AND_RULES, (text or "").rstrip()) for text in (
+            codemap.guidance(ws), repo_map, repos.guidance(db, agent.id))])   # attached repos: a session root's
+        if extra:
+            profile = replace(profile, prompt=f"{profile.prompt}\n\n{extra}".strip())
     if agent.headless:
         profile = replace(profile, headless=True)
     # An org's managed models (Enterprise): a profile pointing elsewhere is
