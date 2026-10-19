@@ -145,6 +145,27 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 @pytest.fixture(autouse=True)
+def no_real_agent_cli(tmp_path, monkeypatch):
+    """A test must never start the real claude/codex in a tmux pane: it would
+    outlive the run as an orphan (ppid 1). Their pane commands run an inert stub
+    instead, which the private tmux server's teardown kills. A fake binary a
+    test puts under its own tmp_path is left alone."""
+    from brindle import tmux
+
+    real = tmux.new_window
+    stub = tmp_path / "agent-cli-stub"
+    stub.write_text("#!/bin/sh\nexec sleep 600\n")
+    stub.chmod(0o755)
+
+    def guarded(session, name, cwd, command, *args, **kwargs):
+        command = [str(stub) if os.path.basename(p) in ("claude", "codex") and not p.startswith(str(tmp_path))
+                   else p for p in command]
+        return real(session, name, cwd, command, *args, **kwargs)
+
+    monkeypatch.setattr(tmux, "new_window", guarded)
+
+
+@pytest.fixture(autouse=True)
 def no_signed_in_providers(monkeypatch):
     """No sign-in probes in tests, and no `providers` param on /entitlement
     (tests/test_entitlement_providers.py sets its own)."""
