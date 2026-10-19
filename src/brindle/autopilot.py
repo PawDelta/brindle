@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config
-from brindle import escapes
+from brindle import escapes, knowledge
 from brindle.db import DB, Agent, Autopilot, Milestone, Workspace
 from brindle.profiles import load_profile
 
@@ -674,6 +674,8 @@ def set_goal(db: DB, root_id: str, goal: str,
                             passed_sha=prev.passed_sha)
     db.bump_progress(root_id)
     write_goals_file(db, root_id)
+    knowledge.note(db, root_id, knowledge.INTENT,
+                   {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
 
 
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy"}
