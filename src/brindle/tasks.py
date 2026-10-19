@@ -121,6 +121,24 @@ def _where(other_ws: Workspace | None) -> str:
     return f"{other_ws.branch}{session}"
 
 
+def _intent_overlap(db: DB, ws: Workspace, files: list[str]) -> str | None:
+    """A warning if ``files`` matches a live intent another session announced
+    for this repo, naming that session and its goal line."""
+    from brindle import autopilot, knowledge
+    own = {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)}
+    for intent in knowledge.intents(db, knowledge.repo_key(ws.repo_root)):
+        if intent["status"] != "live" or intent["session_root"] in own:
+            continue
+        for mine in files:
+            for theirs in intent["paths"]:
+                if _glob_match(mine, theirs):
+                    goal = intent["summary"].strip().splitlines()[0] if intent["summary"].strip() else ""
+                    return (f"overlaps with session {intent['session_root']}'s intent on {theirs}"
+                            + (f" ({goal})" if goal else "")
+                            + "; consider depends_on or merging first")
+    return None
+
+
 def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
                     task_text: str | None = None) -> str | None:
     """A warning if ``files`` overlaps another active task's declared or
@@ -139,6 +157,10 @@ def overlap_warning(db: DB, ws: Workspace, files: list[str] | None,
                         branch = other_ws.branch if other_ws else "?"
                         return (f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
                                 "consider depends_on or merging first")
+    if files:
+        warning = _intent_overlap(db, ws, files)
+        if warning:
+            return warning
     mine_issues = _issue_numbers(task_text)
     if not files and not mine_issues:
         return None
