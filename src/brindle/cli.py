@@ -111,7 +111,8 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
             # there. Never attach a second client from within the server's
             # own pane, which hung the whole server once (see
             # tmux.inside_this_server).
-            tmux.switch_client(window or f"={ws.tmux_session}")
+            if not tmux.switch_client(window or f"={ws.tmux_session}"):
+                typer.echo(f"No terminal is attached here; run `brindle attach {ws.name}` in one.")
             return
     except tmux.TmuxError as e:
         _fail(str(e))

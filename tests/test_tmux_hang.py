@@ -181,12 +181,23 @@ def test_from_inside_a_pane_brindle_switches_the_client(db, repo, monkeypatch):
     monkeypatch.setattr(tmux, "has_session", lambda s: True)
     monkeypatch.setattr(tmux, "select_window", lambda t: None)
     ran = []
-    monkeypatch.setattr(tmux, "_tmux",
-                        lambda *args, **kw: ran.append(args) or subprocess.CompletedProcess(args, 0, "", ""))
+    clients = "/dev/ttys004\n"                       # the client on this pane's session
+
+    def fake(*args, **kw):
+        ran.append(args)
+        return subprocess.CompletedProcess(args, 0, clients if args[0] == "list-clients" else "", "")
+
+    monkeypatch.setattr(tmux, "_tmux", fake)
     monkeypatch.setattr(cli.subprocess, "run", lambda argv, *a, **k: ran.append(tuple(argv)))
     assert tmux.inside_this_server()
     cli._attach(ws, "%3")
-    assert ran == [("switch-client", "-t", "%3")]
+    assert ran[-1] == ("switch-client", "-c", "/dev/ttys004", "-t", "%3")
+
+    # No client on the caller's session: never switch someone else's.
+    clients = ""
+    ran.clear()
+    cli._attach(ws, "%3")
+    assert not any(a[0] == "switch-client" for a in ran)
 
 
 def test_a_pane_this_server_does_not_know_is_not_inside(monkeypatch):

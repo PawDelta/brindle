@@ -913,11 +913,27 @@ def inside_this_server() -> bool:
     return bool(pane) and pane_session(pane) is not None
 
 
-def switch_client(target: str) -> None:
-    """Point the client this process runs under at ``target`` (a session,
-    ``=name``, or a window or pane id). TmuxError if there is no such client
-    (a pane nobody is attached to)."""
-    _tmux("switch-client", "-t", target)
+def own_client() -> str | None:
+    """The client attached to the session this process's pane is in, or None
+    (no TMUX_PANE, or nobody is attached to that session)."""
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return None
+    proc = _tmux("list-clients", "-t", pane, "-F", "#{client_name}", check=False)
+    clients = proc.stdout.split() if proc.returncode == 0 else []
+    return clients[0] if clients else None
+
+
+def switch_client(target: str) -> bool:
+    """Point the client attached to this process's own session at ``target``
+    (a session, ``=name``, or a window or pane id). Returns False, switching
+    nothing, when that session has no client: a bare ``switch-client`` would
+    pick the most recently active client, i.e. someone else's terminal."""
+    client = own_client()
+    if client is None:
+        return False
+    _tmux("switch-client", "-c", client, "-t", target)
+    return True
 
 
 def select_window(target: str) -> None:
