@@ -27,7 +27,7 @@ def _unavailable(root):
 
 
 @pytest.mark.parametrize("policy, managed, clis, model_ok", [
-    (allow(), None, ["claude", "codex", "antigravity"], True),
+    (allow(), None, ["claude", "codex", "antigravity", "opencode"], True),
     ({"allowed_providers": ["codex", "claude"], "allowed_models": ["gpt-5"]}, None, ["claude", "codex"], False),
     ({}, "exclusive", ["codex"], True),                       # the managed routing serves only Codex
     ({}, _unavailable, [], False),                            # can't read it: nothing

@@ -284,12 +284,14 @@ SCREENS["w"] = ("workers", _open_workers)
 
 
 def _login_command(provider: str) -> list[str]:
-    from brindle import antigravity, providers
+    from brindle import antigravity, opencode, providers
 
     if provider == "claude":
         return [providers.claude_binary(), "auth", "login"]
     if provider == "codex":
         return [providers.codex_binary(), "login"]
+    if provider == "opencode":
+        return [opencode.binary(), "auth", "login"]
     return [antigravity.binary()]      # agy signs in on its first screen
 
 
