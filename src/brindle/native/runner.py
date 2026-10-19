@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from brindle import agents, codemap, git, workspaces
@@ -25,6 +26,7 @@ from brindle.config import brindle_home
 from brindle.db import DB, Workspace
 from brindle.native.client import Client, ClientError, Endpoint
 from brindle.native.loop import LoopConfig, NativeAgent
+from brindle.native.lsp import LSP
 from brindle.native.permissions import Permissions
 from brindle.native.tools import Tool, Toolbox, ToolResult, core_tools
 from brindle.profiles import Profile, load_profile, subscription_token_problem
@@ -262,6 +264,12 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
     """The runner (see above). Returns non-zero when the endpoint or the
     profile is unusable, 0 once the agent is gone. ``exit_when_idle`` (for
     tests) returns as soon as there's nothing left to run."""
+    with ExitStack() as resources:
+        return _run_native(db, agent_id, resume, poll, exit_when_idle, resources)
+
+
+def _run_native(db: DB, agent_id: str, resume: str | None, poll: float,
+                exit_when_idle: bool, resources: ExitStack) -> int:
     agent = db.get_agent(agent_id)
     ws = db.get_workspace(agent.workspace_id) if agent else None
     if agent is None or ws is None:
@@ -279,8 +287,9 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
     db.update_agent(agent_id, transcript_path=str(transcript), session_ref=str(saved))
 
     # _profile_for already cleared the scopes if guardrails isn't entitled.
+    lsp = resources.enter_context(LSP(ws.path, read_scope=profile.read_scope))
     toolbox = Toolbox().add(*core_tools(ws.path, write_scope=profile.write_scope,
-                                        read_scope=profile.read_scope)).add(*brindle_tools(db, agent_id, ws, agent.mode))
+                                        read_scope=profile.read_scope, lsp=lsp)).add(*brindle_tools(db, agent_id, ws, agent.mode))
     permissions = Permissions(profile.permission_mode, [*(profile.allowed_tools or []), *codemap.ALLOWED_TOOLS])
     system = "\n\n".join(filter(None, [profile.prompt, NATIVE_NOTE, DELIVERY_NOTE]))
     config = LoopConfig(context_tokens=profile.context_tokens or DEFAULT_CONTEXT_TOKENS)
