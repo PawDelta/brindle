@@ -553,9 +553,10 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
 
     monkeypatch.setattr(type(agents.get_provider(provider)), "after_launch", delayed_ready)
     cli.after_launch_cmd(a.id, token=token)
+    cli.launch_health_cmd(a.id, startup=False, token=token, verify=True)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
     assert row["delivered_at"] == 112 and row["outcome"] is None and reports == []
-    followups = [cmd for cmd in detached if cmd[4] == "_launch-health" and "--startup" not in cmd]
+    followups = [cmd for cmd in detached if cmd[4] == "_launch-health" and "--startup" not in cmd and "--verify" not in cmd]
     assert len(followups) == 1
     now[0] = 114.0
     cli.launch_health_cmd(a.id, startup=False, token=token)
@@ -571,12 +572,14 @@ def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeyp
     now = [100.0]
     monkeypatch.setattr(time, "time", lambda: now[0])
     monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "loading" if now[0] < 106 else ready_screen)
+    ready_at = 190 if provider == "codex" else 106
+    loading = "✨ Update available! 0.162.1 -> 0.163.0\nloading" if provider == "codex" else "loading"
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: loading if now[0] < ready_at else ready_screen)
     assert agents.get_provider(provider).after_launch("%test") is True
-    assert now[0] == 106
+    assert now[0] == ready_at
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: "loading")
     assert agents.get_provider(provider).after_launch("%test") is False
-    assert now[0] == 136
+    assert now[0] == ready_at + (150 if provider == "codex" else 30)
 
 
 @pytest.mark.parametrize("provider,trust_screen,ready_screen", [
@@ -839,8 +842,12 @@ def test_provider_names_and_keyboard_help_in_prose_are_not_ui(provider, screen):
     assert launch_health.failure(screen, provider=provider) is None
 
 
+@pytest.mark.parametrize("lost", [
+    pytest.param(False, marks=pytest.mark.variant("slow original turn under load must not be submitted twice")),
+    True,
+])
 def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launches, detached, monkeypatch,
-                                                               isolated_health_clock):
+                                                               isolated_health_clock, lost):
     from brindle import launch_health as lh, model_access
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
@@ -853,20 +860,97 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda *a: True)
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE +
+                        ("\nesc to interrupt" if not lost and now[0] >= 145.5 else ""))
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    pasted, cleared = [], []
+    def screen_capture(*args, **kwargs):
+        value = CODEX_EMPTY_PANE + ("\nesc to interrupt" if not lost and now[0] >= 145.5 else "")
+        return value if kwargs.get("escapes") else providers.Codex.ANSI_SGR.sub("", value)
+    monkeypatch.setattr(tmux, "capture", screen_capture)
+    def paste(*args, **kwargs):
+        pasted.append(args[1])
+        submitted_at = now[0]
+        def after_paste(*args, **kwargs):
+            value = CODEX_EMPTY_PANE + ("\nesc to interrupt" if now[0] >= submitted_at + 45 else "")
+            return value if kwargs.get("escapes") else providers.Codex.ANSI_SGR.sub("", value)
+        monkeypatch.setattr(tmux, "capture", after_paste)
+    monkeypatch.setattr(tmux, "paste", paste)
+    monkeypatch.setattr(tmux, "send_keys", lambda *args, **kwargs: cleared.append(args[1:]))
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task",
                      parent_id=boss.id, mode="assign", background_setup=True)
     cli.after_launch_cmd(a.id, token=a._launch_health_token)
+    assert now[0] == 100.5  # readiness schedules observation without waiting
+    cli.launch_health_cmd(a.id, startup=False, token=a._launch_health_token, verify=True)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
-    assert row["delivered_at"] == 100.5 and row["outcome"] is None
-    assert len([cmd for cmd in detached if "_launch-health" in cmd and "--startup" not in cmd]) == 1
+    assert row["delivered_at"] > 100.5 and row["outcome"] is None
+    assert len(pasted) == int(lost) and not cleared
+    assert len([cmd for cmd in detached if "_launch-health" in cmd and "--startup" not in cmd and "--verify" not in cmd]) == 1
     assert sum("real task" in arg for arg in launches[-1]) == 1
     monkeypatch.setattr(lh, "capture", lambda a: "■ unexpected status 403 Forbidden\n" + CODEX_EMPTY_PANE)
     assert lh.inspect(db, a.id, token=a._launch_health_token) == "failed"
-    assert sleeps == [0.5, 5.0] and now[0] == 105.5
+    assert now[0] >= row["delivered_at"] + 5
     assert len(reports) == 1 and model_access.refused(a.profile, fp=row["fingerprint"]) == lh.AUTH
+
+
+@pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])
+def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, started, clears):
+    from brindle import prompt_answer
+    lh, a, now, _, _, reports = health
+    brief = "Implement a feature with these constraints.\n" + "\n".join(
+        f"Instruction {i}: preserve the surrounding implementation conventions." for i in range(70))
+    brief += "\nWorker restrictions:\n1. Work only here and nowhere else."
+    db.update_agent(a.id, provider="claude", status="idle",
+                    task=brief)
+    a = db.get_agent(a.id)
+    db.enqueue(a.id, a.task, None)
+    old_error = "\x1b[31m● API Error: 401 invalid API key\x1b[0m\n"
+    draft = "❯ brindle delivered this message: " + brief.rsplit("\n", 1)[0]
+    screen = old_error + (draft if started else "\n".join(draft.splitlines()[-60:]))
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    pastes, keys = [], []
+    def paste(*args, **kwargs):
+        pastes.append(args[1])
+        if len(pastes) == 1:
+            assert prompt_answer.Startup(a.tmux_window, ask=lambda _: pytest.fail("draft classified as prompt")).step(screen) == ""
+            if started:
+                assert agents.get_provider("claude").after_launch(a.tmux_window)
+            else:
+                prompt_answer.launched(db, a)
+                assert cull.settle_startups(db, now[0] + 41, {})
+        if len(pastes) == 2:
+            # A second flush cannot replace or duplicate this delivery.
+            lh.verify_delivery(db, a, a.task)
+            cli.launch_health_cmd(a.id, startup=False, token=token, verify=True)
+            db.enqueue(a.id, "followup", None)
+            assert not agents.flush(db, a.id)
+            if started:
+                agents.handle_hook(db, a.id, "prompt-submit", {"prompt": a.task})
+    monkeypatch.setattr(tmux, "paste", paste)
+    def clear(*args, **kwargs):
+        nonlocal screen
+        keys.append(args[1:])
+        if clears:
+            screen = old_error + "❯\n? for shortcuts"
+    monkeypatch.setattr(tmux, "send_keys", clear)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    prompt_answer.bind(db, a)
+    assert agents.flush(db, a.id)
+    assert len(pastes) == 1 and not keys
+    token = db.conn.execute("SELECT token FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0]
+    cli.launch_health_cmd(a.id, startup=False, token=token, verify=True)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert len(pastes) == (2 if clears else 1) and keys
+    assert (row["delivered_at"] is not None) == started
+    assert (row["outcome"] == "delivery-failed") == (not started)
+    assert len(reports) == (0 if started else 1)
+    assert db.get_agent(a.id).status == ("processing" if started else "failed")
+    if started:
+        assert lh.inspect(db, a.id) == "pending" and reports == []
 
 
 def test_resumed_startup_failure_observes_new_pane_before_delivery(db, health, monkeypatch):
