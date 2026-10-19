@@ -206,8 +206,10 @@ def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     agents.start_review(db, parent, ws, "reviewer-codex", None, cfg)
     assert len(detached) == 2 and spawned == []   # neither swallowed by the other's process
     # Whichever detached process gets there first, the other still isn't deduped away.
-    agents.review_after_checks(db, "boss", ws, "reviewer-codex", cfg=cfg)
-    agents.review_after_checks(db, "boss", ws, "reviewer", cfg=cfg)
+    agents.review_after_checks(db, "boss", ws, "reviewer-codex", cfg=cfg,
+                               request_id=detached[1][-1])
+    agents.review_after_checks(db, "boss", ws, "reviewer", cfg=cfg,
+                               request_id=detached[0][-1])
     assert sorted(spawned) == ["reviewer", "reviewer-codex"]
 
 

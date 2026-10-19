@@ -2435,10 +2435,7 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     if not cfg.checks:
         return request_review(db, caller, ws, profile, focus, cfg)
     _review_kill_switch(ws)
-    _review_profile(db, ws, profile, cfg)
-    existing = _live_reviewer(db, ws, gates.head(ws), profile)
-    if existing:
-        return existing   # one reviewer per workspace and commit
+    profile = _review_profile(db, ws, profile, cfg)
     argv = [*brindle_invocation(), "_review-after-checks", ws.id]
     if caller:
         argv += ["--caller", caller.id]
@@ -2448,7 +2445,19 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
         argv += ["--focus", focus]
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
-    _detach([*ORPHANED, *argv])
+    with review_dispatch_lock(ws.id):
+        existing = _live_reviewer(db, ws, gates.head(ws), profile)
+        if existing:
+            return existing
+        # Publish before detaching: even a helper that hasn't started yet
+        # must know that a later request superseded it. Profiles have separate
+        # claims so a required second review survives the first one's request.
+        request_id = uuid.uuid4().hex
+        claim = _review_request_file(ws.id, profile)
+        pending = claim.with_suffix("." + request_id)
+        pending.write_text(request_id)
+        pending.replace(claim)
+        _detach([*ORPHANED, *argv, "--request-id", request_id])
     return None
 
 
@@ -2467,15 +2476,37 @@ def expected_check_wait(db: DB, ws: Workspace, cfg: RepoConfig) -> float | None:
 MOVED_RETRIES = 2   # check runs a branch that keeps moving under them gets again (review_after_checks)
 
 
+def _review_request_file(workspace_id: str, profile: str):
+    from brindle.config import brindle_home
+
+    directory = brindle_home() / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(json.dumps([workspace_id, profile]).encode()).hexdigest()
+    return directory / ("review-request-" + key)
+
+
+def _review_requested(workspace_id: str, profile: str, request_id: str | None) -> bool:
+    # Helpers from before request claims were introduced can still finish.
+    if request_id is None:
+        return True
+    try:
+        return _review_request_file(workspace_id, profile).read_text() == request_id
+    except FileNotFoundError:
+        return False
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
-                        focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
+                        focus: str | None = None, cfg: RepoConfig | None = None,
+                        request_id: str | None = None) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
     Meant to run from a detached process, which outlives the call that
     started it. Gives up quietly when the workspace is gone, a reviewer is
     already at work on this commit, or the branch moves on to a commit a new
-    report hands to a run of its own. A piped branch that moves on without
+    report hands to a run of its own. A request claim also drops superseded
+    helpers that were queued before the latest report, even if those helpers
+    only start after the branch has moved. A piped branch that moves on without
     a new report (its worker committed again, or merged its moved base in)
     is checked again on its new head, up to ``MOVED_RETRIES`` times, and then
     goes to the supervisor. Raises ``AgentError`` when the reviewer can't
@@ -2485,19 +2516,24 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
+    profile = _review_profile(db, ws, profile, cfg)
     with pipeline.review_run(ws.id):
         since = pipeline.review_claim(db, ws)
         for _attempt in range(MOVED_RETRIES + 1):
+            if not _review_requested(ws.id, profile, request_id):
+                return None
             sha = gates.head(ws)
             if _live_reviewer(db, ws, sha, profile):
                 return None
             try:
-                summary = gates.check_summary(db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha)
+                summary = gates.check_summary(
+                    db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
+                    or not _review_requested(ws.id, profile, request_id))
             except gates.Abandoned:
                 summary = None
             except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
                 summary = f"(running the checks crashed: {e})"
-            if db.get_workspace(ws.id) is None:
+            if db.get_workspace(ws.id) is None or not _review_requested(ws.id, profile, request_id):
                 return None
             if gates.head(ws) == sha:
                 break
@@ -2508,7 +2544,11 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             return None
         caller = db.get_agent(caller_id) if caller_id else None
         text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
-        return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
+        # A newer request cannot slip between the final claim check and spawn.
+        with review_dispatch_lock(ws.id):
+            if not _review_requested(ws.id, profile, request_id):
+                return None
+            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
 
 
 def review_dispatch_lock(workspace_id: str):
@@ -2548,6 +2588,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
+    profile = _review_profile(db, ws, profile, cfg)
     sha = gates.head(ws)
     failed = None
     for old in db.list_agents(ws.id):
@@ -2568,7 +2609,6 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if failed:
         return launch_health.retry_reviewer(db, failed, ws)
     worker = workspace_worker(db, ws)
-    profile = _review_profile(db, ws, profile, cfg)
 
     base = ws.base_branch or "the base branch"
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
