@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>brindle</title>
+<style>
+  :root { --bg: #fafaf8; --fg: #1d1d1b; --dim: #6b6b66; --line: #e2e1dc; --card: #fff;
+          --ok: #2f7d3b; --busy: #8a3fa0; --alert: #a86b00; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #e8e7e3; --dim: #9a9993; --line: #2e2d2a; --card: #1e1e1c;
+            --ok: #6cc47a; --busy: #c58fd6; --alert: #e0a73a; --bad: #ef7a72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 12px 16px;
+           border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 16px; }
+  header .dim { font-size: 12px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px;
+         padding: 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+            padding: 12px 14px; min-width: 0; }
+  section h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase;
+               letter-spacing: .04em; color: var(--dim); }
+  .dim { color: var(--dim); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .ws { padding: 8px 0; border-top: 1px solid var(--line); }
+  .ws:first-of-type { border-top: 0; }
+  .ws-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+  .agent { display: flex; gap: 8px; padding: 2px 0 2px 14px; flex-wrap: wrap; }
+  .status { font-weight: 600; }
+  .s-ok { color: var(--ok); } .s-busy { color: var(--busy); }
+  .s-alert { color: var(--alert); } .s-bad { color: var(--bad); }
+  ol.milestones { margin: 0; padding-left: 20px; }
+  ol.milestones li { margin: 4px 0; }
+  details pre { white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
+                margin: 4px 0 0; padding: 6px; background: var(--bg); border-radius: 4px; }
+  .panel-slot:empty::before { content: "Coming soon."; color: var(--dim); }
+  #error { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>brindle</h1>
+  <span id="repo" class="dim mono"></span>
+  <span id="updated" class="dim"></span>
+  <span id="error"></span>
+</header>
+<main>
+  <section id="agents-panel">
+    <h2>Workspaces and agents</h2>
+    <div id="workspaces"></div>
+  </section>
+  <section id="goal-panel">
+    <h2>Goal</h2>
+    <div id="goal"></div>
+  </section>
+  <!-- Chat panel: filled by web/chat.py's routes and its own script. -->
+  <section id="chat-panel">
+    <h2>Chat</h2>
+    <div id="chat" class="panel-slot" data-panel="chat"></div>
+  </section>
+  <!-- Diff panel: filled by web/diff.py's routes and its own script. -->
+  <section id="diff-panel">
+    <h2>Diff</h2>
+    <div id="diff" class="panel-slot" data-panel="diff"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
