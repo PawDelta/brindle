@@ -227,6 +227,7 @@ def _forget(db: DB, s: Session) -> None:
     for a in s.members:
         agents._note_reviewer_end(db, a)
         db.delete_agent(a.id)
+        agents.forget_files(a)
 
 
 def enforce(db: DB, repo_root: str, now: float | None = None) -> int:

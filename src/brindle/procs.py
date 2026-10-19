@@ -142,7 +142,7 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
 
 _SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh"}
 _PLUMBING = re.compile(r"claude|brindle|\bmcp\b|tmux|node_modules|\bnpm exec\b|caffeinate")
-_CLI_NAMES = {"codex", "agy", "antigravity"}
+_CLI_NAMES = {"codex", "agy", "antigravity", "opencode"}
 _LAUNCHERS = {"node", "python", "python3", "npx"}
 
 

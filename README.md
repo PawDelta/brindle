@@ -1521,6 +1521,7 @@ change files under a directory without prompts.
 | `claude` (Claude Code) | yes (the default) | yes |
 | `codex` | yes | yes |
 | `antigravity` (`agy`) | yes | yes |
+| `opencode` (OpenCode) | yes | yes (`developer-opencode`, `reviewer-opencode`) |
 | `native` (local models) | no: its loop has only the worker tools (report, message, diff), not `assign` or `handoff` | yes |
 | `subagent` | no: it runs inside a supervisor's own Agent tool | yes, through `assign`/`handoff` |
 | `shell` | only as a stand-in, for testing brindle itself | a plain shell, for dev servers and testing brindle |
@@ -1546,6 +1547,7 @@ it's signed in without a plan that includes it, is reported to its supervisor.
 | `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
 | `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY`. With Codex signed in with ChatGPT (checked on Codex CLI 0.162.0): interactive `codex`, which brindle runs in agent panes, ignores both keys and uses the ChatGPT plan, and only `codex login --with-api-key` switches it to a key; headless `codex exec` (Brindle-CI) bills `CODEX_API_KEY` over the login and ignores `OPENAI_API_KEY`. `brindle doctor` and `brindle keys set` say so, and `auth: api_key` on an interactive Codex profile is refused under a ChatGPT login (run `codex login --with-api-key`, or use `auth: subscription`) |
 | `antigravity` | `GEMINI_API_KEY`, only with `"modelProvider": "gemini"` in `agy`'s `settings.json` (see [Google Antigravity](#google-antigravity)); otherwise `agy`'s own browser sign-in |
+| `opencode` | whatever the model's provider takes (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...), or `opencode auth login`; its free `opencode/...` models need neither |
 
 Workers that run unattended should use key login where the CLI supports it.
 A personal login is one interactive session with one quota shared by every
@@ -1581,6 +1583,38 @@ When running long, unattended autopilot sessions with API keys:
   - **Proactive rotation in live sessions**: For Claude keys rotated outside brindle, set Claude Code's `apiKeyHelper` in `~/.claude/settings.json` or the project's `.claude/settings.json`. Claude Code re-runs the helper every 5 minutes (configurable with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`) and after a 401, so running workers pick up the new key. Don't also export `ANTHROPIC_API_KEY` or set a Claude key with `brindle keys set`, since an environment key takes precedence over the helper. Codex and Antigravity keys still need workers stopped, then `brindle keys set`, then `brindle continue`. Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
   - **Precedence**: Newly stored keys (`brindle keys set`) or session credentials updated during recovery take effect dynamically for all new panes, overriding stale launcher environments. For profile-level overrides, an explicit profile key (`env.NAME`) takes precedence over default provider credentials.
 - **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts unless permissions are pre-populated in `settings.json` (see Permissions) or run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
+
+#### OpenCode
+
+[OpenCode](https://opencode.ai) (`npm install -g opencode-ai`) runs in an agent
+pane like the other CLIs; `brindle doctor` says whether it's installed. Run a
+supervisor on it with `brindle -s opencode`, or workers with the built-in
+`developer-opencode` and `reviewer-opencode` profiles (or any profile with
+`provider: opencode`). Checked with OpenCode 1.19.3.
+
+brindle writes nothing into the worktree. It hands OpenCode its MCP server, a
+small plugin and the profile's prompt through `OPENCODE_CONFIG_CONTENT`, which
+OpenCode merges over your own config, so your providers, models and other MCP
+servers still apply. The plugin reports each turn's start, its end (and any
+error, such as a rate limit), and permission prompts from OpenCode's own
+events, so a worker's status never depends on reading its screen.
+
+| Profile field | OpenCode |
+|---|---|
+| `model` | `--model`. Use OpenCode's `provider/model` form (`anthropic/claude-sonnet-4-5`, `opencode/big-pickle`); a bare `claude-…`, `gpt-…` or `gemini-…` name gets its provider added. With no model, OpenCode's own default. |
+| `allowed_tools` | Each `Bash(cmd:*)` becomes an allowed `bash` pattern; any other command asks. |
+| `permission_mode` | `bypassPermissions`: everything runs. `dontAsk`: only `allowed_tools` commands run, edits and web fetches are refused. `acceptEdits`/`auto`: edits run. `plan`: OpenCode's `plan` agent. Unset: edits ask too. |
+| `add_dirs`, `worker_extra_read_dirs` | Allowed as external directories. |
+
+A `dontAsk` OpenCode worker (the built-in reviewer, for one) can't read outside
+its worktree or its `add_dirs`: with nobody to ask, anything else is refused.
+
+`effort` isn't passed (OpenCode's terminal UI has no flag for it). With
+`permission_policy` on, brindle's plugin also asks brindle before every tool
+call and stops the ones the policy denies (as for Claude Code and Codex
+workers); calls the policy allows or asks about are left to the profile's
+permissions above, so the policy can narrow what an OpenCode worker does but
+never widens it.
 
 ### Cheap workers
 
@@ -1871,6 +1905,17 @@ No hooks, no screen scraping, and messages sent to the worker arrive between
 its model calls. It works with any OpenAI-compatible chat-completions endpoint
 or Anthropic Messages endpoint.
 
+The native worker automatically starts language servers found on `PATH` when it
+first reads or changes a supported file (Python: `pyright-langserver` or `pylsp`;
+JS/TS: `typescript-language-server`; Go: `gopls`; Rust: `rust-analyzer`; C/C++:
+`clangd`; Ruby: `ruby-lsp`; Lua: `lua-language-server`). Servers use the worktree
+as their root and stop with the worker. `Diagnostics`, `Definition`, and
+`References` provide code information; diagnostics also follow successful Edit
+and Write calls. Navigation takes 1-based lines and character columns. Explicit
+LSP tools report missing servers; ordinary file tools stay silent when no server
+can run. Profiles with a narrowed read scope skip language
+servers because workspace indexing cannot enforce that boundary.
+
 ```markdown
 ---
 name: developer-local
@@ -1931,6 +1976,14 @@ Other endpoints, same fields:
 | Z.ai GLM | anthropic | `https://api.z.ai/api/anthropic` | GLM-4.7-Flash is free; `api_key_env: ZAI_API_KEY` |
 | DeepSeek | anthropic | `https://api.deepseek.com/anthropic` | paid; `api_key_env: DEEPSEEK_API_KEY` |
 | Anthropic | anthropic | `https://api.anthropic.com` | `api_key_env: ANTHROPIC_API_KEY` |
+
+Or name any [Models.dev](https://models.dev) model as `model: <provider>/<model>`
+(say `nano-gpt/deepseek/deepseek-v3`) and leave out `base_url`: brindle fills in
+`base_url`, `api`, `api_key_env` and `context_tokens` from the catalog, and
+anything you set in the profile wins. The catalog is cached in
+`~/.brindle/models-catalog.json` for a day. It is never fetched in air-gap mode
+or offline; brindle uses the cached copy, and says so if there isn't one. A profile
+with its own `base_url` is left alone, so OpenRouter-style ids still work.
 
 What to expect: a 30B-class local model does well on small, well-specified
 tasks (the kind brindle hands out: one change, the test named up front) and on
