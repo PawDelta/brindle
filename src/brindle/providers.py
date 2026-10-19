@@ -1276,6 +1276,9 @@ class Codex(Provider):
     uses_hooks = True
     announces_turns = False
     announces_start = False
+    # The MCP connection alone can take 120s under load. The launch observer
+    # must not abandon readiness before that connection has had its budget.
+    STARTUP_SECONDS = 150
     # Codex's approval prompts: run a command, make edits, grant permissions,
     # send input to a terminal. Nothing else on its screen asks this way.
     APPROVAL = re.compile(r"Would you like to (?:run the following command|make the following edits"
@@ -1381,6 +1384,10 @@ class Codex(Provider):
         from brindle import codex_hook
 
         argv += codex_hook.launch_flags(ctx.cwd)
+        if ctx.mode in ("handoff", "handoff_detached", "assign", "review"):
+            # Supported by Codex 0.162.1. Workers cannot act on an update
+            # notice; omit this extra startup UI from automated launches.
+            argv += ["-c", "check_for_update_on_startup=false"]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
@@ -1425,7 +1432,7 @@ class Codex(Provider):
         from brindle import prompt_answer
 
         prompts = prompt_answer.Startup(target, permission=self.tool_permission)
-        deadline = time.time() + 30
+        deadline = time.time() + self.STARTUP_SECONDS
         while time.time() < deadline:
             time.sleep(0.5)
             try:

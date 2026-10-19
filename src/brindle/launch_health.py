@@ -24,6 +24,10 @@ from brindle import model_access, tmux
 from brindle.pro import route_health
 
 FOLLOWUP_SECONDS = 5.0
+# A visible composer can precede MCP/session initialization on a loaded host.
+# Give each submission the same budget as the Codex MCP connection before
+# assuming it was swallowed; a busy model turn itself needs no such wait.
+DELIVERY_SECONDS = 120.0
 _LAUNCH_ENV = frozenset({"BRINDLE_AGENT_ID", "BRINDLE_ROOT_PATH", "BRINDLE_WORKSPACE_PATH",
                          "BRINDLE_WORKSPACE_NAME", "BRINDLE_WORKSPACE_ID", "BRINDLE_BRANCH",
                          "BRINDLE_BASE_BRANCH", "BRINDLE_PORT_BASE", "BRINDLE_TMUX_SOCKET",
@@ -174,7 +178,8 @@ def verify_delivery(db, agent, text: str | None = None, baseline: str = "", lead
         return fresh
 
     for attempt in range(2):
-        for tick in range(11):
+        deadline = time.time() + DELIVERY_SECONDS
+        while True:
             fresh = pending()
             if fresh is None:
                 return
@@ -184,8 +189,9 @@ def verify_delivery(db, agent, text: str | None = None, baseline: str = "", lead
                                submitted_prompt=text, provider=agent.provider)):
                 delivered(db, agent, baseline)
                 return
-            if tick < 10:
-                time.sleep(0.5)
+            if time.time() >= deadline:
+                break
+            time.sleep(0.5)
         if attempt == 0:
             # Never clear a menu, a permission dialog or a different session.
             draft = provider.paste_blocked(screen, True) == "typing"

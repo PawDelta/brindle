@@ -571,12 +571,14 @@ def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeyp
     now = [100.0]
     monkeypatch.setattr(time, "time", lambda: now[0])
     monkeypatch.setattr(time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "loading" if now[0] < 106 else ready_screen)
+    ready_at = 190 if provider == "codex" else 106
+    loading = "✨ Update available! 0.162.1 -> 0.163.0\nloading" if provider == "codex" else "loading"
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: loading if now[0] < ready_at else ready_screen)
     assert agents.get_provider(provider).after_launch("%test") is True
-    assert now[0] == 106
+    assert now[0] == ready_at
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: "loading")
     assert agents.get_provider(provider).after_launch("%test") is False
-    assert now[0] == 136
+    assert now[0] == ready_at + (150 if provider == "codex" else 30)
 
 
 @pytest.mark.parametrize("provider,trust_screen,ready_screen", [
@@ -839,8 +841,12 @@ def test_provider_names_and_keyboard_help_in_prose_are_not_ui(provider, screen):
     assert launch_health.failure(screen, provider=provider) is None
 
 
+@pytest.mark.parametrize("lost", [
+    pytest.param(False, marks=pytest.mark.variant("slow original turn under load must not be submitted twice")),
+    True,
+])
 def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launches, detached, monkeypatch,
-                                                               isolated_health_clock):
+                                                               isolated_health_clock, lost):
     from brindle import launch_health as lh, model_access
     boss, ws = root
     now, sleeps, reports = [100.0], [], []
@@ -853,13 +859,16 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda *a: True)
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE +
+                        ("\nesc to interrupt" if not lost and now[0] >= 145.5 else ""))
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     pasted, cleared = [], []
     def paste(*args, **kwargs):
         pasted.append(args[1])
-        monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE + "\nesc to interrupt")
+        submitted_at = now[0]
+        monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_EMPTY_PANE +
+                            ("\nesc to interrupt" if now[0] >= submitted_at + 45 else ""))
     monkeypatch.setattr(tmux, "paste", paste)
     monkeypatch.setattr(tmux, "send_keys", lambda *args, **kwargs: cleared.append(args[1:]))
     a = agents.spawn(db, ws, "developer", provider_name="codex", prompt="real task",
@@ -867,7 +876,7 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     cli.after_launch_cmd(a.id, token=a._launch_health_token)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
     assert row["delivered_at"] > 100.5 and row["outcome"] is None
-    assert len(pasted) == 1 and not cleared
+    assert len(pasted) == int(lost) and not cleared
     assert len([cmd for cmd in detached if "_launch-health" in cmd and "--startup" not in cmd]) == 1
     assert sum("real task" in arg for arg in launches[-1]) == 1
     monkeypatch.setattr(lh, "capture", lambda a: "■ unexpected status 403 Forbidden\n" + CODEX_EMPTY_PANE)
