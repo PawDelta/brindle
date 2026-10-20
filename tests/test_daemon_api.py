@@ -278,15 +278,21 @@ def test_routing_shows_each_tier_and_setting_with_its_source(seeded, monkeypatch
     assert (rows["developer-light"]["cost_tier"], rows["developer-heavy"]["cost_tier"]) == ("low", "high")
 
 
-def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch):
+ROUTE_ID = "us.anthropic.claude-opus-x-v1:0"     # the Bedrock id the org's route pins opus to
+
+
+@pytest.mark.parametrize("allowed,heavy_ok", [
+    (ROUTE_ID, True),                               # the pin is allowed: developer-heavy (opus) runs as it
+    ("opus", True),                                 # the alias itself is allowed
+    ("eu.anthropic.claude-opus-x-v1:0", False),     # a pin matches exactly, as check_assign matches it
+], ids=["pinned-id", "alias", "other-region"])
+def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch, allowed, heavy_ok):
     from brindle import providers
     from brindle.pro import managed_models, team_policy
 
-    # The org allows one Bedrock id, which its enforced Claude route pins opus to (developer-heavy's model).
-    route_id = "us.anthropic.claude-opus-x-v1:0"
     setup = team_policy.AgentSetup(claude=team_policy.ClaudeSetup(
-        route="bedrock", models=team_policy.ModelsSetup(opus=route_id)), enforce=True)
-    acc = team_policy.Access(org_id="acme", allowed_providers=("claude",), allowed_models=(route_id,),
+        route="bedrock", models=team_policy.ModelsSetup(opus=ROUTE_ID)), enforce=True)
+    acc = team_policy.Access(org_id="acme", allowed_providers=("claude",), allowed_models=(allowed,),
                              deny_personal_keys=True, agent_setup=setup)
     monkeypatch.setattr(team_policy, "access", lambda repo: acc)
     monkeypatch.setattr(managed_models, "current", lambda repo: None)
@@ -297,12 +303,13 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     assert {(lock["kind"], lock["name"]) for lock in policy["locked"]} == {
         ("provider", "codex"), ("provider", "antigravity"), ("provider", "opencode"), ("keys", "personal_api_keys")}
     rows = {p["name"]: p for p in body["profiles"]}
-    assert rows["developer-heavy"]["allowed"] and rows["developer-heavy"]["refusal"] is None
+    assert (rows["developer-heavy"]["allowed"], rows["developer-heavy"]["refusal"] is None) == (heavy_ok, heavy_ok)
     for refused in ("developer-light", "developer-codex"):      # a model, then a provider, the org doesn't allow
         assert not rows[refused]["allowed"] and rows[refused]["refusal"]
-    assert "developer-heavy" in policy["models"][route_id] and "developer-light" not in policy["models"][route_id]
+    assert ("developer-heavy" in policy["models"][allowed]) == heavy_ok
+    assert "developer-light" not in policy["models"][allowed]
     heavy = [m for t in body["tiers"].values() for m in t["models"] if m["profile"] == "developer-heavy"]
-    assert heavy and all((m["model"], m["provider_name"], m["allowed"]) == (route_id, "Claude Code", True)
+    assert heavy and all((m["model"], m["provider_name"], m["allowed"]) == (ROUTE_ID, "Claude Code", heavy_ok)
                          for m in heavy)
 
 

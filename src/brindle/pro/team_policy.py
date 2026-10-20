@@ -1078,13 +1078,8 @@ class ProPolicy(PolicyPlugin):
             return deny(f"{who} uses {got}; org {p.org_id} allows only "
                         f"{', '.join(p.allowed_providers) or 'no providers'}")
         if p.allowed_models is not None:
-            from brindle import pricing
-            norm_model = pricing.normalize(info.model) if info.model else None
-            norm_allowed = {pricing.normalize(m) for m in p.allowed_models}
             route = claude_route(p.org_id, p.agent_setup, info.provider)
-            pinned = pinned_model(route, info.model)
-            if norm_model not in norm_allowed and info.model not in p.allowed_models \
-                    and not (pinned and pinned in p.allowed_models):
+            if not model_allowed(p.allowed_models, info.model, pinned_model(route, info.model)):
                 got = f"model {info.model!r}" if info.model else "no declared model"
                 fix = (f"it is the default model of org {p.org_id}'s Claude route; an org admin must change "
                        "agent_setup" if route and info.model and info.model == route.default_model
@@ -1134,6 +1129,19 @@ def pinned_model(route: ClaudeSetup | None, model: str | None) -> str | None:
     return getattr(route.models, model, None)
 
 
+def model_allowed(allowed: tuple[str, ...] | None, model: str | None, pinned: str | None = None) -> bool:
+    """Whether ``allowed`` (an org's allowed_models; None: any) lets a worker
+    run ``model``: the model itself, matched as pricing normalizes it, or the
+    route id its alias is ``pinned`` to, matched exactly."""
+    if allowed is None:
+        return True
+    from brindle import pricing
+
+    if model and (model in allowed or pricing.normalize(model) in {pricing.normalize(m) for m in allowed}):
+        return True
+    return bool(pinned) and pinned in allowed
+
+
 @dataclass(frozen=True)
 class Access:
     """The CLIs, models and profiles this person may use here: the org's
@@ -1152,16 +1160,17 @@ class Access:
     error: str | None = None
     agent_setup: AgentSetup | None = None               # its Claude route may pin an alias to an allowed id
 
+    def pinned(self, provider: str | None, model: str | None) -> str | None:
+        """The route id the org's Claude route pins ``model`` (an alias) to, or None."""
+        return pinned_model(claude_route(self.org_id, self.agent_setup, provider), model)
+
     def route_model(self, provider: str | None, model: str | None) -> str | None:
-        """The model a ``provider`` worker on ``model`` runs as: the route id
-        the org's Claude route pins an alias to, else ``model``."""
-        return pinned_model(claude_route(self.org_id, self.agent_setup, provider), model) or model
+        """The model a ``provider`` worker on ``model`` runs as: its pinned route id, else ``model``."""
+        return self.pinned(provider, model) or model
 
     def allows_run(self, provider: str | None, model: str | None) -> bool:
-        """Whether ``model`` may be used by ``provider``, by check_assign's
-        matching: the model itself, or the route id its alias is pinned to."""
-        pinned = self.route_model(provider, model)
-        return self.allows_model(model) or (pinned != model and self.allows_model(pinned))
+        """Whether ``model`` may be used by ``provider``: check_assign's test (:func:`model_allowed`)."""
+        return not self.error and model_allowed(self.allowed_models, model, self.pinned(provider, model))
 
     def refusal(self, provider: str) -> str | None:
         """Why this person may not run ``provider``'s CLI, or None."""
@@ -1177,14 +1186,7 @@ class Access:
 
     def allows_model(self, model: str | None) -> bool:
         """Whether ``model`` may be used, by check_assign's matching."""
-        if self.error:
-            return False
-        if self.allowed_models is None:
-            return True
-        from brindle import pricing
-
-        return bool(model) and (model in self.allowed_models or pricing.normalize(model)
-                                in {pricing.normalize(m) for m in self.allowed_models})
+        return not self.error and model_allowed(self.allowed_models, model)
 
     def allows_profile(self, profile: str, provider: str | None, model: str | None) -> bool:
         """Whether a worker on ``profile`` (which runs ``provider``'s ``model``,

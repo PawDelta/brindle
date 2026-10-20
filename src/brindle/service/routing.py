@@ -76,8 +76,6 @@ class RoutingPolicy:
 
     def to_dto(self, profiles: list) -> RoutingPolicyDTO:
         """The policy block; ``profiles``: every profile, to map the allowed models onto."""
-        from brindle import pricing
-
         if not self.applies:
             return RoutingPolicyDTO()
         acc = self.access
@@ -85,14 +83,16 @@ class RoutingPolicy:
             return RoutingPolicyDTO(applies=True, org_id=acc.org_id, editable=False, reason=acc.error)
         models: dict[str, list[str]] = {m: [] for m in acc.allowed_models or ()}
         for p in profiles:
-            _, model = self.runs(p.name)
+            provider, model = self._fields(p.name)
             if not model or self.refusal(p):
                 continue
             if acc.allowed_models is None:
-                models.setdefault(model, []).append(p.name)
+                models.setdefault(acc.route_model(provider, model), []).append(p.name)
                 continue
+            # By check_assign's test: an entry may name the alias itself or the id it is pinned to.
+            pinned = acc.pinned(provider, model)
             for m in acc.allowed_models:
-                if model == m or pricing.normalize(model) == pricing.normalize(m):
+                if team_policy.model_allowed((m,), model, pinned):
                     models[m].append(p.name)
         locked = [RoutingLockDTO(kind="provider", name=cli, reason=why)
                   for cli in team_policy.CLI_NAMES if (why := acc.refusal(cli))]

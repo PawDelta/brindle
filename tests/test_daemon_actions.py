@@ -14,7 +14,7 @@ from brindle.daemon import peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.pro.account import ProAccount
-from brindle.pro.team_policy import Access
+from brindle.pro.team_policy import Access, AgentSetup, ClaudeSetup, ModelsSetup
 
 TOKEN = "t" * 43
 
@@ -133,18 +133,27 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
             autopilot.choose_profile(db, "sup", str(repo), weight="light")
 
 
-@pytest.mark.parametrize("acc", [
-    Access(org_id="acme", allowed_providers=("claude",)),
-    Access(org_id="acme", error="couldn't read the policy"),
-], ids=["forbidden", "unreadable"])
-def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, acc):
+PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),
+                    enforce=True)
+
+
+@pytest.mark.parametrize("acc,profile", [
+    (Access(org_id="acme", allowed_providers=("claude",)), "developer-codex"),
+    (Access(org_id="acme", error="couldn't read the policy"), "developer-codex"),
+    # opus is pinned to the us. id; delegation matches a pin exactly, so the eu. one doesn't allow it.
+    (Access(org_id="acme", allowed_models=("eu.anthropic.claude-opus-x-v1:0",), agent_setup=PINNED),
+     "developer-heavy"),
+], ids=["forbidden", "unreadable", "pin-elsewhere"])
+def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, acc, profile):
+    from brindle import providers
     from brindle.pro import managed_models, team_policy
 
     monkeypatch.setattr(team_policy, "access", lambda repo: acc)
     monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
     before = config._read_json(config.scope_paths(str(repo))["user"])
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "user",
-                                               "tiers": {"light": ["developer-codex"]}})
+                                               "tiers": {"light": [profile]}})
     assert (code, reply["error"]["code"]) == (403, "forbidden") and reply["error"]["message"]
     assert config._read_json(config.scope_paths(str(repo))["user"]) == before
 
