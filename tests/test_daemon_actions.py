@@ -455,6 +455,9 @@ def _brindle_allows_npm_test() -> bool:
     # Two requests for the same rule: one allowed always and consumed, the other expired.
     # The rule the first wrote stays.
     ("allow_always", False, "shared", 409, None, "brindle"),
+    # The same command denied in the app, asked again, and the retry approved at the CLI's
+    # own prompt: its PostToolUse ends the retry's hold, not the old denied request's.
+    ("allow_once", True, "retried", None, None, None),
     # The stored request changed while the hook waits: it isn't the request the hook registered.
     ("allow_once", True, "mutated", 409, None, None),
     # An answer written into the database is no answer: the hold runs out.
@@ -468,7 +471,7 @@ def _brindle_allows_npm_test() -> bool:
     pytest.param("allow_once", True, "agent", 403, None, None,
                  marks=pytest.mark.variant("an agent holding the token can't answer a permission request")),
 ], ids=["once", "always-brindle", "always-claude", "deny", "terminal", "codex", "antigravity", "native",
-        "in-flight", "lost", "expired-once", "expired-always", "shared-rule", "mutated", "db-answer", "forged-json", "locked",
+        "in-flight", "lost", "expired-once", "expired-always", "shared-rule", "retried", "mutated", "db-answer", "forged-json", "locked",
         "closed", "agent"])
 def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answering, monkeypatch, choice,
                                                        suggested, race, status, verdict, rule):
@@ -546,6 +549,19 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
             return take(request_id, nonce)
 
         monkeypatch.setattr(holds.HOLDS, "take", other_answered_then_too_late)
+    if race == "retried":   # the same command asked before, and denied in the app
+        denied_agent, denied = db.get_agent(agent_id), []
+        first = threading.Thread(target=lambda: denied.append(run(DB(), denied_agent)))
+        first.start()
+        assert asked.wait(5)
+        asked.clear()
+        denied_id = db.hook_permission_request(agent_id)["tool_use_id"]
+        denied_digest = next(p.dto for p in inbox.pending_permissions(db, denied_agent)
+                             if p.dto.request_id == denied_id).digest
+        assert _send("POST", f"/v1/inbox/{agent_id}/permission",
+                     {"request": denied_id, "digest": denied_digest, "choice": "deny"})[0] == 200
+        first.join(5)
+        assert [_verdict(o) for o in denied] == ["deny"]
     out, held, started = [], db.get_agent(agent_id), time.time()
     hook = threading.Thread(target=lambda: out.append(run(DB(), held)))
     hook.start()
@@ -569,6 +585,12 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
         db.update_agent(agent_id, dismissed_at=time.time())
         hook.join(HOLD / 2)     # well before the hold would end
         assert not hook.is_alive()
+    if race == "retried":   # approved at the CLI's own prompt: the tool ran, and its PostToolUse came
+        agents.note_permission_outcome(db, held, {"tool_name": "Bash", "tool_input": {"command": "npm test"},
+                                                  "tool_use_id": "toolu_retry", "cwd": str(repo)})
+        hook.join(HOLD / 2)     # well before the hold would end
+        assert not hook.is_alive() and holds.HOLDS.held(agent_id, request_id) is None
+        assert inbox.pending_permissions(db, held) == []
     if status is not None:
         code, reply = _send("POST", f"/v1/inbox/{agent_id}/permission",
                             {"request": shown.request_id, "digest": shown.digest, "choice": choice},

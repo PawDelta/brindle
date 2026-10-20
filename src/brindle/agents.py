@@ -3139,7 +3139,9 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
             holder.end()
             db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
                                          answer=answer)
-    if not keep:
+    # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
+    # take the pairing meant for the same command asked again (note_permission_outcome).
+    if not keep or answer == "deny":
         db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
     return answer
 
