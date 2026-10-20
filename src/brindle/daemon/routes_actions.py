@@ -31,6 +31,7 @@ from starlette.routing import Route
 
 from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, tmux, workspaces
 from brindle import sessions as sessions_mod
+from brindle.daemon import terminal
 from brindle.db import DB, Agent, Workspace
 from brindle.service import sessions as svc
 from brindle.service.dto import SessionDTO
@@ -455,8 +456,11 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     """``tiers`` (tier -> profiles to try, in order), ``reviewer`` and
     ``exclude_providers`` into ~/.brindle/config.json (scope "user"), the
     repo's .brindle/config.local.json ("local") or its shared
-    .brindle/config.json ("repo"). Tiers not given keep their value there."""
+    .brindle/config.json ("repo"). Tiers not given keep their value there.
+    A profile the org's policy doesn't allow, or any change while the policy
+    applies but can't be read, is refused (403)."""
     from brindle import config, profiles, providers
+    from brindle.service.routing import RoutingPolicy
 
     repo = _get(body, "repo", required=True)
     scope = _get(body, "scope", required=True)
@@ -466,7 +470,8 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", "scope must be user, local or repo")
     tiers, reviewer = _get(body, "tiers", dict), _get(body, "reviewer")
     excluded = _get(body, "exclude_providers", list)
-    known = {p.name for p in profiles.list_profiles(repo)}
+    by_name = {p.name: p for p in profiles.list_profiles(repo)}
+    known = set(by_name)
     named = [reviewer] if reviewer is not None else []
     for tier, names in (tiers or {}).items():
         if config.normalize_weight(tier) not in config.WEIGHTS:
@@ -478,6 +483,12 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"no such profile(s): {', '.join(unknown)}")
     if excluded is not None and (bad := sorted(set(map(str, excluded)) - set(providers.PROVIDERS))):
         raise ServiceError("invalid", f"no such provider(s): {', '.join(bad)}")
+    policy = RoutingPolicy.load(repo)
+    if policy.applies and policy.access.error:
+        raise ServiceError("forbidden", f"routing can't be changed now: {policy.access.error}", 403)
+    for name in dict.fromkeys(named):
+        if why := policy.refusal(by_name[name]):
+            raise ServiceError("forbidden", why, 403)
     write, updated = setters[scope], []
     if tiers:
         routing = config._read_json(config.scope_paths(repo)[scope]).get("routing")
@@ -568,6 +579,42 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
     return {"messages": _said(account)}
 
 
+# -- terminals: the real command in a terminal the app shows -------------------------
+# Each answers {"terminal": id, "started": bool} for WS /v1/terminal/{id}; while
+# the same action is still running, a second press gets its terminal (started
+# False). The person signs in or types the secret there; the daemon never
+# automates a sign-in or sees a key.
+
+
+def provider_login(db: DB, params: dict, body: Body) -> Any:
+    """The provider CLI's own sign-in (``claude auth login``, ``codex login``, ...)."""
+    from brindle import picker
+    from brindle.pro.team_policy import CLI_NAMES
+
+    provider = params["provider"]
+    if provider not in CLI_NAMES:
+        raise ServiceError("invalid", f"provider must be one of {', '.join(CLI_NAMES)}")
+    browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
+    env = {"BROWSER": browser["BROWSER"]} if browser else {}
+    return terminal.open_action(f"login {provider}", picker._login_command(provider), env=env)
+
+
+def set_key(db: DB, params: dict, body: Body) -> Any:
+    """``brindle keys set NAME``: the value goes into the terminal's hidden prompt."""
+    from brindle import keystore, providers
+
+    name, repo = params["name"], _get(body, "repo")
+    try:
+        keystore.check_name(name, repo)
+    except keystore.CredentialError as e:
+        raise ServiceError("invalid", str(e)) from e
+    return terminal.open_action(f"key {name}", [*providers.brindle_invocation(), "keys", "set", name], cwd=repo)
+
+
+def upgrade_engine(db: DB, params: dict, body: Body) -> Any:
+    return terminal.open_action("upgrade", ["uv", "tool", "upgrade", "brindle"])
+
+
 def _post(path: str, fn: Action) -> Route:
     return Route(f"/v1{path}", _endpoint(fn), methods=["POST"])
 
@@ -601,4 +648,8 @@ ROUTES = [
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),
     _post("/account/switch-org", account_switch_org),
+    # Like every route, refused to agent callers by the guard.
+    _post("/providers/{provider}/login", provider_login),
+    _post("/keys/{name}/set", set_key),
+    _post("/engine/upgrade", upgrade_engine),
 ]

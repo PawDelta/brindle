@@ -129,25 +129,33 @@ def _when(ts: int | None) -> str:
 
 
 class _OrgCommands:
-    def cmd_org_list(self, base: str | None) -> int:
+    def orgs(self, base: str | None) -> list[dict]:
+        """The orgs the signed-in account belongs to: ``id``, ``name``,
+        ``role``, ``plan``, ``personal`` and ``current`` (the one in use)."""
         client = self._client(base)
         status, body = auth.authed(client, self.store, "GET", "/orgs")
         if status != 200:
             raise auth._error(status, body)
         current = self._current_org()
-        orgs = body.get("orgs") if isinstance(body.get("orgs"), list) else []
+        out = []
+        for o in body.get("orgs") if isinstance(body.get("orgs"), list) else []:
+            if not isinstance(o, dict):
+                continue
+            org_id = auth._sanitize(o.get("org_id", ""), 64)
+            out.append({"id": org_id, "name": auth._sanitize(o.get("name", ""), 40),
+                        "role": auth._sanitize(o.get("role", ""), 8), "plan": auth._sanitize(o.get("plan", ""), 12),
+                        "personal": bool(o.get("personal")), "current": org_id == current})
+        return out
+
+    def cmd_org_list(self, base: str | None) -> int:
+        orgs = self.orgs(base)
         if not orgs:
             self._say("You don't belong to any orgs.")
             return 0
         for o in orgs:
-            if not isinstance(o, dict):
-                continue
-            org_id = auth._sanitize(o.get("org_id", ""), 64)
-            mark = "*" if org_id == current else " "
-            kind = "personal" if o.get("personal") else "team"
-            self._say(f"{mark} {org_id:<28} {auth._sanitize(o.get('name', ''), 40):<32} "
-                      f"{kind:<8} {auth._sanitize(o.get('role', ''), 8):<7} "
-                      f"{auth._sanitize(o.get('plan', ''), 12)}")
+            mark = "*" if o["current"] else " "
+            kind = "personal" if o["personal"] else "team"
+            self._say(f"{mark} {o['id']:<28} {o['name']:<32} {kind:<8} {o['role']:<7} {o['plan']}")
         return 0
 
     def _current_org(self) -> str | None:

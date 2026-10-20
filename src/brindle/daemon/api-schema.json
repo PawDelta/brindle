@@ -2,6 +2,46 @@
   "api_version": "1.0",
   "models": {
     "AccountDTO": {
+      "$defs": {
+        "AccountOrgDTO": {
+          "properties": {
+            "current": {
+              "title": "Current",
+              "type": "boolean"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "personal": {
+              "title": "Personal",
+              "type": "boolean"
+            },
+            "plan": {
+              "title": "Plan",
+              "type": "string"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "role",
+            "plan",
+            "personal",
+            "current"
+          ],
+          "title": "AccountOrgDTO",
+          "type": "object"
+        }
+      },
       "properties": {
         "name": {
           "anyOf": [
@@ -14,6 +54,14 @@
           ],
           "default": null,
           "title": "Name"
+        },
+        "orgs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AccountOrgDTO"
+          },
+          "title": "Orgs",
+          "type": "array"
         },
         "plan": {
           "anyOf": [
@@ -36,6 +84,44 @@
         "signed_in"
       ],
       "title": "AccountDTO",
+      "type": "object"
+    },
+    "AccountOrgDTO": {
+      "properties": {
+        "current": {
+          "title": "Current",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "personal": {
+          "title": "Personal",
+          "type": "boolean"
+        },
+        "plan": {
+          "title": "Plan",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "plan",
+        "personal",
+        "current"
+      ],
+      "title": "AccountOrgDTO",
       "type": "object"
     },
     "AgentDTO": {
@@ -765,8 +851,146 @@
     },
     "RoutingDTO": {
       "$defs": {
+        "RoutingLockDTO": {
+          "properties": {
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "reason"
+          ],
+          "title": "RoutingLockDTO",
+          "type": "object"
+        },
+        "RoutingPolicyDTO": {
+          "description": "The org policy routing answers to. ``applies``: a Team or Enterprise\norg's policy covers this person; ``editable``: they may change routing\nat all (not when the policy applies but can't be read: ``reason``).\n``models``: each model the org allows (every model the profiles run, with\nno list) -> the local profiles that run it.",
+          "properties": {
+            "allowed_models": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Allowed Models"
+            },
+            "allowed_profiles": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Allowed Profiles"
+            },
+            "allowed_providers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Allowed Providers"
+            },
+            "applies": {
+              "default": false,
+              "title": "Applies",
+              "type": "boolean"
+            },
+            "deny_personal_keys": {
+              "default": false,
+              "title": "Deny Personal Keys",
+              "type": "boolean"
+            },
+            "editable": {
+              "default": true,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "locked": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/RoutingLockDTO"
+              },
+              "title": "Locked",
+              "type": "array"
+            },
+            "models": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "title": "Models",
+              "type": "object"
+            },
+            "org_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Org Id"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            }
+          },
+          "title": "RoutingPolicyDTO",
+          "type": "object"
+        },
         "RoutingProfileDTO": {
           "properties": {
+            "allowed": {
+              "default": true,
+              "title": "Allowed",
+              "type": "boolean"
+            },
             "cost_tier": {
               "title": "Cost Tier",
               "type": "string"
@@ -798,6 +1022,30 @@
             "provider": {
               "title": "Provider",
               "type": "string"
+            },
+            "provider_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider Name"
+            },
+            "refusal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Refusal"
             },
             "signed_in": {
               "title": "Signed In",
@@ -835,11 +1083,110 @@
           ],
           "title": "RoutingSettingDTO",
           "type": "object"
+        },
+        "RoutingTierDTO": {
+          "properties": {
+            "models": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/RoutingTierModelDTO"
+              },
+              "title": "Models",
+              "type": "array"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "values",
+            "source"
+          ],
+          "title": "RoutingTierDTO",
+          "type": "object"
+        },
+        "RoutingTierModelDTO": {
+          "description": "One of a tier's profiles in model terms, as the website names them:\nthe model id the org's policy is checked against and the agent's name.",
+          "properties": {
+            "allowed": {
+              "default": true,
+              "title": "Allowed",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            },
+            "provider": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider"
+            },
+            "provider_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider Name"
+            }
+          },
+          "required": [
+            "profile"
+          ],
+          "title": "RoutingTierModelDTO",
+          "type": "object"
         }
       },
       "properties": {
         "exclude_providers": {
           "$ref": "#/$defs/RoutingSettingDTO"
+        },
+        "policy": {
+          "$ref": "#/$defs/RoutingPolicyDTO",
+          "default": {
+            "allowed_models": null,
+            "allowed_profiles": null,
+            "allowed_providers": null,
+            "applies": false,
+            "deny_personal_keys": false,
+            "editable": true,
+            "locked": [],
+            "models": {},
+            "org_id": null,
+            "reason": null
+          }
         },
         "profiles": {
           "items": {
@@ -853,7 +1200,7 @@
         },
         "tiers": {
           "additionalProperties": {
-            "$ref": "#/$defs/RoutingSettingDTO"
+            "$ref": "#/$defs/RoutingTierDTO"
           },
           "title": "Tiers",
           "type": "object"
@@ -868,8 +1215,171 @@
       "title": "RoutingDTO",
       "type": "object"
     },
+    "RoutingLockDTO": {
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "reason"
+      ],
+      "title": "RoutingLockDTO",
+      "type": "object"
+    },
+    "RoutingPolicyDTO": {
+      "$defs": {
+        "RoutingLockDTO": {
+          "properties": {
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "reason"
+          ],
+          "title": "RoutingLockDTO",
+          "type": "object"
+        }
+      },
+      "description": "The org policy routing answers to. ``applies``: a Team or Enterprise\norg's policy covers this person; ``editable``: they may change routing\nat all (not when the policy applies but can't be read: ``reason``).\n``models``: each model the org allows (every model the profiles run, with\nno list) -> the local profiles that run it.",
+      "properties": {
+        "allowed_models": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Models"
+        },
+        "allowed_profiles": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Profiles"
+        },
+        "allowed_providers": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Providers"
+        },
+        "applies": {
+          "default": false,
+          "title": "Applies",
+          "type": "boolean"
+        },
+        "deny_personal_keys": {
+          "default": false,
+          "title": "Deny Personal Keys",
+          "type": "boolean"
+        },
+        "editable": {
+          "default": true,
+          "title": "Editable",
+          "type": "boolean"
+        },
+        "locked": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RoutingLockDTO"
+          },
+          "title": "Locked",
+          "type": "array"
+        },
+        "models": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "title": "Models",
+          "type": "object"
+        },
+        "org_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Org Id"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "title": "RoutingPolicyDTO",
+      "type": "object"
+    },
     "RoutingProfileDTO": {
       "properties": {
+        "allowed": {
+          "default": true,
+          "title": "Allowed",
+          "type": "boolean"
+        },
         "cost_tier": {
           "title": "Cost Tier",
           "type": "string"
@@ -901,6 +1411,30 @@
         "provider": {
           "title": "Provider",
           "type": "string"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        },
+        "refusal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refusal"
         },
         "signed_in": {
           "title": "Signed In",
@@ -937,6 +1471,147 @@
         "source"
       ],
       "title": "RoutingSettingDTO",
+      "type": "object"
+    },
+    "RoutingTierDTO": {
+      "$defs": {
+        "RoutingTierModelDTO": {
+          "description": "One of a tier's profiles in model terms, as the website names them:\nthe model id the org's policy is checked against and the agent's name.",
+          "properties": {
+            "allowed": {
+              "default": true,
+              "title": "Allowed",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            },
+            "provider": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider"
+            },
+            "provider_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider Name"
+            }
+          },
+          "required": [
+            "profile"
+          ],
+          "title": "RoutingTierModelDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "models": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RoutingTierModelDTO"
+          },
+          "title": "Models",
+          "type": "array"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "values",
+        "source"
+      ],
+      "title": "RoutingTierDTO",
+      "type": "object"
+    },
+    "RoutingTierModelDTO": {
+      "description": "One of a tier's profiles in model terms, as the website names them:\nthe model id the org's policy is checked against and the agent's name.",
+      "properties": {
+        "allowed": {
+          "default": true,
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "title": "RoutingTierModelDTO",
       "type": "object"
     },
     "SessionDTO": {
@@ -1407,6 +2082,10 @@
       "path": "/v1/doctor"
     },
     {
+      "method": "POST",
+      "path": "/v1/engine/upgrade"
+    },
+    {
       "method": "WS",
       "path": "/v1/events"
     },
@@ -1439,6 +2118,10 @@
       "path": "/v1/kb/sources"
     },
     {
+      "method": "POST",
+      "path": "/v1/keys/{name}/set"
+    },
+    {
       "method": "GET",
       "path": "/v1/meta"
     },
@@ -1449,6 +2132,10 @@
     {
       "method": "GET",
       "path": "/v1/profiles"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/login"
     },
     {
       "method": "GET",

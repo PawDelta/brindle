@@ -355,7 +355,9 @@ def run(backend, *args):
     return code, out.getvalue(), err.getvalue()
 
 
-def test_org_list_use_and_policy(team):
+def test_org_list_use_and_policy(team, monkeypatch):
+    from brindle.daemon import routes_read
+
     login(team, claims())          # personal org first
     code, out, _ = run(team, "org", "list")
     assert code == 0 and ORG in out and "Team One" in out and "team" in out
@@ -364,6 +366,11 @@ def test_org_list_use_and_policy(team):
     assert team.store.load()["org_id"] == ORG
     code, out, _ = run(team, "org", "list")
     assert f"* {ORG}" in out
+    # The app's org picker: the same list, from GET /v1/account.
+    monkeypatch.setattr(account.ProAccount, "_client", lambda self, base: auth.Client(BASE, transport=team))
+    body = json.loads(routes_read.account(None).body)
+    assert [(o["id"], o["name"], o["role"], o["current"]) for o in body["orgs"]] == [
+        ("org_personal", "me (personal)", "owner", False), (ORG, "Team One", "member", True)]
     code, out, _ = run(team, "org", "policy")
     assert code == 0 and "version 3" in out and "claude, codex" in out
     assert "require human review   yes" in out

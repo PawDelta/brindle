@@ -3,6 +3,7 @@ job whose end arrives on the bus, and a choice the person must make is a 409."""
 
 import asyncio
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from brindle.daemon import peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.pro.account import ProAccount
+from brindle.pro.team_policy import Access, AgentSetup, ClaudeSetup, ModelsSetup
 
 TOKEN = "t" * 43
 
@@ -129,3 +131,72 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
         # The light candidate and the default agent both run on claude: routing refuses, not falls back.
         with pytest.raises(autopilot.AutopilotError, match="excluded from routing"):
             autopilot.choose_profile(db, "sup", str(repo), weight="light")
+
+
+PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),
+                    enforce=True)
+
+
+@pytest.mark.parametrize("acc,profile", [
+    (Access(org_id="acme", allowed_providers=("claude",)), "developer-codex"),
+    (Access(org_id="acme", error="couldn't read the policy"), "developer-codex"),
+    # opus is pinned to the us. id; delegation matches a pin exactly, so the eu. one doesn't allow it.
+    (Access(org_id="acme", allowed_models=("eu.anthropic.claude-opus-x-v1:0",), agent_setup=PINNED),
+     "developer-heavy"),
+], ids=["forbidden", "unreadable", "pin-elsewhere"])
+def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, acc, profile):
+    from brindle import providers
+    from brindle.pro import managed_models, team_policy
+
+    monkeypatch.setattr(team_policy, "access", lambda repo: acc)
+    monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    before = config._read_json(config.scope_paths(str(repo))["user"])
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "user",
+                                               "tiers": {"light": [profile]}})
+    assert (code, reply["error"]["code"]) == (403, "forbidden") and reply["error"]["message"]
+    assert config._read_json(config.scope_paths(str(repo))["user"]) == before
+
+
+@pytest.mark.parametrize("path,status,command", [
+    ("/v1/providers/codex/login", 200, "login"),
+    ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
+    ("/v1/engine/upgrade", 200, "upgrade"),
+    ("/v1/keys/BRINDLE_TOKEN/set", 400, None),
+], ids=["login", "key", "upgrade", "bad-key"])
+def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeypatch, path, status, command):
+    from brindle import providers, tmux
+    from brindle.daemon import terminal
+
+    windows = {}            # terminal id -> [window name, argv, alive]
+    second: list = []       # a second press, made while the first is creating its window
+
+    def ensure_session(session, cwd, env):
+        if not second:
+            t = threading.Thread(target=lambda: second.append(_send("POST", path)))
+            t.start()
+            t.join(0.5)     # it must wait for the first window rather than make its own
+            second.append(t)
+
+    def new_window(session, name, cwd, argv, env, tag):
+        windows[tag[1]] = [name, argv, True]
+        return f"%{len(windows)}"
+
+    monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
+    monkeypatch.setattr(tmux, "ensure_session", ensure_session)
+    monkeypatch.setattr(tmux, "new_window", new_window)
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
+        (f"%{i + 1}", name, alive, tid) for i, (tid, (name, _, alive)) in enumerate(windows.items())])
+    code, reply = _send("POST", path)
+    assert code == status, reply
+    if command is None:
+        assert windows == {} and second == []
+        return
+    thread = second.pop(0)
+    thread.join(5)
+    assert second == [(200, {"terminal": reply["terminal"], "started": False})]
+    assert reply["started"] and len(windows) == 1 and command in windows[reply["terminal"]][1]
+    assert terminal._find(reply["terminal"])["target"] == "%1"
+    windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
+    code, again = _send("POST", path)
+    assert (code, again["started"], len(windows)) == (200, True, 2)

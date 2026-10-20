@@ -555,6 +555,21 @@ def get_pane_tag(pane: str, key: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def tagged_panes(session: str, key: str) -> list[tuple[str, str, bool, str]]:
+    """(pane id, window name, alive, value) of each pane of ``session`` that
+    sets the pane-level user option ``key``; empty when there is no such session."""
+    fmt = f"#{{pane_id}}\t#{{window_name}}\t#{{pane_dead}}\t#{{{key}}}"
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F", fmt, check=False)
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        pane, name, dead, tag = (line.split("\t") + ["", "", ""])[:4]
+        if tag:
+            out.append((pane, name, dead.strip() == "0", tag))
+    return out
+
+
 def agent_pane_in_window(window: str, sidebar: str | None) -> str | None:
     """The pane to anchor the sidebar beside in ``window``: its active pane,
     or (if that's the sidebar itself) any other pane there. None if the
