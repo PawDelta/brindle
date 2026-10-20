@@ -92,7 +92,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 continue
             if row.plan_state == "proposed":
                 out.append(InboxItemDTO(kind="plan", reason="plan awaiting approval",
-                                        agent_id=a["id"], workspace_id=ws["id"]))
+                                        agent_id=a["id"], workspace_id=ws["id"],
+                                        detail=row.plan_text))
             if row.parent_id is not None:
                 continue
             ap = db.get_autopilot(row.id)
