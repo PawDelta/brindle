@@ -79,7 +79,12 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
     out: list[InboxItemDTO] = []
     for ws in view.snapshot(db, repo_root, panes=panes):
         for a in ws["agents"]:
-            if reason := needs_you(a, ws):
+            if a.get("locked"):
+                continue   # another identity's session: structure only, nothing read from it
+            # A failed merge waits on the person even when autopilot reviews the rest.
+            reason = needs_you(a, ws) or next(
+                (r for r in [awaiting_review(a, ws)] if r and r.startswith("merge failed")), None)
+            if reason:
                 out.append(InboxItemDTO(kind=_kind(a, ws, reason), reason=reason,
                                         agent_id=a["id"], workspace_id=ws["id"]))
             row = db.get_agent(a["id"])
@@ -91,6 +96,11 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             if row.parent_id is not None:
                 continue
             ap = db.get_autopilot(row.id)
+            # The workspace holds one asking id; each root's own state is the truth.
+            if ap and ap.state == "blocked" and not any(
+                    i.kind == "question" and i.agent_id == a["id"] for i in out):
+                out.append(InboxItemDTO(kind="question", reason="has a question",
+                                        agent_id=a["id"], workspace_id=ws["id"]))
             if ap and autopilot.proposing(ap):
                 checks = json.loads(ap.proposal).get("checks") or []
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed",
