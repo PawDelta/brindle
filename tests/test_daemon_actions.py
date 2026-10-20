@@ -709,6 +709,8 @@ def lead(db, repo, tmp_path, monkeypatch):
     db.add_autopilot("lead")
     db.update_autopilot("lead", state="done")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    monkeypatch.setattr(routes_actions, "_PR_WORK", set())
+    monkeypatch.setattr(routes_actions, "_PR_TRIED", {})
     return ws
 
 
@@ -904,6 +906,46 @@ def test_session_review_auto_pr_opens_once_when_ready_and_allowed(db, lead, tmp_
     pushed = sh("git ls-remote origin sess", sess).split()[:1]
     assert (creates, urls, pushed == [head]) == ((1, ["https://github.com/o/r/pull/7"], True) if opened
                                                   else (0, [], False))
+
+
+def test_session_review_auto_pr_survives_gh_failing_a_restart_and_another_identity(db, lead, tmp_path, monkeypatch):
+    from brindle import identity_lock
+
+    sess, called, fail = Path(lead.path), tmp_path / "gh-called", tmp_path / "gh-fails"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\n[ -f {fail} ] && exit 1\necho https://github.com/o/r/pull/7\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    config.set_local(lead.repo_root, "auto_pr", True)
+    head = _commit(sess, "a.py", "a\n")
+
+    def prs() -> list[tuple]:
+        return [tuple(r) for r in db.conn.execute("SELECT url, pushed_sha FROM session_prs")]
+
+    # gh can't open it: the compare page is no PR, so nothing is recorded and the next turn to ready retries.
+    fail.touch()
+    routes_actions.auto_pr(db, "lead", opening=True)
+    assert prs() == [] and bus.tail(db, kinds=("session.pr_opened",)) == []
+    fail.unlink()
+    # Its job dispatched but not yet run: a second trigger leaves that work alone.
+    held = []
+    monkeypatch.setattr(routes_actions, "_spawn", held.append)
+    assert routes_actions.auto_pr(db, "lead", opening=True) is not None
+    assert routes_actions.auto_pr(db, "lead", opening=True) is None and len(held) == 1 and prs() == [(None, None)]
+    # The daemon stopped before running it: after a restart the claim is matched to the PR gh finds open.
+    creates = called.read_text().count("pr create")
+    monkeypatch.setattr(routes_actions, "_PR_WORK", set())
+    monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    routes_actions.auto_pr(db, "lead", opening=False)
+    assert prs() == [("https://github.com/o/r/pull/7", None)] and called.read_text().count("pr create") == creates
+    routes_actions.auto_pr(db, "lead", opening=False)
+    assert prs() == [("https://github.com/o/r/pull/7", head)]
+    # Signed in as someone else: the session's new commit isn't pushed under their name.
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "someone@other.example")
+    newer = _commit(sess, "a.py", "b\n")
+    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] == head
+    assert sh("git ls-remote origin sess", sess).split()[0] != newer
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:

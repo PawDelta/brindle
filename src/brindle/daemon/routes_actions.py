@@ -685,7 +685,9 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
     ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
     unless the session is ready. The job's result carries the URL, which is
     also published as ``session.pr_opened`` and recorded in ``session_prs``
-    (``auto``: brindle's own, whose row :func:`auto_pr` claimed first)."""
+    (``auto``: brindle's own, whose row :func:`auto_pr` claimed first). When
+    gh can't open it, the URL is the compare page's and nothing is recorded
+    (brindle's own fails instead)."""
     root, ws = review.session(db, params["root"])
     identity_lock.ensure(root)
     review.require_ready(db, root, ws)
@@ -693,21 +695,55 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
     key = (root.id, ws.branch)
 
     def work(db: DB, job: Job) -> Any:
-        head = git.out(["rev-parse", "HEAD"], ws.path)
         try:
-            url = workspaces.pull_request(ws, title, draft, body=text)
+            head = git.out(["rev-parse", "HEAD"], ws.path)
+            url = workspaces.open_pull_request(ws, title, draft, body=text)
+            if url is None and auto:
+                raise workspaces.WorkspaceError("pushed, but gh couldn't open the PR")
+            if url is None:     # the person opens it from the compare page: no PR to record yet
+                url = workspaces.compare_url(ws)
+            else:
+                _record_pr(db, key, url, head, auto)
         except BaseException:
             if auto:    # its claim goes, so the session's next turn to ready tries again
                 db.conn.execute(f"DELETE FROM session_prs WHERE {_SESSION_PR} AND url IS NULL", key)
             raise
-        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, auto, opened_at)"
-                        " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
-                        " url = excluded.url, pushed_sha = excluded.pushed_sha",
-                        (*key, url, head, int(auto), time.time()))
-        bus.publish_agent(db, "session.pr_opened", root.id, url=url, auto=auto)
+        finally:
+            if auto:
+                _end_pr_work(key)
         return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
 
     return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
+
+
+# The session branches (root id, branch) whose PR this daemon is opening or pushing
+# to now: a session_prs row with no url and no entry here was left by a daemon that
+# stopped half way. And the commit last tried on each, so a failed push waits for
+# the next commit (or a restart) instead of retrying every sweep.
+_PR_WORK: set[tuple[str, str]] = set()
+_PR_TRIED: dict[tuple[str, str], str] = {}
+_PR_LOCK = threading.Lock()
+
+
+def _start_pr_work(key: tuple[str, str]) -> bool:
+    with _PR_LOCK:
+        if key in _PR_WORK:
+            return False
+        _PR_WORK.add(key)
+        return True
+
+
+def _end_pr_work(key: tuple[str, str]) -> None:
+    with _PR_LOCK:
+        _PR_WORK.discard(key)
+
+
+def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None, auto: bool) -> None:
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, auto, opened_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
+                    " url = excluded.url, pushed_sha = excluded.pushed_sha",
+                    (*key, url, pushed, int(auto), time.time()))
+    bus.publish_agent(db, "session.pr_opened", key[0], url=url, auto=auto)
 
 
 def auto_pr(db: DB, root_id: str, opening: bool) -> Job | None:
@@ -715,31 +751,51 @@ def auto_pr(db: DB, root_id: str, opening: bool) -> Job | None:
     (review.auto_pr): open its PR with the drafted title and body when it
     just became ready (``opening``) and its branch has none yet, or push a
     commit made since to the PR it has. Once per branch: the row is claimed
-    before the PR is opened."""
+    before the PR is opened, and a claim a stopped daemon left is first
+    matched to the PR gh finds open. Nothing while the session belongs to
+    another identity, or while this daemon is already at work on its PR."""
     root, ws = review.session(db, root_id)
     key = (root.id, ws.branch)
+    if identity_lock.locked_by(root.id) or not _start_pr_work(key):
+        return None
+    try:
+        job = _auto_pr(db, root, ws, key, opening)
+    except BaseException:
+        _end_pr_work(key)
+        raise
+    if job is None:
+        _end_pr_work(key)
+    return job
+
+
+def _auto_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], opening: bool) -> Job | None:
     row = db.conn.execute(f"SELECT url, pushed_sha FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
     head = git.out(["rev-parse", "HEAD"], ws.path)
-    if (row["url"] is None or row["pushed_sha"] == head) if row else not opening:
-        return None     # being opened, nothing new to push, or not just ready
-    if not review.auto_pr(ws.repo_root):
-        return None
-    if row:
-        db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (head, *key))
+    if row and row["url"]:
+        if head in (row["pushed_sha"], _PR_TRIED.get(key)) or not review.auto_pr(ws.repo_root):
+            return None
+        _PR_TRIED[key] = head
 
         def push(db: DB, job: Job) -> Any:
             try:
+                identity_lock.ensure(root)
                 git.push(ws.path, ws.branch)
-            except BaseException:
-                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR} AND pushed_sha = ?",
-                                (row["pushed_sha"], *key, head))
-                raise
+                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (head, *key))
+            finally:
+                _end_pr_work(key)
             bus.publish_agent(db, "session.pr_pushed", root.id, url=row["url"], commit=head)
             return {"url": row["url"], "commit": head}
 
         return start_job("session.push", push, root_id=root.id, repo_root=ws.repo_root)
-    if not db.conn.execute("INSERT OR IGNORE INTO session_prs (root_id, branch, auto, opened_at) VALUES (?, ?, 1, ?)",
-                           (*key, time.time())).rowcount:
+    abandoned = row is not None
+    if not (opening or abandoned) or not review.auto_pr(ws.repo_root):
+        return None
+    if abandoned and (url := workspaces.existing_pull_request(ws)):
+        _record_pr(db, key, url, None, True)     # its commits are pushed on the next sweep
+        return None
+    if not abandoned and not db.conn.execute(
+            "INSERT OR IGNORE INTO session_prs (root_id, branch, auto, opened_at) VALUES (?, ?, 1, ?)",
+            (*key, time.time())).rowcount:
         return None
     try:
         d = review.draft(db, root, ws)
