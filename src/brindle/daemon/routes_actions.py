@@ -212,7 +212,7 @@ def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool
     else:
         ws = workspaces.adopt_root(db, repo)
     provider = provider or load_profile(agents.SUPERVISOR, ws.repo_root).provider
-    chat = Agent("preflight", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
+    chat = Agent("", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
     return _blocked([(chat, ws)], keys_only=read_only)
 
 
@@ -825,9 +825,7 @@ def provider_consent(db: DB, params: dict, body: Body) -> Any:
     item, repo, profile = _get(body, "id", required=True), _get(body, "repo"), _get(body, "profile")
     env = None
     if repo and profile:    # the launch it was asked for (the item's action names it): the same identity
-        ws = workspaces.adopt_root(db, repo)
-        who = Agent("preflight", ws.id, profile, params["provider"], None, "interactive", "starting", "", None, 0.0)
-        env = agents.launch_identity(who, ws)[0]
+        env = agents.consent_identity(db, repo, profile, params["provider"], _get(body, "session"))
     try:
         preflight.record_consent(params["provider"], item, env, _get(body, "key"))
     except preflight.StaleConsent as e:

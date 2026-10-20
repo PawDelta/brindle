@@ -399,9 +399,11 @@ def _codex_trust(codex, repo, level):
     # A worker started any way (assign, handoff, a queued task) goes through the same launch.
     ("assign", "claude", "fresh", ["consent"]),
     ("assign", "codex", "untrusted", ["trust"]),
+    # The session's own key (its session_credentials), not brindle's: approving it clears the worker.
+    ("assign", "claude", "session-key", ["consent"]),
     ("interactive", "claude", "fresh", []),         # a chat in a terminal: the person answers it there
 ], ids=["start", "start-trusts-silently", "start-untrusted", "start-stored-key", "stale-open", "continue",
-        "rewind", "worker-consent", "worker-untrusted", "terminal-chat"])
+        "rewind", "worker-consent", "worker-untrusted", "worker-session-key", "terminal-chat"])
 def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, how, provider, setup,
                                                         blocked):
     from brindle import keystore
@@ -411,6 +413,9 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
         _codex_trust(codex, world.repo_root, "untrusted")
     if setup == "stored-key":
         keystore.set_key("ANTHROPIC_API_KEY", SECRET)
+    if setup == "session-key":
+        db.set_session_credential("sup", "ANTHROPIC_API_KEY", SECRET)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-0000000000abcd")
     before = codex.read_text() if codex.exists() else None
     monkeypatch.setattr(providers, "signed_out", lambda p, env=None: "Claude Code isn't signed in" if (
         p == "claude" and setup in ("signed-out", "stored-key") and not (env or {}).get("ANTHROPIC_API_KEY")) else None)
@@ -429,10 +434,25 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
         kinds = [i["kind"] for i in reply.get("preflight", [])]
         assert all(i["action"]["path"].startswith(f"/v1/providers/{provider}/") for i in reply.get("preflight", []))
     else:
-        with pytest.raises(agents.AgentError) as e:
-            agents.spawn(db, world, "developer" if how == "assign" else "supervisor", provider_name=provider,
-                         mode=how, parent_id="sup" if how == "assign" else None, prompt="go")
-        kinds = [i.kind for i in getattr(e.value, "items", [])]
+        def spawn():
+            with pytest.raises(agents.AgentError) as e:
+                agents.spawn(db, world, "developer" if how == "assign" else "supervisor", provider_name=provider,
+                             mode=how, parent_id="sup" if how == "assign" else None, prompt="go")
+            return getattr(e.value, "items", [])
+
+        items = spawn()
+        kinds = [i.kind for i in items]
+        if setup == "session-key":
+            action = items[0].action
+            assert "wxyz" in items[0].detail and action.body["session"] == "sup"
+            confirm = {**action.body, "accept": True}
+            assert _send("POST", action.path, {**confirm, "key": "0" * 16})[0] == 409   # some other key
+            assert _send("POST", action.path, {**confirm, "session": "wk"})[0] == 409   # not a session root
+            assert _send("POST", action.path, confirm)[0] == 200
+            assert providers.api_key_approved(SECRET)
+            assert not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+            assert spawn() == [] and len(opened) == 1      # the same worker now launches
+            opened.clear()
     assert kinds == blocked and len(opened) == (0 if blocked else 1)
     if blocked:
         assert (codex.read_text() if codex.exists() else None) == before

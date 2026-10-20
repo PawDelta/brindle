@@ -835,8 +835,47 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
     if keys_only:
         # brindle's own list of the CLI's credentials: never names a repo declares.
         env = {k: v for k, v in env.items() if k in providers._ENV_AUTH.get(agent.provider, ())}
-    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key,
-                           launch={"repo": ws.repo_root, "profile": agent.profile})
+    launch = {"repo": ws.repo_root, "profile": agent.profile}
+    session = credentials_session(agent)
+    if session:
+        launch["session"] = session
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch)
+
+
+def credentials_session(agent: Agent) -> str | None:
+    """The root session whose stored credentials ``agent``'s launch gets (see
+    agent_env), when it has any: a consent asked for that launch names it, so
+    recording it resolves the same key."""
+    from brindle.db import DB
+
+    db = DB()
+    try:
+        current = agent.parent_id or agent.id
+        while current:
+            a = db.get_agent(current)
+            if a is None or not a.parent_id:
+                break
+            current = a.parent_id
+        return current if current and db.get_session_credentials(current) else None
+    finally:
+        db.conn.close()
+
+
+def consent_identity(db: DB, repo: str, profile: str, provider: str, session: str | None) -> dict[str, str]:
+    """The environment a consent's launch signs in with, rebuilt from what
+    its action names: ``repo``, ``profile``, and ``session`` (a recorded root
+    session in that repo, whose stored credentials it gets)."""
+    ws = workspaces.adopt_root(db, repo)
+    parent = None
+    if session is not None:
+        root = db.get_agent(session)
+        root_ws = db.get_workspace(root.workspace_id) if root else None
+        if root is None or root.parent_id or root_ws is None or root_ws.repo_root != ws.repo_root:
+            raise AgentError(f"no session {session!r} in {repo}")
+        parent = root.id
+    who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
+                None, 0.0)
+    return launch_identity(who, ws)[0]
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
