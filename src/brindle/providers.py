@@ -301,6 +301,39 @@ def approve_api_key(api_key: str) -> str:
     return config
 
 
+def claude_onboarded() -> bool:
+    """Whether Claude Code has been through its first-run screens here (theme,
+    security notes): ``hasCompletedOnboarding`` in its global config."""
+    try:
+        return _read_json(os.path.realpath(claude_global_config())).get("hasCompletedOnboarding") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def record_claude_onboarding() -> str:
+    """Record that the person went through Claude Code's first-run screens,
+    as Claude Code records it (``hasCompletedOnboarding``), with its theme
+    left as they set it or the CI default. Only after the person confirmed
+    its security notes in the app: brindle never acknowledges them for
+    anyone. Returns the file's path; raises OSError or ValueError."""
+    config = os.path.realpath(claude_global_config())
+    os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+    with _config_lock():
+        try:
+            data = _read_json(config)
+            import stat
+
+            mode = stat.S_IMODE(os.stat(config).st_mode)
+        except FileNotFoundError:
+            data, mode = {}, 0o600
+        if not isinstance(data, dict):
+            raise ValueError(f"{config} doesn't hold a JSON object")
+        data["hasCompletedOnboarding"] = True
+        data.setdefault("theme", CI_THEME)
+        _replace_json(config, data, mode)
+    return config
+
+
 # Where Claude Code reads its org-managed settings (its documented system
 # paths); BRINDLE_CLAUDE_MANAGED_SETTINGS (os.pathsep-separated) replaces them.
 MANAGED_SETTINGS_PATHS = (
@@ -341,9 +374,10 @@ def claude_org_managed() -> str | None:
     return None
 
 
-def _config_lock():
-    """The brindle lock around every write to Claude Code's global state, so
-    two brindle processes can't drop each other's change."""
+def _config_lock(name: str = "claude-trust.lock"):
+    """The brindle lock around every write to Claude Code's global state (or,
+    by ``name``, another CLI's), so two brindle processes can't drop each
+    other's change."""
     import contextlib
     import fcntl
 
@@ -353,7 +387,7 @@ def _config_lock():
     def held():
         lock_dir = brindle_home() / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        with open(lock_dir / "claude-trust.lock", "a+") as lock:
+        with open(lock_dir / name, "a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 yield
@@ -388,11 +422,14 @@ def _write_trust(config: str, key: str) -> bool:
 def _replace_json(config: str, data: dict, mode: int) -> None:
     """Write ``data`` over ``config`` atomically with ``mode``, through a temp
     file beside it that never has a wider mode and is always removed."""
+    _replace_text(config, json.dumps(data, indent=2), mode)
+
+
+def _replace_text(config: str, text: str, mode: int) -> None:
     import uuid
 
     tmp = f"{config}.brindle-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     try:
-        text = json.dumps(data, indent=2)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
@@ -1076,6 +1113,79 @@ def codex_chatgpt_login() -> bool:
     mode = data.get("auth_mode") if isinstance(data, dict) else None
     del data
     return mode == "chatgpt"
+
+
+def codex_config_path() -> str:
+    return os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "config.toml")
+
+
+def codex_trust(repo_root: str) -> str | None:
+    """Codex's recorded trust for ``repo_root``: its ``trust_level`` under
+    ``[projects."<path>"]`` in config.toml (Codex keys a worktree by its main
+    repository, symlinks resolved), or None when it has none. Raises
+    ValueError when the file doesn't parse."""
+    import tomllib
+
+    try:
+        with open(codex_config_path(), "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return None
+    projects = data.get("projects")
+    entry = projects.get(os.path.realpath(repo_root)) if isinstance(projects, dict) else None
+    return entry.get("trust_level", "") if isinstance(entry, dict) else None
+
+
+def trust_codex_project(repo_root: str, *, override: bool = False) -> bool:
+    """Record ``repo_root`` as trusted in Codex's config.toml, as its "Trust
+    this folder?" screen does, so a session never opens on that screen. A
+    repo Codex has no answer for gets one (the answer Codex.after_launch gives
+    anyway for a repo the person started brindle in); a different answer the
+    person gave Codex is kept unless ``override`` (they chose to trust it in
+    the app). Edits only that one value, and writes only when the result
+    parses to exactly the old config plus it. Returns whether it's trusted
+    now; leaves a missing Codex home alone."""
+    import stat
+    import tomllib
+
+    path, key = codex_config_path(), os.path.realpath(repo_root)
+    if not os.path.isdir(os.path.dirname(path)):
+        return False
+    with _config_lock("codex-trust.lock"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            text, mode = "", 0o600
+        old = tomllib.loads(text)
+        projects = old.get("projects") if isinstance(old.get("projects"), dict) else {}
+        entry = projects.get(key)
+        if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
+            return True
+        if isinstance(entry, dict) and "trust_level" in entry and not override:
+            return False
+        header = f"[projects.{json.dumps(key)}]"
+        lines = text.splitlines()
+        if header in lines:
+            at = lines.index(header) + 1
+            end = next((i for i in range(at, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+            body = [i for i in range(at, end) if re.match(r"\s*trust_level\s*=", lines[i])]
+            if body:
+                lines[body[0]] = 'trust_level = "trusted"'
+            else:
+                lines.insert(at, 'trust_level = "trusted"')
+            new = "\n".join(lines) + "\n"
+        else:
+            new = (text if not text or text.endswith("\n") else text + "\n") + f'\n{header}\ntrust_level = "trusted"\n'
+        want = {**old, "projects": {**projects, key: {**(entry or {}), "trust_level": "trusted"}}}
+        try:
+            if tomllib.loads(new) != want:
+                return False
+        except ValueError:
+            return False
+        _replace_text(path, new, mode)
+    return True
 
 
 # Checked on Codex CLI 0.162.0 signed in with ChatGPT: the interactive TUI (what

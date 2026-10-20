@@ -24,14 +24,15 @@ from brindle.pro.license import NotEntitled as LicenseNotEntitled
 
 
 class ServiceError(Exception):
-    def __init__(self, code: str, message: str, http_status: int = 400):
+    def __init__(self, code: str, message: str, http_status: int = 400, **extra: Any):
         super().__init__(message)
         self.code = code
         self.message = message
         self.http_status = http_status
+        self.extra = extra          # more fields for the error object (e.g. a log tail)
 
     def to_json(self) -> dict[str, Any]:
-        return {"error": {"code": self.code, "message": self.message}}
+        return {"error": {**self.extra, "code": self.code, "message": self.message}}
 
 
 # Checked in order: the first class an exception is an instance of wins, so a

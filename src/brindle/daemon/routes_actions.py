@@ -3,8 +3,10 @@ service layer or the engine function the CLI or MCP tool already uses.
 
 Every route takes a JSON body (or none) and answers JSON. A service
 ``Conflict`` (a choice the person has to make first) answers 409 with the
-choices; any other refusal is a ``ServiceError`` with its own status. A long
-action (a merge, a PR, a rewind, milestone checks, a sign-in) answers 202
+choices, and a launch its provider's CLI would stop on answers 409 with
+``preflight`` items (brindle.preflight); any other refusal is a
+``ServiceError`` with its own status. A long action (a merge, a PR, a
+rewind, milestone checks, a sign-in, an engine upgrade) answers 202
 with a job id at once and runs on its own: ``job.done`` or ``job.failed``
 (carrying that id) arrives on the bus when it ends, ``job.progress`` while
 it runs. Milestone checks run in the engine's existing detached helper, so
@@ -33,7 +35,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, tmux, workspaces
+from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, preflight, tmux, workspaces
 from brindle import sessions as sessions_mod
 from brindle.daemon import terminal
 from brindle.db import DB, Agent, Workspace
@@ -60,10 +62,10 @@ def _spawn(target: Callable[[], None]) -> None:
     threading.Thread(target=target, daemon=True).start()
 
 
-def start_job(kind: str, work: Callable[[DB, Job], Any], **fields) -> Job:
+def start_job(kind: str, work: Callable[[DB, Job], Any], job: Job | None = None, **fields) -> Job:
     """Run ``work`` on its own thread (with its own DB connection) and
     publish how it ended. ``fields``: the event's ids (workspace_id, root_id ...)."""
-    job = Job(secrets.token_hex(8), kind)
+    job = job or Job(secrets.token_hex(8), kind)
 
     def run() -> None:
         db = DB()
@@ -132,7 +134,7 @@ def _endpoint(fn: Action):
             if err.code == "internal":
                 log.exception("daemon action %s failed", request.url.path)
             return _error(err)
-        if isinstance(got, svc.Conflict):
+        if isinstance(got, (svc.Conflict, preflight.Blocked)):
             return JSONResponse(got.to_json(), 409)
         if isinstance(got, Job):
             return JSONResponse(got.to_json(), 202)
@@ -185,7 +187,18 @@ def _notes(notes: list[svc.Note]) -> list[dict[str, str]]:
 
 
 def start_session(db: DB, params: dict, body: Body) -> Any:
-    got = svc.start(db, _get(body, "repo", required=True), provider=_get(body, "provider"),
+    """A 409 ``{"preflight": [...]}`` instead of a chat opening on its CLI's
+    sign-in or first-run screen (see brindle.preflight); opening a running
+    session ("o") launches nothing, so it isn't held up."""
+    from brindle.profiles import load_profile
+
+    repo = _get(body, "repo", required=True)
+    if _get(body, "choice") != "o":
+        provider = _get(body, "provider") or load_profile(agents.SUPERVISOR, repo).provider
+        blocked = preflight.gate([provider], repo)
+        if blocked:
+            return blocked
+    got = svc.start(db, repo, provider=_get(body, "provider"),
                     prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
                     autopilot=_get(body, "autopilot", bool), branch=_get(body, "branch"),
                     worktree=_get(body, "worktree"), choice=_get(body, "choice"),
@@ -199,6 +212,10 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
 
 def continue_session(db: DB, params: dict, body: Body) -> Any:
     _, ws = _root(db, params["root"])
+    blocked = preflight.gate([a.provider for a in agents.tree(db, params["root"]) if a.status != "done"],
+                             ws.repo_root)
+    if blocked:
+        return blocked
     got = svc.continue_(db, svc.continue_workspace(db, ws.path), params["root"])
     return got if isinstance(got, svc.Conflict) else {**got.to_json(), "notes": _notes(got.notes)}
 
@@ -286,6 +303,15 @@ def rewind_agent(db: DB, params: dict, body: Body) -> Any:
     identity_lock.ensure(a)
     to = _get(body, "to", int, required=True)
     profile, note = _get(body, "profile"), _get(body, "note")
+    ws = _workspace(db, a.workspace_id)
+    if profile:
+        from brindle.profiles import load_profile
+
+        blocked = preflight.gate([load_profile(profile, ws.repo_root).provider], ws.repo_root)
+    else:
+        blocked = preflight.gate([a.provider], ws.repo_root)
+    if blocked:
+        return blocked
 
     def work(db: DB, job: Job) -> Any:
         fresh = rewind.rewind(db, a.id, to, profile=profile, note=note)
@@ -751,6 +777,26 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env)
 
 
+def provider_trust(db: DB, params: dict, body: Body) -> Any:
+    """The person chose in the app to trust ``repo`` in this provider's CLI
+    (a preflight ``trust`` item): recorded where the CLI keeps its answer."""
+    repo = _get(body, "repo", required=True)
+    if not preflight.trust(params["provider"], repo):
+        raise ServiceError("not_stored", f"couldn't record {params['provider']}'s trust for {repo}", 422)
+    return {"provider": params["provider"], "repo": repo, "trusted": True}
+
+
+def provider_consent(db: DB, params: dict, body: Body) -> Any:
+    """The person accepted a preflight ``consent`` item (``id``) in the app:
+    brindle records it as the CLI does. Only this route, on the person's own
+    confirmation, ever records one."""
+    if _get(body, "accept", bool) is not True:
+        raise ServiceError("invalid", "accept must be true: only the person's confirmation records a consent")
+    item = _get(body, "id", required=True)
+    preflight.record_consent(params["provider"], item)
+    return {"provider": params["provider"], "id": item, "recorded": True}
+
+
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
@@ -801,8 +847,58 @@ def set_key(db: DB, params: dict, body: Body) -> Any:
     return terminal.open_action(f"key {name}", [*providers.brindle_invocation(), "keys", "set", name], cwd=repo)
 
 
+# -- engine ----------------------------------------------------------------------
+
+
+UPGRADE_TAIL = 20
+_upgrading: Job | None = None
+_upgrade_lock = threading.Lock()
+
+
+def _run_upgrade() -> tuple[int, str]:
+    """``uv tool upgrade brindle``: its exit status and output. uv is looked
+    up where its installer puts it too, since an app-started daemon's PATH
+    may not have it."""
+    import shutil
+    from pathlib import Path
+
+    uv = shutil.which("uv") or next((str(p) for p in (Path.home() / ".local/bin/uv", Path.home() / ".cargo/bin/uv")
+                                     if p.is_file()), None)
+    if uv is None:
+        return 127, "uv isn't installed: see https://docs.astral.sh/uv/"
+    try:
+        out = subprocess.run([uv, "tool", "upgrade", "brindle"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        return 124, "uv tool upgrade brindle took over 15 minutes and was stopped"
+    return out.returncode, out.stdout or ""
+
+
 def upgrade_engine(db: DB, params: dict, body: Body) -> Any:
-    return terminal.open_action("upgrade", ["uv", "tool", "upgrade", "brindle"])
+    """Upgrade brindle in the background, no terminal: ``job.progress``
+    (stage "upgrading") when it starts, then ``job.done`` or ``job.failed``,
+    the failure carrying the last lines of uv's output (the only time any of
+    it goes on the bus). A press while one runs gets that job back."""
+    global _upgrading
+    with _upgrade_lock:
+        if _upgrading is not None:
+            return _upgrading
+        _upgrading = job = Job(secrets.token_hex(8), "engine.upgrade")
+
+    def work(db: DB, job: Job) -> Any:
+        global _upgrading
+        try:
+            bus.publish(db, "job.progress", job=job.id, stage="upgrading")
+            code, output = _run_upgrade()
+        finally:
+            with _upgrade_lock:
+                _upgrading = None
+        if code != 0:
+            raise ServiceError("upgrade_failed", f"uv tool upgrade brindle exited {code}", 500,
+                               tail=output.splitlines()[-UPGRADE_TAIL:])
+        return {"upgraded": True}
+
+    return start_job("engine.upgrade", work, job=job)
 
 
 def _post(path: str, fn: Action) -> Route:
@@ -841,6 +937,8 @@ ROUTES = [
     _post("/account/switch-org", account_switch_org),
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
+    _post("/providers/{provider}/trust", provider_trust),
+    _post("/providers/{provider}/consent", provider_consent),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
     _post("/terminals/{id}/input", terminal_input),

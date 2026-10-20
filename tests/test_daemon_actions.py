@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import sh
 
-from brindle import agents, autopilot, bus, config, coordinator, pipeline, workspaces
+from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
 from brindle.daemon import peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
@@ -18,6 +18,7 @@ from brindle.pro.account import ProAccount
 from brindle.pro.team_policy import Access, AgentSetup, ClaudeSetup, ModelsSetup
 
 TOKEN = "t" * 43
+REAL_PREFLIGHT = preflight.check
 
 
 def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None) -> tuple[int, dict]:
@@ -58,6 +59,7 @@ def world(db, repo, monkeypatch):
                        time.time(), plan_first=1, plan_state="proposed"))
     db.add_autopilot("sup")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None: [])
     return root
 
 
@@ -299,9 +301,8 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 @pytest.mark.parametrize("path,status,command", [
     ("/v1/providers/codex/login", 200, "login"),
     ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
-    ("/v1/engine/upgrade", 200, "upgrade"),
     ("/v1/keys/BRINDLE_TOKEN/set", 400, None),
-], ids=["login", "key", "upgrade", "bad-key"])
+], ids=["login", "key", "bad-key"])
 def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeypatch, path, status, command):
     from brindle import providers, tmux
     from brindle.daemon import terminal
@@ -360,3 +361,120 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "a\nb"})[0] == 400
     assert _send("POST", "/v1/terminals/wk/input", {"text": "ab-12"})[0] == 404
     assert len(typed) == 2
+
+
+def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
+    """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
+    monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)
+    for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN"):
+        (tmp_path / env).write_text("")
+        monkeypatch.setenv(env, str(tmp_path / env))
+    claude = tmp_path / "claude-config" / ".claude.json"
+    claude.parent.mkdir()
+    claude.write_text(json.dumps({"hasCompletedOnboarding": True} if onboarded else {"numStartups": 1}))
+    (tmp_path / "codex-home").mkdir()
+    return claude, tmp_path / "codex-home" / "config.toml"
+
+
+def _codex_trust(codex, repo, level):
+    import os
+
+    codex.write_text(f'model = "x"\n\n[projects.{json.dumps(os.path.realpath(repo))}]\ntrust_level = "{level}"\n')
+
+
+@pytest.mark.parametrize("path,provider,trust,blocked", [
+    ("/v1/sessions", "claude", None, ["signin"]),
+    ("/v1/sessions", "codex", None, []),            # Codex's trust is recorded silently, then it launches
+    ("/v1/sessions", "codex", "untrusted", ["trust"]),   # the person's own answer to Codex is never overridden
+    ("/v1/sessions/sup/continue", "claude", None, ["signin"]),
+    ("/v1/agents/wk/rewind", "claude", None, ["signin"]),
+], ids=["start", "start-trusts-silently", "start-untrusted", "continue", "rewind"])
+def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, path, provider, trust,
+                                                        blocked):
+    _, codex = _provider_setup(tmp_path, monkeypatch)
+    if trust:
+        _codex_trust(codex, world.repo_root, trust)
+    before = codex.read_text() if codex.exists() else None
+    monkeypatch.setattr(providers, "signed_out",
+                        lambda p, env=None: "Claude Code isn't signed in" if p == "claude" else None)
+    opened = []
+
+    def open_window(*a, **k):
+        opened.append(a)
+        raise agents.AgentError("stopped at the window")
+
+    monkeypatch.setattr(agents, "_open_window", open_window)
+    code, reply = _send("POST", path, {"repo": world.repo_root, "provider": provider, "to": 1})
+    assert code == 409, reply
+    if blocked:
+        assert [i["kind"] for i in reply["preflight"]] == blocked and opened == []
+        assert all(i["action"]["path"].startswith(f"/v1/providers/{provider}/") for i in reply["preflight"])
+        assert (codex.read_text() if codex.exists() else None) == before
+        return
+    assert len(opened) == 1 and "preflight" not in reply
+    assert providers.codex_trust(world.repo_root) == "trusted"
+
+
+@pytest.mark.parametrize("provider,setup,item", [
+    ("claude", "missing", "claude.install"),
+    ("antigravity", "gemini", "key.GEMINI_API_KEY"),
+    ("claude", "fresh", "claude.onboarding"),
+    ("claude", "key", "claude.api_key"),
+    ("codex", "untrusted", "codex.trust"),
+], ids=["setup", "key", "consent-onboarding", "consent-api-key", "trust"])
+def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, world, tmp_path, monkeypatch,
+                                                                          provider, setup, item):
+    claude, codex = _provider_setup(tmp_path, monkeypatch, onboarded=setup != "fresh")
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: None)
+    if setup == "missing":
+        monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
+    if setup == "gemini":
+        settings = tmp_path / "agy-home" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text('{"modelProvider": "gemini"}')
+    if setup == "key":
+        monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
+    if setup == "untrusted":
+        _codex_trust(codex, world.repo_root, "untrusted")
+    configs = lambda: [p.read_text() if p.exists() else None for p in (claude, codex)]  # noqa: E731
+    before = configs()
+    query = f"/v1/providers/{provider}/preflight?repo={world.repo_root}"
+    code, items = _send("GET", query)
+    assert code == 200, items
+    found = next(i for i in items if i["id"] == item)
+    assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    action = found["action"]
+    if action is None or action["name"] == "set_key":
+        return
+    if found["kind"] == "consent":
+        assert found["link"] or found["detail"]
+        # Nothing records a consent but the person's own confirmation.
+        assert _send(action["method"], action["path"], action["body"])[0] == 400 and configs() == before
+    code, reply = _send(action["method"], action["path"], {**action["body"], "accept": True})
+    assert code == 200, reply
+    assert item not in [i["id"] for i in _send("GET", query)[1]]
+    if setup == "untrusted":
+        assert codex.read_text().startswith('model = "x"\n')
+
+
+@pytest.mark.parametrize("exit_code", [0, 1], ids=["done", "failed"])
+def test_upgrade_runs_in_the_background_and_reports_on_the_bus(db, world, monkeypatch, exit_code):
+    output = "\n".join(f"uv line {i}" for i in range(30))
+    runs, again = [], []
+
+    def run():
+        runs.append(1)
+        again.append(_send("POST", "/v1/engine/upgrade"))      # pressed again while it runs
+        return exit_code, output
+
+    monkeypatch.setattr(routes_actions, "_run_upgrade", run)
+    code, reply = _send("POST", "/v1/engine/upgrade")
+    assert code == 202 and runs == [1] and again == [(202, reply)]
+    events = bus.tail(db, kinds=("job.progress", "job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["job"]) for e in events] == [
+        ("job.progress", reply["job"]), ("job.done" if exit_code == 0 else "job.failed", reply["job"])]
+    if exit_code == 0:
+        assert "uv line" not in json.dumps(events)
+    else:
+        error = events[-1]["payload"]["error"]
+        assert error["code"] == "upgrade_failed" and error["tail"] == [f"uv line {i}" for i in range(10, 30)]

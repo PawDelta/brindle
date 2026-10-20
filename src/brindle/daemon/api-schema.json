@@ -772,6 +772,123 @@
       "title": "NativeSubagentDTO",
       "type": "object"
     },
+    "PreflightActionDTO": {
+      "properties": {
+        "body": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Body",
+          "type": "object"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "method",
+        "path"
+      ],
+      "title": "PreflightActionDTO",
+      "type": "object"
+    },
+    "PreflightItemDTO": {
+      "$defs": {
+        "PreflightActionDTO": {
+          "properties": {
+            "body": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Body",
+              "type": "object"
+            },
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "path": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "method",
+            "path"
+          ],
+          "title": "PreflightActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "One thing a provider's CLI would stop on before a session (brindle.preflight).",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreflightActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "link": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Link"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "provider",
+        "title",
+        "detail"
+      ],
+      "title": "PreflightItemDTO",
+      "type": "object"
+    },
     "ProfileDTO": {
       "properties": {
         "description": {
@@ -2147,7 +2264,19 @@
     },
     {
       "method": "POST",
+      "path": "/v1/providers/{provider}/consent"
+    },
+    {
+      "method": "POST",
       "path": "/v1/providers/{provider}/login"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/providers/{provider}/preflight"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/trust"
     },
     {
       "method": "GET",

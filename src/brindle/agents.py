@@ -862,6 +862,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle.providers import trust_folder
 
         trust_folder(ws.path)  # no trust dialog for nobody to answer
+    if provider.name == "codex":
+        try:   # Codex keys trust by the main repository: one answer covers every worktree
+            providers.trust_codex_project(ws.repo_root)
+        except (OSError, ValueError):
+            pass   # after_launch still answers the screen; preflight reports a config it can't read
     if provider.name == "antigravity" and m is not None and m.setup is not None and m.setup.antigravity is not None:
         try:
             providers.set_agy_gemini()

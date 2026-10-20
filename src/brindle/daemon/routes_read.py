@@ -39,6 +39,7 @@ from brindle.service.dto import (
     AgentDTO,
     DecisionDTO,
     GoalDTO,
+    PreflightItemDTO,
     ProfileDTO,
     RoutingDTO,
     RoutingProfileDTO,
@@ -286,6 +287,16 @@ def get_doctor(request: Request) -> Any:
 
 
 @_json
+def provider_preflight(request: Request) -> Any:
+    """What would stop a session on this provider in ``repo`` before its first
+    turn: the items POST /v1/sessions answers 409 with (see brindle.preflight)."""
+    from brindle import preflight
+
+    items = preflight.check(request.path_params["provider"], _repo(request))
+    return [PreflightItemDTO(**i.to_json()).to_json() for i in items]
+
+
+@_json
 def account(request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
@@ -349,6 +360,7 @@ ROUTES = [
     Route("/v1/config", get_config),
     Route("/v1/routing", get_routing),
     Route("/v1/doctor", get_doctor),
+    Route("/v1/providers/{provider}/preflight", provider_preflight),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
 ]
