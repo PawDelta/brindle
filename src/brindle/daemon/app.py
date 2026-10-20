@@ -14,6 +14,7 @@ from starlette.types import ASGIApp
 import brindle
 from brindle import airgap
 from brindle.config import db_path
+from brindle.daemon import routes_read
 from brindle.daemon.auth import Guard
 
 API_VERSION = "1.0"
@@ -34,4 +35,4 @@ async def meta(request: Request) -> JSONResponse:
 def build_app(token: str, port: int | None = None) -> ASGIApp:
     """The daemon's ASGI app. ``port``: its TCP port, if it listens on one
     (pages served from there count as its own Origin)."""
-    return Guard(Starlette(routes=[Route("/v1/meta", meta)]), token, port)
+    return Guard(Starlette(routes=[Route("/v1/meta", meta), *routes_read.ROUTES]), token, port)
