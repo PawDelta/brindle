@@ -447,6 +447,9 @@ def _brindle_allows_npm_test() -> bool:
     # delivered, so a conflict, and the rule written for it goes again.
     ("allow_once", True, "expired", 409, None, None),
     ("allow_always", False, "expired", 409, None, None),
+    # Two requests for the same rule: one allowed always and consumed, the other expired.
+    # The rule the first wrote stays.
+    ("allow_always", False, "shared", 409, None, "brindle"),
     # The stored request changed while the hook waits: it isn't the request the hook registered.
     ("allow_once", True, "mutated", 409, None, None),
     # An answer written into the database is no answer: the hold runs out.
@@ -460,7 +463,7 @@ def _brindle_allows_npm_test() -> bool:
     pytest.param("allow_once", True, "agent", 403, None, None,
                  marks=pytest.mark.variant("an agent holding the token can't answer a permission request")),
 ], ids=["once", "always-brindle", "always-claude", "deny", "terminal", "codex", "antigravity", "native",
-        "in-flight", "lost", "expired-once", "expired-always", "mutated", "db-answer", "forged-json", "locked",
+        "in-flight", "lost", "expired-once", "expired-always", "shared-rule", "mutated", "db-answer", "forged-json", "locked",
         "closed", "agent"])
 def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answering, monkeypatch, choice,
                                                        suggested, race, status, verdict, rule):
@@ -494,7 +497,7 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
             return release(agent_id, request_id)
 
         monkeypatch.setattr(holds.HOLDS, "release", hook_gives_up_first)
-    if race == "expired":
+    def expire_next():
         take = holds.HOLDS.take
 
         def too_late(request_id, nonce):    # the hook's first look after the hand-over comes too late
@@ -504,11 +507,40 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
             return take(request_id, nonce)
 
         monkeypatch.setattr(holds.HOLDS, "take", too_late)
+
+    if race == "expired":
+        expire_next()
     if race == "forged-json":
         lifecycle.info_path().write_text(json.dumps({"pid": 1, "token": "forged", "socket": "/tmp/elsewhere.sock"}))
     asked, publish = threading.Event(), bus.publish_agent
     monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
         kind == "permission.pending" and asked.set(), publish(d, kind, *a, **k))[1])
+    if race == "shared":
+        # Another request for the same rule, held too. While this one's answer is handed over
+        # but not yet taken, the other is allowed always and consumed; then this one expires.
+        other_agent, others, other_reply, done = db.get_agent(agent_id), [], [], []
+        other = threading.Thread(target=lambda: others.append(run(DB(), other_agent)))
+        other.start()
+        assert asked.wait(5)
+        asked.clear()
+        other_id = db.hook_permission_request(agent_id)["tool_use_id"]
+        other_digest = next(p.dto for p in inbox.pending_permissions(db, other_agent)
+                            if p.dto.request_id == other_id).digest
+        take = holds.HOLDS.take
+
+        def other_answered_then_too_late(request_id, nonce):
+            hold = holds.HOLDS._holds.get(request_id)
+            if request_id != other_id and hold is not None and hold.released and not done:
+                done.append(True)
+                answering = threading.Thread(target=lambda: other_reply.append(_send(
+                    "POST", f"/v1/inbox/{agent_id}/permission",
+                    {"request": other_id, "digest": other_digest, "choice": "allow_always"})))
+                answering.start()
+                answering.join(10)
+                monkeypatch.setattr(holds.HOLDS, "clock", lambda: time.time() + 10 * HOLD)
+            return take(request_id, nonce)
+
+        monkeypatch.setattr(holds.HOLDS, "take", other_answered_then_too_late)
     out, held, started = [], db.get_agent(agent_id), time.time()
     hook = threading.Thread(target=lambda: out.append(run(DB(), held)))
     hook.start()
@@ -539,6 +571,9 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
         assert code == status, reply
     hook.join(HOLD + 5)
     assert [_verdict(o) for o in out] == [verdict]
+    if race == "shared":    # the other one was answered, allowed, and its rule is what remains
+        other.join(5)
+        assert other_reply[0][0] == 200 and [_verdict(o) for o in others] == ["allow"]
     if rule == "claude":
         assert out[0]["hookSpecificOutput"]["decision"]["updatedPermissions"] == SUGGESTED
     assert _brindle_allows_npm_test() == (rule == "brindle")

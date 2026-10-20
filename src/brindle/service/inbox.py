@@ -262,15 +262,16 @@ def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
     return True
 
 
-def _write_rule(req: permissions.Request) -> str | None:
+def _write_rule(req: permissions.Request) -> None:
     """Allow-always through the hook with no rule from Claude Code: brindle's
-    exact allow rule, written while this answer holds the request (claimed,
-    not yet consumed by the hook). The id of a rule it added (to remove again
-    if the answer never reaches the hook), or None when it was there before."""
-    kind, match = permissions.learnable_pattern(req)
-    existed = any(r.id == permissions.rule_id(kind, "exact", match, "allow") for r in permissions.load_store().rules)
-    rule = permissions.add_rule(kind, match, "allow")
-    return None if existed else rule.id
+    exact allow rule, written once the hook has consumed the answer (it was
+    allowed this time), so an answer that never reaches the hook writes
+    nothing, and nothing is ever taken back (another request may rely on
+    the same rule)."""
+    from brindle import antigravity
+
+    permissions.add_rule(*permissions.learnable_pattern(req), "allow")
+    antigravity.resync_permissions()
 
 
 def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str | None, choice: str) -> dict:
@@ -282,8 +283,9 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     through the daemon's hold (brindle.daemon.holds), never the database.
 
     The hold is claimed first, so a second answer, a retry, or an answer
-    racing the hook's window gets a 409 and changes nothing; allow-always
-    writes brindle's rule only while holding the claim. ``choice`` "terminal"
+    racing the hook's window gets a 409 and changes nothing; it succeeds
+    only once the hook consumed the answer, and only then does allow-always
+    write brindle's rule (the hook is allowed this time either way). ``choice`` "terminal"
     ends the hold instead, so the CLI's own prompt asks (the app's "answer
     in the terminal instead"). A request at the CLI's own prompt is refused
     (409): no key is ever typed into it. Says what rule allow-always wrote,
@@ -308,12 +310,7 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     if not HOLDS.claim(agent.id, request_id, digest, choice):
         raise ServiceError("conflict", f"{agent_id}'s request was answered, went to its own prompt, or isn't "
                                        "the one its hook holds: fetch the inbox again", 409)
-    from brindle import antigravity
-
-    added = None
     try:
-        if choice == "allow_always" and not pending.suggestions:
-            added = _write_rule(pending.request)
         if not HOLDS.release(agent.id, request_id):
             raise ServiceError("conflict", f"{agent_id}'s request went to its own prompt before it "
                                            "was answered: nothing was written; answer it in its terminal", 409)
@@ -326,11 +323,9 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
                                            "answer it in its terminal", 409)
     except BaseException:
         HOLDS.unclaim(agent.id, request_id)
-        if added:
-            permissions.forget(added)
         raise
-    if added:
-        antigravity.resync_permissions()
+    if choice == "allow_always" and not pending.suggestions:
+        _write_rule(pending.request)    # only now: the hook allowed it this time
     bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
                       via="hook", cleared=True)
     return {"choice": choice, "via": "hook", "cleared": True,
