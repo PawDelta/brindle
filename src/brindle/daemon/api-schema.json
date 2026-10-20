@@ -1303,6 +1303,10 @@
       "path": "/v1/snapshot"
     },
     {
+      "method": "WS",
+      "path": "/v1/terminal/{agent}"
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/{id:path}/diff"
     },
