@@ -610,7 +610,8 @@ def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
     ``submit`` is false. User-typed input only: nothing brindle or an agent
-    makes up goes in here, and agent callers are refused like everywhere."""
+    makes up goes in here, and agent callers are refused like everywhere.
+    Over --tcp the agent check can't run; the token is the only gate."""
     text = _get(body, "text", required=True)
     if not text or len(text) > 4096 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in text):
         raise ServiceError("invalid", "text must be one line of printable characters")
@@ -622,7 +623,8 @@ def terminal_input(db: DB, params: dict, body: Body) -> Any:
 def put_key(db: DB, params: dict, body: Body) -> Any:
     """Store ``value`` as key ``name``, as ``brindle keys set NAME`` does.
     Write-only: the reply carries the last four characters, never the value,
-    and neither the value nor the body is logged or put on the bus."""
+    and neither the value nor the body is logged or put on the bus. Agent
+    callers are refused; over --tcp that check can't run and the token is the only gate."""
     from brindle import keys_cmds, keystore
 
     name, repo = params["name"], _get(body, "repo")
