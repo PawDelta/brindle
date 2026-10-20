@@ -13,6 +13,7 @@ from brindle.daemon import peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.pro.account import ProAccount
+from brindle.pro.team_policy import Access
 
 TOKEN = "t" * 43
 
@@ -129,3 +130,46 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
         # The light candidate and the default agent both run on claude: routing refuses, not falls back.
         with pytest.raises(autopilot.AutopilotError, match="excluded from routing"):
             autopilot.choose_profile(db, "sup", str(repo), weight="light")
+
+
+@pytest.mark.parametrize("acc,why", [
+    (Access(org_id="acme", allowed_providers=("claude",)), "doesn't allow Codex"),
+    (Access(org_id="acme", error="couldn't read the policy"), "couldn't read the policy"),
+], ids=["forbidden", "unreadable"])
+def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, acc, why):
+    from brindle.pro import managed_models, team_policy
+
+    monkeypatch.setattr(team_policy, "access", lambda repo: acc)
+    monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    before = config._read_json(config.scope_paths(str(repo))["user"])
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "user",
+                                               "tiers": {"light": ["developer-codex"]}})
+    assert (code, reply["error"]["code"]) == (403, "forbidden") and why in reply["error"]["message"]
+    assert config._read_json(config.scope_paths(str(repo))["user"]) == before
+
+
+@pytest.mark.parametrize("path,status,command", [
+    ("/v1/providers/codex/login", 200, "login"),
+    ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
+    ("/v1/engine/upgrade", 200, "upgrade"),
+    ("/v1/keys/BRINDLE_TOKEN/set", 400, None),
+], ids=["login", "key", "upgrade", "bad-key"])
+def test_login_and_secret_actions_open_a_terminal_the_app_streams(world, monkeypatch, path, status, command):
+    from brindle import providers, tmux
+    from brindle.daemon import terminal
+
+    windows = {}
+    monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
+    monkeypatch.setattr(tmux, "ensure_session", lambda session, cwd, env: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag: windows.setdefault(
+        tag[1], (session, argv)) and "%9")
+    monkeypatch.setattr(tmux, "tagged_pane", lambda session, key, value: "%9" if value in windows else None)
+    monkeypatch.setattr(tmux, "window_alive", lambda target: True)
+    code, reply = _send("POST", path)
+    assert code == status, reply
+    if command is None:
+        assert windows == {}
+        return
+    session, argv = windows[reply["terminal"]]
+    assert session == terminal.ACTION_SESSION and command in argv
+    assert terminal._find(reply["terminal"])["target"] == "%9"

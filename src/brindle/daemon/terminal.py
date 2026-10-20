@@ -1,4 +1,6 @@
-"""``WS /v1/terminal/{agent}``: an agent's live terminal.
+"""``WS /v1/terminal/{agent}``: an agent's live terminal, or one of the
+daemon's action terminals (a sign-in, ``brindle keys set``, an upgrade; see
+:func:`open_action`), named by its ``t-...`` id instead of an agent id.
 
 After the guard has taken the token (the socket's first frame), the client gets
 a JSON hello, then the pane as binary frames: a seed (the last SEED_LINES of
@@ -34,8 +36,11 @@ import asyncio
 import collections
 import json
 import logging
+import re
+import secrets
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -54,6 +59,9 @@ POLL_SECONDS = 0.1
 MAX_SIZE = 1000                 # columns or rows a resize may ask for
 WS_NOT_FOUND = 4404
 RESET = b"\x1bc"                # RIS: the client's terminal starts from a clean slate
+ACTION_SESSION = "brindle-app"  # the daemon's own tmux session: the app's action terminals
+ACTION_TAG = "@brindle_terminal"
+ACTION_ID = re.compile(r"t-[0-9a-f]{16}")
 
 
 class Ring:
@@ -489,12 +497,43 @@ class Hub:
             await control.close()
 
 
+def open_action(kind: str, command: list[str], cwd: str | None = None,
+                env: dict[str, str] | None = None) -> str:
+    """Run ``command`` in a new window of the daemon's own tmux session
+    (ACTION_SESSION) and return its terminal id, which ``WS
+    /v1/terminal/{id}`` streams like an agent's pane. The person types into
+    it there (a sign-in, a secret): nothing they type passes through the API.
+    The pane stays after the command exits, so its last words can be read."""
+    terminal_id = "t-" + secrets.token_hex(8)
+    cwd = cwd or str(Path.home())
+    tmux.ensure_session(ACTION_SESSION, cwd, {})
+    tmux.new_window(ACTION_SESSION, kind, cwd, command, env or {}, tag=(ACTION_TAG, terminal_id))
+    return terminal_id
+
+
+def _find_action(terminal_id: str) -> dict:
+    pane = tmux.tagged_pane(ACTION_SESSION, ACTION_TAG, terminal_id)
+    if pane is None:
+        return {"type": "error", "code": "not_found", "message": f"no terminal {terminal_id}"}
+    if tmux.window_alive(pane):
+        return {"type": "terminal", "terminal": terminal_id, "target": pane, "server": tmux.current_server()}
+    try:
+        text = tmux.capture(pane, lines=SEED_LINES, escapes=True)
+    except tmux.TmuxError:
+        text = None
+    return {"type": "no_pane", "terminal": terminal_id, "reason": "exited",
+            "source": "capture" if text else None, "text": text}
+
+
 def _find(agent_id: str) -> dict:
     """The hello for ``agent_id``: its pane to stream (``target``, ``server``),
-    or ``no_pane`` with what is left of it (``text``), or an error."""
+    or ``no_pane`` with what is left of it (``text``), or an error. An action
+    terminal's id (see open_action) names that terminal instead."""
     from brindle import agents, identity_lock
     from brindle.db import DB
 
+    if ACTION_ID.fullmatch(agent_id):
+        return _find_action(agent_id)
     try:
         a = agents.get(DB(), agent_id)
     except agents.AgentError as e:

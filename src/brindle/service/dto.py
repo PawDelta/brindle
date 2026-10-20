@@ -165,24 +165,76 @@ class RoutingSettingDTO(_DTO):
     source: str              # "default", "user", "repo" or "local"
 
 
+class RoutingTierModelDTO(_DTO):
+    """One of a tier's profiles in model terms, as the website names them:
+    the model id the org's policy is checked against and the agent's name."""
+    profile: str
+    provider: str | None = None
+    provider_name: str | None = None     # "Claude Code", "Codex", ...
+    model: str | None = None
+    allowed: bool = True
+
+
+class RoutingTierDTO(RoutingSettingDTO):
+    models: list[RoutingTierModelDTO] = []
+
+
 class RoutingProfileDTO(_DTO):
     name: str
     provider: str
+    provider_name: str | None = None
     model: str | None = None
     installed: bool
     signed_in: bool
     excluded: bool
     cost_tier: str           # "low", "medium" or "high"
+    allowed: bool = True     # whether the org's policy lets a worker run on it
+    refusal: str | None = None
+
+
+class RoutingLockDTO(_DTO):
+    kind: str                # "provider" (not allowed), "route" (managed by the org) or "keys"
+    name: str
+    reason: str
+
+
+class RoutingPolicyDTO(_DTO):
+    """The org policy routing answers to. ``applies``: a Team or Enterprise
+    org's policy covers this person; ``editable``: they may change routing
+    at all (not when the policy applies but can't be read: ``reason``).
+    ``models``: each model the org allows (every model the profiles run, with
+    no list) -> the local profiles that run it."""
+    applies: bool = False
+    org_id: str | None = None
+    editable: bool = True
+    reason: str | None = None
+    allowed_providers: list[str] | None = None
+    allowed_models: list[str] | None = None
+    allowed_profiles: list[str] | None = None
+    deny_personal_keys: bool = False
+    models: dict[str, list[str]] = {}
+    locked: list[RoutingLockDTO] = []
 
 
 class RoutingDTO(_DTO):
-    tiers: dict[str, RoutingSettingDTO]
+    tiers: dict[str, RoutingTierDTO]
     reviewer: RoutingSettingDTO
     exclude_providers: RoutingSettingDTO
     profiles: list[RoutingProfileDTO]
+    policy: RoutingPolicyDTO = RoutingPolicyDTO()
+
+
+class AccountOrgDTO(_DTO):
+    id: str
+    name: str
+    role: str
+    plan: str
+    personal: bool
+    current: bool            # the org this account is using now
 
 
 class AccountDTO(_DTO):
     signed_in: bool
     name: str | None = None
     plan: str | None = None
+    orgs: list[AccountOrgDTO] = []

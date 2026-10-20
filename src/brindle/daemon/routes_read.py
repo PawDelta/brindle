@@ -41,6 +41,8 @@ from brindle.service.dto import (
     RoutingDTO,
     RoutingProfileDTO,
     RoutingSettingDTO,
+    RoutingTierDTO,
+    RoutingTierModelDTO,
     SessionDTO,
     WorkspaceDTO,
 )
@@ -173,30 +175,44 @@ def get_config(request: Request) -> Any:
 
 @_json
 def get_routing(request: Request) -> Any:
-    """Each tier's profiles, the reviewer and the excluded providers, with the
-    scope each comes from, and every profile with what routing knows of it."""
+    """Each tier's profiles (and the model and agent each runs), the reviewer
+    and the excluded providers, with the scope each comes from, every profile
+    with what routing knows of it, and the org policy all of it answers to."""
     from brindle import autopilot, providers
+    from brindle.service.routing import RoutingPolicy, provider_name
 
     repo = _need_repo(request)
     cfg = config.load_repo_config(repo)
+    policy = RoutingPolicy.load(repo)
+    every = profiles.list_profiles(repo)
+    refusals = {p.name: policy.refusal(p) for p in every}
     scope_of = {str(path): scope for scope, path in config.scope_paths(repo).items()}
-    tiers = {t: RoutingSettingDTO(values=cfg.routing[t], source=scope_of.get(cfg.routing_sources[t], "default"))
+
+    def as_model(name: str) -> RoutingTierModelDTO:
+        provider, model = policy.runs(name)
+        return RoutingTierModelDTO(profile=name, provider=provider, provider_name=provider_name(provider),
+                                   model=model, allowed=refusals.get(name) is None)
+
+    tiers = {t: RoutingTierDTO(values=cfg.routing[t], source=scope_of.get(cfg.routing_sources[t], "default"),
+                               models=[as_model(n) for n in cfg.routing[t]])
              for t in config.WEIGHTS}
     installed = doctor.signin_providers()
     rows = []
-    for p in profiles.list_profiles(repo):
+    for p in every:
         # A provider with no CLI of its own (native) is always there.
         here = p.provider not in doctor.CLI_INSTALL or p.provider in installed
         rows.append(RoutingProfileDTO(
-            name=p.name, provider=p.provider, model=autopilot.effective_profile_model(p, repo) or None,
+            name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
+            model=autopilot.effective_profile_model(p, repo) or None,
             installed=here, signed_in=here and providers.signed_out(p.provider, p.env) is None,
-            excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, repo)))
+            excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, repo),
+            allowed=refusals[p.name] is None, refusal=refusals[p.name]))
     return RoutingDTO(
         tiers=tiers,
         reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=config.setting_source(repo, "reviewer")),
         exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers,
                                             source=config.setting_source(repo, "exclude_providers")),
-        profiles=rows).to_json()
+        profiles=rows, policy=policy.to_dto(every)).to_json()
 
 
 @_json
@@ -207,12 +223,19 @@ def get_doctor(request: Request) -> Any:
 @_json
 def account(request: Request) -> Any:
     from brindle.pro import license
+    from brindle.pro.account import ProAccount
 
     try:
         ent = license.current(refresh=False)
     except license.LicenseError:
         return AccountDTO(signed_in=False).to_json()
-    return AccountDTO(signed_in=True, plan=ent.plan).to_json()
+    try:
+        # For the app's org picker; the plan still shows when the org list can't be had.
+        orgs = ProAccount().orgs(None)
+    except Exception:  # noqa: BLE001 - offline, or the backend refused
+        log.debug("brindle: daemon couldn't list the account's orgs", exc_info=True)
+        orgs = []
+    return AccountDTO(signed_in=True, plan=ent.plan, orgs=orgs).to_json()
 
 
 @_json

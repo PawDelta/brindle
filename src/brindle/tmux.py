@@ -555,6 +555,19 @@ def get_pane_tag(pane: str, key: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def tagged_pane(session: str, key: str, value: str) -> str | None:
+    """The pane of ``session`` whose pane-level user option ``key`` is
+    ``value``, or None (no such pane, or no such session)."""
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F", f"#{{pane_id}}\t#{{{key}}}", check=False)
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        pane, _, tag = line.partition("\t")
+        if tag == value:
+            return pane
+    return None
+
+
 def agent_pane_in_window(window: str, sidebar: str | None) -> str | None:
     """The pane to anchor the sidebar beside in ``window``: its active pane,
     or (if that's the sidebar itself) any other pane there. None if the
