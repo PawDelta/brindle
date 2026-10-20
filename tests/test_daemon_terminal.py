@@ -196,7 +196,7 @@ def test_control_frames_reach_the_pane(fake, attached):
         sock.send_text("not json")
         sock.send_json({"type": "key", "text": '-t %2 "$x\\\n'})
         sock.send_json({"type": "key", "keys": ["C-c", "Enter"]})
-        sock.send_json({"type": "paste", "text": "a\nb"})
+        sock.send_json({"type": "paste", "text": "-a\nb"})   # "-a": data, not a set-buffer option
         for cols in (80, 100, 120):
             sock.send_json({"type": "resize", "cols": cols, "rows": 40})
         if attached:    # a terminal is attached: its size rules, nothing is resized
@@ -208,7 +208,7 @@ def test_control_frames_reach_the_pane(fake, attached):
         assert sent == [
             'send-keys -t %1 -l -- "-t %2 \\"\\$x\\\\\\012"',
             'send-keys -t %1 -- "C-c" "Enter"',
-            f'set-buffer -b {name} "a\\012b"',
+            f'set-buffer -b {name} -- "-a\\012b"',
             f"paste-buffer -p -d -b {name} -t %1",
         ]
         assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == (
@@ -234,6 +234,29 @@ def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processe
     assert fake.procs == []
 
 
+def test_control_quote_is_one_argument_tmux_reads_back_as_the_text():
+    # tmux's parser undoes \\ \" and \$ and turns \ooo into the byte, so
+    # control characters can cross a line-based channel; a NUL can't.
+    assert tmux.control_quote('-t %2 "$x\\' + "\n\x7f\x00é") == '"-t %2 \\"\\$x\\\\\\012\\177é"'
+
+
+def test_coalescing_ends_at_the_byte_threshold_before_the_timer(monkeypatch):
+    monkeypatch.setattr(terminal, "COALESCE_SECONDS", 30.0)
+
+    async def run():
+        pane = terminal.Pane("%1", None, None)
+        viewer = pane.add()
+        pane.printed(b"a")
+        gathering = asyncio.ensure_future(terminal._coalesce(pane, viewer))
+        await asyncio.sleep(0.01)
+        assert not gathering.done()                 # a small chunk: still gathering
+        pane.printed(b"b" * terminal.COALESCE_BYTES)  # over the threshold: done now
+        await asyncio.wait_for(gathering, 1)
+        assert pane.ring.since(viewer.pos) == b"a" + b"b" * terminal.COALESCE_BYTES
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("agent,locked,hello,shown,code", [
     ("w9", None, {"type": "no_pane", "agent": "w9", "reason": "exited", "source": "transcript"},
      b"\x1bcall done\r\nbye", 1000),
@@ -243,7 +266,8 @@ def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processe
 ])
 def test_without_a_pane_says_so_and_shows_what_is_left(fake, monkeypatch, agent, locked, hello,
                                                        shown, code):
-    monkeypatch.setattr(identity_lock, "locked_by", lambda a: locked)
+    # locked_by takes the agent's id: handed anything else it answers None (fail-open)
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: locked if agent_id == agent else None)
     with TestClient(build_app(TOKEN)) as client:
         sock = connect(client, agent)
         assert sock.receive_json() == hello
@@ -267,7 +291,10 @@ def test_a_real_pane_streams_what_it_prints(db, repo, monkeypatch):
         sock = connect(client, "w1")
         sock.receive_json()
         sock.receive_bytes()
-        sock.send_json({"type": "paste", "text": 'x="a\\$b"\necho "brindle-$((40+2)) $x"'})
+        # a paste starting with "-" (an option, to tmux's parser) with the
+        # quoting control_quote must undo: quotes, $, a backslash, a newline
+        sock.send_json({"type": "paste",
+                        "text": '--help 2>/dev/null; x="a\\$b"\necho "brindle-$((40+2)) $x"'})
         sock.send_json({"type": "key", "keys": ["Enter"]})
         seen = b""
         while b"brindle-42 a$b" not in seen:

@@ -189,6 +189,14 @@ class Control:
                 pane.stream_ended()
 
     def _answer(self, lines: list[bytes], error: bool) -> None:
+        # A reply block is pane-written text between tmux's guard lines, so a
+        # program printing a guard-shaped row can cut a capture short and have
+        # its next rows read as protocol. It can only garble what its own
+        # viewers see (they see everything it prints anyway); it must not
+        # kill the stream, so a block nobody is waiting for is dropped.
+        if not self._replies:
+            log.debug("brindle: stray reply block on %s", self.session)
+            return
         fut = self._replies.popleft()
         if not fut.done():
             fut.set_result(Reply(lines, error, {t: p.ring.end for t, p in self.panes.items()}))
@@ -303,7 +311,8 @@ class Pane:
             await self.run(tmux.paste, self.target, text, False)
             return
         buf = f"brindle-{uuid.uuid4().hex[:8]}"
-        await self._command(f"set-buffer -b {buf} {tmux.control_quote(text)}")
+        # "--": a paste starting with "-" is data, not a set-buffer option
+        await self._command(f"set-buffer -b {buf} -- {tmux.control_quote(text)}")
         await self._command(f"paste-buffer -p -d -b {buf} -t {self.target}")
 
     async def _command(self, line: str) -> Reply:
@@ -490,7 +499,7 @@ def _find(agent_id: str) -> dict:
         a = agents.get(DB(), agent_id)
     except agents.AgentError as e:
         return {"type": "error", "code": "not_found", "message": str(e)}
-    who = identity_lock.locked_by(a)
+    who = identity_lock.locked_by(a.id)
     if who:
         return {"type": "no_pane", "agent": a.id, "reason": "locked", "locked_by": who}
     has_window = bool(a.tmux_window) and agents.runs_process(a)
@@ -561,10 +570,7 @@ async def _stream(ws: WebSocket, hub: Hub, hello: dict) -> None:
             waker.cancel()
             if reader.done():
                 break
-            viewer.wake.clear()
-            if pane.ring.end - viewer.pos < COALESCE_BYTES:
-                # Gather what the pane prints next into the same frame.
-                await asyncio.sleep(COALESCE_SECONDS)
+            await _coalesce(pane, viewer)
             try:
                 await _flush(ws, pane, viewer)
             except tmux.TmuxError:          # a reseed with the pane gone
@@ -572,6 +578,24 @@ async def _stream(ws: WebSocket, hub: Hub, hello: dict) -> None:
     finally:
         reader.cancel()
         await asyncio.shield(hub.leave(pane, viewer))
+
+
+async def _coalesce(pane: Pane, viewer: Viewer) -> None:
+    """Gather what the pane prints next into the same frame: wait up to
+    COALESCE_SECONDS, or until COALESCE_BYTES are pending, whichever is
+    first."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + COALESCE_SECONDS
+    while not pane.ended and pane.ring.end - viewer.pos < COALESCE_BYTES:
+        viewer.wake.clear()
+        left = deadline - loop.time()
+        if left <= 0:
+            break
+        try:
+            await asyncio.wait_for(viewer.wake.wait(), left)
+        except asyncio.TimeoutError:
+            break
+    viewer.wake.clear()
 
 
 async def _flush(ws: WebSocket, pane: Pane, viewer: Viewer) -> None:
