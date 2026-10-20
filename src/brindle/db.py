@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from typing import Iterator
 
+from brindle import bus
 from brindle.config import db_path
 
 # Claude Code's own subagents (native_subagents table, see below). A crash
@@ -938,6 +939,7 @@ class DB:
                 (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
                  ws.path, ws.port_base, ws.tmux_session, ws.created_at),
             )
+        bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
 
     def get_workspace(self, ws_id: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()
@@ -977,8 +979,11 @@ class DB:
         return _load(Workspace, row) if row else None
 
     def delete_workspace(self, ws_id: str) -> None:
+        ws = self.get_workspace(ws_id)
         with self.tx() as c:
             c.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
+        if ws:
+            bus.publish_ws(self, "workspace.removed", ws, branch=ws.branch)
 
     # -- attached repos (brindle.repos) ---------------------------------------
 
@@ -1176,6 +1181,9 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
+        if "pipeline" in fields:   # the review / merge pipeline's step for this worker
+            bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
+                              merge_failed=bool(fields.get("merge_failed")))
 
     def claim_idle(self, agent_id: str) -> bool:
         """Atomically flip idle -> processing. Only the caller that wins may type
@@ -1185,21 +1193,29 @@ class DB:
                 "UPDATE agents SET status='processing', status_since=? WHERE id=? AND status='idle'",
                 (time.time(), agent_id),
             )
-            return cur.rowcount == 1
+            claimed = cur.rowcount == 1
+        if claimed:
+            bus.publish_agent(self, "agent.status", agent_id, status="processing")
+        return claimed
 
     _STAMP = "status_since = CASE WHEN status = ? THEN status_since ELSE ? END"
 
     def set_status(self, agent_id: str, status: str, only_if: str | None = None) -> None:
         guard, args = ("", ()) if only_if is None else (" AND status=?", (only_if,))
+        # A row already in ``status`` is left as is (its status_since kept),
+        # so only a real change is published.
         with self.tx() as c:
-            c.execute(
-                f"UPDATE agents SET {self._STAMP}, status=? WHERE id=?{guard}",
-                (status, time.time(), status, agent_id, *args),
-            )
+            changed = c.execute(
+                f"UPDATE agents SET {self._STAMP}, status=? WHERE id=? AND status IS NOT ?{guard}",
+                (status, time.time(), status, agent_id, status, *args),
+            ).rowcount
+        if changed:
+            bus.publish_agent(self, "agent.status", agent_id, status=status)
 
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE agents SET result=? WHERE id=?", (result, agent_id))
+        bus.publish_agent(self, "agent.result", agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
         with self.tx() as c:
@@ -1217,7 +1233,11 @@ class DB:
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, noticed_at) VALUES (?,?,?,?,?)",
                 (agent_id, sender_id, body, now, now if notice else None),
             )
-            return int(cur.lastrowid)
+            message_id = int(cur.lastrowid)
+        if not notice:
+            bus.publish_agent(self, "message.queued", agent_id, message_id=message_id,
+                              sender_id=sender_id)
+        return message_id
 
     def mark_delivered(self, message_id: int) -> None:
         with self.tx() as c:
@@ -1306,13 +1326,20 @@ class DB:
 
     # Pull mode: messages held for the agent to read with read_messages.
 
-    def enqueue_held(self, agent_id: str, body: str, sender_id: str | None) -> int:
+    def enqueue_held(self, agent_id: str, body: str, sender_id: str | None,
+                     publish: bool = True) -> int:
+        """Keep ``body`` for read_messages. ``publish=False``: it is only the
+        full text of a message delivered as another row, so no event."""
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, held) VALUES (?,?,?,?,1)",
                 (agent_id, sender_id, body, time.time()),
             )
-            return int(cur.lastrowid)
+            message_id = int(cur.lastrowid)
+        if publish:
+            bus.publish_agent(self, "message.queued", agent_id, message_id=message_id,
+                              sender_id=sender_id, held=True)
+        return message_id
 
     def get_message(self, agent_id: str, message_id: int) -> Message | None:
         row = self.conn.execute(

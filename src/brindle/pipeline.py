@@ -49,8 +49,8 @@ import time
 from contextlib import contextmanager
 
 from brindle import (
-    agents, autopilot, codemap, codemap_docs, conflicts, events, gates, git, history, learning, policy, savings,
-    tasks, workspaces,
+    agents, autopilot, bus, codemap, codemap_docs, conflicts, events, gates, git, history, learning, policy,
+    savings, tasks, workspaces,
 )
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import DB, Agent, Workspace
@@ -197,6 +197,7 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
     ``reported=True``, ``approved=``, ``escalated=True`` or ``merged=``
     (see learning.note); the events plugin hears it as a review, escalated,
     merge or remove event from ``actor``."""
+    _publish(db, ws, worker, actor, **event)
     try:
         cfg = load_repo_config(ws.repo_root)
         worker = worker or agents.workspace_worker(db, ws)
@@ -226,6 +227,33 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
         events.emit(cfg, "merge", ws, worker, actor=actor)
     elif event.get("merged") is False:
         events.emit(cfg, "remove", ws, worker, actor=actor, merged=False)
+
+
+def _publish(db: DB, ws: Workspace, worker: Agent | None, actor: Agent | str | None,
+             **event) -> None:
+    """The bus event for one of ``_note``'s steps (see its ``event``)."""
+    if event.get("reported"):
+        kind = "pipeline.reported"
+    elif event.get("approved") is not None:
+        kind = "pipeline.review"
+    elif event.get("escalated"):
+        kind = "pipeline.escalated"
+    elif event.get("merged") is True:
+        kind = "pipeline.merged"
+    elif event.get("merged") is False:
+        kind = "pipeline.removed"
+    else:
+        return
+    try:
+        worker = worker or agents.workspace_worker(db, ws)
+    except Exception:
+        worker = None
+    fields = {"actor": actor.id if isinstance(actor, Agent) else actor, "branch": ws.branch,
+              **{k: v for k, v in event.items() if k != "reported"}}
+    if worker:
+        bus.publish_agent(db, kind, worker.id, workspace_id=ws.id, repo_root=ws.repo_root, **fields)
+    else:
+        bus.publish_ws(db, kind, ws, **fields)
 
 
 def note_reported(db: DB, ws: Workspace, worker: Agent | None = None) -> None:
@@ -267,6 +295,8 @@ def note_removed_merged(db: DB, ws: Workspace, actor: Agent | None = None,
     """A worktree whose branch had merged is being removed: an event only
     (the learner heard about the merge). Pass ``worker`` when the
     workspace's records are already gone."""
+    bus.publish_ws(db, "pipeline.removed", ws, agent_id=worker.id if worker else None,
+                   actor=actor.id if actor else None, branch=ws.branch, merged=True)
     try:
         cfg = load_repo_config(ws.repo_root)
         worker = worker or agents.workspace_worker(db, ws)

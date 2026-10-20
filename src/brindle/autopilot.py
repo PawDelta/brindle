@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config
-from brindle import escapes, knowledge
+from brindle import bus, escapes, knowledge
 from brindle.db import DB, Agent, Autopilot, Milestone, Workspace
 from brindle.profiles import load_profile
 
@@ -673,6 +673,7 @@ def set_goal(db: DB, root_id: str, goal: str,
             db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
                             passed_sha=prev.passed_sha)
     db.bump_progress(root_id)
+    bus.publish_agent(db, "autopilot.goal", root_id, goal=goal.strip(), milestones=len(milestones))
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
@@ -1064,6 +1065,7 @@ def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
         ap = db.get_autopilot(root_id)
         fields["nudged_at"] = ap.progress if ap else None
     db.update_autopilot(root_id, **fields)
+    bus.publish_agent(db, "autopilot.need_user", root_id, question=note, ask=ask)
 
 
 def held(ap: Autopilot) -> bool:
@@ -1074,6 +1076,7 @@ def held(ap: Autopilot) -> bool:
 
 def answered(db: DB, root_id: str) -> None:
     db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0)
+    bus.publish_agent(db, "autopilot.answered", root_id)
 
 
 def user_spoke(db: DB, agent: Agent) -> None:
@@ -1286,6 +1289,9 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         db.update_autopilot(root_id, state="running")
     elif ap and ap.state in ("done", "auditing"):
         db.update_autopilot(root_id, state="running")
+    bus.publish_agent(db, "autopilot.checked", root_id, position=position,
+                      passed=sum(m.status == "passed" for m in ms), total=len(ms),
+                      regressed=[m.position for m in regressed], done=done)
     sync_goals_file(db, root_id)
     regressed_ids = {m.id for m in regressed}
     shown = [m for m in ms if position is None or m.position == position or done or m.id in regressed_ids]
@@ -1447,6 +1453,7 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     auditor = agents.spawn(db, ws, profile, prompt=audit_prompt(db, ap, head), parent_id=root_id,
                            mode="review", background_setup=True)
     db.update_autopilot(root_id, auditor_id=auditor.id, audit_sha=head, audit_ok=None)
+    bus.publish_agent(db, "autopilot.audit_started", root_id, auditor_id=auditor.id, sha=head)
     return auditor
 
 
@@ -1456,11 +1463,14 @@ def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
     entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
     new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     db.update_autopilot(root_id, audit_history=new_history, audit_sha=None, audit_ok=None, auditor_id=None, state="running")
+    bus.publish_agent(db, "autopilot.audit_decision", root_id)
 
 
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
     """The auditor's verdict. Returns the message for the supervisor."""
     ap = db.get_autopilot(root_id)
+    bus.publish_agent(db, "autopilot.audit", root_id, approved=approved,
+                      sha=ap.audit_sha if ap else None)
     sha = (ap.audit_sha or "")[:8] if ap else ""
     root = db.get_agent(root_id)
     now = _commit(db.get_workspace(root.workspace_id) if root else None, tracked_only=True)

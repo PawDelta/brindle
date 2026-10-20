@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from brindle import agents, autopilot, config, git, sessions, workspaces
+from brindle import agents, autopilot, bus, config, git, sessions, workspaces
 from brindle.db import Agent, Task
 
 from conftest import sh
@@ -91,6 +91,8 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     task = db.get_task("t1")
     assert task.caller_id == "new" and task.caller_ws_id == dest.id
     assert not db.get_autopilot("old").enabled
+    assert [(e["root_id"], e["payload"]) for e in bus.tail(db, kinds=("session.handover",))] == [
+        ("new", {"from_root": "old"})]
 
 
 def test_checkout_for_target_reads_a_slashed_name_as_a_branch(db, repo, monkeypatch):

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from conftest import full_text, sh
-from brindle import agents, mcp_server, tasks, workspaces
+from brindle import agents, bus, mcp_server, tasks, workspaces
 from brindle.db import Agent
 from test_merge_order import fake_spawn
 
@@ -174,6 +174,8 @@ def test_queued_task_starts_from_holder_merge(db, repo, two_sessions, monkeypatc
     assert starts == [db.merged_sha(ws_b.id)]
     [a_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-a"]
     assert a_task.state == "started"
+    assert [e["kind"] for e in bus.tail(db, kinds=("task.queued", "task.started"))
+            if e["task_id"] == a_task.id] == ["task.queued", "task.started"]
 
 
 # -- dependencies: queue until merge, then auto-start --------------------------
@@ -271,6 +273,8 @@ def test_cancellation_cascades_to_a_task_depending_on_the_cancelled_one(db, repo
     [c_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-c"]
     assert b_task.state == "cancelled"
     assert c_task.state == "cancelled"
+    assert [(e["kind"], e["task_id"]) for e in bus.tail(db, kinds=("task.cancelled",))] == [
+        ("task.cancelled", b_task.id), ("task.cancelled", c_task.id)]
 
     first = db.pop_pending("boss")
     second = db.pop_pending("boss")

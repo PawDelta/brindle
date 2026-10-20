@@ -984,6 +984,23 @@ def doctor(
         raise typer.Exit(1)
 
 
+APP_DOWNLOAD_URL = "https://github.com/PawDelta/brindle-app/releases"
+
+
+@app.command("app")
+def app_cmd() -> None:
+    """Open the brindle desktop app, or print where to download it."""
+    cmd = ["open", "-a", "brindle"] if sys.platform == "darwin" else ["xdg-open", "brindle://"]
+    try:
+        opened = subprocess.run(cmd, capture_output=True).returncode == 0
+    except OSError:
+        opened = False
+    if opened:
+        typer.echo("opened the brindle app")
+    else:
+        typer.echo(f"the brindle app isn't installed. Download it from {APP_DOWNLOAD_URL}")
+
+
 @app.command("ls")
 def list_cmd(
     all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),

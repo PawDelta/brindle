@@ -22,7 +22,7 @@ import time
 import uuid
 from types import SimpleNamespace
 
-from brindle import cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
+from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
@@ -1174,6 +1174,7 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
     if stop_local_models:
         _stop_local_models(db)
     knowledge.note(db, root_id, knowledge.PAUSE)
+    bus.publish_agent(db, "session.paused", root_id, agents=[a.id for a in paused])
     return paused
 
 
@@ -1290,7 +1291,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         auth_indicators = ("auth", "credential", "sign in", "signed out", "login", "api key", "key", "token", "unauthorized", "forbidden")
         if any(ind in note for ind in auth_indicators):
             db.update_autopilot(root_id, state="running", note=None)
-
+    if resumed:
+        bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
     return resumed
 
 
@@ -1573,7 +1575,7 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
     provider = get_provider(agent.provider)
     if condensed:
         # The full text is kept, already read, for read_messages(message_id=...).
-        kept = db.enqueue_held(agent.id, body, sender_id)
+        kept = db.enqueue_held(agent.id, body, sender_id, publish=False)
         db.mark_delivered(kept)
         text = one_line(db, kept, body, sender_id)
     else:
@@ -1887,6 +1889,9 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         ws = db.get_workspace(agent.workspace_id)
     first = agent.result is None
     db.set_result(agent.id, result)
+    if ws:
+        bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
+                          repo_root=ws.repo_root, mode=agent.mode, first=first)
     # Usage and history are extras: never let them stop the result arriving.
     try:
         u = usage_mod.agent_usage(db, agent)
@@ -2054,6 +2059,7 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         close_later(caller_id)
         return gone
     db.add_review(ws.id, sha, caller.id, approved, summary)
+    bus.publish_agent(db, "review.submitted", caller.id, approved=approved, sha=sha)
     if approved:
         db.bump_progress(autopilot.root_of(db, caller.id))
     pipeline.note_review(db, ws, approved, reviewer=caller)

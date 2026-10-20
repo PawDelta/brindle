@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from conftest import sh
 
-from brindle import agents, tmux, workspaces
+from brindle import agents, bus, tmux, workspaces
 from brindle.db import Agent
 from brindle.providers import ClaudeCode, LaunchContext
 from brindle.profiles import load_profile
@@ -257,6 +257,9 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     # Finishing later forwards the result to the supervisor's inbox...
     agents.report_result(db, "w1", "done later")
     assert db.pending_count("boss") == 1
+    assert [(e["kind"], e["agent_id"], e["payload"].get("sender_id"))
+            for e in bus.tail(db, kinds=("agent.result", "message.queued"))] == [
+        ("agent.result", "w1", None), ("message.queued", "boss", "w1")]
     # ...and if the supervisor collects it directly, the duplicate is dropped.
     out = mcp_server._await_worker(db, "w1", wait_seconds=0)
     assert "done later" in out
