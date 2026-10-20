@@ -22,6 +22,7 @@ TOKEN = "t" * 43
 
 def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None) -> tuple[int, dict]:
     raw = json.dumps(body or {}).encode()
+    path, _, query = path.partition("?")
     sent: list[dict] = []
 
     async def receive():
@@ -31,7 +32,7 @@ def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None
         sent.append(message)
 
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method,
-             "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"",
+             "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": query.encode(),
              "root_path": "", "server": ("127.0.0.1", 8123), "client": ("127.0.0.1", 50000),
              "headers": [(b"authorization", f"Bearer {TOKEN}".encode()),
                          (b"content-type", b"application/json")]}
@@ -98,6 +99,7 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
 
 @pytest.mark.parametrize("path,base,setup,status", [
     ("app.py", "shown", None, 200),
+    ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
     ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
     ("app.py", "shown", "busy", 409),
     ("app.py", "shown", "hook-refuses", 409),   # the file goes back; the worker's index survives
@@ -113,7 +115,7 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
                  marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
     pytest.param("pkg/m.py", "shown", "swap", 400,
                  marks=pytest.mark.variant("a directory swapped for an escaping symlink mid-edit")),
-], ids=["edit-commits", "edit-stale", "edit-busy", "edit-refused", "edit-new-file", "edit-new-file-refused",
+], ids=["edit-commits", "edit-read", "edit-stale", "edit-busy", "edit-refused", "edit-new-file", "edit-new-file-refused",
         "edit-deleted-refused", "edit-to-head", "edit-agent",
         "edit-dotdot", "edit-symlink", "edit-git", "edit-pathspec", "edit-swap"])
 def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, monkeypatch,
@@ -159,6 +161,12 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
     head, staged = sh("git rev-parse HEAD", wt), sh("git diff --cached", wt)
     shown = sh(f"git hash-object {path if path in ('app.py', 'new.txt') else 'pkg/m.py'}", wt)[:7]
     content = "print('hi')\n" if setup == "to-head" else "print('bye')\n"
+    if base == "read":
+        for escape in ("../proj/app.py", "out/m.py"):
+            assert _send("GET", f"/v1/workspaces/proj/w-e/file?path={escape}")[0] == 400
+        code, got = _send("GET", f"/v1/workspaces/proj/w-e/file?path={path}")
+        assert code == 200 and got["content"] == "print('working')\n", got
+        base = got["base"]
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent ew")
     code, reply = _send("PUT", "/v1/workspaces/proj/w-e/file",
                         {"path": path, "content": content, "base": shown if base == "shown" else base},

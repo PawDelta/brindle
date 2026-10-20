@@ -357,6 +357,7 @@ def remove_workspace(db: DB, params: dict, body: Body) -> Any:
 
 # An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.
 BUSY = ("starting", "processing", "waiting")
+MAX_EDIT_BYTES = 1 << 20       # a file the review sheet can edit inline
 
 
 def _edit_dir(ws: Workspace, rel: str) -> tuple[str, int, str]:
@@ -379,6 +380,38 @@ def _edit_dir(ws: Workspace, rel: str) -> tuple[str, int, str]:
             raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
         raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
     return "/".join(parts), fd, parts[-1]
+
+
+def read_edit_target(ws: Workspace, rel: str) -> tuple[str, int, str, bytes, int]:
+    """``rel`` checked as :func:`_edit_dir` does and read: its normalized
+    name, an open descriptor of its directory (the caller closes it), the
+    file's own name there, its bytes and its permission bits. Only a regular
+    text file of at most MAX_EDIT_BYTES is editable."""
+    name, dir_fd, leaf = _edit_dir(ws, rel)
+    try:
+        try:
+            fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+        except FileNotFoundError:
+            raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
+        except OSError:     # a symlink (ELOOP)
+            raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
+            data = fh.read(MAX_EDIT_BYTES + 1)
+        if len(data) > MAX_EDIT_BYTES:
+            raise ServiceError("too_large", f"{rel} is over {MAX_EDIT_BYTES // 1024} KB; edit it in an editor", 413)
+        try:
+            text = data.decode()
+        except UnicodeDecodeError:
+            text = "\0"
+        if "\0" in text:
+            raise ServiceError("binary", f"{rel} isn't UTF-8 text; edit it in an editor", 415)
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return name, dir_fd, leaf, data, stat.S_IMODE(st.st_mode)
 
 
 def _replace(dir_fd: int, leaf: str, data: bytes, mode: int) -> None:
@@ -412,27 +445,17 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
     identity_lock.ensure_workspace(db, ws)
     rel, content = _get(body, "path", required=True), _get(body, "content", required=True)
     base = _get(body, "base", required=True).strip().lower()
+    if len(data := content.encode()) > MAX_EDIT_BYTES:
+        raise ServiceError("too_large", f"an edit is at most {MAX_EDIT_BYTES // 1024} KB", 413)
     with git.checkout_lock(ws.path, timeout=10):
         if busy := [a.id for a in db.list_agents(ws.id) if a.status in BUSY]:
             raise ServiceError("busy", f"{', '.join(busy)} is working in {ws.id}; edit once it has stopped", 409)
         if git.current_branch(ws.path) != ws.branch:
             raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
-        name, dir_fd, leaf = _edit_dir(ws, rel)
+        name, dir_fd, leaf, before, mode = read_edit_target(ws, rel)
         try:
-            try:
-                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
-            except FileNotFoundError:
-                raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
-            except OSError:     # a symlink (ELOOP)
-                raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
-            with os.fdopen(fd, "rb") as fh:
-                st = os.fstat(fh.fileno())
-                before = fh.read() if stat.S_ISREG(st.st_mode) else None
-            if before is None:
-                raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
             if len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base):
                 raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
-            data, mode = content.encode(), stat.S_IMODE(st.st_mode)
             _replace(dir_fd, leaf, data, mode)
             commit = None
             # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.

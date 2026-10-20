@@ -2198,6 +2198,10 @@
       "path": "/v1/workspaces/{id:path}/diff"
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/{id:path}/file"
+    },
+    {
       "method": "PUT",
       "path": "/v1/workspaces/{id:path}/file"
     },
