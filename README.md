@@ -22,9 +22,9 @@ brindle is free to use, including at work, under the [brindle License 1.0](LICEN
 may install and run it, but not modify or redistribute it or use it to build a competing
 service ([details](#license)).
 
-![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](assets/brindle-demo.gif)
+![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
 
-*`brindle demo`, recorded on brindle 0.4.1 (sped up 6×, about 20 seconds): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
+*`brindle demo`, recorded on brindle 0.4.1 (sped up about 4.4×, 20 seconds): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
 
 - **Done means a command passed.** A goal is split into milestones, each with a
   check command that brindle runs itself. A milestone is verified when its check exits

@@ -13,7 +13,10 @@
 #
 #   DEMO_COLS / DEMO_ROWS   terminal size recorded (default 150x45)
 #   DEMO_TIMEOUT            hard stop, seconds (default 1200)
-#   DEMO_SPEED              agg playback speed (default 6: about 20 s for a typical run)
+#   DEMO_SECONDS            target GIF length in seconds (default 20); sets the speed
+#   DEMO_SPEED              agg playback speed (default: whatever gives DEMO_SECONDS)
+#   DEMO_FONTS              agg font list (default: a monospace font, then Apple Symbols,
+#                           so Claude Code's ⏺ draws as a dot, not a colour emoji)
 #   DEMO_FONT_SIZE          agg font size in px (default 13: 150 cols ~ 1190 px wide)
 #   DEMO_SETTLE             seconds to keep recording once the goal is reached (default 8)
 #   DEMO_TMUX_SOCKET        name of the private tmux server used (default brindle-demo-rec)
@@ -26,8 +29,10 @@ OUT=${1:-"$ROOT/assets/brindle-demo.gif"}
 COLS=${DEMO_COLS:-150}
 ROWS=${DEMO_ROWS:-45}
 TIMEOUT=${DEMO_TIMEOUT:-1200}
-SPEED=${DEMO_SPEED:-6}
+SPEED=${DEMO_SPEED:-}
+SECONDS_TARGET=${DEMO_SECONDS:-20}
 FONT_SIZE=${DEMO_FONT_SIZE:-13}
+FONTS=${DEMO_FONTS:-"JetBrains Mono,SF Mono,Menlo,DejaVu Sans Mono,Apple Symbols"}
 # Settle time after the goal is reached, so the dashboard repaints with both
 # milestones green before the session is closed (recorded seconds).
 SETTLE=${DEMO_SETTLE:-8}
@@ -49,21 +54,36 @@ if [[ ${DEMO_RENDER_ONLY:-0} == 1 ]]; then
 else
 rm -f "$CAST"
 
-# A throwaway brindle home for the demo, so nothing it does touches your real
-# ~/.brindle: not its database (a demo running on a private tmux server would
-# otherwise take your own sessions' agents, which it can't see, for dead and
-# stop them), not its locks, not its worktrees. Only what signing in and the
-# global config need is copied across; the whole directory goes at the end.
-REAL_HOME=${BRINDLE_HOME:-$HOME/.brindle}
+# A brand-new brindle home for the demo, so the recording shows what a new
+# user sees and nothing it does touches your real ~/.brindle: not its database
+# (a demo running on a private tmux server would otherwise take your own
+# sessions' agents, which it can't see, for dead and stop them), not its
+# locks, not its worktrees. Nothing is copied across: no config, no profiles,
+# no brindle Pro sign-in (so no org or budget lines). quota.json is made a
+# directory so brindle can't record plan usage: no "Claude at N% of its weekly
+# limit" lines and no usage figures in the Costs section. The whole directory
+# goes at the end.
 export BRINDLE_HOME
 BRINDLE_HOME=$(mktemp -d -t brindle-demo-rec)
-for item in config.json agents legacy-warned.json; do
-    [[ -e "$REAL_HOME/$item" ]] && cp -R "$REAL_HOME/$item" "$BRINDLE_HOME/$item"
-done
-if [[ -d "$REAL_HOME/pro" ]]; then
-    mkdir -p -m 700 "$BRINDLE_HOME/pro"
-    find "$REAL_HOME/pro" -maxdepth 1 -type f ! -name '*.lock' -exec cp {} "$BRINDLE_HOME/pro/" \;
-fi
+mkdir -p "$BRINDLE_HOME/quota.json"
+# Not signed in: Pro credentials are read from this home only, never from
+# your keychain.
+export BRINDLE_PRO_CREDENTIAL_STORE=file
+# The one setting the demo needs: hand each milestone to its own worker at
+# once (with the default "balanced", the supervisor may do both itself).
+printf '{"delegation": "fast"}\n' >"$BRINDLE_HOME/config.json"
+
+# Your own global git setup, plus a global excludes file for tool output that
+# global agent hooks may leave in the demo repo (graphify-out/ and the like),
+# which would otherwise block the first merge as "uncommitted changes".
+export GIT_CONFIG_GLOBAL="$BRINDLE_HOME/gitconfig"
+printf 'graphify-out/\n.graphify*/\n' >"$BRINDLE_HOME/gitignore"
+{
+    for f in "$HOME/.gitconfig" "${XDG_CONFIG_HOME:-$HOME/.config}/git/config"; do
+        [[ -f $f ]] && printf '[include]\n\tpath = %s\n' "$f"
+    done
+    printf '[core]\n\texcludesFile = %s\n' "$BRINDLE_HOME/gitignore"
+} >"$GIT_CONFIG_GLOBAL"
 DEMO_HOME="$BRINDLE_HOME/demo"
 mkdir -p "$DEMO_HOME"
 
@@ -168,7 +188,7 @@ fi  # DEMO_RENDER_ONLY
 # alternate screen (its client detaching), and the checkout's path from the
 # header, which agg never draws but which has no place in a published file.
 python3 - "$CAST" <<'EOF'
-import json, os, sys
+import json, os, re, sys
 path = sys.argv[1]
 lines = open(path, encoding="utf-8").read().splitlines()
 header = json.loads(lines[0])
@@ -190,15 +210,45 @@ for e in events:
     carry = 0.0
     kept.append(e)
 events = kept
+# Claude Code's banner names the recording account's plan ("Opus 5.5 · Claude
+# Max"): blank the plan, keeping the width so the rest of the line stays put.
+plan = re.compile(r" · Claude (?:Max|Pro|Team|Enterprise)\b")
+for e in events:
+    if e[1] == "o":
+        e[2] = plan.sub(lambda m: " " * len(m.group(0)), e[2])
+# agg draws a no-break space (Claude Code puts one after its prompt and tree
+# glyphs) as a stray triangle; a plain space looks the same in a terminal.
+for e in events:
+    if e[1] == "o":
+        e[2] = e[2].replace("\u00a0", " ")
+# Open on the supervisor's banner: everything before it (the build, the tmux
+# attach, start-up warnings from your own agent settings) becomes one event,
+# so the first frame is the dashboard rather than a shell line.
+first = next((i for i, e in enumerate(events) if e[1] == "o" and "Claude Code" in e[2]), None)
+if first:
+    head = "".join(e[2] for e in events[:first + 1] if e[1] == "o")
+    events = [[0.0, "o", head]] + events[first + 1:]
 with open(path, "w", encoding="utf-8") as f:
     f.write(json.dumps(header, ensure_ascii=False) + "\n")
     for e in events:
         f.write(json.dumps(e, ensure_ascii=False) + "\n")
 EOF
 
-echo "record_demo: rendering $OUT"
+# The speed that makes the GIF about DEMO_SECONDS long: agg caps idle gaps at
+# 2 s and holds the last frame for 4 s.
+if [[ -z $SPEED ]]; then
+    SPEED=$(python3 - "$CAST" "$SECONDS_TARGET" <<'PY'
+import json, sys
+lines = open(sys.argv[1], encoding="utf-8").read().splitlines()[1:]
+played = sum(min(json.loads(l)[0], 2.0) for l in lines if l.strip())
+print(f"{max(1.0, played / max(float(sys.argv[2]) - 4, 1)):.2f}")
+PY
+)
+fi
+echo "record_demo: rendering $OUT at ${SPEED}x"
 agg --quiet \
     --theme "$THEME" \
+    --font-family "$FONTS" \
     --font-size "$FONT_SIZE" \
     --speed "$SPEED" \
     --idle-time-limit 2 \
