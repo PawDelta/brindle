@@ -483,9 +483,12 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         routing = config._read_json(config.scope_paths(repo)[scope]).get("routing")
         routing = dict(routing) if isinstance(routing, dict) else {}
         for tier, names in tiers.items():
-            routing[config.normalize_weight(tier)] = names
+            canon = config.normalize_weight(tier)
+            # An alias ("reasoning") left in place would still override the canonical key.
+            routing = {k: v for k, v in routing.items() if config.normalize_weight(k) != canon}
+            routing[canon] = names
             if scope == "user":
-                config.forget_user(f"routing_{config.normalize_weight(tier)}")   # the picker's pick would win
+                config.forget_user(f"routing_{canon}")   # the picker's pick would win
         path = write("routing", routing)
         updated.append("routing")
     if reviewer is not None:

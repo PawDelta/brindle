@@ -105,18 +105,20 @@ def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monke
 
 
 @pytest.mark.parametrize("scope,body,peer_pid,status,written", [
-    # The picker's pick for a tier is dropped too, or it would still win.
-    ("user", {"tiers": {"light": ["developer-codex"]}}, None, 200,
-     {"routing": {"heavy": ["developer"], "light": ["developer-codex"]}}),
+    # The picker's pick for a tier is dropped too, and so is an alias of a tier, or either would still win.
+    ("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
+     {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}}),
     ("local", {"reviewer": "reviewer"}, None, 200, {"reviewer": "reviewer"}),
-    ("repo", {"exclude_providers": ["antigravity"]}, None, 200, {"exclude_providers": ["antigravity"]}),
+    ("repo", {"tiers": {"light": ["developer"]}, "exclude_providers": ["claude"]}, None, 200,
+     {"routing": {"light": ["developer"]}, "exclude_providers": ["claude"]}),
     ("repo", {"tiers": {"heavy": ["developer", "nope"]}}, None, 400, {}),
     pytest.param("repo", {"reviewer": "reviewer"}, 310, 403, {},
                  marks=pytest.mark.variant("an agent holding the token still can't change routing")),
 ], ids=["user", "local", "repo", "bad-profile", "agent"])
-def test_routing_put_writes_its_scope(db, repo, monkeypatch, scope, body, peer_pid, status, written):
+def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body, peer_pid, status, written):
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
-    config.set_user("routing", {"heavy": ["developer"]})
+    config.set_user("routing", {"heavy": ["developer"], "advanced": ["developer-heavy"],
+                                "reasoning": ["developer-fable"]})
     config.set_user("routing_light", "claude-haiku")
     before = config._read_json(config.scope_paths(str(repo))[scope])
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": scope, **body}, peer_pid)
@@ -124,5 +126,6 @@ def test_routing_put_writes_its_scope(db, repo, monkeypatch, scope, body, peer_p
     after = config._read_json(config.scope_paths(str(repo))[scope])
     assert after == ({k: v for k, v in before.items() if k != "routing_light"} | written if written else before)
     if "exclude_providers" in written:
-        cfg = config.load_repo_config(str(repo))
-        assert "excluded" in autopilot._unavailable("developer-gemini", cfg, str(repo))
+        # The light candidate and the default agent both run on claude: routing refuses, not falls back.
+        with pytest.raises(autopilot.AutopilotError, match="excluded from routing"):
+            autopilot.choose_profile(db, "sup", str(repo), weight="light")

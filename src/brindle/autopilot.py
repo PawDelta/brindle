@@ -702,6 +702,17 @@ def set_goal(db: DB, root_id: str, goal: str,
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", "opencode": "opencode"}
 
 
+def _excluded(name: str, cfg: RepoConfig, repo_root: str) -> bool:
+    """Whether profile ``name`` runs on a provider in ``exclude_providers``
+    (a profile that doesn't exist isn't: its own check reports it)."""
+    if not cfg.exclude_providers:
+        return False
+    try:
+        return load_profile(name, repo_root).provider in cfg.exclude_providers
+    except KeyError:
+        return False
+
+
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                  weight: str | None = None) -> str | None:
     """Why routing skips profile ``name`` (its provider is in
@@ -1008,10 +1019,13 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             if picked:
                 name = picked
             else:
-                fallback = cfg.default_agent
-                if ceiling and weight_order[profile_weight(fallback, cfg, repo_root)] > weight_order[ceiling]:
+                candidates = [cfg.default_agent]
+                if ceiling and weight_order[profile_weight(cfg.default_agent, cfg, repo_root)] > weight_order[ceiling]:
                     candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
-                    fallback = candidates[0] if candidates else None
+                fallback = next((n for n in candidates if not _excluded(n, cfg, repo_root)), None)
+                if not fallback and candidates:
+                    raise AutopilotError(f"no agent profile left for a {weight} task: every candidate runs on a "
+                                         f"provider excluded from routing ({', '.join(cfg.exclude_providers)})")
                 if not fallback:
                     raise AutopilotError(f"no permissible agent profile under max_weight ceiling {ceiling!r}")
                 name = fallback
