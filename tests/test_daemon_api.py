@@ -313,6 +313,46 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
                          for m in heavy)
 
 
+def test_knowledge_search_returns_hits_for_an_indexed_doc(seeded, db):
+    (Path(seeded["repo"]) / "NOTES.md").write_text("# Storage\n\nWe keep state in sqlite, never postgres.\n")
+    src = kb_mod.sources(db, knowledge.repo_key(seeded["repo"]))[0]["id"]
+    kb_mod.sync(db, src)
+    _, hits = _get("/v1/kb/search", AUTH, f"repo={seeded['repo']}&q=sqlite")
+    assert [h["heading_path"] for h in hits] == ["Storage"] and "sqlite" in hits[0]["text"]
+    assert _get("/v1/kb/search", AUTH, f"repo={seeded['repo']}")[1] == []
+
+
+def test_profiles_detail_lints_a_broken_profile(seeded):
+    agents_dir = Path(seeded["repo"]) / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "orphan.md").write_text("---\nname: orphan\nextends: nobody\n---\nHi.\n")
+    _, bad = _get("/v1/profiles/orphan", AUTH, f"repo={seeded['repo']}")
+    assert bad["name"] == "orphan" and any("nobody" in e for e in bad["lint"]["errors"])
+    _, good = _get("/v1/profiles/developer", AUTH, f"repo={seeded['repo']}")
+    assert good["lint"]["errors"] == [] and "env" not in good
+    assert _get("/v1/profiles/nope", AUTH, f"repo={seeded['repo']}")[1]["error"]["code"] == "not_found"
+
+
+@pytest.mark.parametrize("setting,available,effective", [
+    ("off", True, False),    # entitled, but the repo turned learning off
+    ("cloud", True, True),
+    ("auto", True, True),
+    ("cloud", False, False),  # asked for, but the plan has no hosted learning
+], ids=["off", "cloud", "auto", "unentitled"])
+def test_account_learning_is_the_repos_effective_mode(seeded, monkeypatch, setting, available, effective):
+    from brindle import config, learning
+
+    feats = frozenset({"learning"} if available else set())
+    ent = license.Entitlement("u", "org1", "pro", "active", feats, 1, 0, 9, "k", role="owner")
+    monkeypatch.setattr(license, "current", lambda **kw: ent)
+    monkeypatch.setattr("brindle.pro.account.ProAccount.orgs", lambda self, org: [])
+    monkeypatch.setattr(learning, "kept_note", lambda cfg, repo: "kept the default")
+    config.set_repo(seeded["repo"], "learning", setting)
+    _, body = _get("/v1/account", AUTH, f"repo={seeded['repo']}")
+    assert (body["learning_available"], body["learning"]) == (available, effective)
+    assert body["learning_note"] == ("kept the default" if effective else None)
+
+
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
     monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)

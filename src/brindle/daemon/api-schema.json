@@ -2115,6 +2115,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/kb/search"
+    },
+    {
+      "method": "GET",
       "path": "/v1/kb/sources"
     },
     {
@@ -2132,6 +2136,10 @@
     {
       "method": "GET",
       "path": "/v1/profiles"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/profiles/{name}"
     },
     {
       "method": "POST",
