@@ -30,7 +30,6 @@ from brindle.service.errors import ServiceError
 log = logging.getLogger(__name__)
 
 EDIT_MESSAGE = "review edits"       # a review edit's commit: "review edits: <path>"
-EDIT_TRAILER = "Brindle-Review-Edit: true"      # only the session edit route writes it
 MERGED_RE =re.compile(r"^Merge branch '([^']+)'")
 SQUASHED_RE = re.compile(r"^Squash merge (\S+)$")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -67,13 +66,14 @@ def session(db: DB, root_id: str) -> tuple[Agent, Workspace]:
     return root, workspaces.refresh_branch(db, ws)
 
 
-def _only_review_edits_since(ws: Workspace, sha: str) -> bool:
-    """Every commit after ``sha`` (an ancestor of HEAD) is a review edit."""
+def _only_review_edits_since(db: DB, ws: Workspace, sha: str) -> bool:
+    """Every commit after ``sha`` (an ancestor of HEAD) is one the daemon
+    recorded as a review edit (never judged by a commit's own message)."""
     if not git.ok(["merge-base", "--is-ancestor", sha, "HEAD"], ws.path):
         return False
-    rng = f"{sha}..HEAD"
-    return git.out(["rev-list", "--count", rng], ws.path) == git.out(
-        ["rev-list", "--count", f"--grep=^{EDIT_TRAILER}$", rng], ws.path)
+    recorded = {r["sha"] for r in db.conn.execute(
+        "SELECT sha FROM review_edits WHERE workspace_id = ?", (ws.id,))}
+    return set(git.out(["rev-list", f"{sha}..HEAD"], ws.path).split()) <= recorded
 
 
 def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
@@ -88,7 +88,7 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
                 for m in ms if m.status != "passed"]
         if not out:
             head = None if git.dirty_files(ws.path, tracked_only=True) else git.out(["rev-parse", "HEAD"], ws.path)
-            if head and ap.audit_sha and _only_review_edits_since(ws, ap.audit_sha):
+            if head and ap.audit_sha and _only_review_edits_since(db, ws, ap.audit_sha):
                 head = ap.audit_sha     # the person's own edits don't un-audit the work
             if due := autopilot.audit_due(ap, load_repo_config(ws.repo_root), head):
                 out.append(AUDIT_REASONS[due])

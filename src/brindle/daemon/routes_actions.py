@@ -580,9 +580,7 @@ def commit_edit(ws: Workspace, rel: str, data: bytes | None, base: str | None,
                 else:
                     # --only commits just this path: what is staged elsewhere is left alone,
                     # and a refused commit leaves the index as it was.
-                    trailer = ["-m", review.EDIT_TRAILER] if message == review.EDIT_MESSAGE else []
-                    git.run([*lit, "commit", "-q", "--only", "-m", f"{message}: {name}", *trailer, "--", name],
-                            ws.path)
+                    git.run([*lit, "commit", "-q", "--only", "-m", f"{message}: {name}", "--", name], ws.path)
                     commit = git.out(["rev-parse", "HEAD"], ws.path)
         except (git.GitError, ServiceError):
             # Refused (a hook, say): the index entry and the file exactly as they were.
@@ -649,6 +647,9 @@ def _edit_session(db: DB, params: dict, body: Body, data: bytes | None) -> Any:
         if (root := _agent(db, root.id)).status in BUSY:
             raise ServiceError("busy", f"the supervisor {root.id} is working; edit once it has stopped", 409)
         name, commit = commit_edit(ws, rel, data, base.strip().lower() if base else None, review.EDIT_MESSAGE)
+        if commit:
+            db.conn.execute("INSERT OR IGNORE INTO review_edits (workspace_id, sha) VALUES (?, ?)", (ws.id, commit))
+            db.conn.commit()
     bus.publish_agent(db, "session.edited", root.id, path=name, commit=commit, deleted=data is None)
     return {"root_id": root.id, "path": name, "commit": commit,
             "blob": git.hash_blob(ws.path, data, name) if data is not None else None}
