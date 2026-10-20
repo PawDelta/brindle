@@ -449,6 +449,19 @@ CREATE TABLE IF NOT EXISTS kb_events (
     ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS kb_events_repo ON kb_events(repo_key, ts);
+-- The local event bus (brindle.bus owns this): append-only, short-lived.
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    repo_root TEXT,
+    root_id TEXT,
+    agent_id TEXT,
+    workspace_id TEXT,
+    task_id TEXT,
+    payload TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
 CREATE TABLE IF NOT EXISTS intents (
     session_root TEXT NOT NULL,
     repo_key TEXT NOT NULL,
