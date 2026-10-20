@@ -790,7 +790,7 @@ class PreflightBlocked(AgentError):
         super().__init__("; ".join(i.detail for i in items))
 
 
-def launch_identity(agent: Agent, ws: Workspace, profile, m=_UNREAD) -> tuple[dict[str, str], bool, tuple]:
+def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tuple[dict[str, str], bool, tuple]:
     """Who ``agent``'s CLI signs in as on this launch: the environment it gets
     (its profile's env lines, the managed provider's variables, the
     credentials brindle hands it, and the keys its auth or the org denies,
@@ -801,6 +801,9 @@ def launch_identity(agent: Agent, ws: Workspace, profile, m=_UNREAD) -> tuple[di
 
     if m is _UNREAD:
         m = managed(ws.repo_root)
+    profile = profile or _guarded_profile(agent, ws)
+    if profile is None:
+        raise AgentError(f"no profile {agent.profile!r}")
     launch_env = {**profile.env, **managed_models.agent_env(m, agent.provider)}
     deny = pane_auth.deny_names(agent.provider, profile.auth, m,
                                 agent.provider == "claude" and bool(providers.claude_org_managed()))
@@ -830,9 +833,10 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
         return preflight.check("native", ws.repo_root, profile=profile)
     env, org_key, _ = identity or launch_identity(agent, ws, profile, m)
     if keys_only:
-        names = {*keystore.known_names(ws.repo_root), *providers._ENV_AUTH.get(agent.provider, ())}
-        env = {k: v for k, v in env.items() if k in names}
-    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key)
+        # brindle's own list of the CLI's credentials: never names a repo declares.
+        env = {k: v for k, v in env.items() if k in providers._ENV_AUTH.get(agent.provider, ())}
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key,
+                           launch={"repo": ws.repo_root, "profile": agent.profile})
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,

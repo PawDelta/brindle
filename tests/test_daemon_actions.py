@@ -456,8 +456,12 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     # the CLI's status check: asking (a GET) must never hand it over.
     agents_dir = Path(world.repo_root) / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
-    (agents_dir / "supervisor.md").write_text(f"---\nname: supervisor\nprovider: {provider}\n"
-                                              "env.NODE_OPTIONS: --require ./x.js\n---\nYou supervise.\n")
+    # (Declaring it as the profile's key name doesn't get it through either.)
+    # The "key" setup: the profile's own key, with a different one in brindle's environment.
+    (agents_dir / "supervisor.md").write_text(
+        f"---\nname: supervisor\nprovider: {provider}\napi_key_env: NODE_OPTIONS\n"
+        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + SECRET + chr(10) if setup == 'key' else ''}"
+        "---\nYou supervise.\n")
     if setup == "missing":
         monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
     if setup == "gemini":
@@ -465,7 +469,7 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
         settings.parent.mkdir()
         settings.write_text('{"modelProvider": "gemini"}')
     if setup == "key":
-        monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-0000000000abcd")
     if setup == "untrusted":
         _codex_trust(codex, world.repo_root, "untrusted")
     configs = lambda: [p.read_text() if p.exists() else None for p in (claude, codex)]  # noqa: E731
@@ -483,9 +487,16 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
         assert found["link"] or found["detail"]
         # Nothing records a consent but the person's own confirmation.
         assert _send(action["method"], action["path"], action["body"])[0] == 400 and configs() == before
+    if setup == "key":
+        assert "wxyz" in found["detail"]        # the profile's key, not brindle's own
+        # A confirmation of some other key than the one shown records nothing.
+        stale = {**action["body"], "accept": True, "key": "0" * 16}
+        assert _send(action["method"], action["path"], stale)[0] == 409 and configs() == before
     code, reply = _send(action["method"], action["path"], {**action["body"], "accept": True})
     assert code == 200, reply
     assert item not in [i["id"] for i in _send("GET", query)[1]]
+    if setup == "key":
+        assert providers.api_key_approved(SECRET) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
     if setup == "untrusted":
         assert codex.read_text().startswith('model = "x"\n')
 

@@ -55,13 +55,15 @@ INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt"
                        r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
 # Only the person answers these, whatever the model makes of them: their
 # accounts and data, anything that widens what the agent may run (a
-# project's MCP servers or hooks, skipping permission checks, installing),
-# and any terms, licence, agreement or first-run notice a CLI wants accepted
-# (brindle never accepts one for anyone; see brindle.preflight).
+# project's MCP servers or hooks, skipping permission checks, installing).
 PERSONAL = re.compile(r"(?i)sign.?in|log.?in\b|password|api.?key|payment|billing|credit card|subscri"
                       r"|delet|erase|outside (?:this|the) (?:folder|project|worktree|workspace)"
-                      r"|\bmcp\b|\bhooks?\b|bypass|dangerous|skip\w*.{0,20}permission|install|updat"
-                      r"|\bterms\b|licen[cs]e|\bagree|consent|privacy|security notes")
+                      r"|\bmcp\b|\bhooks?\b|bypass|dangerous|skip\w*.{0,20}permission|install|updat")
+# Nor these: terms, a licence, an agreement or a first-run notice a CLI wants
+# accepted (brindle never accepts one for anyone; see brindle.preflight).
+# Looked for in the whole capture, not just the tail the model sees: an
+# agreement's terms can sit far above its "Continue".
+CONSENT = re.compile(r"(?i)\bterms\b|licen[cs]e|\bagree|consent|privacy|security notes")
 # The model only points at an option; brindle answers with it only if it is
 # one of these (the screen can carry text from the repo, which can steer the
 # model). A settings picker is only ever answered with its default.
@@ -435,7 +437,7 @@ class Startup:
 
     def decide(self, screen: str) -> Decision:
         text = normalize(screen)
-        if (PERSONAL.search(text) or SECRET.search(text)
+        if (PERSONAL.search(text) or CONSENT.search(plain(screen)) or SECRET.search(text)
                 or any(CONFIG_PATH.search(p) for p in PATH.findall("\n".join(_tail(screen))))):
             return Decision("needs_user")
         key = _key(text)

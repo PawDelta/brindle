@@ -75,10 +75,22 @@ def _set_key(name: str) -> Action:
     return Action("set_key", "PUT", f"/v1/keys/{name}")
 
 
-def _consent(provider: str, item_id: str) -> Action:
+def _consent(provider: str, item_id: str, **body: str) -> Action:
     if item_id not in RECORDERS:
         return Action("open_provider_once", "POST", f"/v1/providers/{provider}/login")
-    return Action("consent", "POST", f"/v1/providers/{provider}/consent", {"id": item_id})
+    return Action("consent", "POST", f"/v1/providers/{provider}/consent", {"id": item_id, **body})
+
+
+def key_fingerprint(value: str) -> str:
+    """Which key, without the key: a short hash a consent is bound to, so a
+    confirmation records the key the person was shown and no other."""
+    import hashlib
+
+    return hashlib.sha256(value.strip().encode()).hexdigest()[:16]
+
+
+class StaleConsent(ValueError):
+    """What the person confirmed isn't what would be recorded now."""
 
 
 def _key_value(name: str, env: dict[str, str] | None = None) -> str | None:
@@ -104,12 +116,14 @@ def _binary(provider: str) -> str:
 
 
 def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | None = None,
-          signed_in: bool = False, profile=None) -> list[Item]:
+          signed_in: bool = False, profile=None, launch: dict[str, str] | None = None) -> list[Item]:
     """What would stop a session on ``provider`` in ``repo_root`` before its
     first turn; empty when nothing would. ``env``: the environment the CLI
     signs in with (agents.launch_identity; a blank value is a key it won't
     get), else brindle's own. ``signed_in``: the org's key signs it in.
-    ``profile``: for native, the one profile to check (else all of them)."""
+    ``profile``: for native, the one profile to check (else all of them).
+    ``launch``: the ``repo`` and ``profile`` that identity is for, which a
+    consent's action carries so recording it resolves the same identity."""
     from brindle import doctor, providers
 
     if provider not in PROVIDERS:
@@ -136,13 +150,13 @@ def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | 
             items.append(Item("signin", f"{provider}.signin", provider,
                               f"Sign in to {doctor.CLI_INSTALL[provider][0]}", why, _login(provider)))
     if provider == "claude":
-        items += _claude_consents(env)
+        items += _claude_consents(env, launch or {})
     if provider == "codex" and repo_root:
         items += _codex_trust(repo_root)
     return items
 
 
-def _claude_consents(env: dict[str, str] | None) -> list[Item]:
+def _claude_consents(env: dict[str, str] | None, launch: dict[str, str]) -> list[Item]:
     from brindle import providers
 
     out = []
@@ -165,7 +179,7 @@ def _claude_consents(env: dict[str, str] | None) -> list[Item]:
             "consent", "claude.api_key", "claude", "Use ANTHROPIC_API_KEY in Claude Code?",
             f"Claude Code asks once whether to use the key ending {value[-4:]}; with it, usage "
             "is billed to that key, not a subscription login.",
-            _consent("claude", "claude.api_key")))
+            _consent("claude", "claude.api_key", **launch, key=key_fingerprint(value))))
     return out
 
 
@@ -207,16 +221,20 @@ def _native(repo_root: str | None, profile=None) -> list[Item]:
 # -- recording what the person accepted in the app --------------------------------
 
 
-def _record_api_key() -> None:
-    from brindle import keystore, providers
+def _record_api_key(env: dict[str, str] | None, key: str | None) -> None:
+    """Approve the key the launch's identity (``env``) gets, only if it's the
+    one the person was shown (``key``, its fingerprint)."""
+    from brindle import providers
 
-    value = os.environ.get("ANTHROPIC_API_KEY") or keystore.get_key("ANTHROPIC_API_KEY")
+    value = _key_value("ANTHROPIC_API_KEY", env)
     if not value:
-        raise ValueError("no ANTHROPIC_API_KEY to approve")
-    providers.approve_api_key(value.strip())
+        raise StaleConsent("no ANTHROPIC_API_KEY to approve any more; check again")
+    if key is None or key_fingerprint(value) != key:
+        raise StaleConsent("ANTHROPIC_API_KEY isn't the key you were asked about any more; check again")
+    providers.approve_api_key(value)
 
 
-def _record_onboarding() -> None:
+def _record_onboarding(env: dict[str, str] | None, key: str | None) -> None:
     from brindle import providers
 
     providers.record_claude_onboarding()
@@ -227,10 +245,12 @@ def _record_onboarding() -> None:
 RECORDERS = {"claude.onboarding": _record_onboarding, "claude.api_key": _record_api_key}
 
 
-def record_consent(provider: str, item_id: str) -> None:
+def record_consent(provider: str, item_id: str, env: dict[str, str] | None = None, key: str | None = None) -> None:
+    """Record consent ``item_id``. ``env``: the identity of the launch it was
+    asked for (as the item's action names it); ``key``: what it was bound to."""
     if not item_id.startswith(f"{provider}.") or item_id not in RECORDERS:
         raise ValueError(f"{item_id!r} isn't a consent brindle can record for {provider}")
-    RECORDERS[item_id]()
+    RECORDERS[item_id](env, key)
 
 
 def trust(provider: str, repo_root: str) -> bool:

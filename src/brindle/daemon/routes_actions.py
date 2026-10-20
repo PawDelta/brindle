@@ -822,8 +822,16 @@ def provider_consent(db: DB, params: dict, body: Body) -> Any:
     confirmation, ever records one."""
     if _get(body, "accept", bool) is not True:
         raise ServiceError("invalid", "accept must be true: only the person's confirmation records a consent")
-    item = _get(body, "id", required=True)
-    preflight.record_consent(params["provider"], item)
+    item, repo, profile = _get(body, "id", required=True), _get(body, "repo"), _get(body, "profile")
+    env = None
+    if repo and profile:    # the launch it was asked for (the item's action names it): the same identity
+        ws = workspaces.adopt_root(db, repo)
+        who = Agent("preflight", ws.id, profile, params["provider"], None, "interactive", "starting", "", None, 0.0)
+        env = agents.launch_identity(who, ws)[0]
+    try:
+        preflight.record_consent(params["provider"], item, env, _get(body, "key"))
+    except preflight.StaleConsent as e:
+        raise ServiceError("conflict", str(e), 409) from None
     return {"provider": params["provider"], "id": item, "recorded": True}
 
 
