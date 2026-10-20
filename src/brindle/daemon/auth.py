@@ -11,7 +11,11 @@ connection.
 
 A browser always names the page it runs on in ``Origin``: only the app's own
 webview (``tauri://localhost``, ``http://tauri.localhost`` on Windows) and
-the daemon's own TCP address may. Clients that aren't browsers send none."""
+the daemon's own TCP address may. Clients that aren't browsers send none.
+
+Agents run as the same user, so they could read the token too: on the Unix
+socket the guard also refuses a caller that is one of a brindle agent's
+processes (see :mod:`brindle.daemon.peer`)."""
 
 from __future__ import annotations
 
@@ -19,12 +23,16 @@ import asyncio
 import hmac
 import json
 import secrets
+import time
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from brindle.daemon import peer
 
 APP_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
 FIRST_FRAME_TIMEOUT = 10.0      # seconds a WebSocket has to send its token
 WS_UNAUTHORIZED = 4401          # close code for a WebSocket whose first frame isn't the token
+CALLER_TTL = 5.0                # seconds a Unix-socket caller's agent check is reused
 
 
 def new_token() -> str:
@@ -38,6 +46,7 @@ class Guard:
         self.app = app
         self._token = token.encode()
         self._origins = set(APP_ORIGINS)
+        self._callers: dict[int, tuple[float, str | None]] = {}   # pid -> (when, agent_caller)
         if port:
             self._origins |= {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
@@ -47,8 +56,10 @@ class Guard:
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         origin_ok = "origin" not in headers or headers["origin"] in self._origins
+        # Only the Unix socket names its caller: over TCP the token is all that keeps agents out.
+        refused = await self._agent_caller(scope[peer.PEER_PID]) if peer.PEER_PID in scope else None
         if scope["type"] == "websocket":
-            if not origin_ok:
+            if not origin_ok or refused:
                 await send({"type": "websocket.close", "code": 1008})   # refused before the handshake: a 403
                 return
             await self._websocket(scope, receive, send)
@@ -56,11 +67,25 @@ class Guard:
         if not origin_ok:
             await _reject(send, 403, "forbidden", "requests from another origin are refused")
             return
+        if refused:
+            await _reject(send, 403, "agent_caller",
+                          f"refused: {refused}; the daemon serves the app and people, not agents")
+            return
         scheme, _, token = headers.get("authorization", "").partition(" ")
         if scheme.lower() != "bearer" or not self._token_ok(token):
             await _reject(send, 401, "unauthorized", "missing or wrong token (see ~/.brindle/daemon.json)")
             return
         await self.app(scope, receive, send)
+
+    async def _agent_caller(self, pid: int) -> str | None:
+        """peer.agent_caller, remembered for CALLER_TTL: it lists every
+        process, and the app makes many requests."""
+        now = time.monotonic()
+        hit = self._callers.get(pid)
+        if hit is None or now - hit[0] > CALLER_TTL:
+            self._callers = {p: h for p, h in self._callers.items() if now - h[0] <= CALLER_TTL}
+            hit = self._callers[pid] = (now, await asyncio.to_thread(peer.agent_caller, pid))
+        return hit[1]
 
     def _token_ok(self, token: object) -> bool:
         return isinstance(token, str) and hmac.compare_digest(token.strip().encode(), self._token)
