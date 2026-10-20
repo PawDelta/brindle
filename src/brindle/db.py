@@ -586,6 +586,7 @@ class Agent:
     unreported_noted: int | None = None
     plan_first: int | None = None      # must get its plan approved before editing (brindle.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
+    plan_text: str | None = None       # the plan awaiting a decision (agents.submit_plan), shown in the inbox
     tmux_server: str | None = None     # the private tmux server its window is on (see tmux.current_server)
     stop_reminded_at: float | None = None
     reopened_at: float | None = None
@@ -842,7 +843,7 @@ class DB:
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
-                          ("merge_failed", "TEXT")):
+                          ("merge_failed", "TEXT"), ("plan_text", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}

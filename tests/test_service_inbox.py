@@ -59,7 +59,7 @@ def _notice(db, root, worker, mp):
     ("review", _worker(result="done"), [("w1", None)]),
     ("merge_failed", _worker(result="done", merge_failed="conflict in app.py"), [("w1", None)]),
     ("merge_failed", _merge_failed_on_autopilot, [("w1", None)]),
-    ("plan", _worker(plan_state="proposed"), [("w1", None)]),
+    ("plan", _worker(plan_state="proposed", plan_text="1. add the column"), [("w1", "1. add the column")]),
     ("proposed_checks", _checks, [("r1", "pytest -q")]),
     ("proposed_checks", _locked_checks, []),
     ("login", _login, [("r1", "aws sso login")]),

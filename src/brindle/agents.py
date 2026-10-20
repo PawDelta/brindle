@@ -2767,7 +2767,7 @@ def submit_plan(db: DB, agent_id: str, plan: str) -> str:
         return "Give the plan."
     if not agent.parent_id:
         raise AgentError("no supervisor to send the plan to")
-    db.update_agent(agent.id, plan_state="proposed")
+    db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip())
     send_message(db, agent.parent_id,
                  f"Worker {agent.id} proposes this plan and is waiting for your decision "
                  f"(approve_plan agent_id={agent.id}):\n\n{plan.strip()}", sender_id=agent.id)
@@ -2786,7 +2786,7 @@ def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
     feedback = feedback.strip()
     if approved:
-        db.update_agent(agent.id, plan_state="approved")
+        db.update_agent(agent.id, plan_state="approved", plan_text=None)
         text = "Your plan is approved: go ahead and implement it."
     else:
         db.update_agent(agent.id, plan_state="revise")
