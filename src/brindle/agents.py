@@ -811,9 +811,14 @@ def launch_identity(agent: Agent, ws: Workspace, profile, m=_UNREAD) -> tuple[di
     return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
 
 
-def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, identity=None) -> list:
+def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, identity=None,
+                    keys_only: bool = False) -> list:
     """What would stop ``agent``'s CLI before its first turn if it launched
-    now in ``ws`` (brindle.preflight), judged with the identity it runs as."""
+    now in ``ws`` (brindle.preflight), judged with the identity it runs as.
+    ``keys_only``: when nobody is starting anything yet (a read), the CLI's
+    sign-in check sees only the credential names of that identity, never
+    the rest of a repo profile's env lines (NODE_OPTIONS, PATH, a config
+    dir), which only a launch the person starts may run with."""
     from brindle import preflight
 
     if agent.provider not in preflight.PROVIDERS:
@@ -824,6 +829,9 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
     if agent.provider == "native":
         return preflight.check("native", ws.repo_root, profile=profile)
     env, org_key, _ = identity or launch_identity(agent, ws, profile, m)
+    if keys_only:
+        names = {*keystore.known_names(ws.repo_root), *providers._ENV_AUTH.get(agent.provider, ())}
+        env = {k: v for k, v in env.items() if k in names}
     return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key)
 
 

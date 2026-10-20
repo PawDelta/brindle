@@ -188,25 +188,32 @@ def _notes(notes: list[svc.Note]) -> list[dict[str, str]]:
 # -- sessions --------------------------------------------------------------------
 
 
-def _blocked(launches: list[tuple[Agent, Workspace]]) -> preflight.Blocked | None:
+def _blocked(launches: list[tuple[Agent, Workspace]], keys_only: bool = False) -> preflight.Blocked | None:
     """What would stop any of these launches (agent, where) before its first
     turn, each item once, judged with the identity each runs as."""
     items: dict[str, preflight.Item] = {}
     for a, ws in launches:
-        for item in agents.launch_blockers(a, ws):
+        for item in agents.launch_blockers(a, ws, keys_only=keys_only):
             items.setdefault(item.id, item)
     return preflight.Blocked(list(items.values())) if items else None
 
 
-def session_blockers(db: DB, repo: str, provider: str | None) -> preflight.Blocked | None:
+def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool = False) -> preflight.Blocked | None:
     """What would stop a new supervisor chat in ``repo`` (on ``provider``, else
-    its profile's) before its first turn."""
+    its profile's) before its first turn. ``read_only`` (a GET): the checkout
+    isn't registered, and the sign-in check sees only credentials (see
+    agents.launch_blockers)."""
     from brindle.profiles import load_profile
 
-    ws = workspaces.adopt_root(db, repo)
+    if read_only:
+        top = git.toplevel(repo)
+        ws = db.workspace_by_path(top) or Workspace("preflight", git.main_repo_root(repo), "main", "main",
+                                                    "HEAD", None, top, None, "", 0.0)
+    else:
+        ws = workspaces.adopt_root(db, repo)
     provider = provider or load_profile(agents.SUPERVISOR, ws.repo_root).provider
     chat = Agent("preflight", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
-    return _blocked([(chat, ws)])
+    return _blocked([(chat, ws)], keys_only=read_only)
 
 
 def start_session(db: DB, params: dict, body: Body) -> Any:

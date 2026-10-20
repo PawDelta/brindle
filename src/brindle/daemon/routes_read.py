@@ -301,7 +301,7 @@ def provider_preflight(request: Request) -> Any:
     else:
         if provider not in preflight.PROVIDERS:
             raise ServiceError("invalid", f"provider must be one of {', '.join(preflight.PROVIDERS)}")
-        blocked = session_blockers(DB(), repo, provider)
+        blocked = session_blockers(DB(), repo, provider, read_only=True)
         items = blocked.items if blocked else []
     return [PreflightItemDTO(**i.to_json()).to_json() for i in items]
 

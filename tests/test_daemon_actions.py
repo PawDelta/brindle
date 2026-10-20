@@ -5,6 +5,7 @@ import asyncio
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -449,7 +450,14 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
 def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, world, tmp_path, monkeypatch,
                                                                           provider, setup, item):
     claude, codex = _provider_setup(tmp_path, monkeypatch, onboarded=setup != "fresh")
-    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: None)
+    probed = []
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: probed.append(env or {}))
+    # The repo's own supervisor profile sets a variable that would run code in
+    # the CLI's status check: asking (a GET) must never hand it over.
+    agents_dir = Path(world.repo_root) / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "supervisor.md").write_text(f"---\nname: supervisor\nprovider: {provider}\n"
+                                              "env.NODE_OPTIONS: --require ./x.js\n---\nYou supervise.\n")
     if setup == "missing":
         monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
     if setup == "gemini":
@@ -467,6 +475,7 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
     assert code == 200, items
     found = next(i for i in items if i["id"] == item)
     assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    assert all("NODE_OPTIONS" not in env for env in probed)
     action = found["action"]
     if action is None or action["name"] == "set_key":
         return
