@@ -96,36 +96,76 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
         assert [(e["kind"], e["payload"]["job"]) for e in done] == [("job.done", reply["job"])]
 
 
-@pytest.mark.parametrize("path,base,busy,status", [
-    ("app.py", "shown", False, 200),
-    ("app.py", "e69de29", False, 409),          # the empty blob: not what the file is now
-    ("app.py", "shown", True, 409),
-    ("../proj/app.py", "shown", False, 400),
-    ("out/app.py", "shown", False, 400),        # a symlinked directory leading out of the worktree
-    pytest.param(".git/HEAD", "shown", False, 400, marks=pytest.mark.variant("the worktree's own git link")),
-], ids=["edit-commits", "edit-stale", "edit-busy", "edit-dotdot", "edit-symlink", "edit-git"])
-def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, path, base, busy, status):
-    wt = tmp_path / "wt"
+@pytest.mark.parametrize("path,base,setup,status", [
+    ("app.py", "shown", None, 200),
+    ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
+    ("app.py", "shown", "busy", 409),
+    ("app.py", "shown", "locked", 409),         # the commit is refused: the worker's index survives
+    ("../proj/app.py", "shown", None, 400),
+    ("out/m.py", "shown", None, 400),           # a symlinked directory leading out of the worktree
+    pytest.param(".git/HEAD", "shown", None, 400, marks=pytest.mark.variant("the worktree's own git link")),
+    pytest.param(":(glob)*", "shown", None, 200,
+                 marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
+    pytest.param("pkg/m.py", "shown", "swap", 200,
+                 marks=pytest.mark.variant("a directory swapped for an escaping symlink mid-edit")),
+], ids=["edit-commits", "edit-stale", "edit-busy", "edit-refused", "edit-dotdot", "edit-symlink", "edit-git",
+        "edit-pathspec", "edit-swap"])
+def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, monkeypatch,
+                                                           path, base, setup, status):
+    from brindle import git
+
+    wt, outside = tmp_path / "wt", tmp_path / "outside"
     sh(f"git worktree add -q -b rev {wt} main", repo)
-    (wt / "out").symlink_to(repo)
+    (wt / "pkg").mkdir()
+    for name in ("pkg/m.py", ":(glob)*"):
+        (wt / name).write_text("print('hi')\n")
+    sh("git add -A && git commit -qm more", wt)
+    # HEAD, the index and the worktree all differ for app.py; abc.txt is unrelated staged work.
+    (wt / "app.py").write_text("print('staged')\n")
+    (wt / "abc.txt").write_text("wip\n")
+    sh("git add app.py abc.txt", wt)
+    (wt / "app.py").write_text("print('working')\n")
+    outside.mkdir()
+    (outside / "m.py").write_text("outside\n")
+    (wt / "out").symlink_to(outside)
     db.add_workspace(Workspace("proj/w-e", world.repo_root, "rev", "worktree", "rev", "main", str(wt),
                                None, "brindle-z", time.time()))
-    if busy:
+    if setup == "busy":
         db.add_agent(Agent("ew", "proj/w-e", "developer", "claude", "sup", "assign", "processing", "%3",
                            None, time.time()))
-    head = sh("git rev-parse HEAD", wt)
-    shown = sh("git hash-object app.py", wt)[:7] if base == "shown" else base
+    if setup == "locked":
+        (repo / ".git" / "refs" / "heads" / "rev.lock").write_text("")
+    if setup == "swap":
+        real = git.hash_blob
+
+        def swap_then_hash(*a, **k):        # after the file is opened, before it is written
+            if not (wt / "pkg.moved").exists():
+                (wt / "pkg").rename(wt / "pkg.moved")
+                (wt / "pkg").symlink_to(outside)
+            return real(*a, **k)
+
+        monkeypatch.setattr(git, "hash_blob", swap_then_hash)
+    head, staged = sh("git rev-parse HEAD", wt), sh("git diff --cached", wt)
+    shown = sh(f"git hash-object {'app.py' if path == 'app.py' else 'pkg/m.py'}", wt)[:7]
     code, reply = _send("PUT", "/v1/workspaces/proj/w-e/file",
-                        {"path": path, "content": "print('bye')\n", "base": shown})
+                        {"path": path, "content": "print('bye')\n", "base": shown if base == "shown" else base})
     assert code == status, reply
     edited = bus.tail(db, kinds=("workspace.edited",))
+    assert (outside / "m.py").read_text() == "outside\n" and (repo / "app.py").read_text() == "print('hi')\n"
     if status != 200:
-        assert sh("git rev-parse HEAD", wt) == head and edited == []
-        assert (wt / "app.py").read_text() == (repo / "app.py").read_text() == "print('hi')\n"
+        assert sh("git rev-parse HEAD", wt) == head and sh("git diff --cached", wt) == staged and edited == []
+        assert (wt / "app.py").read_text() == "print('working')\n"
         return
-    assert sh("git log -1 --format=%s rev", wt) == "edit from review: app.py"
-    assert sh("git show rev:app.py", wt) == "print('bye')" and sh("git status --porcelain app.py", wt) == ""
-    assert reply["commit"] == sh("git rev-parse HEAD", wt) and "app.py" in reply["stat"]
+    assert sh("git log -1 --format=%s rev", wt) == f"edit from review: {path}"
+    assert sh("git diff-tree --no-commit-id --name-only -r HEAD", wt) == path
+    assert sh(f"git show 'rev:{path}'", wt) == "print('bye')"
+    cached = sh("git diff --cached --name-only", wt).splitlines()
+    assert "abc.txt" in cached and path not in cached
+    if setup != "swap":     # swapped, the worktree's pkg is the symlink and the write went to pkg.moved
+        assert (wt / path).read_text() == "print('bye')\n" and path in reply["stat"]
+    else:
+        assert (wt / "pkg.moved" / "m.py").read_text() == "print('bye')\n"
+    assert reply["commit"] == sh("git rev-parse HEAD", wt)
     assert [e["workspace_id"] for e in edited] == ["proj/w-e"]
 
 
