@@ -105,6 +105,13 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
             tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
         if window:
             tmux.select_window(window)
+        if not sys.stdin.isatty():
+            # A script or a chat's `!` has no terminal of its own. From a pane
+            # of this server, switching "our" client would move the person's
+            # real terminal into the new session; attaching would just fail.
+            typer.echo(f"No terminal here; run `brindle attach {ws.name}` in one "
+                       f"(tmux session {ws.tmux_session}).")
+            return
         if tmux.inside_this_server():
             # From inside one of this server's panes (TMUX set, or only
             # TMUX_PANE left after `env -u TMUX brindle`): switch the client
@@ -2995,19 +3002,22 @@ def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -
             agents.ready(db, agent_id)
             # Carry the observed launch token into the delivery CAS.
             a._launch_health_token = token
-            launch_health.accepted(db, a)
+            launch_health.verify_delivery(db, a)
         else:
             prompt_answer.report_blocked(db, a)
-        launch_health.inspect(db, agent_id, wait=False, token=token)
+            launch_health.inspect(db, agent_id, wait=False, token=token)
 
 
 @app.command("_launch-health", hidden=True)
 def launch_health_cmd(agent_id: str, startup: bool = typer.Option(False),
-                      token: Optional[str] = typer.Option(None)) -> None:
+                      token: Optional[str] = typer.Option(None), verify: bool = False) -> None:
     from brindle import launch_health
 
     db = _helper_db()
     if not launch_health.current(db, agent_id, token):
+        return
+    if verify:
+        launch_health.verify_pending(db, agent_id, token)
         return
     if startup:
         time.sleep(launch_health.FOLLOWUP_SECONDS)

@@ -137,6 +137,16 @@ def test_sweep_answers_a_prompt_after_after_launch_gave_up(db, launch, provider,
     assert prompt_answer.pending(db) == []
 
 
+def test_sweep_leaves_codex_to_its_inflight_startup_helper(db, launch, monkeypatch):
+    from test_codex_notify import CODEX_EMPTY_PANE
+    pane, _ = launch("loading", [], {}, provider="codex")
+    monkeypatch.setattr(pane, "render", lambda: CODEX_EMPTY_PANE)
+    assert cull.settle_startups(db, launch.clock[0] + 41, {}) == []
+    assert prompt_answer.pending(db)
+    assert len(cull.settle_startups(db, launch.clock[0] + 161, {})) == 1
+    assert prompt_answer.pending(db) == []
+
+
 @pytest.mark.variant("bypass attempt: a menu the agent raises mid-task; the only test of the hook ending startup")
 def test_a_menu_after_the_session_started_is_never_answered(db, launch):
     # A hook ran, so the session is going: a menu now is the agent's own

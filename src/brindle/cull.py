@@ -267,7 +267,8 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 # supervisor is told (once per spell of waiting).
 STUCK_AFTER = 90.0
 # How long after a launch a sweep starts looking at a CLI that hasn't shown
-# its input box: past the 30 seconds its own after_launch watches.
+# its input box: past the ordinary 30s startup wait. Providers with a longer
+# startup budget retain ownership until that budget has elapsed too.
 STARTUP_GRACE = 40.0
 
 
@@ -294,13 +295,17 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.owns_pane(db, a, owners)):
             continue
         provider = agents.get_provider(a.provider)
+        if now - launched_at < getattr(provider, "STARTUP_SECONDS", 30) + 10:
+            continue  # its original after-launch helper still owns startup
         try:
             screen = tmux.capture(pane, lines=60, server=agents.server_of(a))
         except tmux.TmuxError:
             continue
         if provider.tool_permission(screen):
             continue  # the permission policy's, never a startup prompt
-        if not provider.input_ready(screen) and (not prompt_answer.looks_like_prompt(screen)
+        brief = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+        partial = brief and prompt_answer.brief_draft(screen, brief["submitted_prompt"])
+        if not partial and not provider.input_ready(screen) and (not prompt_answer.looks_like_prompt(screen)
                                                  or prompt_answer.cached_kind(screen) == "not_a_prompt"):
             continue
         if prompt_answer.finish_launch(db, a):
