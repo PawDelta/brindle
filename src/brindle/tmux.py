@@ -578,6 +578,16 @@ def move_pane(pane: str, target: str, columns: int = 30, position: str = "left")
           f"resize-pane -t {pane} {axis} {size}", check=False)
 
 
+def window_zoomed(window: str) -> bool:
+    zoomed = _tmux("display-message", "-p", "-t", window, "#{window_zoomed_flag}", check=False)
+    return zoomed.stdout.strip() == "1"
+
+
+def unzoom(window: str) -> None:
+    if window_zoomed(window):
+        _tmux("resize-pane", "-Z", "-t", window, check=False)
+
+
 def toggle_sidebar(pane: str) -> None:
     """Hide or show the sidebar ``pane`` without ending it: zoom the chat
     beside it (the sidebar keeps running, unseen), or unzoom. Same as the
