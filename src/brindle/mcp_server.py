@@ -4,10 +4,8 @@ from ``BRINDLE_AGENT_ID`` (set in the agent's environment at spawn)."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
-import time
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -18,10 +16,10 @@ from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import list_profiles
+from brindle.view import last_activity
 
 MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
-LAST_ACTIVITY_TAIL_BYTES = 65_536
 
 def _calling_agent() -> Agent | None:
     agent_id = os.environ.get("BRINDLE_AGENT_ID")
@@ -154,60 +152,6 @@ def _summary(db: DB, ws: Workspace) -> str:
         f"workspace {ws.id} on branch {ws.branch}: {st.ahead} commit(s) ahead of {base}, "
         f"{st.behind} behind{dirty}\n{stat}"
     )
-
-
-def _ago(seconds: float) -> str:
-    s = max(int(seconds), 0)
-    if s < 90:
-        return f"{s}s ago"
-    if s < 90 * 60:
-        return f"{s // 60}m ago"
-    return f"{s // 3600}h ago"
-
-
-def _last_tool(transcript: str) -> str | None:
-    """Name of the last tool call in the tail of a session transcript (Claude
-    Code's or a native worker's JSONL). Reads only the last few KB."""
-    try:
-        with open(transcript, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(f.tell() - LAST_ACTIVITY_TAIL_BYTES, 0))
-            tail = f.read().decode("utf-8", errors="ignore")
-    except OSError:
-        return None
-    for line in reversed(tail.splitlines()):
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(entry, dict):
-            continue
-        blocks = (entry.get("message") or {}).get("content") if isinstance(entry.get("message"), dict) else None
-        for b in reversed(blocks if isinstance(blocks, list) else []):
-            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name"):
-                return str(b["name"])
-        calls = entry.get("tool_calls")
-        if isinstance(calls, list) and calls and isinstance(calls[-1], dict) and calls[-1].get("name"):
-            return str(calls[-1]["name"])
-    return None
-
-
-def _last_activity(a: Agent) -> str:
-    """`` last: WebFetch 40s ago`` from the agent's transcript (its mtime is
-    the last activity), or empty when it has none."""
-    from brindle import identity_lock
-
-    who = identity_lock.locked_by(a.id) if getattr(a, "id", None) else None
-    if who:
-        return f" locked: {who}"
-    if not a.transcript_path:
-        return ""
-    try:
-        age = time.time() - os.stat(a.transcript_path).st_mtime
-    except OSError:
-        return ""
-    tool = _last_tool(a.transcript_path)
-    return f" last: {tool + ' ' if tool else ''}{_ago(age)}"
 
 
 DEFAULT_WAIT_SECONDS = 240
@@ -705,7 +649,7 @@ def list_agents(repo: str | None = None) -> str:
                     pass
                 lines.append(
                     f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
-                    f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}"
+                    f"ws={ws.id} branch={ws.branch}{usage_str}{last_activity(a)}"
                     + (f" review={state}" if piped is not None and a.id == piped.id else "")
                 )
         return "\n".join(lines) or "No agents."
