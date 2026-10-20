@@ -193,6 +193,13 @@ def test_peer_pid_names_the_unix_socket_caller():
         assert peer.peer_pid(a) == os.getpid()
 
 
+def test_committed_api_schema_matches_the_routes_and_dtos():
+    # Drift: after changing a route or a DTO, run `brindle daemon schema` and commit the file.
+    from brindle.daemon import schema
+
+    assert schema.SCHEMA_PATH.read_text() == schema.render()
+
+
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
     monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)
