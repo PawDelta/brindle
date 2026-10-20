@@ -90,6 +90,16 @@ def test_sweep_stops_processes_of_paused_agents(db, ws, proc_cleanup):
     assert any("leftover" in n for n in notes)
 
 
+def test_sweep_prunes_old_bus_events(db, ws):
+    from brindle import bus
+
+    old = bus.publish(db, "old")
+    db.conn.execute("UPDATE events SET ts = ts - 90000 WHERE id = ?", (old,))
+    keep = bus.publish(db, "new")
+    cull.sweep(db)
+    assert [e["id"] for e in bus.tail(db)] == [keep]
+
+
 def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypatch):
     """Killing the chat's tmux session also kills the wrapper that would have
     paused its session (agents._pause_when_done): the sweep must stop every
