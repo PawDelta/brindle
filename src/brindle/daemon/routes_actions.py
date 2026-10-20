@@ -18,6 +18,7 @@ import functools
 import io
 import json
 import logging
+import os
 import secrets
 import subprocess
 import threading
@@ -371,6 +372,13 @@ def _edit_target(ws: Workspace, rel: str) -> Path:
     return target
 
 
+def _write_no_follow(target: Path, data: bytes) -> None:
+    """Write ``data`` to ``target``, refusing (ELOOP) if it has become a symlink since it was checked."""
+    fd = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
 def edit_file(db: DB, params: dict, body: Body) -> Any:
     """The person's edit from the review sheet: ``content`` becomes ``path``
     in the worker's worktree, committed on its branch. ``base`` is the blob
@@ -383,18 +391,18 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
     identity_lock.ensure_workspace(db, ws)
     rel, content = _get(body, "path", required=True), _get(body, "content", required=True)
     base = _get(body, "base", required=True).strip().lower()
-    target = _edit_target(ws, rel)
     with git.checkout_lock(ws.path, timeout=10):
         if busy := [a.id for a in db.list_agents(ws.id) if a.status in BUSY]:
             raise ServiceError("busy", f"{', '.join(busy)} is working in {ws.id}; edit once it has stopped", 409)
         if git.current_branch(ws.path) != ws.branch:
             raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
+        target = _edit_target(ws, rel)     # checked under the lock, just before the write
         if not target.is_file():
             raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404)
         if len(base) < 7 or not git.out(["hash-object", "--", rel], ws.path).startswith(base):
             raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
         before = target.read_bytes()
-        target.write_bytes(content.encode())
+        _write_no_follow(target, content.encode())
         commit = None
         try:
             git.run(["add", "--", rel], ws.path)
@@ -402,7 +410,7 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
                 git.run(["commit", "-q", "--only", "-m", f"edit from review: {rel}", "--", rel], ws.path)
                 commit = git.out(["rev-parse", "HEAD"], ws.path)
         except git.GitError:
-            target.write_bytes(before)      # a hook refused it: leave the file as the worker had it
+            _write_no_follow(target, before)    # a hook refused it: leave the file as the worker had it
             git.run(["reset", "-q", "--", rel], ws.path, check=False)
             raise
         blob = git.out(["hash-object", "--", rel], ws.path)
