@@ -80,7 +80,9 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, kind, setup, expec
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")
 
 
-PROMPT = """ Bash command
+PROMPT = """ 1. No, skip the tests
+ 2. Yes, run them
+ Bash command
 
    npm test
    Run the test suite
@@ -94,29 +96,37 @@ SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": 
               "behavior": "allow", "destination": "localSettings"}]
 
 
-@pytest.mark.parametrize("channel, choices, wording", [
+ON_SCREEN = [("allow_once", "Yes", None),
+             ("allow_always", "Yes, and don't ask again for npm test commands in /repo",
+              "the CLI's own rule, as its option says: Yes, and don't ask again for npm test commands in /repo"),
+             ("deny", "No, and tell Claude what to do differently (esc)", None)]
+# The numbered list above the prompt is the agent's output, never an option.
+WORDING = ("1. No, skip the tests\n2. Yes, run them\nBash command\nnpm test\nRun the test suite\n"
+           "Do you want to proceed?")
+
+
+@pytest.mark.parametrize("channel, recorded, target, choices, wording", [
     # brindle's hook holds it: Claude Code's own suggestion is what allow-always writes.
-    ("hook", [("allow_once", "Allow once", None),
-              ("allow_always", "Allow always", "Claude Code's own rule: allow Bash(npm test:*) (localSettings)"),
-              ("deny", "Deny", None)], None),
-    # The CLI's own prompt is on screen: its wording and its options.
-    ("prompt", [("allow_once", "Yes", None),
-                ("allow_always", "Yes, and don't ask again for npm test commands in /repo",
-                 "the CLI's own rule, as its option says: Yes, and don't ask again for npm test commands in /repo"),
-                ("deny", "No, and tell Claude what to do differently (esc)", None)],
-     "Bash command\nnpm test\nRun the test suite\nDo you want to proceed?"),
-])
-def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, channel, choices,
-                                                                   wording):
+    ("hook", "npm test", "npm test",
+     [("allow_once", "Allow once", None),
+      ("allow_always", "Allow always", "Claude Code's own rule: allow Bash(npm test:*) (localSettings)"),
+      ("deny", "Deny", None)], None),
+    # The CLI's own prompt is on screen: its wording and its menu's options.
+    ("prompt", "npm test", "npm test", ON_SCREEN, WORDING),
+    # An older recorded request isn't what the prompt asks: only the screen speaks.
+    ("prompt", "rm -rf build", None, ON_SCREEN, WORDING),
+], ids=["hook", "prompt", "prompt-stale-record"])
+def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, channel, recorded,
+                                                                   target, choices, wording):
     from brindle import permissions, tmux
 
     monkeypatch.setattr(tmux, "capture", lambda target, **kw: PROMPT if channel == "prompt" else "")
     ws = workspaces.create(db, str(repo), "feat/inbox").workspace
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
     db.add_agent(Agent("w1", ws.id, "developer", "claude", "r1", "assign", "waiting", "@2", None, time.time()))
-    req = permissions.Request("claude", "bash", "Bash", command="npm test")
+    req = permissions.Request("claude", "bash", "Bash", command=recorded)
     db.add_permission_request("w1", "tu1", json.dumps(req.to_dict()), "", json.dumps(SUGGESTED), channel)
     got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
     assert [(i.kind, i.root_id, i.permission.via, i.permission.target, i.permission.wording) for i in got] == [
-        ("permission", "r1", channel, "npm test", wording)]
+        ("permission", "r1", channel, target, wording)]
     assert [(c.choice, c.label, c.rule) for c in got[0].permission.choices] == choices

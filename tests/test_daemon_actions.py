@@ -383,14 +383,18 @@ DENIED = {"behavior": "deny", "message": "brindle: the person denied this in the
      f"the CLI's own rule, as its option says: {OPTIONS[1]}"),
     pytest.param("prompt", "allow_once", True, 310, 403, None, [], None,
                  marks=pytest.mark.variant("an agent holding the token can't answer a permission prompt")),
-], ids=["hook-once", "hook-always-brindle", "hook-always-claude", "hook-deny", "prompt-keys", "agent"])
+    # An answer written into the database, not signed by the daemon: the CLI's prompt asks instead.
+    ("forged", "allow_once", True, None, None, None, [], None),
+], ids=["hook-once", "hook-always-brindle", "hook-always-claude", "hook-deny", "prompt-keys", "agent", "forged"])
 def test_a_permission_answer_resolves_the_request(db, repo, world, monkeypatch, via, choice, suggested, peer_pid,
                                                   status, decision, keys, rule):
     from brindle import permissions, tmux
+    from brindle.daemon import lifecycle
     from brindle.db import DB
     from brindle.service import inbox
 
     pane, pressed = {"at": 0, "open": via == "prompt"}, []
+    monkeypatch.setattr(lifecycle, "read_info", lambda: {"pid": 1, "token": TOKEN})
 
     def capture(target, **kw):
         if not pane["open"]:
@@ -406,7 +410,7 @@ def test_a_permission_answer_resolves_the_request(db, repo, world, monkeypatch, 
     monkeypatch.setattr(tmux, "capture", capture)
     monkeypatch.setattr(tmux, "send_keys", send_keys)
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent wk")
-    monkeypatch.setattr(agents, "_app_open", lambda: via == "hook")
+    monkeypatch.setattr(agents, "_app_open", lambda: via != "prompt")
     monkeypatch.setattr(agents, "APP_ANSWER_POLL", 0.01)
     monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
     payload = {"tool_name": "Bash", "tool_input": {"command": "npm test"}, "tool_use_id": "tu1",
@@ -421,6 +425,11 @@ def test_a_permission_answer_resolves_the_request(db, repo, world, monkeypatch, 
         hook.join(5)        # no app to wait for: the CLI prompts as usual
     else:
         assert asked.wait(5)    # the hook holds the request for the app's answer
+    if via == "forged":
+        db.answer_permission_request("wk", "tu1", choice, mac="0" * 64)
+        hook.join(5)
+        assert out == [None] and db.latest_permission_request("wk")["channel"] == "prompt"
+        return
     code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": choice}, peer_pid)
     hook.join(5)
     assert code == status, reply

@@ -10,6 +10,7 @@ would press, only ever on the person's request from the app."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections.abc import Callable
@@ -176,22 +177,36 @@ def _always_rule(req: permissions.Request | None, suggestions: list | None, repo
             + (" (applies once permission_policy is on)" if off else ""))
 
 
+def _menu(lines: list[str]) -> tuple[int, list[str]]:
+    """The prompt's own menu in ``lines``: the last run of numbered lines
+    holding the cursor (a numbered list in the agent's output above it is
+    no option), as (its first line's index, the options' texts)."""
+    cursor = next((i for i in range(len(lines) - 1, -1, -1)
+                   if prompt_answer.NUMBERED.match(lines[i]) and prompt_answer.SELECTED.match(lines[i])), None)
+    if cursor is None:
+        return len(lines), []
+    start = end = cursor
+    while start > 0 and prompt_answer.NUMBERED.match(lines[start - 1]):
+        start -= 1
+    while end + 1 < len(lines) and prompt_answer.NUMBERED.match(lines[end + 1]):
+        end += 1
+    return start, [prompt_answer.OPTION.match(ln).group(2) for ln in lines[start:end + 1]]
+
+
 def _read_prompt(screen: str) -> tuple[str, list[PermissionChoiceDTO]]:
-    """A permission prompt's wording and the choices among its numbered
+    """A permission prompt's wording and the choices among its menu's
     options, each labelled with the option's own text (which is what
     _press selects)."""
     lines = prompt_answer._tail(screen)
-    options = [(i, m.group(2)) for i, ln in enumerate(lines)
-               if prompt_answer.NUMBERED.match(ln) and (m := prompt_answer.OPTION.match(ln))]
+    start, options = _menu(lines)
     choices: dict[str, PermissionChoiceDTO] = {}
-    for _, label in options:
+    for label in options:
         choice = next((c for c, pattern in OPTION_CHOICE if pattern.search(label)), None)
         if choice and choice not in choices:
             choices[choice] = PermissionChoiceDTO(
                 choice=choice, label=label,
                 rule=f"the CLI's own rule, as its option says: {label}" if choice == "allow_always" else None)
-    above = lines[:options[0][0]] if options else lines
-    wording = [BOX.sub("", ln) for ln in above]
+    wording = [BOX.sub("", ln) for ln in lines[:start]]
     wording = prompt_answer.redact("\n".join([ln for ln in wording if ln][-8:]))
     return wording, sorted(choices.values(), key=lambda c: CHOICES.index(c.choice))
 
@@ -221,8 +236,20 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
     if not get_provider(agent.provider).tool_permission(screen):
         return None
     wording, choices = _read_prompt(screen)
+    if req is None or not _on_screen(req, wording):
+        # What the hook recorded isn't this prompt (an older request): the screen alone says what it asks.
+        row, req, fields = None, None, {}
     return Pending("prompt", row, req, None,
                    PermissionDTO(via="prompt", wording=wording, choices=choices, **fields))
+
+
+def _on_screen(req: permissions.Request, wording: str) -> bool:
+    """Whether the prompt's ``wording`` names what ``req`` asks for: the
+    start of its command or URL, or its file's name (CLIs shorten paths)."""
+    text = " ".join(wording.split())
+    lines = req.target().strip().splitlines()
+    head = " ".join(lines[0].split())[:80] if lines else ""
+    return bool(head) and head in text or bool(req.path) and os.path.basename(req.path) in text
 
 
 def _until(done: Callable[[], bool], seconds: float = CONFIRM_SECONDS) -> bool:
@@ -285,7 +312,10 @@ def answer_permission(db: DB, agent_id: str, choice: str) -> dict:
 
             permissions.add_rule(*permissions.learnable_pattern(pending.request), "allow")
             antigravity.resync_permissions()
-        if not db.answer_permission_request(agent.id, tool_use_id, choice):
+        mac = permissions.answer_mac(agent.id, tool_use_id, choice)
+        if mac is None:
+            raise ServiceError("conflict", "no running daemon to sign the answer with", 409)
+        if not db.answer_permission_request(agent.id, tool_use_id, choice, mac):
             raise ServiceError("conflict", f"{agent_id}'s request just went to its own prompt: "
                                            "fetch the inbox and answer it again", 409)
         cleared = _until(lambda: (db.conn.execute(
@@ -294,7 +324,7 @@ def answer_permission(db: DB, agent_id: str, choice: str) -> dict:
     else:
         cleared = _press(agent, offered.label)
         if pending.row:
-            db.answer_permission_request(agent.id, pending.row["tool_use_id"], choice, hook=False)
+            db.answer_permission_request(agent.id, pending.row["tool_use_id"], choice)
     bus.publish_agent(db, "permission.answered", agent.id, choice=choice, via=pending.via, cleared=cleared)
     return {"choice": choice, "via": pending.via, "cleared": cleared,
             "rule": offered.rule if choice == "allow_always" else None}

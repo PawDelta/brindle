@@ -369,6 +369,7 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
     channel TEXT,                   -- hook | prompt | answered
     answer TEXT,                    -- allow_once | allow_always | deny
+    answer_mac TEXT,                -- the daemon's signature of it (permissions.answer_mac)
     PRIMARY KEY (agent_id, tool_use_id)
 );
 -- One row per delegation: which profile brindle would have used without
@@ -908,7 +909,7 @@ class DB:
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
         request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
-        for col in ("suggestions", "channel", "answer"):
+        for col in ("suggestions", "channel", "answer", "answer_mac"):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} TEXT")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1263,35 +1264,36 @@ class DB:
                       (agent_id, tool_use_id, request, reason, time.time(), suggestions, channel))
 
     def answer_permission_request(self, agent_id: str, tool_use_id: str, answer: str,
-                                  hook: bool = True) -> bool:
-        """Hand ``answer`` to the hook still waiting on the request: False
-        when none is (it gave the request to the CLI's prompt meanwhile).
-        With ``hook=False``: record it as answered at that prompt."""
+                                  mac: str | None = None) -> bool:
+        """Hand ``answer``, signed ``mac``, to the hook still waiting on the
+        request: False when none is (it gave the request to the CLI's prompt
+        meanwhile). With no ``mac``: record it as answered at that prompt."""
         with self.tx() as c:
-            if hook:
-                cur = c.execute("UPDATE permission_requests SET answer=? WHERE agent_id=? AND tool_use_id=? "
-                                "AND channel='hook' AND answer IS NULL", (answer, agent_id, tool_use_id))
+            if mac is not None:
+                cur = c.execute("UPDATE permission_requests SET answer=?, answer_mac=? WHERE agent_id=? "
+                                "AND tool_use_id=? AND channel='hook' AND answer IS NULL",
+                                (answer, mac, agent_id, tool_use_id))
             else:
                 cur = c.execute("UPDATE permission_requests SET answer=?, channel='answered' "
                                 "WHERE agent_id=? AND tool_use_id=?", (answer, agent_id, tool_use_id))
         return cur.rowcount == 1
 
-    def take_permission_answer(self, agent_id: str, tool_use_id: str, give_up: bool = False) -> str | None:
-        """The waiting hook's side: the answer handed to it, if any (the
-        request is then 'answered'); with ``give_up`` and none yet, it stops
-        waiting and the CLI's own prompt takes the request ('prompt')."""
+    def take_permission_answer(self, agent_id: str, tool_use_id: str, verify, give_up: bool = False) -> str | None:
+        """The waiting hook's side: the answer handed to it, once
+        ``verify(answer, mac)`` holds (the request is then 'answered'); ""
+        when it no longer waits: an answer that fails the check, or
+        ``give_up`` with none yet, gives the request to the CLI's own prompt
+        ('prompt'). None: no answer yet, keep waiting."""
         with self.tx() as c:
-            row = c.execute("SELECT answer FROM permission_requests WHERE agent_id=? AND tool_use_id=? "
-                            "AND channel='hook'", (agent_id, tool_use_id)).fetchone()
+            row = c.execute("SELECT answer, answer_mac FROM permission_requests WHERE agent_id=? "
+                            "AND tool_use_id=? AND channel='hook'", (agent_id, tool_use_id)).fetchone()
             if row is None:
-                return None
-            if row["answer"]:
-                c.execute("UPDATE permission_requests SET channel='answered' WHERE agent_id=? AND tool_use_id=?",
-                          (agent_id, tool_use_id))
-                return row["answer"]
-            if give_up:
-                c.execute("UPDATE permission_requests SET channel='prompt' WHERE agent_id=? AND tool_use_id=?",
-                          (agent_id, tool_use_id))
+                return ""
+            verified = bool(row["answer"]) and verify(row["answer"], row["answer_mac"])
+            if verified or row["answer"] or give_up:
+                c.execute("UPDATE permission_requests SET channel=? WHERE agent_id=? AND tool_use_id=?",
+                          ("answered" if verified else "prompt", agent_id, tool_use_id))
+                return row["answer"] if verified else ""
         return None
 
     def pop_permission_request(self, agent_id: str, tool_use_id: str) -> sqlite3.Row | None:

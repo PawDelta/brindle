@@ -3004,19 +3004,26 @@ def _await_app_answer(db: DB, agent: Agent, tool_use_id: str, req) -> str | None
     """The person's answer from the app's inbox (service.inbox.answer_permission)
     to a request the hook left to them, or None after APP_ANSWER_WAIT: then
     the request goes to the CLI's own prompt, answered there or from the app
-    by its keys. The agent shows waiting meanwhile, as at that prompt."""
+    by its keys. The agent shows waiting meanwhile, as at that prompt. Only
+    an answer the daemon signed counts (permissions.answer_verified): one
+    written into the database by anything else sends the request to the
+    prompt instead."""
+    from brindle import permissions
+
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
     deadline = time.monotonic() + APP_ANSWER_WAIT
     while True:
         late = time.monotonic() >= deadline
-        answer = db.take_permission_answer(agent.id, tool_use_id, give_up=late)
-        if answer or late:
+        answer = db.take_permission_answer(
+            agent.id, tool_use_id, lambda a, mac: permissions.answer_verified(agent.id, tool_use_id, a, mac),
+            give_up=late)
+        if answer is not None or late:
             break
         time.sleep(APP_ANSWER_POLL)
     if answer:
         db.set_status(agent.id, "processing", only_if="waiting")
-    return answer
+    return answer or None
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
