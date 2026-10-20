@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, gates, watch, workspaces
+from brindle import agents, autopilot, gates, git, watch, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.providers import status_line
@@ -58,9 +58,18 @@ def test_enable_loads_goals_md(db, repo):
     assert autopilot.enable(db, "first", ws) is None and db.get_autopilot("first").goal is None
     assert autopilot.parse_goals(autopilot.session_goals_path(db, "old").read_text()).goal == "Updated goal"
     seed.write_text(GOALS)
+    sh("git add -A && git commit -qm goals", repo)   # a committed seed, as in `brindle demo`
     add_agent(db, ws, "boss")
     plan = autopilot.enable(db, "boss", ws)
     assert plan and db.get_autopilot("boss").goal == "Settings page"
+    # Its deletion is brindle's bookkeeping: it never blocks a merge; other changes still do.
+    assert not seed.exists() and git.dirty_files(str(repo), tracked_only=True) == []
+    sh("git checkout -qb work && echo x > api.txt && git add api.txt && git commit -qm api && git checkout -q main", repo)
+    git.merge_into(str(repo), str(repo), "work", squash=True)
+    (repo / "app.py").write_text("print('bye')\n")
+    with pytest.raises(git.GitError, match="uncommitted changes"):
+        git.merge_into(str(repo), str(repo), "work", squash=True)
+    sh("git checkout -q app.py", repo)
     assert [m.title for m in db.milestones("boss")] == ["Settings API", "Settings UI"]
     assert "2 milestones" in autopilot.kickoff(plan, "boss")
     # A second session in the same checkout never gets the first's goal, and
@@ -70,29 +79,6 @@ def test_enable_loads_goals_md(db, repo):
     autopilot.set_goal(db, "next", "Docs", [("Readme", "true", None)])
     assert db.get_autopilot("boss").goal == "Settings page"
     assert autopilot.parse_goals(autopilot.session_goals_path(db, "boss").read_text()) == plan
-
-
-def test_claiming_a_committed_goals_md_never_blocks_a_merge(db, repo):
-    """The seed's move leaves a committed goals.md deleted in the checkout:
-    brindle's own bookkeeping, so merges and the checkout's sha go on as before."""
-    from brindle import git
-
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "goals.md").write_text(GOALS)
-    sh("git add -A && git commit -qm goals", repo)
-    ws = workspaces.adopt_root(db, str(repo))
-    add_agent(db, ws, "boss")
-    db.add_autopilot("boss")
-    assert autopilot.enable(db, "boss", ws)
-    assert not (repo / ".brindle" / "goals.md").exists()
-    assert git.dirty_files(str(repo)) == [] and git.dirty_files(str(repo), tracked_only=True) == []
-    sh("git checkout -qb work && echo x > api.txt && git add -A && git commit -qm api && git checkout -q main", repo)
-    git.merge_into(str(repo), str(repo), "work", squash=True)
-    assert (repo / "api.txt").exists()
-    # Anything else uncommitted still blocks.
-    (repo / "app.py").write_text("print('bye')\n")
-    with pytest.raises(git.GitError, match="uncommitted changes"):
-        git.merge_into(str(repo), str(repo), "work", squash=True)
 
 
 def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
