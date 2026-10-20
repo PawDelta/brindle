@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -1143,6 +1144,25 @@ def doctor(
     typer.echo(doctor_mod.render(results))
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)
+
+
+APP_DOWNLOAD_URL = "https://github.com/PawDelta/brindle-app/releases"
+
+
+@app.command("app")
+def app_cmd() -> None:
+    """Open the brindle desktop app, or print where to download it."""
+    if sys.platform == "darwin":
+        opened = subprocess.run(["open", "-a", "brindle"], capture_output=True).returncode == 0
+    else:
+        exe = shutil.which("brindle-app")
+        if exe:
+            subprocess.Popen([exe], start_new_session=True)
+        opened = exe is not None
+    if opened:
+        typer.echo("opened the brindle app")
+    else:
+        typer.echo(f"the brindle app isn't installed. Download it from {APP_DOWNLOAD_URL}")
 
 
 @app.command("ls")
