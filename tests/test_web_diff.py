@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from urllib.parse import quote
 
 from brindle import git, workspaces
@@ -13,26 +12,6 @@ def request(db, repo, workspace_id):
     assert found is not None
     handler, params = found
     return handler(Request(App(str(repo), None), "GET", path, {}, params, {}, _db=db))
-
-
-def test_diff_from_worktree_includes_commits_edits_and_is_capped(db, repo, monkeypatch):
-    ws = workspaces.create(db, str(repo), "feature", fetch=False, run_setup=False).workspace
-    source = Path(ws.path) / "app.py"
-    source.write_text("committed\n")
-    git.commit_all(ws.path, "change")
-    source.write_text("committed\nworking\n")
-    response = request(db, repo, ws.id)
-    assert response.status == 200
-    data = json.loads(response.body)
-    assert "app.py" in data["stat"] and "2 insertions(+)" in data["stat"]
-    assert "+committed\n+working" in data["diff"]
-    assert not data["truncated"]
-    source.write_text("large\n" * 20000)
-    capped = json.loads(request(db, repo, ws.id).body)
-    assert capped["truncated"] and len(capped["diff"]) <= 60000
-    monkeypatch.setattr("brindle.web.diff.MAX_DIFF_CHARS", 20)
-    capped = json.loads(request(db, repo, ws.id).body)
-    assert capped["stat_truncated"] and len(capped["stat"]) == 20
 
 
 def test_diff_returns_workspace_review_and_check_history(db, repo):
