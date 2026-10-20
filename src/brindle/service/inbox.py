@@ -327,20 +327,26 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
 
 
 def _on_screen(req: permissions.Request, wording: str) -> bool:
-    """Whether the prompt's ``wording`` shows all of what ``req`` asks for:
-    its whole command or URL (whitespace aside), or its whole path, as given
-    or relative to where the agent works (CLIs shorten paths to that). Part
-    of it is not enough: the person must see what they approve."""
+    """Whether the prompt's ``wording`` shows exactly what ``req`` asks for:
+    its command or URL as whole lines of the prompt (whitespace aside, and
+    nothing more on them), or its path as a whole word, absolute or relative
+    to where the agent works with at least one directory in it (CLIs shorten
+    paths to that; a bare file name could be any file). Anything else, a
+    request named by its tool alone included, doesn't bind: the person must
+    see exactly what they approve."""
     def flat(s: str) -> str:
         return " ".join(s.split())
 
-    text = flat(wording)
+    lines = [flat(ln) for ln in wording.splitlines() if flat(ln)]
     if req.path:
         base = req.cwd or req.worktree
-        shown = [req.path, *([os.path.relpath(req.path, base)] if base else [])]
-        return any(flat(p) and flat(p) in text for p in shown)
-    target = flat(req.command or req.url or req.tool or "")
-    return bool(target) and target in text
+        rel = os.path.relpath(req.path, base) if base else ""
+        shown = {req.path, *([rel] if "/" in rel and not rel.startswith("..") else [])}
+        words = {w.strip("'\"`?,:;()") for ln in lines for w in ln.split()}
+        return bool(shown & words)
+    target = flat(req.command or req.url or "")
+    return bool(target) and any(" ".join(lines[i:j]) == target
+                                for i in range(len(lines)) for j in range(i + 1, len(lines) + 1))
 
 
 def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:

