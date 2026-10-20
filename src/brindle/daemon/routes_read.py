@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -30,6 +31,7 @@ from brindle import (
     view,
     workspaces,
 )
+from brindle.daemon.routes_actions import read_edit_target
 from brindle.db import DB
 from brindle.service import inbox
 from brindle.service.dto import (
@@ -139,6 +141,21 @@ def diff(request: Request) -> Any:
     base = workspaces.require_base(ws)
     return {"workspace_id": ws.id, "base": base, "diff": git.diff(ws.path, base),
             "stat": git.diff(ws.path, base, stat=True)}
+
+
+@_json
+def workspace_file(request: Request) -> Any:
+    """``?path=``: a file the review sheet can edit inline, read with the
+    same checks as ``PUT .../file``. ``base`` is the blob sha that PUT takes."""
+    ws = DB().get_workspace(request.path_params["id"])
+    if ws is None:
+        raise ServiceError("not_found", "no such workspace", 404)
+    rel = request.query_params.get("path")
+    if not rel:
+        raise ServiceError("invalid", "path is required", 400)
+    name, dir_fd, _, data, _ = read_edit_target(ws, rel)
+    os.close(dir_fd)
+    return {"path": name, "content": data.decode(), "base": git.hash_blob(ws.path, data, name)}
 
 
 @_json
@@ -322,6 +339,8 @@ ROUTES = [
     Route("/v1/inbox", inbox_),
     Route("/v1/agents/{id}", agent),
     Route("/v1/workspaces/{id:path}/diff", diff),
+    # PUT on the same path is the edit (routes_actions); agent callers are refused by the guard.
+    Route("/v1/workspaces/{id:path}/file", workspace_file),
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
