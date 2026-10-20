@@ -360,3 +360,74 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "a\nb"})[0] == 400
     assert _send("POST", "/v1/terminals/wk/input", {"text": "ab-12"})[0] == 404
     assert len(typed) == 2
+
+
+OPTIONS = ["Yes", "Yes, and don't ask again for npm test commands in /repo",
+           "No, and tell Claude what to do differently (esc)"]
+SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
+              "behavior": "allow", "destination": "localSettings"}]
+DENIED = {"behavior": "deny", "message": "brindle: the person denied this in the brindle app"}
+
+
+@pytest.mark.parametrize("via,choice,suggested,peer_pid,status,decision,keys,rule", [
+    ("hook", "allow_once", True, None, 200, {"behavior": "allow"}, [], None),
+    # No suggestion from Claude Code: brindle's own rule is written, and said so.
+    ("hook", "allow_always", False, None, 200, {"behavior": "allow"}, [],
+     "brindle's permission rule: allow bash exact 'npm test' (applies once permission_policy is on)"),
+    # Claude Code's suggestion goes back to it to apply, as if picked in its prompt.
+    ("hook", "allow_always", True, None, 200, {"behavior": "allow", "updatedPermissions": SUGGESTED}, [],
+     "Claude Code's own rule: allow Bash(npm test:*) (localSettings)"),
+    ("hook", "deny", True, None, 200, DENIED, [], None),
+    # The hook gave the request to the CLI's prompt: its own option, by its keys.
+    ("prompt", "allow_always", True, None, 200, None, ["Down", "Enter"],
+     f"the CLI's own rule, as its option says: {OPTIONS[1]}"),
+    pytest.param("prompt", "allow_once", True, 310, 403, None, [], None,
+                 marks=pytest.mark.variant("an agent holding the token can't answer a permission prompt")),
+], ids=["hook-once", "hook-always-brindle", "hook-always-claude", "hook-deny", "prompt-keys", "agent"])
+def test_a_permission_answer_resolves_the_request(db, repo, world, monkeypatch, via, choice, suggested, peer_pid,
+                                                  status, decision, keys, rule):
+    from brindle import permissions, tmux
+    from brindle.db import DB
+    from brindle.service import inbox
+
+    pane, pressed = {"at": 0, "open": via == "prompt"}, []
+
+    def capture(target, **kw):
+        if not pane["open"]:
+            return "❯ \n? for shortcuts"
+        return "Bash command\n  npm test\nDo you want to proceed?\n" + "\n".join(
+            f"{'❯' if i == pane['at'] else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))
+
+    def send_keys(target, key, server=None):
+        pressed.append(key)
+        pane["at"] += {"Down": 1, "Up": -1}.get(key, 0)
+        pane["open"] = key != "Enter"
+
+    monkeypatch.setattr(tmux, "capture", capture)
+    monkeypatch.setattr(tmux, "send_keys", send_keys)
+    monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent wk")
+    monkeypatch.setattr(agents, "_app_open", lambda: via == "hook")
+    monkeypatch.setattr(agents, "APP_ANSWER_POLL", 0.01)
+    monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
+    payload = {"tool_name": "Bash", "tool_input": {"command": "npm test"}, "tool_use_id": "tu1",
+               "cwd": str(repo), "permission_suggestions": SUGGESTED if suggested else []}
+    asked, publish = threading.Event(), bus.publish_agent
+    monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
+        kind == "permission.pending" and asked.set(), publish(d, kind, *a, **k))[1])
+    out, wk = [], db.get_agent("wk")
+    hook = threading.Thread(target=lambda: out.append(agents.permission_request_decision(DB(), wk, payload)))
+    hook.start()
+    if via == "prompt":
+        hook.join(5)        # no app to wait for: the CLI prompts as usual
+    else:
+        assert asked.wait(5)    # the hook holds the request for the app's answer
+    code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": choice}, peer_pid)
+    hook.join(5)
+    assert code == status, reply
+    assert out == [decision and {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}]
+    assert pressed == keys
+    stored = [(r.kind, r.match, r.match_type) for r in permissions.load_store().rules if r.decision == "allow"]
+    assert (("bash", "npm test", "exact") in stored) == bool(rule and rule.startswith("brindle"))
+    if status == 200:
+        assert reply == {"choice": choice, "via": via, "cleared": True, "rule": rule}
+        assert [e["payload"]["choice"] for e in bus.tail(db, kinds=("permission.answered",))] == [choice]

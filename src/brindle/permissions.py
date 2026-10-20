@@ -247,6 +247,39 @@ def claude_output(decision: Decision) -> dict | None:
     }}
 
 
+def claude_answer(answer: str, suggestions: list | None = None) -> dict:
+    """What the PermissionRequest hook prints for the person's answer from
+    the app: allow_once, allow_always (with Claude Code's own suggested
+    updates, which it then applies as if picked in its prompt) or deny."""
+    if answer == "deny":
+        decision: dict = {"behavior": "deny", "message": "brindle: the person denied this in the brindle app"}
+    else:
+        decision = {"behavior": "allow"}
+        if answer == "allow_always" and suggestions:
+            decision["updatedPermissions"] = suggestions
+    return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+
+
+def describe_updates(updates: list) -> str:
+    """Claude Code's permission updates in a line: "allow Bash(npm test:*) (localSettings)"."""
+    parts = []
+    for u in updates:
+        if not isinstance(u, dict):
+            continue
+        if u.get("type") in ("addRules", "replaceRules"):
+            rules = [f"{r.get('toolName')}({r['ruleContent']})" if r.get("ruleContent") else str(r.get("toolName"))
+                     for r in u.get("rules") or [] if isinstance(r, dict)]
+            text = f"{u.get('behavior', 'allow')} {', '.join(rules)}"
+        elif u.get("type") == "addDirectories":
+            text = "access to " + ", ".join(map(str, u.get("directories") or []))
+        elif u.get("type") == "setMode":
+            text = f"permission mode {u.get('mode')}"
+        else:
+            text = str(u.get("type"))
+        parts.append(text + (f" ({u['destination']})" if u.get("destination") else ""))
+    return "; ".join(parts)
+
+
 # -- providers: Codex -------------------------------------------------------------------------
 #
 # Codex's PermissionRequest hook (see brindle.codex_hook for how it's installed)

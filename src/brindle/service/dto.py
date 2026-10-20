@@ -80,14 +80,42 @@ class SessionDTO(_DTO):
                    mode=a.mode, created_at=a.created_at, status_since=a.status_since, goal=goal)
 
 
+class PermissionChoiceDTO(_DTO):
+    choice: str                  # allow_once | allow_always | deny
+    label: str                   # the provider's own option, where it shows one
+    rule: str | None = None      # allow_always: the rule it writes, and whose
+
+
+class PermissionDTO(_DTO):
+    """A tool-permission request waiting on the person: POST
+    /inbox/{agent_id}/permission {choice}. ``via``: "hook" (brindle's hook
+    holds the request and takes the answer) or "prompt" (the CLI's own
+    prompt is on screen; the answer goes in as its keys)."""
+    via: str
+    tool: str | None = None
+    kind: str | None = None      # brindle.permissions.KINDS
+    target: str | None = None    # the command, path or URL
+    wording: str | None = None   # the prompt as the provider words it
+    choices: list[PermissionChoiceDTO] = []
+
+
+class InboxActionDTO(_DTO):
+    """A route the app can call to act on the item itself."""
+    method: str
+    path: str
+
+
 class InboxItemDTO(_DTO):
     kind: str
     reason: str
     # An org notice belongs to no agent or workspace.
     agent_id: str | None = None
     workspace_id: str | None = None
+    root_id: str | None = None     # the agent's session: with agent_id, where the app links to
     detail: str | None = None
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
+    permission: PermissionDTO | None = None
+    action: InboxActionDTO | None = None
 
 
 class MilestoneDTO(_DTO):

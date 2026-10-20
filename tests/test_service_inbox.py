@@ -75,3 +75,48 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, kind, setup, expec
     got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True, "@3": True})
            if i.kind == kind]
     assert sorted((i.agent_id, i.detail) for i in got) == expected
+    # Each agent's item links into its session; a sign-in carries the login the app can start.
+    assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
+    assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")
+
+
+PROMPT = """ Bash command
+
+   npm test
+   Run the test suite
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for npm test commands in /repo
+   3. No, and tell Claude what to do differently (esc)
+"""
+SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
+              "behavior": "allow", "destination": "localSettings"}]
+
+
+@pytest.mark.parametrize("channel, choices, wording", [
+    # brindle's hook holds it: Claude Code's own suggestion is what allow-always writes.
+    ("hook", [("allow_once", "Allow once", None),
+              ("allow_always", "Allow always", "Claude Code's own rule: allow Bash(npm test:*) (localSettings)"),
+              ("deny", "Deny", None)], None),
+    # The CLI's own prompt is on screen: its wording and its options.
+    ("prompt", [("allow_once", "Yes", None),
+                ("allow_always", "Yes, and don't ask again for npm test commands in /repo",
+                 "the CLI's own rule, as its option says: Yes, and don't ask again for npm test commands in /repo"),
+                ("deny", "No, and tell Claude what to do differently (esc)", None)],
+     "Bash command\nnpm test\nRun the test suite\nDo you want to proceed?"),
+])
+def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, channel, choices,
+                                                                   wording):
+    from brindle import permissions, tmux
+
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: PROMPT if channel == "prompt" else "")
+    ws = workspaces.create(db, str(repo), "feat/inbox").workspace
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "r1", "assign", "waiting", "@2", None, time.time()))
+    req = permissions.Request("claude", "bash", "Bash", command="npm test")
+    db.add_permission_request("w1", "tu1", json.dumps(req.to_dict()), "", json.dumps(SUGGESTED), channel)
+    got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
+    assert [(i.kind, i.root_id, i.permission.via, i.permission.target, i.permission.wording) for i in got] == [
+        ("permission", "r1", channel, "npm test", wording)]
+    assert [(c.choice, c.label, c.rule) for c in got[0].permission.choices] == choices

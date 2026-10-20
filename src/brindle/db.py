@@ -357,13 +357,18 @@ CREATE TABLE IF NOT EXISTS pool_failures (
 -- A tool-permission request brindle's policy left to the person (see
 -- brindle.permissions): the structured request, so the supervisor can be told
 -- exactly what's pending, and so the tool's PostToolUse (same tool_use_id)
--- can count as the person approving it. Cleared when the turn ends.
+-- can count as the person approving it. Cleared when the turn ends. While
+-- the app is open the hook waits for its answer (channel 'hook'), then hands
+-- the request to the CLI's own prompt ('prompt') or takes it ('answered').
 CREATE TABLE IF NOT EXISTS permission_requests (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     tool_use_id TEXT NOT NULL,
     request TEXT NOT NULL,          -- JSON of brindle.permissions.Request
-    reason TEXT NOT NULL,
+    reason TEXT NOT NULL,           -- the policy's; '' when the policy is off
     created_at REAL NOT NULL,
+    suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
+    channel TEXT,                   -- hook | prompt | answered
+    answer TEXT,                    -- allow_once | allow_always | deny
     PRIMARY KEY (agent_id, tool_use_id)
 );
 -- One row per delegation: which profile brindle would have used without
@@ -902,6 +907,10 @@ class DB:
         for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
+        request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
+        for col in ("suggestions", "channel", "answer"):
+            if col not in request_cols:
+                self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} TEXT")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
         if "token" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN token TEXT NOT NULL DEFAULT ''")
@@ -1246,11 +1255,44 @@ class DB:
 
     # -- permission requests left to the person (brindle.permissions) --
 
-    def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str) -> None:
+    def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str,
+                               suggestions: str | None = None, channel: str | None = None) -> None:
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO permission_requests (agent_id, tool_use_id, request, "
-                      "reason, created_at) VALUES (?,?,?,?,?)",
-                      (agent_id, tool_use_id, request, reason, time.time()))
+                      "reason, created_at, suggestions, channel) VALUES (?,?,?,?,?,?,?)",
+                      (agent_id, tool_use_id, request, reason, time.time(), suggestions, channel))
+
+    def answer_permission_request(self, agent_id: str, tool_use_id: str, answer: str,
+                                  hook: bool = True) -> bool:
+        """Hand ``answer`` to the hook still waiting on the request: False
+        when none is (it gave the request to the CLI's prompt meanwhile).
+        With ``hook=False``: record it as answered at that prompt."""
+        with self.tx() as c:
+            if hook:
+                cur = c.execute("UPDATE permission_requests SET answer=? WHERE agent_id=? AND tool_use_id=? "
+                                "AND channel='hook' AND answer IS NULL", (answer, agent_id, tool_use_id))
+            else:
+                cur = c.execute("UPDATE permission_requests SET answer=?, channel='answered' "
+                                "WHERE agent_id=? AND tool_use_id=?", (answer, agent_id, tool_use_id))
+        return cur.rowcount == 1
+
+    def take_permission_answer(self, agent_id: str, tool_use_id: str, give_up: bool = False) -> str | None:
+        """The waiting hook's side: the answer handed to it, if any (the
+        request is then 'answered'); with ``give_up`` and none yet, it stops
+        waiting and the CLI's own prompt takes the request ('prompt')."""
+        with self.tx() as c:
+            row = c.execute("SELECT answer FROM permission_requests WHERE agent_id=? AND tool_use_id=? "
+                            "AND channel='hook'", (agent_id, tool_use_id)).fetchone()
+            if row is None:
+                return None
+            if row["answer"]:
+                c.execute("UPDATE permission_requests SET channel='answered' WHERE agent_id=? AND tool_use_id=?",
+                          (agent_id, tool_use_id))
+                return row["answer"]
+            if give_up:
+                c.execute("UPDATE permission_requests SET channel='prompt' WHERE agent_id=? AND tool_use_id=?",
+                          (agent_id, tool_use_id))
+        return None
 
     def pop_permission_request(self, agent_id: str, tool_use_id: str) -> sqlite3.Row | None:
         with self.tx() as c:
@@ -1262,8 +1304,10 @@ class DB:
         return row
 
     def latest_permission_request(self, agent_id: str) -> sqlite3.Row | None:
+        """The newest request still waiting on an answer."""
         return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? "
-                                 "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
+                                 "AND channel IS NOT 'answered' ORDER BY created_at DESC LIMIT 1",
+                                 (agent_id,)).fetchone()
 
     def clear_permission_requests(self, agent_id: str) -> None:
         with self.tx() as c:

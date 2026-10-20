@@ -571,8 +571,159 @@
       "title": "GoalDTO",
       "type": "object"
     },
-    "InboxItemDTO": {
+    "InboxActionDTO": {
+      "description": "A route the app can call to act on the item itself.",
       "properties": {
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ],
+      "title": "InboxActionDTO",
+      "type": "object"
+    },
+    "InboxItemDTO": {
+      "$defs": {
+        "InboxActionDTO": {
+          "description": "A route the app can call to act on the item itself.",
+          "properties": {
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "path": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "path"
+          ],
+          "title": "InboxActionDTO",
+          "type": "object"
+        },
+        "PermissionChoiceDTO": {
+          "properties": {
+            "choice": {
+              "title": "Choice",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "choice",
+            "label"
+          ],
+          "title": "PermissionChoiceDTO",
+          "type": "object"
+        },
+        "PermissionDTO": {
+          "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {choice}. ``via``: \"hook\" (brindle's hook\nholds the request and takes the answer) or \"prompt\" (the CLI's own\nprompt is on screen; the answer goes in as its keys).",
+          "properties": {
+            "choices": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionChoiceDTO"
+              },
+              "title": "Choices",
+              "type": "array"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Kind"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Target"
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tool"
+            },
+            "via": {
+              "title": "Via",
+              "type": "string"
+            },
+            "wording": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Wording"
+            }
+          },
+          "required": [
+            "via"
+          ],
+          "title": "PermissionDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InboxActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "agent_id": {
           "anyOf": [
             {
@@ -613,9 +764,32 @@
           "default": null,
           "title": "Notice Id"
         },
+        "permission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "reason": {
           "title": "Reason",
           "type": "string"
+        },
+        "root_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Root Id"
         },
         "workspace_id": {
           "anyOf": [
@@ -770,6 +944,138 @@
         "started_at"
       ],
       "title": "NativeSubagentDTO",
+      "type": "object"
+    },
+    "PermissionChoiceDTO": {
+      "properties": {
+        "choice": {
+          "title": "Choice",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        }
+      },
+      "required": [
+        "choice",
+        "label"
+      ],
+      "title": "PermissionChoiceDTO",
+      "type": "object"
+    },
+    "PermissionDTO": {
+      "$defs": {
+        "PermissionChoiceDTO": {
+          "properties": {
+            "choice": {
+              "title": "Choice",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "choice",
+            "label"
+          ],
+          "title": "PermissionChoiceDTO",
+          "type": "object"
+        }
+      },
+      "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {choice}. ``via``: \"hook\" (brindle's hook\nholds the request and takes the answer) or \"prompt\" (the CLI's own\nprompt is on screen; the answer goes in as its keys).",
+      "properties": {
+        "choices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionChoiceDTO"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool"
+        },
+        "via": {
+          "title": "Via",
+          "type": "string"
+        },
+        "wording": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wording"
+        }
+      },
+      "required": [
+        "via"
+      ],
+      "title": "PermissionDTO",
       "type": "object"
     },
     "ProfileDTO": {

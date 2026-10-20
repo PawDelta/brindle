@@ -37,6 +37,7 @@ from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipel
 from brindle import sessions as sessions_mod
 from brindle.daemon import terminal
 from brindle.db import DB, Agent, Workspace
+from brindle.service import inbox
 from brindle.service import sessions as svc
 from brindle.service.dto import SessionDTO
 from brindle.service.errors import ServiceError, from_exception
@@ -244,6 +245,9 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
                                                 _get(body, "allow_commands", bool, False))}
     if action == "answer":
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
+    if action == "permission":
+        # The person's answer to a's permission request (agent callers never get here).
+        return inbox.answer_permission(db, a.id, _get(body, "choice", required=True))
     if action == "review":
         return review_workspace(db, {"id": a.workspace_id}, body)
     if action == "merge":
