@@ -1200,6 +1200,54 @@ def cost_estimate_cmd(
     typer.echo(cost_estimate.describe(specs, reviewer or cfg.reviewer, repo_root=repo_root, db=db))
 
 
+# -- brindle daemon (the desktop app's local API; see brindle.daemon) ----------------------------
+
+daemon_app = typer.Typer(invoke_without_command=True,
+                         help="The local API the desktop app talks to: bare `brindle daemon` runs it.")
+app.add_typer(daemon_app, name="daemon")
+
+
+@daemon_app.callback()
+def daemon_cmd(
+    ctx: typer.Context,
+    unix: bool = typer.Option(True, "--socket/--no-socket", help="Listen on ~/.brindle/daemon.sock."),
+    tcp: bool = typer.Option(False, "--tcp", help="Also listen on 127.0.0.1 (a random port, in daemon.json)."),
+    idle_exit: bool = typer.Option(False, "--idle-exit", help="Exit after 10 minutes with no client while no agent runs."),
+) -> None:
+    if ctx.invoked_subcommand:
+        return
+    from brindle.daemon import lifecycle
+
+    try:
+        lifecycle.serve(unix=unix, tcp=tcp, idle_exit=idle_exit)
+    except (lifecycle.DaemonError, OSError) as e:
+        typer.secho(str(e), fg="red", err=True)
+        raise typer.Exit(1)
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    """Whether the daemon runs, and where."""
+    from brindle.daemon import lifecycle
+
+    info = lifecycle.running()
+    if info is None:
+        typer.echo("not running")
+        raise typer.Exit(1)
+    where = ", ".join(x for x in (info.get("socket") and f"socket {info['socket']}",
+                                  info.get("port") and f"127.0.0.1:{info['port']}") if x)
+    typer.echo(f"running: pid {info['pid']}, brindle {info.get('version')}, {where}")
+
+
+@daemon_app.command("stop")
+def daemon_stop() -> None:
+    """Stop the running daemon."""
+    from brindle.daemon import lifecycle
+
+    info = lifecycle.stop()
+    typer.echo(f"stopped (pid {info['pid']})" if info else "not running")
+
+
 # -- brindle permissions (the permission policy; see brindle.permissions) -------------------------
 
 permissions_app = typer.Typer(no_args_is_help=True,
