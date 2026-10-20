@@ -2801,6 +2801,10 @@
       "path": "/v1/sessions/{root}/pause"
     },
     {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/transfer"
+    },
+    {
       "method": "GET",
       "path": "/v1/snapshot"
     },

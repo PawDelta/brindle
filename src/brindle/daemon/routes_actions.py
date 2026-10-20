@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, preflight, tmux, workspaces
+from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, preflight, scratch, tmux, workspaces
 from brindle import sessions as sessions_mod
 from brindle.daemon import session_review as review
 from brindle.daemon import terminal
@@ -266,6 +266,21 @@ def handover_session(db: DB, params: dict, body: Body) -> Any:
     new = sessions_mod.handover(db, root.id, dest, _get(body, "note"))
     svc.cull_detached(dest.repo_root)
     return SessionDTO.from_agent(new).to_json()
+
+
+def transfer_session(db: DB, params: dict, body: Body) -> Any:
+    root, ws = _root(db, params["root"])
+    identity_lock.ensure(root)
+    target, branch = _get(body, "target_path", required=True), _get(body, "branch")
+    if not scratch.is_scratch(ws.path):       # refused at once, not as a failed job
+        raise ServiceError("invalid", "This isn't a scratch session; the work is already in a real repository.")
+
+    def work(db: DB, job: Job) -> Any:
+        t = svc.transfer_to_repo(db, ws, target, branch)
+        return {"workspace_id": t.workspace.id, "branch": t.workspace.branch,
+                "repo_root": t.workspace.repo_root, "commits": t.commits}
+
+    return start_job("session.transfer", work, root_id=root.id, repo_root=ws.repo_root)
 
 
 # -- inbox -----------------------------------------------------------------------
@@ -1204,6 +1219,7 @@ ROUTES = [
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/handover", handover_session),
+    _post("/sessions/{root}/transfer", transfer_session),
     # GET on the file path reads (routes_read); agent callers are refused by the guard.
     Route("/v1/sessions/{root:path}/file", _endpoint(put_session_file), methods=["PUT"]),
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
