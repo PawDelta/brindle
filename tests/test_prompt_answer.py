@@ -98,6 +98,9 @@ def sweeps(db, clock, n=2):
     ("Sign in to Antigravity to continue",
      ["Continue with Google", "Use a key file"], {"kind": "trust", "option": "Continue with Google"},
      [], None, 1),
+    # terms or a licence are the person's to accept: never a plain "Continue"
+    ("By continuing you agree to the Terms of Service and license agreement",
+     ["Continue", "Exit"], {"kind": "acknowledge", "option": "Continue"}, [], None, 1),
     ("Starting up", ["brindle", "github"], {"kind": "not_a_prompt", "option": ""}, [], None, 0),
     # a tool permission is the permission policy's (note_stuck reports it), never answered here
     ("Requesting permission for read_file\n{path}/README.md", ["Allow", "Deny"],

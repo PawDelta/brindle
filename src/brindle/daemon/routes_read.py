@@ -289,10 +289,20 @@ def get_doctor(request: Request) -> Any:
 @_json
 def provider_preflight(request: Request) -> Any:
     """What would stop a session on this provider in ``repo`` before its first
-    turn: the items POST /v1/sessions answers 409 with (see brindle.preflight)."""
+    turn: the items POST /v1/sessions answers 409 with, for the identity its
+    chat would run as (see brindle.preflight). Native, which runs no chat,
+    and a request without ``repo`` get the provider's checks as brindle sees it."""
     from brindle import preflight
+    from brindle.daemon.routes_actions import session_blockers
 
-    items = preflight.check(request.path_params["provider"], _repo(request))
+    provider, repo = request.path_params["provider"], _repo(request)
+    if repo is None or provider == "native":
+        items = preflight.check(provider, repo)
+    else:
+        if provider not in preflight.PROVIDERS:
+            raise ServiceError("invalid", f"provider must be one of {', '.join(preflight.PROVIDERS)}")
+        blocked = session_blockers(DB(), repo, provider)
+        items = blocked.items if blocked else []
     return [PreflightItemDTO(**i.to_json()).to_json() for i in items]
 
 

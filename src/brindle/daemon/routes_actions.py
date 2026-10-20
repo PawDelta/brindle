@@ -129,6 +129,8 @@ def _endpoint(fn: Action):
             return _error(ServiceError("invalid", "the body must be a JSON object"))
         try:
             got = await asyncio.to_thread(_call, fn, dict(request.path_params), body)
+        except agents.PreflightBlocked as e:      # a launch on the way: as if asked first
+            return JSONResponse(preflight.Blocked(e.items).to_json(), 409)
         except Exception as e:  # noqa: BLE001 - mapped to a status below
             err = from_exception(e)
             if err.code == "internal":
@@ -186,16 +188,37 @@ def _notes(notes: list[svc.Note]) -> list[dict[str, str]]:
 # -- sessions --------------------------------------------------------------------
 
 
-def start_session(db: DB, params: dict, body: Body) -> Any:
-    """A 409 ``{"preflight": [...]}`` instead of a chat opening on its CLI's
-    sign-in or first-run screen (see brindle.preflight); opening a running
-    session ("o") launches nothing, so it isn't held up."""
+def _blocked(launches: list[tuple[Agent, Workspace]]) -> preflight.Blocked | None:
+    """What would stop any of these launches (agent, where) before its first
+    turn, each item once, judged with the identity each runs as."""
+    items: dict[str, preflight.Item] = {}
+    for a, ws in launches:
+        for item in agents.launch_blockers(a, ws):
+            items.setdefault(item.id, item)
+    return preflight.Blocked(list(items.values())) if items else None
+
+
+def session_blockers(db: DB, repo: str, provider: str | None) -> preflight.Blocked | None:
+    """What would stop a new supervisor chat in ``repo`` (on ``provider``, else
+    its profile's) before its first turn."""
     from brindle.profiles import load_profile
 
-    repo = _get(body, "repo", required=True)
-    if _get(body, "choice") != "o":
-        provider = _get(body, "provider") or load_profile(agents.SUPERVISOR, repo).provider
-        blocked = preflight.gate([provider], repo)
+    ws = workspaces.adopt_root(db, repo)
+    provider = provider or load_profile(agents.SUPERVISOR, ws.repo_root).provider
+    chat = Agent("preflight", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
+    return _blocked([(chat, ws)])
+
+
+def start_session(db: DB, params: dict, body: Body) -> Any:
+    """A 409 ``{"preflight": [...]}`` instead of a chat opening on its CLI's
+    sign-in or first-run screen (see brindle.preflight). Only opening a
+    session that is running now launches nothing, so only that isn't checked."""
+    repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
+    opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
+               and any(s.root.id == session_id
+                       for s in sessions_mod.live(db, workspaces.adopt_root(db, repo).repo_root)))
+    if not opening:
+        blocked = session_blockers(db, repo, _get(body, "provider"))
         if blocked:
             return blocked
     got = svc.start(db, repo, provider=_get(body, "provider"),
@@ -212,8 +235,8 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
 
 def continue_session(db: DB, params: dict, body: Body) -> Any:
     _, ws = _root(db, params["root"])
-    blocked = preflight.gate([a.provider for a in agents.tree(db, params["root"]) if a.status != "done"],
-                             ws.repo_root)
+    blocked = _blocked([(a, db.get_workspace(a.workspace_id) or ws)
+                        for a in agents.tree(db, params["root"]) if a.status != "done"])
     if blocked:
         return blocked
     got = svc.continue_(db, svc.continue_workspace(db, ws.path), params["root"])
@@ -304,12 +327,12 @@ def rewind_agent(db: DB, params: dict, body: Body) -> Any:
     to = _get(body, "to", int, required=True)
     profile, note = _get(body, "profile"), _get(body, "note")
     ws = _workspace(db, a.workspace_id)
+    fresh = a
     if profile:
         from brindle.profiles import load_profile
 
-        blocked = preflight.gate([load_profile(profile, ws.repo_root).provider], ws.repo_root)
-    else:
-        blocked = preflight.gate([a.provider], ws.repo_root)
+        fresh = dataclasses.replace(a, profile=profile, provider=load_profile(profile, ws.repo_root).provider)
+    blocked = _blocked([(fresh, ws)])
     if blocked:
         return blocked
 

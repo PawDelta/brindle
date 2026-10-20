@@ -1136,6 +1136,24 @@ def codex_trust(repo_root: str) -> str | None:
     return entry.get("trust_level", "") if isinstance(entry, dict) else None
 
 
+def _toml_header_is(line: str, path: tuple[str, ...]) -> bool:
+    """Whether ``line`` is a TOML table header naming ``path``, however it's
+    quoted or commented (``[projects.'/repo'] # mine``)."""
+    import tomllib
+
+    if not line.lstrip().startswith("[") or line.lstrip().startswith("[["):
+        return False
+    try:
+        data = tomllib.loads(line)
+    except ValueError:
+        return False
+    for part in path:
+        if not isinstance(data, dict) or list(data) != [part]:
+            return False
+        data = data[part]
+    return data == {}
+
+
 def trust_codex_project(repo_root: str, *, override: bool = False) -> bool:
     """Record ``repo_root`` as trusted in Codex's config.toml, as its "Trust
     this folder?" screen does, so a session never opens on that screen. A
@@ -1165,10 +1183,9 @@ def trust_codex_project(repo_root: str, *, override: bool = False) -> bool:
             return True
         if isinstance(entry, dict) and "trust_level" in entry and not override:
             return False
-        header = f"[projects.{json.dumps(key)}]"
         lines = text.splitlines()
-        if header in lines:
-            at = lines.index(header) + 1
+        at = next((i + 1 for i, line in enumerate(lines) if _toml_header_is(line, ("projects", key))), None)
+        if at is not None:
             end = next((i for i in range(at, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
             body = [i for i in range(at, end) if re.match(r"\s*trust_level\s*=", lines[i])]
             if body:
@@ -1177,7 +1194,8 @@ def trust_codex_project(repo_root: str, *, override: bool = False) -> bool:
                 lines.insert(at, 'trust_level = "trusted"')
             new = "\n".join(lines) + "\n"
         else:
-            new = (text if not text or text.endswith("\n") else text + "\n") + f'\n{header}\ntrust_level = "trusted"\n'
+            new = ((text if not text or text.endswith("\n") else text + "\n")
+                   + f'\n[projects.{json.dumps(key)}]\ntrust_level = "trusted"\n')
         want = {**old, "projects": {**projects, key: {**(entry or {}), "trust_level": "trusted"}}}
         try:
             if tomllib.loads(new) != want:

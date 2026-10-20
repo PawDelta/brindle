@@ -19,6 +19,7 @@ from brindle.pro.team_policy import Access, AgentSetup, ClaudeSetup, ModelsSetup
 
 TOKEN = "t" * 43
 REAL_PREFLIGHT = preflight.check
+REAL_ONBOARDED = providers.claude_onboarded
 
 
 def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None) -> tuple[int, dict]:
@@ -59,7 +60,7 @@ def world(db, repo, monkeypatch):
                        time.time(), plan_first=1, plan_state="proposed"))
     db.add_autopilot("sup")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
-    monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None: [])
+    monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [])
     return root
 
 
@@ -366,6 +367,7 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
     """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
     monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)
+    monkeypatch.setattr(providers, "claude_onboarded", REAL_ONBOARDED)
     for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN"):
         (tmp_path / env).write_text("")
         monkeypatch.setenv(env, str(tmp_path / env))
@@ -379,24 +381,38 @@ def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
 def _codex_trust(codex, repo, level):
     import os
 
-    codex.write_text(f'model = "x"\n\n[projects.{json.dumps(os.path.realpath(repo))}]\ntrust_level = "{level}"\n')
+    # Quoted and commented as a person might: still the repo's own table.
+    codex.write_text(f"model = \"x\"\n\n[projects.'{os.path.realpath(repo)}'] # mine\ntrust_level = \"{level}\"\n")
 
 
-@pytest.mark.parametrize("path,provider,trust,blocked", [
-    ("/v1/sessions", "claude", None, ["signin"]),
+@pytest.mark.parametrize("how,provider,setup,blocked", [
+    ("/v1/sessions", "claude", "signed-out", ["signin"]),
     ("/v1/sessions", "codex", None, []),            # Codex's trust is recorded silently, then it launches
     ("/v1/sessions", "codex", "untrusted", ["trust"]),   # the person's own answer to Codex is never overridden
-    ("/v1/sessions/sup/continue", "claude", None, ["signin"]),
-    ("/v1/agents/wk/rewind", "claude", None, ["signin"]),
-], ids=["start", "start-trusts-silently", "start-untrusted", "continue", "rewind"])
-def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, path, provider, trust,
+    # Signed in by the key brindle stores for it, which Claude Code then asks about.
+    ("/v1/sessions", "claude", "stored-key", ["consent"]),
+    # "open" a session that has since exited: a fresh one would start, so it's checked.
+    ("/v1/sessions?open", "claude", "signed-out", ["signin"]),
+    ("/v1/sessions/sup/continue", "claude", "signed-out", ["signin"]),
+    ("/v1/agents/wk/rewind", "claude", "signed-out", ["signin"]),
+    # A worker started any way (assign, handoff, a queued task) goes through the same launch.
+    ("assign", "claude", "fresh", ["consent"]),
+    ("assign", "codex", "untrusted", ["trust"]),
+    ("interactive", "claude", "fresh", []),         # a chat in a terminal: the person answers it there
+], ids=["start", "start-trusts-silently", "start-untrusted", "start-stored-key", "stale-open", "continue",
+        "rewind", "worker-consent", "worker-untrusted", "terminal-chat"])
+def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, how, provider, setup,
                                                         blocked):
-    _, codex = _provider_setup(tmp_path, monkeypatch)
-    if trust:
-        _codex_trust(codex, world.repo_root, trust)
+    from brindle import keystore
+
+    _, codex = _provider_setup(tmp_path, monkeypatch, onboarded=setup != "fresh")
+    if setup == "untrusted":
+        _codex_trust(codex, world.repo_root, "untrusted")
+    if setup == "stored-key":
+        keystore.set_key("ANTHROPIC_API_KEY", SECRET)
     before = codex.read_text() if codex.exists() else None
-    monkeypatch.setattr(providers, "signed_out",
-                        lambda p, env=None: "Claude Code isn't signed in" if p == "claude" else None)
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: "Claude Code isn't signed in" if (
+        p == "claude" and setup in ("signed-out", "stored-key") and not (env or {}).get("ANTHROPIC_API_KEY")) else None)
     opened = []
 
     def open_window(*a, **k):
@@ -404,15 +420,23 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
         raise agents.AgentError("stopped at the window")
 
     monkeypatch.setattr(agents, "_open_window", open_window)
-    code, reply = _send("POST", path, {"repo": world.repo_root, "provider": provider, "to": 1})
-    assert code == 409, reply
+    if how.startswith("/"):
+        path, _, opening = how.partition("?")
+        body = {"repo": world.repo_root, "provider": provider, "to": 1}
+        code, reply = _send("POST", path, {**body, "choice": "o", "session_id": "sup"} if opening else body)
+        assert code == 409 and SECRET not in json.dumps(reply), reply
+        kinds = [i["kind"] for i in reply.get("preflight", [])]
+        assert all(i["action"]["path"].startswith(f"/v1/providers/{provider}/") for i in reply.get("preflight", []))
+    else:
+        with pytest.raises(agents.AgentError) as e:
+            agents.spawn(db, world, "developer" if how == "assign" else "supervisor", provider_name=provider,
+                         mode=how, parent_id="sup" if how == "assign" else None, prompt="go")
+        kinds = [i.kind for i in getattr(e.value, "items", [])]
+    assert kinds == blocked and len(opened) == (0 if blocked else 1)
     if blocked:
-        assert [i["kind"] for i in reply["preflight"]] == blocked and opened == []
-        assert all(i["action"]["path"].startswith(f"/v1/providers/{provider}/") for i in reply["preflight"])
         assert (codex.read_text() if codex.exists() else None) == before
-        return
-    assert len(opened) == 1 and "preflight" not in reply
-    assert providers.codex_trust(world.repo_root) == "trusted"
+    elif provider == "codex":
+        assert providers.codex_trust(world.repo_root) == "trusted"
 
 
 @pytest.mark.parametrize("provider,setup,item", [

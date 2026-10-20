@@ -76,7 +76,7 @@ def test_a_profile_env_key_counts_as_signed_in(db, repo, monkeypatch, tmp_path):
     # (nothing can really launch a stand-in agy).
     seen = []
     real = providers.signed_out
-    monkeypatch.setattr(agents, "signed_out", lambda p, env=None: seen.append(env) or real(p, env))
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: seen.append(env) or real(p, env))
 
     class Stop(Exception):
         pass

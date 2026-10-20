@@ -29,7 +29,7 @@ from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
-from brindle.providers import LaunchContext, get_provider, signed_out, unusable
+from brindle.providers import LaunchContext, get_provider, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
     SIDEBAR_DISMISSED,
@@ -781,6 +781,52 @@ def add_dirs_warning(agent: Agent, ws: Workspace) -> str | None:
     return _add_dirs_warning(load_profile(agent.profile, ws.repo_root), agent.provider)
 
 
+class PreflightBlocked(AgentError):
+    """A launch its CLI would stop on before the first turn: ``items`` are
+    brindle.preflight items, each naming what resolves it."""
+
+    def __init__(self, items: list) -> None:
+        self.items = items
+        super().__init__("; ".join(i.detail for i in items))
+
+
+def launch_identity(agent: Agent, ws: Workspace, profile, m=_UNREAD) -> tuple[dict[str, str], bool, tuple]:
+    """Who ``agent``'s CLI signs in as on this launch: the environment it gets
+    (its profile's env lines, the managed provider's variables, the
+    credentials brindle hands it, and the keys its auth or the org denies,
+    blanked so the launcher's own copy doesn't count), whether the org's own
+    key signs it in (no login to check), and the denied names. ``agent`` need
+    not be recorded yet: a launch about to happen is checked the same way."""
+    from brindle.pro import managed_models
+
+    if m is _UNREAD:
+        m = managed(ws.repo_root)
+    launch_env = {**profile.env, **managed_models.agent_env(m, agent.provider)}
+    deny = pane_auth.deny_names(agent.provider, profile.auth, m,
+                                agent.provider == "claude" and bool(providers.claude_org_managed()))
+    org_key = managed_models.has_org_key(m, agent.provider)
+    prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
+    eff_env = _window_environment(agent, ws, m)[0]
+    probe_env = {**launch_env, **{k: eff_env[k] for k in prov_creds if k in eff_env}}
+    return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
+
+
+def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, identity=None) -> list:
+    """What would stop ``agent``'s CLI before its first turn if it launched
+    now in ``ws`` (brindle.preflight), judged with the identity it runs as."""
+    from brindle import preflight
+
+    if agent.provider not in preflight.PROVIDERS:
+        return []
+    profile = profile or _guarded_profile(agent, ws)
+    if profile is None:
+        return []
+    if agent.provider == "native":
+        return preflight.check("native", ws.repo_root, profile=profile)
+    env, org_key, _ = identity or launch_identity(agent, ws, profile, m)
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key)
+
+
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False,
             model_checked: bool = False) -> None:
@@ -812,26 +858,20 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     from brindle import signin_pause
 
     signin_pause.record_launch(agent)   # who it runs as, so a resume never crosses accounts
-    # What the agent will run with: the managed provider's variables, and
-    # no personal keys (blank, so the launcher's own copy doesn't count).
-    from brindle.pro import managed_models
-
-    launch_env = {**profile.env, **managed_models.agent_env(m, provider.name)}
-    deny = pane_auth.deny_names(provider.name, profile.auth, m,
-                                provider.name == "claude" and bool(providers.claude_org_managed()))
-    org_key = managed_models.has_org_key(m, provider.name)
+    env, org_key, deny = launch_identity(agent, ws, profile, m)
     why = pane_auth.key_problem(profile, provider.name, deny, org_key)
     if why:
         raise AgentError(why)
-    # The org's own key signs the agent in: there is no login to check.
-    prov_creds = set() if org_key else secrets.agent_credentials(provider.name, profile.name, ws.repo_root)
-    eff_env = _window_environment(agent, ws, m)[0]
-    probe_keys = {k: eff_env[k] for k in prov_creds if k in eff_env}
-    probe_env = {**launch_env, **probe_keys}
-    why = None if org_key else signed_out(
-        provider.name, {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}})
-    if why:
-        raise AgentError(why)
+    # What its CLI would stop on before the first turn (brindle.preflight),
+    # with the identity it runs as. A person starting their own chat from a
+    # terminal answers its first-run screens there; nobody watches a worker's.
+    blocking = launch_blockers(agent, ws, profile, m, identity=(env, org_key, deny))
+    # Installing a CLI or tmux shows when the window opens, as before.
+    blocking = [b for b in blocking if b.kind != "setup"]
+    if agent.parent_id is None and agent.mode == "interactive":
+        blocking = [b for b in blocking if b.kind not in ("consent", "trust")]
+    if blocking:
+        raise PreflightBlocked(blocking)
     # Here rather than in spawn, so a resume checks too: a directory can be
     # deleted between the first launch and a `brindle continue`. This reaches a
     # person running brindle in a terminal; a launch from the MCP server has no

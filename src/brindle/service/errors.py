@@ -52,6 +52,8 @@ _MAP: tuple[tuple[tuple[type[BaseException], ...], str, int], ...] = (
 def from_exception(exc: BaseException) -> ServiceError:
     if isinstance(exc, ServiceError):
         return exc
+    if isinstance(exc, agents.PreflightBlocked):   # a job's launch: the items, as POST answers them
+        return ServiceError("preflight", str(exc), 409, preflight=[i.to_json() for i in exc.items])
     for kinds, code, status in _MAP:
         if isinstance(exc, kinds):
             return ServiceError(code, str(exc), status)

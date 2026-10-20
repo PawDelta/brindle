@@ -54,11 +54,14 @@ HINT = re.compile(r"(?i)\benter to (?:confirm|continue|select|proceed)\b|\bpress
 INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt"
                        r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
 # Only the person answers these, whatever the model makes of them: their
-# accounts and data, and anything that widens what the agent may run (a
-# project's MCP servers or hooks, skipping permission checks, installing).
+# accounts and data, anything that widens what the agent may run (a
+# project's MCP servers or hooks, skipping permission checks, installing),
+# and any terms, licence, agreement or first-run notice a CLI wants accepted
+# (brindle never accepts one for anyone; see brindle.preflight).
 PERSONAL = re.compile(r"(?i)sign.?in|log.?in\b|password|api.?key|payment|billing|credit card|subscri"
                       r"|delet|erase|outside (?:this|the) (?:folder|project|worktree|workspace)"
-                      r"|\bmcp\b|\bhooks?\b|bypass|dangerous|skip\w*.{0,20}permission|install|updat")
+                      r"|\bmcp\b|\bhooks?\b|bypass|dangerous|skip\w*.{0,20}permission|install|updat"
+                      r"|\bterms\b|licen[cs]e|\bagree|consent|privacy|security notes")
 # The model only points at an option; brindle answers with it only if it is
 # one of these (the screen can carry text from the repo, which can steer the
 # model). A settings picker is only ever answered with its default.

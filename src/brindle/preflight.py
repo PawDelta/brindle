@@ -15,7 +15,13 @@ route that resolves it:
   with the provider's own link. Never accepted for them: after they confirm
   in the app, POST /v1/providers/{p}/consent records it where the CLI keeps a
   record; with no record to keep, the action is ``open_provider_once``.
-- ``setup``: something to install or configure outside brindle (no route)."""
+- ``setup``: something to install or configure outside brindle (no route).
+
+Every launch is checked with the identity it runs as (agents.launch_blockers):
+the daemon answers 409 with the items before starting a chat or worker, and
+agents._launch refuses any worker launch they block (PreflightBlocked), so a
+CLI never opens on a screen nobody will answer. A screen no check foresaw
+that asks for terms or a licence is left to the person (prompt_answer.PERSONAL)."""
 
 from __future__ import annotations
 
@@ -75,15 +81,19 @@ def _consent(provider: str, item_id: str) -> Action:
     return Action("consent", "POST", f"/v1/providers/{provider}/consent", {"id": item_id})
 
 
-def _has_key(name: str, env: dict[str, str] | None = None) -> bool:
+def _key_value(name: str, env: dict[str, str] | None = None) -> str | None:
+    """The value of key ``name`` the CLI gets: from ``env`` when it names it
+    (blank: denied to it), else brindle's environment or key store."""
     from brindle import keystore
 
-    if os.environ.get(name) or (env or {}).get(name):
-        return True
+    if env is not None and name in env:
+        return env[name].strip() or None
+    if os.environ.get(name):
+        return os.environ[name].strip() or None
     try:
-        return bool(keystore.get_key(name))
+        return keystore.get_key(name)
     except keystore.CredentialError:
-        return False
+        return None
 
 
 def _binary(provider: str) -> str:
@@ -93,15 +103,19 @@ def _binary(provider: str) -> str:
             "antigravity": antigravity.binary, "opencode": opencode.binary}[provider]()
 
 
-def check(provider: str, repo_root: str | None = None) -> list[Item]:
+def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | None = None,
+          signed_in: bool = False, profile=None) -> list[Item]:
     """What would stop a session on ``provider`` in ``repo_root`` before its
-    first turn; empty when nothing would."""
+    first turn; empty when nothing would. ``env``: the environment the CLI
+    signs in with (agents.launch_identity; a blank value is a key it won't
+    get), else brindle's own. ``signed_in``: the org's key signs it in.
+    ``profile``: for native, the one profile to check (else all of them)."""
     from brindle import doctor, providers
 
     if provider not in PROVIDERS:
         raise ValueError(f"provider must be one of {', '.join(PROVIDERS)}")
     if provider == "native":
-        return _native(repo_root)
+        return _native(repo_root, profile)
     items = []
     if not shutil.which("tmux"):
         items.append(Item("setup", "tmux", provider, "Install tmux",
@@ -112,24 +126,24 @@ def check(provider: str, repo_root: str | None = None) -> list[Item]:
         name, how = doctor.CLI_INSTALL[provider]
         return items + [Item("setup", f"{provider}.install", provider, f"Install {name}",
                              f"{name} (`{exe}`) isn't on PATH. Install: {how}")]
-    if provider == "antigravity" and providers.agy_uses_gemini_key() and not _has_key("GEMINI_API_KEY"):
+    if provider == "antigravity" and providers.agy_uses_gemini_key() and not _key_value("GEMINI_API_KEY", env):
         items.append(Item("key", "key.GEMINI_API_KEY", provider, "Add your Gemini API key",
                           "Antigravity is set to the Gemini API, which needs GEMINI_API_KEY",
                           _set_key("GEMINI_API_KEY")))
-    else:
-        why = providers.signed_out(provider)
+    elif not signed_in:
+        why = providers.signed_out(provider, env)
         if why:
             items.append(Item("signin", f"{provider}.signin", provider,
                               f"Sign in to {doctor.CLI_INSTALL[provider][0]}", why, _login(provider)))
     if provider == "claude":
-        items += _claude_consents()
+        items += _claude_consents(env)
     if provider == "codex" and repo_root:
         items += _codex_trust(repo_root)
     return items
 
 
-def _claude_consents() -> list[Item]:
-    from brindle import keystore, providers
+def _claude_consents(env: dict[str, str] | None) -> list[Item]:
+    from brindle import providers
 
     out = []
     if not providers.claude_onboarded():
@@ -137,20 +151,21 @@ def _claude_consents() -> list[Item]:
             "consent", "claude.onboarding", "claude", "Claude Code's security notes",
             "Before its first session Claude Code shows its security notes: Claude can make mistakes, "
             "so review what it does, and code or content it reads can try to steer it (prompt "
-            "injection). Read them, then confirm to continue; brindle records it as Claude Code does.",
+            "injection). Read them, then confirm to continue (or run `claude` once in a terminal); "
+            "brindle records it as Claude Code does.",
             _consent("claude", "claude.onboarding"), CLAUDE_SECURITY_URL))
-    cred = providers.claude_credential()
-    if cred.kind == "api key":
-        try:
-            value = os.environ.get("ANTHROPIC_API_KEY") or keystore.get_key("ANTHROPIC_API_KEY")
-        except keystore.CredentialError:
-            value = None
-        if value and not providers.api_key_approved(value.strip()):
-            out.append(Item(
-                "consent", "claude.api_key", "claude", "Use ANTHROPIC_API_KEY in Claude Code?",
-                f"Claude Code asks once whether to use the key ending {value.strip()[-4:]} "
-                f"({cred.source}); with it, usage is billed to that key, not a subscription login.",
-                _consent("claude", "claude.api_key")))
+    # Claude Code asks about a key only when it would use one: not under its
+    # managed settings, a cloud backend or a token, which come first.
+    first = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+             "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
+    value = _key_value("ANTHROPIC_API_KEY", env)
+    if value and not providers.claude_org_managed() and not any(_key_value(k, env) for k in first) \
+            and not providers.api_key_approved(value):
+        out.append(Item(
+            "consent", "claude.api_key", "claude", "Use ANTHROPIC_API_KEY in Claude Code?",
+            f"Claude Code asks once whether to use the key ending {value[-4:]}; with it, usage "
+            "is billed to that key, not a subscription login.",
+            _consent("claude", "claude.api_key")))
     return out
 
 
@@ -170,32 +185,23 @@ def _codex_trust(repo_root: str) -> list[Item]:
                  Action("trust", "POST", "/v1/providers/codex/trust", {"repo": repo_root}))]
 
 
-def _native(repo_root: str | None) -> list[Item]:
+def _native(repo_root: str | None, profile=None) -> list[Item]:
     from brindle.profiles import list_profiles
 
     out: dict[str, Item] = {}
-    for p in list_profiles(repo_root):
+    for p in [profile] if profile is not None else list_profiles(repo_root):
         if p.provider != "native":
             continue
         if not p.base_url or not p.model:
             out[p.name] = Item("setup", f"native.{p.name}", "native", f"Finish profile {p.name}",
                                f"profile {p.name!r} uses the native provider but gives no "
                                f"{'base_url' if not p.base_url else 'model'}")
-        elif p.api_key_env and not _has_key(p.api_key_env, p.env):
+        elif p.api_key_env and not _key_value(p.api_key_env, p.env if p.api_key_env in p.env else None):
             out.setdefault(p.api_key_env, Item("key", f"key.{p.api_key_env}", "native",
                                                f"Add {p.api_key_env}",
                                                f"profile {p.name!r} needs {p.api_key_env}",
                                                _set_key(p.api_key_env)))
     return list(out.values())
-
-
-def gate(provider_names, repo_root: str | None) -> Blocked | None:
-    """The items blocking any of ``provider_names`` (each once), or None."""
-    items: list[Item] = []
-    for name in dict.fromkeys(provider_names):
-        if name in PROVIDERS:
-            items += check(name, repo_root)
-    return Blocked(items) if items else None
 
 
 # -- recording what the person accepted in the app --------------------------------
