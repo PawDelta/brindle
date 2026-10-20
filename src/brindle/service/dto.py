@@ -160,6 +160,28 @@ class ProfileDTO(_DTO):
                    local=p.local, fallback=list(p.fallback))
 
 
+class RoutingSettingDTO(_DTO):
+    values: list[str]
+    source: str              # "default", "user", "repo" or "local"
+
+
+class RoutingProfileDTO(_DTO):
+    name: str
+    provider: str
+    model: str | None = None
+    installed: bool
+    signed_in: bool
+    excluded: bool
+    cost_tier: str           # "low", "medium" or "high"
+
+
+class RoutingDTO(_DTO):
+    tiers: dict[str, RoutingSettingDTO]
+    reviewer: RoutingSettingDTO
+    exclude_providers: RoutingSettingDTO
+    profiles: list[RoutingProfileDTO]
+
+
 class AccountDTO(_DTO):
     signed_in: bool
     name: str | None = None

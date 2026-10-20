@@ -763,6 +763,182 @@
       "title": "ProfileDTO",
       "type": "object"
     },
+    "RoutingDTO": {
+      "$defs": {
+        "RoutingProfileDTO": {
+          "properties": {
+            "cost_tier": {
+              "title": "Cost Tier",
+              "type": "string"
+            },
+            "excluded": {
+              "title": "Excluded",
+              "type": "boolean"
+            },
+            "installed": {
+              "title": "Installed",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "provider": {
+              "title": "Provider",
+              "type": "string"
+            },
+            "signed_in": {
+              "title": "Signed In",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "provider",
+            "installed",
+            "signed_in",
+            "excluded",
+            "cost_tier"
+          ],
+          "title": "RoutingProfileDTO",
+          "type": "object"
+        },
+        "RoutingSettingDTO": {
+          "properties": {
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "values",
+            "source"
+          ],
+          "title": "RoutingSettingDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "exclude_providers": {
+          "$ref": "#/$defs/RoutingSettingDTO"
+        },
+        "profiles": {
+          "items": {
+            "$ref": "#/$defs/RoutingProfileDTO"
+          },
+          "title": "Profiles",
+          "type": "array"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/RoutingSettingDTO"
+        },
+        "tiers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutingSettingDTO"
+          },
+          "title": "Tiers",
+          "type": "object"
+        }
+      },
+      "required": [
+        "tiers",
+        "reviewer",
+        "exclude_providers",
+        "profiles"
+      ],
+      "title": "RoutingDTO",
+      "type": "object"
+    },
+    "RoutingProfileDTO": {
+      "properties": {
+        "cost_tier": {
+          "title": "Cost Tier",
+          "type": "string"
+        },
+        "excluded": {
+          "title": "Excluded",
+          "type": "boolean"
+        },
+        "installed": {
+          "title": "Installed",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "signed_in": {
+          "title": "Signed In",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "provider",
+        "installed",
+        "signed_in",
+        "excluded",
+        "cost_tier"
+      ],
+      "title": "RoutingProfileDTO",
+      "type": "object"
+    },
+    "RoutingSettingDTO": {
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "values",
+        "source"
+      ],
+      "title": "RoutingSettingDTO",
+      "type": "object"
+    },
     "SessionDTO": {
       "properties": {
         "created_at": {
@@ -1277,6 +1453,14 @@
     {
       "method": "GET",
       "path": "/v1/repos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/routing"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/routing"
     },
     {
       "method": "GET",

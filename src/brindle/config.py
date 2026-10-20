@@ -184,6 +184,7 @@ class RepoConfig:
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
+    exclude_providers: list[str] = field(default_factory=list)  # providers weight routing never picks
     # Model prices in $/MTok that add to or override brindle's built-in ones (see brindle.pricing):
     # {"model": {"input", "output", "cache_write"?, "cache_read"?}}, merged per model: user, then repo, then config.local.json.
     pricing: dict[str, dict] = field(default_factory=dict)
@@ -285,7 +286,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy", "agy_approvals",
-                "learned_rules_repeats", "learned_rules_profile"):
+                "learned_rules_repeats", "learned_rules_profile", "exclude_providers"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -432,6 +433,32 @@ def set_local(repo_root: str | Path, key: str, value: object) -> Path:
     if not ignore.exists():
         ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
     return path
+
+
+def set_repo(repo_root: str | Path, key: str, value: object) -> Path:
+    """Set one key in the repo's shared ``.brindle/config.json`` (committed:
+    everyone's settings; other keys are kept)."""
+    path = scope_paths(repo_root)["repo"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _read_json(path)
+    data[key] = value
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def scope_paths(repo_root: str | Path) -> dict[str, Path]:
+    """The file of each settings scope for ``repo_root``: "user"
+    (~/.brindle/config.json), "repo" (.brindle/config.json) and "local"
+    (.brindle/config.local.json)."""
+    base = config_root(repo_root) / CONFIG_DIR
+    return {"user": user_config_path(), "repo": base / CONFIG_FILE, "local": base / LOCAL_CONFIG_FILE}
+
+
+def setting_source(repo_root: str | Path, key: str) -> str:
+    """The scope whose file sets ``key`` as load_repo_config reads it
+    ("local", then "repo", then "user"), or "default"."""
+    paths = scope_paths(repo_root)
+    return next((s for s in ("local", "repo", "user") if key in _read_json(paths[s])), "default")
 
 
 def write_template(repo_root: str | Path, values: dict | None = None) -> Path:

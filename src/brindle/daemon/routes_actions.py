@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import io
 import json
 import logging
@@ -450,6 +451,57 @@ def patch_config(db: DB, params: dict, body: Body) -> Any:
     return {"updated": sorted(values), "path": str(path)}
 
 
+def put_routing(db: DB, params: dict, body: Body) -> Any:
+    """``tiers`` (tier -> profiles to try, in order), ``reviewer`` and
+    ``exclude_providers`` into ~/.brindle/config.json (scope "user"), the
+    repo's .brindle/config.local.json ("local") or its shared
+    .brindle/config.json ("repo"). Tiers not given keep their value there."""
+    from brindle import config, profiles, providers
+
+    repo = _get(body, "repo", required=True)
+    scope = _get(body, "scope", required=True)
+    setters = {"user": config.set_user, "local": functools.partial(config.set_local, repo),
+               "repo": functools.partial(config.set_repo, repo)}
+    if scope not in setters:
+        raise ServiceError("invalid", "scope must be user, local or repo")
+    tiers, reviewer = _get(body, "tiers", dict), _get(body, "reviewer")
+    excluded = _get(body, "exclude_providers", list)
+    known = {p.name for p in profiles.list_profiles(repo)}
+    named = [reviewer] if reviewer is not None else []
+    for tier, names in (tiers or {}).items():
+        if config.normalize_weight(tier) not in config.WEIGHTS:
+            raise ServiceError("invalid", f"tier must be one of {', '.join(config.WEIGHTS)}, not {tier!r}")
+        if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
+            raise ServiceError("invalid", f"{tier} must be a non-empty list of profile names")
+        named.extend(names)
+    if unknown := sorted(set(named) - known):
+        raise ServiceError("invalid", f"no such profile(s): {', '.join(unknown)}")
+    if excluded is not None and (bad := sorted(set(map(str, excluded)) - set(providers.PROVIDERS))):
+        raise ServiceError("invalid", f"no such provider(s): {', '.join(bad)}")
+    write, updated = setters[scope], []
+    if tiers:
+        routing = config._read_json(config.scope_paths(repo)[scope]).get("routing")
+        routing = dict(routing) if isinstance(routing, dict) else {}
+        for tier, names in tiers.items():
+            canon = config.normalize_weight(tier)
+            # An alias ("reasoning") left in place would still override the canonical key.
+            routing = {k: v for k, v in routing.items() if config.normalize_weight(k) != canon}
+            routing[canon] = names
+            if scope == "user":
+                config.forget_user(f"routing_{canon}")   # the picker's pick would win
+        path = write("routing", routing)
+        updated.append("routing")
+    if reviewer is not None:
+        path = write("reviewer", reviewer)
+        updated.append("reviewer")
+    if excluded is not None:
+        path = write("exclude_providers", excluded)
+        updated.append("exclude_providers")
+    if not updated:
+        raise ServiceError("invalid", "give tiers, reviewer or exclude_providers")
+    return {"updated": updated, "path": str(path)}
+
+
 def change_permissions(db: DB, params: dict, body: Body) -> Any:
     """``op``: allow or deny (``kind``, ``match``, ``match_type``), forget or
     accept (``id``), or reset."""
@@ -543,6 +595,8 @@ ROUTES = [
     _post("/decisions", record_decision),
     _post("/coordinator/undo", coordinator_undo),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
+    # Agents never get here: the guard refuses them (see brindle.daemon.auth).
+    Route("/v1/routing", _endpoint(put_routing), methods=["PUT"]),
     _post("/permissions", change_permissions),
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),

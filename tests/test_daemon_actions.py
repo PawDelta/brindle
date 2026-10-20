@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, workspaces
-from brindle.daemon import routes_actions
+from brindle.daemon import peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.pro.account import ProAccount
@@ -17,7 +17,7 @@ from brindle.pro.account import ProAccount
 TOKEN = "t" * 43
 
 
-def _send(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None) -> tuple[int, dict]:
     raw = json.dumps(body or {}).encode()
     sent: list[dict] = []
 
@@ -32,6 +32,8 @@ def _send(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
              "root_path": "", "server": ("127.0.0.1", 8123), "client": ("127.0.0.1", 50000),
              "headers": [(b"authorization", f"Bearer {TOKEN}".encode()),
                          (b"content-type", b"application/json")]}
+    if peer_pid is not None:
+        scope[peer.PEER_PID] = peer_pid
     asyncio.run(build_app(TOKEN)(scope, receive, send))
     out = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
     return sent[0]["status"], json.loads(out)
@@ -100,3 +102,30 @@ def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monke
     conflict = reply["conflict"]
     assert [c["key"] for c in conflict["choices"]] == ["o", "n", "p"]
     assert [s["id"] for s in conflict["sessions"]] == ["sup"]
+
+
+@pytest.mark.parametrize("scope,body,peer_pid,status,written", [
+    # The picker's pick for a tier is dropped too, and so is an alias of a tier, or either would still win.
+    ("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
+     {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}}),
+    ("local", {"reviewer": "reviewer"}, None, 200, {"reviewer": "reviewer"}),
+    ("repo", {"tiers": {"light": ["developer"]}, "exclude_providers": ["claude"]}, None, 200,
+     {"routing": {"light": ["developer"]}, "exclude_providers": ["claude"]}),
+    ("repo", {"tiers": {"heavy": ["developer", "nope"]}}, None, 400, {}),
+    pytest.param("repo", {"reviewer": "reviewer"}, 310, 403, {},
+                 marks=pytest.mark.variant("an agent holding the token still can't change routing")),
+], ids=["user", "local", "repo", "bad-profile", "agent"])
+def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body, peer_pid, status, written):
+    monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
+    config.set_user("routing", {"heavy": ["developer"], "advanced": ["developer-heavy"],
+                                "reasoning": ["developer-fable"]})
+    config.set_user("routing_light", "claude-haiku")
+    before = config._read_json(config.scope_paths(str(repo))[scope])
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": scope, **body}, peer_pid)
+    assert code == status, reply
+    after = config._read_json(config.scope_paths(str(repo))[scope])
+    assert after == ({k: v for k, v in before.items() if k != "routing_light"} | written if written else before)
+    if "exclude_providers" in written:
+        # The light candidate and the default agent both run on claude: routing refuses, not falls back.
+        with pytest.raises(autopilot.AutopilotError, match="excluded from routing"):
+            autopilot.choose_profile(db, "sup", str(repo), weight="light")

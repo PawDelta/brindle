@@ -200,6 +200,26 @@ def test_committed_api_schema_matches_the_routes_and_dtos():
     assert schema.SCHEMA_PATH.read_text() == schema.render()
 
 
+def test_routing_shows_each_tier_and_setting_with_its_source(seeded, monkeypatch):
+    from brindle import config, providers
+
+    config.set_local(seeded["repo"], "routing", {"light": ["developer"]})
+    config.set_repo(seeded["repo"], "exclude_providers", ["antigravity"])
+    config.set_user("reviewer", "reviewer")
+    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude"])
+    monkeypatch.setattr(providers, "signed_out", lambda provider, env=None: None)
+    _, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
+    assert body["tiers"]["light"] == {"values": ["developer"], "source": "local"}
+    assert body["tiers"]["medium"] == {"values": config.DEFAULT_ROUTING["medium"], "source": "default"}
+    assert body["reviewer"] == {"values": ["reviewer"], "source": "user"}
+    assert body["exclude_providers"] == {"values": ["antigravity"], "source": "repo"}
+    rows = {p["name"]: p for p in body["profiles"]}
+    assert (rows["developer"]["installed"], rows["developer"]["signed_in"]) == (True, True)
+    assert (rows["developer-codex"]["installed"], rows["developer-codex"]["signed_in"]) == (False, False)
+    assert rows["developer-gemini"]["excluded"] and not rows["developer"]["excluded"]
+    assert (rows["developer-light"]["cost_tier"], rows["developer-heavy"]["cost_tier"]) == ("low", "high")
+
+
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
     monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)

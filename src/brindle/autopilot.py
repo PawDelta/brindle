@@ -702,9 +702,21 @@ def set_goal(db: DB, root_id: str, goal: str,
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", "opencode": "opencode"}
 
 
+def _excluded(name: str, cfg: RepoConfig, repo_root: str) -> bool:
+    """Whether profile ``name`` runs on a provider in ``exclude_providers``
+    (a profile that doesn't exist isn't: its own check reports it)."""
+    if not cfg.exclude_providers:
+        return False
+    try:
+        return load_profile(name, repo_root).provider in cfg.exclude_providers
+    except KeyError:
+        return False
+
+
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                  weight: str | None = None) -> str | None:
-    """Why routing skips profile ``name`` (its CLI isn't installed or
+    """Why routing skips profile ``name`` (its provider is in
+    ``exclude_providers``, its CLI isn't installed or
     signed in, its provider is out of headroom, it would break a budget
     (``gate``: a ``brindle.budget.Gate``), it doesn't exist), or None if it's usable."""
     from brindle import quota
@@ -715,6 +727,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     except KeyError:
         source = cfg.routing_sources.get(weight or "", "DEFAULT_ROUTING")
         return f"no profile {name} in {source}, skipped {name}"
+    if p.provider in cfg.exclude_providers:
+        return f"{p.provider} is excluded from routing, skipped {name}"
     over = gate.why_not(name, weight) if gate is not None and gate.active else None
     if over:
         return f"over budget, skipped {name} ({over})"
@@ -866,17 +880,19 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
         model_info = [model_name]
         if p.effort:
             model_info.append(f"{p.effort} effort")
-        pw = profile_weight(name, cfg, repo_root)
-        if pw in ("heavy", "advanced", "reasoning"):
-            cost_tier = "most expensive tier"
-        elif pw == "light":
-            cost_tier = "lowest cost tier"
-        else:
-            cost_tier = "medium cost tier"
-        cost_tag = f"; {cost_tier}"
-        return f" ({', '.join(model_info)}{cost_tag})"
+        tier = cost_tier(name, cfg, repo_root)
+        label = {"high": "most expensive tier", "low": "lowest cost tier"}.get(tier, "medium cost tier")
+        return f" ({', '.join(model_info)}; {label})"
     except Exception:
         return ""
+
+
+def cost_tier(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+    """How expensive profile ``name`` runs: "low", "medium" or "high", by its weight."""
+    pw = profile_weight(name, cfg, repo_root)
+    if pw in ("heavy", "advanced", "reasoning"):
+        return "high"
+    return "low" if pw == "light" else "medium"
 
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
@@ -1003,10 +1019,13 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             if picked:
                 name = picked
             else:
-                fallback = cfg.default_agent
-                if ceiling and weight_order[profile_weight(fallback, cfg, repo_root)] > weight_order[ceiling]:
+                candidates = [cfg.default_agent]
+                if ceiling and weight_order[profile_weight(cfg.default_agent, cfg, repo_root)] > weight_order[ceiling]:
                     candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
-                    fallback = candidates[0] if candidates else None
+                fallback = next((n for n in candidates if not _excluded(n, cfg, repo_root)), None)
+                if not fallback and candidates:
+                    raise AutopilotError(f"no agent profile left for a {weight} task: every candidate runs on a "
+                                         f"provider excluded from routing ({', '.join(cfg.exclude_providers)})")
                 if not fallback:
                     raise AutopilotError(f"no permissible agent profile under max_weight ceiling {ceiling!r}")
                 name = fallback
