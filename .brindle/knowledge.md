@@ -6,4 +6,4 @@ _Kept by brindle from its CI runs: facts and counts, never code. Each fact here 
 
 These failed, then passed on the same commit. Re-run them before changing code for them.
 
-- workflow ` .github/workflows/ci.yml `: 3 commits
+- workflow ` .github/workflows/ci.yml `: 9 commits
