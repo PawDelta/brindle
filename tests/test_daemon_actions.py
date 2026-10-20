@@ -66,7 +66,6 @@ def _flat(args):
     ("POST", "/v1/inbox/wk/approve", {}, (agents, "approve_plan"), "approved", 200, "sup"),
     ("POST", "/v1/agents/wk/kill", {}, (agents, "kill"), None, 200, "wk"),
     ("POST", "/v1/workspaces/w-1/review", {}, (agents, "start_review"), None, 200, "w-1"),
-    ("POST", "/v1/workspaces/w-1/merge", {}, (pipeline, "merge"), "Merged feat", 202, "w-1"),
     # Real workspace ids contain a slash, which arrives in the path as %2F decoded.
     ("POST", "/v1/workspaces/proj/w-2/merge", {}, (pipeline, "merge"), "Merged feat2", 202, "proj/w-2"),
     ("POST", "/v1/workspaces/proj/w-2/remove", {}, (workspaces, "remove"), SimpleNamespace(branch_note=None, teardown=None), 200, "proj/w-2"),
