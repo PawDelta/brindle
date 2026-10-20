@@ -189,9 +189,12 @@ def _exit(sig, frame) -> None:
 def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> dict:
     """Run the daemon in this process until it's stopped. Returns its info."""
     import uvicorn
+    from uvicorn.protocols.http.auto import AutoHTTPProtocol
+    from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
 
     from brindle.daemon.app import build_app
     from brindle.daemon.auth import new_token
+    from brindle.daemon.peer import with_peer
 
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
@@ -199,8 +202,11 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
 
     poller = start_poller()
     activity = Activity(build_app(token, port=info["port"], poller=poller))
-    server = uvicorn.Server(uvicorn.Config(activity, lifespan="off", log_level="warning",
-                                           access_log=False))
+    # with_peer: the guard learns who calls on the Unix socket (see brindle.daemon.peer).
+    server = uvicorn.Server(uvicorn.Config(
+        activity, lifespan="off", log_level="warning", access_log=False,
+        http=with_peer(AutoHTTPProtocol),
+        ws=with_peer(AutoWebSocketsProtocol) if AutoWebSocketsProtocol else "none"))
 
     async def run() -> None:
         watcher = asyncio.create_task(_watch(server, activity, idle_exit))

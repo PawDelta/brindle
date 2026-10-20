@@ -2,15 +2,16 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import stat
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from brindle import cost, doctor, identity_lock, keystore, knowledge, tmux, workspaces
+from brindle import cost, doctor, identity_lock, keystore, knowledge, procs, tmux, workspaces
 from brindle import kb as kb_mod
-from brindle.daemon import lifecycle
+from brindle.daemon import lifecycle, peer
 from brindle.daemon.app import build_app
 from brindle.daemon.auth import WS_UNAUTHORIZED, Guard
 from brindle.db import Agent
@@ -19,8 +20,9 @@ from brindle.pro import license
 TOKEN = "t" * 43
 
 
-def _get(path: str, headers: dict[str, str], query: str = "") -> tuple[int, dict]:
-    """One HTTP request straight through the ASGI app."""
+def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | None = None) -> tuple[int, dict]:
+    """One HTTP request straight through the ASGI app (``peer_pid``: as if
+    that process called on the Unix socket)."""
     sent: list[dict] = []
 
     async def receive():
@@ -33,6 +35,8 @@ def _get(path: str, headers: dict[str, str], query: str = "") -> tuple[int, dict
              "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": query.encode(),
              "root_path": "", "server": ("127.0.0.1", 8123), "client": ("127.0.0.1", 50000),
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
+    if peer_pid is not None:
+        scope[peer.PEER_PID] = peer_pid
     asyncio.run(build_app(TOKEN, port=8123)(scope, receive, send))
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
     return sent[0]["status"], json.loads(body)
@@ -154,6 +158,39 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     code, body = _get(path.format(ws=seeded["ws"]), AUTH, f"repo={seeded['repo']}")
     assert code in (200, 404)
     assert check(body, seeded)
+
+
+@pytest.mark.parametrize("caller,refused_as", [
+    (310, "w1"),     # a command under w1's pane, however deep
+    (420, "w2"),     # BRINDLE_AGENT_ID in its own environment
+    (410, None),     # a person's terminal
+    (999, "can't be checked"),   # exited before the check: fire and forget
+])
+def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as):
+    table = {p.pid: p for p in [
+        procs.Proc(1, 0, "/sbin/launchd"),
+        procs.Proc(100, 1, "tmux new-session -d"),
+        procs.Proc(200, 100, "claude --model opus"),
+        procs.Proc(300, 200, "/bin/zsh -c pytest"),
+        procs.Proc(310, 300, "curl --unix-socket daemon.sock HOME=/u"),
+        procs.Proc(400, 1, "-zsh HOME=/u"),
+        procs.Proc(410, 400, "brindle daemon status HOME=/u"),
+        procs.Proc(420, 400, "curl --unix-socket daemon.sock HOME=/u BRINDLE_AGENT_ID=w2"),
+    ]}
+    monkeypatch.setattr(procs, "table", lambda: table)
+    monkeypatch.setattr(tmux, "window_pids", lambda w, server=None: {"@1": [150], "@2": [200]}.get(w, []))
+    code, body = _get("/v1/meta", AUTH, peer_pid=caller)
+    if refused_as:
+        assert code == 403 and body["error"]["code"] == "agent_caller"
+        assert refused_as in body["error"]["message"]
+    else:
+        assert code == 200
+
+
+def test_peer_pid_names_the_unix_socket_caller():
+    a, b = socket.socketpair(socket.AF_UNIX)
+    with a, b:
+        assert peer.peer_pid(a) == os.getpid()
 
 
 def test_committed_api_schema_matches_the_routes_and_dtos():
