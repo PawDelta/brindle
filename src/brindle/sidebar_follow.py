@@ -167,11 +167,10 @@ def sidebar_here(db: DB, session: str) -> str:
         raise ValueError("this brindle session is paused: resume it first")
     before = db.get_sidebar_pane(root_id)
     was_there = _valid_sidebar(before, root_id) and tmux.pane_session(before) == session
-    window = tmux.active_window(session)
-    zoomed = bool(window) and tmux.window_zoomed(window)
     if not bring_sidebar(db, root_id, session, revive=True):
         raise ValueError("couldn't place the sidebar here (is this window just the sidebar?)")
-    if zoomed:
+    window = tmux.active_window(session)
+    if window and tmux.window_zoomed(window):
         # A zoomed window hides the sidebar, so unzoom it for the person to see it.
         tmux.unzoom(window)
         return "unzoomed the window: the sidebar is shown now"

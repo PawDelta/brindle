@@ -425,12 +425,13 @@ def test_sidebar_here_pulls_it_from_another_session(stranded):
 
 
 def test_sidebar_zoom_sidebar_here_unzooms_the_window(stranded):
-    db, root_win, _, _ = stranded
-    tmux._tmux("split-window", "-t", root_win)  # zoom needs a second pane
-    tmux._tmux("resize-pane", "-Z", "-t", root_win)
+    db, root_win, _, sidebar = stranded
+    assert sidebar_here(db, ROOT_SESSION) == "sidebar brought here"
+    tmux._tmux("resize-pane", "-Z", "-t", root_win)  # the sidebar is already in this window
     assert tmux.window_zoomed(root_win)
     assert sidebar_here(db, ROOT_SESSION) == "unzoomed the window: the sidebar is shown now"
     assert not tmux.window_zoomed(root_win)
+    assert db.get_sidebar_pane("root1") == sidebar
 
 
 def test_sidebar_here_restarts_a_quit_sidebar(stranded):
