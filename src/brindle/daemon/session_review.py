@@ -143,6 +143,25 @@ def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
         raise NotReady(why)
 
 
+def auto_pr_forbidden(repo_root: str) -> str | None:
+    """Why the org's policy keeps brindle from opening a PR on its own in
+    ``repo_root``, or None: one that requires a human review forbids it, as
+    does one that applies but can't be read."""
+    from brindle.policy import Decision
+    from brindle.pro import team_policy
+
+    p = team_policy.ProPolicy(repo_root).policy()
+    if isinstance(p, Decision):
+        return None if p.allowed else p.reason
+    return f"org {p.org_id} requires a human review" if p.require_human_review else None
+
+
+def auto_pr(repo_root: str) -> bool:
+    """Whether brindle opens a session's PR on its own here: the person's
+    ``auto_pr``, unless the org's policy forbids it."""
+    return load_repo_config(repo_root).auto_pr and auto_pr_forbidden(repo_root) is None
+
+
 # -- the diff ----------------------------------------------------------------
 
 
@@ -343,7 +362,9 @@ def draft(db: DB, root: Agent, ws: Workspace) -> dict[str, Any]:
 
 class ReadinessWatch:
     """Remembers which sessions are ready for a PR and publishes
-    ``session.pr_ready`` when one becomes ready. The first sweep only looks."""
+    ``session.pr_ready`` when one becomes ready; with ``auto_pr``, opens its
+    PR then, and pushes a ready session's later commits to the PR it has
+    (routes_actions.auto_pr). The first sweep only looks."""
 
     def __init__(self) -> None:
         self.ready: dict[str, bool] | None = None
@@ -367,6 +388,13 @@ class ReadinessWatch:
         flipped = [r for r, ok in now.items() if ok and not was.get(r)]
         for r in flipped:
             bus.publish_agent(db, "session.pr_ready", r)
+        from brindle.daemon import routes_actions
+
+        for r in (r for r, ok in now.items() if ok):
+            try:
+                routes_actions.auto_pr(db, r, opening=r in flipped)
+            except Exception:  # noqa: BLE001 - one session's PR never stops the others'
+                log.exception("brindle: couldn't open or push %s's PR", r)
         return flipped
 
     def sweep_safely(self) -> None:

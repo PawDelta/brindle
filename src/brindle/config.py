@@ -182,6 +182,9 @@ class RepoConfig:
     local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
+    # Open a session's PR on its own once it is ready (never where the org's policy
+    # requires a human review; see brindle.daemon.session_review.auto_pr).
+    auto_pr: bool = False
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
     # ~/.brindle/config.json's, then the repo's, then config.local.json's, all kept.
@@ -303,7 +306,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
                 "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
+                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers"):

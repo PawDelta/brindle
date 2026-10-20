@@ -755,6 +755,30 @@ def pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
                  body: str | None = None) -> str:
     """Push, then open a PR with ``gh`` when available, else return the
     compare URL for the browser."""
+    return open_pull_request(ws, title, draft, body) or compare_url(ws)
+
+
+def existing_pull_request(ws: Workspace) -> str | None:
+    """The URL of the PR ``gh`` finds open for ``ws``'s branch, or None."""
+    if not shutil.which("gh"):
+        return None
+    existing = subprocess.run(["gh", "pr", "view", ws.branch, "--json", "url", "-q", ".url"],
+                              cwd=ws.path, capture_output=True, text=True)
+    return existing.stdout.strip() if existing.returncode == 0 and existing.stdout.strip() else None
+
+
+def compare_url(ws: Workspace) -> str:
+    """The browser page for opening ``ws``'s PR by hand."""
+    web = git.remote_web_url(ws.repo_root)
+    if not web:
+        raise WorkspaceError("pushed, but couldn't work out a web URL for origin")
+    return f"{web}/compare/{require_base(ws)}...{ws.branch}?expand=1"
+
+
+def open_pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
+                      body: str | None = None) -> str | None:
+    """Push, then open a PR with ``gh``: its URL (or the one already open for
+    the branch), or None when ``gh`` isn't there or can't open one."""
     base = require_base(ws)
     git.push(ws.path, ws.branch)
     if shutil.which("gh"):
@@ -776,16 +800,8 @@ def pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
         proc = subprocess.run(args, cwd=ws.path, capture_output=True, text=True)
         if proc.returncode == 0:
             return proc.stdout.strip()
-        existing = subprocess.run(
-            ["gh", "pr", "view", ws.branch, "--json", "url", "-q", ".url"],
-            cwd=ws.path, capture_output=True, text=True,
-        )
-        if existing.returncode == 0 and existing.stdout.strip():
-            return existing.stdout.strip()
-    web = git.remote_web_url(ws.repo_root)
-    if not web:
-        raise WorkspaceError("pushed, but couldn't work out a web URL for origin")
-    return f"{web}/compare/{base}...{ws.branch}?expand=1"
+        return existing_pull_request(ws)
+    return None
 
 
 def keeps_merged_branches(repo_root: str) -> bool:

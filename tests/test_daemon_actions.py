@@ -709,6 +709,8 @@ def lead(db, repo, tmp_path, monkeypatch):
     db.add_autopilot("lead")
     db.update_autopilot("lead", state="done")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    monkeypatch.setattr(routes_actions, "_PR_WORK", set())
+    monkeypatch.setattr(routes_actions, "_PR_TRIED", {})
     return ws
 
 
@@ -864,6 +866,105 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     done = bus.tail(db, kinds=("job.done", "job.failed"))
     assert done[-1]["payload"]["result"]["url"] == "https://github.com/o/r/pull/7"
     assert "--base main --head sess --title Ship it --body" in called.read_text()
+
+
+@pytest.mark.parametrize("auto_pr,org,opened", [
+    (True, None, True),
+    (False, None, False),
+    (True, "requires-review", False),
+], ids=["on", "off", "policy-forbids"])
+def test_session_review_auto_pr_opens_once_when_ready_and_allowed(db, lead, tmp_path, monkeypatch,
+                                                                   auto_pr, org, opened):
+    from brindle.daemon import session_review
+    from brindle.pro import team_policy
+
+    sess, called = Path(lead.path), tmp_path / "gh-called"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    if org:
+        monkeypatch.setattr(team_policy.ProPolicy, "policy", lambda self: team_policy.OrgPolicy(
+            "acme", 1, require_human_review=True))
+    config.set_local(lead.repo_root, "auto_pr", auto_pr)
+    watch = session_review.ReadinessWatch()
+    watch.sweep(db)
+    _commit(sess, "a.py", "a\n")
+    assert watch.sweep(db) == ["lead"]
+    code, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
+    assert code == 200 and (ready["ready"], ready["auto_pr"]) == (True, opened)
+    _, cfg = _send("GET", f"/v1/config?repo={lead.repo_root}")
+    assert (cfg["repo"]["auto_pr"], cfg["auto_pr_forbidden"] is None) == (auto_pr, not org)
+    # Not ready (uncommitted work), then ready again with a new commit: no second PR, only a push.
+    (sess / "a.py").write_text("b\n")
+    assert watch.sweep(db) == []
+    head = _commit(sess, "a.py", "b\n")
+    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
+    creates = called.read_text().count("pr create") if called.exists() else 0
+    urls = [e["payload"]["url"] for e in bus.tail(db, kinds=("session.pr_opened",))]
+    pushed = sh("git ls-remote origin sess", sess).split()[:1]
+    assert (creates, urls, pushed == [head]) == ((1, ["https://github.com/o/r/pull/7"], True) if opened
+                                                  else (0, [], False))
+
+
+def test_session_review_auto_pr_survives_gh_failing_a_restart_and_another_identity(db, lead, tmp_path, monkeypatch):
+    from brindle import identity_lock
+
+    sess, called, fail = Path(lead.path), tmp_path / "gh-called", tmp_path / "gh-fails"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\n[ -f {fail} ] && exit 1\necho https://github.com/o/r/pull/7\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    config.set_local(lead.repo_root, "auto_pr", True)
+    _commit(sess, "a.py", "a\n")
+
+    def prs() -> list[tuple]:
+        return [tuple(r) for r in db.conn.execute("SELECT url, pushed_sha FROM session_prs")]
+
+    # gh can't open it: the compare page is no PR, so nothing is recorded and the next turn to ready retries.
+    fail.touch()
+    routes_actions.auto_pr(db, "lead", opening=True)
+    assert prs() == [] and bus.tail(db, kinds=("session.pr_opened",)) == []
+    fail.unlink()
+    creates = called.read_text().count("pr create")
+
+    def remote() -> str:
+        return sh("git ls-remote origin sess", sess).split()[0]
+
+    # Its job dispatched but not yet run: a second trigger leaves that work alone, and someone
+    # else signing in before it runs keeps it from pushing or opening anything under their name.
+    head = _commit(sess, "a.py", "b\n")
+    held = []
+    monkeypatch.setattr(routes_actions, "_spawn", held.append)
+    assert routes_actions.auto_pr(db, "lead", opening=True) is not None
+    assert routes_actions.auto_pr(db, "lead", opening=True) is None and len(held) == 1 and prs() == [(None, None)]
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "someone@other.example")
+    held.pop()()
+    assert prs() == [] and remote() != head and called.read_text().count("pr create") == creates
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: None)
+    # The daemon stopped before running its job: after a restart the claim is matched to the PR gh finds open.
+    routes_actions.auto_pr(db, "lead", opening=True)
+    monkeypatch.setattr(routes_actions, "_PR_WORK", set())
+    monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    routes_actions.auto_pr(db, "lead", opening=False)
+    assert prs() == [("https://github.com/o/r/pull/7", None)] and called.read_text().count("pr create") == creates
+    routes_actions.auto_pr(db, "lead", opening=False)
+    assert prs() == [("https://github.com/o/r/pull/7", head)]
+    # A push that fails is tried again (here on the session's next turn to ready), with no second PR.
+    origin = sh("git remote get-url origin", sess)
+    sh("git remote set-url origin /nowhere", sess)
+    head = _commit(sess, "a.py", "c\n")
+    routes_actions.auto_pr(db, "lead", opening=False)
+    sh(f"git remote set-url origin {origin}", sess)
+    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] != head
+    routes_actions.auto_pr(db, "lead", opening=True)
+    assert prs()[0][1] == head == remote() and called.read_text().count("pr create") == creates
+    # Signed in as someone else: the session's new commit isn't pushed under their name.
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "someone@other.example")
+    newer = _commit(sess, "a.py", "d\n")
+    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] == head != newer
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
