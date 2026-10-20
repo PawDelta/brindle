@@ -683,20 +683,23 @@ def quota_checks(repo_root: str | None) -> list[Check]:
 
 
 def daemon_checks(home: Path | None = None) -> list[Check]:
-    """Whether the daemon is running, from the pid in its ``daemon.json``."""
+    """Whether the daemon is running, from the pid in its ``daemon.json``, and
+    its TCP address when it also listens there (``--tcp``)."""
     import json
 
     from brindle import config, procs
 
     path = (home or config.brindle_home()) / "daemon.json"
     try:
-        pid = json.loads(path.read_text()).get("pid")
+        info = json.loads(path.read_text())
+        pid = info.get("pid")
     except (OSError, ValueError, AttributeError):
         return [Check(OK, "daemon", "not running")]
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return [Check(WARN, "daemon", f"{path} has no pid; restart the daemon to rewrite it")]
     if procs.alive(pid):
-        return [Check(OK, "daemon", f"running (pid {pid})")]
+        tcp = f", tcp 127.0.0.1:{info['port']}" if info.get("port") else ""
+        return [Check(OK, "daemon", f"running (pid {pid}{tcp})")]
     return [Check(WARN, "daemon", f"not running: {path} is left from pid {pid}, which is gone")]
 
 

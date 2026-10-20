@@ -1213,11 +1213,19 @@ def daemon_cmd(
     unix: bool = typer.Option(True, "--socket/--no-socket", help="Listen on ~/.brindle/daemon.sock."),
     tcp: bool = typer.Option(False, "--tcp", help="Also listen on 127.0.0.1 (a random port, in daemon.json)."),
     idle_exit: bool = typer.Option(False, "--idle-exit", help="Exit after 10 minutes with no client while no agent runs."),
+    print_connection: bool = typer.Option(
+        False, "--print-connection",
+        help="Print how to reach the running daemon as JSON (its URL, and where to read the token: "
+             "inside WSL, daemon.json's \\\\wsl$ path for a Windows app), then exit."),
 ) -> None:
     if ctx.invoked_subcommand:
         return
     from brindle.daemon import lifecycle
 
+    if print_connection:
+        conn = lifecycle.connection(lifecycle.running())
+        typer.echo(json.dumps(conn, indent=2))
+        raise typer.Exit(0 if conn["running"] else 1)
     try:
         lifecycle.serve(unix=unix, tcp=tcp, idle_exit=idle_exit)
     except (lifecycle.DaemonError, OSError) as e:

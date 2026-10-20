@@ -11,6 +11,7 @@ IDLE_SECONDS while no agent runs. It removes its files on the way out."""
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import signal
@@ -84,6 +85,9 @@ def bind_unix(path: Path) -> socket.socket:
 
 
 def bind_tcp(port: int = 0) -> socket.socket:
+    # TCP has no OS user boundary: it must never reach past this machine.
+    if not ipaddress.ip_address(HOST).is_loopback:
+        raise DaemonError(f"refusing to listen on {HOST}: the daemon binds loopback only")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((HOST, port))
@@ -125,6 +129,23 @@ def prepare(token: str, *, unix: bool = True, tcp: bool = False,
             s.close()
         raise
     return socks, info
+
+
+def connection(info: dict | None) -> dict:
+    """How a client reaches the daemon ``info`` describes (None: none runs),
+    for ``brindle daemon --print-connection``. The token stays in
+    ``daemon.json``: inside WSL, ``windows_info_path`` names that file as
+    Windows sees it (``\\\\wsl$\\<distro>\\...``), where the Windows app reads
+    the token before it calls ``url`` (WSL2 forwards localhost)."""
+    path = info_path().absolute()     # BRINDLE_HOME may be relative; a UNC path can't be
+    distro = os.environ.get("WSL_DISTRO_NAME")
+    port = info.get("port") if info else None
+    return {"running": info is not None,
+            "pid": info["pid"] if info else None,
+            "url": f"http://{HOST}:{port}" if port else None,
+            "socket": info.get("socket") if info else None,
+            "info_path": str(path),
+            "windows_info_path": "\\\\wsl$\\" + distro + str(path).replace("/", "\\") if distro else None}
 
 
 def cleanup(info: dict) -> None:
@@ -186,15 +207,26 @@ def _exit(sig, frame) -> None:
     raise SystemExit(0)
 
 
-def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> dict:
-    """Run the daemon in this process until it's stopped. Returns its info."""
+def make_server(app):
+    """The uvicorn server the daemon runs ``app`` with, on sockets handed to
+    its ``serve``."""
     import uvicorn
     from uvicorn.protocols.http.auto import AutoHTTPProtocol
     from uvicorn.protocols.websockets.auto import AutoWebSocketsProtocol
 
+    from brindle.daemon.peer import with_peer
+
+    # with_peer: the guard learns who calls on the Unix socket (see brindle.daemon.peer).
+    return uvicorn.Server(uvicorn.Config(
+        app, lifespan="off", log_level="warning", access_log=False,
+        http=with_peer(AutoHTTPProtocol),
+        ws=with_peer(AutoWebSocketsProtocol) if AutoWebSocketsProtocol else "none"))
+
+
+def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> dict:
+    """Run the daemon in this process until it's stopped. Returns its info."""
     from brindle.daemon.app import build_app
     from brindle.daemon.auth import new_token
-    from brindle.daemon.peer import with_peer
 
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
@@ -202,11 +234,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
 
     poller = start_poller()
     activity = Activity(build_app(token, port=info["port"], poller=poller))
-    # with_peer: the guard learns who calls on the Unix socket (see brindle.daemon.peer).
-    server = uvicorn.Server(uvicorn.Config(
-        activity, lifespan="off", log_level="warning", access_log=False,
-        http=with_peer(AutoHTTPProtocol),
-        ws=with_peer(AutoWebSocketsProtocol) if AutoWebSocketsProtocol else "none"))
+    server = make_server(activity)
 
     async def run() -> None:
         watcher = asyncio.create_task(_watch(server, activity, idle_exit))
