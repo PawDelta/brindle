@@ -2556,6 +2556,18 @@
       "path": "/v1/goal/enabled"
     },
     {
+      "method": "POST",
+      "path": "/v1/holds"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/{id}/end"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/{id}/wait"
+    },
+    {
       "method": "GET",
       "path": "/v1/inbox"
     },

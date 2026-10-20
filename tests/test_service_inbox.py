@@ -91,39 +91,42 @@ PROMPT = """ Bash command
 """
 SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
               "behavior": "allow", "destination": "localSettings"}]
-HELD = [("allow_once", "Allow once", None),
-        ("allow_always", "Allow always", "Claude Code's own rule: allow Bash(npm test:*) (localSettings)"),
-        ("deny", "Deny", None)]
 # Claude Code's pane while its PermissionRequest hook waits: still its busy spinner.
 BUSY = "✳ Clauding… (12s · esc to interrupt)\n\n❯ \n"
 
 
-@pytest.mark.parametrize("channel, screen, hold, choices, note", [
-    # brindle's hook holds it, whatever the pane shows meanwhile: Claude Code's own suggestion
-    # is what allow-always writes, and over an hour left reads as waiting, not a countdown.
-    ("hook", BUSY, 86400, HELD, "waiting for you"),
-    ("hook", BUSY, 600, HELD, "answer within 10 min, or it goes to the agent's terminal"),
+@pytest.mark.parametrize("channel, screen, held, choices", [
+    # The daemon holds it for brindle's hook, whatever the pane shows meanwhile: Claude Code's
+    # own suggestion is what allow-always writes.
+    ("hook", BUSY, True, ["allow_once", "allow_always", "deny"]),
+    # A row that says 'hook' with no hold in the daemon behind it is no request to answer.
+    ("hook", PROMPT, False, []),
     # At the CLI's own prompt: no choices, the agent's terminal only ("Go to it").
-    ("prompt", PROMPT, None, [], None),
-], ids=["hook", "hook-last-hour", "prompt"])
-def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, channel, screen, hold,
-                                                                   choices, note):
+    ("prompt", PROMPT, False, []),
+], ids=["hook", "row-without-hold", "prompt"])
+def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, channel, screen, held,
+                                                                   choices):
     from brindle import permissions, tmux
+    from brindle.daemon.holds import HOLDS
 
     monkeypatch.setattr(tmux, "capture", lambda target, **kw: screen)
     ws = workspaces.create(db, str(repo), "feat/inbox").workspace
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
     db.add_agent(Agent("w1", ws.id, "developer", "claude", "r1", "assign", "waiting", "@2", None, time.time()))
     stored = json.dumps(permissions.Request("claude", "bash", "Bash", command="npm test").to_dict())
-    db.add_permission_request("w1", "tu1", stored, "", json.dumps(SUGGESTED), channel,
-                              hold_until=hold and time.time() + hold)
-    got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
+    digest, hold_until = permissions.request_digest(stored, json.dumps(SUGGESTED)), time.time() + 600
+    db.add_permission_request("w1", "tu1", stored, "", json.dumps(SUGGESTED), channel, hold_until=hold_until)
+    if held:
+        assert HOLDS.register("w1", "tu1", digest, "nonce")
+    try:
+        got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
+    finally:
+        HOLDS.end("tu1", "nonce")
     p = got[0].permission
     assert [(i.kind, i.root_id) for i in got] == [("permission", "r1")]
-    assert [(c.choice, c.label, c.rule) for c in p.choices] == choices
-    assert (p.via, p.hold_note, p.terminal) == (channel, note, None if hold else inbox.TERMINAL)
-    if hold:    # the answer must name this request, exactly as recorded
-        assert (p.request_id, p.target) == ("tu1", "npm test")
-        assert p.digest == permissions.request_digest(stored, json.dumps(SUGGESTED))
+    assert [c.choice for c in p.choices] == choices
+    assert p.via == ("hook" if held else "prompt") and bool(p.terminal) != held
+    if held:    # the answer must name this request, exactly as recorded, until the hold ends
+        assert (p.request_id, p.target, p.digest, p.hold_until) == ("tu1", "npm test", digest, hold_until)
     else:
         assert "npm test" in p.wording and p.request_id is None

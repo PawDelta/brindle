@@ -2994,74 +2994,75 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return None
 
 
-APP_ANSWER_POLL = 0.25
+# Seconds a hold waits on the daemon at a time between looks at whether the
+# agent was closed or its request answered at the CLI's own prompt.
+HOLD_LOOK_SECONDS = 5.0
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
-
-
-def _app_open() -> bool:
-    """Whether the desktop app's daemon runs, so a person can answer a
-    permission request in its inbox."""
-    try:
-        from brindle.daemon import lifecycle
-
-        return lifecycle.running() is not None
-    except Exception:  # noqa: BLE001
-        return False
+ANSWERS = ("allow_once", "allow_always", "deny")
 
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
                   hold: float) -> str | None:
-    """Record a request the policy left to the person and, while the app is
-    open, hold it for the app's answer for ``hold`` seconds (_await_app_answer;
-    the row's ``hold_until`` says till when, for the app). Neither CLI's
+    """Record a request the policy left to the person and, while the app's
+    daemon runs, hold it there for the person's answer for ``hold`` seconds
+    (_await_app_answer; the row's ``hold_until`` says till when, for the
+    app's inbox). The answer comes only from the daemon, to this hook alone
+    (brindle.daemon.holds): the row is for showing the request, never read
+    as an answer. With no daemon, nothing is held. Neither CLI's
     PermissionRequest carries a tool_use_id: the request gets an id of its
     own (Claude Code's PostToolUse is paired with it by tool and input, see
-    note_permission_outcome). ``keep``: record it even with no app to answer
-    it, and keep it once the hold ends (for that pairing)."""
+    note_permission_outcome). ``keep``: record it even when nothing is held,
+    and keep it once the hold ends (for that pairing)."""
     from brindle import permissions
+    from brindle.daemon.holds import Holder
 
-    app = _app_open()
-    if not (app or keep):
-        return None
     request_id = uuid.uuid4().hex[:16]
     recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
-    db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1], "hook" if app else None,
-                              hold_until=time.time() + hold if app else None)
     # Only an answer to exactly this request and these suggestions counts.
-    answer = (_await_app_answer(db, agent, request_id, req, permissions.request_digest(*recorded), hold)
-              if app else None)
+    holder = Holder(agent.id, request_id, permissions.request_digest(*recorded))
+    db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1])
+    answer = None
+    if holder.register():
+        db.update_permission_request(agent.id, request_id, channel="hook", hold_until=time.time() + hold)
+        try:
+            answer = _await_app_answer(db, agent, holder, req, hold)
+        finally:
+            holder.end()
+            db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
+                                         answer=answer)
     if not keep:
         db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
     return answer
 
 
-def _await_app_answer(db: DB, agent: Agent, tool_use_id: str, req, digest: str, hold: float) -> str | None:
-    """The person's answer from the app's inbox (service.inbox.answer_permission)
-    to a request the hook left to them, or None after ``hold`` seconds, when
-    the person asks to answer in the terminal, or once the agent is closed or
-    killed: then the request goes to the CLI's own prompt (or, where there is
-    none, is refused). The agent shows waiting meanwhile, as at that
-    prompt. Only an answer to the request as the hook recorded it
-    (``digest``) counts: one to a stored request changed meanwhile sends it
-    to the prompt instead."""
+def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | None:
+    """The person's answer from the app's inbox, as the daemon hands it to
+    ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
+    the person asks to answer in the terminal, once the agent is closed or
+    killed, once its CLI's own prompt took the request (its PostToolUse
+    removed the row), or if the daemon goes away: then the request goes to
+    the CLI's own prompt (or, where there is none, is refused). The agent
+    shows waiting meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline = time.monotonic() + hold
+    deadline, answer = time.monotonic() + hold, None
     while True:
-        # Killed (its row and so this request gone: take_permission_answer
-        # says so), closed, or past the hold: the hold ends.
         now = db.get_agent(agent.id)
-        closed = now is None or now.status in ("done", "paused") or now.dismissed_at is not None
-        late = closed or time.monotonic() >= deadline
-        answer = db.take_permission_answer(agent.id, tool_use_id, digest, give_up=late)
-        if answer is not None or late:
+        recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+                                   (agent.id, holder.request_id)).fetchone()
+        left = deadline - time.monotonic()
+        if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
+                or recorded is None or left <= 0):
             break
-        time.sleep(APP_ANSWER_POLL)
+        held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
+        if answer is not None or not held:
+            break
+    answer = answer if answer in ANSWERS else None     # "terminal": the person sent it to the prompt
     if answer:
         db.set_status(agent.id, "processing", only_if="waiting")
-    return answer or None
+    return answer
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:

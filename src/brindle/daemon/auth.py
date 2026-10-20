@@ -15,7 +15,10 @@ the daemon's own TCP address may. Clients that aren't browsers send none.
 
 Agents run as the same user, so they could read the token too: on the Unix
 socket the guard also refuses a caller that is one of a brindle agent's
-processes (see :mod:`brindle.daemon.peer`)."""
+processes (see :mod:`brindle.daemon.peer`). The one exception is the
+permission hold routes (:mod:`brindle.daemon.holds`): a hook waiting on the
+person's answer is an agent's child, so they take no token and no agent
+check, only the Unix socket and the hold's own nonce."""
 
 from __future__ import annotations
 
@@ -33,6 +36,12 @@ APP_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
 FIRST_FRAME_TIMEOUT = 10.0      # seconds a WebSocket has to send its token
 WS_UNAUTHORIZED = 4401          # close code for a WebSocket whose first frame isn't the token
 CALLER_TTL = 5.0                # seconds a Unix-socket caller's agent check is reused
+
+
+def _hold_route(path: str) -> bool:
+    from brindle.daemon.holds import PREFIX
+
+    return path == PREFIX or path.startswith(PREFIX + "/")
 
 
 def new_token() -> str:
@@ -56,6 +65,15 @@ class Guard:
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         origin_ok = "origin" not in headers or headers["origin"] in self._origins
+        if scope["type"] == "http" and _hold_route(scope["path"]):
+            # A permission hook (an agent's own child) waiting on the person's
+            # answer: over the Unix socket only, with no browser Origin, and
+            # checked by its own nonce instead (brindle.daemon.holds).
+            if peer.PEER_PID in scope and "origin" not in headers:
+                await self.app(scope, receive, send)
+            else:
+                await _reject(send, 403, "forbidden", "permission holds are for brindle's hooks, on the Unix socket")
+            return
         # Only the Unix socket names its caller: over TCP the token is all that keeps agents out.
         refused = await self._agent_caller(scope[peer.PEER_PID]) if peer.PEER_PID in scope else None
         if scope["type"] == "websocket":

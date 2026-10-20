@@ -262,12 +262,10 @@ def claude_answer(answer: str, suggestions: list | None = None) -> dict:
 
 def request_digest(request: str, suggestions: str | None) -> str:
     """The exact request (its recorded JSON) and suggested rule a person was
-    shown: the app's answer carries it, and the waiting hook takes only an
-    answer to the request it recorded itself, so a stored request changed
-    while it waits gets no answer. (The app's answers reach the database
-    through the daemon, which refuses agent callers; an answer a same-user
-    process writes into the database directly is a limit that predates
-    this, as for every other row there.)"""
+    shown: the app's answer carries it, and the daemon hands the waiting
+    hook only an answer to the digest the hook registered for its own
+    request (brindle.daemon.holds), so a stored request changed while it
+    waits gets no answer."""
     return hashlib.sha256(json.dumps([request, suggestions]).encode()).hexdigest()
 
 

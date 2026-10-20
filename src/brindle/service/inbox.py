@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, tmux, view
 from brindle.config import load_repo_config
+from brindle.daemon.holds import HOLDS
 from brindle.db import DB, Agent
 from brindle.providers import get_provider
 from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDTO, PermissionDTO
@@ -211,7 +212,8 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
     request and suggested rule it shows, and the time its answer window
     ends), else one at its CLI's own prompt on screen, terminal-only."""
     hook = db.hook_permission_request(agent.id)
-    if hook is not None:
+    # Only one the daemon really holds (a row alone says nothing: anything can write one).
+    if hook is not None and HOLDS.held(agent.id, hook["tool_use_id"]) is not None:
         hook = dict(hook)
         req = permissions.Request.from_dict(json.loads(hook["request"]))
         suggestions = json.loads(hook["suggestions"]) if hook["suggestions"] else None
@@ -247,7 +249,7 @@ def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
     return True
 
 
-def _write_rule(db: DB, agent: Agent, request_id: str, digest: str, req: permissions.Request) -> None:
+def _write_rule(db: DB, agent: Agent, request_id: str, req: permissions.Request) -> None:
     """Allow-always through the hook with no rule from Claude Code: brindle's
     exact allow rule, written only while this answer holds the request
     (claimed, not yet released for the hook to take), and removed again if
@@ -257,7 +259,7 @@ def _write_rule(db: DB, agent: Agent, request_id: str, digest: str, req: permiss
     kind, match = permissions.learnable_pattern(req)
     existed = any(r.id == permissions.rule_id(kind, "exact", match, "allow") for r in permissions.load_store().rules)
     rule = permissions.add_rule(kind, match, "allow")
-    if db.release_permission_answer(agent.id, request_id, digest):
+    if HOLDS.release(agent.id, request_id):
         antigravity.resync_permissions()
         return
     if not existed:
@@ -269,11 +271,12 @@ def _write_rule(db: DB, agent: Agent, request_id: str, digest: str, req: permiss
 def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str | None, choice: str) -> dict:
     """Answer the permission request ``request_id`` brindle's hook holds for
     ``agent_id``, exactly as the app showed it (``digest``: an answer to any
-    other request, or to this one changed since, is refused; the hook checks
-    the digest against the request it recorded too), with ``choice``
-    (allow_once, allow_always or deny), the person's own from the app.
+    other request, or to one that differs from what the hook registered with
+    the daemon, is refused), with ``choice`` (allow_once, allow_always or
+    deny), the person's own from the app. The answer goes to the hook only
+    through the daemon's hold (brindle.daemon.holds), never the database.
 
-    The request is claimed first, so a second answer, a retry, or an answer
+    The hold is claimed first, so a second answer, a retry, or an answer
     racing the hook's window gets a 409 and changes nothing; allow-always
     writes brindle's rule only while holding the claim. ``choice`` "terminal"
     ends the hold instead, so the CLI's own prompt asks (the app's "answer
@@ -295,22 +298,20 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     offered = next((c for c in pending.dto.choices if c.choice == choice), None)
     if offered is None and choice != RELEASE:
         raise ServiceError("conflict", f"{agent_id}'s request offers no {choice}", 409)
-    if not db.claim_permission_answer(agent.id, request_id, choice):
-        raise ServiceError("conflict", f"{agent_id}'s request was answered or went to its own prompt: "
-                                       "fetch the inbox again", 409)
+    if not HOLDS.claim(agent.id, request_id, digest, choice):
+        raise ServiceError("conflict", f"{agent_id}'s request was answered, went to its own prompt, or isn't "
+                                       "the one its hook holds: fetch the inbox again", 409)
     try:
         if choice == "allow_always" and not pending.suggestions:
-            _write_rule(db, agent, request_id, digest, pending.request)
-        elif not db.release_permission_answer(agent.id, request_id, digest):
+            _write_rule(db, agent, request_id, pending.request)
+        elif not HOLDS.release(agent.id, request_id):
             raise ServiceError("conflict", f"{agent_id}'s request went to its own prompt before it "
                                            "was answered: answer it in its terminal", 409)
     except BaseException:
-        db.unclaim_permission_answer(agent.id, request_id)
+        HOLDS.unclaim(agent.id, request_id)
         raise
-    # The hook has taken it once it no longer holds it ('answered', or 'prompt' for a release).
-    cleared = _until(lambda: (db.conn.execute(
-        "SELECT channel FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-        (agent.id, request_id)).fetchone() or {"channel": "answered"})["channel"] != "hook")
+    # The hook has taken it once the daemon no longer holds it.
+    cleared = _until(lambda: HOLDS.held(agent.id, request_id) is None)
     bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
                       via="hook", cleared=cleared)
     return {"choice": choice, "via": "hook", "cleared": cleared,

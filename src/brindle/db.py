@@ -357,10 +357,11 @@ CREATE TABLE IF NOT EXISTS pool_failures (
 -- A tool-permission request left to the person (see brindle.permissions):
 -- the structured request, so the supervisor can be told exactly what's
 -- pending, and so the tool's PostToolUse (the same tool and input) can count
--- as the person approving it. Cleared when the turn ends. While the app is
--- open the hook waits for its answer (channel 'hook'), then hands the request
--- to the CLI's own prompt ('prompt') or takes it ('answered'). ``tool_use_id``
--- is the request's id: brindle's own, not the CLI's.
+-- as the person approving it. Cleared when the turn ends. While the daemon
+-- holds it for the person's answer (channel 'hook': for the inbox to show;
+-- the answer itself goes through the daemon, brindle.daemon.holds), then the
+-- CLI's own prompt has it ('prompt') or the hook took an answer ('answered').
+-- ``tool_use_id`` is the request's id: brindle's own, not the CLI's.
 CREATE TABLE IF NOT EXISTS permission_requests (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     tool_use_id TEXT NOT NULL,
@@ -369,8 +370,7 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     created_at REAL NOT NULL,
     suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
     channel TEXT,                   -- hook | prompt | answered
-    answer TEXT,                    -- allow_once | allow_always | deny | terminal (release to the prompt)
-    answer_digest TEXT,             -- the request it answers (permissions.request_digest)
+    answer TEXT,                    -- what the person answered (a record only: answers go through the daemon)
     hold_until REAL,                -- when the hook stops holding it for the app
     PRIMARY KEY (agent_id, tool_use_id)
 );
@@ -912,7 +912,7 @@ class DB:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
         request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
         for col, kind in (("suggestions", "TEXT"), ("channel", "TEXT"), ("answer", "TEXT"),
-                          ("answer_digest", "TEXT"), ("hold_until", "REAL")):
+                          ("hold_until", "REAL")):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1262,6 +1262,7 @@ class DB:
     def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str,
                                suggestions: str | None = None, channel: str | None = None,
                                hold_until: float | None = None) -> None:
+        """Record a request (for the inbox and the supervisor; never an answer)."""
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO permission_requests (agent_id, tool_use_id, request, "
                       "reason, created_at, suggestions, channel, hold_until) VALUES (?,?,?,?,?,?,?,?)",
@@ -1272,52 +1273,13 @@ class DB:
         return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND channel='hook' "
                                  "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
 
-    def claim_permission_answer(self, agent_id: str, tool_use_id: str, answer: str) -> bool:
-        """Claim the request the hook holds for ``answer``: False when it
-        isn't held any more (it went to the CLI's prompt) or another answer
-        won. The hook takes it only once released (release_permission_answer)."""
+    def update_permission_request(self, agent_id: str, tool_use_id: str, **fields) -> None:
+        """Set ``channel``, ``hold_until`` or ``answer`` (a record of what the
+        person answered: brindle never reads it as one) on a request."""
+        cols = [c for c in fields if c in ("channel", "hold_until", "answer")]
         with self.tx() as c:
-            cur = c.execute("UPDATE permission_requests SET answer=?, answer_digest=NULL WHERE agent_id=? "
-                            "AND tool_use_id=? AND channel='hook' AND answer IS NULL",
-                            (answer, agent_id, tool_use_id))
-        return cur.rowcount == 1
-
-    def release_permission_answer(self, agent_id: str, tool_use_id: str, digest: str) -> bool:
-        """Hand a claimed answer to the hook, with the digest of the request
-        the person answered (permissions.request_digest): False when the hook
-        stopped waiting meanwhile."""
-        with self.tx() as c:
-            cur = c.execute("UPDATE permission_requests SET answer_digest=? WHERE agent_id=? AND tool_use_id=? "
-                            "AND channel='hook' AND answer IS NOT NULL AND answer_digest IS NULL",
-                            (digest, agent_id, tool_use_id))
-        return cur.rowcount == 1
-
-    def unclaim_permission_answer(self, agent_id: str, tool_use_id: str) -> None:
-        with self.tx() as c:
-            c.execute("UPDATE permission_requests SET answer=NULL WHERE agent_id=? AND tool_use_id=? "
-                      "AND channel='hook' AND answer_digest IS NULL", (agent_id, tool_use_id))
-
-    def take_permission_answer(self, agent_id: str, tool_use_id: str, digest: str,
-                               give_up: bool = False) -> str | None:
-        """The waiting hook's side: the answer handed to it, when it answers
-        the request the hook recorded (``digest``; the request is then
-        'answered'); "" when it no longer waits: an answer to anything else
-        (the stored request changed), the person's "terminal" (answer it at
-        the prompt instead), or ``give_up`` with none yet, gives the request
-        to the CLI's own prompt ('prompt'). None: no answer handed over yet
-        (one may be claimed), keep waiting."""
-        with self.tx() as c:
-            row = c.execute("SELECT answer, answer_digest FROM permission_requests WHERE agent_id=? "
-                            "AND tool_use_id=? AND channel='hook'", (agent_id, tool_use_id)).fetchone()
-            if row is None:
-                return ""
-            released = bool(row["answer"]) and row["answer_digest"] is not None
-            verified = released and row["answer_digest"] == digest and row["answer"] != "terminal"
-            if released or give_up:
-                c.execute("UPDATE permission_requests SET channel=? WHERE agent_id=? AND tool_use_id=?",
-                          ("answered" if verified else "prompt", agent_id, tool_use_id))
-                return row["answer"] if verified else ""
-        return None
+            c.execute(f"UPDATE permission_requests SET {', '.join(f'{k}=?' for k in cols)} "
+                      "WHERE agent_id=? AND tool_use_id=?", (*(fields[k] for k in cols), agent_id, tool_use_id))
 
     def pop_permission_request(self, agent_id: str, matches) -> sqlite3.Row | None:
         """Remove and return the agent's oldest recorded request ``matches(row)`` holds for."""
