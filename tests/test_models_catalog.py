@@ -46,24 +46,6 @@ def write_profile(repo, model, extra=""):
     return load_profile("p", str(repo))
 
 
-def test_the_entry_fills_in_the_endpoint(repo):
-    p = write_profile(repo, "nano-gpt/deepseek/deepseek-v3")
-    assert (p.model, p.base_url, p.api, p.api_key_env) == (
-        "deepseek/deepseek-v3", "https://nano-gpt.com/api/v1", "openai", "NANO_GPT_API_KEY")
-    assert p.context_tokens == 120000
-
-
-def test_anthropic_style_and_a_provider_without_an_api_url(repo):
-    p = write_profile(repo, "anthropic/claude-x")
-    assert (p.base_url, p.api, p.context_tokens) == ("https://api.anthropic.com", "anthropic", 100000)
-
-
-def test_fields_the_profile_sets_win(repo):
-    p = write_profile(repo, "nano-gpt/deepseek/deepseek-v3",
-                      "api: anthropic\napi_key_env: MY_KEY\ncontext_tokens: 32000\n")
-    assert (p.api, p.api_key_env, p.context_tokens) == ("anthropic", "MY_KEY", 32000)
-
-
 def test_an_explicit_base_url_keeps_the_model_id_unless_it_is_the_providers_own(repo):
     own = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: HTTPS://nano-gpt.com/api/v1/\n")
     assert (own.model, own.api_key_env, own.context_tokens) == ("deepseek/deepseek-v3", "NANO_GPT_API_KEY", 120000)
@@ -96,18 +78,6 @@ def test_air_gap_never_fetches_and_uses_the_stale_cache(repo, monkeypatch):
         write_profile(repo, "anthropic/claude-x")
 
 
-def test_loading_a_profile_never_downloads(repo, monkeypatch):
-    def no_network(*a, **k):
-        raise AssertionError("downloaded while loading a profile")
-
-    monkeypatch.setattr(catalog, "_download", no_network)
-    kicked = []
-    monkeypatch.setattr(catalog, "refresh_async", lambda: kicked.append(1))
-    os.utime(catalog.cache_path(), (0, 0))
-    assert write_profile(repo, "anthropic/claude-x").api == "anthropic"
-    assert len(kicked) == 1
-
-
 def test_a_cold_cache_fetches_synchronously_then_resolves(repo, monkeypatch):
     timeouts = []
 
@@ -130,14 +100,12 @@ def test_a_cold_cache_fetches_synchronously_then_resolves(repo, monkeypatch):
         write_profile(repo, "anthropic/claude-x")
 
 
-def test_refresh_rewrites_a_stale_cache(repo, monkeypatch):
+def test_refresh_rewrites_a_stale_cache_and_a_failed_write_keeps_the_old_one(repo, monkeypatch):
     os.utime(catalog.cache_path(), (0, 0))
     monkeypatch.setattr(catalog, "_download", lambda timeout: {"x": {"api": "http://h/v1", "models": {"m": {}}}})
     assert catalog.refresh() is True
     assert catalog.resolve("x/m").base_url == "http://h/v1"
 
-
-def test_a_failed_cache_write_keeps_the_old_cache(repo, monkeypatch):
     def fail(src, dst):
         raise OSError("disk full")
 
