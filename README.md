@@ -91,7 +91,8 @@ as `brindle doctor`. Commit the config so your team gets it too.
 New to brindle? `brindle demo` runs it on a tiny practice repo (under `~/.brindle/demo/`)
 with two failing test files and a two-milestone goal: in a few minutes you watch two
 workers fix them in parallel, each branch get reviewed and merged, and both milestones
-turn green only once their test command passes. `brindle demo --local` keeps the workers
+turn green only once their test command passes (the demo repo's config sets
+`"delegation": "fast"`, so the supervisor always splits the work). `brindle demo --local` keeps the workers
 and reviewers on a local model (Ollama).
 
 `brindle doctor` checks that everything brindle needs is there (tmux, the agent CLIs,
@@ -322,6 +323,11 @@ A session stops writing when it's handed over, paused, or has autopilot off,
 or once its goal was replaced from the chat. From a linked worktree, it writes
 the `goals.md` it loaded (the main checkout's), never another session's. A
 write that fails never fails the check.
+
+A new session takes a hand-written `goals.md` over by moving it to its own
+`.brindle/goals/<session id>.md` (git-ignored). If `goals.md` was committed,
+its deletion is left for you to commit or restore; brindle doesn't count it as
+an uncommitted change, so it never blocks a merge or a milestone's check.
 
 `brindle autopilot` shows progress, `brindle autopilot check` runs the checks
 now, and `brindle autopilot off` (or `on`) hands the wheel back (or takes it

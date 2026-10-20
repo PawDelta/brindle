@@ -146,6 +146,8 @@ def test_demo_repo_has_failing_goal(brindle_home):
     assert [m[1] for m in plan.milestones] == ["python3 -m unittest tests.test_slug -q",
                                                "python3 -m unittest tests.test_wrap -q"]
     # Each branch can pass the merge check alone; the milestone checks fail until the work is done.
+    # Always fast: the demo shows parallel workers, never a supervisor doing it all.
+    assert load_repo_config(root).delegation == "fast"
     check = load_repo_config(root).checks[0].split()
     assert subprocess.run(check, cwd=root, capture_output=True).returncode == 0
     assert subprocess.run(["python3", "-m", "unittest", "-q"], cwd=root, capture_output=True).returncode != 0

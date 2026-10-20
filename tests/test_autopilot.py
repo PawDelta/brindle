@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, gates, watch, workspaces
+from brindle import agents, autopilot, gates, git, watch, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.providers import status_line
@@ -58,9 +58,18 @@ def test_enable_loads_goals_md(db, repo):
     assert autopilot.enable(db, "first", ws) is None and db.get_autopilot("first").goal is None
     assert autopilot.parse_goals(autopilot.session_goals_path(db, "old").read_text()).goal == "Updated goal"
     seed.write_text(GOALS)
+    sh("git add -A && git commit -qm goals", repo)   # a committed seed, as in `brindle demo`
     add_agent(db, ws, "boss")
     plan = autopilot.enable(db, "boss", ws)
     assert plan and db.get_autopilot("boss").goal == "Settings page"
+    # Its deletion is brindle's bookkeeping: it never blocks a merge; other changes still do.
+    assert not seed.exists() and git.dirty_files(str(repo), tracked_only=True) == []
+    sh("git checkout -qb work && echo x > api.txt && git add api.txt && git commit -qm api && git checkout -q main", repo)
+    git.merge_into(str(repo), str(repo), "work", squash=True)
+    (repo / "app.py").write_text("print('bye')\n")
+    with pytest.raises(git.GitError, match="uncommitted changes"):
+        git.merge_into(str(repo), str(repo), "work", squash=True)
+    sh("git checkout -q app.py", repo)
     assert [m.title for m in db.milestones("boss")] == ["Settings API", "Settings UI"]
     assert "2 milestones" in autopilot.kickoff(plan, "boss")
     # A second session in the same checkout never gets the first's goal, and
