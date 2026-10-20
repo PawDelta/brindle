@@ -29,7 +29,7 @@ from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
-from brindle.providers import LaunchContext, get_provider, signed_out, unusable
+from brindle.providers import LaunchContext, get_provider, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
     SIDEBAR_DISMISSED,
@@ -781,6 +781,103 @@ def add_dirs_warning(agent: Agent, ws: Workspace) -> str | None:
     return _add_dirs_warning(load_profile(agent.profile, ws.repo_root), agent.provider)
 
 
+class PreflightBlocked(AgentError):
+    """A launch its CLI would stop on before the first turn: ``items`` are
+    brindle.preflight items, each naming what resolves it."""
+
+    def __init__(self, items: list) -> None:
+        self.items = items
+        super().__init__("; ".join(i.detail for i in items))
+
+
+def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tuple[dict[str, str], bool, tuple]:
+    """Who ``agent``'s CLI signs in as on this launch: the environment it gets
+    (its profile's env lines, the managed provider's variables, the
+    credentials brindle hands it, and the keys its auth or the org denies,
+    blanked so the launcher's own copy doesn't count), whether the org's own
+    key signs it in (no login to check), and the denied names. ``agent`` need
+    not be recorded yet: a launch about to happen is checked the same way."""
+    from brindle.pro import managed_models
+
+    if m is _UNREAD:
+        m = managed(ws.repo_root)
+    profile = profile or _guarded_profile(agent, ws)
+    if profile is None:
+        raise AgentError(f"no profile {agent.profile!r}")
+    launch_env = {**profile.env, **managed_models.agent_env(m, agent.provider)}
+    deny = pane_auth.deny_names(agent.provider, profile.auth, m,
+                                agent.provider == "claude" and bool(providers.claude_org_managed()))
+    org_key = managed_models.has_org_key(m, agent.provider)
+    prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
+    eff_env = _window_environment(agent, ws, m)[0]
+    probe_env = {**launch_env, **{k: eff_env[k] for k in prov_creds if k in eff_env}}
+    return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
+
+
+def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, identity=None,
+                    keys_only: bool = False) -> list:
+    """What would stop ``agent``'s CLI before its first turn if it launched
+    now in ``ws`` (brindle.preflight), judged with the identity it runs as.
+    ``keys_only``: when nobody is starting anything yet (a read), the CLI's
+    sign-in check sees only the credential names of that identity, never
+    the rest of a repo profile's env lines (NODE_OPTIONS, PATH, a config
+    dir), which only a launch the person starts may run with."""
+    from brindle import preflight
+
+    if agent.provider not in preflight.PROVIDERS:
+        return []
+    profile = profile or _guarded_profile(agent, ws)
+    if profile is None:
+        return []
+    if agent.provider == "native":
+        return preflight.check("native", ws.repo_root, profile=profile)
+    env, org_key, _ = identity or launch_identity(agent, ws, profile, m)
+    if keys_only:
+        # brindle's own list of the CLI's credentials: never names a repo declares.
+        env = {k: v for k, v in env.items() if k in providers._ENV_AUTH.get(agent.provider, ())}
+    launch = {"repo": ws.repo_root, "profile": agent.profile}
+    session = credentials_session(agent)
+    if session:
+        launch["session"] = session
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch)
+
+
+def credentials_session(agent: Agent) -> str | None:
+    """The root session whose stored credentials ``agent``'s launch gets (see
+    agent_env), when it has any: a consent asked for that launch names it, so
+    recording it resolves the same key."""
+    from brindle.db import DB
+
+    db = DB()
+    try:
+        current = agent.parent_id or agent.id
+        while current:
+            a = db.get_agent(current)
+            if a is None or not a.parent_id:
+                break
+            current = a.parent_id
+        return current if current and db.get_session_credentials(current) else None
+    finally:
+        db.conn.close()
+
+
+def consent_identity(db: DB, repo: str, profile: str, provider: str, session: str | None) -> dict[str, str]:
+    """The environment a consent's launch signs in with, rebuilt from what
+    its action names: ``repo``, ``profile``, and ``session`` (a recorded root
+    session in that repo, whose stored credentials it gets)."""
+    ws = workspaces.adopt_root(db, repo)
+    parent = None
+    if session is not None:
+        root = db.get_agent(session)
+        root_ws = db.get_workspace(root.workspace_id) if root else None
+        if root is None or root.parent_id or root_ws is None or root_ws.repo_root != ws.repo_root:
+            raise AgentError(f"no session {session!r} in {repo}")
+        parent = root.id
+    who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
+                None, 0.0)
+    return launch_identity(who, ws)[0]
+
+
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False,
             model_checked: bool = False) -> None:
@@ -812,26 +909,20 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     from brindle import signin_pause
 
     signin_pause.record_launch(agent)   # who it runs as, so a resume never crosses accounts
-    # What the agent will run with: the managed provider's variables, and
-    # no personal keys (blank, so the launcher's own copy doesn't count).
-    from brindle.pro import managed_models
-
-    launch_env = {**profile.env, **managed_models.agent_env(m, provider.name)}
-    deny = pane_auth.deny_names(provider.name, profile.auth, m,
-                                provider.name == "claude" and bool(providers.claude_org_managed()))
-    org_key = managed_models.has_org_key(m, provider.name)
+    env, org_key, deny = launch_identity(agent, ws, profile, m)
     why = pane_auth.key_problem(profile, provider.name, deny, org_key)
     if why:
         raise AgentError(why)
-    # The org's own key signs the agent in: there is no login to check.
-    prov_creds = set() if org_key else secrets.agent_credentials(provider.name, profile.name, ws.repo_root)
-    eff_env = _window_environment(agent, ws, m)[0]
-    probe_keys = {k: eff_env[k] for k in prov_creds if k in eff_env}
-    probe_env = {**launch_env, **probe_keys}
-    why = None if org_key else signed_out(
-        provider.name, {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}})
-    if why:
-        raise AgentError(why)
+    # What its CLI would stop on before the first turn (brindle.preflight),
+    # with the identity it runs as. A person starting their own chat from a
+    # terminal answers its first-run screens there; nobody watches a worker's.
+    blocking = launch_blockers(agent, ws, profile, m, identity=(env, org_key, deny))
+    # Installing a CLI or tmux shows when the window opens, as before.
+    blocking = [b for b in blocking if b.kind != "setup"]
+    if agent.parent_id is None and agent.mode == "interactive":
+        blocking = [b for b in blocking if b.kind not in ("consent", "trust")]
+    if blocking:
+        raise PreflightBlocked(blocking)
     # Here rather than in spawn, so a resume checks too: a directory can be
     # deleted between the first launch and a `brindle continue`. This reaches a
     # person running brindle in a terminal; a launch from the MCP server has no
@@ -862,6 +953,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle.providers import trust_folder
 
         trust_folder(ws.path)  # no trust dialog for nobody to answer
+    if provider.name == "codex":
+        try:   # Codex keys trust by the main repository: one answer covers every worktree
+            providers.trust_codex_project(ws.repo_root)
+        except (OSError, ValueError):
+            pass   # after_launch still answers the screen; preflight reports a config it can't read
     if provider.name == "antigravity" and m is not None and m.setup is not None and m.setup.antigravity is not None:
         try:
             providers.set_agy_gemini()

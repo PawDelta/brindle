@@ -245,6 +245,7 @@ def test_launch_resolves_effective_credentials_before_signed_out_probe(db, repo,
 
     # Set key in keystore (no key in os.environ)
     keystore.set_key("ANTHROPIC_API_KEY", "dummy-replacement-key-555")
+    providers.approve_api_key("dummy-replacement-key-555")     # Claude Code's question answered
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     # Fake signed_out probe: if ANTHROPIC_API_KEY is not in full_env, reports loggedIn=False

@@ -40,6 +40,7 @@ from brindle.service.dto import (
     AgentDTO,
     DecisionDTO,
     GoalDTO,
+    PreflightItemDTO,
     ProfileDTO,
     RoutingDTO,
     RoutingProfileDTO,
@@ -329,6 +330,26 @@ def get_doctor(request: Request) -> Any:
 
 
 @_json
+def provider_preflight(request: Request) -> Any:
+    """What would stop a session on this provider in ``repo`` before its first
+    turn: the items POST /v1/sessions answers 409 with, for the identity its
+    chat would run as (see brindle.preflight). Native, which runs no chat,
+    and a request without ``repo`` get the provider's checks as brindle sees it."""
+    from brindle import preflight
+    from brindle.daemon.routes_actions import session_blockers
+
+    provider, repo = request.path_params["provider"], _repo(request)
+    if repo is None or provider == "native":
+        items = preflight.check(provider, repo)
+    else:
+        if provider not in preflight.PROVIDERS:
+            raise ServiceError("invalid", f"provider must be one of {', '.join(preflight.PROVIDERS)}")
+        blocked = session_blockers(DB(), repo, provider, read_only=True)
+        items = blocked.items if blocked else []
+    return [PreflightItemDTO(**i.to_json()).to_json() for i in items]
+
+
+@_json
 def account(request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
@@ -397,6 +418,7 @@ ROUTES = [
     Route("/v1/config", get_config),
     Route("/v1/routing", get_routing),
     Route("/v1/doctor", get_doctor),
+    Route("/v1/providers/{provider}/preflight", provider_preflight),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
 ]

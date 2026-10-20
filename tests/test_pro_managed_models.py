@@ -186,7 +186,7 @@ def test_a_launch_reads_the_policy_once(db, ws, monkeypatch):
     monkeypatch.setattr(agents.tmux, "new_window", lambda *a, **k: "@1")
     monkeypatch.setattr(agents, "_ensure_sidebar", lambda *a, **k: None)
     monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a, **k: None)
-    monkeypatch.setattr(agents, "signed_out", lambda *a, **k: None)
+    monkeypatch.setattr(providers, "signed_out", lambda *a, **k: None)
     agents._launch(db, a, ws, prompt=None, resume=None, watch_pane=False)
     assert len(calls) == 1
 
@@ -394,7 +394,7 @@ def test_antigravity_gateway_route_yields_endpoint_and_model_provider_at_launch(
     monkeypatch.setattr(agents.tmux, "new_window", fake_new_window)
     monkeypatch.setattr(agents, "_ensure_sidebar", lambda *a, **k: None)
     monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a, **k: None)
-    monkeypatch.setattr(agents, "signed_out", lambda *a, **k: None)
+    monkeypatch.setattr(providers, "signed_out", lambda *a, **k: None)
     monkeypatch.setattr(agents, "_detach", lambda *a, **k: None)
     monkeypatch.setattr(providers.Antigravity, "after_launch", lambda *a, **k: True)
     monkeypatch.setattr(providers.Antigravity, "command", lambda self, ctx: ["agy"])
