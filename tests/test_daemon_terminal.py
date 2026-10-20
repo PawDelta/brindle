@@ -201,8 +201,11 @@ def test_control_frames_reach_the_pane(fake, attached):
             sock.send_json({"type": "resize", "cols": cols, "rows": 40})
         if attached:    # a terminal is attached: its size rules, nothing is resized
             fake.wait_for(lambda: sum(l.startswith("list-clients") for l in fake.lines) >= 2)
-        else:
-            fake.wait_for(lambda: fake.calls and fake.calls[-1][0] == "resize-window")
+        else:       # the first size at once, the last after the throttle, then viewers reseeded
+            fake.wait_for(lambda: ("resize-window", "-t", "%1", "-x", "120", "-y", "40") in fake.calls)
+            fake.wait_for(lambda: sum(l.startswith("capture-pane") for l in fake.lines) >= 2)
+            assert sock.receive_json() == {"type": "resync"}
+            assert sock.receive_bytes().startswith(b"\x1bc")
         sent = [l for l in fake.lines if l.split()[0] in ("send-keys", "set-buffer", "paste-buffer")]
         name = sent[2].split()[2]
         assert sent == [
@@ -213,8 +216,137 @@ def test_control_frames_reach_the_pane(fake, attached):
         ]
         assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == (
             [] if attached else [("set-option", "-w", "-t", "%1", "window-size", "manual"),
+                                 ("resize-window", "-t", "%1", "-x", "80", "-y", "40"),
                                  ("resize-window", "-t", "%1", "-x", "120", "-y", "40")])
         sock.__exit__(None, None, None)
+
+
+def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
+    class Clock:
+        now = 0.0
+        timers: list = []
+
+        def time(self):
+            return self.now
+
+        def call_later(self, wait, fn):
+            self.timers.append((self.now + wait, fn))
+
+            class Handle:
+                cancel = staticmethod(lambda: None)
+            return Handle()
+
+    async def go():
+        pane, clock, sized = terminal.Pane("%1", None, None), Clock(), []
+        pane._loop = clock
+
+        gated, state, ops = {}, {"attached": 0}, []
+
+        async def run(fn, target, *args):
+            if fn is tmux.attached_terminals:
+                return state["attached"]
+            if fn is tmux.set_window_size_manual:
+                ops.append("manual")
+                if "manual" in gated:
+                    await gated["manual"].wait()
+            if fn is tmux.unset_window_size:
+                ops.append("unset")
+            if fn is tmux.resize_window:
+                sized.append(args)
+                if "gate" in gated:
+                    await gated["gate"].wait()
+            return 0
+        pane.run = run
+        viewer = pane.add()
+
+        async def settle():
+            for _ in range(8):
+                await asyncio.sleep(0)
+
+        for size in ((80, 24), (90, 24), (100, 24)):
+            pane.resize(*size)
+        await settle()
+        assert sized == [(80, 24)]              # first at once, the rest wait
+        assert not viewer.reseed                # a resize is still waiting
+        (at, fire), = clock.timers
+        assert at == terminal.RESIZE_SECONDS
+        clock.now = at
+        fire()
+        await settle()
+        assert sized == [(80, 24), (100, 24)]
+        assert viewer.reseed
+
+        # A slow tmux call: later requests wait for it, one at a time, and the
+        # last size wins; a repeat of the final size still reseeds.
+        viewer.reseed = False
+        clock.now += 5
+        gate = gated["gate"] = asyncio.Event()
+        pane.resize(120, 24)
+        await settle()
+        pane.resize(130, 24)
+        clock.now += 5
+        pane.resize(130, 24)
+        await settle()
+        assert sized[2:] == [(120, 24)] and not viewer.reseed
+        gate.set()
+        gated.clear()
+        await settle()
+        assert sized[2:] == [(120, 24), (130, 24)]
+        assert viewer.reseed
+
+        async def ask(cols):
+            await terminal._apply(pane, {"type": "resize", "cols": cols, "rows": 24})
+
+        # The same size asked for twice while its resize is pending: one
+        # resize, and the trailing no-op still reseeds.
+        viewer.reseed = False
+        clock.now += 5
+        timers = len(clock.timers)
+        gated["gate"] = gate = asyncio.Event()
+        await ask(140)
+        await settle()
+        await ask(140)
+        gate.set()
+        gated.clear()
+        await settle()
+        assert not viewer.reseed and len(clock.timers) == timers + 1
+        clock.now = clock.timers[-1][0]
+        clock.timers[-1][1]()
+        await settle()
+        assert sized[-1] == (140, 24) and sized.count((140, 24)) == 1
+        assert viewer.reseed
+
+        # A terminal attaches while the daemon is taking the sizing: the
+        # handback waits for that and undoes it, and once the terminal leaves
+        # the same size is applied again, not taken as done.
+        state["attached"] = 1
+        await pane._check_shared()
+        state["attached"] = 0
+        await pane._check_shared()
+        assert not pane._manual
+        clock.now += 5
+        ops.clear()
+        gated["manual"] = gate = asyncio.Event()
+        await ask(90)
+        await settle()
+        state["attached"] = 1
+        attach = asyncio.ensure_future(pane._check_shared())
+        await settle()
+        assert not attach.done()
+        gate.set()
+        gated.clear()
+        await attach
+        await settle()
+        assert ops == ["manual", "unset"] and not pane._manual and pane.shared
+        state["attached"] = 0
+        await pane._check_shared()
+        clock.now += 5
+        await ask(90)
+        await settle()
+        assert ops == ["manual", "unset", "manual"] and sized[-1] == (90, 24)
+        pane._closed = True
+
+    asyncio.run(go())
 
 
 def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processes(fake, monkeypatch):
