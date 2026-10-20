@@ -693,7 +693,7 @@ def daemon_checks(home: Path | None = None) -> list[Check]:
         pid = json.loads(path.read_text()).get("pid")
     except (OSError, ValueError, AttributeError):
         return [Check(OK, "daemon", "not running")]
-    if not isinstance(pid, int):
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return [Check(WARN, "daemon", f"{path} has no pid; restart the daemon to rewrite it")]
     if procs.alive(pid):
         return [Check(OK, "daemon", f"running (pid {pid})")]

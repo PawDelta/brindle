@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -1152,13 +1151,11 @@ APP_DOWNLOAD_URL = "https://github.com/PawDelta/brindle-app/releases"
 @app.command("app")
 def app_cmd() -> None:
     """Open the brindle desktop app, or print where to download it."""
-    if sys.platform == "darwin":
-        opened = subprocess.run(["open", "-a", "brindle"], capture_output=True).returncode == 0
-    else:
-        exe = shutil.which("brindle-app")
-        if exe:
-            subprocess.Popen([exe], start_new_session=True)
-        opened = exe is not None
+    cmd = ["open", "-a", "brindle"] if sys.platform == "darwin" else ["xdg-open", "brindle://"]
+    try:
+        opened = subprocess.run(cmd, capture_output=True).returncode == 0
+    except OSError:
+        opened = False
     if opened:
         typer.echo("opened the brindle app")
     else:

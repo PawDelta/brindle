@@ -86,6 +86,32 @@ def test_version_flag_prints_the_installed_version():
     assert __version__ != "unknown"
 
 
+def test_app_command_opens_the_app_or_prints_the_download_url(monkeypatch):
+    import subprocess
+    import sys
+
+    from brindle import cli
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    runs = []
+    no_opener = []
+
+    def run(cmd, **kw):
+        runs.append(cmd)
+        if no_opener:
+            raise OSError("no opener")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    installed = CliRunner().invoke(cli.app, ["app"])
+    assert runs == [["xdg-open", "brindle://"]]
+    assert cli.APP_DOWNLOAD_URL not in installed.output
+
+    no_opener.append(True)
+    missing = CliRunner().invoke(cli.app, ["app"])
+    assert cli.APP_DOWNLOAD_URL in missing.output
+
+
 def test_continue_from_inside_session(db, repo, monkeypatch, fake_agent_cli):
     ws = workspaces.adopt_root(db, str(repo))
     caller = agents.spawn(db, ws, "developer", mode="interactive")
