@@ -751,15 +751,18 @@ def with_footer(body: str, repo_root: str) -> str:
     return f"{body.rstrip()}\n\n{PR_FOOTER}" if body.strip() else PR_FOOTER
 
 
-def pull_request(ws: Workspace, title: str | None = None, draft: bool = False) -> str:
+def pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
+                 body: str | None = None) -> str:
     """Push, then open a PR with ``gh`` when available, else return the
     compare URL for the browser."""
     base = require_base(ws)
     git.push(ws.path, ws.branch)
     if shutil.which("gh"):
         args = ["gh", "pr", "create", "--base", base, "--head", ws.branch]
-        if title:
-            body = ""
+        if title or body is not None:
+            body = body or ""
+            if not title:
+                args.append("--fill")
         else:
             # --fill picks the title; the body is what --fill would write
             # (the commit subjects) with the footer, since --body overrides it.

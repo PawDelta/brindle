@@ -73,13 +73,14 @@ _held = threading.local()
 
 
 @contextmanager
-def _file_lock(name: str):
+def _file_lock(name: str, wait: bool = True):
+    """Without ``wait``, BlockingIOError when another holds it."""
     from brindle.config import brindle_home
 
     lock_dir = brindle_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"{name}.lock", "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         try:
             yield
         finally:
@@ -100,27 +101,27 @@ def merge_lock(ws_id: str):
 
 
 @contextmanager
-def base_lock(repo_root: str, base: str | None):
+def base_lock(repo_root: str, base: str | None, wait: bool = True):
     """Hold the base branch ``base`` of ``repo_root`` for one merge into it,
     from the sync with it through the gates to the merge (#197). Branch locks
     alone let the supervisor's merge_workspace of one branch and the
     pipeline's merge of another into the same base overlap, and git then
     fails on the other's MERGE_HEAD. Taken after the branch's merge_lock,
-    never before it."""
+    never before it. Without ``wait``, BlockingIOError while a merge holds it."""
     key = hashlib.sha1(f"{repo_root}\0{base or ''}".encode()).hexdigest()[:16]
-    with _reentrant_lock("base-" + key):
+    with _reentrant_lock("base-" + key, wait):
         yield
 
 
 @contextmanager
-def _reentrant_lock(name: str):
+def _reentrant_lock(name: str, wait: bool = True):
     held = getattr(_held, "ids", None)
     if held is None:
         held = _held.ids = set()
     if name in held:
         yield
         return
-    with _file_lock(name):
+    with _file_lock(name, wait):
         held.add(name)
         try:
             yield
