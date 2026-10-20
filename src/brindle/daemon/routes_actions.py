@@ -650,7 +650,9 @@ def _edit_session(db: DB, params: dict, body: Body, data: bytes | None) -> Any:
         name, commit = commit_edit(ws, rel, data, base.strip().lower() if base else None, review.EDIT_MESSAGE)
         # Record only the one commit this edit made, directly on top of what was there: a hook that
         # added commits of its own leaves them unrecorded, so they still need an audit.
-        if commit and git.out(["rev-parse", f"{commit}^"], ws.path) == before:
+        # and touching only the edited path (a formatter hook may change its content, never other files).
+        if commit and git.out(["rev-parse", f"{commit}^"], ws.path) == before and git.out(
+                ["diff-tree", "--no-commit-id", "-r", "--name-only", "-z", commit], ws.path).strip("\0") == name:
             db.conn.execute("INSERT OR IGNORE INTO review_edits (workspace_id, sha) VALUES (?, ?)", (ws.id, commit))
             db.conn.commit()
     bus.publish_agent(db, "session.edited", root.id, path=name, commit=commit, deleted=data is None)
