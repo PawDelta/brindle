@@ -23,6 +23,7 @@ import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from starlette.requests import Request
@@ -349,6 +350,65 @@ def remove_workspace(db: DB, params: dict, body: Body) -> Any:
     teardown = removed.teardown
     return {"removed": ws.id, "branch_note": removed.branch_note, "note": note,
             "teardown_failed": teardown.log if teardown and not teardown.ok else None}
+
+
+# An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.
+BUSY = ("starting", "processing", "waiting")
+
+
+def _edit_target(ws: Workspace, rel: str) -> Path:
+    """``rel`` as a file of the worktree: relative, no ``..``, nothing in
+    .git, and no symlink (the file itself, or a directory on the way that
+    leads out of the worktree)."""
+    parts = PurePosixPath(rel).parts
+    if (not parts or PurePosixPath(rel).is_absolute() or "\\" in rel
+            or any(p == ".." or p.lower() == ".git" for p in parts)):
+        raise ServiceError("invalid", f"{rel!r} isn't a path inside the worktree")
+    root = Path(ws.path).resolve()
+    target = root.joinpath(*parts)
+    if target.is_symlink() or not target.resolve().is_relative_to(root):
+        raise ServiceError("invalid", f"{rel!r} isn't a path inside the worktree")
+    return target
+
+
+def edit_file(db: DB, params: dict, body: Body) -> Any:
+    """The person's edit from the review sheet: ``content`` becomes ``path``
+    in the worker's worktree, committed on its branch. ``base`` is the blob
+    sha the app showed (the diff's ``index`` line, abbreviated is fine); if
+    the file has changed since, the edit is refused (409), as it is while
+    any agent in the workspace is busy."""
+    ws = _workspace(db, params["id"])
+    if ws.kind != "worktree":
+        raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be edited")
+    identity_lock.ensure_workspace(db, ws)
+    rel, content = _get(body, "path", required=True), _get(body, "content", required=True)
+    base = _get(body, "base", required=True).strip().lower()
+    target = _edit_target(ws, rel)
+    with git.checkout_lock(ws.path, timeout=10):
+        if busy := [a.id for a in db.list_agents(ws.id) if a.status in BUSY]:
+            raise ServiceError("busy", f"{', '.join(busy)} is working in {ws.id}; edit once it has stopped", 409)
+        if git.current_branch(ws.path) != ws.branch:
+            raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
+        if not target.is_file():
+            raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404)
+        if len(base) < 7 or not git.out(["hash-object", "--", rel], ws.path).startswith(base):
+            raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
+        before = target.read_bytes()
+        target.write_bytes(content.encode())
+        commit = None
+        try:
+            git.run(["add", "--", rel], ws.path)
+            if not git.ok(["diff", "--cached", "--quiet", "HEAD", "--", rel], ws.path):
+                git.run(["commit", "-q", "--only", "-m", f"edit from review: {rel}", "--", rel], ws.path)
+                commit = git.out(["rev-parse", "HEAD"], ws.path)
+        except git.GitError:
+            target.write_bytes(before)      # a hook refused it: leave the file as the worker had it
+            git.run(["reset", "-q", "--", rel], ws.path, check=False)
+            raise
+        blob = git.out(["hash-object", "--", rel], ws.path)
+    bus.publish_ws(db, "workspace.edited", ws, path=rel, commit=commit)
+    return {"workspace_id": ws.id, "path": rel, "commit": commit, "blob": blob,
+            "stat": git.diff(ws.path, workspaces.require_base(ws), stat=True)}
 
 
 # -- goal ------------------------------------------------------------------------
@@ -681,6 +741,7 @@ ROUTES = [
     _post("/workspaces/{id:path}/sync", sync_workspace),
     _post("/workspaces/{id:path}/pr", pr_workspace),
     _post("/workspaces/{id:path}/remove", remove_workspace),
+    Route("/v1/workspaces/{id:path}/file", _endpoint(edit_file), methods=["PUT"]),
     _post("/goal", set_goal),
     _post("/goal/check", check_goal),
     _post("/goal/enabled", enable_goal),

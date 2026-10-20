@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from conftest import sh
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, workspaces
 from brindle.daemon import peer, routes_actions
@@ -93,6 +94,39 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
     if status == 202:
         done = bus.tail(db, kinds=("job.done", "job.failed"))
         assert [(e["kind"], e["payload"]["job"]) for e in done] == [("job.done", reply["job"])]
+
+
+@pytest.mark.parametrize("path,base,busy,status", [
+    ("app.py", "shown", False, 200),
+    ("app.py", "e69de29", False, 409),          # the empty blob: not what the file is now
+    ("app.py", "shown", True, 409),
+    ("../proj/app.py", "shown", False, 400),
+    ("out/app.py", "shown", False, 400),        # a symlinked directory leading out of the worktree
+    pytest.param(".git/HEAD", "shown", False, 400, marks=pytest.mark.variant("the worktree's own git link")),
+], ids=["edit-commits", "edit-stale", "edit-busy", "edit-dotdot", "edit-symlink", "edit-git"])
+def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, path, base, busy, status):
+    wt = tmp_path / "wt"
+    sh(f"git worktree add -q -b rev {wt} main", repo)
+    (wt / "out").symlink_to(repo)
+    db.add_workspace(Workspace("proj/w-e", world.repo_root, "rev", "worktree", "rev", "main", str(wt),
+                               None, "brindle-z", time.time()))
+    if busy:
+        db.add_agent(Agent("ew", "proj/w-e", "developer", "claude", "sup", "assign", "processing", "%3",
+                           None, time.time()))
+    head = sh("git rev-parse HEAD", wt)
+    shown = sh("git hash-object app.py", wt)[:7] if base == "shown" else base
+    code, reply = _send("PUT", "/v1/workspaces/proj/w-e/file",
+                        {"path": path, "content": "print('bye')\n", "base": shown})
+    assert code == status, reply
+    edited = bus.tail(db, kinds=("workspace.edited",))
+    if status != 200:
+        assert sh("git rev-parse HEAD", wt) == head and edited == []
+        assert (wt / "app.py").read_text() == (repo / "app.py").read_text() == "print('hi')\n"
+        return
+    assert sh("git log -1 --format=%s rev", wt) == "edit from review: app.py"
+    assert sh("git show rev:app.py", wt) == "print('bye')" and sh("git status --porcelain app.py", wt) == ""
+    assert reply["commit"] == sh("git rev-parse HEAD", wt) and "app.py" in reply["stat"]
+    assert [e["workspace_id"] for e in edited] == ["proj/w-e"]
 
 
 def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monkeypatch):
