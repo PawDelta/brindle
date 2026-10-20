@@ -275,12 +275,34 @@ def transfer_session(db: DB, params: dict, body: Body) -> Any:
     if not scratch.is_scratch(ws.path):       # refused at once, not as a failed job
         raise ServiceError("invalid", "This isn't a scratch session; the work is already in a real repository.")
 
+    job = Job(secrets.token_hex(8), "session.transfer")
+    with _TRANSFER_LOCK:
+        running = _TRANSFERRING.get(ws.id)
+        if running:
+            if running[1] != (target, branch):
+                raise ServiceError("conflict", "this session is already being transferred elsewhere", 409)
+            return running[0]                 # pressed again: the one already running
+        _TRANSFERRING[ws.id] = (job, (target, branch))
+
     def work(db: DB, job: Job) -> Any:
-        t = svc.transfer_to_repo(db, ws, target, branch)
+        try:
+            t = svc.transfer_to_repo(db, ws, target, branch)
+        finally:
+            with _TRANSFER_LOCK:
+                _TRANSFERRING.pop(ws.id, None)
         return {"workspace_id": t.workspace.id, "branch": t.workspace.branch,
                 "repo_root": t.workspace.repo_root, "commits": t.commits}
 
-    return start_job("session.transfer", work, root_id=root.id, repo_root=ws.repo_root)
+    try:
+        return start_job("session.transfer", work, job=job, root_id=root.id, repo_root=ws.repo_root)
+    except BaseException:
+        with _TRANSFER_LOCK:
+            _TRANSFERRING.pop(ws.id, None)
+        raise
+
+
+_TRANSFER_LOCK = threading.Lock()
+_TRANSFERRING: dict[str, tuple[Job, tuple[str, str | None]]] = {}     # scratch workspace -> its transfer
 
 
 # -- inbox -----------------------------------------------------------------------

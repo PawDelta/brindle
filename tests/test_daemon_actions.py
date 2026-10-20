@@ -1139,7 +1139,8 @@ def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, wo
         assert codex.read_text().startswith('model = "x"\n')
 
 
-def test_a_scratch_session_transfers_into_a_repo_and_a_real_one_is_refused(db, world, repo, tmp_path):
+def test_a_scratch_session_transfers_into_a_repo_and_a_real_one_is_refused(db, world, repo, tmp_path,
+                                                                           monkeypatch):
     from brindle import git, scratch
 
     elsewhere = tmp_path / "Downloads"
@@ -1150,8 +1151,15 @@ def test_a_scratch_session_transfers_into_a_repo_and_a_real_one_is_refused(db, w
     (Path(s.path) / "notes.md").write_text("plan\n")
     git.commit_all(s.path, "Add notes")
 
+    queued = []
+    monkeypatch.setattr(routes_actions, "_spawn", queued.append)      # the first job stays pending
     code, reply = _send("POST", "/v1/sessions/scr/transfer", {"target_path": str(repo)})
     assert code == 202, reply
+    assert _send("POST", "/v1/sessions/scr/transfer", {"target_path": str(repo)}) == (202, reply)
+    other = _send("POST", "/v1/sessions/scr/transfer", {"target_path": str(tmp_path)})
+    assert (other[0], other[1]["error"]["code"]) == (409, "conflict")
+    assert len(queued) == 1
+    queued[0]()
     done = bus.tail(db, kinds=("job.done", "job.failed"))
     assert [(e["kind"], e["payload"]["job"]) for e in done] == [("job.done", reply["job"])]
     moved = db.get_workspace(done[0]["payload"]["result"]["workspace_id"])
