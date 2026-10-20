@@ -864,15 +864,23 @@ def credentials_session(agent: Agent) -> str | None:
 def consent_identity(db: DB, repo: str, profile: str, provider: str, session: str | None) -> dict[str, str]:
     """The environment a consent's launch signs in with, rebuilt from what
     its action names: ``repo``, ``profile``, and ``session`` (a recorded root
-    session in that repo, whose stored credentials it gets)."""
-    ws = workspaces.adopt_root(db, repo)
+    session whose stored credentials it gets; ``repo`` is its own repo or one
+    attached to it, as a worker's launch there would be)."""
+    from brindle import repos
+
     parent = None
-    if session is not None:
+    if session is None:
+        ws = workspaces.adopt_root(db, repo)
+    else:
         root = db.get_agent(session)
-        root_ws = db.get_workspace(root.workspace_id) if root else None
-        if root is None or root.parent_id or root_ws is None or root_ws.repo_root != ws.repo_root:
+        own = repos.own_root(db, session) if root and not root.parent_id else None
+        try:
+            target = repos.resolve(db, session, own, repo) if own else None
+        except repos.RepoError:
+            target = None
+        if target is None:
             raise AgentError(f"no session {session!r} in {repo}")
-        parent = root.id
+        ws, parent = repos.target_workspace(db, target), root.id
     who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
                 None, 0.0)
     return launch_identity(who, ws)[0]

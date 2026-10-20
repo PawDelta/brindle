@@ -564,9 +564,11 @@ def _codex_trust(codex, repo, level):
     ("assign", "codex", "untrusted", ["trust"]),
     # The session's own key (its session_credentials), not brindle's: approving it clears the worker.
     ("assign", "claude", "session-key", ["consent"]),
+    ("attached", "claude", "session-key", ["consent"]),   # the same, for a worker in a repo attached to it
     ("interactive", "claude", "fresh", []),         # a chat in a terminal: the person answers it there
 ], ids=["start", "start-trusts-silently", "start-untrusted", "start-stored-key", "stale-open", "continue",
-        "rewind", "worker-consent", "worker-untrusted", "worker-session-key", "terminal-chat"])
+        "rewind", "worker-consent", "worker-untrusted", "worker-session-key", "worker-session-key-attached",
+        "terminal-chat"])
 def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, how, provider, setup,
                                                         blocked):
     from brindle import keystore
@@ -597,10 +599,21 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
         kinds = [i["kind"] for i in reply.get("preflight", [])]
         assert all(i["action"]["path"].startswith(f"/v1/providers/{provider}/") for i in reply.get("preflight", []))
     else:
+        from brindle import repos
+        from brindle.pro import license
+
+        ws, worker = world, how in ("assign", "attached")
+        for name in ("other", "unrelated") if setup == "session-key" else ():
+            sh(f"git init -q -b main {tmp_path / name} && git -C {tmp_path / name} commit -q --allow-empty -m init",
+               tmp_path)
+        if how == "attached":
+            monkeypatch.setattr(license, "has", lambda feature: feature == "multi_repo")
+            ws = repos.target_workspace(db, repos.attach(db, "sup", str(tmp_path / "other")).repo_root)
+
         def spawn():
             with pytest.raises(agents.AgentError) as e:
-                agents.spawn(db, world, "developer" if how == "assign" else "supervisor", provider_name=provider,
-                             mode=how, parent_id="sup" if how == "assign" else None, prompt="go")
+                agents.spawn(db, ws, "developer" if worker else "supervisor", provider_name=provider,
+                             mode="assign" if worker else how, parent_id="sup" if worker else None, prompt="go")
             return getattr(e.value, "items", [])
 
         items = spawn()
@@ -608,9 +621,12 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
         if setup == "session-key":
             action = items[0].action
             assert "wxyz" in items[0].detail and action.body["session"] == "sup"
+            assert action.body["repo"] == ws.repo_root
             confirm = {**action.body, "accept": True}
             assert _send("POST", action.path, {**confirm, "key": "0" * 16})[0] == 409   # some other key
             assert _send("POST", action.path, {**confirm, "session": "wk"})[0] == 409   # not a session root
+            # A repo that is neither the session's own nor attached to it.
+            assert _send("POST", action.path, {**confirm, "repo": str(tmp_path / "unrelated")})[0] == 409
             assert _send("POST", action.path, confirm)[0] == 200
             assert providers.api_key_approved(SECRET)
             assert not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
