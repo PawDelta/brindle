@@ -34,11 +34,14 @@ async def meta(request: Request) -> JSONResponse:
     })
 
 
+ROUTES = [Route("/v1/meta", meta), *routes_read.ROUTES,
+          WebSocketRoute("/v1/events", events), *ACTIONS]
+
+
 def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
     """The daemon's ASGI app. ``port``: its TCP port, if it listens on one
     (pages served from there count as its own Origin). ``poller``: the Pro
     status poller whose bar text and notices ``/v1/events`` relays."""
-    app = Starlette(routes=[Route("/v1/meta", meta), *routes_read.ROUTES,
-                            WebSocketRoute("/v1/events", events), *ACTIONS])
+    app = Starlette(routes=ROUTES)
     app.state.poller = poller
     return Guard(app, token, port)

@@ -1248,6 +1248,14 @@ def daemon_stop() -> None:
     typer.echo(f"stopped (pid {info['pid']})" if info else "not running")
 
 
+@daemon_app.command("schema")
+def daemon_schema() -> None:
+    """Write api-schema.json: the v1 routes and the DTO schemas the TypeScript client is built from."""
+    from brindle.daemon import schema
+
+    typer.echo(f"wrote {schema.write()}")
+
+
 # -- brindle permissions (the permission policy; see brindle.permissions) -------------------------
 
 permissions_app = typer.Typer(no_args_is_help=True,
