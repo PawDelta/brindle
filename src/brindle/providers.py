@@ -185,6 +185,21 @@ DELIVERY_NOTE = (
 )
 
 
+def _permission_hook_timeout(cwd: str | None) -> int:
+    """Claude Code's timeout for brindle's PermissionRequest hook (seconds; its
+    docs give command hooks 600 by default and no maximum): the repo's
+    permission_hold_seconds, plus agents.HOOK_SLACK so the hook hands the
+    request to the prompt itself before Claude Code would cancel it."""
+    from brindle.agents import HOOK_SLACK
+    from brindle.config import RepoConfig, load_repo_config
+
+    try:
+        hold = load_repo_config(cwd).permission_hold_seconds if cwd else RepoConfig.permission_hold_seconds
+    except Exception:  # noqa: BLE001 - never stop a launch over this
+        hold = RepoConfig.permission_hold_seconds
+    return int(hold) + HOOK_SLACK
+
+
 def claude_binary() -> str:
     """BRINDLE_CLAUDE_BIN, else `claude` on PATH."""
     return os.environ.get("BRINDLE_CLAUDE_BIN") or "claude"
@@ -516,7 +531,7 @@ class ClaudeCode(Provider):
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
     @staticmethod
-    def _hook(event: str, agent_id: str) -> list[dict]:
+    def _hook(event: str, agent_id: str, timeout: int | None = None) -> list[dict]:
         # The agent's id (and where brindle keeps its state) go in the command
         # itself, not just the pane's environment: Claude Code may run the
         # session in a process its background daemon started earlier, whose
@@ -526,7 +541,7 @@ class ClaudeCode(Provider):
         assigns = "".join(f"{k}={shlex.quote(v)} " for k, v in sorted(env.items()))
         cmd = assigns + " ".join(shlex.quote(a) for a in
                                  [*brindle_invocation(), "_hook", event, "--agent", agent_id])
-        return [{"hooks": [{"type": "command", "command": cmd}]}]
+        return [{"hooks": [{"type": "command", "command": cmd, **({"timeout": timeout} if timeout else {})}]}]
 
     @staticmethod
     def _mcp_timeout(ctx: LaunchContext) -> str:
@@ -568,8 +583,11 @@ class ClaudeCode(Provider):
                 # When a tool would prompt, brindle's permission policy (off
                 # unless permission_policy is "on"; see brindle.permissions)
                 # may answer allow or deny from the structured request; no
-                # answer leaves the prompt to the person.
-                "PermissionRequest": self._hook("permission-request", ctx.agent_id),
+                # answer leaves the prompt to the person. While the app is
+                # open it holds the request for the app's answer for the
+                # repo's permission_hold_seconds: Claude Code must let it.
+                "PermissionRequest": self._hook("permission-request", ctx.agent_id,
+                                                timeout=_permission_hook_timeout(ctx.cwd)),
             },
             # Claude Code only tells status lines how much of the plan's usage
             # is spent. brindle's records that, then runs the person's own

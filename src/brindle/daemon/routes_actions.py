@@ -247,8 +247,8 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
     if action == "permission":
         # The person's answer to a's permission request (agent callers never get here).
-        return inbox.answer_permission(db, a.id, _get(body, "request", required=True),
-                                       _get(body, "digest"), _get(body, "choice", required=True))
+        return inbox.answer_permission(db, a.id, _get(body, "request"), _get(body, "digest"),
+                                       _get(body, "choice", required=True))
     if action == "review":
         return review_workspace(db, {"id": a.workspace_id}, body)
     if action == "merge":

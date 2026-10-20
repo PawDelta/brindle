@@ -370,9 +370,14 @@ def test_install_codex_hook_dry_run_then_yes(monkeypatch):
     assert "trusted" in res.output
     rec = permissions.load_store().codex_hook
     assert rec == {"command": codex_hook.hook_command(),
-                   "key": "/<session-flags>/config.toml:permission_request:0:0", "hash": "sha256:abc"}
+                   "key": "/<session-flags>/config.toml:permission_request:0:0", "hash": "sha256:abc",
+                   "timeout": str(codex_hook.TIMEOUT)}
     assert codex_hook.trusted()
     assert "already trusted" in r.invoke(app, ["permissions", "install-codex-hook"]).output
+    # Trusted with another timeout (an older brindle's): another hook to Codex, trusted again.
+    with permissions.editing() as store:
+        store.codex_hook = {**store.codex_hook, "timeout": "30"}
+    assert codex_hook.status() == codex_hook.MOVED
 
 
 def launch_argv(ws):

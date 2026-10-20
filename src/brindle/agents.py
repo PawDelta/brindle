@@ -2874,9 +2874,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
     policy (brindle.permissions) answers allow or deny, or None to let the CLI
     prompt the person as usual (ask). Off unless the repo or user config
-    sets ``permission_policy: "on"``. A Claude request left to the person is
-    recorded either way, for the app's inbox, and while the app is open the
-    person answers it there (_await_app_answer). Never raises: any failure is ask."""
+    sets ``permission_policy: "on"``. A request left to the person is held
+    for the app's answer while the app is open (_hold_for_app; a Claude one
+    is recorded with the policy off too). Never raises: any failure is ask."""
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -2943,6 +2943,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
+            if decision.decision == "ask" and len(reqs) == 1:
+                # The same hold for the app's answer as Claude Code's (no suggested rules here).
+                from brindle import codex_hook
+
+                # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
+                hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
+                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
+                if answer:
+                    decision = permissions.Decision("deny" if answer == "deny" else "allow",
+                                                    "the person answered in the brindle app")
             return permissions.codex_output(decision)
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
@@ -2970,24 +2980,12 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         else:
             decision = permissions.Decision("ask", "")
         if decision.decision == "ask":
-            # Claude Code's PermissionRequest carries no tool_use_id: the request
-            # gets an id of its own, and its PostToolUse is paired by tool and
-            # input (note_permission_outcome).
-            request_id = uuid.uuid4().hex[:16]
             # Claude Code's own "always allow" options, as it would apply them.
             suggestions = payload.get("permission_suggestions")
             suggestions = suggestions if isinstance(suggestions, list) and suggestions else None
-            app = _app_open()
-            # The command's description as Claude Code shows it under the command,
-            # so the app can tell the prompt on screen is exactly this request.
-            description = (payload.get("tool_input") or {}).get("description")
-            shown = {**req.to_dict(), **({"description": description} if isinstance(description, str) else {})}
-            recorded = json.dumps(shown), json.dumps(suggestions) if suggestions else None
-            db.add_permission_request(agent.id, request_id, recorded[0], decision.reason, recorded[1],
-                                      "hook" if app else None)
-            # Only an answer to exactly this request and these suggestions counts.
-            answer = (_await_app_answer(db, agent, request_id, req, permissions.request_digest(*recorded))
-                      if app else None)
+            # Recorded either way: its PostToolUse counts as the person's approval.
+            answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
+                                   hold=cfg.permission_hold_seconds)
             if answer:
                 return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
@@ -2996,8 +2994,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return None
 
 
-APP_ANSWER_WAIT = 45.0   # seconds, inside Claude Code's 60-second hook timeout
 APP_ANSWER_POLL = 0.25
+# Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
+# so the hook gives the request to the prompt itself before the CLI cancels it.
+HOOK_SLACK = 30
 
 
 def _app_open() -> bool:
@@ -3011,18 +3011,50 @@ def _app_open() -> bool:
         return False
 
 
-def _await_app_answer(db: DB, agent: Agent, tool_use_id: str, req, digest: str) -> str | None:
+def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
+                  hold: float) -> str | None:
+    """Record a request the policy left to the person and, while the app is
+    open, hold it for the app's answer for ``hold`` seconds (_await_app_answer;
+    the row's ``hold_until`` says till when, for the app). Neither CLI's
+    PermissionRequest carries a tool_use_id: the request gets an id of its
+    own (Claude Code's PostToolUse is paired with it by tool and input, see
+    note_permission_outcome). ``keep``: record it even with no app to answer
+    it, and keep it once the hold ends (for that pairing)."""
+    from brindle import permissions
+
+    app = _app_open()
+    if not (app or keep):
+        return None
+    request_id = uuid.uuid4().hex[:16]
+    recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+    db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1], "hook" if app else None,
+                              hold_until=time.time() + hold if app else None)
+    # Only an answer to exactly this request and these suggestions counts.
+    answer = (_await_app_answer(db, agent, request_id, req, permissions.request_digest(*recorded), hold)
+              if app else None)
+    if not keep:
+        db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
+    return answer
+
+
+def _await_app_answer(db: DB, agent: Agent, tool_use_id: str, req, digest: str, hold: float) -> str | None:
     """The person's answer from the app's inbox (service.inbox.answer_permission)
-    to a request the hook left to them, or None after APP_ANSWER_WAIT: then
-    the request goes to the CLI's own prompt, answered there or from the app
-    by its keys. The agent shows waiting meanwhile, as at that prompt. Only
-    an answer to the request as the hook recorded it (``digest``) counts:
-    one to a stored request changed meanwhile sends it to the prompt instead."""
+    to a request the hook left to them, or None after ``hold`` seconds, when
+    the person asks to answer in the terminal, or once the agent is closed or
+    killed: then the request goes to the CLI's own prompt (or, where there is
+    none, is refused). The agent shows waiting meanwhile, as at that
+    prompt. Only an answer to the request as the hook recorded it
+    (``digest``) counts: one to a stored request changed meanwhile sends it
+    to the prompt instead."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline = time.monotonic() + APP_ANSWER_WAIT
+    deadline = time.monotonic() + hold
     while True:
-        late = time.monotonic() >= deadline
+        # Killed (its row and so this request gone: take_permission_answer
+        # says so), closed, or past the hold: the hold ends.
+        now = db.get_agent(agent.id)
+        closed = now is None or now.status in ("done", "paused") or now.dismissed_at is not None
+        late = closed or time.monotonic() >= deadline
         answer = db.take_permission_answer(agent.id, tool_use_id, digest, give_up=late)
         if answer is not None or late:
             break

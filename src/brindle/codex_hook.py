@@ -42,7 +42,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 EVENT = "codex-permission-request"
-TIMEOUT = 30
+# Seconds Codex gives the hook: room for the default permission_hold_seconds
+# (a day) plus agents.HOOK_SLACK. Codex caps only SessionEnd hooks' timeouts
+# (codex-rs/hooks/src/engine/discovery.rs); others take any value. Fixed, not
+# per repo: the trusted hash covers it, so a change is a new hook to Codex
+# (status() reads it as MOVED, and ensure() trusts it again). A longer hold
+# is cut to fit (agents).
+TIMEOUT = 86400 + 30
 SOURCE = "sessionFlags"
 
 
@@ -111,7 +117,8 @@ def status(command: str | None = None) -> str:
     entry = state.get(rec["key"]) if isinstance(state, dict) else None
     if not (isinstance(entry, dict) and entry.get("trusted_hash") == rec["hash"]):
         return REMOVED
-    return TRUSTED if rec["command"] == command else MOVED
+    # A trust recorded for another timeout (TIMEOUT changed since) is for another hook.
+    return TRUSTED if rec["command"] == command and rec.get("timeout", "30") == str(TIMEOUT) else MOVED
 
 
 def trusted(command: str | None = None) -> bool:
@@ -290,5 +297,6 @@ def trust(binary: str, state: HookState) -> HookState:
     if after.status != "trusted":
         raise CodexHookError(f"Codex still reports the hook as {after.status}")
     with permissions.editing() as store:
-        store.codex_hook = {"command": after.command, "key": after.key, "hash": after.hash}
+        store.codex_hook = {"command": after.command, "key": after.key, "hash": after.hash,
+                            "timeout": str(TIMEOUT)}
     return after

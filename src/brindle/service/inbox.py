@@ -2,20 +2,17 @@
 sidebar uses, plus plans, proposed checks, failed merges, cloud logins,
 permission requests and org notices as ``InboxItemDTO`` rows.
 
-A permission request is answered (``answer_permission``) through brindle's
-hook while it holds the request (agents._await_app_answer), else by typing
-the answer into the CLI's own prompt: the same keys a person at the pane
-would press, only ever on the person's request from the app, and only
-where the whole request is known and the option the keys pick can be seen
-selected first. Anything else is answered in the agent's own terminal."""
+A permission request is answered from the app (``answer_permission``) only
+while brindle's hook holds it (agents._hold_for_app), for its answer window.
+A request already at the CLI's own prompt is an item too, to answer in the
+agent's terminal: brindle never types an answer into that prompt, since the
+screen can't show reliably which request it is."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -28,30 +25,23 @@ from brindle.service.errors import ServiceError
 
 WORKERS = ("assign", "handoff")
 CHOICES = ("allow_once", "allow_always", "deny")
-# What a prompt's option grants, by its wording; the first match wins.
-OPTION_CHOICE = (
-    ("deny", re.compile(r"(?i)^(?:no|reject|deny|don.t allow|cancel)\b")),
-    ("allow_always", re.compile(r"(?i)don.t ask again|\balways\b|allow all|for (?:this|the) session")),
-    ("allow_once", re.compile(r"(?i)^(?:yes|allow|approve|proceed|run)\b")),
-)
+RELEASE = "terminal"     # the person's "answer in the terminal instead": the hold ends now
+# Whether a CLI draws its own permission prompt while brindle's hook holds
+# the request (PermissionDTO.terminal_prompt_visible). Claude Code 2.1.304, in
+# a real pane: yes, the prompt shows while its PermissionRequest hook runs, and
+# answering there runs the tool at once (its PostToolUse then ends the hold).
+# Native workers and agy under agy_approvals "brindle" have no prompt at all.
+# Codex: not seen yet (absent: not known).
+TERMINAL_PROMPT_VISIBLE: dict[str, bool] = {"claude": True, "native": False, "antigravity": False}
+# Providers whose own prompt takes a request once the hold ends; for the rest
+# (no prompt of their own) it is refused then.
+PROMPT_AFTER_HOLD = ("claude", "codex")
 BOX = re.compile(r"^[\s│┃╭╮╰╯─━]+|[\s│┃╭╮╰╯─━]+$")
-# OpenCode's prompt: buttons on one line, whose selection shows only as a
-# colour, so brindle can't see which one Enter would pick.
-ROW_MENU = re.compile(r"(Allow once)\s+(Allow always)\s+(Reject)")
-# Why a prompt on screen goes to the agent's terminal instead (PermissionDTO.terminal).
-TERMINAL = {
-    "row": "its prompt doesn't show which option is selected",
-    "none": "brindle can't tell how its prompt selects an option",
-    "unknown": "brindle can't tell that its prompt shows exactly, and all of, a request its hook recorded",
-}
-# Claude Code's Bash permission prompt: the header over the command block,
-# and the question under its description (_on_screen).
-CLAUDE_BASH_HEADER = "Bash command"
-CLAUDE_BASH_QUESTION = "Do you want to proceed?"
+# Why a request at the CLI's own prompt goes to the agent's terminal (PermissionDTO.terminal).
+TERMINAL = "it is at the CLI's own prompt now: answer it in the agent's terminal"
 WORDING_LINES = 12       # of a prompt, shown to the person
-CAPTURE_LINES = 200      # of a pane, read for its prompt (the fingerprint covers them all)
-STEP_SECONDS = 0.2       # between keys, and between looks at the pane or the hook
-CONFIRM_SECONDS = 5.0    # for the prompt to clear (or the hook to take the answer)
+STEP_SECONDS = 0.2       # between looks at the hook
+CONFIRM_SECONDS = 5.0    # for the hook to take the answer
 
 
 def awaiting_review(agent: dict, ws: dict) -> str | None:
@@ -174,33 +164,12 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
 
 
 @dataclass
-class Menu:
-    """A permission prompt as it shows on screen. ``layout``: "list", a
-    numbered menu whose cursor shows the selection (Claude Code, Codex); "row",
-    OpenCode's buttons on one line; "none", any other prompt. Only a list is
-    answered by keys (TERMINAL)."""
-    layout: str
-    options: list[str]
-    wording: str      # its last lines, redacted, to show the person
-    above: str = ""   # everything captured above its options, as is
-
-    @property
-    def fingerprint(self) -> str:
-        """Which prompt this is, whichever option is selected: what an answer
-        must still find on screen before each key it sends. Taken over the
-        whole capture above the options, unredacted, so a prompt that
-        differs anywhere (not only in the lines shown) is another prompt."""
-        return hashlib.sha256("\0".join([self.above, *self.options]).encode()).hexdigest()[:16]
-
-
-@dataclass
 class Pending:
     """A permission request ``agent`` waits on, and what answering it needs."""
     via: str                                 # "hook" or "prompt", as PermissionDTO.via
-    row: dict                                # its permission_requests row
-    request: permissions.Request | None      # what the hook recorded, when it saw it
+    row: dict | None                         # the hook's permission_requests row ("hook" only)
+    request: permissions.Request | None
     suggestions: list | None                 # Claude Code's own "always allow" updates
-    menu: Menu | None                        # the prompt on screen ("prompt" only)
     dto: PermissionDTO
 
 
@@ -218,138 +187,55 @@ def _always_rule(req: permissions.Request | None, suggestions: list | None, repo
             + (" (applies once permission_policy is on)" if off else ""))
 
 
-def _menu(lines: list[str]) -> tuple[int, list[str]]:
-    """The prompt's own menu in ``lines``: the last run of numbered lines
-    holding the cursor (a numbered list in the agent's output above it is
-    no option), as (its first line's index, the options' texts)."""
-    cursor = next((i for i in range(len(lines) - 1, -1, -1)
-                   if prompt_answer.NUMBERED.match(lines[i]) and prompt_answer.SELECTED.match(lines[i])), None)
-    if cursor is None:
-        return len(lines), []
-    start = end = cursor
-    while start > 0 and prompt_answer.NUMBERED.match(lines[start - 1]):
-        start -= 1
-    while end + 1 < len(lines) and prompt_answer.NUMBERED.match(lines[end + 1]):
-        end += 1
-    return start, [prompt_answer.OPTION.match(ln).group(2) for ln in lines[start:end + 1]]
+def _hold_note(provider: str, hold_until: float | None) -> str | None:
+    """How the hold reads for the person: "waiting for you" while more than
+    an hour is left, else how long, and what happens then."""
+    if hold_until is None:
+        return None
+    left = hold_until - time.time()
+    if left > 3600:
+        return "waiting for you"
+    then = "it goes to the agent's terminal" if provider in PROMPT_AFTER_HOLD else "it is refused"
+    return f"answer within {max(1, round(left / 60))} min, or {then}"
 
 
-def read_menu(screen: str) -> Menu:
-    """The permission prompt at the bottom of ``screen``: its wording and its
-    options (none for a layout brindle can't read options from, such as
-    Antigravity's "Yes / No")."""
-    every = [ln.rstrip() for ln in prompt_answer.plain(screen).rstrip().splitlines()]
-    skip = max(0, len(every) - len(prompt_answer._tail(screen)))   # the options are at the bottom
-    lines = every[skip:]
-    start, options = _menu(lines)
-    layout = "list"
-    if not options:
-        row = next((i for i in range(len(lines) - 1, -1, -1) if ROW_MENU.search(lines[i])), None)
-        start, options, layout = ((row, list(ROW_MENU.search(lines[row]).groups()), "row") if row is not None
-                                  else (len(lines), [], "none"))
-    wording = [BOX.sub("", ln) for ln in lines[:start]]
-    return Menu(layout, options, prompt_answer.redact("\n".join([ln for ln in wording if ln][-WORDING_LINES:])),
-                "\n".join(every[:skip + start]))
-
-
-def _choices(menu: Menu) -> list[PermissionChoiceDTO]:
-    """The menu's options as choices, each labelled with the option's own
-    text (which is what _press selects)."""
-    choices: dict[str, PermissionChoiceDTO] = {}
-    for label in menu.options:
-        choice = next((c for c, pattern in OPTION_CHOICE if pattern.search(label)), None)
-        if choice and choice not in choices:
-            choices[choice] = PermissionChoiceDTO(
-                choice=choice, label=label,
-                rule=f"the CLI's own rule, as its option says: {label}" if choice == "allow_always" else None)
-    return sorted(choices.values(), key=lambda c: CHOICES.index(c.choice))
+def _prompt_wording(screen: str) -> str:
+    """The last lines of the CLI's prompt, redacted, to show the person."""
+    lines = [BOX.sub("", ln) for ln in prompt_answer._tail(screen)]
+    return prompt_answer.redact("\n".join([ln for ln in lines if ln][-WORDING_LINES:]))
 
 
 def pending_permission(db: DB, agent: Agent) -> Pending | None:
     """The permission request ``agent`` waits on: one brindle's hook holds
-    for the app's answer, else its CLI's prompt on screen. Each has its own
-    row, whose id the app's answer must name (``request_id``), with the
-    digest of the exact request and suggested rule it shows (``digest``): a
-    prompt the hook recorded is its row once the screen names the same
-    request (and keeps the prompt it was first shown as); any other prompt
-    gets a row of its own the first time it is seen, gone once no prompt is
-    up. A prompt is answerable from the app only as a list whose request the
-    hook recorded whole; otherwise ``terminal`` says why it isn't."""
-    def recorded(r: dict) -> permissions.Request | None:
-        return permissions.Request.from_dict(json.loads(r["request"])) if r["request"] != "null" else None
-
-    def described(r: dict, req: permissions.Request | None) -> dict:
-        if req is None:
-            return {}
-        return {"tool": req.tool, "kind": req.kind, "target": req.target(),
-                "digest": permissions.request_digest(r["request"], r["suggestions"])}
-
-    rows = [dict(r) for r in db.open_permission_requests(agent.id)]
-    hook = next((r for r in rows if r["channel"] == "hook"), None)
-    if hook:
-        req = recorded(hook)
+    for the app's answer (``request_id``, with the digest of the exact
+    request and suggested rule it shows, and the time its answer window
+    ends), else one at its CLI's own prompt on screen, terminal-only."""
+    hook = db.hook_permission_request(agent.id)
+    if hook is not None:
+        hook = dict(hook)
+        req = permissions.Request.from_dict(json.loads(hook["request"]))
         suggestions = json.loads(hook["suggestions"]) if hook["suggestions"] else None
         ws = db.get_workspace(agent.workspace_id)
-        rule = _always_rule(req, suggestions, ws.repo_root if ws else None)
+        # A native worker's loop reads its profile's permissions, not brindle's rules.
+        rule = None if agent.provider == "native" else _always_rule(req, suggestions, ws.repo_root if ws else None)
         choices = [PermissionChoiceDTO(choice="allow_once", label="Allow once"),
                    *([PermissionChoiceDTO(choice="allow_always", label="Allow always", rule=rule)] if rule else []),
                    PermissionChoiceDTO(choice="deny", label="Deny")]
-        return Pending("hook", hook, req, suggestions, None, PermissionDTO(
-            via="hook", request_id=hook["tool_use_id"], choices=choices, **described(hook, req)))
+        return Pending("hook", hook, req, suggestions, PermissionDTO(
+            via="hook", request_id=hook["tool_use_id"], tool=req.tool, kind=req.kind, target=req.target(),
+            digest=permissions.request_digest(hook["request"], hook["suggestions"]), choices=choices,
+            hold_until=hook["hold_until"], hold_note=_hold_note(agent.provider, hook["hold_until"]),
+            terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider)))
     if not agent.tmux_window:
         return None
     try:
-        screen = tmux.capture(agent.tmux_window, lines=CAPTURE_LINES, server=agents.server_of(agent))
+        screen = tmux.capture(agent.tmux_window, lines=60, server=agents.server_of(agent))
     except tmux.TmuxError:
         return None
     if not get_provider(agent.provider).tool_permission(screen):
-        db.drop_screen_requests(agent.id)
         return None
-    menu = read_menu(screen)
-    fp = menu.fingerprint
-    # What the hook recorded is this prompt only when it is the newest request
-    # recorded, the prompt's own lines (not the transcript) show all of it, and
-    # it wasn't first shown as another prompt (an older request, asked again).
-    newest = next((r for r in rows if r["request"] != "null"), None)
-    row = newest if (newest is not None and newest["fingerprint"] in (None, fp)
-                     and _on_screen(agent.provider, json.loads(newest["request"]), menu.above)) else None
-    if row is not None and row["fingerprint"] is None:
-        db.note_permission_fingerprint(agent.id, row["tool_use_id"], fp)
-        row["fingerprint"] = fp
-    if row is None:
-        row = next((r for r in rows if r["request"] == "null" and r["fingerprint"] == fp), None)
-    if row is None:
-        row = {"tool_use_id": uuid.uuid4().hex[:16], "request": "null", "suggestions": None,
-               "fingerprint": fp, "channel": "prompt"}
-        db.add_permission_request(agent.id, row["tool_use_id"], "null", "", channel="prompt", fingerprint=fp)
-    req = recorded(row)
-    terminal = TERMINAL[menu.layout] if menu.layout != "list" else None if req else TERMINAL["unknown"]
-    return Pending("prompt", row, req, None, menu, PermissionDTO(
-        via="prompt", request_id=row["tool_use_id"], wording=menu.wording, terminal=terminal,
-        choices=[] if terminal else _choices(menu), **described(row, req)))
-
-
-def _on_screen(provider: str, recorded: dict, above: str) -> bool:
-    """Whether the prompt on screen (``above`` its options, as captured) is
-    exactly the request the hook recorded. Only a layout brindle knows binds:
-    Claude Code's Bash prompt, whose command block (between its last "Bash
-    command" header and its question) must be the recorded command's lines
-    and then its recorded description, nothing more or less. Any other
-    prompt (a file's, another tool's, one whose header scrolled off) doesn't
-    bind, and is answered in the agent's terminal."""
-    def flat(s: str) -> str:
-        return " ".join(BOX.sub("", s).split())
-
-    command = recorded.get("command")
-    if provider != "claude" or recorded.get("tool") != "Bash" or not isinstance(command, str):
-        return False
-    lines = [flat(ln) for ln in above.splitlines() if flat(ln)]
-    header = max((i for i, ln in enumerate(lines) if ln == CLAUDE_BASH_HEADER), default=None)
-    if header is None or not lines or lines[-1] != CLAUDE_BASH_QUESTION:
-        return False
-    description = recorded.get("description")
-    want = [flat(ln) for ln in command.splitlines() if flat(ln)] + ([flat(description)] if description else [])
-    return bool(want) and lines[header + 1:-1] == want
+    return Pending("prompt", None, None, None,
+                   PermissionDTO(via="prompt", wording=_prompt_wording(screen), terminal=TERMINAL))
 
 
 def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
@@ -359,57 +245,6 @@ def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
             return False
         time.sleep(STEP_SECONDS)
     return True
-
-
-class _Changed(ServiceError):
-    """The prompt on screen is no longer the one being answered: no key goes in."""
-
-    def __init__(self, agent_id: str) -> None:
-        super().__init__("conflict", f"{agent_id}'s prompt changed before it was answered: "
-                                     "fetch the inbox and answer the prompt it shows now", 409)
-
-
-def _press(agent: Agent, menu: Menu, label: str) -> bool:
-    """Pick the option ``label`` in the CLI's permission prompt (a list) by
-    its own keys, then whether the prompt cleared. Before every key the
-    screen must still show the same prompt (``menu.fingerprint``): a
-    replaced prompt, even one with the same options, gets no key (_Changed).
-    The cursor moves with Up/Down, and Enter goes in only once ``label``
-    shows selected."""
-    provider, server = get_provider(agent.provider), agents.server_of(agent)
-
-    def capture() -> str:
-        return tmux.capture(agent.tmux_window, lines=CAPTURE_LINES, server=server)
-
-    def same(screen: str) -> bool:
-        return provider.tool_permission(screen) and read_menu(screen).fingerprint == menu.fingerprint
-
-    def send(key: str) -> None:
-        tmux.send_keys(agent.tmux_window, key, server=server)
-
-    def cleared() -> bool:
-        try:
-            return _until(lambda: not same(capture()))
-        except tmux.TmuxError:
-            return False
-
-    want = prompt_answer.Decision("permission", label)
-    seen = None
-    for _ in range(prompt_answer.MAX_MOVES * 2):
-        screen = capture()
-        if not same(screen):
-            raise _Changed(agent.id)
-        if prompt_answer._tail(screen) == seen:
-            time.sleep(STEP_SECONDS)   # the last key hasn't shown yet: don't press another
-            continue
-        key = prompt_answer.next_key(screen, want)
-        if key is None:
-            raise _Changed(agent.id)
-        send(key)
-        if key == "Enter":
-            return cleared()
-        seen = prompt_answer._tail(screen)
-    raise ServiceError("conflict", f"couldn't reach {label!r} in {agent.id}'s prompt: answer it in its terminal", 409)
 
 
 def _write_rule(db: DB, agent: Agent, request_id: str, digest: str, req: permissions.Request) -> None:
@@ -428,63 +263,55 @@ def _write_rule(db: DB, agent: Agent, request_id: str, digest: str, req: permiss
     if not existed:
         permissions.forget(rule.id)
     raise ServiceError("conflict", f"{agent.id}'s request went to its own prompt before it was answered: "
-                                   "nothing was written; fetch the inbox and answer it again", 409)
+                                   "nothing was written; answer it in its terminal", 409)
 
 
-def answer_permission(db: DB, agent_id: str, request_id: str, digest: str | None, choice: str) -> dict:
-    """Answer ``agent_id``'s permission request ``request_id``, exactly as
-    the app showed it (``digest``: an answer to any other request, or to
-    this one changed since, is refused) with ``choice`` (allow_once,
-    allow_always or deny), the person's own from the app.
+def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str | None, choice: str) -> dict:
+    """Answer the permission request ``request_id`` brindle's hook holds for
+    ``agent_id``, exactly as the app showed it (``digest``: an answer to any
+    other request, or to this one changed since, is refused; the hook checks
+    the digest against the request it recorded too), with ``choice``
+    (allow_once, allow_always or deny), the person's own from the app.
 
-    Through brindle's hook when it holds the request (which checks the
-    digest against the request it recorded itself), else by the CLI
-    prompt's own keys (_press). Either way the request is claimed first, so
-    a second answer, a retry, or an answer racing the hook's timeout gets a
-    409 and changes nothing; allow-always writes brindle's rule only while
-    holding the claim. Says how, what rule allow-always wrote, and whether
-    the request then cleared."""
-    if choice not in CHOICES:
-        raise ServiceError("invalid", f"choice must be one of {', '.join(CHOICES)}")
+    The request is claimed first, so a second answer, a retry, or an answer
+    racing the hook's window gets a 409 and changes nothing; allow-always
+    writes brindle's rule only while holding the claim. ``choice`` "terminal"
+    ends the hold instead, so the CLI's own prompt asks (the app's "answer
+    in the terminal instead"). A request at the CLI's own prompt is refused
+    (409): no key is ever typed into it. Says what rule allow-always wrote,
+    and whether the hook took the answer."""
+    if choice not in (*CHOICES, RELEASE):
+        raise ServiceError("invalid", f"choice must be one of {', '.join((*CHOICES, RELEASE))}")
     agent = db.get_agent(agent_id)
     if agent is None:
         raise ServiceError("not_found", f"no agent {agent_id}", 404)
     identity_lock.ensure(agent)
     pending = pending_permission(db, agent)
+    if pending is not None and pending.via == "prompt":
+        raise ServiceError("conflict", f"{agent_id}'s request {TERMINAL}", 409)
     if pending is None or pending.dto.request_id != request_id or pending.dto.digest != digest:
         raise ServiceError("conflict", f"{agent_id} isn't waiting on that request, as shown, any more: "
                                        "fetch the inbox again", 409)
     offered = next((c for c in pending.dto.choices if c.choice == choice), None)
-    if offered is None:
-        raise ServiceError("conflict", f"{agent_id}'s request offers no {choice} brindle can give: "
-                                       f"answer it in its terminal ({pending.dto.terminal or 'not offered'})", 409)
-    if pending.via == "hook":
-        if not db.claim_permission_answer(agent.id, request_id, choice):
-            raise ServiceError("conflict", f"{agent_id}'s request was answered or went to its own prompt: "
-                                           "fetch the inbox again", 409)
-        try:
-            if choice == "allow_always" and not pending.suggestions:
-                _write_rule(db, agent, request_id, digest, pending.request)
-            elif not db.release_permission_answer(agent.id, request_id, digest):
-                raise ServiceError("conflict", f"{agent_id}'s request went to its own prompt before it "
-                                               "was answered: fetch the inbox again", 409)
-        except BaseException:
-            db.unclaim_permission_answer(agent.id, request_id)
-            raise
-        cleared = _until(lambda: (db.conn.execute(
-            "SELECT channel FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-            (agent.id, request_id)).fetchone() or {"channel": "answered"})["channel"] == "answered")
-    else:
-        if not db.claim_permission_prompt(agent.id, request_id, pending.menu.fingerprint):
-            raise ServiceError("conflict", f"{agent_id}'s prompt is already being answered or was answered: "
-                                           "fetch the inbox again", 409)
-        try:
-            cleared = _press(agent, pending.menu, offered.label)
-        except BaseException:
-            db.finish_permission_prompt(agent.id, request_id, None)
-            raise
-        db.finish_permission_prompt(agent.id, request_id, choice)
+    if offered is None and choice != RELEASE:
+        raise ServiceError("conflict", f"{agent_id}'s request offers no {choice}", 409)
+    if not db.claim_permission_answer(agent.id, request_id, choice):
+        raise ServiceError("conflict", f"{agent_id}'s request was answered or went to its own prompt: "
+                                       "fetch the inbox again", 409)
+    try:
+        if choice == "allow_always" and not pending.suggestions:
+            _write_rule(db, agent, request_id, digest, pending.request)
+        elif not db.release_permission_answer(agent.id, request_id, digest):
+            raise ServiceError("conflict", f"{agent_id}'s request went to its own prompt before it "
+                                           "was answered: answer it in its terminal", 409)
+    except BaseException:
+        db.unclaim_permission_answer(agent.id, request_id)
+        raise
+    # The hook has taken it once it no longer holds it ('answered', or 'prompt' for a release).
+    cleared = _until(lambda: (db.conn.execute(
+        "SELECT channel FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+        (agent.id, request_id)).fetchone() or {"channel": "answered"})["channel"] != "hook")
     bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
-                      via=pending.via, cleared=cleared)
-    return {"choice": choice, "via": pending.via, "cleared": cleared,
+                      via="hook", cleared=cleared)
+    return {"choice": choice, "via": "hook", "cleared": cleared,
             "rule": offered.rule if choice == "allow_always" else None}

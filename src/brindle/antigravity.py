@@ -198,9 +198,15 @@ def install(workspace: str, permission_policy: bool = False, strict: bool = Fals
     hooks = {"PreInvocation": handler("PreInvocation"), "Stop": handler("Stop"),
              "PostToolUse": [{"matcher": "*", "hooks": handler("PostToolUse")}]}
     if strict:
-        # agy runs every call this hook doesn't deny, so it sees every tool.
+        # agy runs every call this hook doesn't deny, so it sees every tool. It
+        # holds a call left to the person for the app's answer (pre_tool_decision),
+        # for the repo's permission_hold_seconds: agy must let it.
+        from brindle.agents import HOOK_SLACK
+        from brindle.config import load_repo_config
+
+        timeout = load_repo_config(workspace).permission_hold_seconds + HOOK_SLACK
         hooks["PreToolUse"] = [{"matcher": "*", "hooks": [
-            {"type": "command", "command": _hook_command(STRICT_EVENT), "timeout": 60}]}]
+            {"type": "command", "command": _hook_command(STRICT_EVENT), "timeout": timeout}]}]
     elif permission_policy:
         hooks["PreToolUse"] = [{"matcher": PRE_TOOL_MATCHER, "hooks": handler("PreToolUse")}]
     _merge_json(workspace, AGENTS_DIR / "hooks.json", "", "brindle", hooks)
@@ -426,6 +432,17 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root],
                          readable=[str(agy_home / "mcp" / "brindle"), str(agy_home / "builtin")],
                          has_supervisor=bool(agent.parent_id))
+            if decision.decision == "ask" and out["decision"] == "deny" and req is not None:
+                # Left to a person, and agy runs no prompt of its own here: held
+                # for the app's answer while it's open, refused as before otherwise.
+                from brindle.agents import _hold_for_app
+
+                answer = _hold_for_app(db, agent, req, decision.reason, None, keep=False,
+                                       hold=cfg.permission_hold_seconds)
+                if answer:
+                    allowed = answer in ("allow_once", "allow_always")
+                    out = {"decision": "allow" if allowed else "deny",
+                           "reason": f"brindle: the person {'allowed' if allowed else 'denied'} this in the brindle app"}
     else:
         out = output(decision, req, spaces)
     if req is not None and out["decision"] == "deny":

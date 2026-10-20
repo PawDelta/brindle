@@ -82,22 +82,26 @@ class SessionDTO(_DTO):
 
 class PermissionChoiceDTO(_DTO):
     choice: str                  # allow_once | allow_always | deny
-    label: str                   # the provider's own option, where it shows one
+    label: str
     rule: str | None = None      # allow_always: the rule it writes, and whose
 
 
 class PermissionDTO(_DTO):
-    """A tool-permission request waiting on the person: POST
-    /inbox/{agent_id}/permission {request: request_id, digest, choice},
-    refused for any request but the one shown, exactly as shown. ``via``:
-    "hook" (brindle's hook holds the request and takes the answer) or
-    "prompt" (the CLI's own prompt is on screen; the answer goes in as its
-    keys). ``terminal``: why it can only be answered in the agent's own
-    terminal (the app's "Go to it", with the item's root_id and agent_id);
-    it then has no ``choices``."""
+    """A tool-permission request waiting on the person. ``via``: "hook"
+    (brindle's hook holds the request: POST /inbox/{agent_id}/permission
+    {request: request_id, digest, choice} answers it until ``hold_until``,
+    refused for any request but the one shown, exactly as shown; choice
+    "terminal" ends the hold so the CLI's own prompt asks instead) or
+    "prompt" (it is at the CLI's own prompt: ``terminal`` says so, and the
+    app's "Go to it", with the item's root_id and agent_id, is the way to
+    answer it; no ``choices``)."""
     via: str
-    request_id: str
-    digest: str | None = None     # of the exact request and suggested rule shown
+    request_id: str | None = None
+    digest: str | None = None         # of the exact request and suggested rule shown
+    hold_until: float | None = None   # when the hook stops holding it (epoch seconds)
+    hold_note: str | None = None      # the same for the person: "waiting for you" while over an hour is left
+    # Whether the CLI's own prompt shows in its terminal meanwhile too (None: not known).
+    terminal_prompt_visible: bool | None = None
     terminal: str | None = None
     tool: str | None = None
     kind: str | None = None      # brindle.permissions.KINDS
