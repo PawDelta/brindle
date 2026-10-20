@@ -139,6 +139,21 @@ def refresh_async() -> None:
         raise
 
 
+def _norm_url(url: str) -> str:
+    return url.strip().rstrip("/").lower()
+
+
+def is_own_url(spec: str, base_url: str, catalog: dict) -> bool:
+    """Whether ``base_url`` is the API URL the catalog gives the provider that
+    ``spec`` (``<provider>/<model>``) names, ignoring case and a trailing slash."""
+    provider_id = spec.partition("/")[0]
+    provider = catalog.get(provider_id)
+    if not isinstance(provider, dict):
+        return False
+    own = provider.get("api") or DEFAULT_BASE_URLS.get(provider_id)
+    return isinstance(own, str) and _norm_url(own) == _norm_url(base_url)
+
+
 def resolve(spec: str, catalog: dict | None = None, base_url: str | None = None) -> Resolved:
     """The endpoint for ``spec`` (``<provider>/<model>``, split at the first
     slash). Raises CatalogError when the catalog can't be had or doesn't list it.

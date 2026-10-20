@@ -16,6 +16,11 @@ CATALOG = {
         "api": "https://nano-gpt.com/api/v1",
         "models": {"deepseek/deepseek-v3": {"limit": {"context": 128000, "output": 8000}}},
     },
+    "deepseek": {
+        "id": "deepseek", "env": ["DEEPSEEK_API_KEY"], "npm": "@ai-sdk/openai-compatible",
+        "api": "https://api.deepseek.com",
+        "models": {"deepseek-chat": {"limit": {"context": 64000, "output": 8000}}},
+    },
     "anthropic": {
         "id": "anthropic", "env": ["ANTHROPIC_API_KEY"], "npm": "@ai-sdk/anthropic",
         "models": {"claude-x": {"limit": {"context": 200000, "output": 150000}}},
@@ -59,12 +64,13 @@ def test_fields_the_profile_sets_win(repo):
     assert (p.api, p.api_key_env, p.context_tokens) == ("anthropic", "MY_KEY", 32000)
 
 
-def test_an_explicit_base_url_still_resolves_a_known_model(repo):
-    p = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: https://proxy.example/v1\n")
-    assert (p.model, p.base_url, p.api_key_env, p.context_tokens) == (
-        "deepseek/deepseek-v3", "https://proxy.example/v1", "NANO_GPT_API_KEY", 120000)
-    raw = write_profile(repo, "qwen/qwen3-coder", "base_url: https://openrouter.ai/api/v1\n")
-    assert (raw.model, raw.base_url) == ("qwen/qwen3-coder", "https://openrouter.ai/api/v1")
+def test_an_explicit_base_url_keeps_the_model_id_unless_it_is_the_providers_own(repo):
+    own = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: HTTPS://nano-gpt.com/api/v1/\n")
+    assert (own.model, own.api_key_env, own.context_tokens) == ("deepseek/deepseek-v3", "NANO_GPT_API_KEY", 120000)
+    for model in ("qwen/qwen3-coder", "deepseek/deepseek-chat", "nano-gpt/deepseek/deepseek-v3"):
+        p = write_profile(repo, model, "base_url: https://openrouter.ai/api/v1\n")
+        assert (p.model, p.base_url, p.api_key_env, p.api, p.context_tokens) == (
+            model, "https://openrouter.ai/api/v1", None, None, None)
 
 
 def test_an_unlisted_or_malformed_model_is_an_error(repo):
