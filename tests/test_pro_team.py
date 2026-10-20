@@ -368,7 +368,11 @@ def test_org_list_use_and_policy(team, monkeypatch):
     assert f"* {ORG}" in out
     # The app's org picker: the same list, from GET /v1/account.
     monkeypatch.setattr(account.ProAccount, "_client", lambda self, base: auth.Client(BASE, transport=team))
-    body = json.loads(routes_read.account(None).body)
+    from starlette.requests import Request
+
+    request = Request({"type": "http", "method": "GET", "path": "/v1/account", "query_string": b"",
+                       "headers": []})
+    body = json.loads(routes_read.account(request).body)
     assert [(o["id"], o["name"], o["role"], o["current"]) for o in body["orgs"]] == [
         ("org_personal", "me (personal)", "owner", False), (ORG, "Team One", "member", True)]
     code, out, _ = run(team, "org", "policy")

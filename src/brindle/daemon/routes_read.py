@@ -184,7 +184,12 @@ def get_profile(request: Request) -> Any:
         # Written but unresolvable (a cycle, a missing parent): as written, the lint saying why.
         p = next((x for x in profiles.list_profiles(repo) if x.name == name), None)
         if p is None:
-            raise ServiceError("not_found", f"no profile {name}", 404) from e
+            source = profiles.profile_source(name, repo)
+            if source is None:
+                raise ServiceError("not_found", f"no profile {name}", 404) from e
+            # Present but unparsable: its identity and why, without resolved fields.
+            return {"name": name, "source": source, "extends": [], "rules": [], "prompt": "",
+                    "lint": {"errors": errors, "warnings": warnings}}
     try:
         packs = profiles.load_rule_packs(p, repo)
     except (KeyError, profiles.ProfileError):

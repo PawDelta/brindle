@@ -328,6 +328,9 @@ def test_profiles_detail_lints_a_broken_profile(seeded):
     (agents_dir / "orphan.md").write_text("---\nname: orphan\nextends: nobody\n---\nHi.\n")
     _, bad = _get("/v1/profiles/orphan", AUTH, f"repo={seeded['repo']}")
     assert bad["name"] == "orphan" and any("nobody" in e for e in bad["lint"]["errors"])
+    (agents_dir / "torn.md").write_text("---\nname: torn\nauth: invalid\n")     # unclosed fence
+    code, torn = _get("/v1/profiles/torn", AUTH, f"repo={seeded['repo']}")
+    assert code == 200 and torn["name"] == "torn" and torn["lint"]["errors"] and "torn.md" in torn["source"]
     _, good = _get("/v1/profiles/developer", AUTH, f"repo={seeded['repo']}")
     assert good["lint"]["errors"] == [] and "env" not in good
     assert _get("/v1/profiles/nope", AUTH, f"repo={seeded['repo']}")[1]["error"]["code"] == "not_found"
