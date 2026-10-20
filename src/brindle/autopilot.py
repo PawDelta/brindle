@@ -704,7 +704,8 @@ CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", 
 
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                  weight: str | None = None) -> str | None:
-    """Why routing skips profile ``name`` (its CLI isn't installed or
+    """Why routing skips profile ``name`` (its provider is in
+    ``exclude_providers``, its CLI isn't installed or
     signed in, its provider is out of headroom, it would break a budget
     (``gate``: a ``brindle.budget.Gate``), it doesn't exist), or None if it's usable."""
     from brindle import quota
@@ -715,6 +716,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     except KeyError:
         source = cfg.routing_sources.get(weight or "", "DEFAULT_ROUTING")
         return f"no profile {name} in {source}, skipped {name}"
+    if p.provider in cfg.exclude_providers:
+        return f"{p.provider} is excluded from routing, skipped {name}"
     over = gate.why_not(name, weight) if gate is not None and gate.active else None
     if over:
         return f"over budget, skipped {name} ({over})"
@@ -866,17 +869,19 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
         model_info = [model_name]
         if p.effort:
             model_info.append(f"{p.effort} effort")
-        pw = profile_weight(name, cfg, repo_root)
-        if pw in ("heavy", "advanced", "reasoning"):
-            cost_tier = "most expensive tier"
-        elif pw == "light":
-            cost_tier = "lowest cost tier"
-        else:
-            cost_tier = "medium cost tier"
-        cost_tag = f"; {cost_tier}"
-        return f" ({', '.join(model_info)}{cost_tag})"
+        tier = cost_tier(name, cfg, repo_root)
+        label = {"high": "most expensive tier", "low": "lowest cost tier"}.get(tier, "medium cost tier")
+        return f" ({', '.join(model_info)}; {label})"
     except Exception:
         return ""
+
+
+def cost_tier(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+    """How expensive profile ``name`` runs: "low", "medium" or "high", by its weight."""
+    pw = profile_weight(name, cfg, repo_root)
+    if pw in ("heavy", "advanced", "reasoning"):
+        return "high"
+    return "low" if pw == "light" else "medium"
 
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:

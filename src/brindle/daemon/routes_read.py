@@ -38,6 +38,9 @@ from brindle.service.dto import (
     DecisionDTO,
     GoalDTO,
     ProfileDTO,
+    RoutingDTO,
+    RoutingProfileDTO,
+    RoutingSettingDTO,
     SessionDTO,
     WorkspaceDTO,
 )
@@ -169,6 +172,34 @@ def get_config(request: Request) -> Any:
 
 
 @_json
+def get_routing(request: Request) -> Any:
+    """Each tier's profiles, the reviewer and the excluded providers, with the
+    scope each comes from, and every profile with what routing knows of it."""
+    from brindle import autopilot, providers
+
+    repo = _need_repo(request)
+    cfg = config.load_repo_config(repo)
+    scope_of = {str(path): scope for scope, path in config.scope_paths(repo).items()}
+    tiers = {t: RoutingSettingDTO(values=cfg.routing[t], source=scope_of.get(cfg.routing_sources[t], "default"))
+             for t in config.WEIGHTS}
+    installed = doctor.signin_providers()
+    rows = []
+    for p in profiles.list_profiles(repo):
+        # A provider with no CLI of its own (native) is always there.
+        here = p.provider not in doctor.CLI_INSTALL or p.provider in installed
+        rows.append(RoutingProfileDTO(
+            name=p.name, provider=p.provider, model=autopilot.effective_profile_model(p, repo) or None,
+            installed=here, signed_in=here and providers.signed_out(p.provider, p.env) is None,
+            excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, repo)))
+    return RoutingDTO(
+        tiers=tiers,
+        reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=config.setting_source(repo, "reviewer")),
+        exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers,
+                                            source=config.setting_source(repo, "exclude_providers")),
+        profiles=rows).to_json()
+
+
+@_json
 def get_doctor(request: Request) -> Any:
     return [dataclasses.asdict(c) for c in doctor.checks(_repo(request))]
 
@@ -209,6 +240,7 @@ ROUTES = [
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/profiles", list_profiles),
     Route("/v1/config", get_config),
+    Route("/v1/routing", get_routing),
     Route("/v1/doctor", get_doctor),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
