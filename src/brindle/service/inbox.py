@@ -38,7 +38,13 @@ BOX = re.compile(r"^[\s│┃╭╮╰╯─━]+|[\s│┃╭╮╰╯─━]+$
 # "Allow once" for each new request), Enter picking one. "Allow always" and a
 # subagent's "Reject" then ask once more, opening on Confirm.
 ROW_MENU = re.compile(r"(Allow once)\s+(Allow always)\s+(Reject)")
-ROW_FOLLOW_UP = re.compile(r"Always allow|Reject permission")
+# Those second steps, each recognized by its title and its own controls.
+ROW_FOLLOW_UP = {
+    "Allow always": (re.compile(r"Always allow"), re.compile(r"Confirm\s+Cancel")),
+    "Reject": (re.compile(r"Reject permission"), re.compile(r"Tell OpenCode what to do differently")),
+}
+WORDING_LINES = 12       # of a prompt, shown to the person
+CAPTURE_LINES = 200      # of a pane, read for its prompt (the fingerprint covers them all)
 STEP_SECONDS = 0.2       # between keys, and between looks at the pane or the hook
 CONFIRM_SECONDS = 5.0    # for the prompt to clear (or the hook to take the answer)
 
@@ -169,13 +175,16 @@ class Menu:
     "row", OpenCode's buttons on one line, moved through with Right."""
     layout: str
     options: list[str]
-    wording: str
+    wording: str      # its last lines, redacted, to show the person
+    above: str = ""   # everything captured above its options, as is
 
     @property
     def fingerprint(self) -> str:
         """Which prompt this is, whichever option is selected: what an answer
-        must still find on screen before each key it sends."""
-        return hashlib.sha256("\0".join([self.wording, *self.options]).encode()).hexdigest()[:16]
+        must still find on screen before each key it sends. Taken over the
+        whole capture above the options, unredacted, so a prompt that
+        differs anywhere (not only in the lines shown) is another prompt."""
+        return hashlib.sha256("\0".join([self.above, *self.options]).encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -223,7 +232,9 @@ def read_menu(screen: str) -> Menu:
     """The permission prompt at the bottom of ``screen``: its wording and its
     options (none when its layout is one brindle can't drive, such as
     Antigravity's "Yes / No", whose keys aren't known: answered in its pane)."""
-    lines = prompt_answer._tail(screen)
+    every = [ln.rstrip() for ln in prompt_answer.plain(screen).rstrip().splitlines()]
+    skip = max(0, len(every) - len(prompt_answer._tail(screen)))   # the options are at the bottom
+    lines = every[skip:]
     start, options = _menu(lines)
     layout = "list"
     if not options:
@@ -231,7 +242,8 @@ def read_menu(screen: str) -> Menu:
         start, options, layout = ((row, list(ROW_MENU.search(lines[row]).groups()), "row") if row is not None
                                   else (len(lines), [], "none"))
     wording = [BOX.sub("", ln) for ln in lines[:start]]
-    return Menu(layout, options, prompt_answer.redact("\n".join([ln for ln in wording if ln][-8:])))
+    return Menu(layout, options, prompt_answer.redact("\n".join([ln for ln in wording if ln][-WORDING_LINES:])),
+                "\n".join(every[:skip + start]))
 
 
 def _choices(menu: Menu) -> list[PermissionChoiceDTO]:
@@ -275,7 +287,7 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
     if not agent.tmux_window:
         return None
     try:
-        screen = tmux.capture(agent.tmux_window, lines=60, server=agents.server_of(agent))
+        screen = tmux.capture(agent.tmux_window, lines=CAPTURE_LINES, server=agents.server_of(agent))
     except tmux.TmuxError:
         return None
     if not get_provider(agent.provider).tool_permission(screen):
@@ -286,7 +298,7 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
     # What the hook recorded is this prompt only when the screen names it, and
     # it wasn't first shown as another prompt (an older request, asked again).
     row = next((r for r in rows if r["request"] != "null" and r["fingerprint"] in (None, fp)
-                and _on_screen(recorded(r), menu.wording)), None)
+                and _on_screen(recorded(r), menu.wording)), None)   # the prompt's own lines, not the transcript
     if row is not None and row["fingerprint"] is None:
         db.note_permission_fingerprint(agent.id, row["tool_use_id"], fp)
         row["fingerprint"] = fp
@@ -338,7 +350,7 @@ def _press(agent: Agent, menu: Menu, label: str) -> bool:
     provider, server = get_provider(agent.provider), agents.server_of(agent)
 
     def capture() -> str:
-        return tmux.capture(agent.tmux_window, lines=60, server=server)
+        return tmux.capture(agent.tmux_window, lines=CAPTURE_LINES, server=server)
 
     def same(screen: str) -> bool:
         return provider.tool_permission(screen) and read_menu(screen).fingerprint == menu.fingerprint
@@ -357,9 +369,18 @@ def _press(agent: Agent, menu: Menu, label: str) -> bool:
             if not same(capture()):
                 raise _Changed(agent.id)
             send(key)
-        follow_up = lambda: bool(ROW_FOLLOW_UP.search("\n".join(prompt_answer._tail(capture(), 12))))  # noqa: E731
-        if label != menu.options[0] and _until(follow_up, seconds=1.0):
-            send("Enter")   # its Confirm (opened on) for "Always allow"; an empty reason for a reject
+        if label in ROW_FOLLOW_UP:
+            title, controls = ROW_FOLLOW_UP[label]
+
+            def follow_up() -> bool:
+                """The second step this option opens, and no permission prompt
+                (this one, or a new one) in its place."""
+                tail = "\n".join(prompt_answer._tail(capture(), 12))
+                return bool(title.search(tail) and controls.search(tail)) and not (
+                    ROW_MENU.search(tail) or provider.tool_permission(tail))
+
+            if _until(follow_up, seconds=1.0):
+                send("Enter")   # its Confirm (opened on) for "Always allow"; an empty reason for a reject
         return cleared()
     want = prompt_answer.Decision("permission", label)
     seen = None

@@ -463,17 +463,21 @@ ROW = "   Allow once   Allow always   Reject"
 @pytest.mark.parametrize("provider,choice,case,status,keys,rule", [
     # The hook gave the request to the CLI's prompt: its own option, by its keys.
     ("claude", "allow_always", None, 200, ["Down", "Enter"], f"the CLI's own rule, as its option says: {OPTIONS[1]}"),
-    # Another command with the same options replaced the prompt before the first key: none goes in.
+    # Another command with the same options replaced the prompt before the first key, in a line
+    # above those shown: none goes in.
     ("claude", "allow_once", "replaced", 409, [], None),
     # Answered, and the same command asked again: a retry of the first answer doesn't answer the second.
     ("claude", "allow_once", "repeat", 409, ["Enter"], None),
     # OpenCode's buttons: Right to "Allow always", Enter, then Enter on its Confirm.
     ("opencode", "allow_always", None, 200, ["Right", "Enter", "Enter"],
      "the CLI's own rule, as its option says: Allow always"),
+    # A new request's prompt comes up where its Confirm would: it gets no Enter.
+    ("opencode", "allow_always", "next-request", 200, ["Right", "Enter"],
+     "the CLI's own rule, as its option says: Allow always"),
     ("claude", "allow_once", "locked", 409, [], None),
     pytest.param("claude", "allow_once", "agent", 403, [], None,
                  marks=pytest.mark.variant("an agent holding the token can't answer a permission prompt")),
-], ids=["keys", "replaced", "repeat", "opencode", "locked", "agent"])
+], ids=["keys", "replaced", "repeat", "opencode", "opencode-next-request", "locked", "agent"])
 def test_a_permission_answer_goes_into_the_prompt_it_was_shown(db, repo, world, answering, monkeypatch, provider,
                                                                choice, case, status, keys, rule):
     from brindle import identity_lock, tmux
@@ -493,13 +497,17 @@ def test_a_permission_answer_goes_into_the_prompt_it_was_shown(db, repo, world, 
             if pane["stage"] == "always":
                 return "△ Always allow\nThis will allow the following patterns until OpenCode is restarted\n   Confirm   Cancel"
             return f"△ Permission required\n$ {pane['command']}\n{ROW}"
-        return f"Bash command\n  {pane['command']}\nDo you want to proceed?\n" + "\n".join(
-            f"{'❯' if i == pane['at'] else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))
+        # A long command: its first line is above the lines the app is shown.
+        return (f"Bash command\n  {pane['command']} \\\n" + "    --step \\\n" * 14 + "    --done\n"
+                "Do you want to proceed?\n" + "\n".join(
+                    f"{'❯' if i == pane['at'] else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS)))
 
     def send_keys(target, key, server=None):
         pressed.append(key)
         pane["at"] += key in ("Down", "Right")
-        if key == "Enter":
+        if key == "Enter" and case == "next-request" and pane["stage"] == "ask":
+            pane.update(stage="next", at=0, command="git push --force")
+        elif key == "Enter":
             pane["stage"] = "always" if provider == "opencode" and pane["at"] == 1 and pane["stage"] == "ask" else "done"
 
     monkeypatch.setattr(tmux, "capture", capture)
