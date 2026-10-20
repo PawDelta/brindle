@@ -226,7 +226,12 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         hold = live.get(row["tool_use_id"])
         if hold is None:
             if row["channel"] == "hook":
-                db.update_permission_request(agent.id, row["tool_use_id"], channel="prompt")
+                if agent.provider == "claude":
+                    # Kept: its PostToolUse pairs with it (agents.note_permission_outcome).
+                    db.update_permission_request(agent.id, row["tool_use_id"], channel="prompt")
+                else:
+                    # Nothing pairs with it and its hook is gone (the CLI cancelled the call).
+                    db.pop_permission_request(agent.id, lambda r, t=row["tool_use_id"]: r["tool_use_id"] == t)
             continue
         req = permissions.Request.from_dict(json.loads(row["request"]))
         suggestions = json.loads(row["suggestions"]) if row["suggestions"] else None

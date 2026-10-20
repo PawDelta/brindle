@@ -829,6 +829,32 @@ def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
     assert not agy_settings.exists()
 
 
+def test_agy_sync_leaves_the_real_home_alone_under_another_brindle_home(ws, monkeypatch, tmp_path):
+    home = tmp_path / "realhome"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(antigravity, "settings_path", antigravity._default_settings_path)
+    assert antigravity.sync_permissions(ws.repo_root, on=True, checks=[]) == ([], [])
+    assert not (home / ".gemini").exists()
+
+
+def test_allow_always_never_offers_a_session_wide_mode():
+    rule = {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
+            "behavior": "allow", "destination": "localSettings"}
+    mode = {"type": "setMode", "mode": "acceptEdits", "destination": "session"}
+    assert permissions.persistent_suggestions([mode, rule]) == [rule]
+    assert permissions.persistent_suggestions([mode]) is None
+
+
+def test_a_dead_codex_hooks_request_row_is_removed(db, ws):
+    from brindle.service import inbox
+
+    a = worker(db, ws)
+    db.add_permission_request(a.id, "r1", json.dumps(permissions.Request("codex", "bash", "Bash").to_dict()),
+                              "asking", None, "hook", hold_until=time.time() + 60)
+    assert inbox.pending_permissions(db, a) == []   # no daemon holds it: the hook died
+    assert db.permission_requests_of(a.id) == []
+
+
 def test_agy_mirror_never_widens_an_allow():
     rules = [Rule("bash", "echo $(id)", "exact", "allow"),     # brindle never allows it
              Rule("bash", "npm *", "glob", "allow"),           # agy can't say it as narrowly
