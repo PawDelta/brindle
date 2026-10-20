@@ -161,17 +161,31 @@ def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, a
 SECRET = "sk-ant-daemon-test-0123456789wxyz"
 
 
-@pytest.mark.parametrize("name,peer_pid,status", [
-    ("ANTHROPIC_API_KEY", None, 200),
-    pytest.param("ANTHROPIC_API_KEY", 310, 403, marks=pytest.mark.variant("an agent holding the token")),
-    ("BRINDLE_TOKEN", None, 400),
-], ids=["stored", "agent", "unknown-name"])
-def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, monkeypatch, provider_http,
-                                                                     name, peer_pid, status):
-    from brindle import keystore
+@pytest.mark.parametrize("name,value,peer_pid,status", [
+    ("ANTHROPIC_API_KEY", SECRET, None, 200),
+    pytest.param("ANTHROPIC_API_KEY", SECRET, 310, 403, marks=pytest.mark.variant("an agent holding the token")),
+    ("BRINDLE_TOKEN", SECRET, None, 400),
+    # http.client refuses the header, quoting the whole value in its error.
+    ("ANTHROPIC_API_KEY", SECRET + "\nsecond-line", None, 422),
+], ids=["stored", "agent", "unknown-name", "bad-header"])
+def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, monkeypatch, provider_http, caplog,
+                                                                     name, value, peer_pid, status):
+    import http.client
 
+    from brindle import key_check, keystore
+
+    answer = key_check._get
+
+    def checked_get(url, headers):      # the header check urllib makes before connecting
+        conn = http.client.HTTPConnection("localhost")
+        conn.putrequest("GET", "/")
+        for k, v in headers.items():
+            conn.putheader(k, v)
+        return answer(url, headers)
+
+    monkeypatch.setattr(key_check, "_get", checked_get)
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
-    code, reply = _send("PUT", f"/v1/keys/{name}", {"value": SECRET}, peer_pid)
+    code, reply = _send("PUT", f"/v1/keys/{name}", {"value": value}, peer_pid)
     assert code == status, reply
     stored = keystore.get_key("ANTHROPIC_API_KEY")
     if status == 200:
@@ -181,6 +195,7 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
     else:
         assert stored is None and provider_http["calls"] == []
     assert SECRET not in json.dumps(reply) and SECRET not in json.dumps(bus.tail(db))
+    assert SECRET not in caplog.text
 
 
 @pytest.mark.parametrize("path,status,command", [
