@@ -154,8 +154,51 @@ def kb_sources(request: Request) -> Any:
 
 
 @_json
+def kb_search(request: Request) -> Any:
+    """The best chunks for ``q`` among the repo's indexed, non-quarantined
+    documents (kb.search): heading path, text, source link and date. No
+    query, no hits."""
+    return kb.search(DB(), knowledge.repo_key(_need_repo(request)), request.query_params.get("q", ""))
+
+
+@_json
 def list_profiles(request: Request) -> Any:
     return [ProfileDTO.from_profile(p).to_json() for p in profiles.list_profiles(_repo(request))]
+
+
+@_json
+def get_profile(request: Request) -> Any:
+    """One profile as ``brindle profile show`` resolves it (its fields, where
+    it is read from, the extends chain, its rule packs and the full prompt;
+    never env, whose values can be secrets) with ``brindle profile lint``'s
+    findings for it: ``{**ProfileDTO, source, extends, rules, prompt, lint}``."""
+    from brindle.cli import _lint_one   # the lint `brindle profile lint` runs; one definition
+
+    repo, name = _repo(request), request.path_params["name"]
+    errors, warnings = _lint_one(name, repo)
+    try:
+        p = profiles.load_profile(name, repo)
+    except (KeyError, profiles.ProfileError) as e:
+        # Written but unresolvable (a cycle, a missing parent): as written, the lint saying why.
+        p = next((x for x in profiles.list_profiles(repo) if x.name == name), None)
+        if p is None:
+            raise ServiceError("not_found", f"no profile {name}", 404) from e
+    try:
+        packs = profiles.load_rule_packs(p, repo)
+    except (KeyError, profiles.ProfileError):
+        packs = []
+    chain, parent = [], p.extends
+    while parent and parent not in chain:
+        chain.append(parent)
+        try:
+            parent = profiles.load_profile(parent, repo).extends
+        except (KeyError, profiles.ProfileError):
+            break
+    prompt = f"{p.prompt.strip()}\n\n{profiles.rules_prompt(packs)}".strip() if packs else p.prompt.strip()
+    return {**ProfileDTO.from_profile(p).to_json(),
+            "source": profiles.profile_source(name, repo), "extends": chain,
+            "rules": [{"name": k.name, "description": k.description, "source": k.source} for k in packs],
+            "prompt": prompt, "lint": {"errors": errors, "warnings": warnings}}
 
 
 @_json
@@ -212,7 +255,19 @@ def account(request: Request) -> Any:
         ent = license.current(refresh=False)
     except license.LicenseError:
         return AccountDTO(signed_in=False).to_json()
-    return AccountDTO(signed_in=True, plan=ent.plan).to_json()
+    # Signed in, the DTO carries more: the org, status, features, seats, role,
+    # expiry and grace, and whether hosted learning is on, with the learner's
+    # kept note for `repo` when it said anything. Never the tokens.
+    from brindle import learning
+
+    on = "learning" in ent.features and not ent.in_grace
+    repo = _repo(request)
+    note = learning.kept_note(config.load_repo_config(repo), repo) if on and repo else None
+    return {**AccountDTO(signed_in=True, plan=ent.plan).to_json(),
+            "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
+            "seats": ent.seats, "role": ent.role, "expires_at": ent.exp,
+            "in_grace": ent.in_grace, "grace_until": ent.grace_until,
+            "learning": on, "learning_note": note}
 
 
 @_json
@@ -238,7 +293,9 @@ ROUTES = [
     Route("/v1/workspaces/{id:path}/diff", diff),
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
+    Route("/v1/kb/search", kb_search),
     Route("/v1/profiles", list_profiles),
+    Route("/v1/profiles/{name}", get_profile),
     Route("/v1/config", get_config),
     Route("/v1/routing", get_routing),
     Route("/v1/doctor", get_doctor),
