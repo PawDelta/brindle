@@ -105,3 +105,14 @@ def test_non_ollama_endpoint_has_no_context_check(repo, serve):
     assert context_checks(repo) == []
     assert runner.server_context(runner.Endpoint(fake.base_url + "/v1", "tiny")) is None
     assert fake.show_requests == []
+
+
+def test_doctor_daemon_reports_live_and_stale_pid(tmp_path, monkeypatch):
+    from brindle import procs
+
+    (tmp_path / "daemon.json").write_text(json.dumps({"pid": 4242}))
+    monkeypatch.setattr(procs, "alive", lambda pid: True)
+    [live] = doctor.daemon_checks(tmp_path)
+    monkeypatch.setattr(procs, "alive", lambda pid: False)
+    [stale] = doctor.daemon_checks(tmp_path)
+    assert (live.level, stale.level) == (doctor.OK, doctor.WARN)

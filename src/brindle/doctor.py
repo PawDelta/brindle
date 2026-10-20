@@ -322,6 +322,7 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(Check(OK, "sidebar",
                      "`brindle sidebar` (or prefix S in tmux) brings a lost sidebar back to the session you're in"))
 
+    out.extend(daemon_checks())
     out.extend(native_checks(repo_root))
     out.extend(override_checks())
     out.extend(quota_checks(repo_root))
@@ -679,6 +680,24 @@ def quota_checks(repo_root: str | None) -> list[Check]:
         if n:
             out.append(Check(WARN if quota.headroom(p) <= 10 else OK, f"{p} quota", n))
     return out
+
+
+def daemon_checks(home: Path | None = None) -> list[Check]:
+    """Whether the daemon is running, from the pid in its ``daemon.json``."""
+    import json
+
+    from brindle import config, procs
+
+    path = (home or config.brindle_home()) / "daemon.json"
+    try:
+        pid = json.loads(path.read_text()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        return [Check(OK, "daemon", "not running")]
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return [Check(WARN, "daemon", f"{path} has no pid; restart the daemon to rewrite it")]
+    if procs.alive(pid):
+        return [Check(OK, "daemon", f"running (pid {pid})")]
+    return [Check(WARN, "daemon", f"not running: {path} is left from pid {pid}, which is gone")]
 
 
 MARK = {OK: "✓", WARN: "!", FAIL: "✗"}
