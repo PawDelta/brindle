@@ -74,13 +74,17 @@ def _agent_panes() -> dict[str, list[int]]:
 
 
 def agent_caller(pid: int) -> str | None:
-    """The id of the brindle agent that process ``pid`` belongs to (it has
+    """Why process ``pid`` is refused: it belongs to a brindle agent (it has
     BRINDLE_AGENT_ID in its environment, or it or an ancestor is one of a
-    live agent's processes), or None for anyone else's."""
+    live agent's processes), or it can't be checked. None for anyone else's."""
     table = procs.table()
     me = table.get(pid)
-    if me and (m := re.search(r"(?:^|\s)BRINDLE_AGENT_ID=(\S+)", me.text)):
-        return m.group(1)
+    if me is None:
+        # Gone already (a request sent before exiting) or not this user's:
+        # unchecked is refused, or an agent could fire and exit.
+        return "the caller can't be checked (it exited, or isn't this user's process)"
+    if (m := re.search(r"(?:^|\s)BRINDLE_AGENT_ID=(\S+)", me.text)):
+        return f"the caller runs under brindle agent {m.group(1)}"
     chain, p = set(), pid
     while p in table and p not in chain:
         chain.add(p)
@@ -88,4 +92,5 @@ def agent_caller(pid: int) -> str | None:
     panes = _agent_panes()
     owned = procs.agent_pids(procs.all_agent_ids(table) | set(panes), panes, table,
                              through_ancestors=True)
-    return next((aid for aid, pids in owned.items() if pids & chain), None)
+    return next((f"the caller runs under brindle agent {aid}"
+                 for aid, pids in owned.items() if pids & chain), None)

@@ -57,9 +57,9 @@ class Guard:
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         origin_ok = "origin" not in headers or headers["origin"] in self._origins
         # Only the Unix socket names its caller: over TCP the token is all that keeps agents out.
-        agent = await self._agent_caller(scope[peer.PEER_PID]) if peer.PEER_PID in scope else None
+        refused = await self._agent_caller(scope[peer.PEER_PID]) if peer.PEER_PID in scope else None
         if scope["type"] == "websocket":
-            if not origin_ok or agent:
+            if not origin_ok or refused:
                 await send({"type": "websocket.close", "code": 1008})   # refused before the handshake: a 403
                 return
             await self._websocket(scope, receive, send)
@@ -67,10 +67,9 @@ class Guard:
         if not origin_ok:
             await _reject(send, 403, "forbidden", "requests from another origin are refused")
             return
-        if agent:
+        if refused:
             await _reject(send, 403, "agent_caller",
-                          f"refused: the caller runs under brindle agent {agent}; "
-                          "the daemon serves the app and people, not agents")
+                          f"refused: {refused}; the daemon serves the app and people, not agents")
             return
         scheme, _, token = headers.get("authorization", "").partition(" ")
         if scheme.lower() != "bearer" or not self._token_ok(token):

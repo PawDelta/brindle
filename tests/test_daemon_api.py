@@ -164,6 +164,7 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     (310, "w1"),     # a command under w1's pane, however deep
     (420, "w2"),     # BRINDLE_AGENT_ID in its own environment
     (410, None),     # a person's terminal
+    (999, "can't be checked"),   # exited before the check: fire and forget
 ])
 def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as):
     table = {p.pid: p for p in [
