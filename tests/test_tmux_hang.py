@@ -15,6 +15,7 @@ an empty pane list, the cull would have killed every agent's processes too.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 
@@ -239,3 +240,28 @@ def test_attach_fails_fast_on_a_hung_server(db, repo, hung_tmux):
     with pytest.raises((SystemExit, typer.Exit)):
         cli._attach(ws)
     assert time.time() - t0 < 5
+
+
+def test_tmux_bin_override_and_pane_streaming_controls(tmp_path, monkeypatch):
+    real = shutil.which("tmux")
+    wrapper = tmp_path / "custom-tmux"
+    log = tmp_path / "custom.log"
+    wrapper.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real}" "$@"\n')
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("BRINDLE_TMUX_BIN", str(tmp_path / "missing-tmux"))
+    with pytest.raises(tmux.TmuxError):
+        tmux._tmux("list-sessions")
+    monkeypatch.setenv("BRINDLE_TMUX_BIN", str(wrapper))
+    tmux.ensure_session("brindle_pipe", str(tmp_path), {})
+    target = "=brindle_pipe:"
+    tmux.set_window_size_manual(target)
+    tmux.resize_window(target, 132, 43)
+    out = tmp_path / "pane out.bin"
+    tmux.pipe_pane(target, out)
+    info = tmux._tmux("display-message", "-p", "-t", target,
+                      "#{window_width}x#{window_height} #{pane_pipe}").stdout.strip()
+    assert info == "132x43 1"
+    assert tmux._tmux("show-options", "-w", "-v", "-t", target, "window-size").stdout.strip() == "manual"
+    tmux.unpipe_pane(target)
+    assert tmux._tmux("display-message", "-p", "-t", target, "#{pane_pipe}").stdout.strip() == "0"
+    assert f"pipe-pane -O -t {target} cat >> '{out}'" in log.read_text()
