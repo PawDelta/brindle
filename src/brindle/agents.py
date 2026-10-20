@@ -2978,10 +2978,12 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             suggestions = payload.get("permission_suggestions")
             suggestions = suggestions if isinstance(suggestions, list) and suggestions else None
             app = _app_open()
-            db.add_permission_request(agent.id, request_id, json.dumps(req.to_dict()), decision.reason,
-                                      json.dumps(suggestions) if suggestions else None,
+            recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+            db.add_permission_request(agent.id, request_id, recorded[0], decision.reason, recorded[1],
                                       "hook" if app else None)
-            answer = _await_app_answer(db, agent, request_id, req) if app else None
+            # Only an answer to exactly this request and these suggestions counts.
+            answer = (_await_app_answer(db, agent, request_id, req, permissions.request_digest(*recorded))
+                      if app else None)
             if answer:
                 return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
@@ -3005,24 +3007,19 @@ def _app_open() -> bool:
         return False
 
 
-def _await_app_answer(db: DB, agent: Agent, tool_use_id: str, req) -> str | None:
+def _await_app_answer(db: DB, agent: Agent, tool_use_id: str, req, digest: str) -> str | None:
     """The person's answer from the app's inbox (service.inbox.answer_permission)
     to a request the hook left to them, or None after APP_ANSWER_WAIT: then
     the request goes to the CLI's own prompt, answered there or from the app
     by its keys. The agent shows waiting meanwhile, as at that prompt. Only
-    an answer the daemon signed counts (permissions.answer_verified): one
-    written into the database by anything else sends the request to the
-    prompt instead."""
-    from brindle import permissions
-
+    an answer to the request as the hook recorded it (``digest``) counts:
+    one to a stored request changed meanwhile sends it to the prompt instead."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
     deadline = time.monotonic() + APP_ANSWER_WAIT
     while True:
         late = time.monotonic() >= deadline
-        answer = db.take_permission_answer(
-            agent.id, tool_use_id, lambda a, mac: permissions.answer_verified(agent.id, tool_use_id, a, mac),
-            give_up=late)
+        answer = db.take_permission_answer(agent.id, tool_use_id, digest, give_up=late)
         if answer is not None or late:
             break
         time.sleep(APP_ANSWER_POLL)

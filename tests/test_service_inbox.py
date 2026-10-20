@@ -109,25 +109,24 @@ WORDING = ("1. No, skip the tests\n2. Yes, run them\nBash command\nnpm test\nRun
 BUSY = "✳ Clauding… (12s · esc to interrupt)\n\n❯ \n"
 
 
-@pytest.mark.parametrize("provider, channel, recorded, screen, target, bound, choices, wording", [
+@pytest.mark.parametrize("provider, channel, recorded, screen, target, bound, choices, wording, terminal", [
     # brindle's hook holds it, whatever the pane shows meanwhile: Claude Code's own
     # suggestion is what allow-always writes.
     ("claude", "hook", "npm test", BUSY, "npm test", True,
      [("allow_once", "Allow once", None),
       ("allow_always", "Allow always", "Claude Code's own rule: allow Bash(npm test:*) (localSettings)"),
-      ("deny", "Deny", None)], None),
-    # The CLI's own prompt is on screen: its wording and its menu's options.
-    ("claude", "prompt", "npm test", PROMPT, "npm test", True, ON_SCREEN, WORDING),
-    # An older recorded request isn't what the prompt asks: only the screen speaks, as a request of its own.
-    ("claude", "prompt", "rm -rf build", PROMPT, None, False, ON_SCREEN, WORDING),
-    # OpenCode's buttons on one line.
+      ("deny", "Deny", None)], None, None),
+    # The CLI's own prompt is on screen, for the request the hook recorded whole: its menu's options.
+    ("claude", "prompt", "npm test", PROMPT, "npm test", True, ON_SCREEN, WORDING, None),
+    # An older recorded request isn't what the prompt asks, and the screen alone may not show
+    # all of it: the agent's terminal only.
+    ("claude", "prompt", "rm -rf build", PROMPT, None, False, [], WORDING, "unknown"),
+    # OpenCode's buttons on one line show no selection brindle can read: its terminal only.
     ("opencode", None, None, "┃ △ Permission required\n┃ $ npm test\n   Allow once   Allow always   Reject",
-     None, False, [("allow_once", "Allow once", None),
-                   ("allow_always", "Allow always", "the CLI's own rule, as its option says: Allow always"),
-                   ("deny", "Reject", None)], "△ Permission required\n$ npm test"),
+     None, False, [], "△ Permission required\n$ npm test", "row"),
 ], ids=["hook", "prompt", "prompt-stale-record", "opencode"])
 def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, provider, channel, recorded,
-                                                                   screen, target, bound, choices, wording):
+                                                                   screen, target, bound, choices, wording, terminal):
     from brindle import permissions, tmux
 
     monkeypatch.setattr(tmux, "capture", lambda target, **kw: screen)
@@ -141,5 +140,8 @@ def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monk
     assert [(i.kind, i.root_id, i.permission.via, i.permission.target, i.permission.wording) for i in got] == [
         ("permission", "r1", channel or "prompt", target, wording)]
     assert [(c.choice, c.label, c.rule) for c in got[0].permission.choices] == choices
-    # The answer must name this request: the recorded one when the screen shows it.
+    assert got[0].permission.terminal == (terminal and inbox.TERMINAL[terminal])
+    # The answer must name this request, as recorded: the hook's own when the screen shows it.
     assert (got[0].permission.request_id == "tu1") == bound
+    assert got[0].permission.digest == (bound and permissions.request_digest(
+        json.dumps(req.to_dict()), json.dumps(SUGGESTED)) or None)

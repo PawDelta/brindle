@@ -642,7 +642,7 @@
           "type": "object"
         },
         "PermissionDTO": {
-          "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {request: request_id, choice}, refused for\nany request but the one shown. ``via``: \"hook\" (brindle's hook holds the\nrequest and takes the answer) or \"prompt\" (the CLI's own prompt is on\nscreen; the answer goes in as its keys). No ``choices``: a prompt brindle\ncan't answer, to answer in the agent's terminal.",
+          "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {request: request_id, digest, choice},\nrefused for any request but the one shown, exactly as shown. ``via``:\n\"hook\" (brindle's hook holds the request and takes the answer) or\n\"prompt\" (the CLI's own prompt is on screen; the answer goes in as its\nkeys). ``terminal``: why it can only be answered in the agent's own\nterminal (the app's \"Go to it\", with the item's root_id and agent_id);\nit then has no ``choices``.",
           "properties": {
             "choices": {
               "default": [],
@@ -651,6 +651,18 @@
               },
               "title": "Choices",
               "type": "array"
+            },
+            "digest": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Digest"
             },
             "kind": {
               "anyOf": [
@@ -679,6 +691,18 @@
               ],
               "default": null,
               "title": "Target"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Terminal"
             },
             "tool": {
               "anyOf": [
@@ -1014,7 +1038,7 @@
           "type": "object"
         }
       },
-      "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {request: request_id, choice}, refused for\nany request but the one shown. ``via``: \"hook\" (brindle's hook holds the\nrequest and takes the answer) or \"prompt\" (the CLI's own prompt is on\nscreen; the answer goes in as its keys). No ``choices``: a prompt brindle\ncan't answer, to answer in the agent's terminal.",
+      "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {request: request_id, digest, choice},\nrefused for any request but the one shown, exactly as shown. ``via``:\n\"hook\" (brindle's hook holds the request and takes the answer) or\n\"prompt\" (the CLI's own prompt is on screen; the answer goes in as its\nkeys). ``terminal``: why it can only be answered in the agent's own\nterminal (the app's \"Go to it\", with the item's root_id and agent_id);\nit then has no ``choices``.",
       "properties": {
         "choices": {
           "default": [],
@@ -1023,6 +1047,18 @@
           },
           "title": "Choices",
           "type": "array"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Digest"
         },
         "kind": {
           "anyOf": [
@@ -1051,6 +1087,18 @@
           ],
           "default": null,
           "title": "Target"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal"
         },
         "tool": {
           "anyOf": [

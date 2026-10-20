@@ -88,16 +88,20 @@ class PermissionChoiceDTO(_DTO):
 
 class PermissionDTO(_DTO):
     """A tool-permission request waiting on the person: POST
-    /inbox/{agent_id}/permission {request: request_id, choice}, refused for
-    any request but the one shown. ``via``: "hook" (brindle's hook holds the
-    request and takes the answer) or "prompt" (the CLI's own prompt is on
-    screen; the answer goes in as its keys). No ``choices``: a prompt brindle
-    can't answer, to answer in the agent's terminal."""
+    /inbox/{agent_id}/permission {request: request_id, digest, choice},
+    refused for any request but the one shown, exactly as shown. ``via``:
+    "hook" (brindle's hook holds the request and takes the answer) or
+    "prompt" (the CLI's own prompt is on screen; the answer goes in as its
+    keys). ``terminal``: why it can only be answered in the agent's own
+    terminal (the app's "Go to it", with the item's root_id and agent_id);
+    it then has no ``choices``."""
     via: str
     request_id: str
+    digest: str | None = None     # of the exact request and suggested rule shown
+    terminal: str | None = None
     tool: str | None = None
     kind: str | None = None      # brindle.permissions.KINDS
-    target: str | None = None    # the command, path or URL
+    target: str | None = None    # the command, path or URL, complete
     wording: str | None = None   # the prompt as the provider words it
     choices: list[PermissionChoiceDTO] = []
 

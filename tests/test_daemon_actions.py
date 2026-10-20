@@ -376,15 +376,9 @@ BRINDLE_RULE = "brindle's permission rule: allow bash exact 'npm test' (applies 
 
 @pytest.fixture
 def answering(db, world, monkeypatch):
-    """A daemon that started just now and wrote daemon.json, signing with
-    TOKEN; the hook and the pane are quick to look at."""
-    from brindle.daemon import lifecycle
+    """The hook and the pane are quick to look at."""
     from brindle.service import inbox
 
-    info = {"pid": 1, "token": TOKEN}
-    lifecycle.info_path().write_text(json.dumps(info))
-    monkeypatch.setattr(lifecycle, "running", lambda: info)
-    monkeypatch.setattr(lifecycle, "_started_at", lambda pid: time.time())
     monkeypatch.setattr(agents, "APP_ANSWER_POLL", 0.01)
     monkeypatch.setattr(agents, "APP_ANSWER_WAIT", 2.0)
     monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
@@ -409,29 +403,27 @@ def _brindle_allows_npm_test() -> bool:
     ("deny", True, None, 200, DENIED, None),
     # A deny already in flight holds the request: this answer is refused and writes nothing.
     ("allow_always", False, "in-flight", 409, None, None),
-    # The hook gives up between the claim and the signature: the rule written meanwhile goes again.
+    # The hook gives up between the claim and the hand-over: the rule written meanwhile goes again.
     ("allow_always", False, "lost", 409, None, None),
-    # Written into the database, not signed by the daemon: the CLI's prompt asks instead.
-    ("allow_once", True, "forged", None, None, None),
-    # Signed with the token of a daemon.json rewritten since the daemon started: no answer either.
-    ("allow_once", True, "rewritten", 200, None, None),
-], ids=["once", "always-brindle", "always-claude", "deny", "in-flight", "lost", "forged", "rewritten"])
+    # The stored request changed while the hook waits: an answer to what is stored now is no
+    # answer to the request the hook recorded, and the CLI's prompt asks instead.
+    ("allow_once", True, "mutated", 200, None, None),
+], ids=["once", "always-brindle", "always-claude", "deny", "in-flight", "lost", "mutated"])
 def test_a_permission_answer_resolves_through_the_hook(db, repo, answering, monkeypatch, choice,
                                                        suggested, race, status, decision, rule):
-    from brindle.daemon import lifecycle
+    from brindle import permissions
     from brindle.db import DB
+    from brindle.service import inbox
 
     monkeypatch.setattr(agents, "_app_open", lambda: True)
-    if race == "rewritten":     # daemon.json changed just now, an hour after the daemon started
-        monkeypatch.setattr(lifecycle, "_started_at", lambda pid: time.time() - 3600)
     if race == "lost":
-        sign = DB.sign_permission_answer
+        release = DB.release_permission_answer
 
-        def hook_gives_up_first(self, agent_id, request_id, mac):
+        def hook_gives_up_first(self, agent_id, request_id, digest):
             self.conn.execute("UPDATE permission_requests SET channel='prompt' WHERE tool_use_id=?", (request_id,))
-            return sign(self, agent_id, request_id, mac)
+            return release(self, agent_id, request_id, digest)
 
-        monkeypatch.setattr(DB, "sign_permission_answer", hook_gives_up_first)
+        monkeypatch.setattr(DB, "release_permission_answer", hook_gives_up_first)
     asked, publish = threading.Event(), bus.publish_agent
     monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
         kind == "permission.pending" and asked.set(), publish(d, kind, *a, **k))[1])
@@ -443,12 +435,14 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, answering, monk
     request_id = db.hook_permission_request("wk")["tool_use_id"]
     if race == "in-flight":
         assert db.claim_permission_answer("wk", request_id, "deny")
-    if race == "forged":
-        assert db.claim_permission_answer("wk", request_id, choice)
-        db.sign_permission_answer("wk", request_id, "0" * 64)
-    else:
-        code, reply = _send("POST", "/v1/inbox/wk/permission", {"request": request_id, "choice": choice})
-        assert code == status, reply
+    if race == "mutated":
+        swapped = permissions.Request("claude", "bash", "Bash", command="rm -rf important-data")
+        db.conn.execute("UPDATE permission_requests SET request=? WHERE tool_use_id=?",
+                        (json.dumps(swapped.to_dict()), request_id))
+    shown = inbox.pending_permission(db, wk).dto      # what the app's inbox item carries
+    code, reply = _send("POST", "/v1/inbox/wk/permission",
+                        {"request": shown.request_id, "digest": shown.digest, "choice": choice})
+    assert code == status, reply
     hook.join(5)
     assert out == [decision and {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}]
     assert _brindle_allows_npm_test() == (rule == BRINDLE_RULE)
@@ -463,21 +457,18 @@ ROW = "   Allow once   Allow always   Reject"
 @pytest.mark.parametrize("provider,choice,case,status,keys,rule", [
     # The hook gave the request to the CLI's prompt: its own option, by its keys.
     ("claude", "allow_always", None, 200, ["Down", "Enter"], f"the CLI's own rule, as its option says: {OPTIONS[1]}"),
-    # Another command with the same options replaced the prompt before the first key, in a line
-    # above those shown: none goes in.
+    # Another command with the same options replaced the prompt before the first key: none goes in.
     ("claude", "allow_once", "replaced", 409, [], None),
     # Answered, and the same command asked again: a retry of the first answer doesn't answer the second.
     ("claude", "allow_once", "repeat", 409, ["Enter"], None),
-    # OpenCode's buttons: Right to "Allow always", Enter, then Enter on its Confirm.
-    ("opencode", "allow_always", None, 200, ["Right", "Enter", "Enter"],
-     "the CLI's own rule, as its option says: Allow always"),
-    # A new request's prompt comes up where its Confirm would: it gets no Enter.
-    ("opencode", "allow_always", "next-request", 200, ["Right", "Enter"],
-     "the CLI's own rule, as its option says: Allow always"),
+    # A command longer than the prompt lines shown: never answered blind, its terminal only.
+    ("claude", "allow_once", "long", 409, [], None),
+    # OpenCode's buttons show no selection to check before Enter: its terminal only.
+    ("opencode", "allow_once", None, 409, [], None),
     ("claude", "allow_once", "locked", 409, [], None),
     pytest.param("claude", "allow_once", "agent", 403, [], None,
                  marks=pytest.mark.variant("an agent holding the token can't answer a permission prompt")),
-], ids=["keys", "replaced", "repeat", "opencode", "opencode-next-request", "locked", "agent"])
+], ids=["keys", "replaced", "repeat", "long", "opencode", "locked", "agent"])
 def test_a_permission_answer_goes_into_the_prompt_it_was_shown(db, repo, world, answering, monkeypatch, provider,
                                                                choice, case, status, keys, rule):
     from brindle import identity_lock, tmux
@@ -485,7 +476,9 @@ def test_a_permission_answer_goes_into_the_prompt_it_was_shown(db, repo, world, 
 
     db.add_agent(Agent("oc", "w-1", "developer", "opencode", "sup", "assign", "waiting", "%3", None, time.time()))
     agent_id = {"claude": "wk", "opencode": "oc"}[provider]
-    pane, pressed = {"command": "npm test", "at": 0, "stage": "ask", "looks": 0}, []
+    # A long command's first line ends up above the prompt lines the app is shown.
+    command = "npm test \\\n" + "    --step \\\n" * 14 + "    --done" if case == "long" else "npm test"
+    pane, pressed = {"command": command, "at": 0, "stage": "ask", "looks": 0}, []
 
     def capture(target, **kw):
         pane["looks"] += 1
@@ -494,31 +487,25 @@ def test_a_permission_answer_goes_into_the_prompt_it_was_shown(db, repo, world, 
         if pane["stage"] == "done":
             return "❯ \n? for shortcuts"
         if provider == "opencode":
-            if pane["stage"] == "always":
-                return "△ Always allow\nThis will allow the following patterns until OpenCode is restarted\n   Confirm   Cancel"
             return f"△ Permission required\n$ {pane['command']}\n{ROW}"
-        # A long command: its first line is above the lines the app is shown.
-        return (f"Bash command\n  {pane['command']} \\\n" + "    --step \\\n" * 14 + "    --done\n"
-                "Do you want to proceed?\n" + "\n".join(
-                    f"{'❯' if i == pane['at'] else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS)))
+        return f"Bash command\n  {pane['command']}\nDo you want to proceed?\n" + "\n".join(
+            f"{'❯' if i == pane['at'] else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))
 
     def send_keys(target, key, server=None):
         pressed.append(key)
-        pane["at"] += key in ("Down", "Right")
-        if key == "Enter" and case == "next-request" and pane["stage"] == "ask":
-            pane.update(stage="next", at=0, command="git push --force")
-        elif key == "Enter":
-            pane["stage"] = "always" if provider == "opencode" and pane["at"] == 1 and pane["stage"] == "ask" else "done"
+        pane["at"] += key == "Down"
+        pane["stage"] = "done" if key == "Enter" else pane["stage"]
 
     monkeypatch.setattr(tmux, "capture", capture)
     monkeypatch.setattr(tmux, "send_keys", send_keys)
     monkeypatch.setattr(agents, "_app_open", lambda: False)
     if provider == "claude":    # no app to wait for: the hook records it and the CLI prompts as usual
-        assert agents.permission_request_decision(db, db.get_agent("wk"), {**ASK, "cwd": str(repo)}) is None
+        ask = {**ASK, "cwd": str(repo), "tool_input": {"command": command}}
+        assert agents.permission_request_decision(db, db.get_agent("wk"), ask) is None
     if case == "locked":
         monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "another@example.com")
-    request_id = inbox.pending_permission(db, db.get_agent(agent_id)).dto.request_id
-    body = {"request": request_id, "choice": choice}
+    shown = inbox.pending_permission(db, db.get_agent(agent_id)).dto     # what the app's inbox item carries
+    body = {"request": shown.request_id, "digest": shown.digest, "choice": choice}
     if case == "repeat":
         assert _send("POST", f"/v1/inbox/{agent_id}/permission", body)[0] == 200
         pane["stage"] = "ask"

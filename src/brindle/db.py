@@ -372,7 +372,7 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
     channel TEXT,                   -- hook | prompt | answering | answered
     answer TEXT,                    -- allow_once | allow_always | deny
-    answer_mac TEXT,                -- the daemon's signature of it (permissions.answer_mac)
+    answer_digest TEXT,             -- the request it answers (permissions.request_digest)
     fingerprint TEXT,               -- the prompt on screen it was shown as (service.inbox)
     PRIMARY KEY (agent_id, tool_use_id)
 );
@@ -913,7 +913,7 @@ class DB:
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
         request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
-        for col in ("suggestions", "channel", "answer", "answer_mac", "fingerprint"):
+        for col in ("suggestions", "channel", "answer", "answer_digest", "fingerprint"):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} TEXT")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1283,26 +1283,27 @@ class DB:
     def claim_permission_answer(self, agent_id: str, tool_use_id: str, answer: str) -> bool:
         """Claim the request the hook holds for ``answer``: False when it
         isn't held any more (it went to the CLI's prompt) or another answer
-        won. The hook takes it only once signed (sign_permission_answer)."""
+        won. The hook takes it only once released (release_permission_answer)."""
         with self.tx() as c:
-            cur = c.execute("UPDATE permission_requests SET answer=?, answer_mac=NULL WHERE agent_id=? "
+            cur = c.execute("UPDATE permission_requests SET answer=?, answer_digest=NULL WHERE agent_id=? "
                             "AND tool_use_id=? AND channel='hook' AND answer IS NULL",
                             (answer, agent_id, tool_use_id))
         return cur.rowcount == 1
 
-    def sign_permission_answer(self, agent_id: str, tool_use_id: str, mac: str) -> bool:
-        """Release a claimed answer to the hook with the daemon's signature:
-        False when the hook stopped waiting meanwhile."""
+    def release_permission_answer(self, agent_id: str, tool_use_id: str, digest: str) -> bool:
+        """Hand a claimed answer to the hook, with the digest of the request
+        the person answered (permissions.request_digest): False when the hook
+        stopped waiting meanwhile."""
         with self.tx() as c:
-            cur = c.execute("UPDATE permission_requests SET answer_mac=? WHERE agent_id=? AND tool_use_id=? "
-                            "AND channel='hook' AND answer IS NOT NULL AND answer_mac IS NULL",
-                            (mac, agent_id, tool_use_id))
+            cur = c.execute("UPDATE permission_requests SET answer_digest=? WHERE agent_id=? AND tool_use_id=? "
+                            "AND channel='hook' AND answer IS NOT NULL AND answer_digest IS NULL",
+                            (digest, agent_id, tool_use_id))
         return cur.rowcount == 1
 
     def unclaim_permission_answer(self, agent_id: str, tool_use_id: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE permission_requests SET answer=NULL WHERE agent_id=? AND tool_use_id=? "
-                      "AND channel='hook' AND answer_mac IS NULL", (agent_id, tool_use_id))
+                      "AND channel='hook' AND answer_digest IS NULL", (agent_id, tool_use_id))
 
     def claim_permission_prompt(self, agent_id: str, tool_use_id: str, fingerprint: str) -> bool:
         """Claim the request shown on screen as ``fingerprint`` for one answer
@@ -1334,20 +1335,22 @@ class DB:
             c.execute("DELETE FROM permission_requests WHERE agent_id=? AND request='null' "
                       "AND channel IS NOT 'answering'", (agent_id,))
 
-    def take_permission_answer(self, agent_id: str, tool_use_id: str, verify, give_up: bool = False) -> str | None:
-        """The waiting hook's side: the answer handed to it, once signed and
-        ``verify(answer, mac)`` holds (the request is then 'answered'); ""
-        when it no longer waits: a signed answer that fails the check, or
-        ``give_up`` with none yet, gives the request to the CLI's own prompt
-        ('prompt'). None: no signed answer yet (one may be claimed), keep waiting."""
+    def take_permission_answer(self, agent_id: str, tool_use_id: str, digest: str,
+                               give_up: bool = False) -> str | None:
+        """The waiting hook's side: the answer handed to it, when it answers
+        the request the hook recorded (``digest``; the request is then
+        'answered'); "" when it no longer waits: an answer to anything else
+        (the stored request changed), or ``give_up`` with none yet, gives the
+        request to the CLI's own prompt ('prompt'). None: no answer handed
+        over yet (one may be claimed), keep waiting."""
         with self.tx() as c:
-            row = c.execute("SELECT answer, answer_mac FROM permission_requests WHERE agent_id=? "
+            row = c.execute("SELECT answer, answer_digest FROM permission_requests WHERE agent_id=? "
                             "AND tool_use_id=? AND channel='hook'", (agent_id, tool_use_id)).fetchone()
             if row is None:
                 return ""
-            signed = bool(row["answer"]) and row["answer_mac"] is not None
-            verified = signed and verify(row["answer"], row["answer_mac"])
-            if verified or signed or give_up:
+            released = bool(row["answer"]) and row["answer_digest"] is not None
+            verified = released and row["answer_digest"] == digest
+            if released or give_up:
                 c.execute("UPDATE permission_requests SET channel=? WHERE agent_id=? AND tool_use_id=?",
                           ("answered" if verified else "prompt", agent_id, tool_use_id))
                 return row["answer"] if verified else ""
