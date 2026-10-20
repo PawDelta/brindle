@@ -398,8 +398,8 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     assert missing() == 1           # nothing ahead of main
     head = _commit(sess, "a.py", "a\n")
     assert missing() == 0
-    # Undone again, one condition at a time: a failing milestone, a running worker,
-    # a coordinator-held task, and a supervisor waiting at a prompt.
+    # Undone again, one condition at a time: a failing milestone, a running worker, a
+    # coordinator-held task, a supervisor waiting at a prompt, and a worker's failed merge.
     autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
     db.add_workspace(Workspace("proj/w-r", lead.repo_root, "feat-r", "worktree", "feat-r", "sess", str(sess),
                                None, "brindle-r", time.time()))
@@ -409,8 +409,14 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     db.add_task(Task("t1", lead.repo_root, None, "lead", lead.id, "developer", "later", "assign", 1, None, None,
                      None, None, "held", time.time()))
     db.set_status("lead", "waiting")
-    assert missing() == 4 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
+    db.add_workspace(Workspace("proj/w-f", lead.repo_root, "feat-f", "worktree", "feat-f", "sess", str(sess),
+                               None, "brindle-f", time.time()))
+    db.add_agent(Agent("wf", "proj/w-f", "developer", "claude", "lead", "assign", "idle", "%6", "done", time.time()))
+    db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
+    assert missing() == 5 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
     assert watch.sweep(db) == []
+    db.set_merged("proj/w-f", head)
+    assert missing() == 4
     db.delete_agent("wr")
     assert missing() == 3
     db.update_task("t1", state="cancelled")
@@ -431,17 +437,18 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
     sess = Path(lead.path)
     _commit(repo, "shared.py", "".join(f"{n}\n" for n in range(1, 41)))
     sh("git merge -q --ff-only main", sess)
-    # Each worker deletes one line of the shared file: two hunks, each its own deleter.
-    for branch, name, gone in (("feat-a", "a.py", 5), ("feat-b", "b.py", 40)):
+    # Two parallel workers each delete one line of the shared file and merge in turn (line 5
+    # survives on feat-b until the last merge): two hunks, each its own deleter.
+    for branch, name, gone in (("feat-a", "a.py", 5), ("feat-b", "b.py", 40), ("feat-c", "c.py", 0)):
         sh(f"git switch -q -c {branch} sess", sess)
-        (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 41) if n != gone))
         _commit(sess, name, f"{name}\n")
-        sh("git commit -qam less", sess)
+        if gone:
+            _commit(sess, "shared.py", "".join(f"{n}\n" for n in range(1, 41) if n != gone))
         sh("git switch -q sess", sess)
     _commit(sess, "app.py", "print('hi')\nprint('lead')\n")
-    git.merge_into(lead.repo_root, sess, "feat-a", squash=False)
-    git.merge_into(lead.repo_root, sess, "feat-b", squash=True)
-    # feat-a's worker is still there; feat-b's workspace is gone, its report kept.
+    for branch in ("feat-a", "feat-b", "feat-c"):
+        git.merge_into(lead.repo_root, sess, branch, squash=branch == "feat-c")
+    # feat-a's worker is still there; feat-b's workspace is gone, its report kept; feat-c has neither.
     db.add_workspace(Workspace("proj/w-a", lead.repo_root, "feat-a", "worktree", "feat-a", "sess", str(sess),
                                None, "brindle-a", time.time()))
     db.add_agent(Agent("wa", "proj/w-a", "developer", "claude", "lead", "assign", "idle", "%7", None, time.time()))
@@ -453,11 +460,12 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
     code, d = _send("GET", "/v1/sessions/lead/diff")
     assert code == 200, d
     assert {f["path"]: f["authors"] for f in d["files"]} == {
-        "a.py": ["wa"], "app.py": ["supervisor"], "b.py": ["wb", "you"], "shared.py": ["wa", "wb"]}
+        "a.py": ["wa"], "app.py": ["supervisor"], "b.py": ["wb", "you"], "c.py": ["feat-c"],
+        "shared.py": ["wa", "wb"]}
     assert [h["authors"] for f in d["files"] for h in f["hunks"] if f["path"] == "shared.py"] == [["wa"], ["wb"]]
     assert [(w["id"], w["kind"], w["branch"]) for w in d["workers"]] == [
         ("wa", "worker", "feat-a"), ("supervisor", "supervisor", "sess"), ("wb", "worker", "feat-b"),
-        ("you", "you", None)]
+        ("you", "you", None), ("feat-c", "worker", "feat-c")]
 
 
 @pytest.mark.parametrize("path,body,setup,status", [

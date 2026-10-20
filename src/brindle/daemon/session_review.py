@@ -11,8 +11,9 @@ Attribution walks the session branch's first-parent history since the PR
 base: the commits a merge brought in belong to the worker whose branch it
 merged ("Merge branch 'x'", or brindle's "Squash merge x"); a commit made
 from the review sheet ("review edits: ...") is the person's ("you"), any
-other direct commit the supervisor's. A hunk's added lines are blamed, its
-deleted ones reverse-blamed to the commit that removed them; a change with
+other direct commit the supervisor's. A hunk's added lines are blamed; its
+deleted ones go to the first-parent step (a merge, for a worker's deletion)
+that removed them; a change with
 neither (a mode change, a binary file) takes its file's authors."""
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import logging
 import re
 from typing import Any
 
-from brindle import agents, autopilot, bus, git, knowledge, tasks, workspaces
+from brindle import agents, autopilot, bus, git, knowledge, pipeline, tasks, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -33,7 +34,6 @@ MERGED_RE = re.compile(r"^Merge branch '([^']+)'")
 SQUASHED_RE = re.compile(r"^Squash merge (\S+)$")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 BLAME_RE = re.compile(r"^([0-9a-f]{40}) \d+ (\d+)")
-REVERSE_RE = re.compile(r"^([0-9a-f]{40}) (\d+) (\d+)")    # --reverse: the line's number there, then at the base
 SUPERVISOR, YOU = "supervisor", "you"
 AUDIT_REASONS = {
     "start": "the completion audit hasn't approved the session's current commit",
@@ -103,13 +103,20 @@ def needs_you(db: DB, root: Agent, ap) -> list[str]:
     """What in the session waits on the person: the inbox's items (see
     service.inbox), for this session's agents only."""
     out = []
-    for a in agents.tree(db, root.id):
+    tree = agents.tree(db, root.id)
+    for a in tree:
         if a.status == "waiting":
             out.append(f"{a.id} is waiting on you at a prompt")
         elif a.status == "failed":
             out.append(f"{a.id}'s credentials need attention")
         if a.plan_state == "proposed":
             out.append(f"{a.id}'s plan is waiting for approval")
+    # A worker's approved branch the pipeline couldn't merge (and that hasn't merged since).
+    for ws_id in dict.fromkeys(a.workspace_id for a in tree if a.workspace_id != root.workspace_id):
+        ws = db.get_workspace(ws_id)
+        state = pipeline.review_state(db, ws) if ws else None
+        if state and state.startswith("merge failed"):
+            out.append(f"{ws.branch}: {state}")
     if ap is not None and ap.state == "blocked":
         out.append(f"the session is waiting on you: {ap.note or 'a question'}")
     if ap is not None and autopilot.proposing(ap):
@@ -141,11 +148,14 @@ def _worker(db: DB, ws: Workspace, branch: str) -> dict[str, Any]:
     return {"id": branch, "kind": "worker", "profile": None, "branch": branch}
 
 
-def _owners(db: DB, root: Agent, ws: Workspace, mb: str) -> tuple[dict[str, str], dict[str, dict]]:
-    """Each commit since ``mb`` -> its author's id, and those authors."""
+def _owners(db: DB, root: Agent, ws: Workspace,
+            mb: str) -> tuple[dict[str, str], dict[str, dict], list[tuple[str, str]]]:
+    """Each commit since ``mb`` -> its author's id, those authors, and the
+    first-parent history (each commit and its first parent, oldest first)."""
     people = {SUPERVISOR: {"id": SUPERVISOR, "kind": SUPERVISOR, "profile": root.profile, "branch": ws.branch},
               YOU: {"id": YOU, "kind": YOU, "profile": None, "branch": None}}
     owner: dict[str, str] = {}
+    chain: list[tuple[str, str]] = []
     log_text = git.run(["log", "--first-parent", "--format=%H%x00%P%x00%s", f"{mb}..HEAD"], ws.path).stdout
     for line in log_text.splitlines():
         sha, parents, subject = line.split("\0", 2)
@@ -158,10 +168,11 @@ def _owners(db: DB, root: Agent, ws: Workspace, mb: str) -> tuple[dict[str, str]
         else:
             key = YOU if subject.startswith(f"{EDIT_MESSAGE}: ") else SUPERVISOR
         owner[sha] = key
+        chain.insert(0, (sha, first))
         for tip in merged:
             for c in git.out(["rev-list", f"{first}..{tip}"], ws.path).split():
                 owner.setdefault(c, key)
-    return owner, people
+    return owner, people, chain
 
 
 def _file_authors(ws: Workspace, mb: str, owner: dict[str, str]) -> dict[str, list[str]]:
@@ -219,33 +230,49 @@ def _blame(ws: Workspace, mb: str, path: str, lines: list[int], owner: dict[str,
             for m in map(BLAME_RE.match, text.splitlines()) if m}
 
 
-def _unblame(ws: Workspace, mb: str, path: str, lines: list[int], owner: dict[str, str],
-             children: dict[str, list[str]]) -> dict[int, str]:
-    """Old-side line -> who deleted it, for ``lines`` of ``path`` at ``mb``.
-    A reverse blame names the last commit that still had each line (and its
-    number there); the deleter is that commit's child whose diff removes it
-    (a merge's diff from its first parent, for a worker's deletion)."""
-    text = git.run(["blame", "--reverse", "--line-porcelain", *_ranges(lines), f"{mb}..HEAD", "--", path],
-                   ws.path).stdout
-    removed: dict[tuple[str, str], list[tuple[int, int]]] = {}
-    found: dict[int, str] = {}
-    last: tuple[str, int, int] | None = None
-    for line in text.splitlines():
-        if m := REVERSE_RE.match(line):
-            last = (m.group(1), int(m.group(2)), int(m.group(3)))
-        elif line.startswith("filename ") and last:
-            sha, there, here = last
-            name = line[len("filename "):]
-            for child in children.get(sha, []):
-                if (child, name) not in removed:
-                    hunk_lines = git.run(["diff", "-U0", "--no-color", "--no-ext-diff", sha, child, "--", name],
-                                         ws.path).stdout.splitlines()
-                    removed[(child, name)] = [(int(h.group(1)), int(h.group(2) or 1))
-                                              for h in map(HUNK_RE.match, hunk_lines) if h]
-                if any(start <= there < start + count for start, count in removed[(child, name)]):
-                    found[here] = owner.get(child, SUPERVISOR)
-                    break
-            last = None
+def _file_diffs(ws: Workspace, a: str, b: str, *opts: str) -> list[tuple[str, str | None, str, str]]:
+    """``a``..``b`` per file: (status letter, old path if renamed, path, its patch)."""
+    base = ["-c", "core.quotePath=false", "diff", "-M", "--no-color", "--no-ext-diff", *opts]
+    names = git.run([*base, "-z", "--name-status", a, b], ws.path).stdout.split("\0")
+    patches = re.split(r"^(?=diff --git )", git.run([*base, "--src-prefix=a/", "--dst-prefix=b/", "--patch", a, b],
+                                                     ws.path).stdout, flags=re.M)[1:]
+    out, i = [], 0
+    for patch in patches:      # the same order as the names: the same diff
+        status = names[i]
+        old_path, path = (names[i + 1], names[i + 2]) if status[:1] in ("R", "C") else (None, names[i + 1])
+        i += 3 if old_path else 2
+        out.append((status[:1], old_path, path, patch))
+    return out
+
+
+def _deleters(ws: Workspace, chain: list[tuple[str, str]], wanted: dict[str, list[int]],
+              owner: dict[str, str]) -> dict[str, dict[int, str]]:
+    """Base path -> its deleted base lines -> who deleted each. Each line is
+    carried along the session's first-parent history (``chain``: each commit
+    and its first parent, oldest first) and goes to the commit whose diff
+    from its first parent removes it: a merge's for a merged worker's
+    deletion, never a diff against a worker's branch."""
+    at = {path: {n: n for n in lines} for path, lines in wanted.items()}     # base line -> its number now
+    named = {path: path for path in wanted}                                  # its name now -> base path
+    found: dict[str, dict[int, str]] = {path: {} for path in wanted}
+    for sha, first in chain:
+        if not named:
+            break
+        for _, old_path, path, patch in _file_diffs(ws, first, sha, "-U0"):
+            base = named.pop(old_path or path, None)
+            if base is None:
+                continue
+            hunks = [(h["old_start"], h["old_lines"], h["new_lines"]) for h in _hunks(patch)]
+            moved = {}
+            for line, n in at[base].items():
+                if any(start <= n < start + count for start, count, _ in hunks if count):
+                    found[base][line] = owner.get(sha, SUPERVISOR)
+                else:   # shifted by every hunk before it (an insertion lands after its old line)
+                    moved[line] = n + sum(new - count for start, count, new in hunks
+                                          if (start + count <= n if count else start < n))
+            at[base] = moved
+            if moved:
+                named[path] = base
     return found
 
 
@@ -253,28 +280,18 @@ def diff(db: DB, root: Agent, ws: Workspace) -> dict[str, Any]:
     """The session branch against its PR base, attributed."""
     base = workspaces.require_base(ws)
     mb = git.merge_base(ws.path, git.base_ref(ws.path, base))
-    owner, people = _owners(db, root, ws, mb)
+    owner, people, chain = _owners(db, root, ws, mb)
     by_file = _file_authors(ws, mb, owner)
-    opts = ["-c", "core.quotePath=false", "diff", "-M", "--no-color", "--no-ext-diff"]
-    names = git.run([*opts, "-z", "--name-status", mb, "HEAD"], ws.path).stdout.split("\0")
-    patches = re.split(r"^(?=diff --git )", git.run([*opts, "--src-prefix=a/", "--dst-prefix=b/", "--patch", mb,
-                                                     "HEAD"], ws.path).stdout, flags=re.M)[1:]
-    children: dict[str, list[str]] = {}
-    for line in git.out(["rev-list", "--parents", f"{mb}..HEAD"], ws.path).splitlines():
-        commit, *parents = line.split()
-        for p in parents:
-            children.setdefault(p, []).append(commit)
+    changed = [(path, old_path, status, patch, _hunks(patch))
+               for status, old_path, path, patch in _file_diffs(ws, mb, "HEAD")]
+    deleters = _deleters(ws, chain, {old_path or path: [n for h in hunks for n in h["deleted"]]
+                                     for path, old_path, _, _, hunks in changed
+                                     if any(h["deleted"] for h in hunks)}, owner)
     files, seen = [], []
-    i = 0
-    for patch in patches:
-        status = names[i]
-        old_path, path = (names[i + 1], names[i + 2]) if status[:1] in ("R", "C") else (None, names[i + 1])
-        i += 3 if old_path else 2
-        hunks = _hunks(patch)
+    for path, old_path, status, patch, hunks in changed:
         added = [n for h in hunks for n in h["added"]]
-        deleted = [n for h in hunks for n in h["deleted"]]
         blamed = _blame(ws, mb, path, added, owner) if added else {}
-        unblamed = _unblame(ws, mb, old_path or path, deleted, owner, children) if deleted else {}
+        unblamed = deleters.get(old_path or path, {})
         fallback = by_file.get(path) or [SUPERVISOR]
         for h in hunks:
             who = [blamed.get(n, SUPERVISOR) for n in h["added"]] + [unblamed.get(n, SUPERVISOR) for n in h["deleted"]]
@@ -283,7 +300,7 @@ def diff(db: DB, root: Agent, ws: Workspace) -> dict[str, Any]:
             del h["added"], h["deleted"]
         authors = list(dict.fromkeys(a for h in hunks for a in h["authors"])) or fallback
         seen += authors
-        files.append({"path": path, "old_path": old_path, "status": status[:1],
+        files.append({"path": path, "old_path": old_path, "status": status,
                       "binary": "\nBinary files " in patch or patch.startswith("Binary files "),
                       "authors": authors, "hunks": hunks})
     return {"root_id": root.id, "branch": ws.branch, "base": base, "base_sha": mb,
