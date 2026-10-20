@@ -1595,7 +1595,14 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
 
     if login_pause.holding(db, agent.id):
         return "queued"  # its session waits on an expired cloud login
-    if _deliver_to_inbox(db, agent, message_id, text, sender_id):
+    from brindle import wake
+
+    if wake.enabled(agent):
+        # A chat with brindle's waiter never gets the inbox, where Claude Code
+        # would wrap the message as another session's (see brindle.wake).
+        if wake.live(agent):
+            return "delivered"  # the waiter wakes it with this
+    elif _deliver_to_inbox(db, agent, message_id, text, sender_id):
         return "delivered"
     reconcile(db, agent)
     if db.message_delivered(message_id):
@@ -1736,18 +1743,23 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
 
 def flush(db: DB, agent_id: str) -> bool:
     """Deliver the agent's oldest pending message: through its inbox if it
-    has one, else typed into its pane once it's idle. Returns True if
-    something was delivered."""
+    has one, else typed into its pane once it's idle. A chat with a live
+    waiter (brindle.wake) is left to it, and one that runs a waiter never
+    uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
     from brindle import launch_health
     from brindle import login_pause
+    from brindle import wake
 
     agent = db.get_agent(agent_id)
     if agent is None or agent.headless:
         return False  # its runner takes messages from the inbox itself
     if login_pause.holding(db, agent_id):
         return False  # its session waits on an expired cloud login; resuming flushes it
-    if inbox.usable(agent):
+    waits = wake.enabled(agent)
+    if waits and wake.live(agent):
+        return False  # its waiter hands the queue over (brindle.wake)
+    if not waits and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
             baseline = launch_health.before_delivery(db, agent)
@@ -2999,12 +3011,15 @@ def pending_permission(db: DB, agent_id: str) -> str | None:
         return None
 
 
-def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False) -> dict | None:
+def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
+                   waiter: bool = False) -> dict | None:
     """What the Stop hook decides: a "block" with the reason to carry on, or
     None to let the agent stop. ``via_inbox``: the reason will be sent as an
-    inbox message rather than block the stop, so ``stop_hook_active`` never
-    caps a repeat; the unread-mail reminder is then limited to one per
-    NOTICE_TTL (DB.claim_stop_reminder)."""
+    inbox message (or handed to its waiter) rather than block the stop, so
+    ``stop_hook_active`` never caps a repeat; the unread-mail reminder is
+    then limited to one per NOTICE_TTL (DB.claim_stop_reminder). ``waiter``:
+    the agent runs brindle's waiter (brindle.wake), which this Stop has just
+    started: queued messages stay queued for it."""
     if agent.mode == "interactive":
         # Every supervisor turn ends here: start any queued task a cut-off or
         # manual merge left waiting (its "Started" note is delivered below).
@@ -3014,7 +3029,10 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False)
             tasks.sweep(db)
         except Exception:  # noqa: BLE001 -- must never break the Stop hook
             log.exception("brindle: queued-task sweep failed")
-    msg = db.pop_pending(agent.id)
+    if waiter and db.pending_count(agent.id):
+        db.set_status(agent.id, "processing")
+        return None
+    msg = None if waiter else db.pop_pending(agent.id)
     if msg:
         db.set_status(agent.id, "processing")
         return {"decision": "block", "reason": msg.body}
@@ -3191,9 +3209,18 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         snapshot_turn(db, agent)
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
-        # Where a person watches (an interactive agent with an inbox), brindle
-        # lets the stop happen and sends the same text through the inbox
-        # instead: it arrives as a message from brindle and starts the next turn.
+        # Where a person watches (an interactive agent), brindle lets the stop
+        # happen and hands the same text to the waiter this Stop just started
+        # (brindle.wake), which wakes the model with it as one "Stop hook
+        # feedback" line; a session without a waiter gets it through its
+        # inbox, as a message from another session.
+        from brindle import wake
+
+        if agent.mode == "interactive" and wake.enabled(agent):
+            decision = _stop_decision(db, agent, payload, via_inbox=True, waiter=True)
+            if decision:
+                db.enqueue(agent_id, decision["reason"], None)
+            return None
         if agent.mode == "interactive" and inbox.usable(agent):
             decision = _stop_decision(db, agent, payload, via_inbox=True)
             if decision and inbox.send(agent, decision["reason"]):

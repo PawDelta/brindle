@@ -2958,6 +2958,14 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         return
     # Codex's notify passes the JSON as an argument; Claude Code's hooks use stdin.
     text = payload if payload is not None else sys.stdin.read()
+    if event == "await-mail":
+        # An interactive chat's background waiter (brindle.wake): exit code 2
+        # hands Claude Code what's queued, on stderr, and wakes the model.
+        from brindle import wake
+
+        if agent is None:
+            return  # only a launch bakes the agent in; a stale environment never decides
+        raise typer.Exit(wake.main(_helper_db(), agent_id))
     if event in agents.PERMISSION_EVENTS:
         try:  # any failure means no output: the person is asked as usual
             out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)

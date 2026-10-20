@@ -2155,14 +2155,18 @@ add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
   and every agent's MCP server share it. Worktrees live in
   `~/.brindle/worktrees/<repo>/<branch>`, and the base branch is recorded in git
   config as `branch.<b>.brindle-base`.
-- **Messages arrive through Claude Code's own inbox.** Every Claude Code session
-  listens on a socket for messages from other sessions, and tells its hooks where
-  it is; brindle's SessionStart hook records it, and from then on messages go there
-  instead of being typed into the pane. An idle agent starts a new turn with the
-  message; a busy one gets it between tool calls. Typing into the pane is the
-  fallback when there's no socket (Codex, Antigravity, older Claude Code). A
-  `crossSessionInbound` of `hold` or `refuse` in your Claude settings would hold or
-  drop them.
+- **Messages wake a supervisor through brindle's own hook.** Your interactive
+  Claude Code chat runs a small background waiter (an `asyncRewake` hook started
+  at `SessionStart` and at every `Stop`). When a worker reports, or brindle has a
+  "new messages" notice or an autopilot nudge, the waiter hands it over and Claude
+  Code wakes the model with it: an idle chat starts a new turn, a busy one gets it
+  between steps, and the chat shows one "Stop hook feedback" line. Each message
+  keeps brindle's label (`brindle delivered this message from developer agent w1:`
+  or a `brindle (12:00:00): ...` notice), so the model never mistakes it for you.
+  Workers and older sessions get messages through Claude Code's own inbox
+  (another-session messages; a `crossSessionInbound` of `hold` or `refuse` in your
+  Claude settings would hold or drop them). Typing into the pane is the fallback
+  when neither is there (Codex, Antigravity, older Claude Code).
 - **Agent status comes from hooks, not screen-scraping.** Guessing an agent's
   state by pattern-matching terminal output breaks whenever a CLI redesigns its
   interface. brindle launches Claude Code with `--settings` hooks
