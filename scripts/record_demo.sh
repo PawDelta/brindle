@@ -13,7 +13,7 @@
 #
 #   DEMO_COLS / DEMO_ROWS   terminal size recorded (default 150x45)
 #   DEMO_TIMEOUT            hard stop, seconds (default 1200)
-#   DEMO_SPEED              agg playback speed (default 4)
+#   DEMO_SPEED              agg playback speed (default 6: about 20 s for a typical run)
 #   DEMO_FONT_SIZE          agg font size in px (default 13: 150 cols ~ 1190 px wide)
 #   DEMO_SETTLE             seconds to keep recording once the goal is reached (default 8)
 #   DEMO_TMUX_SOCKET        name of the private tmux server used (default brindle-demo-rec)
@@ -26,7 +26,7 @@ OUT=${1:-"$ROOT/assets/brindle-demo.gif"}
 COLS=${DEMO_COLS:-150}
 ROWS=${DEMO_ROWS:-45}
 TIMEOUT=${DEMO_TIMEOUT:-1200}
-SPEED=${DEMO_SPEED:-4}
+SPEED=${DEMO_SPEED:-6}
 FONT_SIZE=${DEMO_FONT_SIZE:-13}
 # Settle time after the goal is reached, so the dashboard repaints with both
 # milestones green before the session is closed (recorded seconds).
@@ -61,7 +61,7 @@ for item in config.json agents legacy-warned.json; do
     [[ -e "$REAL_HOME/$item" ]] && cp -R "$REAL_HOME/$item" "$BRINDLE_HOME/$item"
 done
 if [[ -d "$REAL_HOME/pro" ]]; then
-    mkdir -p "$BRINDLE_HOME/pro"
+    mkdir -p -m 700 "$BRINDLE_HOME/pro"
     find "$REAL_HOME/pro" -maxdepth 1 -type f ! -name '*.lock' -exec cp {} "$BRINDLE_HOME/pro/" \;
 fi
 DEMO_HOME="$BRINDLE_HOME/demo"
@@ -168,7 +168,7 @@ fi  # DEMO_RENDER_ONLY
 # alternate screen (its client detaching), and the checkout's path from the
 # header, which agg never draws but which has no place in a published file.
 python3 - "$CAST" <<'EOF'
-import json, sys
+import json, os, sys
 path = sys.argv[1]
 lines = open(path, encoding="utf-8").read().splitlines()
 header = json.loads(lines[0])
@@ -177,6 +177,19 @@ events = [json.loads(l) for l in lines[1:] if l.strip()]
 last = max((i for i, e in enumerate(events) if e[1] == "o" and "\x1b[?1049l" in e[2]), default=None)
 if last is not None:
     events = events[:last]
+# Drop any output that shows your home directory (a startup warning quoting
+# your own ~/.claude/settings.json, say), keeping the timing: later frames
+# repaint those cells anyway.
+home = os.path.expanduser("~") + "/"
+kept, carry = [], 0.0
+for e in events:
+    if e[1] == "o" and home in e[2]:
+        carry += e[0]
+        continue
+    e[0] = round(e[0] + carry, 6)
+    carry = 0.0
+    kept.append(e)
+events = kept
 with open(path, "w", encoding="utf-8") as f:
     f.write(json.dumps(header, ensure_ascii=False) + "\n")
     for e in events:
