@@ -625,6 +625,7 @@ Autopilot, merge gates and cleanup:
 | Key | Default | |
 |---|---|---|
 | `autopilot` | `true` | start the supervisor with autopilot on |
+| `claude_permission_mode` | `"default"` | the `--permission-mode` for Claude Code sessions whose profile sets no `permission_mode`; the default holds permission requests for the brindle app, set `"auto"` to opt into auto mode. Only read from `~/.brindle/config.json` |
 | `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
 | `checks` | `[]` | commands that must pass in a worker's branch before it merges |
 | `review` | only under autopilot | require a reviewer's approval before merging |
