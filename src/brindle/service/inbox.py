@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, tmux, view
 from brindle.config import load_repo_config
-from brindle.daemon.holds import HOLDS
+from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent
 from brindle.providers import get_provider
 from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDTO, PermissionDTO
@@ -262,23 +262,15 @@ def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
     return True
 
 
-def _write_rule(db: DB, agent: Agent, request_id: str, req: permissions.Request) -> None:
+def _write_rule(req: permissions.Request) -> str | None:
     """Allow-always through the hook with no rule from Claude Code: brindle's
-    exact allow rule, written only while this answer holds the request
-    (claimed, not yet released for the hook to take), and removed again if
-    the request is lost meanwhile, unless it was there before."""
-    from brindle import antigravity
-
+    exact allow rule, written while this answer holds the request (claimed,
+    not yet consumed by the hook). The id of a rule it added (to remove again
+    if the answer never reaches the hook), or None when it was there before."""
     kind, match = permissions.learnable_pattern(req)
     existed = any(r.id == permissions.rule_id(kind, "exact", match, "allow") for r in permissions.load_store().rules)
     rule = permissions.add_rule(kind, match, "allow")
-    if HOLDS.release(agent.id, request_id):
-        antigravity.resync_permissions()
-        return
-    if not existed:
-        permissions.forget(rule.id)
-    raise ServiceError("conflict", f"{agent.id}'s request went to its own prompt before it was answered: "
-                                   "nothing was written; answer it in its terminal", 409)
+    return None if existed else rule.id
 
 
 def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str | None, choice: str) -> dict:
@@ -316,18 +308,30 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     if not HOLDS.claim(agent.id, request_id, digest, choice):
         raise ServiceError("conflict", f"{agent_id}'s request was answered, went to its own prompt, or isn't "
                                        "the one its hook holds: fetch the inbox again", 409)
+    from brindle import antigravity
+
+    added = None
     try:
         if choice == "allow_always" and not pending.suggestions:
-            _write_rule(db, agent, request_id, pending.request)
-        elif not HOLDS.release(agent.id, request_id):
+            added = _write_rule(pending.request)
+        if not HOLDS.release(agent.id, request_id):
             raise ServiceError("conflict", f"{agent_id}'s request went to its own prompt before it "
-                                           "was answered: answer it in its terminal", 409)
+                                           "was answered: nothing was written; answer it in its terminal", 409)
+        # Delivered only once its hook consumed it; until the hold leaves another way
+        # (expired, ended, dropped), which its lease bounds.
+        _until(lambda: HOLDS.outcome(request_id) is not None, seconds=LEASE_SECONDS + CONFIRM_SECONDS)
+        if HOLDS.outcome(request_id) != "consumed":
+            raise ServiceError("conflict", f"{agent_id}'s request was no longer held when its answer was ready "
+                                           "(it expired or went to its own prompt): nothing was written; "
+                                           "answer it in its terminal", 409)
     except BaseException:
         HOLDS.unclaim(agent.id, request_id)
+        if added:
+            permissions.forget(added)
         raise
-    # The hook has taken it once the daemon no longer holds it.
-    cleared = _until(lambda: HOLDS.held(agent.id, request_id) is None)
+    if added:
+        antigravity.resync_permissions()
     bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
-                      via="hook", cleared=cleared)
-    return {"choice": choice, "via": "hook", "cleared": cleared,
+                      via="hook", cleared=True)
+    return {"choice": choice, "via": "hook", "cleared": True,
             "rule": offered.rule if choice == "allow_always" else None}

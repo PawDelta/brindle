@@ -49,6 +49,7 @@ MAX_HOLDS = 256
 # Seconds a hold lives past its holder's last wait: a hook that vanished
 # without ending it (killed, crashed) stops renewing, and its hold lapses.
 LEASE_SECONDS = 60.0
+OUTCOMES_KEPT = 1024     # how many ended holds' outcomes are remembered
 
 
 def _hash(nonce: str) -> str:
@@ -71,18 +72,37 @@ class Holds:
     """The daemon's live holds, in memory only. The daemon owns their
     lifetime: a hold is live until its ``hold_until`` and while its holder
     keeps waiting on it (its lease); past either it is gone, can't be
-    claimed or released, and frees its place. ``clock``: wall time, for tests."""
+    claimed or released, and frees its place. ``clock``: wall time, for tests.
+
+    How each hold left is kept (``outcome``): "consumed" (its hook took the
+    person's answer), "expired" (past hold_until or its lease), "ended" (its
+    hook stopped holding first) or "dropped" (its agent was closed). Only
+    "consumed" means an answer reached the hook."""
 
     def __init__(self, clock=time.time) -> None:
         self._holds: dict[str, Hold] = {}
+        self._outcomes: dict[str, str] = {}
         self._changed = threading.Lock()
         self.clock = clock
+
+    def _leave(self, request_id: str, outcome: str) -> Hold:
+        """Remove a hold, keeping how it left (with the lock held)."""
+        self._outcomes[request_id] = outcome
+        while len(self._outcomes) > OUTCOMES_KEPT:
+            del self._outcomes[next(iter(self._outcomes))]
+        return self._holds.pop(request_id)
 
     def _purge(self) -> None:
         """Drop the holds past their hold_until or lease (with the lock held)."""
         now = self.clock()
         for request_id in [r for r, h in self._holds.items() if now >= min(h.hold_until, h.lease_until)]:
-            del self._holds[request_id]
+            self._leave(request_id, "expired")
+
+    def outcome(self, request_id: str) -> str | None:
+        """How the hold left (see the class), or None while it is live (or unknown)."""
+        with self._changed:
+            self._purge()
+            return self._outcomes.get(request_id)
 
     def register(self, agent_id: str, request_id: str, digest: str, nonce: str, hold_until: float) -> bool:
         """False when the id is held already, the hold would already be over,
@@ -96,6 +116,7 @@ class Holds:
                 return False
             self._holds[request_id] = Hold(agent_id, request_id, digest, _hash(nonce), hold_until,
                                            now + LEASE_SECONDS)
+            self._outcomes.pop(request_id, None)
             return True
 
     def held(self, agent_id: str, request_id: str) -> Hold | None:
@@ -115,7 +136,7 @@ class Holds:
         """The agent was closed: none of its holds can be answered any more."""
         with self._changed:
             for request_id in [r for r, h in self._holds.items() if h.agent_id == agent_id]:
-                del self._holds[request_id]
+                self._leave(request_id, "dropped")
 
     def claim(self, agent_id: str, request_id: str, digest: str, answer: str) -> bool:
         """Claim the hold for ``answer``, the person's: False when it isn't
@@ -157,7 +178,7 @@ class Holds:
             if hold is None or not hmac.compare_digest(hold.nonce_hash, _hash(nonce)):
                 return False, None
             if hold.released:
-                del self._holds[request_id]
+                self._leave(request_id, "consumed")
                 return True, hold.answer
             hold.lease_until = self.clock() + LEASE_SECONDS
             return True, None
@@ -178,7 +199,7 @@ class Holds:
         with self._changed:
             hold = self._holds.get(request_id)
             if hold is not None and hmac.compare_digest(hold.nonce_hash, _hash(nonce)):
-                del self._holds[request_id]
+                self._leave(request_id, "ended")
 
 
 HOLDS = Holds()

@@ -443,6 +443,10 @@ def _brindle_allows_npm_test() -> bool:
     ("allow_always", False, "in-flight", 409, None, None),
     # The hook gives up between the claim and the hand-over: the rule written meanwhile goes again.
     ("allow_always", False, "lost", 409, None, None),
+    # The hold expires after the answer is handed over but before the hook takes it: not
+    # delivered, so a conflict, and the rule written for it goes again.
+    ("allow_once", True, "expired", 409, None, None),
+    ("allow_always", False, "expired", 409, None, None),
     # The stored request changed while the hook waits: it isn't the request the hook registered.
     ("allow_once", True, "mutated", 409, None, None),
     # An answer written into the database is no answer: the hold runs out.
@@ -456,7 +460,8 @@ def _brindle_allows_npm_test() -> bool:
     pytest.param("allow_once", True, "agent", 403, None, None,
                  marks=pytest.mark.variant("an agent holding the token can't answer a permission request")),
 ], ids=["once", "always-brindle", "always-claude", "deny", "terminal", "codex", "antigravity", "native",
-        "in-flight", "lost", "mutated", "db-answer", "forged-json", "locked", "closed", "agent"])
+        "in-flight", "lost", "expired-once", "expired-always", "mutated", "db-answer", "forged-json", "locked",
+        "closed", "agent"])
 def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answering, monkeypatch, choice,
                                                        suggested, race, status, verdict, rule):
     from brindle import antigravity, identity_lock, permissions
@@ -489,6 +494,16 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
             return release(agent_id, request_id)
 
         monkeypatch.setattr(holds.HOLDS, "release", hook_gives_up_first)
+    if race == "expired":
+        take = holds.HOLDS.take
+
+        def too_late(request_id, nonce):    # the hook's first look after the hand-over comes too late
+            hold = holds.HOLDS._holds.get(request_id)
+            if hold is not None and hold.released:
+                monkeypatch.setattr(holds.HOLDS, "clock", lambda: time.time() + 10 * HOLD)
+            return take(request_id, nonce)
+
+        monkeypatch.setattr(holds.HOLDS, "take", too_late)
     if race == "forged-json":
         lifecycle.info_path().write_text(json.dumps({"pid": 1, "token": "forged", "socket": "/tmp/elsewhere.sock"}))
     asked, publish = threading.Event(), bus.publish_agent
