@@ -240,27 +240,64 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
         pane, clock, sized = terminal.Pane("%1", None, None), Clock(), []
         pane._loop = clock
 
+        gated, state = {}, {"attached": 0}
+
         async def run(fn, target, *args):
+            if fn is tmux.attached_terminals:
+                return state["attached"]
             if fn is tmux.resize_window:
                 sized.append(args)
+                if "gate" in gated:
+                    await gated["gate"].wait()
             return 0
         pane.run = run
         viewer = pane.add()
+
+        async def settle():
+            for _ in range(8):
+                await asyncio.sleep(0)
+
         for size in ((80, 24), (90, 24), (100, 24)):
             pane.resize(*size)
-        for _ in range(4):
-            await asyncio.sleep(0)
+        await settle()
         assert sized == [(80, 24)]              # first at once, the rest wait
         assert not viewer.reseed                # a resize is still waiting
         (at, fire), = clock.timers
         assert at == terminal.RESIZE_SECONDS
         clock.now = at
-        pane._resize = None
         fire()
-        for _ in range(4):
-            await asyncio.sleep(0)
+        await settle()
         assert sized == [(80, 24), (100, 24)]
         assert viewer.reseed
+
+        # A slow tmux call: later requests wait for it, one at a time, and the
+        # last size wins; a repeat of the final size still reseeds.
+        viewer.reseed = False
+        clock.now += 5
+        gate = gated["gate"] = asyncio.Event()
+        pane.resize(120, 24)
+        await settle()
+        pane.resize(130, 24)
+        clock.now += 5
+        pane.resize(130, 24)
+        await settle()
+        assert sized[2:] == [(120, 24)] and not viewer.reseed
+        gate.set()
+        gated.clear()
+        await settle()
+        assert sized[2:] == [(120, 24), (130, 24)]
+        assert viewer.reseed
+
+        # A terminal attaches and leaves: sizing was handed back, so the same
+        # size is applied again.
+        clock.now += 5
+        state["attached"] = 1
+        await pane._check_shared()
+        state["attached"] = 0
+        await pane._check_shared()
+        pane.resize(130, 24)
+        await settle()
+        assert sized[-2:] == [(130, 24), (130, 24)]
         pane._closed = True
 
     asyncio.run(go())

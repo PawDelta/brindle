@@ -246,7 +246,9 @@ class Pane:
         self._resize: asyncio.TimerHandle | None = None
         self._next = 0.0                # when the next resize may be applied at once
         self._applied: tuple[int, int] | None = None
-        self._applying: set[asyncio.Task] = set()
+        self._runner: asyncio.Task | None = None
+        self._dirty = False             # a size was asked for and not yet applied
+        self._unseeded = False          # a resize was applied and viewers not seeded since
         self._tasks: list[asyncio.Task] = []
         self._screen: list[str] | None = None
         self._cursor: tuple[int, int] | None = None
@@ -341,45 +343,69 @@ class Pane:
         applied in the last RESIZE_SECONDS, else at the end of that time, with
         the last size asked for (a dragged window sends dozens)."""
         self._size = (cols, rows)
-        if self._resize:                    # one is waiting: it takes the latest size
+        self._dirty = True
+        if self._resize or self._runner:    # one is waiting or running: it takes the latest size
             return
+        self._schedule()
+
+    def _schedule(self) -> None:
         wait = self._next - self._loop.time()
         if wait > 0:
             self._resize = self._loop.call_later(wait, self._fire_resize)
         else:
-            self._start_resize()
+            self._start_drain()
 
     def _fire_resize(self) -> None:
         self._resize = None
-        self._start_resize()
+        self._start_drain()
 
-    def _start_resize(self) -> None:
-        self._next = self._loop.time() + RESIZE_SECONDS
-        task = asyncio.ensure_future(self._apply_resize(self._size))
-        self._applying.add(task)
-        task.add_done_callback(self._applying.discard)
+    def _start_drain(self) -> None:
+        self._dirty = False
+        self._runner = asyncio.ensure_future(self._drain(self._size))
 
-    async def _apply_resize(self, size: tuple[int, int] | None) -> None:
-        if self._closed or not size or size == self._applied:
+    async def _drain(self, size: tuple[int, int] | None) -> None:
+        """Apply ``size``, then the latest asked for meanwhile: one resize at a
+        time and never sooner than RESIZE_SECONDS after the last. When none is
+        left to apply, seed the viewers again."""
+        try:
+            while size and not self._closed:
+                self._next = self._loop.time() + RESIZE_SECONDS
+                await self._apply_resize(size)
+                if not self._dirty:
+                    break
+                if self._next > self._loop.time():
+                    self._runner = None
+                    self._schedule()
+                    return
+                self._dirty = False
+                size = self._size
+        finally:
+            if self._runner is asyncio.current_task():
+                self._runner = None
+        if self._unseeded and not self._closed:
+            # A program that doesn't redraw on SIGWINCH leaves viewers with the
+            # old layout; tmux has reflowed it, so seed them again.
+            self._unseeded = False
+            for v in self.viewers:
+                v.reseed = True
+            self._wake()
+
+    async def _apply_resize(self, size: tuple[int, int]) -> None:
+        if size == self._applied:
             return
         try:
             await self._check_shared()      # a terminal may have attached since the last poll
             if self.shared:
+                self._applied = None
                 return
             if not self._manual:
                 await self.run(tmux.set_window_size_manual, self.target)
                 self._manual = True
             await self.run(tmux.resize_window, self.target, *size)
             self._applied = size
+            self._unseeded = True
         except tmux.TmuxError:
             log.debug("brindle: can't resize %s", self.target, exc_info=True)
-            return
-        if self._resize is None:            # settled: else the waiting resize reseeds
-            # A program that doesn't redraw on SIGWINCH leaves viewers with the
-            # old layout; tmux has reflowed it, so seed them again.
-            for v in self.viewers:
-                v.reseed = True
-            self._wake()
 
     async def _attached(self) -> int | None:
         """Terminals showing the pane's session (the daemon's own control
@@ -401,6 +427,7 @@ class Pane:
         self.shared = shared
         if shared and self._manual:     # the terminal's size rules again
             self._manual = False
+            self._applied = None
             await self.run(tmux.unset_window_size, self.target)
         self._wake()
 
@@ -432,7 +459,7 @@ class Pane:
 
     async def close(self) -> None:
         self._closed = True
-        for task in (*self._tasks, *self._applying, self._resize):
+        for task in (*self._tasks, self._runner, self._resize):
             if task:
                 task.cancel()
         if self._manual:
