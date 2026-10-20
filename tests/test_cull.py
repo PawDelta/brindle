@@ -97,7 +97,7 @@ def test_sweep_prunes_old_bus_events(db, ws):
     db.conn.execute("UPDATE events SET ts = ts - 90000 WHERE id = ?", (old,))
     keep = bus.publish(db, "new")
     cull.sweep(db)
-    assert [e["id"] for e in bus.tail(db)] == [keep]
+    assert [e["id"] for e in bus.tail(db, kinds=("old", "new"))] == [keep]
 
 
 def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypatch):

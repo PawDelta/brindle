@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from brindle import agents, coordinator, knowledge, mcp_server, workspaces
+from brindle import agents, bus, coordinator, knowledge, mcp_server, workspaces
 from brindle.db import Agent, Task
 
 
@@ -67,6 +67,9 @@ def _overlapping_decision_needs_supersede(db, repo, monkeypatch):
     assert [d["id"] for d in knowledge.decisions(db, key)] == [elsewhere["id"], second["id"]]
     kinds = db.conn.execute("SELECT kind FROM kb_events WHERE repo_key = ?", (key,)).fetchall()
     assert [k[0] for k in kinds] == [knowledge.DECISION] * 3
+    assert [(e["root_id"], e["payload"]["supersedes"])
+            for e in bus.tail(db, kinds=("decision.recorded",))] == [
+        ("s1", None), (None, None), ("s2", first["id"])]
     before = knowledge.decisions(db, key, status="superseded") + knowledge.decisions(db, key)
     db.conn.execute("DELETE FROM decisions")
     knowledge.rebuild(db, key)

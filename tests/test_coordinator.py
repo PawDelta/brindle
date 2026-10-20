@@ -6,7 +6,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from typer.testing import CliRunner
 
-from brindle import agents, cli, coordinator, knowledge, mcp_server, tasks, workspaces
+from brindle import agents, bus, cli, coordinator, knowledge, mcp_server, tasks, workspaces
 from brindle.db import Agent, Task
 from brindle.pro import license
 
@@ -119,6 +119,9 @@ def _undo_restores_queue(db, repo, monkeypatch):
         assert CliRunner().invoke(cli.app, ["coordinator", "undo", event_id[:8]]).exit_code == 0
     t = db.get_task("queued")
     assert (t.state, tasks._loads(t.depends_on)) == ("pending", ["w-b"])
+    assert [(e["payload"]["action"], e["task_id"])
+            for e in bus.tail(db, kinds=("coordinator.action",))] == [
+        ("hold_task", "queued"), ("reorder_queue", "queued"), ("undo", "queued"), ("undo", "queued")]
     assert CliRunner().invoke(cli.app, ["coordinator", "undo", events[0][0][:8]]).exit_code != 0
 
 
