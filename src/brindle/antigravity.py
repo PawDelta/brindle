@@ -530,8 +530,21 @@ def hook_main(db, event: str, stdin_text: str) -> str:
 # -- mirroring brindle's permission rules into agy's settings ---------------------------
 
 
-def settings_path() -> Path:
+def _default_settings_path() -> Path:
     return Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+
+
+def settings_path() -> Path:
+    return _default_settings_path()
+
+
+def _mirror_isolated() -> bool:
+    """Whether BRINDLE_HOME is not the default home while agy's settings are
+    the real ~/.gemini ones: a separate brindle home (a test, a second
+    install) must not rewrite the settings of the person's own agy."""
+    from brindle.config import brindle_home
+
+    return brindle_home() != Path.home() / ".brindle" and settings_path() == _default_settings_path()
 
 
 class SettingsError(RuntimeError):
@@ -663,6 +676,9 @@ def sync_permissions(repo_root: str | None = None, on: bool | None = None,
     entry brindle added is taken out again. Returns (added, removed)."""
     from brindle import permissions
 
+    if _mirror_isolated():
+        print("brindle: BRINDLE_HOME isn't the default home; left agy's settings alone", file=sys.stderr)
+        return [], []
     with permissions.editing() as store:
         if repo_root is not None and on is not None:
             if on:

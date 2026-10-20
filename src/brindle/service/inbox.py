@@ -129,6 +129,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             reason = needs_you(a, ws) or next(
                 (r for r in [awaiting_review(a, ws)] if r and r.startswith("merge failed")), None)
             # A request the hook holds is pending whatever the screen shows meanwhile.
+            drop_orphan_requests(db, row)   # whatever the agent's status: a cancelled call's row
             asking = (pending_permissions(db, row)
                       if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
             out += [InboxItemDTO(kind="permission", reason="asks permission",
@@ -209,6 +210,21 @@ def _closed(agent: Agent) -> bool:
     return agent.status in ("done", "paused") or agent.dismissed_at is not None
 
 
+def drop_orphan_requests(db: DB, agent: Agent) -> None:
+    """Remove a non-Claude agent's hook-held request rows whose hold is gone
+    (the CLI cancelled the call and its hook died): nothing pairs with them.
+    Claude's are kept (agents.note_permission_outcome)."""
+    if agent.provider == "claude":
+        return
+    # Rows before holds: a hook registers its hold before it records its row, so
+    # every row read here already has its hold in the snapshot taken after.
+    rows = db.permission_requests_of(agent.id)
+    live = {h.request_id for h in HOLDS.of_agent(agent.id)}
+    for row in rows:
+        if row["channel"] == "hook" and row["tool_use_id"] not in live:
+            db.pop_permission_request(agent.id, lambda r, t=row["tool_use_id"]: r["tool_use_id"] == t)
+
+
 def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
     """The permission requests ``agent`` waits on: every one the daemon holds
     for a hook of its now, oldest first (each with its ``request_id``, the
@@ -226,7 +242,11 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         hold = live.get(row["tool_use_id"])
         if hold is None:
             if row["channel"] == "hook":
-                db.update_permission_request(agent.id, row["tool_use_id"], channel="prompt")
+                if agent.provider == "claude":
+                    # Kept: its PostToolUse pairs with it (agents.note_permission_outcome).
+                    db.update_permission_request(agent.id, row["tool_use_id"], channel="prompt")
+                else:
+                    drop_orphan_requests(db, agent)
             continue
         req = permissions.Request.from_dict(json.loads(row["request"]))
         suggestions = json.loads(row["suggestions"]) if row["suggestions"] else None

@@ -260,6 +260,19 @@ def claude_answer(answer: str, suggestions: list | None = None) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
 
 
+def persistent_suggestions(suggestions: object) -> list | None:
+    """Claude Code's suggested updates that persist an allow rule (addRules),
+    nothing else: "Allow always" must not switch the session into a mode like
+    acceptEdits, nor only open a directory for the session. None when no such
+    rule is suggested (brindle's own exact rule is offered then)."""
+    if not isinstance(suggestions, list):
+        return None
+    kept = [u for u in suggestions
+            if isinstance(u, dict) and u.get("type") == "addRules" and u.get("behavior", "allow") == "allow"
+            and u.get("rules") and u.get("destination") != "session"]
+    return kept or None
+
+
 def request_digest(request: str, suggestions: str | None) -> str:
     """The exact request (its recorded JSON) and suggested rule a person was
     shown: the app's answer carries it, and the daemon hands the waiting
