@@ -101,6 +101,11 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
     ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
     ("app.py", "shown", "busy", 409),
     ("app.py", "shown", "locked", 409),         # the commit is refused: the worker's index survives
+    ("app.py", "shown", "write-fails", 500),    # the branch and index go back too
+    pytest.param("app.py", "shown", "raced", 409,
+                 marks=pytest.mark.variant("another git client commits while the edit is built")),
+    pytest.param("app.py", "shown", "index-locked", 409,
+                 marks=pytest.mark.variant("another git client holds the worker's index")),
     ("../proj/app.py", "shown", None, 400),
     ("out/m.py", "shown", None, 400),           # a symlinked directory leading out of the worktree
     pytest.param(".git/HEAD", "shown", None, 400, marks=pytest.mark.variant("the worktree's own git link")),
@@ -108,8 +113,8 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
                  marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
     pytest.param("pkg/m.py", "shown", "swap", 200,
                  marks=pytest.mark.variant("a directory swapped for an escaping symlink mid-edit")),
-], ids=["edit-commits", "edit-stale", "edit-busy", "edit-refused", "edit-dotdot", "edit-symlink", "edit-git",
-        "edit-pathspec", "edit-swap"])
+], ids=["edit-commits", "edit-stale", "edit-busy", "edit-refused", "edit-write-fails", "edit-raced",
+        "edit-index-locked", "edit-dotdot", "edit-symlink", "edit-git", "edit-pathspec", "edit-swap"])
 def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, monkeypatch,
                                                            path, base, setup, status):
     from brindle import git
@@ -145,7 +150,28 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
             return real(*a, **k)
 
         monkeypatch.setattr(git, "hash_blob", swap_then_hash)
-    head, staged = sh("git rev-parse HEAD", wt), sh("git diff --cached", wt)
+    if setup == "raced":
+        real_env = git.run_env
+
+        def commit_meanwhile(args, *a, **k):      # another client moves the branch after the tree is built
+            got = real_env(args, *a, **k)
+            if args[0] == "write-tree":
+                sh("git update-ref refs/heads/rev $(git commit-tree HEAD^{tree} -p HEAD -m other)", wt)
+            return got
+
+        monkeypatch.setattr(git, "run_env", commit_meanwhile)
+    if setup == "index-locked":
+        (repo / ".git" / "worktrees" / "wt" / "index.lock").write_text("")
+    if setup == "write-fails":
+        real_rewrite = routes_actions._rewrite
+
+        def disk_full(fh, data):
+            if data == b"print('bye')\n":
+                raise OSError("no space left on device")
+            real_rewrite(fh, data)
+
+        monkeypatch.setattr(routes_actions, "_rewrite", disk_full)
+    tree, staged = sh("git rev-parse HEAD^{tree}", wt), sh("git diff --cached", wt)
     shown = sh(f"git hash-object {'app.py' if path == 'app.py' else 'pkg/m.py'}", wt)[:7]
     code, reply = _send("PUT", "/v1/workspaces/proj/w-e/file",
                         {"path": path, "content": "print('bye')\n", "base": shown if base == "shown" else base})
@@ -153,7 +179,8 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
     edited = bus.tail(db, kinds=("workspace.edited",))
     assert (outside / "m.py").read_text() == "outside\n" and (repo / "app.py").read_text() == "print('hi')\n"
     if status != 200:
-        assert sh("git rev-parse HEAD", wt) == head and sh("git diff --cached", wt) == staged and edited == []
+        assert sh("git rev-parse HEAD^{tree}", wt) == tree and sh("git diff --cached", wt) == staged
+        assert "edit from review" not in sh("git log --format=%s rev", wt) and edited == []
         assert (wt / "app.py").read_text() == "print('working')\n"
         return
     assert sh("git log -1 --format=%s rev", wt) == f"edit from review: {path}"

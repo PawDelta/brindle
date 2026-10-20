@@ -385,25 +385,66 @@ def _open_edit_target(ws: Workspace, rel: str) -> tuple[str, BinaryIO]:
     return "/".join(parts), os.fdopen(fd, "r+b")
 
 
-def _commit_one(ws: Workspace, name: str, mode: str, blob: str) -> str | None:
-    """Commit blob ``blob`` as ``name`` on the worker's branch, built in a
-    scratch index so the worker's own index (what it has staged) is left
-    alone and nothing reads ``name`` as a pathspec. None when HEAD has it already."""
+def _build_commit(ws: Workspace, head: str, entry: str) -> str | None:
+    """A commit on ``head`` that differs only by index ``entry``
+    (``mode,blob,name``), built in a scratch index so the worker's own index
+    is left alone and nothing reads the name as a pathspec. None when
+    ``head`` has it already. Nothing moves the branch here."""
     index = Path(git.out(["rev-parse", "--absolute-git-dir"], ws.path)) / "brindle-edit.index"
     env = {**os.environ, "GIT_INDEX_FILE": str(index)}
     try:
-        git.run_env(["read-tree", "HEAD"], ws.path, env)
-        git.run_env(["update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}"], ws.path, env)
+        git.run_env(["read-tree", head], ws.path, env)
+        git.run_env(["update-index", "--add", "--cacheinfo", entry], ws.path, env)
         tree = git.run_env(["write-tree"], ws.path, env).stdout.strip()
     finally:
         index.unlink(missing_ok=True)
-    head = git.out(["rev-parse", "HEAD"], ws.path)
-    if tree == git.out(["rev-parse", "HEAD^{tree}"], ws.path):
+    if tree == git.out(["rev-parse", f"{head}^{{tree}}"], ws.path):
         return None
-    message = f"edit from review: {name}"
-    commit = git.out(["commit-tree", tree, "-p", head, "-m", message], ws.path)
-    git.run(["update-ref", "-m", message, f"refs/heads/{ws.branch}", commit, head], ws.path)
-    return commit
+    return git.out(["commit-tree", tree, "-p", head, "-m", f"edit from review: {entry.split(',', 2)[2]}"],
+                   ws.path)
+
+
+def _index_entry(ws: Workspace, name: str) -> str | None:
+    """The worker's index entry for ``name`` as ``mode,blob,name``, or None
+    if it isn't in the index. A path with a merge conflict is refused."""
+    listed = git.out(["--literal-pathspecs", "ls-files", "--stage", "-z", "--", name], ws.path)
+    entries = [e.partition("\t")[0].split() for e in listed.split("\0") if e]
+    if any(stage != "0" for _, _, stage in entries):
+        raise ServiceError("conflict", f"{name} has a merge conflict; resolve it first", 409)
+    return f"{entries[0][0]},{entries[0][1]},{name}" if entries else None
+
+
+def _rewrite(fh: BinaryIO, data: bytes) -> None:
+    fh.seek(0)
+    fh.truncate()
+    fh.write(data)
+    fh.flush()
+
+
+def _land(ws: Workspace, fh: BinaryIO, entry: str, head: str, commit: str | None, before: bytes,
+          data: bytes) -> None:
+    """Move the worker's index, then its branch (only if it is still at
+    ``head``), then the file to the edit; when a step fails, the ones before
+    it are undone, so a refused edit leaves all three as they were."""
+    name = entry.split(",", 2)[2]
+    old = _index_entry(ws, name)
+    ref, undo = f"refs/heads/{ws.branch}", []
+    try:
+        git.run(["update-index", "--add", "--cacheinfo", entry], ws.path)
+        undo.append(lambda: git.run(["update-index", "--add", "--cacheinfo", old] if old
+                                    else ["update-index", "--force-remove", "--", name], ws.path))
+        if commit:
+            git.run(["update-ref", "-m", f"edit from review: {name}", ref, commit, head], ws.path)
+            undo.append(lambda: git.run(["update-ref", ref, head, commit], ws.path))
+        undo.append(lambda: _rewrite(fh, before))
+        _rewrite(fh, data)
+    except (git.GitError, OSError):
+        for step in reversed(undo):
+            try:
+                step()
+            except (git.GitError, OSError):
+                log.exception("undoing an edit of %s in %s", name, ws.id)
+        raise
 
 
 def edit_file(db: DB, params: dict, body: Body) -> Any:
@@ -411,8 +452,7 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
     in the worker's worktree, committed on its branch. ``base`` is the blob
     sha the app showed (the diff's ``index`` line, abbreviated is fine); if
     the file has changed since, the edit is refused (409), as it is while
-    any agent in the workspace is busy. The commit lands before the file is
-    written, so a refused commit leaves the worktree and index as they were."""
+    any agent in the workspace is busy, or if the branch moves meanwhile."""
     ws = _workspace(db, params["id"])
     if ws.kind != "worktree":
         raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be edited")
@@ -426,17 +466,18 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
             raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
         name, fh = _open_edit_target(ws, rel)
         with fh:
-            if len(base) < 7 or not git.hash_blob(ws.path, fh.read(), name).startswith(base):
+            before = fh.read()
+            if len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base):
                 raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
             data = content.encode()
             mode = "100755" if os.fstat(fh.fileno()).st_mode & 0o111 else "100644"
             blob = git.hash_blob(ws.path, data, name, write=True)
-            commit = _commit_one(ws, name, mode, blob)
-            # The index matches the commit, so the edit doesn't show as staged undoing it.
-            git.run(["update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}"], ws.path)
-            fh.seek(0)
-            fh.truncate()
-            fh.write(data)
+            # Pinned first: the commit is built on it, and lands only if the branch is still there.
+            head = git.out(["rev-parse", "--verify", f"refs/heads/{ws.branch}"], ws.path)
+            # The index takes the edit too, so it doesn't show as staged undoing it.
+            entry = f"{mode},{blob},{name}"
+            commit = _build_commit(ws, head, entry)
+            _land(ws, fh, entry, head, commit, before, data)
     bus.publish_ws(db, "workspace.edited", ws, path=name, commit=commit)
     return {"workspace_id": ws.id, "path": name, "commit": commit, "blob": blob,
             "stat": git.diff(ws.path, workspaces.require_base(ws), stat=True)}
