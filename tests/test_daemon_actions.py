@@ -430,6 +430,11 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     db.update_autopilot("lead", state="done", audit_sha=head, audit_ok=1)
     assert missing() == 0
     assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
+    # The person's review edit keeps it ready; any other new commit needs a fresh audit.
+    code, edit = _send("PUT", "/v1/sessions/lead/file", {"path": " c.py", "content": "c\n"})
+    assert code == 200 and missing() == 0
+    _commit(sess, "d.py", "d\n")
+    assert missing() == 1
     assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["lead"]
 
 
