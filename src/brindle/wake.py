@@ -13,8 +13,10 @@ brindle uses a hook instead:
   writes it to stderr and exits with code 2. Claude Code then wakes the
   model with that text (a turn starts if it was idle; a running turn gets it
   between steps), and the chat shows a single "Stop hook feedback" line.
-- The text keeps brindle's typed label (agents.message_lead), so the model
-  can tell it came from brindle, and from which agent, never from the person.
+- Each message is wrapped in ``<brindle-msg nonce=... from=...>`` framing
+  whose nonce is fresh for every hand-over (see frame), and who sent it is
+  read from the message's recorded sender, never its text: a worker's body
+  that imitates brindle's framing stays that worker's content.
 
 One waiter per agent: each records itself in ``<brindle home>/wake/<agent>``
 (pid, a token, and a heartbeat as the file's mtime), and an older waiter
@@ -27,6 +29,9 @@ the agent is busy, or are typed into its pane if it's idle (agents.flush).
 from __future__ import annotations
 
 import os
+import re
+import secrets
+import signal
 import sys
 import time
 import uuid
@@ -109,63 +114,98 @@ def _current(agent_id: str, token: str) -> bool:
     return found is not None and found[1] == token
 
 
-def _stand_down(agent_id: str, token: str) -> None:
-    """Mark the waiter gone at once (pid 0), if it's still the current one,
-    so a sender doesn't count on it until its heartbeat runs out."""
-    if _current(agent_id, token):
-        try:
-            _path(agent_id).write_text(f"0 {token}\n")
-        except OSError:
-            pass
+TAG = "brindle-msg"
+# Any opening or closing tag of ours inside a body, however spaced or cased.
+_TAG_IN_BODY = re.compile(r"<\s*(/?)\s*brindle-msg", re.I)
 
 
-def _label(db: DB, agent: Agent, body: str, sender_id: str | None) -> str:
-    from brindle import agents
+def _sender(db: DB, sender_id: str | None) -> str:
+    """Who a message is from, decided by its recorded sender, never its text."""
+    if sender_id in (None, "brindle"):
+        return "brindle"
+    sender = db.get_agent(sender_id)
+    who = f"{sender.profile} agent {sender_id}" if sender else f"agent {sender_id}"
+    return re.sub(r'["<>\n]', "", who)
 
-    if sender_id is None and body.lstrip().startswith(("brindle", "[brindle")):
-        return body  # brindle's own notices and reminders already say so
-    return f"{agents.message_lead(db, agent, sender_id)}\n{body}"
+
+def frame(db: DB, body: str, sender_id: str | None, nonce: str) -> str:
+    """``body`` wrapped in brindle's framing: only an outer tag carrying this
+    delivery's ``nonce`` says who sent it (providers.DELIVERY_NOTE). The
+    nonce is drawn after the body was written, so no sender can have put it
+    in, and any tag of ours inside the body is defused, so the body can't
+    close the frame early or open one of its own."""
+    safe = _TAG_IN_BODY.sub(lambda m: f"&lt;{m.group(1)}{TAG}", body)
+    return (f'<{TAG} nonce="{nonce}" from="{_sender(db, sender_id)}">\n'
+            f"{safe}\n</{TAG} nonce=\"{nonce}\">")
 
 
-def take(db: DB, agent: Agent) -> str | None:
-    """Everything queued for ``agent``, labeled, as one text; None if nothing."""
+def take(db: DB, agent: Agent) -> tuple[str, list] | None:
+    """Everything queued for ``agent``, each message framed with one fresh
+    nonce, as one text, with the messages taken (for ``give_back``); None
+    if nothing. A failure part way puts back what it had taken."""
+    nonce = secrets.token_hex(8)
+    taken: list = []
     parts = []
-    while (msg := db.pop_pending(agent.id)) is not None:
-        parts.append(_label(db, agent, msg.body, msg.sender_id))
-    return "\n\n".join(parts) if parts else None
+    try:
+        while (msg := db.pop_pending(agent.id)) is not None:
+            taken.append(msg)
+            parts.append(frame(db, msg.body, msg.sender_id, nonce))
+    except BaseException:
+        give_back(db, agent.id, taken)
+        raise
+    if not parts:
+        return None
+    return (f"brindle delivered {len(parts)} message{'s' if len(parts) != 1 else ''} "
+            f'(nonce "{nonce}"):\n' + "\n".join(parts)), taken
+
+
+def give_back(db: DB, agent_id: str, taken: list) -> None:
+    """Queue taken messages again, as agents.flush does when a send fails."""
+    for msg in taken:
+        db.enqueue(agent_id, msg.body, msg.sender_id, notice=msg.noticed_at is not None)
+
+
+def _heartbeat(agent_id: str) -> bool:
+    try:
+        os.utime(_path(agent_id))
+        return True
+    except OSError:
+        return False  # its record is gone (cull pruned it): nobody counts on it
 
 
 def wait(db: DB, agent_id: str, poll: float = POLL, limit: float = TIMEOUT - 60,
-         alive=None) -> str | None:
-    """Watch ``agent_id``'s queue until something arrives (returned), a newer
-    waiter takes over, the agent ends, or ``limit`` seconds pass (None)."""
-    from brindle import agents
+         alive=None) -> tuple[str, list] | None:
+    """Watch ``agent_id``'s queue until something arrives (returned, as
+    ``take`` returns it), a newer waiter takes over, the agent ends, or
+    ``limit`` seconds pass (None). Nothing is taken while its session waits
+    on an expired cloud login (brindle.login_pause): that mail goes out once
+    the login is back. A waiter that exits needs no stand-down: its pid is
+    gone, which ``live`` checks."""
+    from brindle import agents, login_pause
 
     alive = alive or agents.is_alive
     token = _register(agent_id)
     end = time.time() + limit
     checked = time.time()
-    try:
-        while time.time() < end:
-            if not _current(agent_id, token):
-                return None  # a newer waiter took over
-            agent = db.get_agent(agent_id)
-            if agent is None or agent.status in ENDED:
+    while time.time() < end:
+        if not _current(agent_id, token):
+            return None  # a newer waiter took over
+        agent = db.get_agent(agent_id)
+        if agent is None or agent.status in ENDED:
+            return None
+        if time.time() - checked >= ALIVE_EVERY:
+            checked = time.time()
+            if not alive(agent):
                 return None
-            if time.time() - checked >= ALIVE_EVERY:
-                checked = time.time()
-                if not alive(agent):
-                    return None
-            # A read first: taking is a write transaction, too much to hold every poll.
-            text = take(db, agent) if db.pending_count(agent_id) else None
-            if text:
-                db.set_status(agent_id, "processing", only_if="idle")  # it wakes with this
-                return text
-            os.utime(_path(agent_id))  # heartbeat
-            time.sleep(poll)
-        return None
-    finally:
-        _stand_down(agent_id, token)
+        # A read first: taking is a write transaction, too much to hold every poll.
+        if db.pending_count(agent_id) and not login_pause.holding(db, agent_id):
+            got = take(db, agent)
+            if got:
+                return got
+        if not _heartbeat(agent_id):
+            return None
+        time.sleep(poll)
+    return None
 
 
 def _mtime(p: Path) -> float:
@@ -193,10 +233,18 @@ def prune(known: set[str]) -> None:
 
 def main(db: DB, agent_id: str) -> int:
     """``brindle _hook await-mail``: the exit code Claude Code reads (2: wake
-    the model with stderr)."""
-    text = wait(db, agent_id)
-    if not text:
+    the model with stderr). Mail taken but not handed over (the write fails,
+    or Claude Code stops the hook first: SIGTERM) is queued again."""
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    got = wait(db, agent_id)
+    if not got:
         return 0
-    sys.stderr.write(text + "\n")
-    sys.stderr.flush()
+    text, taken = got
+    try:
+        sys.stderr.write(text + "\n")
+        sys.stderr.flush()
+    except BaseException:
+        give_back(db, agent_id, taken)
+        raise
+    db.set_status(agent_id, "processing", only_if="idle")  # it wakes with this
     return 2

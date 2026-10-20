@@ -2161,8 +2161,10 @@ add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
   "new messages" notice or an autopilot nudge, the waiter hands it over and Claude
   Code wakes the model with it: an idle chat starts a new turn, a busy one gets it
   between steps, and the chat shows one "Stop hook feedback" line. Each message
-  keeps brindle's label (`brindle delivered this message from developer agent w1:`
-  or a `brindle (12:00:00): ...` notice), so the model never mistakes it for you.
+  is wrapped as `<brindle-msg nonce="..." from="developer agent w1">...</brindle-msg>`
+  with a fresh random nonce every hand-over, and `from` comes from who really sent
+  it, never from its text: a worker can't make its words read as brindle's or yours.
+  A session paused on an expired cloud login gets its mail once the login is back.
   Workers and older sessions get messages through Claude Code's own inbox
   (another-session messages; a `crossSessionInbound` of `hold` or `refuse` in your
   Claude settings would hold or drop them). Typing into the pane is the fallback
