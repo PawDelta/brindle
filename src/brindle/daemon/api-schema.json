@@ -1312,23 +1312,23 @@
     },
     {
       "method": "POST",
-      "path": "/v1/workspaces/{id}/merge"
+      "path": "/v1/workspaces/{id:path}/merge"
     },
     {
       "method": "POST",
-      "path": "/v1/workspaces/{id}/pr"
+      "path": "/v1/workspaces/{id:path}/pr"
     },
     {
       "method": "POST",
-      "path": "/v1/workspaces/{id}/remove"
+      "path": "/v1/workspaces/{id:path}/remove"
     },
     {
       "method": "POST",
-      "path": "/v1/workspaces/{id}/review"
+      "path": "/v1/workspaces/{id:path}/review"
     },
     {
       "method": "POST",
-      "path": "/v1/workspaces/{id}/sync"
+      "path": "/v1/workspaces/{id:path}/sync"
     }
   ]
 }
