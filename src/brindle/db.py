@@ -1268,6 +1268,11 @@ class DB:
                       "reason, created_at, suggestions, channel, hold_until) VALUES (?,?,?,?,?,?,?,?)",
                       (agent_id, tool_use_id, request, reason, time.time(), suggestions, channel, hold_until))
 
+    def permission_requests_of(self, agent_id: str) -> list[sqlite3.Row]:
+        """The agent's recorded requests, oldest first."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? ORDER BY created_at, rowid",
+                                 (agent_id,)).fetchall()
+
     def hook_permission_request(self, agent_id: str) -> sqlite3.Row | None:
         """The request the agent's hook holds for the app's answer, if any."""
         return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND channel='hook' "

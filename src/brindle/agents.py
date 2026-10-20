@@ -3023,9 +3023,10 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     # Only an answer to exactly this request and these suggestions counts.
     holder = Holder(agent.id, request_id, permissions.request_digest(*recorded))
     # Held before it is recorded anywhere, so nothing watching the rows can take its id first.
-    held = holder.register()
+    hold_until = time.time() + hold
+    held = holder.register(hold_until)
     db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
-                              "hook" if held else None, hold_until=time.time() + hold if held else None)
+                              "hook" if held else None, hold_until=hold_until if held else None)
     answer = None
     if held:
         try:

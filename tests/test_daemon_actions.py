@@ -499,7 +499,10 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
     hook.start()
     assert asked.wait(5)    # the hook holds the request for the app's answer
     request_id = db.hook_permission_request(agent_id)["tool_use_id"]
-    shown = inbox.pending_permission(db, held).dto      # what the app's inbox item carries
+    def shown_now():    # what the app's inbox item carries
+        return next(p.dto for p in inbox.pending_permissions(db, held) if p.dto.request_id == request_id)
+
+    shown = shown_now()
     assert started + HOLD <= shown.hold_until <= time.time() + HOLD     # how long the app may answer
     if race == "in-flight":
         assert holds.HOLDS.claim(agent_id, request_id, shown.digest, "deny")
@@ -507,7 +510,7 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
         swapped = permissions.Request("claude", "bash", "Bash", command="rm -rf important-data")
         db.conn.execute("UPDATE permission_requests SET request=? WHERE tool_use_id=?",
                         (json.dumps(swapped.to_dict()), request_id))
-        shown = inbox.pending_permission(db, held).dto
+        shown = shown_now()
     if race == "db-answer":
         db.conn.execute("UPDATE permission_requests SET answer='allow_once' WHERE tool_use_id=?", (request_id,))
     if race == "closed":
@@ -530,18 +533,76 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
         assert [e["payload"]["choice"] for e in bus.tail(db, kinds=("permission.answered",))] == [choice]
 
 
-def test_permission_holds_take_no_token_but_only_a_hooks_own_agents(world, answering, monkeypatch):
-    from brindle.daemon import holds
+def test_every_held_request_is_offered_and_answered_by_its_own_id(db, repo, world, answering, monkeypatch):
+    from brindle import permissions
+    from brindle.db import DB
+    from brindle.service import inbox
 
+    asked, publish = threading.Semaphore(0), bus.publish_agent
+    monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
+        kind == "permission.pending" and asked.release(), publish(d, kind, *a, **k))[1])
+    wk, out = db.get_agent("wk"), {}
+
+    def hook(command):
+        payload = {**ASK, "cwd": str(repo), "tool_input": {"command": command}}
+        out[command] = agents.permission_request_decision(DB(), wk, payload)
+
+    hooks = [threading.Thread(target=hook, args=(c,)) for c in ("npm test", "npm run lint")]
+    for t in hooks:     # one after the other: the older one is held first
+        t.start()
+        assert asked.acquire(timeout=5)
+    # The newest row says 'hook', but nothing holds it.
+    stale = permissions.Request("claude", "bash", "Bash", command="rm -rf important-data").to_dict()
+    db.add_permission_request("wk", "stale", json.dumps(stale), "", None, "hook")
+    shown = [i.permission for i in inbox.items(db, str(repo), panes={"%1": True, "%2": True})
+             if i.agent_id == "wk" and i.kind == "permission"]
+    assert [p.target for p in shown] == ["npm test", "npm run lint"]
+    code, reply = _send("POST", "/v1/inbox/wk/permission",
+                        {"request": shown[0].request_id, "digest": shown[0].digest, "choice": "allow_once"})
+    assert code == 200, reply
+    hooks[0].join(5)
+    assert _verdict(out["npm test"]) == "allow" and "npm run lint" not in out    # the newer one still waits
+    assert [p.dto.target for p in inbox.pending_permissions(db, wk)] == ["npm run lint"]
+    hooks[1].join(HOLD + 5)
+    assert out["npm run lint"] is None      # its hold ran out: the CLI's own prompt asks
+
+
+def test_permission_holds_take_no_token_but_only_a_hooks_own_agents(db, world, answering, monkeypatch):
+    from brindle import permissions
+    from brindle.daemon import holds
+    from brindle.service import inbox
+
+    now = [time.time()]
+    monkeypatch.setattr(holds.HOLDS, "clock", lambda: now[0])
     monkeypatch.setattr(holds, "MAX_PER_AGENT", 1)
-    hold = {"agent_id": "wk", "request_id": "r-tcp", "digest": "d", "nonce": "n"}
+    hold = {"agent_id": "wk", "request_id": "r-tcp", "digest": "d", "nonce": "n", "hold_until": now[0] + 600}
+
+    def register(**fields):
+        return _send("POST", "/v1/holds", {**hold, **fields}, peer_pid=310, token=None)[0]
+
+    def offered(request_id):
+        recorded = permissions.Request("claude", "bash", "Bash", command="npm test").to_dict()
+        db.add_permission_request("wk", request_id, json.dumps(recorded), "", None, "hook")
+        return any(p.dto.request_id == request_id for p in inbox.pending_permissions(db, db.get_agent("wk")))
+
     assert _send("POST", "/v1/holds", hold, token=None)[0] == 403     # TCP: no peer to name
     # Over the Unix socket, only for an agent the calling process runs under, and so many at once.
-    assert _send("POST", "/v1/holds", {**hold, "agent_id": "sup", "request_id": "r-other"}, peer_pid=310,
-                 token=None)[0] == 403
-    assert _send("POST", "/v1/holds", {**hold, "request_id": "r-unix"}, peer_pid=310, token=None)[0] == 200
-    assert _send("POST", "/v1/holds", {**hold, "request_id": "r-more"}, peer_pid=310, token=None)[0] == 409
+    assert register(agent_id="sup", request_id="r-other") == 403
+    assert register(request_id="r-unix") == 200
+    assert register(request_id="r-more") == 409
     assert _send("POST", "/v1/holds/r-unix/end", {"nonce": "n"}, peer_pid=310, token=None)[0] == 200
+    # A hook gone without ending its hold stops renewing it: the hold lapses, isn't offered
+    # or answerable any more, and frees its place.
+    assert register(request_id="r-gone") == 200 and offered("r-gone")
+    now[0] += holds.LEASE_SECONDS + 1
+    assert not offered("r-gone") and not holds.HOLDS.claim("wk", "r-gone", "d", "allow_once")
+    # One whose holder keeps waiting still ends at its hold_until, whatever it claims.
+    assert register(request_id="r-due", hold_until=now[0] + 10) == 200
+    now[0] += 9
+    assert holds.HOLDS.take("r-due", "n") == (True, None)       # renewed
+    now[0] += 2
+    assert not offered("r-due") and not holds.HOLDS.claim("wk", "r-due", "d", "allow_once")
+    assert register(request_id="r-next") == 200
 
 
 def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, world, answering, monkeypatch):
@@ -556,7 +617,7 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     monkeypatch.setattr(holds, "_UnixConnection", lambda path, timeout: (_ for _ in ()).throw(OSError()))
     # No daemon to hold it in: the hook records it and the CLI prompts as usual.
     assert agents.permission_request_decision(db, db.get_agent("wk"), {**ASK, "cwd": str(repo)}) is None
-    shown = inbox.pending_permission(db, db.get_agent("wk")).dto
+    [shown] = [p.dto for p in inbox.pending_permissions(db, db.get_agent("wk"))]
     assert (shown.via, shown.choices, bool(shown.terminal)) == ("prompt", [], True)    # "Go to it"
     code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_once"})
     assert code == 409 and pressed == [], reply

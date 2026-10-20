@@ -129,13 +129,12 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             reason = needs_you(a, ws) or next(
                 (r for r in [awaiting_review(a, ws)] if r and r.startswith("merge failed")), None)
             # A request the hook holds is pending whatever the screen shows meanwhile.
-            asking = (pending_permission(db, row)
-                      if a["status"] == "waiting" or db.hook_permission_request(row.id) else None)
-            if asking:
-                out.append(InboxItemDTO(kind="permission", reason="asks permission",
-                                        detail=asking.request.summary() if asking.request else None,
-                                        permission=asking.dto, **link))
-            elif reason:
+            asking = (pending_permissions(db, row)
+                      if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
+            out += [InboxItemDTO(kind="permission", reason="asks permission",
+                                 detail=p.request.summary() if p.request else None, permission=p.dto, **link)
+                    for p in asking]
+            if reason and not asking:
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
@@ -206,38 +205,52 @@ def _prompt_wording(screen: str) -> str:
     return prompt_answer.redact("\n".join([ln for ln in lines if ln][-WORDING_LINES:]))
 
 
-def pending_permission(db: DB, agent: Agent) -> Pending | None:
-    """The permission request ``agent`` waits on: one brindle's hook holds
-    for the app's answer (``request_id``, with the digest of the exact
-    request and suggested rule it shows, and the time its answer window
-    ends), else one at its CLI's own prompt on screen, terminal-only."""
-    hook = db.hook_permission_request(agent.id)
-    # Only one the daemon really holds (a row alone says nothing: anything can write one).
-    if hook is not None and HOLDS.held(agent.id, hook["tool_use_id"]) is not None:
-        hook = dict(hook)
-        req = permissions.Request.from_dict(json.loads(hook["request"]))
-        suggestions = json.loads(hook["suggestions"]) if hook["suggestions"] else None
+def _closed(agent: Agent) -> bool:
+    return agent.status in ("done", "paused") or agent.dismissed_at is not None
+
+
+def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
+    """The permission requests ``agent`` waits on: every one the daemon holds
+    for a hook of its now, oldest first (each with its ``request_id``, the
+    digest of the exact request and suggested rule it shows, and when the
+    hold ends), else the one at its CLI's own prompt on screen,
+    terminal-only. A row alone is no request: anything can write one, and
+    one whose hold is gone (lapsed, ended, the agent closed) is shown as
+    the CLI's own prompt's from then on."""
+    if _closed(agent):
+        HOLDS.drop_agent(agent.id)      # closed: nothing of its can be answered any more
+    live = {h.request_id: h for h in HOLDS.of_agent(agent.id)}
+    out = []
+    for row in db.permission_requests_of(agent.id):
+        row = dict(row)
+        hold = live.get(row["tool_use_id"])
+        if hold is None:
+            if row["channel"] == "hook":
+                db.update_permission_request(agent.id, row["tool_use_id"], channel="prompt")
+            continue
+        req = permissions.Request.from_dict(json.loads(row["request"]))
+        suggestions = json.loads(row["suggestions"]) if row["suggestions"] else None
         ws = db.get_workspace(agent.workspace_id)
         # A native worker's loop reads its profile's permissions, not brindle's rules.
         rule = None if agent.provider == "native" else _always_rule(req, suggestions, ws.repo_root if ws else None)
         choices = [PermissionChoiceDTO(choice="allow_once", label="Allow once"),
                    *([PermissionChoiceDTO(choice="allow_always", label="Allow always", rule=rule)] if rule else []),
                    PermissionChoiceDTO(choice="deny", label="Deny")]
-        return Pending("hook", hook, req, suggestions, PermissionDTO(
-            via="hook", request_id=hook["tool_use_id"], tool=req.tool, kind=req.kind, target=req.target(),
-            digest=permissions.request_digest(hook["request"], hook["suggestions"]), choices=choices,
-            hold_until=hook["hold_until"], hold_note=_hold_note(agent.provider, hook["hold_until"]),
-            terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider)))
-    if not agent.tmux_window:
-        return None
+        out.append(Pending("hook", row, req, suggestions, PermissionDTO(
+            via="hook", request_id=row["tool_use_id"], tool=req.tool, kind=req.kind, target=req.target(),
+            digest=permissions.request_digest(row["request"], row["suggestions"]), choices=choices,
+            hold_until=hold.hold_until, hold_note=_hold_note(agent.provider, hold.hold_until),
+            terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider))))
+    if out or not agent.tmux_window or _closed(agent):
+        return out
     try:
         screen = tmux.capture(agent.tmux_window, lines=60, server=agents.server_of(agent))
     except tmux.TmuxError:
-        return None
+        return []
     if not get_provider(agent.provider).tool_permission(screen):
-        return None
-    return Pending("prompt", None, None, None,
-                   PermissionDTO(via="prompt", wording=_prompt_wording(screen), terminal=TERMINAL))
+        return []
+    return [Pending("prompt", None, None, None,
+                    PermissionDTO(via="prompt", wording=_prompt_wording(screen), terminal=TERMINAL))]
 
 
 def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
@@ -289,10 +302,12 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     if agent is None:
         raise ServiceError("not_found", f"no agent {agent_id}", 404)
     identity_lock.ensure(agent)
-    pending = pending_permission(db, agent)
-    if pending is not None and pending.via == "prompt":
+    asking = pending_permissions(db, agent)
+    if any(p.via == "prompt" for p in asking):
         raise ServiceError("conflict", f"{agent_id}'s request {TERMINAL}", 409)
-    if pending is None or pending.dto.request_id != request_id or pending.dto.digest != digest:
+    # The one the person answers, by its id: an agent can hold several at once.
+    pending = next((p for p in asking if p.dto.request_id == request_id), None)
+    if pending is None or pending.dto.digest != digest:
         raise ServiceError("conflict", f"{agent_id} isn't waiting on that request, as shown, any more: "
                                        "fetch the inbox again", 409)
     offered = next((c for c in pending.dto.choices if c.choice == choice), None)

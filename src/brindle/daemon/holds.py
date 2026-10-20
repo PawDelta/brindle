@@ -5,9 +5,12 @@ A hook that holds a request (brindle.agents._hold_for_app) makes a random
 nonce it keeps only in memory and registers the hold here (``POST
 /v1/holds``), before it records the request anywhere: the agent (one the
 calling process runs under, by its ancestry), the request's id, and the
-digest of the exact request and suggested rule (permissions.request_digest). It then
-waits (``POST /v1/holds/{id}/wait``) for the decision, which only the holder
-of that nonce is given, and ends the hold when it stops waiting.
+digest of the exact request and suggested rule (permissions.request_digest), and when it stops
+holding (``hold_until``). It then waits (``POST /v1/holds/{id}/wait``) for
+the decision, which only the holder of that nonce is given, and ends the
+hold when it stops waiting. The daemon owns the hold's lifetime all the
+same: past ``hold_until``, or once its holder stops waiting for
+LEASE_SECONDS (a hook killed before it could end it), the hold is gone.
 
 Answers come in only through the person-only inbox route
 (service.inbox.answer_permission), which the guard refuses to agent callers:
@@ -43,6 +46,9 @@ WAIT_SECONDS = 20.0      # longest one wait call lasts before the hook asks agai
 WAIT_STEP = 0.1          # seconds between a wait's looks at its hold (no thread is held meanwhile)
 MAX_PER_AGENT = 16       # holds at once, per agent and in all
 MAX_HOLDS = 256
+# Seconds a hold lives past its holder's last wait: a hook that vanished
+# without ending it (killed, crashed) stops renewing, and its hold lapses.
+LEASE_SECONDS = 60.0
 
 
 def _hash(nonce: str) -> str:
@@ -55,36 +61,68 @@ class Hold:
     request_id: str
     digest: str
     nonce_hash: str
+    hold_until: float              # when the hold ends whatever happens (the hook's permission_hold_seconds)
+    lease_until: float             # when it lapses unless its holder waits again
     answer: str | None = None      # claimed by a person's answer
     released: bool = False         # handed to the hook
 
 
 class Holds:
-    """The daemon's live holds, in memory only."""
+    """The daemon's live holds, in memory only. The daemon owns their
+    lifetime: a hold is live until its ``hold_until`` and while its holder
+    keeps waiting on it (its lease); past either it is gone, can't be
+    claimed or released, and frees its place. ``clock``: wall time, for tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock=time.time) -> None:
         self._holds: dict[str, Hold] = {}
         self._changed = threading.Lock()
+        self.clock = clock
 
-    def register(self, agent_id: str, request_id: str, digest: str, nonce: str) -> bool:
-        """False when the id is held already, or the agent (or everyone) holds too many."""
+    def _purge(self) -> None:
+        """Drop the holds past their hold_until or lease (with the lock held)."""
+        now = self.clock()
+        for request_id in [r for r, h in self._holds.items() if now >= min(h.hold_until, h.lease_until)]:
+            del self._holds[request_id]
+
+    def register(self, agent_id: str, request_id: str, digest: str, nonce: str, hold_until: float) -> bool:
+        """False when the id is held already, the hold would already be over,
+        or the agent (or everyone) holds too many live ones."""
         with self._changed:
+            self._purge()
+            now = self.clock()
             mine = sum(h.agent_id == agent_id for h in self._holds.values())
-            if request_id in self._holds or mine >= MAX_PER_AGENT or len(self._holds) >= MAX_HOLDS:
+            if (request_id in self._holds or hold_until <= now or mine >= MAX_PER_AGENT
+                    or len(self._holds) >= MAX_HOLDS):
                 return False
-            self._holds[request_id] = Hold(agent_id, request_id, digest, _hash(nonce))
+            self._holds[request_id] = Hold(agent_id, request_id, digest, _hash(nonce), hold_until,
+                                           now + LEASE_SECONDS)
             return True
 
     def held(self, agent_id: str, request_id: str) -> Hold | None:
+        """The agent's live hold ``request_id``, if it is one."""
         with self._changed:
+            self._purge()
             hold = self._holds.get(request_id)
             return hold if hold is not None and hold.agent_id == agent_id else None
 
+    def of_agent(self, agent_id: str) -> list[Hold]:
+        """Every live hold of the agent's."""
+        with self._changed:
+            self._purge()
+            return [h for h in self._holds.values() if h.agent_id == agent_id]
+
+    def drop_agent(self, agent_id: str) -> None:
+        """The agent was closed: none of its holds can be answered any more."""
+        with self._changed:
+            for request_id in [r for r, h in self._holds.items() if h.agent_id == agent_id]:
+                del self._holds[request_id]
+
     def claim(self, agent_id: str, request_id: str, digest: str, answer: str) -> bool:
         """Claim the hold for ``answer``, the person's: False when it isn't
-        held, is another agent's, answers a request that differs from the one
-        the hook recorded, or another answer won."""
+        held (or no longer live), is another agent's, answers a request that
+        differs from the one the hook recorded, or another answer won."""
         with self._changed:
+            self._purge()
             hold = self._holds.get(request_id)
             if (hold is None or hold.agent_id != agent_id or hold.answer is not None
                     or not hmac.compare_digest(hold.digest, digest)):
@@ -93,8 +131,10 @@ class Holds:
             return True
 
     def release(self, agent_id: str, request_id: str) -> bool:
-        """Hand a claimed answer to the hook: False when the hold ended meanwhile."""
+        """Hand a claimed answer to the hook: False when the hold ended (or
+        lapsed) meanwhile."""
         with self._changed:
+            self._purge()
             hold = self._holds.get(request_id)
             if hold is None or hold.agent_id != agent_id or hold.answer is None or hold.released:
                 return False
@@ -109,15 +149,17 @@ class Holds:
 
     def take(self, request_id: str, nonce: str) -> tuple[bool, str | None]:
         """For the hook holding ``nonce``, without blocking: (whether the hold
-        is its own and still there, the answer released to it, if any). An
-        answer taken ends the hold."""
+        is its own and still live, the answer released to it, if any). Its
+        waiting renews the lease; an answer taken ends the hold."""
         with self._changed:
+            self._purge()
             hold = self._holds.get(request_id)
             if hold is None or not hmac.compare_digest(hold.nonce_hash, _hash(nonce)):
                 return False, None
             if hold.released:
                 del self._holds[request_id]
                 return True, hold.answer
+            hold.lease_until = self.clock() + LEASE_SECONDS
             return True, None
 
     async def wait(self, request_id: str, nonce: str, seconds: float) -> tuple[bool, str | None]:
@@ -164,12 +206,14 @@ async def register(request: Request) -> JSONResponse:
 
     body = await _body(request)
     fields = [_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
-    if not all(fields):
-        return JSONResponse({"error": {"code": "invalid", "message": "agent_id, request_id, digest and nonce"}}, 400)
+    hold_until = body.get("hold_until")
+    if not all(fields) or not isinstance(hold_until, (int, float)) or isinstance(hold_until, bool):
+        return JSONResponse({"error": {"code": "invalid",
+                                       "message": "agent_id, request_id, digest, nonce and hold_until"}}, 400)
     pid = request.scope.get(peer.PEER_PID)
     if pid is None or fields[0] not in await asyncio.to_thread(peer.caller_agents, pid):
         return JSONResponse({"error": {"code": "forbidden", "message": "a hook holds only its own agent's requests"}}, 403)
-    if not HOLDS.register(*fields):
+    if not HOLDS.register(*fields, float(hold_until)):
         return JSONResponse({"error": {"code": "conflict", "message": "already held, or too many holds"}}, 409)
     return JSONResponse({"held": True})
 
@@ -234,10 +278,11 @@ class Holder:
         self.agent_id, self.request_id, self.digest = agent_id, request_id, digest
         self.nonce = secrets.token_urlsafe(32)
 
-    def register(self) -> bool:
-        """Whether the daemon holds it now (False: no daemon to answer through)."""
-        return call(PREFIX, {"agent_id": self.agent_id, "request_id": self.request_id,
-                             "digest": self.digest, "nonce": self.nonce}, timeout=5.0) is not None
+    def register(self, hold_until: float) -> bool:
+        """Whether the daemon holds it now, until ``hold_until`` at most
+        (False: no daemon to answer through)."""
+        return call(PREFIX, {"agent_id": self.agent_id, "request_id": self.request_id, "digest": self.digest,
+                             "nonce": self.nonce, "hold_until": hold_until}, timeout=5.0) is not None
 
     def wait(self, seconds: float) -> tuple[bool, str | None]:
         """(still held, the person's answer if one came within ``seconds``)."""

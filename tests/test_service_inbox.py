@@ -117,7 +117,7 @@ def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monk
     digest, hold_until = permissions.request_digest(stored, json.dumps(SUGGESTED)), time.time() + 600
     db.add_permission_request("w1", "tu1", stored, "", json.dumps(SUGGESTED), channel, hold_until=hold_until)
     if held:
-        assert HOLDS.register("w1", "tu1", digest, "nonce")
+        assert HOLDS.register("w1", "tu1", digest, "nonce", hold_until)
     try:
         got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
     finally:
