@@ -1,7 +1,7 @@
 import time
 import pytest
 
-from brindle import agents, autopilot
+from brindle import agents, autopilot, prompt_answer
 from brindle.db import DB, Workspace
 
 pytestmark = pytest.mark.usefixtures("fake_agent_cli")
@@ -11,6 +11,8 @@ def test_rate_limit_with_session_id_401_not_treated_as_auth_failure(db, repo):
     ws = db.get_workspace("main") or Workspace("ws-rl", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-rl", 0)
     db.add_workspace(ws)
     worker = agents.spawn(db, ws, "developer", mode="assign")
+    # The fake CLI's pane reads as ready, so the launch didn't sit out after_launch's 30s.
+    assert prompt_answer.pending(db) == []
 
     # A rate limit payload containing '401' only in session_id or transcript path
     payload = {

@@ -209,11 +209,15 @@ def no_real_agent_cli(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fake_agent_cli(tmp_path, monkeypatch):
-    """BRINDLE_CLAUDE_BIN and BRINDLE_CODEX_BIN point at a stub that just sleeps,
-    for tests that need an agent's pane to be live; the private tmux server's
-    teardown kills it."""
+    """BRINDLE_CLAUDE_BIN and BRINDLE_CODEX_BIN point at a stub that draws an
+    idle input box (Claude Code's, then Codex's) and sleeps, for tests that
+    need an agent's pane to be live; the private tmux server's teardown kills
+    it. Without the box each launch's after_launch waited out its 30 seconds,
+    and tests that spawn twice took a minute. Echo is off so a pasted message
+    doesn't read as a draft left in the box."""
     stub = tmp_path / "agent-cli-stub"
-    stub.write_text("#!/bin/sh\nexec sleep 600\n")
+    stub.write_text("#!/bin/sh\nstty -echo 2>/dev/null\n"
+                    "printf '❯ \\n? for shortcuts\\n› \\n  100%% context left\\n'\nexec sleep 600\n")
     stub.chmod(0o755)
     monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(stub))
     monkeypatch.setenv("BRINDLE_CODEX_BIN", str(stub))
