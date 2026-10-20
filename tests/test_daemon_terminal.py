@@ -240,11 +240,17 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
         pane, clock, sized = terminal.Pane("%1", None, None), Clock(), []
         pane._loop = clock
 
-        gated, state = {}, {"attached": 0}
+        gated, state, ops = {}, {"attached": 0}, []
 
         async def run(fn, target, *args):
             if fn is tmux.attached_terminals:
                 return state["attached"]
+            if fn is tmux.set_window_size_manual:
+                ops.append("manual")
+                if "manual" in gated:
+                    await gated["manual"].wait()
+            if fn is tmux.unset_window_size:
+                ops.append("unset")
             if fn is tmux.resize_window:
                 sized.append(args)
                 if "gate" in gated:
@@ -310,23 +316,34 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
         assert sized[-1] == (140, 24) and sized.count((140, 24)) == 1
         assert viewer.reseed
 
-        # A terminal attaches while a resize is in flight and leaves: sizing
-        # went to it, so the same size is applied again, not taken as done.
+        # A terminal attaches while the daemon is taking the sizing: the
+        # handback waits for that and undoes it, and once the terminal leaves
+        # the same size is applied again, not taken as done.
+        state["attached"] = 1
+        await pane._check_shared()
+        state["attached"] = 0
+        await pane._check_shared()
+        assert not pane._manual
         clock.now += 5
-        gated["gate"] = gate = asyncio.Event()
+        ops.clear()
+        gated["manual"] = gate = asyncio.Event()
         await ask(90)
         await settle()
         state["attached"] = 1
-        await pane._check_shared()
+        attach = asyncio.ensure_future(pane._check_shared())
+        await settle()
+        assert not attach.done()
         gate.set()
         gated.clear()
+        await attach
         await settle()
+        assert ops == ["manual", "unset"] and not pane._manual and pane.shared
         state["attached"] = 0
         await pane._check_shared()
         clock.now += 5
         await ask(90)
         await settle()
-        assert sized[-2:] == [(90, 24), (90, 24)]
+        assert ops == ["manual", "unset", "manual"] and sized[-1] == (90, 24)
         pane._closed = True
 
     asyncio.run(go())

@@ -246,7 +246,7 @@ class Pane:
         self._resize: asyncio.TimerHandle | None = None
         self._next = 0.0                # when the next resize may be applied at once
         self._applied: tuple[int, int] | None = None
-        self._handed_back = 0           # times a terminal took the sizing from the daemon
+        self._sizing = asyncio.Lock()   # taking, using and handing back the window's size
         self._runner: asyncio.Task | None = None
         self._dirty = False             # a size was asked for and not yet applied
         self._unseeded = False          # a resize was applied and viewers not seeded since
@@ -392,21 +392,21 @@ class Pane:
             self._wake()
 
     async def _apply_resize(self, size: tuple[int, int]) -> None:
-        if size == self._applied:
-            return
         try:
             await self._check_shared()      # a terminal may have attached since the last poll
-            if self.shared:
-                self._applied = None
-                return
-            owned = self._handed_back
-            if not self._manual:
-                await self.run(tmux.set_window_size_manual, self.target)
-                self._manual = owned == self._handed_back
-            await self.run(tmux.resize_window, self.target, *size)
-            if owned == self._handed_back:  # else a terminal took the sizing meanwhile
+            async with self._sizing:        # the state is read again once it is ours
+                if self.shared or size == self._applied:
+                    return
+                if not self._manual:
+                    self._manual = True     # set first: a cancelled close still hands it back
+                    try:
+                        await self.run(tmux.set_window_size_manual, self.target)
+                    except tmux.TmuxError:
+                        self._manual = False
+                        raise
+                await self.run(tmux.resize_window, self.target, *size)
                 self._applied = size
-            self._unseeded = True
+                self._unseeded = True
         except tmux.TmuxError:
             log.debug("brindle: can't resize %s", self.target, exc_info=True)
 
@@ -425,14 +425,14 @@ class Pane:
         if attached is None:
             raise tmux.TmuxError(f"can't find pane: {self.target}")
         shared = attached > 0
-        if shared == self.shared:
-            return
-        self.shared = shared
-        if shared and self._manual:     # the terminal's size rules again
-            self._manual = False
-            self._applied = None
-            self._handed_back += 1
-            await self.run(tmux.unset_window_size, self.target)
+        async with self._sizing:        # after any resize or acquisition in flight
+            if shared == self.shared:
+                return
+            self.shared = shared
+            if shared and self._manual:     # the terminal's size rules again
+                self._manual = False
+                self._applied = None
+                await self.run(tmux.unset_window_size, self.target)
         self._wake()
 
     async def _poll_shared(self) -> None:
@@ -466,9 +466,10 @@ class Pane:
         for task in (*self._tasks, self._runner, self._resize):
             if task:
                 task.cancel()
-        if self._manual:
+        async with self._sizing:
             try:
-                await self.run(tmux.unset_window_size, self.target)
+                if self._manual:
+                    await self.run(tmux.unset_window_size, self.target)
             except tmux.TmuxError:
                 log.debug("brindle: can't unsize %s", self.target, exc_info=True)
 
