@@ -246,6 +246,7 @@ class Pane:
         self._resize: asyncio.TimerHandle | None = None
         self._next = 0.0                # when the next resize may be applied at once
         self._applied: tuple[int, int] | None = None
+        self._handed_back = 0           # times a terminal took the sizing from the daemon
         self._runner: asyncio.Task | None = None
         self._dirty = False             # a size was asked for and not yet applied
         self._unseeded = False          # a resize was applied and viewers not seeded since
@@ -398,11 +399,13 @@ class Pane:
             if self.shared:
                 self._applied = None
                 return
+            owned = self._handed_back
             if not self._manual:
                 await self.run(tmux.set_window_size_manual, self.target)
-                self._manual = True
+                self._manual = owned == self._handed_back
             await self.run(tmux.resize_window, self.target, *size)
-            self._applied = size
+            if owned == self._handed_back:  # else a terminal took the sizing meanwhile
+                self._applied = size
             self._unseeded = True
         except tmux.TmuxError:
             log.debug("brindle: can't resize %s", self.target, exc_info=True)
@@ -428,6 +431,7 @@ class Pane:
         if shared and self._manual:     # the terminal's size rules again
             self._manual = False
             self._applied = None
+            self._handed_back += 1
             await self.run(tmux.unset_window_size, self.target)
         self._wake()
 

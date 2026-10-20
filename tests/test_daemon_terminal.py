@@ -288,16 +288,45 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
         assert sized[2:] == [(120, 24), (130, 24)]
         assert viewer.reseed
 
-        # A terminal attaches and leaves: sizing was handed back, so the same
-        # size is applied again.
+        async def ask(cols):
+            await terminal._apply(pane, {"type": "resize", "cols": cols, "rows": 24})
+
+        # The same size asked for twice while its resize is pending: one
+        # resize, and the trailing no-op still reseeds.
+        viewer.reseed = False
         clock.now += 5
+        timers = len(clock.timers)
+        gated["gate"] = gate = asyncio.Event()
+        await ask(140)
+        await settle()
+        await ask(140)
+        gate.set()
+        gated.clear()
+        await settle()
+        assert not viewer.reseed and len(clock.timers) == timers + 1
+        clock.now = clock.timers[-1][0]
+        clock.timers[-1][1]()
+        await settle()
+        assert sized[-1] == (140, 24) and sized.count((140, 24)) == 1
+        assert viewer.reseed
+
+        # A terminal attaches while a resize is in flight and leaves: sizing
+        # went to it, so the same size is applied again, not taken as done.
+        clock.now += 5
+        gated["gate"] = gate = asyncio.Event()
+        await ask(90)
+        await settle()
         state["attached"] = 1
         await pane._check_shared()
+        gate.set()
+        gated.clear()
+        await settle()
         state["attached"] = 0
         await pane._check_shared()
-        pane.resize(130, 24)
+        clock.now += 5
+        await ask(90)
         await settle()
-        assert sized[-2:] == [(130, 24), (130, 24)]
+        assert sized[-2:] == [(90, 24), (90, 24)]
         pane._closed = True
 
     asyncio.run(go())
