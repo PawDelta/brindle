@@ -82,9 +82,11 @@ class SessionDTO(_DTO):
 
 class InboxItemDTO(_DTO):
     kind: str
-    agent_id: str
-    workspace_id: str
     reason: str
+    # An org notice belongs to no agent or workspace.
+    agent_id: str | None = None
+    workspace_id: str | None = None
+    detail: str | None = None
 
 
 class MilestoneDTO(_DTO):
