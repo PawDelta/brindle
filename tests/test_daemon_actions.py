@@ -385,30 +385,42 @@ def _commit(path, name: str, text: str, message: str = "work") -> str:
 
 def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     from brindle.daemon import session_review
+    from brindle.db import Task
+
+    def missing() -> int:
+        code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+        assert code == 200 and reply["ready"] == (not reply["reasons"]), reply
+        return len(reply["reasons"])
 
     sess = Path(lead.path)
     watch = session_review.ReadinessWatch()
     watch.sweep(db)                 # the first sweep only looks
-    assert _send("GET", "/v1/sessions/lead/pr/readiness")[1]["reasons"] == [
-        "the session's branch has no commits ahead of main"]
+    assert missing() == 1           # nothing ahead of main
     head = _commit(sess, "a.py", "a\n")
+    assert missing() == 0
+    # Undone again, one condition at a time: a failing milestone, a running worker,
+    # a coordinator-held task, and a supervisor waiting at a prompt.
     autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
     db.add_workspace(Workspace("proj/w-r", lead.repo_root, "feat-r", "worktree", "feat-r", "sess", str(sess),
                                None, "brindle-r", time.time()))
     db.add_agent(Agent("wr", "proj/w-r", "developer", "claude", "lead", "assign", "processing", "%8", None,
                        time.time()))
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
-    assert code == 200 and not reply["ready"]
-    assert reply["reasons"] == ["milestone 1 (tests pass) hasn't passed its check", "1 worker(s) still running: wr"]
-    assert _send("GET", "/v1/sessions/lead/diff")[0] == 409
+    db.add_task(Task("t1", lead.repo_root, None, "lead", lead.id, "developer", "later", "assign", 1, None, None,
+                     None, None, "held", time.time()))
+    db.set_status("lead", "waiting")
+    assert missing() == 4 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
     assert watch.sweep(db) == []
     db.delete_agent("wr")
+    assert missing() == 3
+    db.update_task("t1", state="cancelled")
+    assert missing() == 2
+    db.set_status("lead", "idle")
+    assert missing() == 1
     db.record_check(db.milestones("lead")[0].id, True, "", head)
-    assert _send("GET", "/v1/sessions/lead/pr/readiness")[1]["reasons"] == [
-        "the completion audit hasn't approved the session's current commit"]
+    assert missing() == 1           # the completion audit hasn't approved this commit
     db.update_autopilot("lead", state="done", audit_sha=head, audit_ok=1)
-    assert _send("GET", "/v1/sessions/lead/pr/readiness")[1] == {"root_id": "lead", "ready": True, "reasons": []}
+    assert missing() == 0
     assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
     assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["lead"]
 
@@ -417,9 +429,14 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
     from brindle import git, history
 
     sess = Path(lead.path)
-    for branch, name in (("feat-a", "a.py"), ("feat-b", "b.py")):
+    _commit(repo, "shared.py", "".join(f"{n}\n" for n in range(1, 41)))
+    sh("git merge -q --ff-only main", sess)
+    # Each worker deletes one line of the shared file: two hunks, each its own deleter.
+    for branch, name, gone in (("feat-a", "a.py", 5), ("feat-b", "b.py", 40)):
         sh(f"git switch -q -c {branch} sess", sess)
+        (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 41) if n != gone))
         _commit(sess, name, f"{name}\n")
+        sh("git commit -qam less", sess)
         sh("git switch -q sess", sess)
     _commit(sess, "app.py", "print('hi')\nprint('lead')\n")
     git.merge_into(lead.repo_root, sess, "feat-a", squash=False)
@@ -436,8 +453,8 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
     code, d = _send("GET", "/v1/sessions/lead/diff")
     assert code == 200, d
     assert {f["path"]: f["authors"] for f in d["files"]} == {
-        "a.py": ["wa"], "app.py": ["supervisor"], "b.py": ["wb", "you"]}
-    assert [h["authors"] for f in d["files"] for h in f["hunks"] if f["path"] == "app.py"] == [["supervisor"]]
+        "a.py": ["wa"], "app.py": ["supervisor"], "b.py": ["wb", "you"], "shared.py": ["wa", "wb"]}
+    assert [h["authors"] for f in d["files"] for h in f["hunks"] if f["path"] == "shared.py"] == [["wa"], ["wb"]]
     assert [(w["id"], w["kind"], w["branch"]) for w in d["workers"]] == [
         ("wa", "worker", "feat-a"), ("supervisor", "supervisor", "sess"), ("wb", "worker", "feat-b"),
         ("you", "you", None)]
@@ -484,7 +501,7 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
     code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})
-    assert (code, reply["reasons"]) == (409, ["the session's branch has no commits ahead of main"])
+    assert (code, reply["error"]["code"]) == (409, "not_ready") and reply["reasons"]
     assert not called.exists()
     autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
     autopilot.clear_finished_goal(db, "lead")       # reached: what's left is what the session announced
