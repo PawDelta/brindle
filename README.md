@@ -11,13 +11,20 @@ that exact commit and your checks pass. A goal is done only when its check comma
 exit 0.
 
 ```sh
-curl -fsSL pawdelta.com/brindle/install | sh
+curl -fsSL pawdelta.com/brindle/install | sh   # installs uv and tmux if missing, then brindle
+# or, if you already have uv and tmux:
+uv tool install brindle
+
 brindle demo        # watch it finish a practice repo in a few minutes
 ```
 
-![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://pawdelta.com/brindle/brindle-demo.gif?v=0.0.2)
+brindle is free to use, including at work, under the [brindle License 1.0](LICENSE): you
+may install and run it, but not modify or redistribute it or use it to build a competing
+service ([details](#license)).
 
-*`brindle demo`, recorded on brindle 0.0.2 (sped up 4×): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
+![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
+
+*`brindle demo`, recorded on brindle 0.4.1 (sped up about 2.7×, 20 seconds): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
 
 - **Done means a command passed.** A goal is split into milestones, each with a
   check command that brindle runs itself. A milestone is verified when its check exits
