@@ -131,6 +131,14 @@ def note(db: DB, root_id: str, kind: str, payload: dict | None = None) -> None:
         append(db, repo_key(ws.repo_root), kind, payload or {}, session=root_id)
 
 
+def last_intent(db: DB, root_id: str) -> str | None:
+    """The summary session ``root_id`` last announced (its goal, then its
+    milestones' titles, one per line): kept after the goal itself is cleared."""
+    row = db.conn.execute("SELECT payload FROM kb_events WHERE session = ? AND kind = ?"
+                          " ORDER BY ts DESC, rowid DESC LIMIT 1", (root_id, INTENT)).fetchone()
+    return json.loads(row["payload"]).get("summary") if row else None
+
+
 def intents(db: DB, repo_key: str) -> list[dict]:
     """The sessions' announced intents for ``repo_key``, oldest first."""
     rows = db.conn.execute("SELECT * FROM intents WHERE repo_key = ? ORDER BY updated_at, session_root",

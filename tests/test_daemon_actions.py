@@ -2,9 +2,12 @@
 job whose end arrives on the bus, and a choice the person must make is a 409."""
 
 import asyncio
+import contextlib
 import json
+import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -360,3 +363,164 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "a\nb"})[0] == 400
     assert _send("POST", "/v1/terminals/wk/input", {"text": "ab-12"})[0] == 404
     assert len(typed) == 2
+
+
+@pytest.fixture
+def lead(db, repo, tmp_path, monkeypatch):
+    """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
+    sh(f"git worktree add -q -b sess {tmp_path / 'sess'} main", repo)
+    ws = workspaces.adopt_root(db, str(tmp_path / "sess"))
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
+    db.add_autopilot("lead")
+    db.update_autopilot("lead", state="done")
+    monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    return ws
+
+
+def _commit(path, name: str, text: str, message: str = "work") -> str:
+    (path / name).write_text(text)
+    sh(f"git add {name} && git commit -qm '{message}'", path)
+    return sh("git rev-parse HEAD", path)
+
+
+def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import Task
+
+    def missing() -> int:
+        code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+        assert code == 200 and reply["ready"] == (not reply["reasons"]), reply
+        return len(reply["reasons"])
+
+    sess = Path(lead.path)
+    watch = session_review.ReadinessWatch()
+    watch.sweep(db)                 # the first sweep only looks
+    assert missing() == 1           # nothing ahead of main
+    head = _commit(sess, "a.py", "a\n")
+    assert missing() == 0
+    # Undone again, one condition at a time: a failing milestone, a running worker, a
+    # coordinator-held task, a supervisor waiting at a prompt, and a worker's failed merge.
+    autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
+    db.add_workspace(Workspace("proj/w-r", lead.repo_root, "feat-r", "worktree", "feat-r", "sess", str(sess),
+                               None, "brindle-r", time.time()))
+    db.add_agent(Agent("wr", "proj/w-r", "developer", "claude", "lead", "assign", "processing", "%8", None,
+                       time.time()))
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    db.add_task(Task("t1", lead.repo_root, None, "lead", lead.id, "developer", "later", "assign", 1, None, None,
+                     None, None, "held", time.time()))
+    db.set_status("lead", "waiting")
+    db.add_workspace(Workspace("proj/w-f", lead.repo_root, "feat-f", "worktree", "feat-f", "sess", str(sess),
+                               None, "brindle-f", time.time()))
+    db.add_agent(Agent("wf", "proj/w-f", "developer", "claude", "lead", "assign", "idle", "%6", "done", time.time()))
+    db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
+    assert missing() == 5 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
+    assert watch.sweep(db) == []
+    db.set_merged("proj/w-f", head)
+    assert missing() == 4
+    db.delete_agent("wr")
+    assert missing() == 3
+    db.update_task("t1", state="cancelled")
+    assert missing() == 2
+    db.set_status("lead", "idle")
+    assert missing() == 1
+    db.record_check(db.milestones("lead")[0].id, True, "", head)
+    assert missing() == 1           # the completion audit hasn't approved this commit
+    db.update_autopilot("lead", state="done", audit_sha=head, audit_ok=1)
+    assert missing() == 0
+    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
+    assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["lead"]
+
+
+def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
+    from brindle import git, history
+
+    sess = Path(lead.path)
+    _commit(repo, "shared.py", "".join(f"{n}\n" for n in range(1, 41)))
+    sh("git merge -q --ff-only main", sess)
+    # Two parallel workers each delete one line of the shared file and merge in turn (line 5
+    # survives on feat-b until the last merge): two hunks, each its own deleter.
+    for branch, name, gone in (("feat-a", "a.py", 5), ("feat-b", "b.py", 40), ("feat-c", "c.py", 0)):
+        sh(f"git switch -q -c {branch} sess", sess)
+        (sess / name).write_text(f"{name}\n")
+        if gone:
+            (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 41) if n != gone))
+        # feat-b's commit dated last: a reverse blame then strays onto its branch and credits it with line 5.
+        sh(f"git add -A && GIT_COMMITTER_DATE=@{1_700_000_000 + gone} git commit -qm work", sess)
+        sh("git switch -q sess", sess)
+    for branch in ("feat-a", "feat-b", "feat-c"):
+        git.merge_into(lead.repo_root, sess, branch, squash=branch == "feat-c")
+    _commit(sess, "app.py", "print('hi')\nprint('lead')\n")
+    # feat-a's worker is still there; feat-b's workspace is gone, its report kept; feat-c has neither.
+    db.add_workspace(Workspace("proj/w-a", lead.repo_root, "feat-a", "worktree", "feat-a", "sess", str(sess),
+                               None, "brindle-a", time.time()))
+    db.add_agent(Agent("wa", "proj/w-a", "developer", "claude", "lead", "assign", "idle", "%7", None, time.time()))
+    history.record(db, lead.repo_root, "worker_result", agent_id="wb", branch="feat-b", profile="developer-codex")
+    code, got = _send("GET", "/v1/sessions/lead/file?path=b.py")
+    assert code == 200 and got["content"] == "b.py\n"
+    code, edited = _send("PUT", "/v1/sessions/lead/file?path=b.py", {"content": "b.py\nmine\n", "base": got["base"]})
+    assert code == 200 and sh("git log -1 --format=%s", sess) == "review edits: b.py"
+    code, d = _send("GET", "/v1/sessions/lead/diff")
+    assert code == 200, d
+    assert {f["path"]: f["authors"] for f in d["files"]} == {
+        "a.py": ["wa"], "app.py": ["supervisor"], "b.py": ["wb", "you"], "c.py": ["feat-c"],
+        "shared.py": ["wa", "wb"]}
+    assert [h["authors"] for f in d["files"] for h in f["hunks"] if f["path"] == "shared.py"] == [["wa"], ["wb"]]
+    assert [(w["id"], w["kind"], w["branch"]) for w in d["workers"]] == [
+        ("wa", "worker", "feat-a"), ("supervisor", "supervisor", "sess"), ("wb", "worker", "feat-b"),
+        ("you", "you", None), ("feat-c", "worker", "feat-c")]
+
+
+@pytest.mark.parametrize("path,body,setup,status", [
+    ("app.py", {"content": "print('bye')\n"}, None, 200),
+    ("app.py", {}, "delete", 200),
+    ("new/deep/n.py", {"content": "n\n"}, "hook-refuses", 409),    # the file and its new directories go
+    ("app.py", {"content": "x\n"}, "exists", 409),                  # a create where a file already is
+    ("app.py", {"content": "print('bye')\n"}, "busy", 409),
+    ("app.py", {"content": "print('bye')\n"}, "merging", 409),
+], ids=["edit", "delete", "create-refused", "exists", "busy", "merging"])
+def test_session_review_edits_commit_on_the_session_branch(db, repo, lead, path, body, setup, status):
+    from brindle import git
+
+    sess = Path(lead.path)
+    head = sh("git rev-parse HEAD", sess)
+    base = git.hash_blob(sess, (sess / "app.py").read_bytes(), "app.py")
+    if setup == "busy":
+        db.set_status("lead", "processing")
+    if setup == "hook-refuses":
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+    body = body if setup in ("hook-refuses", "exists") else {**body, "base": base}
+    with pipeline.base_lock(lead.repo_root, "sess") if setup == "merging" else contextlib.nullcontext():
+        code, reply = _send("DELETE" if setup == "delete" else "PUT", f"/v1/sessions/lead/file?path={path}", body)
+    assert code == status, reply
+    if status != 200:
+        assert sh("git rev-parse HEAD", sess) == head and not (sess / "new").exists()
+        assert sh("git status --porcelain", sess) == "" and bus.tail(db, kinds=("session.edited",)) == []
+        return
+    assert sh("git log -1 --format=%s", sess) == "review edits: app.py" and reply["commit"] == sh(
+        "git rev-parse HEAD", sess)
+    assert sh("git ls-files app.py", sess) == ("" if setup == "delete" else "app.py")
+
+
+def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_path, monkeypatch):
+    sess, called = Path(lead.path), tmp_path / "gh-called"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})
+    assert (code, reply["error"]["code"]) == (409, "not_ready") and reply["reasons"]
+    assert not called.exists()
+    autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
+    autopilot.clear_finished_goal(db, "lead")       # reached: what's left is what the session announced
+    db.update_autopilot("lead", state="done")
+    _commit(sess, "a.py", "a\n")
+    code, draft = _send("GET", "/v1/sessions/lead/pr/draft")
+    assert code == 200 and draft["title"] == "Ship it" and "- tests pass" in draft["body"]
+    code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": draft["title"], "body": draft["body"]})
+    assert code == 202, reply
+    done = bus.tail(db, kinds=("job.done", "job.failed"))
+    assert done[-1]["payload"]["result"]["url"] == "https://github.com/o/r/pull/7"
+    assert "--base main --head sess --title Ship it --body" in called.read_text()

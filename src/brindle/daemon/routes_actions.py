@@ -35,6 +35,7 @@ from starlette.routing import Route
 
 from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, tmux, workspaces
 from brindle import sessions as sessions_mod
+from brindle.daemon import session_review as review
 from brindle.daemon import terminal
 from brindle.db import DB, Agent, Workspace
 from brindle.service import sessions as svc
@@ -126,7 +127,9 @@ def _endpoint(fn: Action):
         if not isinstance(body, dict):
             return _error(ServiceError("invalid", "the body must be a JSON object"))
         try:
-            got = await asyncio.to_thread(_call, fn, dict(request.path_params), body)
+            # The query (?path= on a file route) is the params' too; the path's own win.
+            params = {**request.query_params, **request.path_params}
+            got = await asyncio.to_thread(_call, fn, params, body)
         except Exception as e:  # noqa: BLE001 - mapped to a status below
             err = from_exception(e)
             if err.code == "internal":
@@ -360,26 +363,48 @@ BUSY = ("starting", "processing", "waiting")
 MAX_EDIT_BYTES = 1 << 20       # a file the review sheet can edit inline
 
 
-def _edit_dir(ws: Workspace, rel: str) -> tuple[str, int, str]:
+def _edit_dir(ws: Workspace, rel: str, made: list[str] | None = None) -> tuple[str, int, str]:
     """``rel`` normalized, an open descriptor of its directory, and the
     file's own name in it: a relative path with no ``..`` and nothing in
     .git, its directories opened one at a time from the worktree without
-    following a symlink, so nothing swapped in later can redirect a write."""
+    following a symlink, so nothing swapped in later can redirect a write.
+    With ``made``, missing directories are created and their paths appended."""
     parts = PurePosixPath(rel).parts
     if (not parts or PurePosixPath(rel).is_absolute() or "\\" in rel
             or any(p == ".." or p.lower() == ".git" for p in parts)):
         raise ServiceError("invalid", f"{rel!r} isn't a path inside the worktree")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(ws.path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for part in parts[:-1]:
-            fd, parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd), fd
-            os.close(parent)
+        for i, part in enumerate(parts[:-1]):
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if made is None:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=fd)
+                made.append("/".join(parts[:i + 1]))
+                child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
     except OSError as e:
         os.close(fd)
         if isinstance(e, FileNotFoundError):
             raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
         raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
     return "/".join(parts), fd, parts[-1]
+
+
+def _unmake(ws: Workspace, made: list[str]) -> None:
+    """Remove the directories :func:`_edit_dir` made, deepest first, each
+    through its parent opened as it opens them (so never outside)."""
+    for path in reversed(made):
+        with contextlib.suppress(OSError, ServiceError):
+            _, fd, leaf = _edit_dir(ws, path)
+            try:
+                os.rmdir(leaf, dir_fd=fd)
+            finally:
+                os.close(fd)
 
 
 def read_edit_target(ws: Workspace, rel: str) -> tuple[str, int, str, bytes, int]:
@@ -432,6 +457,96 @@ def _replace(dir_fd: int, leaf: str, data: bytes, mode: int) -> None:
         raise
 
 
+def _content(body: Body) -> bytes:
+    data = _get(body, "content", required=True).encode()
+    if len(data) > MAX_EDIT_BYTES:
+        raise ServiceError("too_large", f"an edit is at most {MAX_EDIT_BYTES // 1024} KB", 413)
+    if b"\0" in data:
+        raise ServiceError("binary", "an edit is UTF-8 text; edit binary files in an editor", 415)
+    return data
+
+
+def commit_edit(ws: Workspace, rel: str, data: bytes | None, base: str | None,
+                message: str) -> tuple[str, str | None]:
+    """``data`` becomes ``rel`` in ``ws``'s checkout and is committed alone,
+    as ``<message>: <path>``; None deletes it. ``base`` is the blob sha the
+    app showed (abbreviated is fine): if the file has changed since, the edit
+    is refused (409). None creates the file (and its directories), which
+    must not exist yet. git makes the commit (its hooks and locks included);
+    if it refuses, the file and its index entries go back exactly as they
+    were. The caller holds the checkout's lock. Returns the normalized path
+    and the commit (None when nothing needed committing)."""
+    if git.current_branch(ws.path) != ws.branch:
+        raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
+    made: list[str] = []
+    before: bytes | None = None
+    try:
+        if base is None:
+            name, dir_fd, leaf = _edit_dir(ws, rel, made)
+            mode = 0o644
+            try:
+                os.stat(leaf, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                os.close(dir_fd)
+                raise ServiceError("stale", f"{rel} already exists; reload it", 409)
+        else:
+            name, dir_fd, leaf, before, mode = read_edit_target(ws, rel)
+    except BaseException:
+        _unmake(ws, made)
+        raise
+    try:
+        if base is not None and (len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base)):
+            raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
+        if data is None:
+            os.unlink(leaf, dir_fd=dir_fd)
+        else:
+            _replace(dir_fd, leaf, data, mode)
+        commit = None
+        # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.
+        lit = ["--literal-pathspecs"]
+        # This path's index entries as they are (none when untracked or its deletion is staged).
+        listed = git.out([*lit, "ls-files", "-s", "-z", "--", name], ws.path).split("\0")
+        entries = [e for e in listed if e.partition("\t")[2] == name]
+        tracked = bool(entries)
+        try:
+            # git reads the path itself: a directory swapped for a symlink meanwhile would commit what it points at.
+            if os.path.realpath(os.path.join(ws.path, name)) != os.path.join(os.path.realpath(ws.path), name):
+                raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
+            # An untracked file deleted changes nothing on the branch.
+            if tracked or data is not None:
+                if not tracked:
+                    git.run([*lit, "add", "--", name], ws.path)     # commit --only needs git to know a new file
+                if git.ok([*lit, "diff", "--quiet", "HEAD", "--", name], ws.path):
+                    # Back to HEAD's content: nothing to commit, but the index drops what was staged for it.
+                    git.run([*lit, "add", "--", name], ws.path)
+                else:
+                    # --only commits just this path: what is staged elsewhere is left alone,
+                    # and a refused commit leaves the index as it was.
+                    git.run([*lit, "commit", "-q", "--only", "-m", f"{message}: {name}", "--", name], ws.path)
+                    commit = git.out(["rev-parse", "HEAD"], ws.path)
+        except (git.GitError, ServiceError):
+            # Refused (a hook, say): the index entry and the file exactly as they were.
+            try:
+                git.run(["update-index", "--force-remove", "--", name], ws.path)
+                if entries:
+                    git.run(["update-index", "-z", "--index-info"], ws.path, input="\0".join(entries) + "\0")
+            finally:
+                if before is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(leaf, dir_fd=dir_fd)
+                else:
+                    _replace(dir_fd, leaf, before, mode)
+            raise
+    except BaseException:
+        os.close(dir_fd)
+        _unmake(ws, made)
+        raise
+    os.close(dir_fd)
+    return name, commit
+
+
 def edit_file(db: DB, params: dict, body: Body) -> Any:
     """The person's edit from the review sheet: ``content`` becomes ``path``
     in the worker's worktree, committed on its branch. ``base`` is the blob
@@ -443,57 +558,69 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
     if ws.kind != "worktree":
         raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be edited")
     identity_lock.ensure_workspace(db, ws)
-    rel, content = _get(body, "path", required=True), _get(body, "content", required=True)
+    rel, data = _get(body, "path", required=True), _content(body)
     base = _get(body, "base", required=True).strip().lower()
-    if len(data := content.encode()) > MAX_EDIT_BYTES:
-        raise ServiceError("too_large", f"an edit is at most {MAX_EDIT_BYTES // 1024} KB", 413)
     with git.checkout_lock(ws.path, timeout=10):
         if busy := [a.id for a in db.list_agents(ws.id) if a.status in BUSY]:
             raise ServiceError("busy", f"{', '.join(busy)} is working in {ws.id}; edit once it has stopped", 409)
-        if git.current_branch(ws.path) != ws.branch:
-            raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
-        name, dir_fd, leaf, before, mode = read_edit_target(ws, rel)
-        try:
-            if len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base):
-                raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
-            _replace(dir_fd, leaf, data, mode)
-            commit = None
-            # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.
-            lit = ["--literal-pathspecs"]
-            # This path's index entries as they are (none when untracked or its deletion is staged).
-            listed = git.out([*lit, "ls-files", "-s", "-z", "--", name], ws.path).split("\0")
-            entries = [e for e in listed if e.partition("\t")[2] == name]
-            tracked = bool(entries)
-            try:
-                # git reads the path itself: a directory swapped for a symlink meanwhile would commit what it points at.
-                if os.path.realpath(os.path.join(ws.path, name)) != os.path.join(os.path.realpath(ws.path), name):
-                    raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
-                if not tracked:
-                    git.run([*lit, "add", "--", name], ws.path)     # commit --only needs git to know a new file
-                if git.ok([*lit, "diff", "--quiet", "HEAD", "--", name], ws.path):
-                    # Back to HEAD's content: nothing to commit, but the index drops what was staged for it.
-                    git.run([*lit, "add", "--", name], ws.path)
-                else:
-                    # --only commits just this path: what the worker has staged elsewhere is left alone,
-                    # and a refused commit leaves the index as it was.
-                    git.run([*lit, "commit", "-q", "--only", "-m", f"edit from review: {name}", "--", name],
-                            ws.path)
-                    commit = git.out(["rev-parse", "HEAD"], ws.path)
-            except (git.GitError, ServiceError):
-                # Refused (a hook, say): the index entry and the file exactly as the worker had them.
-                try:
-                    git.run(["update-index", "--force-remove", "--", name], ws.path)
-                    if entries:
-                        git.run(["update-index", "-z", "--index-info"], ws.path, input="\0".join(entries) + "\0")
-                finally:
-                    _replace(dir_fd, leaf, before, mode)
-                raise
-        finally:
-            os.close(dir_fd)
+        name, commit = commit_edit(ws, rel, data, base, "edit from review")
     blob = git.hash_blob(ws.path, data, name)
     bus.publish_ws(db, "workspace.edited", ws, path=name, commit=commit)
     return {"workspace_id": ws.id, "path": name, "commit": commit, "blob": blob,
             "stat": git.diff(ws.path, workspaces.require_base(ws), stat=True)}
+
+
+# -- a session's review ------------------------------------------------------------
+
+
+def _edit_session(db: DB, params: dict, body: Body, data: bytes | None) -> Any:
+    """The person's edit of any file on the session branch, from the session
+    review: committed there as ``review edits: <path>``, with the workspace
+    edit's checks. Refused while the supervisor is mid-turn or a merge into
+    the session branch is under way."""
+    root, ws = review.session(db, params["root"])
+    identity_lock.ensure(root)
+    rel = params.get("path") or _get(body, "path", required=True)
+    base = _get(body, "base", required=data is None)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
+            held.enter_context(git.checkout_lock(ws.path, timeout=1))
+        except (BlockingIOError, git.GitError):
+            raise ServiceError("busy", f"a merge into {ws.branch} is under way; edit once it's done", 409) from None
+        if (root := _agent(db, root.id)).status in BUSY:
+            raise ServiceError("busy", f"the supervisor {root.id} is working; edit once it has stopped", 409)
+        name, commit = commit_edit(ws, rel, data, base.strip().lower() if base else None, review.EDIT_MESSAGE)
+    bus.publish_agent(db, "session.edited", root.id, path=name, commit=commit, deleted=data is None)
+    return {"root_id": root.id, "path": name, "commit": commit,
+            "blob": git.hash_blob(ws.path, data, name) if data is not None else None}
+
+
+def put_session_file(db: DB, params: dict, body: Body) -> Any:
+    """``content`` becomes the file; ``base`` is the blob sha GET .../file
+    gave (leave it out to create a new file)."""
+    return _edit_session(db, params, body, _content(body))
+
+
+def delete_session_file(db: DB, params: dict, body: Body) -> Any:
+    """``base`` (required) is the blob sha GET .../file gave."""
+    return _edit_session(db, params, body, None)
+
+
+def open_session_pr(db: DB, params: dict, body: Body) -> Any:
+    """Push the session branch and open its PR (``title``, ``body``,
+    ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
+    unless the session is ready. The job's result carries the URL."""
+    root, ws = review.session(db, params["root"])
+    identity_lock.ensure(root)
+    review.require_ready(db, root, ws)
+    title, text, draft = _get(body, "title"), _get(body, "body"), _get(body, "draft", bool, False)
+
+    def work(db: DB, job: Job) -> Any:
+        url = workspaces.pull_request(ws, title, draft, body=text)
+        return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
+
+    return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
 
 
 # -- goal ------------------------------------------------------------------------
@@ -814,6 +941,10 @@ ROUTES = [
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/handover", handover_session),
+    # GET on the file path reads (routes_read); agent callers are refused by the guard.
+    Route("/v1/sessions/{root:path}/file", _endpoint(put_session_file), methods=["PUT"]),
+    Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
+    _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
     _post("/agents/{id}/close", close_agent),

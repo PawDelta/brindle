@@ -2170,6 +2170,34 @@
       "path": "/v1/sessions"
     },
     {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/diff"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/sessions/{root:path}/file"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/file"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/sessions/{root:path}/file"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root:path}/pr"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/pr/draft"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/pr/readiness"
+    },
+    {
       "method": "POST",
       "path": "/v1/sessions/{root}/continue"
     },
