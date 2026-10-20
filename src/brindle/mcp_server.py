@@ -1343,18 +1343,17 @@ def transfer_to_repo(target_path: str, branch: str | None = None) -> str:
     (and any uncommitted changes) are replayed onto a new branch there, as a
     brindle workspace to review and merge. Only works from a scratch session
     (brindle started outside a git repo)."""
-    from brindle import scratch
+    from brindle.service import sessions as svc
+    from brindle.service.errors import ServiceError
 
     db = DB()
     caller, ws = _caller(db)
-    if not scratch.is_scratch(ws.path):
-        return "This isn't a scratch session; the work is already in a real repository."
     try:
         # This chat stays up to deliver the reply; the next session started in
         # the target repo pauses it (scratch.pause_transferred_to).
-        t = scratch.transfer(db, ws, target_path, branch, keep_running=caller.id if caller else None)
-    except (scratch.ScratchError, git.GitError, workspaces.WorkspaceError) as e:
-        return f"Transfer failed: {e}"
+        t = svc.transfer_to_repo(db, ws, target_path, branch, keep_running=caller.id if caller else None)
+    except ServiceError as e:
+        return e.message if e.code == "invalid" else f"Transfer failed: {e.message}"
     return (f"Moved {t.commits} commit(s) onto branch {t.workspace.branch} in {t.workspace.repo_root} "
             f"(workspace {t.workspace.id}, at {t.workspace.path}). The user can open it with "
             f"`brindle` in that repo, then review with `brindle diff {t.workspace.name}`.")

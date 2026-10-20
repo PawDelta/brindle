@@ -411,6 +411,19 @@ def handover(db: DB, cwd: str, to: str, note: str | None = None) -> Handed:
     return Handed(root_id, new, dest)
 
 
+def transfer_to_repo(db: DB, ws: Workspace, target_path: str, branch: str | None = None,
+                     keep_running: str | None = None) -> scratch.Transferred:
+    """Move a scratch session's work onto a new branch of the repository at
+    ``target_path``. ``keep_running``: a chat to leave up so it can deliver the
+    reply (the next session started in the target pauses it)."""
+    if not scratch.is_scratch(ws.path):
+        raise ServiceError("invalid", "This isn't a scratch session; the work is already in a real repository.")
+    try:
+        return scratch.transfer(db, ws, target_path, branch, keep_running=keep_running)
+    except (scratch.ScratchError, git.GitError, workspaces.WorkspaceError) as e:
+        raise ServiceError("conflict", str(e), 409) from e
+
+
 def list_(db: DB, repo_root: str) -> list[Paused]:
     """Paused sessions in ``repo_root``, newest first, with the disk their worktrees use."""
     out = []
