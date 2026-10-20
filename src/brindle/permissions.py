@@ -261,12 +261,15 @@ def claude_answer(answer: str, suggestions: list | None = None) -> dict:
 
 
 def persistent_suggestions(suggestions: object) -> list | None:
-    """Claude Code's suggested updates without any ``setMode``: "Allow
-    always" must not switch the session into a mode like acceptEdits. None
-    when nothing else is left (brindle's own exact rule is offered then)."""
+    """Claude Code's suggested updates that persist an allow rule (addRules),
+    nothing else: "Allow always" must not switch the session into a mode like
+    acceptEdits, nor only open a directory for the session. None when no such
+    rule is suggested (brindle's own exact rule is offered then)."""
     if not isinstance(suggestions, list):
         return None
-    kept = [u for u in suggestions if not (isinstance(u, dict) and u.get("type") == "setMode")]
+    kept = [u for u in suggestions
+            if isinstance(u, dict) and u.get("type") == "addRules" and u.get("behavior", "allow") == "allow"
+            and u.get("rules") and u.get("destination") != "session"]
     return kept or None
 
 

@@ -837,21 +837,27 @@ def test_agy_sync_leaves_the_real_home_alone_under_another_brindle_home(ws, monk
     assert not (home / ".gemini").exists()
 
 
-def test_allow_always_never_offers_a_session_wide_mode():
+@pytest.mark.parametrize("with_rule", [False, True])
+def test_allow_always_offers_only_a_persistent_rule(db, ws, with_rule):
     rule = {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
             "behavior": "allow", "destination": "localSettings"}
-    mode = {"type": "setMode", "mode": "acceptEdits", "destination": "session"}
-    assert permissions.persistent_suggestions([mode, rule]) == [rule]
-    assert permissions.persistent_suggestions([mode]) is None
+    incident = [{"type": "addDirectories", "directories": [ws.path], "destination": "session"},
+                {"type": "setMode", "mode": "acceptEdits", "destination": "session"}]
+    a = worker(db, ws, "claude")
+    payload = {"session_id": "s", "cwd": ws.path, "tool_name": "Bash", "tool_input": {"command": "npm test"},
+               "permission_suggestions": [*incident, *([rule] if with_rule else [])]}
+    agents.permission_request_decision(db, a, payload)
+    [row] = db.permission_requests_of(a.id)
+    assert (json.loads(row["suggestions"]) if row["suggestions"] else None) == ([rule] if with_rule else None)
 
 
-def test_a_dead_codex_hooks_request_row_is_removed(db, ws):
+def test_a_dead_codex_hooks_request_row_is_removed_from_an_idle_agents_inbox(db, ws):
     from brindle.service import inbox
 
-    a = worker(db, ws)
+    a = worker(db, ws)    # not waiting: the turn completed after Codex cancelled the call
     db.add_permission_request(a.id, "r1", json.dumps(permissions.Request("codex", "bash", "Bash").to_dict()),
                               "asking", None, "hook", hold_until=time.time() + 60)
-    assert inbox.pending_permissions(db, a) == []   # no daemon holds it: the hook died
+    assert inbox.items(db, None) == []   # no daemon holds it: the hook died
     assert db.permission_requests_of(a.id) == []
 
 
