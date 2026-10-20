@@ -1,6 +1,5 @@
+import asyncio
 import json
-import os
-import shlex
 import subprocess
 import threading
 from unittest.mock import ANY
@@ -10,6 +9,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from brindle import identity_lock, tmux, workspaces
+from brindle.daemon import terminal
 from brindle.daemon.app import build_app
 from brindle.daemon.terminal import WS_NOT_FOUND
 from brindle.db import Agent
@@ -18,12 +18,18 @@ TOKEN = "t" * 43
 
 
 class FakeTmux:
-    """tmux._tmux with one live pane, %1 (every other target is gone), that
-    records each call."""
+    """A tmux server with one live pane, %1, in session ``sess`` (every other
+    target is gone), reached both by tmux processes (``calls``) and by the
+    daemon's control client (``lines``). ``screen`` is what the pane shows;
+    ``print`` makes it print more, as %output lines on the control client."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.lines: list[str] = []
+        self.procs: list[FakeControl] = []
+        self.screen = b"hello\nworld"
         self.attached = 0
+        self.print_during_capture = b""
         self.cond = threading.Condition()
 
     def __call__(self, *args, input=None, check=True, server=None):
@@ -35,15 +41,101 @@ class FakeTmux:
             if check:
                 raise tmux.TmuxError(f"can't find pane: {target}")
             return subprocess.CompletedProcess(args, 1, "", "")
+        out = ""
         if args[0] == "display-message":
-            out = f"3 1 {self.attached}" if "#{session_attached}" in args[-1] else "0"
-        else:
-            out = "hello\nworld\n" if args[0] == "capture-pane" else ""
+            out = {"#{session_name}": "sess", tmux.CURSOR_FORMAT: "3 1"}.get(args[-1], "0")
+        elif args[0] == "capture-pane":
+            out = self.screen.decode() + "\n"
+        elif args[0] == "list-clients":
+            out = "".join(f"{f}\n" for f in self.flags())
         return subprocess.CompletedProcess(args, 0, out, "")
+
+    def flags(self) -> list[str]:
+        return ["attached,focused,control-mode,UTF-8"] * bool(self.procs) + \
+            ["attached,UTF-8"] * self.attached
+
+    async def spawn(self, argv: list[str]) -> "FakeControl":
+        proc = FakeControl(self, argv)
+        self.procs.append(proc)
+        proc.reply([], flags=0)         # attach-session's own reply
+        return proc
+
+    def print(self, *chunks: bytes) -> None:
+        """The pane prints ``chunks``, which tmux hands over together."""
+        self.screen += b"".join(chunks)
+        self.procs[-1].feed(b"".join(_output(c) for c in chunks))
+
+    def command(self, proc: "FakeControl", line: str) -> None:
+        with self.cond:
+            self.lines.append(line)
+            self.cond.notify_all()
+        words = line.split()
+        target = words[words.index("-t") + 1] if "-t" in words else None
+        if target not in (None, "%1") or words[0] == "nonsense":
+            proc.reply([f"can't find pane: {target}".encode()], error=True)
+        elif words[0] == "capture-pane":
+            if self.print_during_capture:
+                self.print(self.print_during_capture)
+                self.print_during_capture = b""
+            proc.reply(self.screen.split(b"\n"))
+        elif words[0] == "display-message":
+            proc.reply([b"3 1"])
+        elif words[0] == "list-clients":
+            proc.reply([f.encode() for f in self.flags()])
+        else:
+            proc.reply([])
 
     def wait_for(self, pred) -> None:
         with self.cond:
-            assert self.cond.wait_for(lambda: pred(self.calls), timeout=5)
+            assert self.cond.wait_for(pred, timeout=5)
+
+
+def _output(chunk: bytes) -> bytes:
+    escaped = b"".join(b"\\%03o" % b if b < 32 or b == 92 else bytes([b]) for b in chunk)
+    return b"%output %1 " + escaped + b"\n"
+
+
+class FakeControl:
+    """The ``tmux -C`` process: commands written to it are answered on its
+    stdout, each with its own %begin/%end block, in order with the output."""
+
+    def __init__(self, fake: FakeTmux, argv: list[str]) -> None:
+        self.fake, self.argv, self.closed = fake, argv, False
+        self.loop = asyncio.get_running_loop()
+        self.thread = threading.get_ident()
+        self.stdout = asyncio.StreamReader(limit=1 << 24)
+        self.stdin = self
+        self.exited = self.loop.create_future()
+        self.n = 0
+
+    def feed(self, data: bytes) -> None:
+        if threading.get_ident() == self.thread:    # from a command: before its reply
+            self.stdout.feed_data(data)
+        else:
+            self.loop.call_soon_threadsafe(self.stdout.feed_data, data)
+
+    def reply(self, lines: list[bytes], error: bool = False, flags: int = 1) -> None:
+        self.n += 1
+        guard = b"1792476213 %d %d" % (self.n, flags)
+        end = b"%error " if error else b"%end "
+        self.stdout.feed_data(b"%begin " + guard + b"\n" + b"".join(l + b"\n" for l in lines)
+                              + end + guard + b"\n")
+
+    def write(self, data: bytes) -> None:
+        for line in data.decode().splitlines():
+            self.fake.command(self, line)
+
+    def close(self) -> None:
+        self.closed = True
+        self.stdout.feed_data(b"%exit\n")
+        self.stdout.feed_eof()
+        self.exited.set_result(None)
+        with self.fake.cond:
+            self.fake.cond.notify_all()
+
+    async def wait(self) -> int:
+        await self.exited
+        return 0
 
 
 @pytest.fixture
@@ -58,6 +150,7 @@ def fake(db, repo, tmp_path, monkeypatch):
     monkeypatch.setattr(identity_lock, "locked_by", lambda a: None)
     fake = FakeTmux()
     monkeypatch.setattr(tmux, "_tmux", fake)
+    monkeypatch.setattr(terminal, "spawn", fake.spawn)
     return fake
 
 
@@ -67,27 +160,30 @@ def connect(client, agent):
     return sock
 
 
-def test_viewers_share_one_pipe_that_ends_with_the_last(fake):
+def test_viewers_share_one_control_client_whose_seeds_are_ordered_with_its_stream(fake):
     with TestClient(build_app(TOKEN)) as client:
         a = connect(client, "w1")
         assert a.receive_json() == {"type": "terminal", "agent": "w1", "shared": False}
-        assert a.receive_bytes() == b"\x1bchello\r\nworld\x1b[2;4H"
+        assert a.receive_bytes() == b"\x1bchello\r\nworld\x1b[0m\x1b[2;4H"
+        fake.print(b"\x1b[31mli", b"ve\\")       # handed over together: one frame
+        assert a.receive_bytes() == b"\x1b[31mlive\\"
+        # b joins while the pane prints "two": the capture answers after it,
+        # so it is in b's seed and not in b's stream, and streamed to a.
+        fake.print_during_capture = b"two"
         b = connect(client, "w1")
         b.receive_json()
-        b.receive_bytes()
-        command = next(c[-1] for c in fake.calls if c[:2] == ("pipe-pane", "-O"))
-        fifo = shlex.split(command)[-1]
-        with open(fifo, "wb") as out:
-            out.write(b"\x1b[31mlive")
-        assert a.receive_bytes() == b.receive_bytes() == b"\x1b[31mlive"
+        assert b.receive_bytes() == b"\x1bchello\r\nworld\x1b[31mlive\\two\x1b[0m\x1b[2;4H"
+        assert a.receive_bytes() == b"two"
+        fake.print(b"more")
+        assert a.receive_bytes() == b.receive_bytes() == b"more"
         b.__exit__(None, None, None)
-        with open(fifo, "wb") as out:      # still piped for the one viewer left
-            out.write(b"more")
-        assert a.receive_bytes() == b"more"
+        fake.print(b"still")                     # still streamed for the one viewer left
+        assert a.receive_bytes() == b"still"
         a.__exit__(None, None, None)
-        fake.wait_for(lambda calls: ("pipe-pane", "-t", "%1") in calls)
-    assert sum(c[:2] == ("pipe-pane", "-O") for c in fake.calls) == 1
-    assert not os.path.exists(fifo)
+        fake.wait_for(lambda: fake.procs[-1].closed)
+    assert [p.argv[-4:] for p in fake.procs] == [["-C", "attach-session", "-t", "=sess"]]
+    assert fake.lines[0] == "refresh-client -f ignore-size"
+    assert sum(line.startswith("capture-pane") for line in fake.lines) == 2
 
 
 @pytest.mark.parametrize("attached", [0, 1])
@@ -98,26 +194,67 @@ def test_control_frames_reach_the_pane(fake, attached):
         assert sock.receive_json()["shared"] is bool(attached)
         sock.receive_bytes()
         sock.send_text("not json")
-        sock.send_json({"type": "key", "text": "-t %2"})
-        sock.send_json({"type": "key", "keys": ["C-c"]})
-        sock.send_json({"type": "paste", "text": "a\nb"})
+        sock.send_json({"type": "key", "text": '-t %2 "$x\\\n'})
+        sock.send_json({"type": "key", "keys": ["C-c", "Enter"]})
+        sock.send_json({"type": "paste", "text": "-a\nb"})   # "-a": data, not a set-buffer option
         for cols in (80, 100, 120):
             sock.send_json({"type": "resize", "cols": cols, "rows": 40})
         if attached:    # a terminal is attached: its size rules, nothing is resized
-            fake.wait_for(lambda calls: sum("#{session_attached}" in c[-1] for c in calls) == 2)
+            fake.wait_for(lambda: sum(l.startswith("list-clients") for l in fake.lines) >= 2)
         else:
-            fake.wait_for(lambda calls: calls[-1][0] == "resize-window")
-        sent = [c for c in fake.calls if c[0] in ("send-keys", "load-buffer", "paste-buffer",
-                                                  "set-option", "resize-window")]
+            fake.wait_for(lambda: fake.calls and fake.calls[-1][0] == "resize-window")
+        sent = [l for l in fake.lines if l.split()[0] in ("send-keys", "set-buffer", "paste-buffer")]
+        name = sent[2].split()[2]
         assert sent == [
-            ("send-keys", "-t", "%1", "-l", "--", "-t %2"),
-            ("send-keys", "-t", "%1", "--", "C-c"),
-            ("load-buffer", "-b", ANY, "-"),
-            ("paste-buffer", "-p", "-d", "-b", ANY, "-t", "%1"),
-            *([] if attached else [("set-option", "-w", "-t", "%1", "window-size", "manual"),
-                                   ("resize-window", "-t", "%1", "-x", "120", "-y", "40")]),
+            'send-keys -t %1 -l -- "-t %2 \\"\\$x\\\\\\012"',
+            'send-keys -t %1 -- "C-c" "Enter"',
+            f'set-buffer -b {name} -- "-a\\012b"',
+            f"paste-buffer -p -d -b {name} -t %1",
         ]
+        assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == (
+            [] if attached else [("set-option", "-w", "-t", "%1", "window-size", "manual"),
+                                 ("resize-window", "-t", "%1", "-x", "120", "-y", "40")])
         sock.__exit__(None, None, None)
+
+
+def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processes(fake, monkeypatch):
+    async def refused(argv):
+        raise OSError("no control mode")
+
+    monkeypatch.setattr(terminal, "spawn", refused)
+    with TestClient(build_app(TOKEN)) as client:
+        sock = connect(client, "w1")
+        sock.receive_json()
+        assert sock.receive_bytes() == b"\x1bchello\r\nworld\x1b[0m\x1b[2;4H"
+        fake.screen = b"hello\nthere"
+        assert sock.receive_bytes() == b"\x1b[?25l\x1b[2;1H\x1b[0m\x1b[2Kthere\x1b[0m\x1b[2;4H\x1b[?25h"
+        sock.send_json({"type": "key", "text": "x"})
+        fake.wait_for(lambda: ("send-keys", "-t", "%1", "-l", "--", "x") in fake.calls)
+        sock.__exit__(None, None, None)
+    assert fake.procs == []
+
+
+def test_control_quote_is_one_argument_tmux_reads_back_as_the_text():
+    # tmux's parser undoes \\ \" and \$ and turns \ooo into the byte, so
+    # control characters can cross a line-based channel; a NUL can't.
+    assert tmux.control_quote('-t %2 "$x\\' + "\n\x7f\x00é") == '"-t %2 \\"\\$x\\\\\\012\\177é"'
+
+
+def test_coalescing_ends_at_the_byte_threshold_before_the_timer(monkeypatch):
+    monkeypatch.setattr(terminal, "COALESCE_SECONDS", 30.0)
+
+    async def run():
+        pane = terminal.Pane("%1", None, None)
+        viewer = pane.add()
+        pane.printed(b"a")
+        gathering = asyncio.ensure_future(terminal._coalesce(pane, viewer))
+        await asyncio.sleep(0.01)
+        assert not gathering.done()                 # a small chunk: still gathering
+        pane.printed(b"b" * terminal.COALESCE_BYTES)  # over the threshold: done now
+        await asyncio.wait_for(gathering, 1)
+        assert pane.ring.since(viewer.pos) == b"a" + b"b" * terminal.COALESCE_BYTES
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("agent,locked,hello,shown,code", [
@@ -129,7 +266,8 @@ def test_control_frames_reach_the_pane(fake, attached):
 ])
 def test_without_a_pane_says_so_and_shows_what_is_left(fake, monkeypatch, agent, locked, hello,
                                                        shown, code):
-    monkeypatch.setattr(identity_lock, "locked_by", lambda a: locked)
+    # locked_by takes the agent's id: handed anything else it answers None (fail-open)
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: locked if agent_id == agent else None)
     with TestClient(build_app(TOKEN)) as client:
         sock = connect(client, agent)
         assert sock.receive_json() == hello
@@ -139,7 +277,7 @@ def test_without_a_pane_says_so_and_shows_what_is_left(fake, monkeypatch, agent,
             sock.receive_bytes()
         assert closed.value.code == code
         sock.__exit__(None, None, None)
-    assert not any(c[0] == "pipe-pane" for c in fake.calls)
+    assert fake.procs == []
 
 
 @pytest.mark.serial
@@ -153,9 +291,12 @@ def test_a_real_pane_streams_what_it_prints(db, repo, monkeypatch):
         sock = connect(client, "w1")
         sock.receive_json()
         sock.receive_bytes()
-        sock.send_json({"type": "key", "text": "echo brindle-$((40+2))"})
+        # a paste starting with "-" (an option, to tmux's parser) with the
+        # quoting control_quote must undo: quotes, $, a backslash, a newline
+        sock.send_json({"type": "paste",
+                        "text": '--help 2>/dev/null; x="a\\$b"\necho "brindle-$((40+2)) $x"'})
         sock.send_json({"type": "key", "keys": ["Enter"]})
         seen = b""
-        while b"brindle-42" not in seen:
+        while b"brindle-42 a$b" not in seen:
             seen += sock.receive_bytes()
         sock.__exit__(None, None, None)

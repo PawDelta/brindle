@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -478,9 +479,11 @@ def pane_window_tag(pane: str, key: str) -> tuple[str | None, str | None]:
     return fields[0] or None, fields[1] or None
 
 
-def pane_session(pane: str) -> str | None:
-    """The name of the session ``pane`` is currently in, or None if it's gone."""
-    proc = _tmux("display-message", "-p", "-t", pane, "#{session_name}", check=False)
+def pane_session(pane: str, server: object = _THIS_SERVER) -> str | None:
+    """The name of the session ``pane`` is currently in, or None if it's gone.
+    ``server`` as for capture."""
+    proc = _tmux("display-message", "-p", "-t", pane, "#{session_name}", check=False,
+                 server=server)
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
@@ -876,13 +879,15 @@ def kill_session(session: str) -> None:
 
 
 def capture(target: str, lines: int = 200, escapes: bool = False,
-            server: object = _THIS_SERVER) -> str:
+            server: object = _THIS_SERVER, join: bool = True) -> str:
     """``escapes`` includes SGR colour/attribute codes (capture-pane -e):
     needed to tell styled placeholder text apart from something typed.
+    ``join`` glues wrapped lines back together (-J); False keeps one line
+    per screen row, for a caller that redraws rows in place.
     ``server``: the tmux server ``target`` is on, when it isn't the one
     brindle is using (an agent's own; see agents.server_of)."""
-    flags = ["-e"] if escapes else []
-    return _tmux("capture-pane", "-p", "-J", *flags, "-t", target, "-S", f"-{lines}",
+    flags = (["-J"] if join else []) + (["-e"] if escapes else [])
+    return _tmux("capture-pane", "-p", *flags, "-t", target, "-S", f"-{lines}",
                  server=server).stdout
 
 
@@ -909,15 +914,69 @@ def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
     _tmux("send-keys", "-t", target, *keys, server=server)
 
 
-def pipe_pane(target: str, path: str | Path, server: object = _THIS_SERVER) -> None:
-    """Stream raw bytes printed by ``target`` into ``path`` (a FIFO or file).
+def control_argv(session: str, server: object = _THIS_SERVER) -> list[str]:
+    """The command of a control-mode client (``tmux -C``) attached to
+    ``session``: one ordered stream of what every pane of the session prints
+    (``%output`` lines, see decode_output) and of the replies to the commands
+    written to its stdin, one per line (arguments quoted with control_quote).
     ``server`` as for capture."""
-    _tmux("pipe-pane", "-O", "-t", target, f"cat >> {shlex.quote(str(path))}", server=server)
+    base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
+    return [*base, "-C", "attach-session", "-t", f"={session}"]
 
 
-def unpipe_pane(target: str, server: object = _THIS_SERVER) -> None:
-    """Stop any ``pipe_pane`` on ``target``. ``server`` as for capture."""
-    _tmux("pipe-pane", "-t", target, check=False, server=server)
+def control_env() -> dict[str, str]:
+    """The environment for control_argv: tmux refuses to attach from inside
+    one of its own panes (``sessions should be nested with care``) unless
+    TMUX is unset, and a control client, which has no terminal, can't nest."""
+    return {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+
+
+def control_quote(text: str) -> str:
+    """``text`` as one double-quoted argument on a control-mode command line.
+    tmux's parser undoes ``\\\\``, ``\\"`` and ``\\$`` (``$name`` would be
+    expanded) and turns ``\\ooo`` into the byte, which is how newlines and
+    other control characters travel on a line-based channel; the parser
+    passes bytes over 127 through, so non-ASCII text goes as UTF-8. A NUL
+    would end the argument early (tmux keeps C strings), so it is dropped."""
+    out = bytearray(b'"')
+    for b in text.encode():
+        if b in b'\\"$':
+            out += b"\\%c" % b
+        elif b == 0:
+            continue
+        elif b < 0x20 or b == 0x7F:
+            out += b"\\%03o" % b
+        else:
+            out.append(b)
+    out += b'"'
+    return out.decode()
+
+
+def decode_output(data: bytes) -> bytes:
+    """The bytes of a ``%output`` line's payload: tmux writes bytes below 32
+    and the backslash as ``\\ooo`` octal and everything else as is."""
+    return _OCTAL.sub(lambda m: bytes([int(m.group(1), 8)]), data)
+
+
+_OCTAL = re.compile(rb"\\([0-7]{3})")
+
+
+def attached_terminals(target: str, server: object = _THIS_SERVER) -> int | None:
+    """How many terminals show ``target``'s session (0: nobody is looking at
+    it), not counting control-mode clients such as the daemon's own, which
+    ``#{session_attached}`` would. None when the pane is gone. ``server`` as
+    for capture."""
+    proc = _tmux("list-clients", "-t", target, "-F", "#{client_flags}", check=False,
+                 server=server)
+    if proc.returncode != 0:
+        return None
+    return count_terminals(proc.stdout.splitlines())
+
+
+def count_terminals(flags: Iterable[str]) -> int:
+    """The non-control clients among ``flags``, one client's
+    ``#{client_flags}`` per item."""
+    return sum(1 for f in flags if f and "control-mode" not in f.split(","))
 
 
 def set_window_size_manual(target: str, server: object = _THIS_SERVER) -> None:
@@ -937,17 +996,24 @@ def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
     _tmux("set-option", "-w", "-u", "-t", target, "window-size", check=False, server=server)
 
 
-def pane_view(target: str, server: object = _THIS_SERVER) -> tuple[int, int, int] | None:
-    """``target``'s cursor column and row, and how many clients are attached to
-    its session (0: no terminal shows it); None when the pane is gone.
+CURSOR_FORMAT = "#{cursor_x} #{cursor_y}"
+
+
+def pane_view(target: str, server: object = _THIS_SERVER) -> tuple[int, int] | None:
+    """``target``'s cursor column and row; None when the pane is gone.
     ``server`` as for capture."""
-    proc = _tmux("display-message", "-p", "-t", target,
-                 "#{cursor_x} #{cursor_y} #{session_attached}", check=False, server=server)
+    proc = _tmux("display-message", "-p", "-t", target, CURSOR_FORMAT, check=False,
+                 server=server)
+    return parse_cursor(proc.stdout) if proc.returncode == 0 else None
+
+
+def parse_cursor(line: str) -> tuple[int, int] | None:
+    """A CURSOR_FORMAT line as (column, row), or None when it isn't one."""
     try:
-        x, y, attached = (int(v) for v in proc.stdout.split())
+        x, y = (int(v) for v in line.split())
     except ValueError:
         return None
-    return (x, y, attached) if proc.returncode == 0 else None
+    return x, y
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:
