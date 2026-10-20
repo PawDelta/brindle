@@ -2168,14 +2168,20 @@ add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
   and every agent's MCP server share it. Worktrees live in
   `~/.brindle/worktrees/<repo>/<branch>`, and the base branch is recorded in git
   config as `branch.<b>.brindle-base`.
-- **Messages arrive through Claude Code's own inbox.** Every Claude Code session
-  listens on a socket for messages from other sessions, and tells its hooks where
-  it is; brindle's SessionStart hook records it, and from then on messages go there
-  instead of being typed into the pane. An idle agent starts a new turn with the
-  message; a busy one gets it between tool calls. Typing into the pane is the
-  fallback when there's no socket (Codex, Antigravity, older Claude Code). A
-  `crossSessionInbound` of `hold` or `refuse` in your Claude settings would hold or
-  drop them.
+- **Messages wake a supervisor through brindle's own hook.** Your interactive
+  Claude Code chat runs a small background waiter (an `asyncRewake` hook started
+  at `SessionStart` and at every `Stop`). When a worker reports, or brindle has a
+  "new messages" notice or an autopilot nudge, the waiter hands it over and Claude
+  Code wakes the model with it: an idle chat starts a new turn, a busy one gets it
+  between steps, and the chat shows one "Stop hook feedback" line. Each message
+  is wrapped as `<brindle-msg nonce="..." from="developer agent w1">...</brindle-msg>`
+  with a fresh random nonce every hand-over, and `from` comes from who really sent
+  it, never from its text: a worker can't make its words read as brindle's or yours.
+  A session paused on an expired cloud login gets its mail once the login is back.
+  Workers and older sessions get messages through Claude Code's own inbox
+  (another-session messages; a `crossSessionInbound` of `hold` or `refuse` in your
+  Claude settings would hold or drop them). Typing into the pane is the fallback
+  when neither is there (Codex, Antigravity, older Claude Code).
 - **Agent status comes from hooks, not screen-scraping.** Guessing an agent's
   state by pattern-matching terminal output breaks whenever a CLI redesigns its
   interface. brindle launches Claude Code with `--settings` hooks
