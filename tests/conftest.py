@@ -365,6 +365,9 @@ def cli_sign_in_unknown(monkeypatch):
 
     monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: None)
     monkeypatch.setattr(providers, "_SIGNED_IN", {})
+    # Nor is a launch held for Claude Code's first-run screens (the temporary
+    # CLAUDE_CONFIG_DIR has never seen them); tests/test_daemon_actions.py checks.
+    monkeypatch.setattr(providers, "claude_onboarded", lambda: True)
     # Only what a test puts on PATH counts as installed, not an app's own copy.
     monkeypatch.setattr(providers, "CODEX_BUNDLED", "/nonexistent/codex")
     monkeypatch.setattr(antigravity, "BUNDLED", "/nonexistent/agy")

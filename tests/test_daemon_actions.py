@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import sh
 
-from brindle import agents, autopilot, bus, config, coordinator, pipeline, workspaces
+from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
 from brindle.daemon import peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
@@ -21,6 +21,8 @@ from brindle.pro.account import ProAccount
 from brindle.pro.team_policy import Access, AgentSetup, ClaudeSetup, ModelsSetup
 
 TOKEN = "t" * 43
+REAL_PREFLIGHT = preflight.check
+REAL_ONBOARDED = providers.claude_onboarded
 
 
 def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None) -> tuple[int, dict]:
@@ -61,6 +63,7 @@ def world(db, repo, monkeypatch):
                        time.time(), plan_first=1, plan_state="proposed"))
     db.add_autopilot("sup")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [])
     return root
 
 
@@ -302,9 +305,8 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 @pytest.mark.parametrize("path,status,command", [
     ("/v1/providers/codex/login", 200, "login"),
     ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
-    ("/v1/engine/upgrade", 200, "upgrade"),
     ("/v1/keys/BRINDLE_TOKEN/set", 400, None),
-], ids=["login", "key", "upgrade", "bad-key"])
+], ids=["login", "key", "bad-key"])
 def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeypatch, path, status, command):
     from brindle import providers, tmux
     from brindle.daemon import terminal
@@ -524,3 +526,198 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     done = bus.tail(db, kinds=("job.done", "job.failed"))
     assert done[-1]["payload"]["result"]["url"] == "https://github.com/o/r/pull/7"
     assert "--base main --head sess --title Ship it --body" in called.read_text()
+
+
+def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
+    """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
+    monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)
+    monkeypatch.setattr(providers, "claude_onboarded", REAL_ONBOARDED)
+    for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN"):
+        (tmp_path / env).write_text("")
+        monkeypatch.setenv(env, str(tmp_path / env))
+    claude = tmp_path / "claude-config" / ".claude.json"
+    claude.parent.mkdir()
+    claude.write_text(json.dumps({"hasCompletedOnboarding": True} if onboarded else {"numStartups": 1}))
+    (tmp_path / "codex-home").mkdir()
+    return claude, tmp_path / "codex-home" / "config.toml"
+
+
+def _codex_trust(codex, repo, level):
+    import os
+
+    # Quoted and commented as a person might: still the repo's own table.
+    codex.write_text(f"model = \"x\"\n\n[projects.'{os.path.realpath(repo)}'] # mine\ntrust_level = \"{level}\"\n")
+
+
+@pytest.mark.parametrize("how,provider,setup,blocked", [
+    ("/v1/sessions", "claude", "signed-out", ["signin"]),
+    ("/v1/sessions", "codex", None, []),            # Codex's trust is recorded silently, then it launches
+    ("/v1/sessions", "codex", "untrusted", ["trust"]),   # the person's own answer to Codex is never overridden
+    # Signed in by the key brindle stores for it, which Claude Code then asks about.
+    ("/v1/sessions", "claude", "stored-key", ["consent"]),
+    # "open" a session that has since exited: a fresh one would start, so it's checked.
+    ("/v1/sessions?open", "claude", "signed-out", ["signin"]),
+    ("/v1/sessions/sup/continue", "claude", "signed-out", ["signin"]),
+    ("/v1/agents/wk/rewind", "claude", "signed-out", ["signin"]),
+    # A worker started any way (assign, handoff, a queued task) goes through the same launch.
+    ("assign", "claude", "fresh", ["consent"]),
+    ("assign", "codex", "untrusted", ["trust"]),
+    # The session's own key (its session_credentials), not brindle's: approving it clears the worker.
+    ("assign", "claude", "session-key", ["consent"]),
+    ("attached", "claude", "session-key", ["consent"]),   # the same, for a worker in a repo attached to it
+    ("interactive", "claude", "fresh", []),         # a chat in a terminal: the person answers it there
+], ids=["start", "start-trusts-silently", "start-untrusted", "start-stored-key", "stale-open", "continue",
+        "rewind", "worker-consent", "worker-untrusted", "worker-session-key", "worker-session-key-attached",
+        "terminal-chat"])
+def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, how, provider, setup,
+                                                        blocked):
+    from brindle import keystore
+
+    _, codex = _provider_setup(tmp_path, monkeypatch, onboarded=setup != "fresh")
+    if setup == "untrusted":
+        _codex_trust(codex, world.repo_root, "untrusted")
+    if setup == "stored-key":
+        keystore.set_key("ANTHROPIC_API_KEY", SECRET)
+    if setup == "session-key":
+        db.set_session_credential("sup", "ANTHROPIC_API_KEY", SECRET)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-0000000000abcd")
+    before = codex.read_text() if codex.exists() else None
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: "Claude Code isn't signed in" if (
+        p == "claude" and setup in ("signed-out", "stored-key") and not (env or {}).get("ANTHROPIC_API_KEY")) else None)
+    opened = []
+
+    def open_window(*a, **k):
+        opened.append(a)
+        raise agents.AgentError("stopped at the window")
+
+    monkeypatch.setattr(agents, "_open_window", open_window)
+    if how.startswith("/"):
+        path, _, opening = how.partition("?")
+        body = {"repo": world.repo_root, "provider": provider, "to": 1}
+        code, reply = _send("POST", path, {**body, "choice": "o", "session_id": "sup"} if opening else body)
+        assert code == 409 and SECRET not in json.dumps(reply), reply
+        kinds = [i["kind"] for i in reply.get("preflight", [])]
+        assert all(i["action"]["path"].startswith(f"/v1/providers/{provider}/") for i in reply.get("preflight", []))
+    else:
+        from brindle import repos
+        from brindle.pro import license
+
+        ws, worker = world, how in ("assign", "attached")
+        for name in ("other", "unrelated") if setup == "session-key" else ():
+            sh(f"git init -q -b main {tmp_path / name} && git -C {tmp_path / name} commit -q --allow-empty -m init",
+               tmp_path)
+        if how == "attached":
+            monkeypatch.setattr(license, "has", lambda feature: feature == "multi_repo")
+            ws = repos.target_workspace(db, repos.attach(db, "sup", str(tmp_path / "other")).repo_root)
+
+        def spawn():
+            with pytest.raises(agents.AgentError) as e:
+                agents.spawn(db, ws, "developer" if worker else "supervisor", provider_name=provider,
+                             mode="assign" if worker else how, parent_id="sup" if worker else None, prompt="go")
+            return getattr(e.value, "items", [])
+
+        items = spawn()
+        kinds = [i.kind for i in items]
+        if setup == "session-key":
+            action = items[0].action
+            assert "wxyz" in items[0].detail and action.body["session"] == "sup"
+            assert action.body["repo"] == ws.repo_root
+            confirm = {**action.body, "accept": True}
+            assert _send("POST", action.path, {**confirm, "key": "0" * 16})[0] == 409   # some other key
+            assert _send("POST", action.path, {**confirm, "session": "wk"})[0] == 409   # not a session root
+            # A repo that is neither the session's own nor attached to it.
+            assert _send("POST", action.path, {**confirm, "repo": str(tmp_path / "unrelated")})[0] == 409
+            assert _send("POST", action.path, confirm)[0] == 200
+            assert providers.api_key_approved(SECRET)
+            assert not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+            assert spawn() == [] and len(opened) == 1      # the same worker now launches
+            opened.clear()
+    assert kinds == blocked and len(opened) == (0 if blocked else 1)
+    if blocked:
+        assert (codex.read_text() if codex.exists() else None) == before
+    elif provider == "codex":
+        assert providers.codex_trust(world.repo_root) == "trusted"
+
+
+@pytest.mark.parametrize("provider,setup,item", [
+    ("claude", "missing", "claude.install"),
+    ("antigravity", "gemini", "key.GEMINI_API_KEY"),
+    ("claude", "fresh", "claude.onboarding"),
+    ("claude", "key", "claude.api_key"),
+    ("codex", "untrusted", "codex.trust"),
+], ids=["setup", "key", "consent-onboarding", "consent-api-key", "trust"])
+def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, world, tmp_path, monkeypatch,
+                                                                          provider, setup, item):
+    claude, codex = _provider_setup(tmp_path, monkeypatch, onboarded=setup != "fresh")
+    probed = []
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: probed.append(env or {}))
+    # The repo's own supervisor profile sets a variable that would run code in
+    # the CLI's status check: asking (a GET) must never hand it over.
+    agents_dir = Path(world.repo_root) / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    # (Declaring it as the profile's key name doesn't get it through either.)
+    # The "key" setup: the profile's own key, with a different one in brindle's environment.
+    (agents_dir / "supervisor.md").write_text(
+        f"---\nname: supervisor\nprovider: {provider}\napi_key_env: NODE_OPTIONS\n"
+        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + SECRET + chr(10) if setup == 'key' else ''}"
+        "---\nYou supervise.\n")
+    if setup == "missing":
+        monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
+    if setup == "gemini":
+        settings = tmp_path / "agy-home" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text('{"modelProvider": "gemini"}')
+    if setup == "key":
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-0000000000abcd")
+    if setup == "untrusted":
+        _codex_trust(codex, world.repo_root, "untrusted")
+    configs = lambda: [p.read_text() if p.exists() else None for p in (claude, codex)]  # noqa: E731
+    before = configs()
+    query = f"/v1/providers/{provider}/preflight?repo={world.repo_root}"
+    code, items = _send("GET", query)
+    assert code == 200, items
+    found = next(i for i in items if i["id"] == item)
+    assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    assert all("NODE_OPTIONS" not in env for env in probed)
+    action = found["action"]
+    if action is None or action["name"] == "set_key":
+        return
+    if found["kind"] == "consent":
+        assert found["link"] or found["detail"]
+        # Nothing records a consent but the person's own confirmation.
+        assert _send(action["method"], action["path"], action["body"])[0] == 400 and configs() == before
+    if setup == "key":
+        assert "wxyz" in found["detail"]        # the profile's key, not brindle's own
+        # A confirmation of some other key than the one shown records nothing.
+        stale = {**action["body"], "accept": True, "key": "0" * 16}
+        assert _send(action["method"], action["path"], stale)[0] == 409 and configs() == before
+    code, reply = _send(action["method"], action["path"], {**action["body"], "accept": True})
+    assert code == 200, reply
+    assert item not in [i["id"] for i in _send("GET", query)[1]]
+    if setup == "key":
+        assert providers.api_key_approved(SECRET) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+    if setup == "untrusted":
+        assert codex.read_text().startswith('model = "x"\n')
+
+
+@pytest.mark.parametrize("exit_code", [0, 1], ids=["done", "failed"])
+def test_upgrade_runs_in_the_background_and_reports_on_the_bus(db, world, monkeypatch, exit_code):
+    output = "\n".join(f"uv line {i}" for i in range(30))
+    runs, again = [], []
+
+    def run():
+        runs.append(1)
+        again.append(_send("POST", "/v1/engine/upgrade"))      # pressed again while it runs
+        return exit_code, output
+
+    monkeypatch.setattr(routes_actions, "_run_upgrade", run)
+    code, reply = _send("POST", "/v1/engine/upgrade")
+    assert code == 202 and runs == [1] and again == [(202, reply)]
+    events = bus.tail(db, kinds=("job.progress", "job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["job"]) for e in events] == [
+        ("job.progress", reply["job"]), ("job.done" if exit_code == 0 else "job.failed", reply["job"])]
+    if exit_code == 0:
+        assert "uv line" not in json.dumps(events)
+    else:
+        error = events[-1]["payload"]["error"]
+        assert error["code"] == "upgrade_failed" and error["tail"] == [f"uv line {i}" for i in range(10, 30)]
