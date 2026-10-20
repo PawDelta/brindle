@@ -583,20 +583,63 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
 # Each answers {"terminal": id, "started": bool} for WS /v1/terminal/{id}; while
 # the same action is still running, a second press gets its terminal (started
 # False). The person signs in or types the secret there; the daemon never
-# automates a sign-in or sees a key.
+# automates a sign-in. The app may instead send a key the person typed to
+# PUT /v1/keys/{name} (write-only), or a code they pasted to a terminal's input.
 
 
 def provider_login(db: DB, params: dict, body: Body) -> Any:
-    """The provider CLI's own sign-in (``claude auth login``, ``codex login``, ...)."""
+    """The provider CLI's own sign-in (``claude auth login``, ``codex login``, ...).
+    ``method``: how to sign in, where the CLI has a flag for it (see
+    picker.LOGIN_METHODS); its own default otherwise."""
     from brindle import picker
     from brindle.pro.team_policy import CLI_NAMES
 
     provider = params["provider"]
     if provider not in CLI_NAMES:
         raise ServiceError("invalid", f"provider must be one of {', '.join(CLI_NAMES)}")
+    method = _get(body, "method")
+    methods = picker.LOGIN_METHODS.get(provider, {})
+    if method is not None and method not in methods:
+        raise ServiceError("invalid", f"{provider} sign-in methods: {', '.join(methods) or 'none'}")
     browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
     env = {"BROWSER": browser["BROWSER"]} if browser else {}
-    return terminal.open_action(f"login {provider}", picker._login_command(provider), env=env)
+    return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env)
+
+
+def terminal_input(db: DB, params: dict, body: Body) -> Any:
+    """Type ``text``, one line the person typed or pasted in the app (a
+    sign-in's code), into the action terminal ``id``, then Enter unless
+    ``submit`` is false. User-typed input only: nothing brindle or an agent
+    makes up goes in here, and agent callers are refused like everywhere."""
+    text = _get(body, "text", required=True)
+    if not text or len(text) > 4096 or any(ord(c) < 0x20 or ord(c) == 0x7f for c in text):
+        raise ServiceError("invalid", "text must be one line of printable characters")
+    if not terminal.send_input(params["id"], text, _get(body, "submit", bool, True)):
+        raise ServiceError("not_found", f"no running terminal {params['id']}", 404)
+    return {"terminal": params["id"], "sent": True}
+
+
+def put_key(db: DB, params: dict, body: Body) -> Any:
+    """Store ``value`` as key ``name``, as ``brindle keys set NAME`` does.
+    Write-only: the reply carries the last four characters, never the value,
+    and neither the value nor the body is logged or put on the bus."""
+    from brindle import keys_cmds, keystore
+
+    name, repo = params["name"], _get(body, "repo")
+    value = body.pop("value", None)
+    if not isinstance(value, str) or not value.strip():
+        raise ServiceError("invalid", "value must be a non-empty string")
+    try:
+        keys_cmds.store(name, value, repo)
+    except keystore.KeyNameError as e:
+        raise ServiceError("invalid", str(e)) from None
+    except keys_cmds.PolicyDenied as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+    except keystore.CredentialError as e:
+        raise ServiceError("not_stored", str(e), 422) from None
+    except Exception:  # noqa: BLE001 - no traceback: its frames held the value
+        raise ServiceError("internal", "couldn't store the key", 500) from None
+    return {"name": name, "last4": value.strip()[-4:], "set": True}
 
 
 def set_key(db: DB, params: dict, body: Body) -> Any:
@@ -651,5 +694,7 @@ ROUTES = [
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
     _post("/keys/{name}/set", set_key),
+    Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
+    _post("/terminals/{id}/input", terminal_input),
     _post("/engine/upgrade", upgrade_engine),
 ]

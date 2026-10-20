@@ -158,6 +158,31 @@ def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, a
     assert config._read_json(config.scope_paths(str(repo))["user"]) == before
 
 
+SECRET = "sk-ant-daemon-test-0123456789wxyz"
+
+
+@pytest.mark.parametrize("name,peer_pid,status", [
+    ("ANTHROPIC_API_KEY", None, 200),
+    pytest.param("ANTHROPIC_API_KEY", 310, 403, marks=pytest.mark.variant("an agent holding the token")),
+    ("BRINDLE_TOKEN", None, 400),
+], ids=["stored", "agent", "unknown-name"])
+def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, monkeypatch, provider_http,
+                                                                     name, peer_pid, status):
+    from brindle import keystore
+
+    monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
+    code, reply = _send("PUT", f"/v1/keys/{name}", {"value": SECRET}, peer_pid)
+    assert code == status, reply
+    stored = keystore.get_key("ANTHROPIC_API_KEY")
+    if status == 200:
+        # The same check as `brindle keys set`: the provider is asked, then the key is kept.
+        assert provider_http["calls"] == ["https://api.anthropic.com/v1/models"]
+        assert reply == {"name": name, "last4": "wxyz", "set": True} and stored == SECRET
+    else:
+        assert stored is None and provider_http["calls"] == []
+    assert SECRET not in json.dumps(reply) and SECRET not in json.dumps(bus.tail(db))
+
+
 @pytest.mark.parametrize("path,status,command", [
     ("/v1/providers/codex/login", 200, "login"),
     ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
@@ -200,3 +225,25 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
     windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
     code, again = _send("POST", path)
     assert (code, again["started"], len(windows)) == (200, True, 2)
+
+
+def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkeypatch):
+    from brindle import providers, tmux
+
+    windows, typed = {}, []
+    monkeypatch.setattr(providers, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        windows.setdefault(tag[1], argv))
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
+        (f"%{i + 1}", "login claude", True, tid) for i, tid in enumerate(windows)])
+    monkeypatch.setattr(tmux, "send_keys", lambda target, *keys, **kw: typed.append((target, *keys)))
+    assert _send("POST", "/v1/providers/claude/login", {"method": "device"})[0] == 400
+    code, reply = _send("POST", "/v1/providers/claude/login", {"method": "console"})
+    assert code == 200 and windows[reply["terminal"]] == ["claude", "auth", "login", "--console"]
+    code, sent = _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "ab-12"})
+    assert code == 200 and typed == [("%1", "-l", "--", "ab-12"), ("%1", "Enter")]
+    # One printable line only, and only into a running action terminal (never an agent's pane).
+    assert _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "a\nb"})[0] == 400
+    assert _send("POST", "/v1/terminals/wk/input", {"text": "ab-12"})[0] == 404
+    assert len(typed) == 2
