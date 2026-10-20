@@ -69,7 +69,7 @@ def _org_notices() -> list[InboxItemDTO]:
         notices = status.unread(status.load())
     except Exception:  # noqa: BLE001 - notices are an extra: never break the inbox
         return []
-    return [InboxItemDTO(kind="org_notice", reason=n["text"], detail=n["from_role"])
+    return [InboxItemDTO(kind="org_notice", reason=n["text"], detail=n["from_role"], notice_id=n["id"])
             for n in notices]
 
 

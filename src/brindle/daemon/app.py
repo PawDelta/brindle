@@ -17,6 +17,7 @@ from brindle.config import db_path
 from brindle.daemon import routes_read
 from brindle.daemon.auth import Guard
 from brindle.daemon.events import events
+from brindle.daemon.routes_actions import ROUTES as ACTIONS
 
 API_VERSION = "1.0"
 
@@ -38,6 +39,6 @@ def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
     (pages served from there count as its own Origin). ``poller``: the Pro
     status poller whose bar text and notices ``/v1/events`` relays."""
     app = Starlette(routes=[Route("/v1/meta", meta), *routes_read.ROUTES,
-                            WebSocketRoute("/v1/events", events)])
+                            WebSocketRoute("/v1/events", events), *ACTIONS])
     app.state.poller = poller
     return Guard(app, token, port)

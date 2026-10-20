@@ -87,6 +87,7 @@ class InboxItemDTO(_DTO):
     agent_id: str | None = None
     workspace_id: str | None = None
     detail: str | None = None
+    notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
 
 
 class MilestoneDTO(_DTO):
