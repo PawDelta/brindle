@@ -1639,6 +1639,8 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     if (agent.headless or not provider.uses_hooks
             or agent.status not in ("starting", "idle", "processing", "waiting")):
         return None  # a headless pane shows output, not a TUI to read
+    if agent.status == "waiting" and db.hook_permission_request(agent.id) is not None:
+        return None  # its hook holds a request for the app's answer: the pane still looks busy
     _sync_hooks_off(db, agent, provider.hooks_disabled(*_settings_scope(db, agent)))
     if agent.status == "idle" and samples < 2 and not agent.hooks_off:
         return None
@@ -2967,16 +2969,19 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
         else:
             decision = permissions.Decision("ask", "")
-        tool_use_id = payload.get("tool_use_id")
-        if decision.decision == "ask" and isinstance(tool_use_id, str) and tool_use_id:
+        if decision.decision == "ask":
+            # Claude Code's PermissionRequest carries no tool_use_id: the request
+            # gets an id of its own, and its PostToolUse is paired by tool and
+            # input (note_permission_outcome).
+            request_id = uuid.uuid4().hex[:16]
             # Claude Code's own "always allow" options, as it would apply them.
             suggestions = payload.get("permission_suggestions")
             suggestions = suggestions if isinstance(suggestions, list) and suggestions else None
             app = _app_open()
-            db.add_permission_request(agent.id, tool_use_id, json.dumps(req.to_dict()), decision.reason,
+            db.add_permission_request(agent.id, request_id, json.dumps(req.to_dict()), decision.reason,
                                       json.dumps(suggestions) if suggestions else None,
                                       "hook" if app else None)
-            answer = _await_app_answer(db, agent, tool_use_id, req) if app else None
+            answer = _await_app_answer(db, agent, request_id, req) if app else None
             if answer:
                 return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
@@ -3028,16 +3033,25 @@ def _await_app_answer(db: DB, agent: Agent, tool_use_id: str, req) -> str | None
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
     """PostToolUse: if the tool's request had been left to the person, they
-    approved it. Count that toward a suggestion (never a rule by itself)."""
-    tool_use_id = payload.get("tool_use_id")
-    if not isinstance(tool_use_id, str) or not tool_use_id:
-        return
+    approved it. Count that toward a suggestion (never a rule by itself).
+    The request is the oldest recorded one for the same tool and input
+    (PermissionRequest has no tool_use_id to pair them by)."""
     try:
-        row = db.pop_permission_request(agent.id, tool_use_id)
-        if row is None or not row["reason"]:
-            return   # none, or recorded for the inbox with the policy off: nothing to learn
         from brindle import permissions
 
+        ws = db.get_workspace(agent.workspace_id)
+        ran = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root) if ws else None
+        if ran is None:
+            return
+        same = (ran.tool, ran.kind, ran.command, ran.path, ran.url)
+
+        def matches(row) -> bool:
+            r = json.loads(row["request"])
+            return (r.get("tool"), r.get("kind"), r.get("command"), r.get("path"), r.get("url")) == same
+
+        row = db.pop_permission_request(agent.id, matches)
+        if row is None or not row["reason"]:
+            return   # none, or recorded for the inbox with the policy off: nothing to learn
         req = permissions.Request.from_dict(json.loads(row["request"]))
         permissions.record_approval(req)
         _record_permission(db, agent, db.get_workspace(agent.workspace_id), req.summary(),

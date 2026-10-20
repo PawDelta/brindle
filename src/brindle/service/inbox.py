@@ -9,14 +9,16 @@ would press, only ever on the person's request from the app."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, permissions, prompt_answer, tmux, view
+from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, tmux, view
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent
 from brindle.providers import get_provider
@@ -32,6 +34,11 @@ OPTION_CHOICE = (
     ("allow_once", re.compile(r"(?i)^(?:yes|allow|approve|proceed|run)\b")),
 )
 BOX = re.compile(r"^[\s│┃╭╮╰╯─━]+|[\s│┃╭╮╰╯─━]+$")
+# OpenCode's prompt: buttons on one line, Right moving the selection (from
+# "Allow once" for each new request), Enter picking one. "Allow always" and a
+# subagent's "Reject" then ask once more, opening on Confirm.
+ROW_MENU = re.compile(r"(Allow once)\s+(Allow always)\s+(Reject)")
+ROW_FOLLOW_UP = re.compile(r"Always allow|Reject permission")
 STEP_SECONDS = 0.2       # between keys, and between looks at the pane or the hook
 CONFIRM_SECONDS = 5.0    # for the prompt to clear (or the hook to take the answer)
 
@@ -119,7 +126,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             # A failed merge waits on the person even when autopilot reviews the rest.
             reason = needs_you(a, ws) or next(
                 (r for r in [awaiting_review(a, ws)] if r and r.startswith("merge failed")), None)
-            asking = pending_permission(db, row) if a["status"] == "waiting" else None
+            # A request the hook holds is pending whatever the screen shows meanwhile.
+            asking = (pending_permission(db, row)
+                      if a["status"] == "waiting" or db.hook_permission_request(row.id) else None)
             if asking:
                 out.append(InboxItemDTO(kind="permission", reason="asks permission",
                                         detail=asking.request.summary() if asking.request else None,
@@ -154,12 +163,29 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
 
 
 @dataclass
+class Menu:
+    """A permission prompt as it shows on screen. ``layout``: "list", a
+    numbered menu whose cursor shows the selection (Claude Code, Codex), or
+    "row", OpenCode's buttons on one line, moved through with Right."""
+    layout: str
+    options: list[str]
+    wording: str
+
+    @property
+    def fingerprint(self) -> str:
+        """Which prompt this is, whichever option is selected: what an answer
+        must still find on screen before each key it sends."""
+        return hashlib.sha256("\0".join([self.wording, *self.options]).encode()).hexdigest()[:16]
+
+
+@dataclass
 class Pending:
     """A permission request ``agent`` waits on, and what answering it needs."""
     via: str                                 # "hook" or "prompt", as PermissionDTO.via
-    row: dict | None                         # its permission_requests row, if brindle's hook saw it
-    request: permissions.Request | None
+    row: dict                                # its permission_requests row
+    request: permissions.Request | None      # what the hook recorded, when it saw it
     suggestions: list | None                 # Claude Code's own "always allow" updates
+    menu: Menu | None                        # the prompt on screen ("prompt" only)
     dto: PermissionDTO
 
 
@@ -193,40 +219,59 @@ def _menu(lines: list[str]) -> tuple[int, list[str]]:
     return start, [prompt_answer.OPTION.match(ln).group(2) for ln in lines[start:end + 1]]
 
 
-def _read_prompt(screen: str) -> tuple[str, list[PermissionChoiceDTO]]:
-    """A permission prompt's wording and the choices among its menu's
-    options, each labelled with the option's own text (which is what
-    _press selects)."""
+def read_menu(screen: str) -> Menu:
+    """The permission prompt at the bottom of ``screen``: its wording and its
+    options (none when its layout is one brindle can't drive, such as
+    Antigravity's "Yes / No", whose keys aren't known: answered in its pane)."""
     lines = prompt_answer._tail(screen)
     start, options = _menu(lines)
+    layout = "list"
+    if not options:
+        row = next((i for i in range(len(lines) - 1, -1, -1) if ROW_MENU.search(lines[i])), None)
+        start, options, layout = ((row, list(ROW_MENU.search(lines[row]).groups()), "row") if row is not None
+                                  else (len(lines), [], "none"))
+    wording = [BOX.sub("", ln) for ln in lines[:start]]
+    return Menu(layout, options, prompt_answer.redact("\n".join([ln for ln in wording if ln][-8:])))
+
+
+def _choices(menu: Menu) -> list[PermissionChoiceDTO]:
+    """The menu's options as choices, each labelled with the option's own
+    text (which is what _press selects)."""
     choices: dict[str, PermissionChoiceDTO] = {}
-    for label in options:
+    for label in menu.options:
         choice = next((c for c, pattern in OPTION_CHOICE if pattern.search(label)), None)
         if choice and choice not in choices:
             choices[choice] = PermissionChoiceDTO(
                 choice=choice, label=label,
                 rule=f"the CLI's own rule, as its option says: {label}" if choice == "allow_always" else None)
-    wording = [BOX.sub("", ln) for ln in lines[:start]]
-    wording = prompt_answer.redact("\n".join([ln for ln in wording if ln][-8:]))
-    return wording, sorted(choices.values(), key=lambda c: CHOICES.index(c.choice))
+    return sorted(choices.values(), key=lambda c: CHOICES.index(c.choice))
 
 
 def pending_permission(db: DB, agent: Agent) -> Pending | None:
     """The permission request ``agent`` waits on: one brindle's hook holds
-    for the app's answer, else its CLI's prompt on screen (with what the
-    hook recorded of it, when it saw it)."""
-    row = db.latest_permission_request(agent.id)
-    row = dict(row) if row is not None else None
-    req = permissions.Request.from_dict(json.loads(row["request"])) if row else None
-    suggestions = json.loads(row["suggestions"]) if row and row["suggestions"] else None
-    fields = {"tool": req.tool, "kind": req.kind, "target": req.target()} if req else {}
-    if row and row["channel"] == "hook":
+    for the app's answer, else its CLI's prompt on screen. Each has its own
+    row, whose id the app's answer must name (``request_id``): a prompt the
+    hook recorded is its row once the screen names the same request (and
+    keeps the prompt it was first shown as); any other prompt gets a row of
+    its own the first time it is seen, gone once no prompt is up."""
+    def recorded(r: dict) -> permissions.Request | None:
+        return permissions.Request.from_dict(json.loads(r["request"])) if r["request"] != "null" else None
+
+    def described(req: permissions.Request | None) -> dict:
+        return {"tool": req.tool, "kind": req.kind, "target": req.target()} if req else {}
+
+    rows = [dict(r) for r in db.open_permission_requests(agent.id)]
+    hook = next((r for r in rows if r["channel"] == "hook"), None)
+    if hook:
+        req = recorded(hook)
+        suggestions = json.loads(hook["suggestions"]) if hook["suggestions"] else None
         ws = db.get_workspace(agent.workspace_id)
         rule = _always_rule(req, suggestions, ws.repo_root if ws else None)
         choices = [PermissionChoiceDTO(choice="allow_once", label="Allow once"),
                    *([PermissionChoiceDTO(choice="allow_always", label="Allow always", rule=rule)] if rule else []),
                    PermissionChoiceDTO(choice="deny", label="Deny")]
-        return Pending("hook", row, req, suggestions, PermissionDTO(via="hook", choices=choices, **fields))
+        return Pending("hook", hook, req, suggestions, None, PermissionDTO(
+            via="hook", request_id=hook["tool_use_id"], choices=choices, **described(req)))
     if not agent.tmux_window:
         return None
     try:
@@ -234,13 +279,26 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
     except tmux.TmuxError:
         return None
     if not get_provider(agent.provider).tool_permission(screen):
+        db.drop_screen_requests(agent.id)
         return None
-    wording, choices = _read_prompt(screen)
-    if req is None or not _on_screen(req, wording):
-        # What the hook recorded isn't this prompt (an older request): the screen alone says what it asks.
-        row, req, fields = None, None, {}
-    return Pending("prompt", row, req, None,
-                   PermissionDTO(via="prompt", wording=wording, choices=choices, **fields))
+    menu = read_menu(screen)
+    fp = menu.fingerprint
+    # What the hook recorded is this prompt only when the screen names it, and
+    # it wasn't first shown as another prompt (an older request, asked again).
+    row = next((r for r in rows if r["request"] != "null" and r["fingerprint"] in (None, fp)
+                and _on_screen(recorded(r), menu.wording)), None)
+    if row is not None and row["fingerprint"] is None:
+        db.note_permission_fingerprint(agent.id, row["tool_use_id"], fp)
+        row["fingerprint"] = fp
+    if row is None:
+        row = next((r for r in rows if r["request"] == "null" and r["fingerprint"] == fp), None)
+    if row is None:
+        row = {"tool_use_id": uuid.uuid4().hex[:16], "request": "null", "fingerprint": fp, "channel": "prompt"}
+        db.add_permission_request(agent.id, row["tool_use_id"], "null", "", channel="prompt", fingerprint=fp)
+    req = recorded(row)
+    return Pending("prompt", row, req, None, menu, PermissionDTO(
+        via="prompt", request_id=row["tool_use_id"], wording=menu.wording, choices=_choices(menu),
+        **described(req)))
 
 
 def _on_screen(req: permissions.Request, wording: str) -> bool:
@@ -252,8 +310,8 @@ def _on_screen(req: permissions.Request, wording: str) -> bool:
     return bool(head) and head in text or bool(req.path) and os.path.basename(req.path) in text
 
 
-def _until(done: Callable[[], bool], seconds: float = CONFIRM_SECONDS) -> bool:
-    deadline = time.monotonic() + seconds
+def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
+    deadline = time.monotonic() + (CONFIRM_SECONDS if seconds is None else seconds)
     while not done():
         if time.monotonic() >= deadline:
             return False
@@ -261,70 +319,141 @@ def _until(done: Callable[[], bool], seconds: float = CONFIRM_SECONDS) -> bool:
     return True
 
 
-def _press(agent: Agent, label: str) -> bool:
-    """Select the option ``label`` in the CLI's permission prompt with its
-    arrow keys, Enter once it shows selected, then whether the prompt
-    cleared. Refused when the prompt on screen no longer offers it."""
+class _Changed(ServiceError):
+    """The prompt on screen is no longer the one being answered: no key goes in."""
+
+    def __init__(self, agent_id: str) -> None:
+        super().__init__("conflict", f"{agent_id}'s prompt changed before it was answered: "
+                                     "fetch the inbox and answer the prompt it shows now", 409)
+
+
+def _press(agent: Agent, menu: Menu, label: str) -> bool:
+    """Pick the option ``label`` in the CLI's permission prompt by its own
+    keys, then whether the prompt cleared. Before every key the screen must
+    still show the same prompt (``menu.fingerprint``): a replaced prompt,
+    even one with the same options, gets no key (_Changed). A list moves its
+    cursor with Up/Down and takes Enter only once ``label`` shows selected;
+    a row moves Right from its first button (where each new request opens),
+    then Enter, then Enter on the Confirm a second step opens on."""
     provider, server = get_provider(agent.provider), agents.server_of(agent)
-    want = prompt_answer.Decision("permission", label)
 
     def capture() -> str:
         return tmux.capture(agent.tmux_window, lines=60, server=server)
 
+    def same(screen: str) -> bool:
+        return provider.tool_permission(screen) and read_menu(screen).fingerprint == menu.fingerprint
+
+    def send(key: str) -> None:
+        tmux.send_keys(agent.tmux_window, key, server=server)
+
+    def cleared() -> bool:
+        try:
+            return _until(lambda: not same(capture()))
+        except tmux.TmuxError:
+            return False
+
+    if menu.layout == "row":
+        for key in ["Right"] * menu.options.index(label) + ["Enter"]:
+            if not same(capture()):
+                raise _Changed(agent.id)
+            send(key)
+        follow_up = lambda: bool(ROW_FOLLOW_UP.search("\n".join(prompt_answer._tail(capture(), 12))))  # noqa: E731
+        if label != menu.options[0] and _until(follow_up, seconds=1.0):
+            send("Enter")   # its Confirm (opened on) for "Always allow"; an empty reason for a reject
+        return cleared()
+    want = prompt_answer.Decision("permission", label)
     seen = None
     for _ in range(prompt_answer.MAX_MOVES * 2):
         screen = capture()
+        if not same(screen):
+            raise _Changed(agent.id)
         if prompt_answer._tail(screen) == seen:
             time.sleep(STEP_SECONDS)   # the last key hasn't shown yet: don't press another
             continue
-        key = prompt_answer.next_key(screen, want) if provider.tool_permission(screen) else None
+        key = prompt_answer.next_key(screen, want)
         if key is None:
-            raise ServiceError("conflict", f"{agent.id}'s prompt no longer offers {label!r}: "
-                                           "fetch the inbox again", 409)
-        tmux.send_keys(agent.tmux_window, key, server=server)
+            raise _Changed(agent.id)
+        send(key)
         if key == "Enter":
-            return _until(lambda: not provider.tool_permission(capture()))
+            return cleared()
         seen = prompt_answer._tail(screen)
     raise ServiceError("conflict", f"couldn't reach {label!r} in {agent.id}'s prompt: answer it in its terminal", 409)
 
 
-def answer_permission(db: DB, agent_id: str, choice: str) -> dict:
-    """Answer the permission request ``agent_id`` waits on with ``choice``
+def _write_rule(db: DB, agent: Agent, request_id: str, req: permissions.Request) -> None:
+    """Allow-always through the hook with no rule from Claude Code: brindle's
+    exact allow rule, written only while this answer holds the request
+    (claimed, not yet signed for the hook to take), and removed again if
+    the request is lost meanwhile, unless it was there before."""
+    from brindle import antigravity
+
+    kind, match = permissions.learnable_pattern(req)
+    existed = any(r.id == permissions.rule_id(kind, "exact", match, "allow") for r in permissions.load_store().rules)
+    rule = permissions.add_rule(kind, match, "allow")
+    mac = permissions.answer_mac(agent.id, request_id, "allow_always")
+    if mac and db.sign_permission_answer(agent.id, request_id, mac):
+        antigravity.resync_permissions()
+        return
+    if not existed:
+        permissions.forget(rule.id)
+    raise ServiceError("conflict", f"{agent.id}'s request went to its own prompt before it was answered: "
+                                   "nothing was written; fetch the inbox and answer it again", 409)
+
+
+def answer_permission(db: DB, agent_id: str, request_id: str, choice: str) -> dict:
+    """Answer ``agent_id``'s permission request ``request_id`` (the one the
+    app showed: an answer for any other is refused) with ``choice``
     (allow_once, allow_always or deny), the person's own from the app.
-    Through brindle's hook when it holds the request; else by the CLI
-    prompt's own keys. Says how, what rule allow-always wrote, and whether
+
+    Through brindle's hook when it holds the request, else by the CLI
+    prompt's own keys (_press). Either way the request is claimed first, so
+    a second answer, a retry, or an answer racing the hook's timeout gets a
+    409 and changes nothing; allow-always writes brindle's rule only while
+    holding the claim. Says how, what rule allow-always wrote, and whether
     the request then cleared."""
     if choice not in CHOICES:
         raise ServiceError("invalid", f"choice must be one of {', '.join(CHOICES)}")
     agent = db.get_agent(agent_id)
     if agent is None:
         raise ServiceError("not_found", f"no agent {agent_id}", 404)
+    identity_lock.ensure(agent)
     pending = pending_permission(db, agent)
-    if pending is None:
-        raise ServiceError("conflict", f"{agent_id} isn't waiting on a permission request", 409)
+    if pending is None or pending.dto.request_id != request_id:
+        raise ServiceError("conflict", f"{agent_id} isn't waiting on request {request_id} any more: "
+                                       "fetch the inbox again", 409)
     offered = next((c for c in pending.dto.choices if c.choice == choice), None)
     if offered is None:
-        raise ServiceError("conflict", f"{agent_id}'s request offers no {choice}: answer it in its terminal", 409)
+        raise ServiceError("conflict", f"{agent_id}'s request offers no {choice} brindle can give: "
+                                       "answer it in its terminal", 409)
     if pending.via == "hook":
-        tool_use_id = pending.row["tool_use_id"]
-        if choice == "allow_always" and not pending.suggestions:
-            from brindle import antigravity
-
-            permissions.add_rule(*permissions.learnable_pattern(pending.request), "allow")
-            antigravity.resync_permissions()
-        mac = permissions.answer_mac(agent.id, tool_use_id, choice)
-        if mac is None:
-            raise ServiceError("conflict", "no running daemon to sign the answer with", 409)
-        if not db.answer_permission_request(agent.id, tool_use_id, choice, mac):
-            raise ServiceError("conflict", f"{agent_id}'s request just went to its own prompt: "
-                                           "fetch the inbox and answer it again", 409)
+        if not db.claim_permission_answer(agent.id, request_id, choice):
+            raise ServiceError("conflict", f"{agent_id}'s request was answered or went to its own prompt: "
+                                           "fetch the inbox again", 409)
+        try:
+            if choice == "allow_always" and not pending.suggestions:
+                _write_rule(db, agent, request_id, pending.request)
+            else:
+                mac = permissions.answer_mac(agent.id, request_id, choice)
+                if not (mac and db.sign_permission_answer(agent.id, request_id, mac)):
+                    raise ServiceError("conflict", f"{agent_id}'s request went to its own prompt before it "
+                                                   "was answered: fetch the inbox again", 409)
+        except BaseException:
+            db.unclaim_permission_answer(agent.id, request_id)
+            raise
         cleared = _until(lambda: (db.conn.execute(
             "SELECT channel FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-            (agent.id, tool_use_id)).fetchone() or {"channel": "answered"})["channel"] == "answered")
+            (agent.id, request_id)).fetchone() or {"channel": "answered"})["channel"] == "answered")
     else:
-        cleared = _press(agent, offered.label)
-        if pending.row:
-            db.answer_permission_request(agent.id, pending.row["tool_use_id"], choice)
-    bus.publish_agent(db, "permission.answered", agent.id, choice=choice, via=pending.via, cleared=cleared)
+        if not db.claim_permission_prompt(agent.id, request_id, pending.menu.fingerprint):
+            raise ServiceError("conflict", f"{agent_id}'s prompt is already being answered or was answered: "
+                                           "fetch the inbox again", 409)
+        try:
+            cleared = _press(agent, pending.menu, offered.label)
+        except BaseException:
+            db.finish_permission_prompt(agent.id, request_id, None)
+            raise
+        db.finish_permission_prompt(agent.id, request_id, choice)
+    bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
+                      via=pending.via, cleared=cleared)
     return {"choice": choice, "via": pending.via, "cleared": cleared,
             "rule": offered.rule if choice == "allow_always" else None}

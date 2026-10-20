@@ -105,28 +105,41 @@ WORDING = ("1. No, skip the tests\n2. Yes, run them\nBash command\nnpm test\nRun
            "Do you want to proceed?")
 
 
-@pytest.mark.parametrize("channel, recorded, target, choices, wording", [
-    # brindle's hook holds it: Claude Code's own suggestion is what allow-always writes.
-    ("hook", "npm test", "npm test",
+# Claude Code's pane while its PermissionRequest hook waits: still its busy spinner.
+BUSY = "✳ Clauding… (12s · esc to interrupt)\n\n❯ \n"
+
+
+@pytest.mark.parametrize("provider, channel, recorded, screen, target, bound, choices, wording", [
+    # brindle's hook holds it, whatever the pane shows meanwhile: Claude Code's own
+    # suggestion is what allow-always writes.
+    ("claude", "hook", "npm test", BUSY, "npm test", True,
      [("allow_once", "Allow once", None),
       ("allow_always", "Allow always", "Claude Code's own rule: allow Bash(npm test:*) (localSettings)"),
       ("deny", "Deny", None)], None),
     # The CLI's own prompt is on screen: its wording and its menu's options.
-    ("prompt", "npm test", "npm test", ON_SCREEN, WORDING),
-    # An older recorded request isn't what the prompt asks: only the screen speaks.
-    ("prompt", "rm -rf build", None, ON_SCREEN, WORDING),
-], ids=["hook", "prompt", "prompt-stale-record"])
-def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, channel, recorded,
-                                                                   target, choices, wording):
+    ("claude", "prompt", "npm test", PROMPT, "npm test", True, ON_SCREEN, WORDING),
+    # An older recorded request isn't what the prompt asks: only the screen speaks, as a request of its own.
+    ("claude", "prompt", "rm -rf build", PROMPT, None, False, ON_SCREEN, WORDING),
+    # OpenCode's buttons on one line.
+    ("opencode", None, None, "┃ △ Permission required\n┃ $ npm test\n   Allow once   Allow always   Reject",
+     None, False, [("allow_once", "Allow once", None),
+                   ("allow_always", "Allow always", "the CLI's own rule, as its option says: Allow always"),
+                   ("deny", "Reject", None)], "△ Permission required\n$ npm test"),
+], ids=["hook", "prompt", "prompt-stale-record", "opencode"])
+def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, provider, channel, recorded,
+                                                                   screen, target, bound, choices, wording):
     from brindle import permissions, tmux
 
-    monkeypatch.setattr(tmux, "capture", lambda target, **kw: PROMPT if channel == "prompt" else "")
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: screen)
     ws = workspaces.create(db, str(repo), "feat/inbox").workspace
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "r1", "assign", "waiting", "@2", None, time.time()))
-    req = permissions.Request("claude", "bash", "Bash", command=recorded)
-    db.add_permission_request("w1", "tu1", json.dumps(req.to_dict()), "", json.dumps(SUGGESTED), channel)
+    db.add_agent(Agent("w1", ws.id, "developer", provider, "r1", "assign", "waiting", "@2", None, time.time()))
+    if recorded:
+        req = permissions.Request("claude", "bash", "Bash", command=recorded)
+        db.add_permission_request("w1", "tu1", json.dumps(req.to_dict()), "", json.dumps(SUGGESTED), channel)
     got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
     assert [(i.kind, i.root_id, i.permission.via, i.permission.target, i.permission.wording) for i in got] == [
-        ("permission", "r1", channel, target, wording)]
+        ("permission", "r1", channel or "prompt", target, wording)]
     assert [(c.choice, c.label, c.rule) for c in got[0].permission.choices] == choices
+    # The answer must name this request: the recorded one when the screen shows it.
+    assert (got[0].permission.request_id == "tu1") == bound

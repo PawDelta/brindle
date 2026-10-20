@@ -261,21 +261,28 @@ def claude_answer(answer: str, suggestions: list | None = None) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
 
 
-def answer_mac(agent_id: str, tool_use_id: str, answer: str) -> str | None:
+def answer_mac(agent_id: str, tool_use_id: str, answer: str, info: dict | None = None) -> str | None:
     """The daemon's signature of the person's ``answer`` to a request, keyed
     by its token (``daemon.json``, which agents are kept from reading: see
     d-daemon), so an answer an agent writes into the database itself is no
-    answer. None when no daemon runs."""
+    answer. ``info``: the daemon.json to key it by (default: the file as it
+    is). None when there is none."""
     from brindle.daemon import lifecycle
 
-    token = (lifecycle.read_info() or {}).get("token")
+    token = (info if info is not None else lifecycle.read_info() or {}).get("token")
     if not isinstance(token, str) or not token:
         return None
     return hmac.new(token.encode(), f"{agent_id}\0{tool_use_id}\0{answer}".encode(), "sha256").hexdigest()
 
 
 def answer_verified(agent_id: str, tool_use_id: str, answer: str, mac: str | None) -> bool:
-    want = answer_mac(agent_id, tool_use_id, answer)
+    """The hook's check of an answer's signature, keyed only by a
+    daemon.json the running daemon wrote at its start (not one rewritten
+    since, by an agent minting its own token)."""
+    from brindle.daemon import lifecycle
+
+    info = lifecycle.written_by_daemon()
+    want = answer_mac(agent_id, tool_use_id, answer, info) if info else None
     return bool(want and mac) and hmac.compare_digest(want, mac)
 
 

@@ -66,6 +66,30 @@ def running() -> dict | None:
     return info if info and _is_daemon(info["pid"]) else None
 
 
+INFO_SLACK = 30.0   # seconds after its start a daemon has written daemon.json by
+
+
+def _started_at(pid: int) -> float | None:
+    out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    try:
+        return time.mktime(time.strptime(" ".join(out.split()), "%a %b %d %H:%M:%S %Y"))
+    except ValueError:
+        return None
+
+
+def written_by_daemon() -> dict | None:
+    """``running()``, only when ``daemon.json`` hasn't changed since that
+    daemon started and wrote it (its ctime can't be set back): a file
+    anything else rewrote later, its token included, isn't the daemon's."""
+    info = running()
+    started = _started_at(info["pid"]) if info else None
+    try:
+        changed = info_path().stat().st_ctime
+    except OSError:
+        return None
+    return info if started is not None and changed <= started + INFO_SLACK else None
+
+
 def _private_dir(d: Path) -> None:
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(d, 0o700)

@@ -642,7 +642,7 @@
           "type": "object"
         },
         "PermissionDTO": {
-          "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {choice}. ``via``: \"hook\" (brindle's hook\nholds the request and takes the answer) or \"prompt\" (the CLI's own\nprompt is on screen; the answer goes in as its keys).",
+          "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {request: request_id, choice}, refused for\nany request but the one shown. ``via``: \"hook\" (brindle's hook holds the\nrequest and takes the answer) or \"prompt\" (the CLI's own prompt is on\nscreen; the answer goes in as its keys). No ``choices``: a prompt brindle\ncan't answer, to answer in the agent's terminal.",
           "properties": {
             "choices": {
               "default": [],
@@ -663,6 +663,10 @@
               ],
               "default": null,
               "title": "Kind"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
             },
             "target": {
               "anyOf": [
@@ -706,7 +710,8 @@
             }
           },
           "required": [
-            "via"
+            "via",
+            "request_id"
           ],
           "title": "PermissionDTO",
           "type": "object"
@@ -1009,7 +1014,7 @@
           "type": "object"
         }
       },
-      "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {choice}. ``via``: \"hook\" (brindle's hook\nholds the request and takes the answer) or \"prompt\" (the CLI's own\nprompt is on screen; the answer goes in as its keys).",
+      "description": "A tool-permission request waiting on the person: POST\n/inbox/{agent_id}/permission {request: request_id, choice}, refused for\nany request but the one shown. ``via``: \"hook\" (brindle's hook holds the\nrequest and takes the answer) or \"prompt\" (the CLI's own prompt is on\nscreen; the answer goes in as its keys). No ``choices``: a prompt brindle\ncan't answer, to answer in the agent's terminal.",
       "properties": {
         "choices": {
           "default": [],
@@ -1030,6 +1035,10 @@
           ],
           "default": null,
           "title": "Kind"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
         },
         "target": {
           "anyOf": [
@@ -1073,7 +1082,8 @@
         }
       },
       "required": [
-        "via"
+        "via",
+        "request_id"
       ],
       "title": "PermissionDTO",
       "type": "object"

@@ -354,22 +354,26 @@ CREATE TABLE IF NOT EXISTS pool_failures (
     failed_at REAL NOT NULL,
     PRIMARY KEY (repo_root, base_branch)
 );
--- A tool-permission request brindle's policy left to the person (see
--- brindle.permissions): the structured request, so the supervisor can be told
--- exactly what's pending, and so the tool's PostToolUse (same tool_use_id)
--- can count as the person approving it. Cleared when the turn ends. While
--- the app is open the hook waits for its answer (channel 'hook'), then hands
--- the request to the CLI's own prompt ('prompt') or takes it ('answered').
+-- A tool-permission request left to the person (see brindle.permissions):
+-- the structured request, so the supervisor can be told exactly what's
+-- pending, and so the tool's PostToolUse (the same tool and input) can count
+-- as the person approving it. Cleared when the turn ends. While the app is
+-- open the hook waits for its answer (channel 'hook'), then hands the request
+-- to the CLI's own prompt ('prompt') or takes it ('answered'). A prompt seen
+-- on screen that no hook recorded (request 'null') gets a row too, so the
+-- app's answer names the one prompt it was shown ('answering' while its keys
+-- go in). ``tool_use_id`` is the request's id: brindle's own, not Claude's.
 CREATE TABLE IF NOT EXISTS permission_requests (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     tool_use_id TEXT NOT NULL,
-    request TEXT NOT NULL,          -- JSON of brindle.permissions.Request
+    request TEXT NOT NULL,          -- JSON of brindle.permissions.Request, or 'null'
     reason TEXT NOT NULL,           -- the policy's; '' when the policy is off
     created_at REAL NOT NULL,
     suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
-    channel TEXT,                   -- hook | prompt | answered
+    channel TEXT,                   -- hook | prompt | answering | answered
     answer TEXT,                    -- allow_once | allow_always | deny
     answer_mac TEXT,                -- the daemon's signature of it (permissions.answer_mac)
+    fingerprint TEXT,               -- the prompt on screen it was shown as (service.inbox)
     PRIMARY KEY (agent_id, tool_use_id)
 );
 -- One row per delegation: which profile brindle would have used without
@@ -909,7 +913,7 @@ class DB:
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
         request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
-        for col in ("suggestions", "channel", "answer", "answer_mac"):
+        for col in ("suggestions", "channel", "answer", "answer_mac", "fingerprint"):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} TEXT")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1257,58 +1261,113 @@ class DB:
     # -- permission requests left to the person (brindle.permissions) --
 
     def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str,
-                               suggestions: str | None = None, channel: str | None = None) -> None:
+                               suggestions: str | None = None, channel: str | None = None,
+                               fingerprint: str | None = None) -> None:
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO permission_requests (agent_id, tool_use_id, request, "
-                      "reason, created_at, suggestions, channel) VALUES (?,?,?,?,?,?,?)",
-                      (agent_id, tool_use_id, request, reason, time.time(), suggestions, channel))
+                      "reason, created_at, suggestions, channel, fingerprint) VALUES (?,?,?,?,?,?,?,?)",
+                      (agent_id, tool_use_id, request, reason, time.time(), suggestions, channel,
+                       fingerprint))
 
-    def answer_permission_request(self, agent_id: str, tool_use_id: str, answer: str,
-                                  mac: str | None = None) -> bool:
-        """Hand ``answer``, signed ``mac``, to the hook still waiting on the
-        request: False when none is (it gave the request to the CLI's prompt
-        meanwhile). With no ``mac``: record it as answered at that prompt."""
+    def open_permission_requests(self, agent_id: str) -> list[sqlite3.Row]:
+        """The agent's requests not yet answered, newest first."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? "
+                                 "AND channel IS NOT 'answered' ORDER BY created_at DESC, rowid DESC",
+                                 (agent_id,)).fetchall()
+
+    def hook_permission_request(self, agent_id: str) -> sqlite3.Row | None:
+        """The request the agent's hook holds for the app's answer, if any."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND channel='hook' "
+                                 "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
+
+    def claim_permission_answer(self, agent_id: str, tool_use_id: str, answer: str) -> bool:
+        """Claim the request the hook holds for ``answer``: False when it
+        isn't held any more (it went to the CLI's prompt) or another answer
+        won. The hook takes it only once signed (sign_permission_answer)."""
         with self.tx() as c:
-            if mac is not None:
-                cur = c.execute("UPDATE permission_requests SET answer=?, answer_mac=? WHERE agent_id=? "
-                                "AND tool_use_id=? AND channel='hook' AND answer IS NULL",
-                                (answer, mac, agent_id, tool_use_id))
-            else:
-                cur = c.execute("UPDATE permission_requests SET answer=?, channel='answered' "
-                                "WHERE agent_id=? AND tool_use_id=?", (answer, agent_id, tool_use_id))
+            cur = c.execute("UPDATE permission_requests SET answer=?, answer_mac=NULL WHERE agent_id=? "
+                            "AND tool_use_id=? AND channel='hook' AND answer IS NULL",
+                            (answer, agent_id, tool_use_id))
         return cur.rowcount == 1
 
+    def sign_permission_answer(self, agent_id: str, tool_use_id: str, mac: str) -> bool:
+        """Release a claimed answer to the hook with the daemon's signature:
+        False when the hook stopped waiting meanwhile."""
+        with self.tx() as c:
+            cur = c.execute("UPDATE permission_requests SET answer_mac=? WHERE agent_id=? AND tool_use_id=? "
+                            "AND channel='hook' AND answer IS NOT NULL AND answer_mac IS NULL",
+                            (mac, agent_id, tool_use_id))
+        return cur.rowcount == 1
+
+    def unclaim_permission_answer(self, agent_id: str, tool_use_id: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE permission_requests SET answer=NULL WHERE agent_id=? AND tool_use_id=? "
+                      "AND channel='hook' AND answer_mac IS NULL", (agent_id, tool_use_id))
+
+    def claim_permission_prompt(self, agent_id: str, tool_use_id: str, fingerprint: str) -> bool:
+        """Claim the request shown on screen as ``fingerprint`` for one answer
+        typed into its prompt ('answering'): False when it is gone, answered,
+        held by the hook, being answered, or shown as another prompt."""
+        with self.tx() as c:
+            cur = c.execute("UPDATE permission_requests SET channel='answering' WHERE agent_id=? AND "
+                            "tool_use_id=? AND (channel IS NULL OR channel='prompt') AND fingerprint=?",
+                            (agent_id, tool_use_id, fingerprint))
+        return cur.rowcount == 1
+
+    def finish_permission_prompt(self, agent_id: str, tool_use_id: str, answer: str | None) -> None:
+        """A claimed prompt's end: answered with ``answer``, or with None
+        (no key went in) back to 'prompt'."""
+        with self.tx() as c:
+            c.execute("UPDATE permission_requests SET channel=?, answer=? WHERE agent_id=? AND "
+                      "tool_use_id=? AND channel='answering'",
+                      ("answered" if answer else "prompt", answer, agent_id, tool_use_id))
+
+    def note_permission_fingerprint(self, agent_id: str, tool_use_id: str, fingerprint: str) -> None:
+        """The prompt a recorded request was first shown as (kept once set)."""
+        with self.tx() as c:
+            c.execute("UPDATE permission_requests SET fingerprint=? WHERE agent_id=? AND tool_use_id=? "
+                      "AND fingerprint IS NULL", (fingerprint, agent_id, tool_use_id))
+
+    def drop_screen_requests(self, agent_id: str) -> None:
+        """Forget the prompts seen only on screen once none is up any more."""
+        with self.tx() as c:
+            c.execute("DELETE FROM permission_requests WHERE agent_id=? AND request='null' "
+                      "AND channel IS NOT 'answering'", (agent_id,))
+
     def take_permission_answer(self, agent_id: str, tool_use_id: str, verify, give_up: bool = False) -> str | None:
-        """The waiting hook's side: the answer handed to it, once
+        """The waiting hook's side: the answer handed to it, once signed and
         ``verify(answer, mac)`` holds (the request is then 'answered'); ""
-        when it no longer waits: an answer that fails the check, or
+        when it no longer waits: a signed answer that fails the check, or
         ``give_up`` with none yet, gives the request to the CLI's own prompt
-        ('prompt'). None: no answer yet, keep waiting."""
+        ('prompt'). None: no signed answer yet (one may be claimed), keep waiting."""
         with self.tx() as c:
             row = c.execute("SELECT answer, answer_mac FROM permission_requests WHERE agent_id=? "
                             "AND tool_use_id=? AND channel='hook'", (agent_id, tool_use_id)).fetchone()
             if row is None:
                 return ""
-            verified = bool(row["answer"]) and verify(row["answer"], row["answer_mac"])
-            if verified or row["answer"] or give_up:
+            signed = bool(row["answer"]) and row["answer_mac"] is not None
+            verified = signed and verify(row["answer"], row["answer_mac"])
+            if verified or signed or give_up:
                 c.execute("UPDATE permission_requests SET channel=? WHERE agent_id=? AND tool_use_id=?",
                           ("answered" if verified else "prompt", agent_id, tool_use_id))
                 return row["answer"] if verified else ""
         return None
 
-    def pop_permission_request(self, agent_id: str, tool_use_id: str) -> sqlite3.Row | None:
+    def pop_permission_request(self, agent_id: str, matches) -> sqlite3.Row | None:
+        """Remove and return the agent's oldest recorded request ``matches(row)`` holds for."""
         with self.tx() as c:
-            row = c.execute("SELECT * FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-                            (agent_id, tool_use_id)).fetchone()
+            rows = c.execute("SELECT * FROM permission_requests WHERE agent_id=? AND request!='null' "
+                             "ORDER BY created_at, rowid", (agent_id,)).fetchall()
+            row = next((r for r in rows if matches(r)), None)
             if row is not None:
                 c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-                          (agent_id, tool_use_id))
+                          (agent_id, row["tool_use_id"]))
         return row
 
     def latest_permission_request(self, agent_id: str) -> sqlite3.Row | None:
-        """The newest request still waiting on an answer."""
-        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? "
-                                 "AND channel IS NOT 'answered' ORDER BY created_at DESC LIMIT 1",
+        """The newest recorded request still waiting on an answer."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND request!='null' "
+                                 "AND channel IS NOT 'answered' ORDER BY created_at DESC, rowid DESC LIMIT 1",
                                  (agent_id,)).fetchone()
 
     def clear_permission_requests(self, agent_id: str) -> None:

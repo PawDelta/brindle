@@ -88,10 +88,13 @@ class PermissionChoiceDTO(_DTO):
 
 class PermissionDTO(_DTO):
     """A tool-permission request waiting on the person: POST
-    /inbox/{agent_id}/permission {choice}. ``via``: "hook" (brindle's hook
-    holds the request and takes the answer) or "prompt" (the CLI's own
-    prompt is on screen; the answer goes in as its keys)."""
+    /inbox/{agent_id}/permission {request: request_id, choice}, refused for
+    any request but the one shown. ``via``: "hook" (brindle's hook holds the
+    request and takes the answer) or "prompt" (the CLI's own prompt is on
+    screen; the answer goes in as its keys). No ``choices``: a prompt brindle
+    can't answer, to answer in the agent's terminal."""
     via: str
+    request_id: str
     tool: str | None = None
     kind: str | None = None      # brindle.permissions.KINDS
     target: str | None = None    # the command, path or URL
