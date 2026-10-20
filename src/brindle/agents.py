@@ -2978,7 +2978,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             suggestions = payload.get("permission_suggestions")
             suggestions = suggestions if isinstance(suggestions, list) and suggestions else None
             app = _app_open()
-            recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+            # The command's description as Claude Code shows it under the command,
+            # so the app can tell the prompt on screen is exactly this request.
+            description = (payload.get("tool_input") or {}).get("description")
+            shown = {**req.to_dict(), **({"description": description} if isinstance(description, str) else {})}
+            recorded = json.dumps(shown), json.dumps(suggestions) if suggestions else None
             db.add_permission_request(agent.id, request_id, recorded[0], decision.reason, recorded[1],
                                       "hook" if app else None)
             # Only an answer to exactly this request and these suggestions counts.

@@ -461,7 +461,7 @@ ROW = "   Allow once   Allow always   Reject"
     ("claude", "allow_once", "replaced", 409, [], None),
     # Answered, and the same command asked again: a retry of the first answer doesn't answer the second.
     ("claude", "allow_once", "repeat", 409, ["Enter"], None),
-    # A command longer than the prompt lines shown: never answered blind, its terminal only.
+    # A command so long the prompt's top is out of the capture: never answered blind, its terminal only.
     ("claude", "allow_once", "long", 409, [], None),
     # OpenCode's buttons show no selection to check before Enter: its terminal only.
     ("opencode", "allow_once", None, 409, [], None),
@@ -476,8 +476,8 @@ def test_a_permission_answer_goes_into_the_prompt_it_was_shown(db, repo, world, 
 
     db.add_agent(Agent("oc", "w-1", "developer", "opencode", "sup", "assign", "waiting", "%3", None, time.time()))
     agent_id = {"claude": "wk", "opencode": "oc"}[provider]
-    # A long command's first line ends up above the prompt lines the app is shown.
     command = "npm test \\\n" + "    --step \\\n" * 14 + "    --done" if case == "long" else "npm test"
+    header = "" if case == "long" else "Bash command\n"     # scrolled off with the command's first lines
     pane, pressed = {"command": command, "at": 0, "stage": "ask", "looks": 0}, []
 
     def capture(target, **kw):
@@ -488,7 +488,8 @@ def test_a_permission_answer_goes_into_the_prompt_it_was_shown(db, repo, world, 
             return "❯ \n? for shortcuts"
         if provider == "opencode":
             return f"△ Permission required\n$ {pane['command']}\n{ROW}"
-        return f"Bash command\n  {pane['command']}\nDo you want to proceed?\n" + "\n".join(
+        command_block = pane["command"] if case != "long" else "\n".join(pane["command"].splitlines()[3:])
+        return f"{header}  {command_block}\nDo you want to proceed?\n" + "\n".join(
             f"{'❯' if i == pane['at'] else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))
 
     def send_keys(target, key, server=None):

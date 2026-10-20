@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import time
 import uuid
@@ -43,8 +42,12 @@ ROW_MENU = re.compile(r"(Allow once)\s+(Allow always)\s+(Reject)")
 TERMINAL = {
     "row": "its prompt doesn't show which option is selected",
     "none": "brindle can't tell how its prompt selects an option",
-    "unknown": "only part of the request shows on screen, and no hook recorded it whole",
+    "unknown": "brindle can't tell that its prompt shows exactly, and all of, a request its hook recorded",
 }
+# Claude Code's Bash permission prompt: the header over the command block,
+# and the question under its description (_on_screen).
+CLAUDE_BASH_HEADER = "Bash command"
+CLAUDE_BASH_QUESTION = "Do you want to proceed?"
 WORDING_LINES = 12       # of a prompt, shown to the person
 CAPTURE_LINES = 200      # of a pane, read for its prompt (the fingerprint covers them all)
 STEP_SECONDS = 0.2       # between keys, and between looks at the pane or the hook
@@ -309,7 +312,7 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
     # it wasn't first shown as another prompt (an older request, asked again).
     newest = next((r for r in rows if r["request"] != "null"), None)
     row = newest if (newest is not None and newest["fingerprint"] in (None, fp)
-                     and _on_screen(recorded(newest), menu.wording)) else None
+                     and _on_screen(agent.provider, json.loads(newest["request"]), menu.above)) else None
     if row is not None and row["fingerprint"] is None:
         db.note_permission_fingerprint(agent.id, row["tool_use_id"], fp)
         row["fingerprint"] = fp
@@ -326,27 +329,27 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
         choices=[] if terminal else _choices(menu), **described(row, req)))
 
 
-def _on_screen(req: permissions.Request, wording: str) -> bool:
-    """Whether the prompt's ``wording`` shows exactly what ``req`` asks for:
-    its command or URL as whole lines of the prompt (whitespace aside, and
-    nothing more on them), or its path as a whole word, absolute or relative
-    to where the agent works with at least one directory in it (CLIs shorten
-    paths to that; a bare file name could be any file). Anything else, a
-    request named by its tool alone included, doesn't bind: the person must
-    see exactly what they approve."""
+def _on_screen(provider: str, recorded: dict, above: str) -> bool:
+    """Whether the prompt on screen (``above`` its options, as captured) is
+    exactly the request the hook recorded. Only a layout brindle knows binds:
+    Claude Code's Bash prompt, whose command block (between its last "Bash
+    command" header and its question) must be the recorded command's lines
+    and then its recorded description, nothing more or less. Any other
+    prompt (a file's, another tool's, one whose header scrolled off) doesn't
+    bind, and is answered in the agent's terminal."""
     def flat(s: str) -> str:
-        return " ".join(s.split())
+        return " ".join(BOX.sub("", s).split())
 
-    lines = [flat(ln) for ln in wording.splitlines() if flat(ln)]
-    if req.path:
-        base = req.cwd or req.worktree
-        rel = os.path.relpath(req.path, base) if base else ""
-        shown = {req.path, *([rel] if "/" in rel and not rel.startswith("..") else [])}
-        words = {w.strip("'\"`?,:;()") for ln in lines for w in ln.split()}
-        return bool(shown & words)
-    target = flat(req.command or req.url or "")
-    return bool(target) and any(" ".join(lines[i:j]) == target
-                                for i in range(len(lines)) for j in range(i + 1, len(lines) + 1))
+    command = recorded.get("command")
+    if provider != "claude" or recorded.get("tool") != "Bash" or not isinstance(command, str):
+        return False
+    lines = [flat(ln) for ln in above.splitlines() if flat(ln)]
+    header = max((i for i, ln in enumerate(lines) if ln == CLAUDE_BASH_HEADER), default=None)
+    if header is None or not lines or lines[-1] != CLAUDE_BASH_QUESTION:
+        return False
+    description = recorded.get("description")
+    want = [flat(ln) for ln in command.splitlines() if flat(ln)] + ([flat(description)] if description else [])
+    return bool(want) and lines[header + 1:-1] == want
 
 
 def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
