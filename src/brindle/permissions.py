@@ -192,6 +192,9 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-ssh", "read", "~/.ssh*", "glob", "deny"),
     _default("d-aws", "read", "~/.aws*", "glob", "deny"),
     _default("d-gnupg", "read", "~/.gnupg*", "glob", "deny"),
+    # The local daemon's token: with it an agent could act as the person (brindle.daemon.auth).
+    _default("d-daemon", "read", "*/.brindle/daemon.json*", "glob", "deny"),
+    _default("d-daemon-sh", "bash", "*daemon.json*", "glob", "deny"),
     _default("d-env", "read", "*/.env*", "glob", "deny"),
     _default("d-env-rel", "read", ".env*", "glob", "deny"),
 )

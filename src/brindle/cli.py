@@ -1254,6 +1254,16 @@ permissions_app = typer.Typer(no_args_is_help=True,
                               help="The rules brindle answers workers' permission requests with "
                                    "(when permission_policy is \"on\").")
 app.add_typer(permissions_app, name="permissions")
+# The subcommands that change rules or what a provider is allowed to do.
+PERMISSION_CHANGES = {"accept", "allow", "deny", "forget", "reset", "sync-agy", "install-codex-hook"}
+
+
+@permissions_app.callback()
+def permissions_group(ctx: typer.Context) -> None:
+    # Like config.set_user: a brindle agent's CLI call must not widen its own permissions.
+    if ctx.invoked_subcommand in PERMISSION_CHANGES and os.environ.get("BRINDLE_AGENT_ID"):
+        _fail("brindle: running as an agent, so the permission rules were not changed; "
+              "the person can run this from their own terminal")
 
 
 def _here_repo() -> str | None:

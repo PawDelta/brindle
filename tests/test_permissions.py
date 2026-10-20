@@ -18,3 +18,12 @@ def test_single_arg_allow():
     # rule-id: allow bash exact 'aws *'
     # Actually wait, `aws *` exact match for bash rule. Let's verify output.
     assert "allow bash exact 'aws *'" in result.stdout
+
+
+def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
+    from brindle import permissions
+
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "w1")
+    before = permissions.load_store().rules
+    result = runner.invoke(app, ["permissions", "allow", "curl"])
+    assert result.exit_code == 1 and permissions.load_store().rules == before
