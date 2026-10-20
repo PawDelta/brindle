@@ -3,8 +3,9 @@ waiting permission hook by.
 
 A hook that holds a request (brindle.agents._hold_for_app) makes a random
 nonce it keeps only in memory and registers the hold here (``POST
-/v1/holds``): the agent, the request's id, and the digest of the exact
-request and suggested rule it recorded (permissions.request_digest). It then
+/v1/holds``), before it records the request anywhere: the agent (one the
+calling process runs under, by its ancestry), the request's id, and the
+digest of the exact request and suggested rule (permissions.request_digest). It then
 waits (``POST /v1/holds/{id}/wait``) for the decision, which only the holder
 of that nonce is given, and ends the hold when it stops waiting.
 
@@ -22,6 +23,7 @@ the nonce is what they check (see brindle.daemon.auth)."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import http.client
@@ -37,7 +39,10 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 PREFIX = "/v1/holds"
-WAIT_SECONDS = 20.0      # longest one wait call blocks before the hook asks again
+WAIT_SECONDS = 20.0      # longest one wait call lasts before the hook asks again
+WAIT_STEP = 0.1          # seconds between a wait's looks at its hold (no thread is held meanwhile)
+MAX_PER_AGENT = 16       # holds at once, per agent and in all
+MAX_HOLDS = 256
 
 
 def _hash(nonce: str) -> str:
@@ -59,11 +64,13 @@ class Holds:
 
     def __init__(self) -> None:
         self._holds: dict[str, Hold] = {}
-        self._changed = threading.Condition()
+        self._changed = threading.Lock()
 
     def register(self, agent_id: str, request_id: str, digest: str, nonce: str) -> bool:
+        """False when the id is held already, or the agent (or everyone) holds too many."""
         with self._changed:
-            if request_id in self._holds:
+            mine = sum(h.agent_id == agent_id for h in self._holds.values())
+            if request_id in self._holds or mine >= MAX_PER_AGENT or len(self._holds) >= MAX_HOLDS:
                 return False
             self._holds[request_id] = Hold(agent_id, request_id, digest, _hash(nonce))
             return True
@@ -92,7 +99,6 @@ class Holds:
             if hold is None or hold.agent_id != agent_id or hold.answer is None or hold.released:
                 return False
             hold.released = True
-            self._changed.notify_all()
             return True
 
     def unclaim(self, agent_id: str, request_id: str) -> None:
@@ -101,23 +107,29 @@ class Holds:
             if hold is not None and hold.agent_id == agent_id and not hold.released:
                 hold.answer = None
 
-    def wait(self, request_id: str, nonce: str, seconds: float) -> tuple[bool, str | None]:
-        """For the hook holding ``nonce``: (whether the hold is its own and
-        still there, the answer released to it, if one was within ``seconds``).
-        An answer given ends the hold."""
-        deadline = time.monotonic() + seconds
+    def take(self, request_id: str, nonce: str) -> tuple[bool, str | None]:
+        """For the hook holding ``nonce``, without blocking: (whether the hold
+        is its own and still there, the answer released to it, if any). An
+        answer taken ends the hold."""
         with self._changed:
-            while True:
-                hold = self._holds.get(request_id)
-                if hold is None or not hmac.compare_digest(hold.nonce_hash, _hash(nonce)):
-                    return False, None
-                if hold.released:
-                    del self._holds[request_id]
-                    return True, hold.answer
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    return True, None
-                self._changed.wait(left)
+            hold = self._holds.get(request_id)
+            if hold is None or not hmac.compare_digest(hold.nonce_hash, _hash(nonce)):
+                return False, None
+            if hold.released:
+                del self._holds[request_id]
+                return True, hold.answer
+            return True, None
+
+    async def wait(self, request_id: str, nonce: str, seconds: float) -> tuple[bool, str | None]:
+        """``take``, looking again every WAIT_STEP for up to ``seconds``: on
+        the event loop, so a waiting hook holds no thread the daemon's other
+        routes need."""
+        deadline = time.monotonic() + seconds
+        while True:
+            held, answer = self.take(request_id, nonce)
+            if not held or answer is not None or time.monotonic() >= deadline:
+                return held, answer
+            await asyncio.sleep(WAIT_STEP)
 
     def end(self, request_id: str, nonce: str) -> None:
         """The hook stopped waiting: no answer reaches it from now on."""
@@ -125,7 +137,6 @@ class Holds:
             hold = self._holds.get(request_id)
             if hold is not None and hmac.compare_digest(hold.nonce_hash, _hash(nonce)):
                 del self._holds[request_id]
-                self._changed.notify_all()
 
 
 HOLDS = Holds()
@@ -148,23 +159,27 @@ async def _body(request: Request) -> dict:
 
 
 async def register(request: Request) -> JSONResponse:
+    """A hook's hold, for an agent it runs under (by its processes' ancestry)."""
+    from brindle.daemon import peer
+
     body = await _body(request)
     fields = [_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
     if not all(fields):
         return JSONResponse({"error": {"code": "invalid", "message": "agent_id, request_id, digest and nonce"}}, 400)
+    pid = request.scope.get(peer.PEER_PID)
+    if pid is None or fields[0] not in await asyncio.to_thread(peer.caller_agents, pid):
+        return JSONResponse({"error": {"code": "forbidden", "message": "a hook holds only its own agent's requests"}}, 403)
     if not HOLDS.register(*fields):
-        return JSONResponse({"error": {"code": "conflict", "message": "already held"}}, 409)
+        return JSONResponse({"error": {"code": "conflict", "message": "already held, or too many holds"}}, 409)
     return JSONResponse({"held": True})
 
 
 async def wait(request: Request) -> JSONResponse:
-    import asyncio
-
     body = await _body(request)
     nonce = _str(body, "nonce") or ""
     seconds = body.get("seconds")
     seconds = min(float(seconds), WAIT_SECONDS) if isinstance(seconds, (int, float)) and seconds > 0 else WAIT_SECONDS
-    held, answer = await asyncio.to_thread(HOLDS.wait, request.path_params["id"], nonce, seconds)
+    held, answer = await HOLDS.wait(request.path_params["id"], nonce, seconds)
     return JSONResponse({"held": held, "answer": answer})
 
 

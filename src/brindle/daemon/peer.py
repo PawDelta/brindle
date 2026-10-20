@@ -85,6 +85,11 @@ def agent_caller(pid: int) -> str | None:
         return "the caller can't be checked (it exited, or isn't this user's process)"
     if (m := re.search(r"(?:^|\s)BRINDLE_AGENT_ID=(\S+)", me.text)):
         return f"the caller runs under brindle agent {m.group(1)}"
+    return next((f"the caller runs under brindle agent {aid}" for aid in sorted(_owners(pid, table))), None)
+
+
+def _owners(pid: int, table) -> set[str]:
+    """The live agents one of whose processes is ``pid`` or an ancestor of it."""
     chain, p = set(), pid
     while p in table and p not in chain:
         chain.add(p)
@@ -92,5 +97,12 @@ def agent_caller(pid: int) -> str | None:
     panes = _agent_panes()
     owned = procs.agent_pids(procs.all_agent_ids(table) | set(panes), panes, table,
                              through_ancestors=True)
-    return next((f"the caller runs under brindle agent {aid}"
-                 for aid, pids in owned.items() if pids & chain), None)
+    return {aid for aid, pids in owned.items() if pids & chain}
+
+
+def caller_agents(pid: int) -> set[str]:
+    """The agents process ``pid`` runs under, by its processes' ancestry (not
+    its environment, which can be a stale launch's): empty when none, or it
+    can't be checked. A permission hook holds requests only for these."""
+    table = procs.table()
+    return _owners(pid, table) if pid in table else set()

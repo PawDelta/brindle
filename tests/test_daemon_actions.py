@@ -404,6 +404,8 @@ def answering(db, world, monkeypatch):
     monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
     monkeypatch.setattr(inbox, "CONFIRM_SECONDS", 0.5)
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent wk")
+    # The hook process (peer pid 310) runs under these tests' agents.
+    monkeypatch.setattr(peer, "caller_agents", lambda pid: {"wk", "co", "an", "na"} if pid == 310 else set())
 
 
 def _verdict(out):
@@ -528,10 +530,17 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
         assert [e["payload"]["choice"] for e in bus.tail(db, kinds=("permission.answered",))] == [choice]
 
 
-def test_permission_holds_take_no_token_but_only_on_the_unix_socket(world, answering):
+def test_permission_holds_take_no_token_but_only_a_hooks_own_agents(world, answering, monkeypatch):
+    from brindle.daemon import holds
+
+    monkeypatch.setattr(holds, "MAX_PER_AGENT", 1)
     hold = {"agent_id": "wk", "request_id": "r-tcp", "digest": "d", "nonce": "n"}
     assert _send("POST", "/v1/holds", hold, token=None)[0] == 403     # TCP: no peer to name
+    # Over the Unix socket, only for an agent the calling process runs under, and so many at once.
+    assert _send("POST", "/v1/holds", {**hold, "agent_id": "sup", "request_id": "r-other"}, peer_pid=310,
+                 token=None)[0] == 403
     assert _send("POST", "/v1/holds", {**hold, "request_id": "r-unix"}, peer_pid=310, token=None)[0] == 200
+    assert _send("POST", "/v1/holds", {**hold, "request_id": "r-more"}, peer_pid=310, token=None)[0] == 409
     assert _send("POST", "/v1/holds/r-unix/end", {"nonce": "n"}, peer_pid=310, token=None)[0] == 200
 
 
