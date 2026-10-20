@@ -21,7 +21,8 @@ capture-pane instead and viewers get the rows that changed.
 The client sends JSON control frames: ``{"type": "key", "keys": [...]}`` (tmux
 key names) or ``{"type": "key", "text": "..."}`` (typed as is), ``{"type":
 "paste", "text": "..."}`` (one bracketed paste, not submitted) and ``{"type":
-"resize", "cols": c, "rows": r}``, applied RESIZE_SECONDS after the last one.
+"resize", "cols": c, "rows": r}``, applied at once, then at most one per RESIZE_SECONDS (the last size always
+lands), and viewers are seeded again once it settles.
 While a terminal client is attached to the pane's session, tmux's own sizing
 rule applies: resizes are skipped and viewers are told ``shared``.
 
@@ -91,6 +92,7 @@ class Ring:
 class Viewer:
     def __init__(self, pos: int, shared: bool) -> None:
         self.pos, self.shared = pos, shared
+        self.reseed = False             # the pane was resized: seed again
         self.wake = asyncio.Event()
 
 
@@ -242,6 +244,9 @@ class Pane:
         self._manual = False
         self._size: tuple[int, int] | None = None
         self._resize: asyncio.TimerHandle | None = None
+        self._next = 0.0                # when the next resize may be applied at once
+        self._applied: tuple[int, int] | None = None
+        self._applying: set[asyncio.Task] = set()
         self._tasks: list[asyncio.Task] = []
         self._screen: list[str] | None = None
         self._cursor: tuple[int, int] | None = None
@@ -332,17 +337,30 @@ class Pane:
         return reply
 
     def resize(self, cols: int, rows: int) -> None:
-        """Size the window to ``cols`` x ``rows`` once no resize has come for
-        RESIZE_SECONDS (a dragged window sends dozens)."""
+        """Size the window to ``cols`` x ``rows``: at once when none was
+        applied in the last RESIZE_SECONDS, else at the end of that time, with
+        the last size asked for (a dragged window sends dozens)."""
         self._size = (cols, rows)
-        if self._resize:
-            self._resize.cancel()
-        self._resize = self._loop.call_later(
-            RESIZE_SECONDS, lambda: asyncio.ensure_future(self._apply_resize()))
+        if self._resize:                    # one is waiting: it takes the latest size
+            return
+        wait = self._next - self._loop.time()
+        if wait > 0:
+            self._resize = self._loop.call_later(wait, self._fire_resize)
+        else:
+            self._start_resize()
 
-    async def _apply_resize(self) -> None:
+    def _fire_resize(self) -> None:
         self._resize = None
-        if self._closed or not self._size:
+        self._start_resize()
+
+    def _start_resize(self) -> None:
+        self._next = self._loop.time() + RESIZE_SECONDS
+        task = asyncio.ensure_future(self._apply_resize(self._size))
+        self._applying.add(task)
+        task.add_done_callback(self._applying.discard)
+
+    async def _apply_resize(self, size: tuple[int, int] | None) -> None:
+        if self._closed or not size or size == self._applied:
             return
         try:
             await self._check_shared()      # a terminal may have attached since the last poll
@@ -351,9 +369,17 @@ class Pane:
             if not self._manual:
                 await self.run(tmux.set_window_size_manual, self.target)
                 self._manual = True
-            await self.run(tmux.resize_window, self.target, *self._size)
+            await self.run(tmux.resize_window, self.target, *size)
+            self._applied = size
         except tmux.TmuxError:
             log.debug("brindle: can't resize %s", self.target, exc_info=True)
+            return
+        if self._resize is None:            # settled: else the waiting resize reseeds
+            # A program that doesn't redraw on SIGWINCH leaves viewers with the
+            # old layout; tmux has reflowed it, so seed them again.
+            for v in self.viewers:
+                v.reseed = True
+            self._wake()
 
     async def _attached(self) -> int | None:
         """Terminals showing the pane's session (the daemon's own control
@@ -406,7 +432,7 @@ class Pane:
 
     async def close(self) -> None:
         self._closed = True
-        for task in (*self._tasks, self._resize):
+        for task in (*self._tasks, *self._applying, self._resize):
             if task:
                 task.cancel()
         if self._manual:
@@ -669,7 +695,8 @@ async def _flush(ws: WebSocket, pane: Pane, viewer: Viewer) -> None:
     if viewer.shared != pane.shared:
         viewer.shared = pane.shared
         await ws.send_json({"type": "shared", "shared": pane.shared})
-    data = pane.ring.since(viewer.pos)
+    data = None if viewer.reseed else pane.ring.since(viewer.pos)
+    viewer.reseed = False
     if data is None:
         await ws.send_json({"type": "resync"})
         await ws.send_bytes(await pane.seed(viewer))
