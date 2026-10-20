@@ -437,7 +437,10 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
             commit = None
             # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.
             lit = ["--literal-pathspecs"]
-            tracked = git.ok([*lit, "ls-files", "--error-unmatch", "--", name], ws.path)
+            # This path's index entries as they are (none when untracked or its deletion is staged).
+            listed = git.out([*lit, "ls-files", "-s", "-z", "--", name], ws.path).split("\0")
+            entries = [e for e in listed if e.partition("\t")[2] == name]
+            tracked = bool(entries)
             try:
                 # git reads the path itself: a directory swapped for a symlink meanwhile would commit what it points at.
                 if os.path.realpath(os.path.join(ws.path, name)) != os.path.join(os.path.realpath(ws.path), name):
@@ -454,9 +457,13 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
                             ws.path)
                     commit = git.out(["rev-parse", "HEAD"], ws.path)
             except (git.GitError, ServiceError):
-                _replace(dir_fd, leaf, before, mode)    # refused (a hook, say): the file as the worker had it
-                if not tracked:     # untracked again (a tracked path's index was left alone by --only)
-                    git.run([*lit, "reset", "-q", "--", name], ws.path)
+                # Refused (a hook, say): the index entry and the file exactly as the worker had them.
+                try:
+                    git.run(["update-index", "--force-remove", "--", name], ws.path)
+                    if entries:
+                        git.run(["update-index", "-z", "--index-info"], ws.path, input="\0".join(entries) + "\0")
+                finally:
+                    _replace(dir_fd, leaf, before, mode)
                 raise
         finally:
             os.close(dir_fd)

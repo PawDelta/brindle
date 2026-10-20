@@ -103,6 +103,7 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
     ("app.py", "shown", "hook-refuses", 409),   # the file goes back; the worker's index survives
     ("new.txt", "shown", None, 200),            # a file git doesn't track yet
     ("new.txt", "shown", "hook-refuses", 409),  # ... refused: untracked again, as it was
+    ("pkg/m.py", "shown", "deleted-refused", 409),  # its deletion staged, then refused: still staged
     ("app.py", "shown", "to-head", 200),        # back to HEAD's content: no commit, the staged version goes
     pytest.param("app.py", "shown", "agent", 403, marks=pytest.mark.variant("an agent holding the token")),
     ("../proj/app.py", "shown", None, 400),
@@ -113,7 +114,7 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
     pytest.param("pkg/m.py", "shown", "swap", 400,
                  marks=pytest.mark.variant("a directory swapped for an escaping symlink mid-edit")),
 ], ids=["edit-commits", "edit-stale", "edit-busy", "edit-refused", "edit-new-file", "edit-new-file-refused",
-        "edit-to-head", "edit-agent",
+        "edit-deleted-refused", "edit-to-head", "edit-agent",
         "edit-dotdot", "edit-symlink", "edit-git", "edit-pathspec", "edit-swap"])
 def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, monkeypatch,
                                                            path, base, setup, status):
@@ -139,7 +140,9 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
     if setup == "busy":
         db.add_agent(Agent("ew", "proj/w-e", "developer", "claude", "sup", "assign", "processing", "%3",
                            None, time.time()))
-    if setup == "hook-refuses":
+    if setup == "deleted-refused":
+        sh("git rm -q --cached pkg/m.py", wt)
+    if setup in ("hook-refuses", "deleted-refused"):
         hook = repo / ".git" / "hooks" / "pre-commit"
         hook.write_text("#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
@@ -166,8 +169,8 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
     if status != 200:
         assert sh("git rev-parse HEAD", wt) == head and sh("git diff --cached", wt) == staged and edited == []
         assert (wt / "app.py").read_text() == "print('working')\n" and (wt / "new.txt").read_text() == "draft\n"
-        if setup == "swap":     # the write went to the file it opened, and was put back
-            assert (wt / "pkg.moved" / "m.py").read_text() == "print('hi')\n"
+        # The write went to the file it opened (moved away when swapped), and was put back.
+        assert (wt / ("pkg.moved" if setup == "swap" else "pkg") / "m.py").read_text() == "print('hi')\n"
         return
     cached = sh("git diff --cached --name-only", wt).splitlines()
     assert "abc.txt" in cached and path not in cached and (wt / path).read_text() == content
