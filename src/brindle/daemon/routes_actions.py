@@ -455,8 +455,8 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
                     commit = git.out(["rev-parse", "HEAD"], ws.path)
             except (git.GitError, ServiceError):
                 _replace(dir_fd, leaf, before, mode)    # refused (a hook, say): the file as the worker had it
-                if not tracked:
-                    git.run([*lit, "rm", "-q", "--cached", "--ignore-unmatch", "--", name], ws.path, check=False)
+                if not tracked:     # untracked again (a tracked path's index was left alone by --only)
+                    git.run([*lit, "reset", "-q", "--", name], ws.path)
                 raise
         finally:
             os.close(dir_fd)
