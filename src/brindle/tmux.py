@@ -931,6 +931,25 @@ def resize_window(target: str, cols: int, rows: int, server: object = _THIS_SERV
     _tmux("resize-window", "-t", target, "-x", str(cols), "-y", str(rows), server=server)
 
 
+def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
+    """Undo ``set_window_size_manual``: ``target``'s window is sized by tmux's
+    own rule again. ``server`` as for capture."""
+    _tmux("set-option", "-w", "-u", "-t", target, "window-size", check=False, server=server)
+
+
+def pane_view(target: str, server: object = _THIS_SERVER) -> tuple[int, int, int] | None:
+    """``target``'s cursor column and row, and how many clients are attached to
+    its session (0: no terminal shows it); None when the pane is gone.
+    ``server`` as for capture."""
+    proc = _tmux("display-message", "-p", "-t", target,
+                 "#{cursor_x} #{cursor_y} #{session_attached}", check=False, server=server)
+    try:
+        x, y, attached = (int(v) for v in proc.stdout.split())
+    except ValueError:
+        return None
+    return (x, y, attached) if proc.returncode == 0 else None
+
+
 def attach_command(session: str, window: str | None = None) -> list[str]:
     target = f"={session}" if window is None else window
     return [*_base(), "attach-session", "-t", target]
