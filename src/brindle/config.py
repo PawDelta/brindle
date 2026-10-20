@@ -400,6 +400,14 @@ def supervisor_pick() -> str | None:
     return pick if isinstance(pick, str) and pick else None
 
 
+def claude_permission_mode() -> str:
+    """The ``--permission-mode`` for Claude sessions whose profile sets none:
+    "default" so held permission requests reach the app, unless the person
+    opted into another mode (e.g. "auto") with ``claude_permission_mode``."""
+    mode = user_settings().get("claude_permission_mode")
+    return mode if isinstance(mode, str) and mode else "default"
+
+
 def set_user(key: str, value: object) -> Path:
     """Set one key in ``~/.brindle/config.json`` (other keys are kept)."""
     path = user_config_path()
