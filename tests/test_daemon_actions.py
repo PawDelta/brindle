@@ -4,6 +4,7 @@ job whose end arrives on the bus, and a choice the person must make is a 409."""
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,6 +44,8 @@ def world(db, repo, monkeypatch):
     root = workspaces.adopt_root(db, str(repo))
     db.add_workspace(Workspace("w-1", root.repo_root, "feat", "worktree", "feat", "main", str(repo),
                                None, "brindle-x", time.time()))
+    db.add_workspace(Workspace("proj/w-2", root.repo_root, "feat2", "worktree", "feat2", "main",
+                               str(repo) + "-2", None, "brindle-y", time.time()))
     db.add_agent(Agent("sup", root.id, "supervisor", "claude", None, "interactive", "idle", "%1",
                        None, time.time()))
     db.add_agent(Agent("wk", "w-1", "developer", "claude", "sup", "assign", "idle", "%2", None,
@@ -63,7 +66,9 @@ def _flat(args):
     ("POST", "/v1/inbox/wk/approve", {}, (agents, "approve_plan"), "approved", 200, "sup"),
     ("POST", "/v1/agents/wk/kill", {}, (agents, "kill"), None, 200, "wk"),
     ("POST", "/v1/workspaces/w-1/review", {}, (agents, "start_review"), None, 200, "w-1"),
-    ("POST", "/v1/workspaces/w-1/merge", {}, (pipeline, "merge"), "Merged feat", 202, "w-1"),
+    # Real workspace ids contain a slash, which arrives in the path as %2F decoded.
+    ("POST", "/v1/workspaces/proj/w-2/merge", {}, (pipeline, "merge"), "Merged feat2", 202, "proj/w-2"),
+    ("POST", "/v1/workspaces/proj/w-2/remove", {}, (workspaces, "remove"), SimpleNamespace(branch_note=None, teardown=None), 200, "proj/w-2"),
     ("POST", "/v1/goal/check", {"root": "sup"}, (routes_actions, "_run_helper"), {"exit": 0}, 202,
      "_check-milestones"),
     ("POST", "/v1/goal/enabled", {"root": "sup", "enabled": False}, (autopilot, "set_enabled"), None,
