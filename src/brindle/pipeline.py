@@ -251,6 +251,7 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
     merged = bool(db.merged_sha(ws.id))
     worker = agents.workspace_worker(db, ws)
     for a in db.list_agents(ws.id):
+        agents.forget_files(a)   # the agent rows go with the workspace
         if a.mode == "review" and a.result is None:
             learning.note_reviewer(db, cfg, a, ws, worker=worker)
         elif (a.mode in ("handoff", "handoff_detached", "assign")
@@ -373,7 +374,7 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
         started = agents.start_review(db, parent, ws, first, None, cfg)   # with checks: after they finish
         if second:
             try:
-                agents.start_review(db, parent, ws, second, None, cfg)
+                agents.start_review(db, parent, ws, second, None, cfg, second=True)
             except agents.AgentError:
                 if started is not None:
                     agents.close(db, started.id)   # don't leave a lone first review running
@@ -714,6 +715,7 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
             agents.request_review(
                 db, parent, ws, profile, focus="\n\n".join(focus_parts),
                 cfg=cfg, check_summary=check_summary,
+                second=bool(db.review_slot(reviewer.id)),   # in the stopped reviewer's place
             )
             agents.close_later(reviewer.id)
             return True

@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -145,12 +146,92 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 @pytest.fixture(autouse=True)
+def no_real_agent_cli(tmp_path, monkeypatch):
+    """A test must never start the real claude/codex, in a tmux pane (it would
+    outlive the run as an orphan) or as a subprocess: any process launch whose
+    argv names one that doesn't resolve under the test's tmp_path raises. A test
+    that needs a live agent pane uses the fake_agent_cli fixture."""
+    from brindle import providers, tmux
+
+    # A test's env must not point at a real binary unless it sets that itself.
+    monkeypatch.delenv("BRINDLE_CLAUDE_BIN", raising=False)
+    monkeypatch.delenv("BRINDLE_CODEX_BIN", raising=False)
+    root = tmp_path.resolve()
+
+    def executable(argv):
+        """The program an argv runs, past env's -u VAR, KEY=VAL and --."""
+        i = 0
+        if argv and os.path.basename(argv[0]) == "env":
+            i = 1
+            while i < len(argv):
+                if argv[i] == "-u":
+                    i += 2
+                elif argv[i] == "--" or "=" in argv[i]:
+                    i += 1
+                else:
+                    break
+        return argv[i] if i < len(argv) else ""
+
+    def refuse(exe, argv):
+        found = shutil.which(exe) or exe
+        if not Path(found).resolve().is_relative_to(root):
+            raise AssertionError(
+                f"{os.environ.get('PYTEST_CURRENT_TEST')} would launch the real {exe!r}: {argv[:6]}; "
+                "use the fake_agent_cli fixture")
+
+    def check(args):
+        argv = [os.fspath(a) for a in ([args] if isinstance(args, (str, os.PathLike)) else args)]
+        exe = executable(argv)
+        overrides = (os.environ.get("BRINDLE_CLAUDE_BIN"), os.environ.get("BRINDLE_CODEX_BIN"))
+        if os.path.basename(exe) in ("claude", "codex") or exe in overrides:
+            refuse(exe, argv)
+        # The headless runner is a child process that resolves the binary itself.
+        # A test that fakes one provider's binary leaves the other unused.
+        if "_headless" in argv:
+            binaries = [b for b in overrides if b] or [providers.claude_binary(), providers.codex_binary()]
+            for binary in binaries:
+                refuse(binary, argv)
+
+    real_init, real_window = subprocess.Popen.__init__, tmux.new_window
+
+    def guarded_init(self, args, *a, **kw):
+        check(args)
+        real_init(self, args, *a, **kw)
+
+    # tmux windows run their command from a script, so its argv is checked here.
+    def guarded_window(session, name, cwd, command, *a, **kw):
+        check(command)
+        return real_window(session, name, cwd, command, *a, **kw)
+
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded_init)
+    monkeypatch.setattr(tmux, "new_window", guarded_window)
+
+
+@pytest.fixture
+def fake_agent_cli(tmp_path, monkeypatch):
+    """BRINDLE_CLAUDE_BIN and BRINDLE_CODEX_BIN point at a stub that draws an
+    idle input box (Claude Code's, then Codex's) and sleeps, for tests that
+    need an agent's pane to be live; the private tmux server's teardown kills
+    it. Without the box each launch's after_launch waited out its 30 seconds,
+    and tests that spawn twice took a minute. Echo is off so a pasted message
+    doesn't read as a draft left in the box."""
+    stub = tmp_path / "agent-cli-stub"
+    stub.write_text("#!/bin/sh\nstty -echo 2>/dev/null\n"
+                    "printf '❯ \\n? for shortcuts\\n› \\n  100%% context left\\n'\nexec sleep 600\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(stub))
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", str(stub))
+
+
+@pytest.fixture(autouse=True)
 def no_signed_in_providers(monkeypatch):
     """No sign-in probes in tests, and no `providers` param on /entitlement
     (tests/test_entitlement_providers.py sets its own)."""
     from brindle import doctor
 
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
+    # And no `<cli> --version` run of whatever claude/codex the machine has.
+    monkeypatch.setattr(doctor, "_version", lambda argv: "")
 
 
 @pytest.fixture(autouse=True)
@@ -280,13 +361,14 @@ def cli_sign_in_unknown(monkeypatch):
     temporary CLAUDE_CONFIG_DIR would say no); tests/test_signin.py fakes it."""
     from brindle import providers
 
-    from brindle import antigravity
+    from brindle import antigravity, opencode
 
     monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: None)
     monkeypatch.setattr(providers, "_SIGNED_IN", {})
     # Only what a test puts on PATH counts as installed, not an app's own copy.
     monkeypatch.setattr(providers, "CODEX_BUNDLED", "/nonexistent/codex")
     monkeypatch.setattr(antigravity, "BUNDLED", "/nonexistent/agy")
+    monkeypatch.setattr(opencode, "INSTALLER", "/nonexistent/opencode")
 
 
 @pytest.fixture(autouse=True)

@@ -30,7 +30,7 @@ def test_reviewer_without_verdict_gets_fallback(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     started = []
 
-    def fallback(db_, caller, ws_, profile=None, focus=None, cfg=None, check_summary=None):
+    def fallback(db_, caller, ws_, profile=None, focus=None, cfg=None, check_summary=None, **kw):
         started.append(profile)
         add(db, ws, "rev1", "review", profile, parent=caller.id)
 

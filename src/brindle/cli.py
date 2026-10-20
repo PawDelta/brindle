@@ -105,6 +105,13 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
             tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
         if window:
             tmux.select_window(window)
+        if not sys.stdin.isatty():
+            # A script or a chat's `!` has no terminal of its own. From a pane
+            # of this server, switching "our" client would move the person's
+            # real terminal into the new session; attaching would just fail.
+            typer.echo(f"No terminal here; run `brindle attach {ws.name}` in one "
+                       f"(tmux session {ws.tmux_session}).")
+            return
         if tmux.inside_this_server():
             # From inside one of this server's panes (TMUX set, or only
             # TMUX_PANE left after `env -u TMUX brindle`): switch the client
@@ -222,7 +229,7 @@ def new(
     no_agent: bool = typer.Option(False, "--no-agent", help="Only create the worktree; start no supervisor."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the supervisor."),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Don't fetch the base branch first."),
     no_setup: bool = typer.Option(False, "--no-setup", help="Skip setup commands."),
@@ -292,7 +299,7 @@ def new(
 def start(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
@@ -921,7 +928,7 @@ def default(
     cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="Start with autopilot on or off (default: on, or `autopilot` in .brindle/config.json)."),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     show_version: bool = typer.Option(False, "--version", help="Print brindle's version and exit."),
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
@@ -958,7 +965,7 @@ def default(
 def supervisor(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(
-        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity). Workers keep their own profiles' providers.",
+        None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
@@ -2340,6 +2347,32 @@ def watch(
         agents.dismiss_sidebar(DB(), os.environ.get("TMUX_PANE"))
 
 
+@app.command("web")
+def web_cmd(
+    port: int = typer.Option(0, "--port", help="Port to listen on (default: any free one)."),
+    no_open: bool = typer.Option(False, "--no-open", help="Print the link without opening a browser."),
+) -> None:
+    """This session in your browser, on 127.0.0.1 only: agents, workspaces and milestones.
+
+    The link it prints carries a one-off token; anyone without it is refused."""
+    from brindle import sidebar_follow
+    from brindle.web import server
+
+    try:
+        repo_root = git.main_repo_root(os.getcwd())
+    except git.GitError:
+        repo_root = None
+    db = DB()
+    session = tmux.current_session()
+    root_id = sidebar_follow.root_for_session(db, session) if session else None
+    try:
+        web = server.make_server(repo_root, root_id, port)
+    except OSError as e:
+        _fail(f"can't listen on 127.0.0.1:{port}: {e.strerror or e}")
+    typer.echo(f"brindle web: {web.url}  (Ctrl-C to stop)")
+    server.serve(web, open_browser=not no_open)
+
+
 @app.command()
 def close(
     agent_id: Optional[str] = typer.Argument(None, help="Agent to close (an unambiguous prefix works)."),
@@ -2902,6 +2935,13 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
 
         typer.echo(antigravity.hook_main(DB(), event, sys.stdin.read()))
         return
+    if event.startswith("opencode-"):
+        from brindle import opencode
+
+        out = opencode.hook_main(DB(), agent or os.environ.get("BRINDLE_AGENT_ID"), event, sys.stdin.read())
+        if out:
+            typer.echo(out)
+        return
     # --agent is baked into the hook command at launch; the environment is
     # only a fallback for sessions launched by an older brindle (and may be stale).
     # Codex's permission hook is the same command for every agent (so one
@@ -2962,19 +3002,22 @@ def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -
             agents.ready(db, agent_id)
             # Carry the observed launch token into the delivery CAS.
             a._launch_health_token = token
-            launch_health.accepted(db, a)
+            launch_health.verify_delivery(db, a)
         else:
             prompt_answer.report_blocked(db, a)
-        launch_health.inspect(db, agent_id, wait=False, token=token)
+            launch_health.inspect(db, agent_id, wait=False, token=token)
 
 
 @app.command("_launch-health", hidden=True)
 def launch_health_cmd(agent_id: str, startup: bool = typer.Option(False),
-                      token: Optional[str] = typer.Option(None)) -> None:
+                      token: Optional[str] = typer.Option(None), verify: bool = False) -> None:
     from brindle import launch_health
 
     db = _helper_db()
     if not launch_health.current(db, agent_id, token):
+        return
+    if verify:
+        launch_health.verify_pending(db, agent_id, token)
         return
     if startup:
         time.sleep(launch_health.FOLLOWUP_SECONDS)
@@ -2982,6 +3025,13 @@ def launch_health_cmd(agent_id: str, startup: bool = typer.Option(False),
         if row is None or row["delivered_at"] is not None:
             return  # the task-delivery helper owns the real five-second follow-up
     launch_health.inspect(db, agent_id, wait=not startup, token=token)
+
+
+@app.command("_recover-reviewer", hidden=True)
+def recover_reviewer_cmd(agent_id: str) -> None:
+    from brindle import launch_health
+
+    launch_health.recover_reviewer(_helper_db(), agent_id)
 
 
 @app.command("_headless", hidden=True)
@@ -3136,7 +3186,9 @@ def flush_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
 @app.command("_review-after-checks", hidden=True)
 def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Option(None, "--caller"),
                             profile: Optional[str] = typer.Option(None, "--profile"),
-                            focus: Optional[str] = typer.Option(None, "--focus")) -> None:
+                            focus: Optional[str] = typer.Option(None, "--focus"),
+                            request_id: Annotated[Optional[str], typer.Option("--request-id")] = None,
+                            second: Annotated[bool, typer.Option("--second-review")] = False) -> None:
     """Run a repo's checks, then start the reviewer with their results in its
     prompt. Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
@@ -3148,7 +3200,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
     if ws is None:
         return
     try:
-        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root))
+        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root),
+                                   request_id=request_id, second=second)
     except (agents.AgentError, ValueError) as e:
         from brindle import pipeline
 

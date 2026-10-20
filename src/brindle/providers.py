@@ -84,6 +84,7 @@ class LaunchContext:
     session_id: str | None = None  # a new session's id, for CLIs that let brindle choose it
     mode: str | None = None     # the agent's mode ('interactive', 'handoff', 'assign', ...)
     plan_first: bool = False    # its edits are gated on plan approval (the hook watches edit tools too)
+    mcp_recovery: bool = False  # a fresh reviewer after a failed MCP connection
 
 
 class Provider:
@@ -164,6 +165,10 @@ class Provider:
         or None if it's clear. Default: always clear (most providers have no
         screen state worth reading here)."""
         return None
+
+    def clear_input(self, target: str, *, server) -> None:
+        """Discard a multiline draft before retrying a worker's first brief."""
+        tmux.send_keys(target, "C-c", server=server)
 
 
 # Why an agent should act on the messages brindle types into its chat,
@@ -523,6 +528,16 @@ class ClaudeCode(Provider):
                                  [*brindle_invocation(), "_hook", event, "--agent", agent_id])
         return [{"hooks": [{"type": "command", "command": cmd}]}]
 
+    @staticmethod
+    def _mcp_timeout(ctx: LaunchContext) -> str:
+        # Claude Code 2.1.303's stdio connect/initialize reads MCP_TIMEOUT (ms).
+        timeout = os.environ.get("MCP_TIMEOUT", "180000")
+        if ctx.mcp_recovery:
+            # A hook inherits the failed CLI's settings.env. Do not let that
+            # old allowance override the retry's longer startup budget.
+            return str(max(300000, int(timeout))) if timeout.isdecimal() else "300000"
+        return timeout
+
     def command(self, ctx: LaunchContext) -> list[str]:
         settings = {
             "hooks": {
@@ -577,7 +592,7 @@ class ClaudeCode(Provider):
             # report_result/submit_review. --settings env is applied before MCP
             # servers connect. Not agents.agent_env: that feeds the launch
             # fingerprint and would reset stored refusals.
-            "env": {"MCP_TIMEOUT": os.environ.get("MCP_TIMEOUT", "120000")},
+            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx)},
             # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
             # application-default login`) whenever its own ADC probe fails, once
             # per process: across a session's many panes that opens a Google
@@ -790,20 +805,19 @@ class ClaudeCode(Provider):
             return "background"
         if not interactive:
             return None
-        styled_lines = screen.rstrip().splitlines()[-25:]
-        candidates = [ln for ln in styled_lines if self.INPUT_LINE.match(self._strip_ansi(ln))]
+        styled_lines = screen.rstrip().splitlines()
+        candidates = [i for i, ln in enumerate(styled_lines) if self.INPUT_LINE.match(self._strip_ansi(ln))]
         if not candidates:
             return None
-        styled_line = candidates[-1]
-        plain_line = self._strip_ansi(styled_line)
-        m = self.INPUT_LINE.match(plain_line)
-        if not (m and m.group(1).strip()):
-            return None
-        idx = styled_line.find("❯")
-        styled_tail = styled_line[idx + 1:] if idx != -1 else styled_line
-        if self._is_placeholder_text(styled_tail):
-            return None
-        return "typing"
+        start = candidates[-1]
+        for i, line in enumerate(styled_lines[start:]):
+            plain = self._strip_ansi(line)
+            if i and (self.BORDER.match(plain) or self.INPUT_FOOTER.search(plain)):
+                break
+            text = line[line.find("❯") + 1:] if not i else line
+            if self._strip_ansi(text).strip() and not self._is_placeholder_text(text):
+                return "typing"
+        return None
 
     def after_launch(self, target: str) -> bool:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks
@@ -822,6 +836,8 @@ class ClaudeCode(Provider):
                 screen = tmux.capture(target, lines=60)
             except tmux.TmuxError:
                 return False
+            if prompts.draft(screen):
+                return True  # let delivery verification clear a partial brief
             if not self.TRUST_DIALOG.search(screen):
                 asking = not self.INPUT_FOOTER.search(screen) and prompt_answer.looks_like_prompt(screen)
                 answer = prompts.step(screen) if asking else ""
@@ -1217,6 +1233,10 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
                 reason = ("Antigravity isn't signed in: run `agy` and sign in with your Google "
                           "account (or set GEMINI_API_KEY with modelProvider \"gemini\" in "
                           f"{AGY_SETTINGS}), then try again")
+    elif provider == "opencode":
+        # OpenCode has no sign-in of its own to miss: its free models need
+        # none, and other providers' keys and logins are its config's.
+        res = (0, "")
     else:
         return None
     if reason is None and res is not None:
@@ -1228,7 +1248,7 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
 # brindle can read, and a way to tell autopilot a turn ended. The native loop
 # has only the worker tools, and a subagent runs inside a supervisor. (A
 # shell is allowed, as a stand-in for testing brindle itself.)
-SUPERVISOR_PROVIDERS = ("claude", "codex", "antigravity")
+SUPERVISOR_PROVIDERS = ("claude", "codex", "antigravity", "opencode")
 NOT_SUPERVISOR = ("native", "subagent")
 
 
@@ -1238,10 +1258,10 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
     ``env`` is a profile's own environment, as for signed_out."""
     import shutil
 
-    from brindle import antigravity
+    from brindle import antigravity, opencode
 
     binary = {"claude": claude_binary, "codex": codex_binary,
-              "antigravity": antigravity.binary}.get(provider)
+              "antigravity": antigravity.binary, "opencode": opencode.binary}.get(provider)
     if binary:
         exe = binary()
         if not (which_cli(exe) or os.path.isfile(exe)):
@@ -1257,6 +1277,9 @@ class Codex(Provider):
     uses_hooks = True
     announces_turns = False
     announces_start = False
+    # The MCP connection alone can take 120s under load. The launch observer
+    # must not abandon readiness before that connection has had its budget.
+    STARTUP_SECONDS = 150
     # Codex's approval prompts: run a command, make edits, grant permissions,
     # send input to a terminal. Nothing else on its screen asks this way.
     APPROVAL = re.compile(r"Would you like to (?:run the following command|make the following edits"
@@ -1362,6 +1385,10 @@ class Codex(Provider):
         from brindle import codex_hook
 
         argv += codex_hook.launch_flags(ctx.cwd)
+        if ctx.mode in ("handoff", "handoff_detached", "assign", "review"):
+            # Supported by Codex 0.162.1. Workers cannot act on an update
+            # notice; omit this extra startup UI from automated launches.
+            argv += ["-c", "check_for_update_on_startup=false"]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
@@ -1406,7 +1433,7 @@ class Codex(Provider):
         from brindle import prompt_answer
 
         prompts = prompt_answer.Startup(target, permission=self.tool_permission)
-        deadline = time.time() + 30
+        deadline = time.time() + self.STARTUP_SECONDS
         while time.time() < deadline:
             time.sleep(0.5)
             try:
@@ -1509,14 +1536,17 @@ class Antigravity(Provider):
     def paste_blocked(self, screen: str, interactive: bool) -> str | None:
         if not interactive:
             return None
-        styled_lines = screen.rstrip().splitlines()[-25:]
-        candidates = [ln for ln in styled_lines if self.INPUT_LINE.match(self._strip_ansi(ln))]
+        styled_lines = screen.rstrip().splitlines()
+        candidates = [i for i, ln in enumerate(styled_lines) if self.INPUT_LINE.match(self._strip_ansi(ln))]
         if not candidates:
             return None
-        plain_line = self._strip_ansi(candidates[-1])
-        m = self.INPUT_LINE.match(plain_line)
-        if m and m.group(1).strip() and not self.MODE_HINT.match(m.group(1).strip()):
-            return "typing"
+        for i, line in enumerate(styled_lines[candidates[-1]:]):
+            text = self._strip_ansi(line)
+            if i and (self.READY.search(text) or re.fullmatch(r"[\s─━╭╮╰╯│]+", text)):
+                break
+            text = self.INPUT_LINE.sub(r"\1", text) if not i else text
+            if text.strip() and not self.MODE_HINT.match(text.strip()):
+                return "typing"
         return None
 
     def after_launch(self, target: str) -> bool:
@@ -1553,6 +1583,82 @@ class Antigravity(Provider):
         if "esc to cancel" in tail:
             return "busy"
         if "? for shortcuts" in tail:
+            return "idle"
+        return None
+
+
+class OpenCode(Provider):
+    """OpenCode's terminal UI (see brindle.opencode). Its status comes from
+    brindle's plugin; the screen only says when it's ready for input."""
+
+    name = "opencode"
+    uses_hooks = True
+    announces_start = False
+
+    @staticmethod
+    def can_resume(session_id: str) -> bool:
+        from brindle import opencode
+
+        return opencode.can_resume(session_id)
+
+    def command(self, ctx: LaunchContext) -> list[str]:
+        from brindle import opencode
+
+        # OpenCode takes brindle's MCP server, plugin, instructions and
+        # permissions from the environment (see brindle.opencode), and
+        # merges them over the person's own config.
+        argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(opencode.config(ctx))]
+        from brindle.codex_hook import policy_on
+
+        if policy_on(ctx.cwd):   # the plugin asks brindle before each tool call
+            argv.append("BRINDLE_OPENCODE_POLICY=1")
+        argv.append(opencode.binary())
+        model = opencode.model_arg(ctx.profile.model)
+        if model:
+            argv += ["--model", model]
+        if ctx.profile.permission_mode == "plan":
+            argv += ["--agent", "plan"]
+        if ctx.resume:
+            argv += ["--session", ctx.resume]
+        if ctx.initial_prompt:
+            # Sent as the first message once the TUI is up, MCP servers connected.
+            argv += ["--prompt", ctx.initial_prompt]
+        return argv
+
+    # The footer below the input box: "ctrl+p commands" once it's drawn, and
+    # "esc interrupt" while a turn runs. A permission or question prompt
+    # replaces the input box.
+    READY = re.compile(r"ctrl\+p commands")
+    BUSY = re.compile(r"esc interrupt")
+    ASKING = re.compile(r"Permission required|Allow once\s+Allow always\s+Reject")
+
+    def after_launch(self, target: str) -> bool:
+        # OpenCode asks nothing at startup (no folder trust): wait for its input box.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                screen = tmux.capture(target, lines=60)
+            except tmux.TmuxError:
+                return False
+            if self.input_ready(screen):
+                return True
+        return False
+
+    def input_ready(self, screen: str) -> bool:
+        return bool(self.READY.search("\n".join(screen.rstrip().splitlines()[-6:])))
+
+    def tool_permission(self, screen: str) -> bool:
+        return super().tool_permission(screen) or bool(self.ASKING.search(screen))
+
+    def screen_state(self, screen: str) -> str | None:
+        tail = "\n".join(screen.rstrip().splitlines()[-25:])
+        if self.ASKING.search(tail):
+            return "waiting"
+        footer = "\n".join(tail.splitlines()[-3:])
+        if self.BUSY.search(footer):
+            return "busy"
+        if self.READY.search(footer):
             return "idle"
         return None
 
@@ -1604,7 +1710,7 @@ class Subagent(Provider):
 
 
 PROVIDERS: dict[str, Provider] = {
-    p.name: p for p in (ClaudeCode(), Codex(), Antigravity(), Native(), Shell(), Subagent())
+    p.name: p for p in (ClaudeCode(), Codex(), Antigravity(), OpenCode(), Native(), Shell(), Subagent())
 }
 
 

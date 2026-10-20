@@ -9,6 +9,7 @@ nothing ever types into a terminal while the agent is mid-turn.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -411,6 +412,7 @@ def spawn(
                 background_setup=background_setup, model_checked=True)
     except Exception:
         db.delete_agent(agent_id)
+        forget_files(agent)
         raise
     return agent
 
@@ -865,8 +867,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             providers.set_agy_gemini()
         except (OSError, ValueError) as e:
             raise AgentError(f"couldn't set Antigravity to the company Gemini route in its settings.json: {e}") from e
+    mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
+        "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
+        (ws.id, agent.review_sha)).fetchone())
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
-                                          mode=agent.mode, plan_first=bool(agent.plan_first)))
+                                          mode=agent.mode, plan_first=bool(agent.plan_first),
+                                          mcp_recovery=mcp_recovery))
     if prompt or db.pending_count(agent.id):
         _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
                               submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
@@ -1253,7 +1259,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         if ws is None or not os.path.isdir(ws.path):
             continue
         provider = get_provider(a.provider)
-        ref = a.session_ref if provider.name in ("claude", "antigravity", "native") and a.session_ref else None
+        ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
         if ref:
@@ -1767,10 +1773,13 @@ def flush(db: DB, agent_id: str) -> bool:
         return False
     agent = db.get_agent(agent_id)
     assert agent is not None
-    baseline = launch_health.before_delivery(db, agent)
+    from brindle import antigravity
+    warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
+    baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
     tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
                server=server_of(agent))
-    launch_health.delivered(db, agent, baseline)
+    if not warmup:
+        launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
     return True
 
 
@@ -2152,6 +2161,15 @@ def kill(db: DB, agent_id: str) -> None:
     _note_reviewer_end(db, agent)
     _stop(db, agent)
     db.delete_agent(agent.id)
+    forget_files(agent)
+
+
+def forget_files(agent: Agent) -> None:
+    """Files brindle keeps outside the DB for a removed agent."""
+    if agent.provider == "opencode":
+        from brindle import opencode
+
+        opencode.remove_instructions(agent.id)
 
 
 def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
@@ -2392,15 +2410,18 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
     """The reviewer still at work on ``ws`` at ``sha``, if any. With
     ``profile``, only one running that profile (a second review by another
     profile is not a duplicate)."""
+    from brindle import launch_health
+
     for a in db.list_agents(ws.id):
         if a.mode == "review" and a.result is None and alive_or_starting(a) and a.review_sha == sha \
-                and (profile is None or a.profile == profile):
+                and (profile is None or a.profile == profile) and not launch_health.has_mcp_failure(db, a, ws):
             return a
     return None
 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
-                 focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
+                 focus: str | None = None, cfg: RepoConfig | None = None,
+                 second: bool = False) -> Agent | None:
     """Have ``ws`` reviewed. Without checks configured the reviewer starts
     right away and is returned. With checks, nothing starts yet: a detached
     ``_review-after-checks`` process runs them and starts the reviewer with
@@ -2408,7 +2429,8 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     at once with None, however long the suite takes. Raises ``AgentError``
     for a reviewer that couldn't start whatever the checks say (the kill
     switch, an unusable profile); a failure after that reaches ``caller``
-    as a message."""
+    as a message. ``second``: the required second review (``cfg.second_review``),
+    which has its own reviewer beside the commit's review."""
     from brindle import gates
     from brindle.config import load_repo_config
     from brindle.providers import brindle_invocation
@@ -2416,12 +2438,9 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     _review_worktree_present(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
     if not cfg.checks:
-        return request_review(db, caller, ws, profile, focus, cfg)
+        return request_review(db, caller, ws, profile, focus, cfg, second=second)
     _review_kill_switch(ws)
-    _review_profile(db, ws, profile, cfg)
-    existing = _live_reviewer(db, ws, gates.head(ws), profile)
-    if existing:
-        return existing   # one reviewer per workspace and commit
+    profile = _review_profile(db, ws, profile, cfg)
     argv = [*brindle_invocation(), "_review-after-checks", ws.id]
     if caller:
         argv += ["--caller", caller.id]
@@ -2429,9 +2448,23 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
         argv += ["--profile", profile]
     if focus:
         argv += ["--focus", focus]
+    if second:
+        argv += ["--second-review"]
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
-    _detach([*ORPHANED, *argv])
+    with review_dispatch_lock(ws.id):
+        existing = _live_reviewer(db, ws, gates.head(ws), profile)
+        if existing:
+            return existing
+        # Publish before detaching: even a helper that hasn't started yet
+        # must know that a later request superseded it. Profiles have separate
+        # claims so a required second review survives the first one's request.
+        request_id = uuid.uuid4().hex
+        claim = _review_request_file(ws.id, profile)
+        pending = claim.with_suffix("." + request_id)
+        pending.write_text(request_id)
+        pending.replace(claim)
+        _detach([*ORPHANED, *argv, "--request-id", request_id])
     return None
 
 
@@ -2450,15 +2483,37 @@ def expected_check_wait(db: DB, ws: Workspace, cfg: RepoConfig) -> float | None:
 MOVED_RETRIES = 2   # check runs a branch that keeps moving under them gets again (review_after_checks)
 
 
+def _review_request_file(workspace_id: str, profile: str):
+    from brindle.config import brindle_home
+
+    directory = brindle_home() / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha1(json.dumps([workspace_id, profile]).encode()).hexdigest()
+    return directory / ("review-request-" + key)
+
+
+def _review_requested(workspace_id: str, profile: str, request_id: str | None) -> bool:
+    # Helpers from before request claims were introduced can still finish.
+    if request_id is None:
+        return True
+    try:
+        return _review_request_file(workspace_id, profile).read_text() == request_id
+    except FileNotFoundError:
+        return False
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
-                        focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
+                        focus: str | None = None, cfg: RepoConfig | None = None,
+                        request_id: str | None = None, second: bool = False) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
     Meant to run from a detached process, which outlives the call that
     started it. Gives up quietly when the workspace is gone, a reviewer is
     already at work on this commit, or the branch moves on to a commit a new
-    report hands to a run of its own. A piped branch that moves on without
+    report hands to a run of its own. A request claim also drops superseded
+    helpers that were queued before the latest report, even if those helpers
+    only start after the branch has moved. A piped branch that moves on without
     a new report (its worker committed again, or merged its moved base in)
     is checked again on its new head, up to ``MOVED_RETRIES`` times, and then
     goes to the supervisor. Raises ``AgentError`` when the reviewer can't
@@ -2468,19 +2523,24 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
+    profile = _review_profile(db, ws, profile, cfg)
     with pipeline.review_run(ws.id):
         since = pipeline.review_claim(db, ws)
         for _attempt in range(MOVED_RETRIES + 1):
+            if not _review_requested(ws.id, profile, request_id):
+                return None
             sha = gates.head(ws)
             if _live_reviewer(db, ws, sha, profile):
                 return None
             try:
-                summary = gates.check_summary(db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha)
+                summary = gates.check_summary(
+                    db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
+                    or not _review_requested(ws.id, profile, request_id))
             except gates.Abandoned:
                 summary = None
             except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
                 summary = f"(running the checks crashed: {e})"
-            if db.get_workspace(ws.id) is None:
+            if db.get_workspace(ws.id) is None or not _review_requested(ws.id, profile, request_id):
                 return None
             if gates.head(ws) == sha:
                 break
@@ -2491,12 +2551,34 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             return None
         caller = db.get_agent(caller_id) if caller_id else None
         text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
-        return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
+        # A newer request cannot slip between the final claim check and spawn.
+        with review_dispatch_lock(ws.id):
+            if not _review_requested(ws.id, profile, request_id):
+                return None
+            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text, second=second)
+
+
+def review_dispatch_lock(workspace_id: str):
+    """Share the dispatch lock with recovery's read of the failed agent."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(workspace_id.encode()).hexdigest()[:16])
 
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
-                   check_summary: str | None = None) -> Agent:
+                   check_summary: str | None = None, second: bool = False) -> Agent | None:
+    """Start or reuse a review, replacing an MCP-broken reviewer once. None
+    while another dispatcher is still starting this commit's reviewer."""
+    # Serialize hook recovery with explicit requests, including the interval
+    # between stopping the broken reviewer and publishing its replacement.
+    with review_dispatch_lock(ws.id):
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second)
+
+
+def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
+                    focus: str | None, cfg: RepoConfig | None,
+                    check_summary: str | None, second: bool = False) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -2508,14 +2590,21 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     workspace already has a review at an earlier commit, the reviewer is
     pointed at just what changed since then, when that's a plain diff (see
     ``is_linear_since``)."""
-    from brindle import gates
+    from brindle import gates, launch_health
     from brindle.config import load_repo_config
 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
+    profile = _review_profile(db, ws, profile, cfg)
     sha = gates.head(ws)
+    failed = None
     for old in db.list_agents(ws.id):
+        if (old.mode == "review" and old.result is None and old.review_sha == sha
+                and (profile is None or old.profile == profile)
+                and launch_health.has_mcp_failure(db, old, ws)):
+            failed = old
+            continue
         if old.mode != "review" or old.result is not None or not alive_or_starting(old):
             continue
         if old.unreported_noted:
@@ -2525,8 +2614,9 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
                 continue   # another profile's review of this commit (a second review): keep both
             return old   # one reviewer per workspace and commit
         close(db, old.id)   # a new commit replaces the reviewer of the old one
+    if failed:
+        return launch_health.retry_reviewer(db, failed, ws)
     worker = workspace_worker(db, ws)
-    profile = _review_profile(db, ws, profile, cfg)
 
     base = ws.base_branch or "the base branch"
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
@@ -2612,8 +2702,45 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     task += (
         "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
     )
-    return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                 mode="review", background_setup=True, review_sha=sha)
+    # The claim, not the profile checks above, makes this the commit's one
+    # reviewer: the learner may pick another profile for each report. Only a
+    # required second review (start_review's ``second``) has a slot of its own.
+    slot = profile if second else ""
+    token, holder = _claim_review(db, ws, sha, slot)
+    if token is None:
+        return holder
+    reviewer = None
+    try:
+        reviewer = spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
+                         mode="review", background_setup=True, review_sha=sha)
+    finally:
+        db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
+    return reviewer
+
+
+def _claim_review(db: DB, ws: Workspace, sha: str, slot: str) -> tuple[float | None, Agent | None]:
+    """Claim in the DB the one reviewer of ``ws`` at ``sha`` (``slot``):
+    ``(token, None)`` when this dispatcher is to start it, else ``(None, the
+    reviewer at work on it)``, or ``(None, None)`` while another dispatcher is
+    still starting it. A claim whose reviewer finished, stopped without a
+    verdict or died, or whose dispatcher never named one, is taken over."""
+    while True:
+        token = db.claim_review(ws.id, sha, slot)
+        if token is not None:
+            return token, None
+        held = db.review_claim(ws.id, sha, slot)
+        if held is None:
+            continue   # given up in between
+        agent_id, claimed_at = held
+        holder = db.get_agent(agent_id) if agent_id else None
+        if holder is not None and holder.result is None and not holder.unreported_noted \
+                and alive_or_starting(holder):
+            return None, holder
+        if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
+            return None, None
+        token = db.claim_review(ws.id, sha, slot, held)
+        if token is not None:
+            return token, None
 
 
 # -- hook entry point --------------------------------------------------------
@@ -2806,6 +2933,22 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
             return permissions.codex_output(decision)
+        if provider == "opencode":
+            # Asked before every tool call, not only those OpenCode would prompt
+            # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
+            reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
+            if not reqs:
+                return None
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            if decision.decision == "ask" and len(reqs) == 1:
+                # A deny on one part of a compound command (cd x && <denied>) still denies.
+                decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+            if decision.decision != "deny":
+                return None
+            req = reqs[0]
+            _record_permission(db, agent, ws, req.summary(), f"deny: {decision.reason}")
+            return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
             return None
@@ -2936,6 +3079,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     from brindle import prompt_answer
 
     prompt_answer.settled(db, agent)
+    if event in ("pre-tool", "tool-done", "stop", "codex-notify"):
+        from brindle import launch_health
+        launch_health.accepted(db, agent)
     if event == "codex-permission-request":
         # Session/status writes are bookkeeping, never prerequisites for
         # returning a policy decision (especially a deny).

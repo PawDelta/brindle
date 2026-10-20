@@ -206,7 +206,7 @@ def piped(db, repo, monkeypatch):
     db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "@0",
                        None, time.time(), task="the task text"))
 
-    def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None):
+    def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None, **kw):
         db_.add_agent(Agent("rev0", ws_.id, "reviewer", "claude", caller.id, "review", "idle",
                             "@0", None, time.time()))
         return db_.get_agent("rev0")

@@ -510,7 +510,41 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
     and a resume or relaunch loads the profile again by that name, so it must
     find this same file, permissions and all. Raises KeyError when there is
     no such profile (or no such parent) and ProfileError on an extends cycle."""
-    return _with_repo_add_dirs(_load(name, repo_root), repo_root)
+    return _with_catalog_model(_with_repo_add_dirs(_load(name, repo_root), repo_root))
+
+
+def _with_catalog_model(profile: Profile) -> Profile:
+    """A native profile with ``model: <provider>/<model>`` names a Models.dev
+    model: fill in its endpoint from the catalog (see brindle.native.catalog).
+    Fields the profile sets itself win. A profile with a ``base_url`` is only
+    resolved when that is the catalog provider's own API URL; otherwise the
+    slash is part of the model id (OpenRouter's ``deepseek/deepseek-chat``) and
+    the profile is left as written. It never waits on a cold-cache fetch."""
+    if profile.provider != "native" or "/" not in (profile.model or ""):
+        return profile
+    from brindle.native import catalog
+
+    catalog.refresh_async()      # background, for a stale cache only
+    table = None
+    if profile.base_url:
+        table = catalog._read_cache()
+        if table is None or not catalog.is_own_url(profile.model, profile.base_url, table):
+            return profile
+    try:
+        found = catalog.resolve(profile.model, table, base_url=profile.base_url)
+    except catalog.CatalogError as e:
+        if profile.base_url:
+            return profile
+        raise ProfileError(f"profile {profile.name!r}: {e}") from e
+    resolved = replace(
+        profile, model=found.model, base_url=found.base_url,
+        api=profile.api or found.api,
+        api_key_env=profile.api_key_env or found.api_key_env,
+        context_tokens=profile.context_tokens or found.context_tokens)
+    problem = subscription_token_problem(resolved)
+    if problem:
+        raise ProfileError(problem)
+    return resolved
 
 
 def local_fallback(profile: Profile, repo_root: str | None = None) -> str | None:

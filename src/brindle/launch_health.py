@@ -24,6 +24,10 @@ from brindle import model_access, tmux
 from brindle.pro import route_health
 
 FOLLOWUP_SECONDS = 5.0
+# A visible composer can precede MCP/session initialization on a loaded host.
+# Give each submission the same budget as the Codex MCP connection before
+# assuming it was swallowed; a busy model turn itself needs no such wait.
+DELIVERY_SECONDS = 120.0
 _LAUNCH_ENV = frozenset({"BRINDLE_AGENT_ID", "BRINDLE_ROOT_PATH", "BRINDLE_WORKSPACE_PATH",
                          "BRINDLE_WORKSPACE_NAME", "BRINDLE_WORKSPACE_ID", "BRINDLE_BRANCH",
                          "BRINDLE_BASE_BRANCH", "BRINDLE_PORT_BASE", "BRINDLE_TMUX_SOCKET",
@@ -136,10 +140,115 @@ def _followup(agent_id: str, token: str) -> None:
 
 
 def accepted(db, agent) -> None:
-    """An argv task reaches the CLI only after startup/trust or prompt-submit."""
-    row = db.conn.execute("SELECT argv_task FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
-    if row and row["argv_task"]:
+    """A turn hook confirms acceptance, including a pasted first task."""
+    row = db.conn.execute("SELECT argv_task, submitted_prompt FROM launch_health WHERE agent_id=?",
+                          (agent.id,)).fetchone()
+    if row and (row["argv_task"] or row["submitted_prompt"]):
         delivered(db, agent)
+
+
+def verify_delivery(db, agent, text: str | None = None, baseline: str | None = None,
+                    lead: str | None = None) -> None:
+    """Schedule one verification without blocking the caller or a sweep."""
+    from brindle import agents
+    from brindle.providers import brindle_invocation
+
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+    if not row or (text is None and not row["argv_task"]):
+        return
+    expected = getattr(agent, "_launch_health_token", None)
+    token = row["token"] if expected is None else expected
+    lead = lead if lead is not None else agents.message_lead(db, agent, None)
+    if not db.conn.execute("UPDATE launch_health SET verifying=1, delivery_lead=?, baseline=COALESCE(?,baseline), "
+                           "submitted_prompt=COALESCE(?,submitted_prompt) "
+                           "WHERE agent_id=? AND token=? "
+                           "AND verifying=0 AND delivered_at IS NULL AND outcome IS NULL",
+                           (lead, baseline, text, agent.id, token)).rowcount:
+        return
+    agents._detach([*brindle_invocation(), "_launch-health", agent.id, "--token", token, "--verify"])
+
+
+def verify_pending(db, agent_id: str, token: str | None) -> None:
+    """Detached turn observation; retry once, fenced to this launch.
+
+    State 1 is scheduled, 2 is running. A duplicate helper cannot take over
+    an existing observation, clear its input or submit another copy.
+    """
+    from brindle import agents
+    from brindle.providers import get_provider
+
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
+    agent = db.get_agent(agent_id)
+    if not row or not agent or token != row["token"]:
+        return
+    if not db.conn.execute("UPDATE launch_health SET verifying=2 WHERE agent_id=? AND token=? "
+                           "AND verifying=1 AND delivered_at IS NULL AND outcome IS NULL", (agent_id, token)).rowcount:
+        return
+    agent._launch_health_token = token
+    text, baseline, lead = row["submitted_prompt"] or agent.task, row["baseline"], row["delivery_lead"]
+    provider = get_provider(agent.provider)
+
+    def pending():
+        latest = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
+        fresh = db.get_agent(agent.id)
+        if (not latest or latest["token"] != token or latest["outcome"]
+                or latest["delivered_at"] is not None or not fresh or fresh.result is not None
+                or fresh.status in ("paused", "done", "failed") or fresh.tmux_window != row["pane"]
+                or not agents.owns_pane(db, fresh)):
+            return None
+        return fresh
+
+    for attempt in range(2):
+        deadline = time.time() + DELIVERY_SECONDS
+        while True:
+            fresh = pending()
+            if fresh is None:
+                return
+            screen = capture(fresh)
+            if (provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing"
+                    or failure(screen, baseline=baseline, task=agent.task or "",
+                               submitted_prompt=text, provider=agent.provider)):
+                delivered(db, agent, baseline)
+                return
+            if time.time() >= deadline:
+                break
+            time.sleep(0.5)
+        if attempt == 0:
+            # Never clear a menu, a permission dialog or a different session.
+            from brindle.prompt_answer import brief_draft
+            draft = provider.paste_blocked(screen, True) == "typing" or brief_draft(screen, text)
+            if (not provider.input_ready(screen) and not draft
+                    or provider.tool_permission(screen) or provider.paste_blocked(screen, False)):
+                break
+            if draft:
+                provider.clear_input(fresh.tmux_window, server=agents.server_of(fresh))
+                # Clearing is a TUI event too. Do not append a duplicate to
+                # a frozen partial composer if it never handles that event.
+                for _ in range(10):
+                    time.sleep(0.5)
+                    fresh = pending()
+                    if fresh is None:
+                        return
+                    screen = capture(fresh)
+                    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+                        delivered(db, agent, baseline)
+                        return
+                    if provider.input_ready(screen) and not provider.paste_blocked(screen, True):
+                        break
+                else:
+                    break
+            tmux.paste(fresh.tmux_window, text, lead=lead, server=agents.server_of(fresh))
+    if not db.conn.execute("UPDATE launch_health SET outcome='delivery-failed' WHERE agent_id=? AND token=? "
+                           "AND delivered_at IS NULL AND outcome IS NULL", (agent.id, token)).rowcount:
+        return
+    db.update_agent(agent.id, status="failed")
+    body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
+            "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
+            "Check its pane and restart the worker; this is not a startup prompt.")
+    try:
+        agents.send_message(db, agent.parent_id, body)
+    except agents.AgentError:
+        db.enqueue(agent.parent_id, body, None)
 
 
 def helper_token(agent) -> list[str]:
@@ -152,13 +261,13 @@ def current(db, agent_id: str, token: str | None) -> bool:
     return token is None or bool(row and row["token"] == token)
 
 
-def delivered(db, agent, baseline: str = "") -> None:
+def delivered(db, agent, baseline: str | None = None) -> None:
     """Called only after delivery of the real task, once per launch."""
     row = db.conn.execute("SELECT token FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     expected = getattr(agent, "_launch_health_token", None)
     if row is None or (expected is not None and expected != row["token"]):
         return
-    changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=? "
+    changed = db.conn.execute("UPDATE launch_health SET delivered_at=?, baseline=COALESCE(?,baseline) "
                               "WHERE agent_id=? AND delivered_at IS NULL AND token=? AND outcome IS NULL "
                               "AND EXISTS (SELECT 1 FROM agents WHERE id=? AND result IS NULL "
                               "AND status NOT IN ('paused','done')) RETURNING pane",
@@ -171,28 +280,37 @@ def capture(agent) -> str:
     from brindle import agents
 
     try:
-        return tmux.capture(agent.tmux_window, lines=80, server=agents.server_of(agent))
+        return tmux.capture(agent.tmux_window, lines=80, escapes=True, server=agents.server_of(agent))
     except tmux.TmuxError:
         return ""
 
 
-def before_delivery(db, agent) -> str:
+def before_delivery(db, agent, text: str | None = None) -> str:
     row = db.conn.execute("SELECT token, delivered_at, pane FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     # Bind this delivery before capture/paste/IPC can race with a resume,
     # including the absence of a launch observation at this point.
     agent._launch_health_token = row["token"] if row else ""
     if not row or row["delivered_at"] is not None:
         return ""
+    if text is not None:
+        # Publish what the startup observer must recognize before the paste
+        # can become visible, including briefs delivered from the queue.
+        db.conn.execute("UPDATE launch_health SET submitted_prompt=? WHERE agent_id=? AND token=? "
+                        "AND delivered_at IS NULL AND outcome IS NULL", (text, agent.id, row["token"]))
     if row["pane"]:
         # A runner may have loaded its Agent before publication, including
         # the previous tmux server. Refresh that metadata along with the pane.
         published = db.get_agent(agent.id)
-        return capture(replace(published, tmux_window=row["pane"])) if published else ""
-    if os.environ.get("BRINDLE_AGENT_ID") == agent.id and os.environ.get("TMUX_PANE"):
+        baseline = capture(replace(published, tmux_window=row["pane"])) if published else ""
+    elif os.environ.get("BRINDLE_AGENT_ID") == agent.id and os.environ.get("TMUX_PANE"):
         # The runner is already inside the new pane, but its launcher has not
         # published that pane yet. Never capture the old resumed pane.
-        return capture(replace(agent, tmux_window=os.environ["TMUX_PANE"], tmux_server=tmux.current_server()))
-    return ""
+        baseline = capture(replace(agent, tmux_window=os.environ["TMUX_PANE"], tmux_server=tmux.current_server()))
+    else:
+        baseline = ""
+    db.conn.execute("UPDATE launch_health SET baseline=? WHERE agent_id=? AND token=? AND delivered_at IS NULL",
+                    (baseline, agent.id, row["token"]))
+    return baseline
 
 
 def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",
@@ -205,7 +323,7 @@ def failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt
 def _failure(screen: str, *, baseline: str = "", task: str = "", submitted_prompt: str = "",
              provider: str | None = None):
     """(the cause, the provider's error block it was read from, or "")."""
-    old = {line.strip() for line in baseline.splitlines()}
+    old = {line.strip() for line in re.sub(r"\x1b\[[0-9;]*m", "", baseline).splitlines()}
     text = re.sub(r"\x1b\[[0-9;]*m", "", screen)
     lines = text.splitlines()
     has_codex_ui = provider in (None, "codex") and bool(re.search(r"OpenAI Codex|\b\d+% context left", text))
@@ -446,8 +564,47 @@ def mcp_failed(worktree: str, session_id: str, launched_at: float) -> bool:
     return False
 
 
+def has_mcp_failure(db, agent, ws) -> bool:
+    """A recorded failure survives closing the agent; also check fresh logs."""
+    row = db.conn.execute("SELECT outcome, launched_at FROM launch_health WHERE agent_id=?",
+                          (agent.id,)).fetchone()
+    return bool(row and (row["outcome"] == "mcp-failed" or (
+        agent.provider == "claude" and agent.session_ref and row["launched_at"] is not None
+        and mcp_failed(ws.path, agent.session_ref, row["launched_at"]))))
+
+
+def retry_reviewer(db, agent, ws):
+    """Called under the review dispatch lock, after checking for live work."""
+    from brindle import agents
+
+    db.conn.execute("UPDATE launch_health SET outcome='mcp-failed' WHERE agent_id=?", (agent.id,))
+    claimed = db.conn.execute("INSERT OR IGNORE INTO review_mcp_retries (workspace_id, sha) VALUES (?,?)",
+                              (ws.id, agent.review_sha)).rowcount
+    agents.close(db, agent.id)
+    if not claimed:
+        raise agents.AgentError(
+            f"Reviewer {agent.id}'s brindle MCP connection failed at {agent.review_sha[:8]}; "
+            "the one automatic retry for this commit has been used. The reviewer was stopped. "
+            "Check the MCP startup logs and CLI installation; automatic recovery is exhausted.")
+    try:
+        # Preserve the exact task (focus and check results included), profile,
+        # parent and commit, but start a new conversation and MCP connection.
+        replacement = agents.spawn(db, ws, agent.profile, prompt=agent.task, parent_id=agent.parent_id,
+                                   mode="review", background_setup=True, review_sha=agent.review_sha)
+    except Exception as exc:
+        raise agents.AgentError(
+            f"Reviewer {agent.id} was stopped after its brindle MCP connection failed; "
+            f"the automatic retry could not start ({type(exc).__name__}). Check launch configuration.") from exc
+    # This attempt is over once a replacement exists. Keep its failure log for
+    # diagnostics, but never let it compete with later reviews or helpers.
+    db.conn.execute("UPDATE review_claims SET agent_id=? WHERE workspace_id=? AND agent_id=?",
+                    (replacement.id, ws.id, agent.id))   # the commit's one reviewer now
+    db.set_result(agent.id, f"Superseded by reviewer {replacement.id} after MCP startup failed.")
+    return replacement
+
+
 def check_mcp(db, agent) -> None:
-    """From the tool-done hook: tell the supervisor once if the agent has no brindle tools."""
+    """From tool-done: recover reviewers, or tell the supervisor once."""
     from brindle import agents
 
     if agent.provider != "claude" or not agent.session_ref or not agent.parent_id:
@@ -462,9 +619,49 @@ def check_mcp(db, agent) -> None:
     if not db.conn.execute("UPDATE launch_health SET outcome='mcp-failed' WHERE agent_id=? "
                            "AND (outcome IS NULL OR outcome='pending')", (agent.id,)).rowcount:
         return
+    if agent.mode == "review" and agent.review_sha:
+        from brindle.providers import brindle_invocation
+
+        # Stopping the pane also kills its hook. This helper must outlive it.
+        agents._detach_orphan([*brindle_invocation(), "_recover-reviewer", agent.id])
+        return
     body = (f"Worker {agent.id} launch health: its brindle MCP server failed to connect, so it has no "
-            "report_result/submit_review tools and cannot finish. Restart it with `brindle continue "
-            f"{agent.id}` or remove its workspace.")
+            "report_result tools and cannot finish. Stop it with `brindle agent kill "
+            f"{agent.id}`, then assign a fresh worker in its workspace.")
+    try:
+        agents.send_message(db, agent.parent_id, body)
+    except agents.AgentError:
+        db.enqueue(agent.parent_id, body, None)
+
+
+def recover_reviewer(db, agent_id: str) -> None:
+    """Read recovery state under the same lock as replacement publication."""
+    from brindle import agents
+
+    agent = db.get_agent(agent_id)
+    if agent:
+        with agents.review_dispatch_lock(agent.workspace_id):
+            _recover_reviewer(db, agent_id)
+
+
+def _recover_reviewer(db, agent_id: str) -> None:
+    """Detached from the broken CLI; refresh state after acquiring the lock."""
+    from brindle import agents, gates
+
+    agent = db.get_agent(agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if not agent or not ws or agent.result is not None or not has_mcp_failure(db, agent, ws):
+        return
+    if gates.head(ws) != agent.review_sha:
+        agents.close(db, agent.id)
+        body = (f"Reviewer {agent.id}'s brindle MCP connection failed and it was stopped. "
+                "The branch has moved; request a review of its current commit.")
+    else:
+        try:
+            agents.request_review(db, db.get_agent(agent.parent_id), ws, agent.profile)
+            return
+        except agents.AgentError as exc:
+            body = str(exc)
     try:
         agents.send_message(db, agent.parent_id, body)
     except agents.AgentError:

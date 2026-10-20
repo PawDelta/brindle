@@ -1120,7 +1120,7 @@ class ProPolicy(PolicyPlugin):
         return allow()
 
 
-CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "antigravity": "Google Antigravity"}
+CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "antigravity": "Google Antigravity", "opencode": "OpenCode"}
 
 
 @dataclass(frozen=True)

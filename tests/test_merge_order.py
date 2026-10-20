@@ -111,7 +111,7 @@ def piped(db, repo, monkeypatch):
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     started = []
 
-    def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None):
+    def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None, **kw):
         add(db_, ws_, f"rev{len(started)}", "review", "reviewer", parent=caller.id)
         started.append(ws_.id)
         return db_.get_agent(f"rev{len(started) - 1}")

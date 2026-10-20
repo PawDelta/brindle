@@ -175,6 +175,7 @@ def test_kill_server_never_targets_the_default_server(fake_tmux, monkeypatch, tm
 
 def test_from_inside_a_pane_brindle_switches_the_client(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("TMUX", raising=False)        # as `env -u TMUX brindle` leaves it
     monkeypatch.setenv("TMUX_PANE", "%7")
     monkeypatch.setattr(tmux, "pane_session", lambda pane: "some_session" if pane == "%7" else None)
@@ -199,6 +200,14 @@ def test_from_inside_a_pane_brindle_switches_the_client(db, repo, monkeypatch):
     cli._attach(ws, "%3")
     assert not any(a[0] == "switch-client" for a in ran)
 
+    # No controlling terminal (stdin /dev/null in a script): the client on
+    # this pane's session is the person's, so don't switch it or attach.
+    clients = "/dev/ttys001\n"
+    ran.clear()
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    cli._attach(ws, "%3")
+    assert not any(a[0] in ("switch-client", "attach-session") for a in ran)
+
 
 def test_a_pane_this_server_does_not_know_is_not_inside(monkeypatch):
     monkeypatch.delenv("TMUX", raising=False)
@@ -213,6 +222,7 @@ def test_a_pane_this_server_does_not_know_is_not_inside(monkeypatch):
 
 def test_from_outside_brindle_attaches(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setattr(tmux, "has_session", lambda s: True)
