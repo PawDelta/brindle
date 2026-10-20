@@ -90,6 +90,9 @@ def _config(local: bool) -> dict:
         "fetch": False,
         # The demo shows the whole loop, so approved branches merge on their own.
         "auto_merge_default_branch": True,
+        # The demo is about parallel workers: "balanced" lets the supervisor
+        # sometimes build both milestones itself, and then there are none.
+        "delegation": "fast",
     }
     if local:
         cfg.update(default_agent="developer-local", review_profile="reviewer-local",

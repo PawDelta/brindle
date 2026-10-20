@@ -72,6 +72,29 @@ def test_enable_loads_goals_md(db, repo):
     assert autopilot.parse_goals(autopilot.session_goals_path(db, "boss").read_text()) == plan
 
 
+def test_claiming_a_committed_goals_md_never_blocks_a_merge(db, repo):
+    """The seed's move leaves a committed goals.md deleted in the checkout:
+    brindle's own bookkeeping, so merges and the checkout's sha go on as before."""
+    from brindle import git
+
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "goals.md").write_text(GOALS)
+    sh("git add -A && git commit -qm goals", repo)
+    ws = workspaces.adopt_root(db, str(repo))
+    add_agent(db, ws, "boss")
+    db.add_autopilot("boss")
+    assert autopilot.enable(db, "boss", ws)
+    assert not (repo / ".brindle" / "goals.md").exists()
+    assert git.dirty_files(str(repo)) == [] and git.dirty_files(str(repo), tracked_only=True) == []
+    sh("git checkout -qb work && echo x > api.txt && git add -A && git commit -qm api && git checkout -q main", repo)
+    git.merge_into(str(repo), str(repo), "work", squash=True)
+    assert (repo / "api.txt").exists()
+    # Anything else uncommitted still blocks.
+    (repo / "app.py").write_text("print('bye')\n")
+    with pytest.raises(git.GitError, match="uncommitted changes"):
+        git.merge_into(str(repo), str(repo), "work", squash=True)
+
+
 def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
