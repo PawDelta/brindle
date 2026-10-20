@@ -700,8 +700,9 @@ class ClaudeCode(Provider):
         model = company_login.claude_model(p.model, ctx.cwd)
         if model:
             argv += ["--model", model]
-        if ctx.profile.permission_mode:
-            argv += ["--permission-mode", ctx.profile.permission_mode]
+        from brindle import config as user_config
+
+        argv += ["--permission-mode", ctx.profile.permission_mode or user_config.claude_permission_mode()]
         if ctx.session_id and not ctx.resume:
             argv += ["--session-id", ctx.session_id]
         if ctx.resume:

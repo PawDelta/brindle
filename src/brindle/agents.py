@@ -3055,8 +3055,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
                 answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
                 if answer:
-                    decision = permissions.Decision("deny" if answer == "deny" else "allow",
-                                                    "the person answered in the brindle app")
+                    decision = permissions.Decision(
+                        "deny" if answer == "deny" else "allow",
+                        "the person denied this in the brindle app" if answer == "deny"
+                        else "the person answered in the brindle app")
             return permissions.codex_output(decision)
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
@@ -3086,7 +3088,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if decision.decision == "ask":
             # Claude Code's own "always allow" options, as it would apply them.
             suggestions = payload.get("permission_suggestions")
-            suggestions = suggestions if isinstance(suggestions, list) and suggestions else None
+            suggestions = permissions.persistent_suggestions(suggestions)
             # Recorded either way: its PostToolUse counts as the person's approval.
             answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
                                    hold=cfg.permission_hold_seconds)
