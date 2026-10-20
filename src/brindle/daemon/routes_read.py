@@ -163,11 +163,12 @@ def workspace_file(request: Request) -> Any:
 @_json
 def session_readiness(request: Request) -> Any:
     """Whether brindle judges the session ready for a PR; ``reasons``: what
-    is missing, in plain words (none when it is ready)."""
+    is missing, in plain words (none when it is ready); ``auto_pr``: whether
+    brindle opens its PR on its own once it is."""
     db = DB()
     root, ws = session_review.session(db, request.path_params["root"])
     why = session_review.reasons(db, root, ws)
-    return {"root_id": root.id, "ready": not why, "reasons": why}
+    return {"root_id": root.id, "ready": not why, "reasons": why, "auto_pr": session_review.auto_pr(ws.repo_root)}
 
 
 @_json
@@ -275,6 +276,8 @@ def get_config(request: Request) -> Any:
     settings = {"user": config.user_settings()}
     if repo:
         settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
+        # The org's policy may force auto_pr off whatever the files say: why, or None.
+        settings["auto_pr_forbidden"] = session_review.auto_pr_forbidden(repo)
     keys = []
     for name in keystore.known_names(repo):
         value = keystore.get_key(name)

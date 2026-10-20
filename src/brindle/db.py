@@ -426,6 +426,18 @@ CREATE TABLE IF NOT EXISTS review_edits (
     sha TEXT NOT NULL,
     PRIMARY KEY (workspace_id, sha)
 );
+-- The PR of a session's branch (POST /v1/sessions/{root}/pr, or brindle's own
+-- with auto_pr): one per session and branch, so none is ever opened twice.
+-- url is NULL while it is being opened; pushed_sha: the commit last pushed to it.
+CREATE TABLE IF NOT EXISTS session_prs (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    url TEXT,
+    pushed_sha TEXT,
+    auto INTEGER NOT NULL DEFAULT 0,
+    opened_at REAL NOT NULL,
+    PRIMARY KEY (root_id, branch)
+);
 -- The one reviewer of a workspace's commit (agents.request_review): only the
 -- dispatcher that inserts or takes over this row starts it. slot is '' for
 -- the commit's review, or the profile of a configured second review.

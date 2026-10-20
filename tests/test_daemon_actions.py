@@ -866,6 +866,46 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     assert "--base main --head sess --title Ship it --body" in called.read_text()
 
 
+@pytest.mark.parametrize("auto_pr,org,opened", [
+    (True, None, True),
+    (False, None, False),
+    (True, "requires-review", False),
+], ids=["on", "off", "policy-forbids"])
+def test_session_review_auto_pr_opens_once_when_ready_and_allowed(db, lead, tmp_path, monkeypatch,
+                                                                   auto_pr, org, opened):
+    from brindle.daemon import session_review
+    from brindle.pro import team_policy
+
+    sess, called = Path(lead.path), tmp_path / "gh-called"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    if org:
+        monkeypatch.setattr(team_policy.ProPolicy, "policy", lambda self: team_policy.OrgPolicy(
+            "acme", 1, require_human_review=True))
+    config.set_local(lead.repo_root, "auto_pr", auto_pr)
+    watch = session_review.ReadinessWatch()
+    watch.sweep(db)
+    _commit(sess, "a.py", "a\n")
+    assert watch.sweep(db) == ["lead"]
+    code, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
+    assert code == 200 and (ready["ready"], ready["auto_pr"]) == (True, opened)
+    _, cfg = _send("GET", f"/v1/config?repo={lead.repo_root}")
+    assert (cfg["repo"]["auto_pr"], cfg["auto_pr_forbidden"] is None) == (auto_pr, not org)
+    # Not ready (uncommitted work), then ready again with a new commit: no second PR, only a push.
+    (sess / "a.py").write_text("b\n")
+    assert watch.sweep(db) == []
+    head = _commit(sess, "a.py", "b\n")
+    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
+    creates = called.read_text().count("pr create") if called.exists() else 0
+    urls = [e["payload"]["url"] for e in bus.tail(db, kinds=("session.pr_opened",))]
+    pushed = sh("git ls-remote origin sess", sess).split()[:1]
+    assert (creates, urls, pushed == [head]) == ((1, ["https://github.com/o/r/pull/7"], True) if opened
+                                                  else (0, [], False))
+
+
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
     """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
     monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)

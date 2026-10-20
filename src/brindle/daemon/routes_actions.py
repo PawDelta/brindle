@@ -26,6 +26,7 @@ import secrets
 import stat
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -676,20 +677,76 @@ def delete_session_file(db: DB, params: dict, body: Body) -> Any:
     return _edit_session(db, params, body, None)
 
 
-def open_session_pr(db: DB, params: dict, body: Body) -> Any:
+_SESSION_PR = "root_id = ? AND branch = ?"
+
+
+def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any:
     """Push the session branch and open its PR (``title``, ``body``,
     ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
-    unless the session is ready. The job's result carries the URL."""
+    unless the session is ready. The job's result carries the URL, which is
+    also published as ``session.pr_opened`` and recorded in ``session_prs``
+    (``auto``: brindle's own, whose row :func:`auto_pr` claimed first)."""
     root, ws = review.session(db, params["root"])
     identity_lock.ensure(root)
     review.require_ready(db, root, ws)
     title, text, draft = _get(body, "title"), _get(body, "body"), _get(body, "draft", bool, False)
+    key = (root.id, ws.branch)
 
     def work(db: DB, job: Job) -> Any:
-        url = workspaces.pull_request(ws, title, draft, body=text)
+        head = git.out(["rev-parse", "HEAD"], ws.path)
+        try:
+            url = workspaces.pull_request(ws, title, draft, body=text)
+        except BaseException:
+            if auto:    # its claim goes, so the session's next turn to ready tries again
+                db.conn.execute(f"DELETE FROM session_prs WHERE {_SESSION_PR} AND url IS NULL", key)
+            raise
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, auto, opened_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
+                        " url = excluded.url, pushed_sha = excluded.pushed_sha",
+                        (*key, url, head, int(auto), time.time()))
+        bus.publish_agent(db, "session.pr_opened", root.id, url=url, auto=auto)
         return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
 
     return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
+
+
+def auto_pr(db: DB, root_id: str, opening: bool) -> Job | None:
+    """For the ready session ``root_id``, where its repo allows ``auto_pr``
+    (review.auto_pr): open its PR with the drafted title and body when it
+    just became ready (``opening``) and its branch has none yet, or push a
+    commit made since to the PR it has. Once per branch: the row is claimed
+    before the PR is opened."""
+    root, ws = review.session(db, root_id)
+    key = (root.id, ws.branch)
+    row = db.conn.execute(f"SELECT url, pushed_sha FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
+    head = git.out(["rev-parse", "HEAD"], ws.path)
+    if (row["url"] is None or row["pushed_sha"] == head) if row else not opening:
+        return None     # being opened, nothing new to push, or not just ready
+    if not review.auto_pr(ws.repo_root):
+        return None
+    if row:
+        db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (head, *key))
+
+        def push(db: DB, job: Job) -> Any:
+            try:
+                git.push(ws.path, ws.branch)
+            except BaseException:
+                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR} AND pushed_sha = ?",
+                                (row["pushed_sha"], *key, head))
+                raise
+            bus.publish_agent(db, "session.pr_pushed", root.id, url=row["url"], commit=head)
+            return {"url": row["url"], "commit": head}
+
+        return start_job("session.push", push, root_id=root.id, repo_root=ws.repo_root)
+    if not db.conn.execute("INSERT OR IGNORE INTO session_prs (root_id, branch, auto, opened_at) VALUES (?, ?, 1, ?)",
+                           (*key, time.time())).rowcount:
+        return None
+    try:
+        d = review.draft(db, root, ws)
+        return open_session_pr(db, {"root": root.id}, {"title": d["title"], "body": d["body"]}, auto=True)
+    except BaseException:
+        db.conn.execute(f"DELETE FROM session_prs WHERE {_SESSION_PR} AND url IS NULL", key)
+        raise
 
 
 # -- goal ------------------------------------------------------------------------
