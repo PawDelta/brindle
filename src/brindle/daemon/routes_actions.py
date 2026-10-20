@@ -696,6 +696,7 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
 
     def work(db: DB, job: Job) -> Any:
         try:
+            identity_lock.ensure(root)      # again: the person signed in may have changed since
             head = git.out(["rev-parse", "HEAD"], ws.path)
             url = workspaces.open_pull_request(ws, title, draft, body=text)
             if url is None and auto:
@@ -718,10 +719,12 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
 
 # The session branches (root id, branch) whose PR this daemon is opening or pushing
 # to now: a session_prs row with no url and no entry here was left by a daemon that
-# stopped half way. And the commit last tried on each, so a failed push waits for
-# the next commit (or a restart) instead of retrying every sweep.
+# stopped half way. And the commit last tried on each and when, so a failed push
+# is tried again after PUSH_RETRY_SECONDS (or as soon as the session turns ready
+# again) instead of every sweep.
 _PR_WORK: set[tuple[str, str]] = set()
-_PR_TRIED: dict[tuple[str, str], str] = {}
+_PR_TRIED: dict[tuple[str, str], tuple[str, float]] = {}
+PUSH_RETRY_SECONDS = 60.0
 _PR_LOCK = threading.Lock()
 
 
@@ -772,9 +775,11 @@ def _auto_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], opening: 
     row = db.conn.execute(f"SELECT url, pushed_sha FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
     head = git.out(["rev-parse", "HEAD"], ws.path)
     if row and row["url"]:
-        if head in (row["pushed_sha"], _PR_TRIED.get(key)) or not review.auto_pr(ws.repo_root):
+        tried, at = _PR_TRIED.get(key, (None, 0.0))
+        waiting = tried == head and not opening and time.monotonic() - at < PUSH_RETRY_SECONDS
+        if head == row["pushed_sha"] or waiting or not review.auto_pr(ws.repo_root):
             return None
-        _PR_TRIED[key] = head
+        _PR_TRIED[key] = (head, time.monotonic())
 
         def push(db: DB, job: Job) -> Any:
             try:

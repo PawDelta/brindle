@@ -918,7 +918,7 @@ def test_session_review_auto_pr_survives_gh_failing_a_restart_and_another_identi
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
     config.set_local(lead.repo_root, "auto_pr", True)
-    head = _commit(sess, "a.py", "a\n")
+    _commit(sess, "a.py", "a\n")
 
     def prs() -> list[tuple]:
         return [tuple(r) for r in db.conn.execute("SELECT url, pushed_sha FROM session_prs")]
@@ -928,24 +928,43 @@ def test_session_review_auto_pr_survives_gh_failing_a_restart_and_another_identi
     routes_actions.auto_pr(db, "lead", opening=True)
     assert prs() == [] and bus.tail(db, kinds=("session.pr_opened",)) == []
     fail.unlink()
-    # Its job dispatched but not yet run: a second trigger leaves that work alone.
+    creates = called.read_text().count("pr create")
+
+    def remote() -> str:
+        return sh("git ls-remote origin sess", sess).split()[0]
+
+    # Its job dispatched but not yet run: a second trigger leaves that work alone, and someone
+    # else signing in before it runs keeps it from pushing or opening anything under their name.
+    head = _commit(sess, "a.py", "b\n")
     held = []
     monkeypatch.setattr(routes_actions, "_spawn", held.append)
     assert routes_actions.auto_pr(db, "lead", opening=True) is not None
     assert routes_actions.auto_pr(db, "lead", opening=True) is None and len(held) == 1 and prs() == [(None, None)]
-    # The daemon stopped before running it: after a restart the claim is matched to the PR gh finds open.
-    creates = called.read_text().count("pr create")
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "someone@other.example")
+    held.pop()()
+    assert prs() == [] and remote() != head and called.read_text().count("pr create") == creates
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: None)
+    # The daemon stopped before running its job: after a restart the claim is matched to the PR gh finds open.
+    routes_actions.auto_pr(db, "lead", opening=True)
     monkeypatch.setattr(routes_actions, "_PR_WORK", set())
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
     routes_actions.auto_pr(db, "lead", opening=False)
     assert prs() == [("https://github.com/o/r/pull/7", None)] and called.read_text().count("pr create") == creates
     routes_actions.auto_pr(db, "lead", opening=False)
     assert prs() == [("https://github.com/o/r/pull/7", head)]
+    # A push that fails is tried again (here on the session's next turn to ready), with no second PR.
+    origin = sh("git remote get-url origin", sess)
+    sh("git remote set-url origin /nowhere", sess)
+    head = _commit(sess, "a.py", "c\n")
+    routes_actions.auto_pr(db, "lead", opening=False)
+    sh(f"git remote set-url origin {origin}", sess)
+    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] != head
+    routes_actions.auto_pr(db, "lead", opening=True)
+    assert prs()[0][1] == head == remote() and called.read_text().count("pr create") == creates
     # Signed in as someone else: the session's new commit isn't pushed under their name.
     monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "someone@other.example")
-    newer = _commit(sess, "a.py", "b\n")
-    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] == head
-    assert sh("git ls-remote origin sess", sess).split()[0] != newer
+    newer = _commit(sess, "a.py", "d\n")
+    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] == head != newer
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
