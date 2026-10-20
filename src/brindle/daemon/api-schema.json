@@ -1,0 +1,1334 @@
+{
+  "api_version": "1.0",
+  "models": {
+    "AccountDTO": {
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan"
+        },
+        "signed_in": {
+          "title": "Signed In",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "signed_in"
+      ],
+      "title": "AccountDTO",
+      "type": "object"
+    },
+    "AgentDTO": {
+      "$defs": {
+        "NativeSubagentDTO": {
+          "properties": {
+            "agent_type": {
+              "title": "Agent Type",
+              "type": "string"
+            },
+            "ended_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ended At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "started_at": {
+              "title": "Started At",
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "agent_type",
+            "started_at"
+          ],
+          "title": "NativeSubagentDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "headless": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Headless"
+        },
+        "hooks_off": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hooks Off"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "locked": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locked"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pending"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "reported": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "status_since": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Since"
+        },
+        "subagents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NativeSubagentDTO"
+          },
+          "title": "Subagents",
+          "type": "array"
+        },
+        "tmux_server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tmux Server"
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tokens"
+        },
+        "unread": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unread"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window"
+        }
+      },
+      "required": [
+        "id",
+        "profile",
+        "provider",
+        "status",
+        "mode"
+      ],
+      "title": "AgentDTO",
+      "type": "object"
+    },
+    "DecisionDTO": {
+      "properties": {
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        },
+        "repo_key": {
+          "title": "Repo Key",
+          "type": "string"
+        },
+        "scope": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scope",
+          "type": "array"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "repo_key",
+        "topic",
+        "body",
+        "rationale",
+        "scope",
+        "status",
+        "created_at"
+      ],
+      "title": "DecisionDTO",
+      "type": "object"
+    },
+    "GoalDTO": {
+      "$defs": {
+        "MilestoneDTO": {
+          "properties": {
+            "check_cmd": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Check Cmd"
+            },
+            "checked_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Checked At"
+            },
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output"
+            },
+            "position": {
+              "title": "Position",
+              "type": "integer"
+            },
+            "profile": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Profile"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "position",
+            "title",
+            "status"
+          ],
+          "title": "MilestoneDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "milestones": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MilestoneDTO"
+          },
+          "title": "Milestones",
+          "type": "array"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "progress": {
+          "title": "Progress",
+          "type": "integer"
+        },
+        "root_id": {
+          "title": "Root Id",
+          "type": "string"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "usage_resets_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Usage Resets At"
+        }
+      },
+      "required": [
+        "root_id",
+        "enabled",
+        "state",
+        "progress"
+      ],
+      "title": "GoalDTO",
+      "type": "object"
+    },
+    "InboxItemDTO": {
+      "properties": {
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Id"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "notice_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notice Id"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Id"
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "title": "InboxItemDTO",
+      "type": "object"
+    },
+    "MilestoneDTO": {
+      "properties": {
+        "check_cmd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Check Cmd"
+        },
+        "checked_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checked At"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
+        },
+        "position": {
+          "title": "Position",
+          "type": "integer"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "position",
+        "title",
+        "status"
+      ],
+      "title": "MilestoneDTO",
+      "type": "object"
+    },
+    "NativeSubagentDTO": {
+      "properties": {
+        "agent_type": {
+          "title": "Agent Type",
+          "type": "string"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "started_at": {
+          "title": "Started At",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "agent_type",
+        "started_at"
+      ],
+      "title": "NativeSubagentDTO",
+      "type": "object"
+    },
+    "ProfileDTO": {
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "fallback": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Fallback",
+          "type": "array"
+        },
+        "headless": {
+          "default": false,
+          "title": "Headless",
+          "type": "boolean"
+        },
+        "local": {
+          "default": false,
+          "title": "Local",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "permission_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Permission Mode"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "provider"
+      ],
+      "title": "ProfileDTO",
+      "type": "object"
+    },
+    "SessionDTO": {
+      "properties": {
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "status_since": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Since"
+        },
+        "workspace_id": {
+          "title": "Workspace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "profile",
+        "status",
+        "mode",
+        "created_at"
+      ],
+      "title": "SessionDTO",
+      "type": "object"
+    },
+    "WorkspaceDTO": {
+      "$defs": {
+        "AgentDTO": {
+          "properties": {
+            "headless": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Headless"
+            },
+            "hooks_off": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Hooks Off"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "locked": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Locked"
+            },
+            "mode": {
+              "title": "Mode",
+              "type": "string"
+            },
+            "parent_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Parent Id"
+            },
+            "pending": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Pending"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            },
+            "provider": {
+              "title": "Provider",
+              "type": "string"
+            },
+            "reported": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reported"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "status_since": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status Since"
+            },
+            "subagents": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/NativeSubagentDTO"
+              },
+              "title": "Subagents",
+              "type": "array"
+            },
+            "tmux_server": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tmux Server"
+            },
+            "tokens": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tokens"
+            },
+            "unread": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unread"
+            },
+            "window": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Window"
+            }
+          },
+          "required": [
+            "id",
+            "profile",
+            "provider",
+            "status",
+            "mode"
+          ],
+          "title": "AgentDTO",
+          "type": "object"
+        },
+        "NativeSubagentDTO": {
+          "properties": {
+            "agent_type": {
+              "title": "Agent Type",
+              "type": "string"
+            },
+            "ended_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ended At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "started_at": {
+              "title": "Started At",
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "agent_type",
+            "started_at"
+          ],
+          "title": "NativeSubagentDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "agents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AgentDTO"
+          },
+          "title": "Agents",
+          "type": "array"
+        },
+        "ahead": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ahead"
+        },
+        "asking": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asking"
+        },
+        "autopilot": {
+          "default": false,
+          "title": "Autopilot",
+          "type": "boolean"
+        },
+        "base_branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Branch"
+        },
+        "behind": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Behind"
+        },
+        "branch": {
+          "title": "Branch",
+          "type": "string"
+        },
+        "dirty": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dirty"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "review": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review"
+        },
+        "review_state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review State"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "branch",
+        "path"
+      ],
+      "title": "WorkspaceDTO",
+      "type": "object"
+    }
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v1/account"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/login"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/logout"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/switch-org"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/agents/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/close"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/kill"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/message"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/peek"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/rewind"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/config"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/config"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/coordinator/undo"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/cost"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/decisions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/decisions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/doctor"
+    },
+    {
+      "method": "WS",
+      "path": "/v1/events"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/goal"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/check"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/enabled"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/inbox"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/inbox/{id}/{action}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kb/sources"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/meta"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/profiles"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/repos"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/continue"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/handover"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/pause"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/snapshot"
+    },
+    {
+      "method": "WS",
+      "path": "/v1/terminal/{agent}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/{id:path}/diff"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id}/merge"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id}/pr"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id}/remove"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id}/review"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id}/sync"
+    }
+  ]
+}

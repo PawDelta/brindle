@@ -1144,19 +1144,8 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     if isinstance(found, str):
         return found
     root_id, _ = found
-    items = []
-    for m in milestones:
-        title = str(m.get("title", "")).strip()
-        if not title:
-            return "Every milestone needs a title."
-        repo_alias, check = repos.split_check(str(m.get("check") or ""))
-        repo_alias = str(m.get("repo") or "").strip() or repo_alias
-        if repo_alias and repos.resolve_attached(db, root_id, repo_alias) is None:
-            return (f"Milestone {title!r} names repo {repo_alias!r}, which isn't attached to this "
-                    "session (list_repos shows what is).")
-        items.append((title, check, (str(m.get("detail") or "").strip() or None),
-                      (str(m.get("profile") or "").strip() or None), repo_alias))
     try:
+        items = autopilot.milestone_items(db, root_id, milestones)
         autopilot.set_goal(db, root_id, goal, items, detail)
     except autopilot.AutopilotError as e:
         return str(e)
