@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, gates, watch, workspaces
+from brindle import agents, autopilot, bus, gates, watch, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.providers import status_line
@@ -167,7 +167,7 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")
 
 
-def test_need_user_question_holds_until_answered(db, root, monkeypatch):
+def test_need_user_question_holds_until_answered_and_publishes_events(db, root, monkeypatch):
     # A question holds only the work that depends on it: an unrelated user
     # message doesn't cancel it, and the supervisor is reminded once per step.
     agent, _ = root
@@ -187,6 +187,9 @@ def test_need_user_question_holds_until_answered(db, root, monkeypatch):
     autopilot.answered(db, "boss")
     ap = db.get_autopilot("boss")
     assert ap.state == "running" and ap.note is None and ap.question is None
+    assert [(e["kind"], e["root_id"], e["payload"].get("question"))
+            for e in bus.tail(db, kinds=("autopilot.need_user", "autopilot.answered"))] == [
+        ("autopilot.need_user", "boss", "Postgres or SQLite?"), ("autopilot.answered", "boss", None)]
 
 
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
@@ -240,6 +243,11 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
     assert "status: passed" in goals.read_text()
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert "goal is reached" in out and db.get_autopilot("boss").state == "done"
+    assert [(e["kind"], e["payload"].get("done", e["payload"].get("approved")))
+            for e in bus.tail(db, kinds=("autopilot.goal", "autopilot.checked",
+                                         "autopilot.audit_started", "autopilot.audit"))] == [
+        ("autopilot.goal", None), ("autopilot.checked", True), ("autopilot.checked", True),
+        ("autopilot.audit_started", None), ("autopilot.audit", True)]
     # The finished goal goes: its file and the session's goal and milestones.
     assert not goals.exists()
     assert db.get_autopilot("boss").goal is None and db.milestones("boss") == []

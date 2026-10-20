@@ -20,6 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
+from brindle import bus
 from brindle.db import DB
 from brindle.pro.orgkey import GIT_TIMEOUT, normalize_remote
 
@@ -284,6 +285,8 @@ def record_decision(db: DB, repo_key: str, topic: str, body: str, rationale: str
                 "rationale": rationale, "scope": scope, "status": "accepted",
                 "link": link, "supersedes": old["id"] if old else None},
                actor=session, session=session)
+    bus.publish(db, "decision.recorded", root_id=session, repo_key=repo_key,
+                decision_id=decision_id, topic=topic, supersedes=old["id"] if old else None)
     return get_decision(db, decision_id), None
 
 
@@ -297,6 +300,8 @@ def propose_decision(db: DB, repo_key: str, topic: str, body: str, rationale: st
             "rationale": _one_line(rationale, 2000),
             "scope": [p for p in (_one_line(p, 200) for p in paths or []) if p],
             "status": "proposed"}, actor=actor)
+    bus.publish(db, "decision.proposed", agent_id=actor, repo_key=repo_key,
+                decision_id=decision_id)
     return get_decision(db, decision_id)
 
 

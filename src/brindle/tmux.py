@@ -60,8 +60,14 @@ def current_server() -> str | None:
     return os.environ.get("BRINDLE_TMUX_SOCKET") or None
 
 
+def _bin() -> str:
+    """BRINDLE_TMUX_BIN, else ``tmux`` on PATH."""
+    return os.environ.get("BRINDLE_TMUX_BIN") or "tmux"
+
+
 def _argv(server: str | None) -> list[str]:
-    return ["tmux", "-L", server] if server else ["tmux"]
+    bin_ = _bin()
+    return [bin_, "-L", server] if server else [bin_]
 
 
 def _base() -> list[str]:
@@ -77,7 +83,7 @@ _THIS_SERVER: object = object()
 
 def _tmux(*args: str, input: str | None = None, check: bool = True,
           server: object = _THIS_SERVER) -> subprocess.CompletedProcess:
-    if not shutil.which("tmux"):
+    if not shutil.which(_bin()):
         raise TmuxError("tmux is not installed (macOS: `brew install tmux`)")
     base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
     try:
@@ -773,7 +779,7 @@ def other_servers(prefix: str = "brindle-") -> list[str]:
 
 
 def _on(server: str, *args: str) -> subprocess.CompletedProcess:
-    base = ["tmux", "-L", server]
+    base = _argv(server)
     try:
         return subprocess.run([*base, *args], capture_output=True, text=True, timeout=timeout())
     except subprocess.TimeoutExpired:
@@ -785,7 +791,7 @@ def server_homes(server: str) -> list[str | None] | None:
     session without one), or None when no server is listening there. A
     server that is listening but not answering raises TmuxTimeout: it is
     not "nothing listening", and its socket must stay."""
-    if not shutil.which("tmux"):
+    if not shutil.which(_bin()):
         return None
     proc = _on(server, "list-sessions", "-F", "#{session_name}")
     if proc.returncode != 0:
@@ -802,7 +808,7 @@ def reap_server(server: str) -> None:
     """Stop the named private ``server`` (if it's running) and remove its
     socket. Never the default server (TmuxError)."""
     server = _ours(server)
-    if shutil.which("tmux"):
+    if shutil.which(_bin()):
         _on(server, "kill-server")
     remove_socket(server)
 
@@ -901,6 +907,28 @@ def paste(target: str, text: str, submit: bool = True, lead: str | None = None,
 def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
     """``server`` as for capture."""
     _tmux("send-keys", "-t", target, *keys, server=server)
+
+
+def pipe_pane(target: str, path: str | Path, server: object = _THIS_SERVER) -> None:
+    """Stream raw bytes printed by ``target`` into ``path`` (a FIFO or file).
+    ``server`` as for capture."""
+    _tmux("pipe-pane", "-O", "-t", target, f"cat >> {shlex.quote(str(path))}", server=server)
+
+
+def unpipe_pane(target: str, server: object = _THIS_SERVER) -> None:
+    """Stop any ``pipe_pane`` on ``target``. ``server`` as for capture."""
+    _tmux("pipe-pane", "-t", target, check=False, server=server)
+
+
+def set_window_size_manual(target: str, server: object = _THIS_SERVER) -> None:
+    """Let ``resize_window`` set ``target``'s size without a client attached.
+    ``server`` as for capture."""
+    _tmux("set-option", "-w", "-t", target, "window-size", "manual", server=server)
+
+
+def resize_window(target: str, cols: int, rows: int, server: object = _THIS_SERVER) -> None:
+    """Resize ``target``'s window to ``cols`` by ``rows``. ``server`` as for capture."""
+    _tmux("resize-window", "-t", target, "-x", str(cols), "-y", str(rows), server=server)
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:
