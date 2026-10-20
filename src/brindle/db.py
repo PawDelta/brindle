@@ -1515,6 +1515,11 @@ class DB:
                                 "AND sha=? AND slot=?", (workspace_id, sha, slot)).fetchone()
         return (row[0], row[1]) if row else None
 
+    def review_slot(self, agent_id: str) -> str | None:
+        """The slot of the claim ``agent_id`` was started under, if any."""
+        row = self.conn.execute("SELECT slot FROM review_claims WHERE agent_id=?", (agent_id,)).fetchone()
+        return row[0] if row else None
+
     def hold_review(self, workspace_id: str, sha: str, slot: str, token: float,
                     agent_id: str | None) -> None:
         """Name the reviewer started under the claim ``token``, or (None) give

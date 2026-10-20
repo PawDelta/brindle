@@ -2420,7 +2420,8 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
-                 focus: str | None = None, cfg: RepoConfig | None = None) -> Agent | None:
+                 focus: str | None = None, cfg: RepoConfig | None = None,
+                 second: bool = False) -> Agent | None:
     """Have ``ws`` reviewed. Without checks configured the reviewer starts
     right away and is returned. With checks, nothing starts yet: a detached
     ``_review-after-checks`` process runs them and starts the reviewer with
@@ -2428,7 +2429,8 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     at once with None, however long the suite takes. Raises ``AgentError``
     for a reviewer that couldn't start whatever the checks say (the kill
     switch, an unusable profile); a failure after that reaches ``caller``
-    as a message."""
+    as a message. ``second``: the required second review (``cfg.second_review``),
+    which has its own reviewer beside the commit's review."""
     from brindle import gates
     from brindle.config import load_repo_config
     from brindle.providers import brindle_invocation
@@ -2436,7 +2438,7 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     _review_worktree_present(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
     if not cfg.checks:
-        return request_review(db, caller, ws, profile, focus, cfg)
+        return request_review(db, caller, ws, profile, focus, cfg, second=second)
     _review_kill_switch(ws)
     profile = _review_profile(db, ws, profile, cfg)
     argv = [*brindle_invocation(), "_review-after-checks", ws.id]
@@ -2446,6 +2448,8 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
         argv += ["--profile", profile]
     if focus:
         argv += ["--focus", focus]
+    if second:
+        argv += ["--second-review"]
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
     with review_dispatch_lock(ws.id):
@@ -2500,7 +2504,7 @@ def _review_requested(workspace_id: str, profile: str, request_id: str | None) -
 
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None,
-                        request_id: str | None = None) -> Agent | None:
+                        request_id: str | None = None, second: bool = False) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
@@ -2551,7 +2555,7 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
         with review_dispatch_lock(ws.id):
             if not _review_requested(ws.id, profile, request_id):
                 return None
-            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text)
+            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text, second=second)
 
 
 def review_dispatch_lock(workspace_id: str):
@@ -2563,18 +2567,18 @@ def review_dispatch_lock(workspace_id: str):
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
-                   check_summary: str | None = None) -> Agent | None:
+                   check_summary: str | None = None, second: bool = False) -> Agent | None:
     """Start or reuse a review, replacing an MCP-broken reviewer once. None
     while another dispatcher is still starting this commit's reviewer."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
-        return _request_review(db, caller, ws, profile, focus, cfg, check_summary)
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second)
 
 
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
-                    check_summary: str | None) -> Agent | None:
+                    check_summary: str | None, second: bool = False) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -2699,8 +2703,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
     )
     # The claim, not the profile checks above, makes this the commit's one
-    # reviewer: the learner may pick another profile for each report.
-    slot = profile if profile in cfg.second_review.values() else ""
+    # reviewer: the learner may pick another profile for each report. Only a
+    # required second review (start_review's ``second``) has a slot of its own.
+    slot = profile if second else ""
     token, holder = _claim_review(db, ws, sha, slot)
     if token is None:
         return holder

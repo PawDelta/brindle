@@ -5,6 +5,7 @@ naming a reviewer rather than a worker."""
 
 from __future__ import annotations
 
+import itertools
 import time
 from pathlib import Path
 
@@ -13,7 +14,7 @@ import pytest
 from conftest import sh
 from brindle import agents, cli, gates, launch_health, pipeline, tmux, workspaces
 from brindle.config import RepoConfig
-from brindle.db import Agent, Workspace
+from brindle.db import Agent, Task, Workspace
 from brindle.profiles import Profile
 
 
@@ -100,16 +101,27 @@ def piped_worker(db, ws, boss, monkeypatch, cfg):
 
 def run_helper(ws, argv):
     """Run a queued ``_review-after-checks`` helper, as its detached process would."""
-    options = dict(zip(argv[argv.index(ws.id) + 1::2], argv[argv.index(ws.id) + 2::2]))
+    args = argv[argv.index(ws.id) + 1:]
+    second = "--second-review" in args
+    options = dict(zip(*[iter(a for a in args if a != "--second-review")] * 2))
     cli.review_after_checks_cmd(ws.id, options.get("--caller"), options.get("--profile"),
-                                options.get("--focus"), options.get("--request-id"))
+                                options.get("--focus"), options.get("--request-id"), second)
 
 
-def test_one_reviewer_per_commit_when_the_learner_picks_another_profile(db, ws, boss, monkeypatch):
+@pytest.mark.parametrize("weight,picks,reviewers", [
+    ("light", ["reviewer", "reviewer-codex"], ["reviewer"]),
+    ("heavy", ["reviewer"], ["reviewer", "reviewer-codex"]),
+])
+def test_one_reviewer_per_commit_when_the_learner_picks_another_profile(db, ws, boss, monkeypatch,
+                                                                       weight, picks, reviewers):
     # Two reports of one commit, each with its own check run, and the learner
-    # picking a different reviewer for each: both runs used to start one.
-    queued = piped_worker(db, ws, boss, monkeypatch, RepoConfig(checks=["suite"], review=True))
-    picks = iter(["reviewer", "reviewer-codex"])
+    # picking a different reviewer for each: both runs used to start one. A
+    # required second review still gets its own.
+    cfg = RepoConfig(checks=["suite"], review=True, second_review={"heavy": "reviewer-codex"})
+    queued = piped_worker(db, ws, boss, monkeypatch, cfg)
+    db.add_task(Task("t1", ws.repo_root, "worker", boss.id, ws.id, "developer", "do it", "assign", 1,
+                     ws.branch, None, None, None, "started", time.time(), weight=weight))
+    picks = itertools.cycle(picks)
     monkeypatch.setattr(agents, "default_review_profile", lambda *a, **k: next(picks))
     monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "PASS")
     started = fake_spawn(monkeypatch)
@@ -117,7 +129,7 @@ def test_one_reviewer_per_commit_when_the_learner_picks_another_profile(db, ws, 
         assert pipeline.on_report(db, db.get_agent("worker"), ws, "done")
     for argv in queued:
         run_helper(ws, argv)
-    assert len(started) == 1
+    assert sorted(a.profile for a in started) == reviewers
 
 
 @pytest.mark.parametrize("supersede", ["before checks", "during checks"])

@@ -56,7 +56,7 @@ def conflicted(db, repo, monkeypatch):
 
     started = []
 
-    def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None):
+    def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None, **kw):
         rid = f"rev{len(started) + 1}"
         add(db_, ws_, rid, "review", "reviewer", parent=caller.id)
         started.append(ws_.id)
