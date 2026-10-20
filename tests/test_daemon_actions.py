@@ -441,13 +441,15 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
     # survives on feat-b until the last merge): two hunks, each its own deleter.
     for branch, name, gone in (("feat-a", "a.py", 5), ("feat-b", "b.py", 40), ("feat-c", "c.py", 0)):
         sh(f"git switch -q -c {branch} sess", sess)
-        _commit(sess, name, f"{name}\n")
+        (sess / name).write_text(f"{name}\n")
         if gone:
-            _commit(sess, "shared.py", "".join(f"{n}\n" for n in range(1, 41) if n != gone))
+            (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 41) if n != gone))
+        # feat-b's commit dated last: a reverse blame then strays onto its branch and credits it with line 5.
+        sh(f"git add -A && GIT_COMMITTER_DATE=@{1_700_000_000 + gone} git commit -qm work", sess)
         sh("git switch -q sess", sess)
-    _commit(sess, "app.py", "print('hi')\nprint('lead')\n")
     for branch in ("feat-a", "feat-b", "feat-c"):
         git.merge_into(lead.repo_root, sess, branch, squash=branch == "feat-c")
+    _commit(sess, "app.py", "print('hi')\nprint('lead')\n")
     # feat-a's worker is still there; feat-b's workspace is gone, its report kept; feat-c has neither.
     db.add_workspace(Workspace("proj/w-a", lead.repo_root, "feat-a", "worktree", "feat-a", "sess", str(sess),
                                None, "brindle-a", time.time()))
