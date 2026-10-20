@@ -410,6 +410,17 @@ CREATE TABLE IF NOT EXISTS review_mcp_retries (
     sha TEXT NOT NULL,
     PRIMARY KEY (workspace_id, sha)
 );
+-- The one reviewer of a workspace's commit (agents.request_review): only the
+-- dispatcher that inserts or takes over this row starts it. slot is '' for
+-- the commit's review, or the profile of a configured second review.
+CREATE TABLE IF NOT EXISTS review_claims (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    slot TEXT NOT NULL,
+    agent_id TEXT,                  -- NULL while its dispatcher is still starting it
+    claimed_at REAL NOT NULL,
+    PRIMARY KEY (workspace_id, sha, slot)
+);
 -- A launch whose CLI hasn't shown its input box yet, and the model calls
 -- spent reading its startup prompts (brindle.prompt_answer).
 CREATE TABLE IF NOT EXISTS startup_prompts (
@@ -1481,6 +1492,39 @@ class DB:
             (workspace_id,),
         ).fetchone()
         return _load(Review, row) if row else None
+
+    def claim_review(self, workspace_id: str, sha: str, slot: str,
+                     held: tuple[str | None, float] | None = None) -> float | None:
+        """Claim the reviewer of ``workspace_id`` at ``sha`` (``slot``) for a
+        dispatcher about to start it. Without ``held``, only an unclaimed
+        commit; with it, only a claim still as ``review_claim`` read it. The
+        claim's token for ``hold_review``, or None when another got it."""
+        now = time.time()
+        if held is None:
+            cur = self.conn.execute("INSERT OR IGNORE INTO review_claims VALUES (?,?,?,NULL,?)",
+                                    (workspace_id, sha, slot, now))
+        else:
+            cur = self.conn.execute(
+                "UPDATE review_claims SET agent_id=NULL, claimed_at=? WHERE workspace_id=? AND sha=? "
+                "AND slot=? AND agent_id IS ? AND claimed_at=?", (now, workspace_id, sha, slot, *held))
+        return now if cur.rowcount == 1 else None
+
+    def review_claim(self, workspace_id: str, sha: str, slot: str) -> tuple[str | None, float] | None:
+        """``(agent_id, claimed_at)`` of the claim on that commit's reviewer, if any."""
+        row = self.conn.execute("SELECT agent_id, claimed_at FROM review_claims WHERE workspace_id=? "
+                                "AND sha=? AND slot=?", (workspace_id, sha, slot)).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def hold_review(self, workspace_id: str, sha: str, slot: str, token: float,
+                    agent_id: str | None) -> None:
+        """Name the reviewer started under the claim ``token``, or (None) give
+        the claim up because none could start."""
+        where = "workspace_id=? AND sha=? AND slot=? AND agent_id IS NULL AND claimed_at=?"
+        if agent_id is None:
+            self.conn.execute(f"DELETE FROM review_claims WHERE {where}", (workspace_id, sha, slot, token))
+        else:
+            self.conn.execute(f"UPDATE review_claims SET agent_id=? WHERE {where}",
+                              (agent_id, workspace_id, sha, slot, token))
 
     def workspace_reviews(self, workspace_id: str) -> list[Review]:
         """Every review of ``workspace_id``, oldest first."""

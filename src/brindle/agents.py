@@ -2563,8 +2563,9 @@ def review_dispatch_lock(workspace_id: str):
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
-                   check_summary: str | None = None) -> Agent:
-    """Start or reuse a review, replacing an MCP-broken reviewer once."""
+                   check_summary: str | None = None) -> Agent | None:
+    """Start or reuse a review, replacing an MCP-broken reviewer once. None
+    while another dispatcher is still starting this commit's reviewer."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
@@ -2573,7 +2574,7 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
 
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
-                    check_summary: str | None) -> Agent:
+                    check_summary: str | None) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -2697,8 +2698,44 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     task += (
         "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
     )
-    return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                 mode="review", background_setup=True, review_sha=sha)
+    # The claim, not the profile checks above, makes this the commit's one
+    # reviewer: the learner may pick another profile for each report.
+    slot = profile if profile in cfg.second_review.values() else ""
+    token, holder = _claim_review(db, ws, sha, slot)
+    if token is None:
+        return holder
+    reviewer = None
+    try:
+        reviewer = spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
+                         mode="review", background_setup=True, review_sha=sha)
+    finally:
+        db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
+    return reviewer
+
+
+def _claim_review(db: DB, ws: Workspace, sha: str, slot: str) -> tuple[float | None, Agent | None]:
+    """Claim in the DB the one reviewer of ``ws`` at ``sha`` (``slot``):
+    ``(token, None)`` when this dispatcher is to start it, else ``(None, the
+    reviewer at work on it)``, or ``(None, None)`` while another dispatcher is
+    still starting it. A claim whose reviewer finished, stopped without a
+    verdict or died, or whose dispatcher never named one, is taken over."""
+    while True:
+        token = db.claim_review(ws.id, sha, slot)
+        if token is not None:
+            return token, None
+        held = db.review_claim(ws.id, sha, slot)
+        if held is None:
+            continue   # given up in between
+        agent_id, claimed_at = held
+        holder = db.get_agent(agent_id) if agent_id else None
+        if holder is not None and holder.result is None and not holder.unreported_noted \
+                and alive_or_starting(holder):
+            return None, holder
+        if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
+            return None, None
+        token = db.claim_review(ws.id, sha, slot, held)
+        if token is not None:
+            return token, None
 
 
 # -- hook entry point --------------------------------------------------------
