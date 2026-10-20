@@ -1743,6 +1743,8 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     if (agent.headless or not provider.uses_hooks
             or agent.status not in ("starting", "idle", "processing", "waiting")):
         return None  # a headless pane shows output, not a TUI to read
+    if agent.status == "waiting" and db.hook_permission_request(agent.id) is not None:
+        return None  # its hook holds a request for the app's answer: the pane still looks busy
     _sync_hooks_off(db, agent, provider.hooks_disabled(*_settings_scope(db, agent)))
     if agent.status == "idle" and samples < 2 and not agent.hooks_off:
         return None
@@ -2976,7 +2978,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
     policy (brindle.permissions) answers allow or deny, or None to let the CLI
     prompt the person as usual (ask). Off unless the repo or user config
-    sets ``permission_policy: "on"``. Never raises: any failure is ask."""
+    sets ``permission_policy: "on"``. A request left to the person is held
+    for the app's answer while the app is open (_hold_for_app; a Claude one
+    is recorded with the policy off too). Never raises: any failure is ask."""
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -2986,7 +2990,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if ws is None:
             return None
         cfg = load_repo_config(ws.repo_root)
-        if cfg.permission_policy != "on":
+        policy = cfg.permission_policy == "on"
+        if not policy and provider != "claude":
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         if provider == "codex":
@@ -3042,6 +3047,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
+            if decision.decision == "ask" and len(reqs) == 1:
+                # The same hold for the app's answer as Claude Code's (no suggested rules here).
+                from brindle import codex_hook
+
+                # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
+                hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
+                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
+                if answer:
+                    decision = permissions.Decision("deny" if answer == "deny" else "allow",
+                                                    "the person answered in the brindle app")
             return permissions.codex_output(decision)
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
@@ -3062,30 +3077,124 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
             return None
-        rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-        decision = permissions.decide(req, checks=cfg.checks, rules=rules)
-        _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
-        tool_use_id = payload.get("tool_use_id")
-        if decision.decision == "ask" and isinstance(tool_use_id, str) and tool_use_id:
-            db.add_permission_request(agent.id, tool_use_id, json.dumps(req.to_dict()), decision.reason)
+        if policy:
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+            _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
+        else:
+            decision = permissions.Decision("ask", "")
+        if decision.decision == "ask":
+            # Claude Code's own "always allow" options, as it would apply them.
+            suggestions = payload.get("permission_suggestions")
+            suggestions = suggestions if isinstance(suggestions, list) and suggestions else None
+            # Recorded either way: its PostToolUse counts as the person's approval.
+            answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
+                                   hold=cfg.permission_hold_seconds)
+            if answer:
+                return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
         return None
 
 
+# Seconds a hold waits on the daemon at a time between looks at whether the
+# agent was closed or its request answered at the CLI's own prompt.
+HOLD_LOOK_SECONDS = 5.0
+# Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
+# so the hook gives the request to the prompt itself before the CLI cancels it.
+HOOK_SLACK = 30
+ANSWERS = ("allow_once", "allow_always", "deny")
+
+
+def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
+                  hold: float) -> str | None:
+    """Record a request the policy left to the person and, while the app's
+    daemon runs, hold it there for the person's answer for ``hold`` seconds
+    (_await_app_answer; the row's ``hold_until`` says till when, for the
+    app's inbox). The answer comes only from the daemon, to this hook alone
+    (brindle.daemon.holds): the row is for showing the request, never read
+    as an answer. With no daemon, nothing is held. Neither CLI's
+    PermissionRequest carries a tool_use_id: the request gets an id of its
+    own (Claude Code's PostToolUse is paired with it by tool and input, see
+    note_permission_outcome). ``keep``: record it even when nothing is held,
+    and keep it once the hold ends (for that pairing)."""
+    from brindle import permissions
+    from brindle.daemon.holds import Holder
+
+    request_id = uuid.uuid4().hex[:16]
+    recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+    # Only an answer to exactly this request and these suggestions counts.
+    holder = Holder(agent.id, request_id, permissions.request_digest(*recorded))
+    # Held before it is recorded anywhere, so nothing watching the rows can take its id first.
+    hold_until = time.time() + hold
+    held = holder.register(hold_until)
+    db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
+                              "hook" if held else None, hold_until=hold_until if held else None)
+    answer = None
+    if held:
+        try:
+            answer = _await_app_answer(db, agent, holder, req, hold)
+        finally:
+            holder.end()
+            db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
+                                         answer=answer)
+    # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
+    # take the pairing meant for the same command asked again (note_permission_outcome).
+    if not keep or answer == "deny":
+        db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
+    return answer
+
+
+def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | None:
+    """The person's answer from the app's inbox, as the daemon hands it to
+    ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
+    the person asks to answer in the terminal, once the agent is closed or
+    killed, once its CLI's own prompt took the request (its PostToolUse
+    removed the row), or if the daemon goes away: then the request goes to
+    the CLI's own prompt (or, where there is none, is refused). The agent
+    shows waiting meanwhile, as at that prompt."""
+    db.set_status(agent.id, "waiting")
+    bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
+    deadline, answer = time.monotonic() + hold, None
+    while True:
+        now = db.get_agent(agent.id)
+        recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+                                   (agent.id, holder.request_id)).fetchone()
+        left = deadline - time.monotonic()
+        if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
+                or recorded is None or left <= 0):
+            break
+        held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
+        if answer is not None or not held:
+            break
+    answer = answer if answer in ANSWERS else None     # "terminal": the person sent it to the prompt
+    if answer:
+        db.set_status(agent.id, "processing", only_if="waiting")
+    return answer
+
+
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
     """PostToolUse: if the tool's request had been left to the person, they
-    approved it. Count that toward a suggestion (never a rule by itself)."""
-    tool_use_id = payload.get("tool_use_id")
-    if not isinstance(tool_use_id, str) or not tool_use_id:
-        return
+    approved it. Count that toward a suggestion (never a rule by itself).
+    The request is the oldest recorded one for the same tool and input
+    (PermissionRequest has no tool_use_id to pair them by)."""
     try:
-        row = db.pop_permission_request(agent.id, tool_use_id)
-        if row is None:
-            return
         from brindle import permissions
 
+        ws = db.get_workspace(agent.workspace_id)
+        ran = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root) if ws else None
+        if ran is None:
+            return
+        same = (ran.tool, ran.kind, ran.command, ran.path, ran.url)
+
+        def matches(row) -> bool:
+            r = json.loads(row["request"])
+            return (r.get("tool"), r.get("kind"), r.get("command"), r.get("path"), r.get("url")) == same
+
+        row = db.pop_permission_request(agent.id, matches)
+        if row is None or not row["reason"]:
+            return   # none, or recorded for the inbox with the policy off: nothing to learn
         req = permissions.Request.from_dict(json.loads(row["request"]))
         permissions.record_approval(req)
         _record_permission(db, agent, db.get_workspace(agent.workspace_id), req.summary(),
@@ -3104,7 +3213,8 @@ def pending_permission(db: DB, agent_id: str) -> str | None:
         from brindle import permissions
 
         req = permissions.Request.from_dict(json.loads(row["request"]))
-        return f"It is asking to use {req.summary()} (brindle's permission policy: {row['reason']})."
+        policy = f" (brindle's permission policy: {row['reason']})" if row["reason"] else ""
+        return f"It is asking to use {req.summary()}{policy}."
     except Exception:  # noqa: BLE001
         return None
 

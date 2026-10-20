@@ -16,6 +16,7 @@ the error in it, which is how brindle notices any agent died.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import time
 from contextlib import ExitStack
@@ -259,6 +260,23 @@ def conversation_path(agent_id: str) -> Path:
     return brindle_home() / "native" / f"{agent_id}.json"
 
 
+def ask_person(db: DB, agent_id: str, ws: Workspace, tool: str, args: dict) -> bool:
+    """A call the profile's permissions leave to a person: held for the app's
+    answer while it's open (agents._hold_for_app), refused when it isn't or
+    once the hold ends, as a native worker has no prompt of its own."""
+    from brindle import permissions as policy
+    from brindle.config import load_repo_config
+
+    req = policy.from_claude({"tool_name": tool, "tool_input": args, "cwd": ws.path}, ws.path, ws.repo_root)
+    held = db.get_agent(agent_id)
+    if req is None or held is None:
+        return False
+    answer = agents._hold_for_app(db, held, dataclasses.replace(req, provider="native"),
+                                  "this profile's permissions leave it to a person", None, keep=False,
+                                  hold=load_repo_config(ws.repo_root).permission_hold_seconds)
+    return answer in ("allow_once", "allow_always")
+
+
 def run_native(db: DB, agent_id: str, resume: str | None = None, *,
                poll: float = 0.5, exit_when_idle: bool = False) -> int:
     """The runner (see above). Returns non-zero when the endpoint or the
@@ -317,7 +335,7 @@ def _run_native(db: DB, agent_id: str, resume: str | None, poll: float,
         system, config=config, transcript=transcript,
         on_status=lambda s: db.set_status(agent_id, s),
         inbox=lambda: _drain(db, agent_id),
-        log=log, on_text=show,
+        log=log, on_text=show, ask=lambda tool, args: ask_person(db, agent_id, ws, tool, args),
     )
     if resume and loop.load(resume):
         print(f"brindle: resumed the conversation ({len(loop.messages)} messages)", flush=True)

@@ -17,6 +17,7 @@ from brindle.config import db_path
 from brindle.daemon import routes_read
 from brindle.daemon.auth import Guard
 from brindle.daemon.events import events
+from brindle.daemon.holds import ROUTES as HOLD_ROUTES
 from brindle.daemon.routes_actions import ROUTES as ACTIONS
 from brindle.daemon.terminal import Hub, terminal
 
@@ -37,7 +38,7 @@ async def meta(request: Request) -> JSONResponse:
 
 ROUTES = [Route("/v1/meta", meta), *routes_read.ROUTES,
           WebSocketRoute("/v1/events", events),
-          WebSocketRoute("/v1/terminal/{agent}", terminal), *ACTIONS]
+          WebSocketRoute("/v1/terminal/{agent}", terminal), *ACTIONS, *HOLD_ROUTES]
 
 
 def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:

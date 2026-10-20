@@ -94,3 +94,20 @@ def agent_caller(pid: int) -> str | None:
                              through_ancestors=True)
     return next((f"the caller runs under brindle agent {aid}"
                  for aid, pids in owned.items() if pids & chain), None)
+
+
+def caller_agents(pid: int) -> set[str]:
+    """The live agents (in brindle's database, with a tmux pane brindle owns)
+    one of whose pane processes ``pid`` descends from: empty when none, or it
+    can't be checked. Only what brindle itself knows counts, never what a
+    process says of itself (its environment, its command line), which an
+    agent could set to pass for another. A permission hook holds requests
+    only for these (brindle.daemon.holds)."""
+    table = procs.table()
+    if pid not in table:
+        return set()
+    chain, p = set(), pid
+    while p in table and p not in chain:
+        chain.add(p)
+        p = table[p].ppid
+    return {aid for aid, pids in _agent_panes().items() if set(pids) & chain}

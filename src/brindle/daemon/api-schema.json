@@ -571,8 +571,231 @@
       "title": "GoalDTO",
       "type": "object"
     },
-    "InboxItemDTO": {
+    "InboxActionDTO": {
+      "description": "A route the app can call to act on the item itself.",
       "properties": {
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ],
+      "title": "InboxActionDTO",
+      "type": "object"
+    },
+    "InboxItemDTO": {
+      "$defs": {
+        "InboxActionDTO": {
+          "description": "A route the app can call to act on the item itself.",
+          "properties": {
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "path": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "path"
+          ],
+          "title": "InboxActionDTO",
+          "type": "object"
+        },
+        "PermissionChoiceDTO": {
+          "properties": {
+            "choice": {
+              "title": "Choice",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "choice",
+            "label"
+          ],
+          "title": "PermissionChoiceDTO",
+          "type": "object"
+        },
+        "PermissionDTO": {
+          "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``).",
+          "properties": {
+            "choices": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionChoiceDTO"
+              },
+              "title": "Choices",
+              "type": "array"
+            },
+            "digest": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Digest"
+            },
+            "hold_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Hold Note"
+            },
+            "hold_until": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Hold Until"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Kind"
+            },
+            "request_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Request Id"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Target"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Terminal"
+            },
+            "terminal_prompt_visible": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Terminal Prompt Visible"
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tool"
+            },
+            "via": {
+              "title": "Via",
+              "type": "string"
+            },
+            "wording": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Wording"
+            }
+          },
+          "required": [
+            "via"
+          ],
+          "title": "PermissionDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InboxActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "agent_id": {
           "anyOf": [
             {
@@ -613,9 +836,32 @@
           "default": null,
           "title": "Notice Id"
         },
+        "permission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "reason": {
           "title": "Reason",
           "type": "string"
+        },
+        "root_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Root Id"
         },
         "workspace_id": {
           "anyOf": [
@@ -770,6 +1016,210 @@
         "started_at"
       ],
       "title": "NativeSubagentDTO",
+      "type": "object"
+    },
+    "PermissionChoiceDTO": {
+      "properties": {
+        "choice": {
+          "title": "Choice",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        }
+      },
+      "required": [
+        "choice",
+        "label"
+      ],
+      "title": "PermissionChoiceDTO",
+      "type": "object"
+    },
+    "PermissionDTO": {
+      "$defs": {
+        "PermissionChoiceDTO": {
+          "properties": {
+            "choice": {
+              "title": "Choice",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "choice",
+            "label"
+          ],
+          "title": "PermissionChoiceDTO",
+          "type": "object"
+        }
+      },
+      "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``).",
+      "properties": {
+        "choices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionChoiceDTO"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Digest"
+        },
+        "hold_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hold Note"
+        },
+        "hold_until": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hold Until"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal"
+        },
+        "terminal_prompt_visible": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal Prompt Visible"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool"
+        },
+        "via": {
+          "title": "Via",
+          "type": "string"
+        },
+        "wording": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wording"
+        }
+      },
+      "required": [
+        "via"
+      ],
+      "title": "PermissionDTO",
       "type": "object"
     },
     "PreflightActionDTO": {
@@ -2221,6 +2671,18 @@
     {
       "method": "POST",
       "path": "/v1/goal/enabled"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/{id}/end"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/{id}/wait"
     },
     {
       "method": "GET",

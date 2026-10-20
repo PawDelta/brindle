@@ -217,13 +217,15 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
-@pytest.mark.parametrize("caller,refused_as", [
-    (310, "w1"),     # a command under w1's pane, however deep
-    (420, "w2"),     # BRINDLE_AGENT_ID in its own environment
-    (410, None),     # a person's terminal
-    (999, "can't be checked"),   # exited before the check: fire and forget
+@pytest.mark.parametrize("caller,refused_as,holds_for", [
+    (310, "w1", {"w1"}),     # a command under w1's pane, however deep
+    # BRINDLE_AGENT_ID in its own environment: refused, but it holds no request as w2,
+    # since a process's word about itself is no proof (permission holds).
+    (420, "w2", set()),
+    (410, None, set()),     # a person's terminal
+    (999, "can't be checked", set()),   # exited before the check: fire and forget
 ])
-def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as):
+def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as, holds_for):
     table = {p.pid: p for p in [
         procs.Proc(1, 0, "/sbin/launchd"),
         procs.Proc(100, 1, "tmux new-session -d"),
@@ -242,6 +244,7 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
         assert refused_as in body["error"]["message"]
     else:
         assert code == 200
+    assert peer.caller_agents(caller) == holds_for
 
 
 def test_peer_pid_names_the_unix_socket_caller():

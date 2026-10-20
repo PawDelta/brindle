@@ -130,6 +130,25 @@ class RepoConfig:
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
     permission_policy: str = "off"
+    # Seconds brindle's permission hook holds a request left to the person for
+    # the app's answer (brindle.agents._hold_for_app): a day, so in practice
+    # until the person answers it, sends it to the terminal, or the agent is
+    # closed. By provider:
+    #   Claude Code  PermissionRequest hook; timeout written as this + 30s (docs:
+    #                600s default, no maximum). Its own prompt shows meanwhile
+    #                (seen in 2.1.304); on timeout that prompt is what's left.
+    #   Codex        PermissionRequest hook (permission_policy on, hook trusted);
+    #                timeout codex_hook.TIMEOUT, a day + 30s (Codex caps only
+    #                SessionEnd hooks), so a longer hold is cut to fit. Whether
+    #                its prompt shows meanwhile: not seen yet.
+    #   Antigravity  PreToolUse hook under agy_approvals "brindle" only; timeout
+    #                written as this + 30s (agy documents no maximum; unverified).
+    #                No prompt of its own: on timeout the call is refused. Under
+    #                "prompt", agy ignores a hook's allow: answered in its pane.
+    #   OpenCode     its plugin can only deny, never allow: answered in its pane.
+    #   Native       brindle's own loop: no timeout but this; no prompt of its
+    #                own, so on timeout the call is refused.
+    permission_hold_seconds: int = 86400
     # "brindle": with the policy on, agy workers run with
     # --dangerously-skip-permissions and brindle's hook allows or denies every
     # call (see brindle.antigravity). "prompt" (default): agy asks as usual.
@@ -285,7 +304,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
                 "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
-                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy", "agy_approvals",
+                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
+                "permission_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers"):
         for source in (local, shared, user):
             if key in source:

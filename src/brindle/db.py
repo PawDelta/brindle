@@ -354,16 +354,24 @@ CREATE TABLE IF NOT EXISTS pool_failures (
     failed_at REAL NOT NULL,
     PRIMARY KEY (repo_root, base_branch)
 );
--- A tool-permission request brindle's policy left to the person (see
--- brindle.permissions): the structured request, so the supervisor can be told
--- exactly what's pending, and so the tool's PostToolUse (same tool_use_id)
--- can count as the person approving it. Cleared when the turn ends.
+-- A tool-permission request left to the person (see brindle.permissions):
+-- the structured request, so the supervisor can be told exactly what's
+-- pending, and so the tool's PostToolUse (the same tool and input) can count
+-- as the person approving it. Cleared when the turn ends. While the daemon
+-- holds it for the person's answer (channel 'hook': for the inbox to show;
+-- the answer itself goes through the daemon, brindle.daemon.holds), then the
+-- CLI's own prompt has it ('prompt') or the hook took an answer ('answered').
+-- ``tool_use_id`` is the request's id: brindle's own, not the CLI's.
 CREATE TABLE IF NOT EXISTS permission_requests (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     tool_use_id TEXT NOT NULL,
     request TEXT NOT NULL,          -- JSON of brindle.permissions.Request
-    reason TEXT NOT NULL,
+    reason TEXT NOT NULL,           -- the policy's; '' when the policy is off
     created_at REAL NOT NULL,
+    suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
+    channel TEXT,                   -- hook | prompt | answered
+    answer TEXT,                    -- what the person answered (a record only: answers go through the daemon)
+    hold_until REAL,                -- when the hook stops holding it for the app
     PRIMARY KEY (agent_id, tool_use_id)
 );
 -- One row per delegation: which profile brindle would have used without
@@ -909,6 +917,11 @@ class DB:
         for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
+        request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
+        for col, kind in (("suggestions", "TEXT"), ("channel", "TEXT"), ("answer", "TEXT"),
+                          ("hold_until", "REAL")):
+            if col not in request_cols:
+                self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
         if "token" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN token TEXT NOT NULL DEFAULT ''")
@@ -1253,24 +1266,49 @@ class DB:
 
     # -- permission requests left to the person (brindle.permissions) --
 
-    def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str) -> None:
+    def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str,
+                               suggestions: str | None = None, channel: str | None = None,
+                               hold_until: float | None = None) -> None:
+        """Record a request (for the inbox and the supervisor; never an answer)."""
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO permission_requests (agent_id, tool_use_id, request, "
-                      "reason, created_at) VALUES (?,?,?,?,?)",
-                      (agent_id, tool_use_id, request, reason, time.time()))
+                      "reason, created_at, suggestions, channel, hold_until) VALUES (?,?,?,?,?,?,?,?)",
+                      (agent_id, tool_use_id, request, reason, time.time(), suggestions, channel, hold_until))
 
-    def pop_permission_request(self, agent_id: str, tool_use_id: str) -> sqlite3.Row | None:
+    def permission_requests_of(self, agent_id: str) -> list[sqlite3.Row]:
+        """The agent's recorded requests, oldest first."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? ORDER BY created_at, rowid",
+                                 (agent_id,)).fetchall()
+
+    def hook_permission_request(self, agent_id: str) -> sqlite3.Row | None:
+        """The request the agent's hook holds for the app's answer, if any."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND channel='hook' "
+                                 "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
+
+    def update_permission_request(self, agent_id: str, tool_use_id: str, **fields) -> None:
+        """Set ``channel``, ``hold_until`` or ``answer`` (a record of what the
+        person answered: brindle never reads it as one) on a request."""
+        cols = [c for c in fields if c in ("channel", "hold_until", "answer")]
         with self.tx() as c:
-            row = c.execute("SELECT * FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-                            (agent_id, tool_use_id)).fetchone()
+            c.execute(f"UPDATE permission_requests SET {', '.join(f'{k}=?' for k in cols)} "
+                      "WHERE agent_id=? AND tool_use_id=?", (*(fields[k] for k in cols), agent_id, tool_use_id))
+
+    def pop_permission_request(self, agent_id: str, matches) -> sqlite3.Row | None:
+        """Remove and return the agent's oldest recorded request ``matches(row)`` holds for."""
+        with self.tx() as c:
+            rows = c.execute("SELECT * FROM permission_requests WHERE agent_id=? "
+                             "ORDER BY created_at, rowid", (agent_id,)).fetchall()
+            row = next((r for r in rows if matches(r)), None)
             if row is not None:
                 c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-                          (agent_id, tool_use_id))
+                          (agent_id, row["tool_use_id"]))
         return row
 
     def latest_permission_request(self, agent_id: str) -> sqlite3.Row | None:
+        """The newest recorded request still waiting on an answer."""
         return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? "
-                                 "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
+                                 "AND channel IS NOT 'answered' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                                 (agent_id,)).fetchone()
 
     def clear_permission_requests(self, agent_id: str) -> None:
         with self.tx() as c:

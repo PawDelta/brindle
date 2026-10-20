@@ -80,14 +80,53 @@ class SessionDTO(_DTO):
                    mode=a.mode, created_at=a.created_at, status_since=a.status_since, goal=goal)
 
 
+class PermissionChoiceDTO(_DTO):
+    choice: str                  # allow_once | allow_always | deny
+    label: str
+    rule: str | None = None      # allow_always: the rule it writes, and whose
+
+
+class PermissionDTO(_DTO):
+    """A tool-permission request waiting on the person. ``via``: "hook"
+    (brindle's hook holds the request: POST /inbox/{agent_id}/permission
+    {request: request_id, digest, choice} answers it until ``hold_until``,
+    refused for any request but the one shown, exactly as shown; choice
+    "terminal" ends the hold so the CLI's own prompt asks instead) or
+    "prompt" (it is at the CLI's own prompt: ``terminal`` says so, and the
+    app's "Go to it", with the item's root_id and agent_id, is the way to
+    answer it; no ``choices``)."""
+    via: str
+    request_id: str | None = None
+    digest: str | None = None         # of the exact request and suggested rule shown
+    hold_until: float | None = None   # when the hook stops holding it (epoch seconds)
+    hold_note: str | None = None      # the same for the person: "waiting for you" while over an hour is left
+    # Whether the CLI's own prompt shows in its terminal meanwhile too (None: not known).
+    terminal_prompt_visible: bool | None = None
+    terminal: str | None = None
+    tool: str | None = None
+    kind: str | None = None      # brindle.permissions.KINDS
+    target: str | None = None    # the command, path or URL, complete
+    wording: str | None = None   # the prompt as the provider words it
+    choices: list[PermissionChoiceDTO] = []
+
+
+class InboxActionDTO(_DTO):
+    """A route the app can call to act on the item itself."""
+    method: str
+    path: str
+
+
 class InboxItemDTO(_DTO):
     kind: str
     reason: str
     # An org notice belongs to no agent or workspace.
     agent_id: str | None = None
     workspace_id: str | None = None
+    root_id: str | None = None     # the agent's session: with agent_id, where the app links to
     detail: str | None = None
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
+    permission: PermissionDTO | None = None
+    action: InboxActionDTO | None = None
 
 
 class MilestoneDTO(_DTO):

@@ -75,3 +75,58 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, kind, setup, expec
     got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True, "@3": True})
            if i.kind == kind]
     assert sorted((i.agent_id, i.detail) for i in got) == expected
+    # Each agent's item links into its session; a sign-in carries the login the app can start.
+    assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
+    assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")
+
+
+PROMPT = """ Bash command
+
+   npm test
+   Run the test suite
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No, and tell Claude what to do differently (esc)
+"""
+SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],
+              "behavior": "allow", "destination": "localSettings"}]
+# Claude Code's pane while its PermissionRequest hook waits: still its busy spinner.
+BUSY = "✳ Clauding… (12s · esc to interrupt)\n\n❯ \n"
+
+
+@pytest.mark.parametrize("channel, screen, held, choices", [
+    # The daemon holds it for brindle's hook, whatever the pane shows meanwhile: Claude Code's
+    # own suggestion is what allow-always writes.
+    ("hook", BUSY, True, ["allow_once", "allow_always", "deny"]),
+    # A row that says 'hook' with no hold in the daemon behind it is no request to answer.
+    ("hook", PROMPT, False, []),
+    # At the CLI's own prompt: no choices, the agent's terminal only ("Go to it").
+    ("prompt", PROMPT, False, []),
+], ids=["hook", "row-without-hold", "prompt"])
+def test_a_pending_permission_request_is_an_item_with_its_choices(db, repo, monkeypatch, channel, screen, held,
+                                                                   choices):
+    from brindle import permissions, tmux
+    from brindle.daemon.holds import HOLDS
+
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: screen)
+    ws = workspaces.create(db, str(repo), "feat/inbox").workspace
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "r1", "assign", "waiting", "@2", None, time.time()))
+    stored = json.dumps(permissions.Request("claude", "bash", "Bash", command="npm test").to_dict())
+    digest, hold_until = permissions.request_digest(stored, json.dumps(SUGGESTED)), time.time() + 600
+    db.add_permission_request("w1", "tu1", stored, "", json.dumps(SUGGESTED), channel, hold_until=hold_until)
+    if held:
+        assert HOLDS.register("w1", "tu1", digest, "nonce", hold_until)
+    try:
+        got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True}) if i.agent_id == "w1"]
+    finally:
+        HOLDS.end("tu1", "nonce")
+    p = got[0].permission
+    assert [(i.kind, i.root_id) for i in got] == [("permission", "r1")]
+    assert [c.choice for c in p.choices] == choices
+    assert p.via == ("hook" if held else "prompt") and bool(p.terminal) != held
+    if held:    # the answer must name this request, exactly as recorded, until the hold ends
+        assert (p.request_id, p.target, p.digest, p.hold_until) == ("tu1", "npm test", digest, hold_until)
+    else:
+        assert "npm test" in p.wording and p.request_id is None
