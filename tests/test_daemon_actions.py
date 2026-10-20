@@ -431,7 +431,7 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     assert missing() == 0
     assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
     # The person's review edit keeps it ready; any other new commit needs a fresh audit.
-    code, edit = _send("PUT", "/v1/sessions/lead/file", {"path": "c.py", "content": "c\n"})
+    code, edit = _send("PUT", "/v1/sessions/lead/file", {"path": " c.py", "content": "c\n"})
     assert code == 200 and missing() == 0
     _commit(sess, "d.py", "d\n")
     assert missing() == 1
