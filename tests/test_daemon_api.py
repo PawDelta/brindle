@@ -129,14 +129,17 @@ def _ws_over_tcp(port: int, first: str) -> object:
                     return json.loads(event.data)["type"]
 
 
-def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(monkeypatch):
+def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(tmp_path, monkeypatch):
     # The Windows app's way in: WSL2 forwards 127.0.0.1, and the token is read from daemon.json over \\wsl$.
     monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BRINDLE_HOME", "relative-home")     # a UNC path needs it made absolute
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
     socks, info = lifecycle.prepare(TOKEN, unix=False, tcp=True)
     conn = lifecycle.connection(lifecycle.read_info())
     assert conn["url"] == f"http://127.0.0.1:{info['port']}" and "token" not in conn
-    assert conn["windows_info_path"] == "\\\\wsl$\\Ubuntu" + str(lifecycle.info_path()).replace("/", "\\")
+    expected = os.path.join(os.getcwd(), "relative-home", "daemon.json").replace("/", "\\")
+    assert conn["windows_info_path"] == "\\\\wsl$\\Ubuntu" + expected
     socks[0].listen()   # connections made before the server is up wait in the backlog
     server = lifecycle.make_server(build_app(TOKEN, port=info["port"]))
     thread = threading.Thread(target=asyncio.run, args=(server.serve(sockets=socks),))

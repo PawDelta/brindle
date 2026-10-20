@@ -137,7 +137,7 @@ def connection(info: dict | None) -> dict:
     ``daemon.json``: inside WSL, ``windows_info_path`` names that file as
     Windows sees it (``\\\\wsl$\\<distro>\\...``), where the Windows app reads
     the token before it calls ``url`` (WSL2 forwards localhost)."""
-    path = info_path()
+    path = info_path().absolute()     # BRINDLE_HOME may be relative; a UNC path can't be
     distro = os.environ.get("WSL_DISTRO_NAME")
     port = info.get("port") if info else None
     return {"running": info is not None,

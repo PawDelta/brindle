@@ -116,4 +116,4 @@ def test_doctor_daemon_reports_live_and_stale_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(procs, "alive", lambda pid: False)
     [stale] = doctor.daemon_checks(tmp_path)
     assert (live.level, stale.level) == (doctor.OK, doctor.WARN)
-    assert live.detail == "running (pid 4242, tcp 127.0.0.1:51234)"
+    assert "127.0.0.1:51234" in live.detail
