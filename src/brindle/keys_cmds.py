@@ -31,19 +31,41 @@ def _fail(msg: str) -> None:
     raise typer.Exit(1)
 
 
+class PolicyDenied(keystore.CredentialError):
+    """The org's policy denies personal keys, or couldn't be read (fail closed)."""
+
+
+def check(name: str, repo_root: str | None) -> None:
+    """Refuse a name brindle won't store, or any key while the org's policy denies them."""
+    keystore.check_name(name, repo_root)
+    try:
+        denied = key_check.personal_keys_denied(repo_root)
+    except Exception as e:  # noqa: BLE001 - policy unreadable: fail closed
+        raise PolicyDenied(f"couldn't read your org's key policy: {e}") from e
+    if denied:
+        raise PolicyDenied("your org's policy denies personal API keys; brindle won't store one")
+
+
+def store(name: str, value: str, repo_root: str | None) -> None:
+    """What ``keys set`` does with a value: check it, verify it with its
+    provider where there is a check, and keep it. Raises CredentialError,
+    whose message never contains the value."""
+    check(name, repo_root)
+    value = value.strip()
+    if value:
+        problem = key_check.verify(name, value)
+        if problem:
+            raise keystore.CredentialError(f"{name} not stored: {problem}")
+    keystore.set_key(name, value, repo_root)
+
+
 @app.command("set")
 def keys_set(name: str = typer.Argument(..., help="The variable, e.g. ANTHROPIC_API_KEY or OPENAI_API_KEY.")) -> None:
     """Store a key. The value is read from a hidden prompt, or from stdin when piped."""
     try:
-        keystore.check_name(name, _root())
+        check(name, _root())
     except keystore.CredentialError as e:
         _fail(str(e))
-    try:
-        denied = key_check.personal_keys_denied(_root())
-    except Exception as e:  # noqa: BLE001 - policy unreadable: fail closed
-        _fail(f"couldn't read your org's key policy: {e}")
-    if denied:
-        _fail("your org's policy denies personal API keys; brindle won't store one")
     page = key_check.key_page(name)
     if sys.stdin.isatty():
         if page:
@@ -54,12 +76,8 @@ def keys_set(name: str = typer.Argument(..., help="The variable, e.g. ANTHROPIC_
     else:
         value = sys.stdin.readline()
     value = value.strip()
-    if value:
-        problem = key_check.verify(name, value)
-        if problem:
-            _fail(f"{name} not stored: {problem}")
     try:
-        keystore.set_key(name, value, _root())
+        store(name, value, _root())
     except keystore.CredentialError as e:
         _fail(str(e))
     typer.echo(f"stored {name}")

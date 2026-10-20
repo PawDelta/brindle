@@ -1211,7 +1211,8 @@ app.add_typer(daemon_app, name="daemon")
 def daemon_cmd(
     ctx: typer.Context,
     unix: bool = typer.Option(True, "--socket/--no-socket", help="Listen on ~/.brindle/daemon.sock."),
-    tcp: bool = typer.Option(False, "--tcp", help="Also listen on 127.0.0.1 (a random port, in daemon.json)."),
+    tcp: bool = typer.Option(False, "--tcp", help="Also listen on 127.0.0.1 (a random port, in daemon.json). "
+                             "Over TCP the agent check can't run; the token is the only gate, so keep TCP for the WSL client."),
     idle_exit: bool = typer.Option(False, "--idle-exit", help="Exit after 10 minutes with no client while no agent runs."),
     print_connection: bool = typer.Option(
         False, "--print-connection",

@@ -537,6 +537,22 @@ def _find_action(terminal_id: str) -> dict:
             "source": "capture" if text else None, "text": text}
 
 
+def send_input(terminal_id: str, text: str, submit: bool = True) -> bool:
+    """Type ``text`` (one line, as is) into the action terminal ``terminal_id``
+    and press Enter unless ``submit`` is False. False when there is no such
+    terminal still running. Only action terminals: an agent's pane is never
+    typed into this way."""
+    if not ACTION_ID.fullmatch(terminal_id):
+        return False
+    found = _find_action(terminal_id)
+    if found["type"] != "terminal":
+        return False
+    tmux.send_keys(found["target"], "-l", "--", text)
+    if submit:
+        tmux.send_keys(found["target"], "Enter")
+    return True
+
+
 def _find(agent_id: str) -> dict:
     """The hello for ``agent_id``: its pane to stream (``target``, ``server``),
     or ``no_pane`` with what is left of it (``text``), or an error. An action

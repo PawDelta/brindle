@@ -2122,6 +2122,10 @@
       "path": "/v1/kb/sources"
     },
     {
+      "method": "PUT",
+      "path": "/v1/keys/{name}"
+    },
+    {
       "method": "POST",
       "path": "/v1/keys/{name}/set"
     },
@@ -2184,6 +2188,10 @@
     {
       "method": "WS",
       "path": "/v1/terminal/{agent}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/terminals/{id}/input"
     },
     {
       "method": "GET",
