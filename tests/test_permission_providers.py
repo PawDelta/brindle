@@ -861,6 +861,26 @@ def test_a_dead_codex_hooks_request_row_is_removed_from_an_idle_agents_inbox(db,
     assert db.permission_requests_of(a.id) == []
 
 
+def test_cleanup_keeps_a_request_whose_hook_registers_during_it(db, ws, monkeypatch):
+    from brindle.daemon.holds import HOLDS
+    from brindle.service import inbox
+
+    a = worker(db, ws)
+    real = HOLDS.of_agent
+
+    def registers_after_the_snapshot(agent_id):
+        held = real(agent_id)
+        # The hook's order: hold first, then its row.
+        assert HOLDS.register(agent_id, "r2", "d", "n", time.time() + 60)
+        db.add_permission_request(agent_id, "r2", "{}", "asking", None, "hook", hold_until=time.time() + 60)
+        return held
+
+    monkeypatch.setattr(HOLDS, "of_agent", registers_after_the_snapshot)
+    inbox.drop_orphan_requests(db, a)
+    assert [r["tool_use_id"] for r in db.permission_requests_of(a.id)] == ["r2"]
+    HOLDS.drop_agent(a.id)
+
+
 def test_agy_mirror_never_widens_an_allow():
     rules = [Rule("bash", "echo $(id)", "exact", "allow"),     # brindle never allows it
              Rule("bash", "npm *", "glob", "allow"),           # agy can't say it as narrowly

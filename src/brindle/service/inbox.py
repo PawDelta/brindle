@@ -216,8 +216,11 @@ def drop_orphan_requests(db: DB, agent: Agent) -> None:
     Claude's are kept (agents.note_permission_outcome)."""
     if agent.provider == "claude":
         return
+    # Rows before holds: a hook registers its hold before it records its row, so
+    # every row read here already has its hold in the snapshot taken after.
+    rows = db.permission_requests_of(agent.id)
     live = {h.request_id for h in HOLDS.of_agent(agent.id)}
-    for row in db.permission_requests_of(agent.id):
+    for row in rows:
         if row["channel"] == "hook" and row["tool_use_id"] not in live:
             db.pop_permission_request(agent.id, lambda r, t=row["tool_use_id"]: r["tool_use_id"] == t)
 
