@@ -277,3 +277,21 @@ class AccountDTO(_DTO):
     name: str | None = None
     plan: str | None = None
     orgs: list[AccountOrgDTO] = []
+
+
+class PreflightActionDTO(_DTO):
+    name: str                # login | set_key | trust | consent | open_provider_once
+    method: str
+    path: str
+    body: dict[str, Any] = {}
+
+
+class PreflightItemDTO(_DTO):
+    """One thing a provider's CLI would stop on before a session (brindle.preflight)."""
+    kind: str                # signin | key | trust | consent | setup
+    id: str
+    provider: str
+    title: str
+    detail: str
+    action: PreflightActionDTO | None = None
+    link: str | None = None

@@ -419,6 +419,13 @@ CREATE TABLE IF NOT EXISTS review_mcp_retries (
     sha TEXT NOT NULL,
     PRIMARY KEY (workspace_id, sha)
 );
+-- The commits the session review's edit route made (the person's own edits):
+-- only the daemon writes them, so they never un-audit a session's work.
+CREATE TABLE IF NOT EXISTS review_edits (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, sha)
+);
 -- The one reviewer of a workspace's commit (agents.request_review): only the
 -- dispatcher that inserts or takes over this row starts it. slot is '' for
 -- the commit's review, or the profile of a configured second review.

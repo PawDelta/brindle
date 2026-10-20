@@ -2,15 +2,18 @@
 job whose end arrives on the bus, and a choice the person must make is a 409."""
 
 import asyncio
+import contextlib
 import json
+import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from conftest import sh
 
-from brindle import agents, autopilot, bus, config, coordinator, pipeline, workspaces
+from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
 from brindle.daemon import peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
@@ -18,6 +21,8 @@ from brindle.pro.account import ProAccount
 from brindle.pro.team_policy import Access, AgentSetup, ClaudeSetup, ModelsSetup
 
 TOKEN = "t" * 43
+REAL_PREFLIGHT = preflight.check
+REAL_ONBOARDED = providers.claude_onboarded
 
 
 def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None,
@@ -59,6 +64,7 @@ def world(db, repo, monkeypatch):
                        time.time(), plan_first=1, plan_state="proposed"))
     db.add_autopilot("sup")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [])
     return root
 
 
@@ -300,9 +306,8 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 @pytest.mark.parametrize("path,status,command", [
     ("/v1/providers/codex/login", 200, "login"),
     ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
-    ("/v1/engine/upgrade", 200, "upgrade"),
     ("/v1/keys/BRINDLE_TOKEN/set", 400, None),
-], ids=["login", "key", "upgrade", "bad-key"])
+], ids=["login", "key", "bad-key"])
 def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeypatch, path, status, command):
     from brindle import providers, tmux
     from brindle.daemon import terminal
@@ -671,3 +676,364 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert (shown.via, shown.choices, bool(shown.terminal)) == ("prompt", [], True)    # "Go to it"
     code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_once"})
     assert code == 409 and pressed == [], reply
+
+
+@pytest.fixture
+def lead(db, repo, tmp_path, monkeypatch):
+    """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
+    sh(f"git worktree add -q -b sess {tmp_path / 'sess'} main", repo)
+    ws = workspaces.adopt_root(db, str(tmp_path / "sess"))
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
+    db.add_autopilot("lead")
+    db.update_autopilot("lead", state="done")
+    monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    return ws
+
+
+def _commit(path, name: str, text: str, message: str = "work") -> str:
+    (path / name).write_text(text)
+    sh(f"git add {name} && git commit -qm '{message}'", path)
+    return sh("git rev-parse HEAD", path)
+
+
+def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import Task
+
+    def missing() -> int:
+        code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+        assert code == 200 and reply["ready"] == (not reply["reasons"]), reply
+        return len(reply["reasons"])
+
+    sess = Path(lead.path)
+    watch = session_review.ReadinessWatch()
+    watch.sweep(db)                 # the first sweep only looks
+    assert missing() == 1           # nothing ahead of main
+    head = _commit(sess, "a.py", "a\n")
+    assert missing() == 0
+    # Undone again, one condition at a time: a failing milestone, a running worker, a
+    # coordinator-held task, a supervisor waiting at a prompt, and a worker's failed merge.
+    autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
+    db.add_workspace(Workspace("proj/w-r", lead.repo_root, "feat-r", "worktree", "feat-r", "sess", str(sess),
+                               None, "brindle-r", time.time()))
+    db.add_agent(Agent("wr", "proj/w-r", "developer", "claude", "lead", "assign", "processing", "%8", None,
+                       time.time()))
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    db.add_task(Task("t1", lead.repo_root, None, "lead", lead.id, "developer", "later", "assign", 1, None, None,
+                     None, None, "held", time.time()))
+    db.set_status("lead", "waiting")
+    db.add_workspace(Workspace("proj/w-f", lead.repo_root, "feat-f", "worktree", "feat-f", "sess", str(sess),
+                               None, "brindle-f", time.time()))
+    db.add_agent(Agent("wf", "proj/w-f", "developer", "claude", "lead", "assign", "idle", "%6", "done", time.time()))
+    db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
+    assert missing() == 5 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
+    assert watch.sweep(db) == []
+    db.set_merged("proj/w-f", head)
+    assert missing() == 4
+    db.delete_agent("wr")
+    assert missing() == 3
+    db.update_task("t1", state="cancelled")
+    assert missing() == 2
+    db.set_status("lead", "idle")
+    assert missing() == 1
+    db.record_check(db.milestones("lead")[0].id, True, "", head)
+    assert missing() == 1           # the completion audit hasn't approved this commit
+    db.update_autopilot("lead", state="done", audit_sha=head, audit_ok=1)
+    assert missing() == 0
+    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
+    # The person's review edit keeps it ready; any other new commit needs a fresh audit.
+    code, edit = _send("PUT", "/v1/sessions/lead/file", {"path": " c.py", "content": "c\n"})
+    assert code == 200 and missing() == 0
+    _commit(sess, "d.py", "d\n")
+    assert missing() == 1
+    assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["lead"]
+
+
+def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
+    from brindle import git, history
+
+    sess = Path(lead.path)
+    _commit(repo, "shared.py", "".join(f"{n}\n" for n in range(1, 41)))
+    sh("git merge -q --ff-only main", sess)
+    # Two parallel workers each delete one line of the shared file and merge in turn (line 5
+    # survives on feat-b until the last merge): two hunks, each its own deleter.
+    for branch, name, gone in (("feat-a", "a.py", 5), ("feat-b", "b.py", 40), ("feat-c", "c.py", 0)):
+        sh(f"git switch -q -c {branch} sess", sess)
+        (sess / name).write_text(f"{name}\n")
+        if gone:
+            (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 41) if n != gone))
+        # feat-b's commit dated last: a reverse blame then strays onto its branch and credits it with line 5.
+        sh(f"git add -A && GIT_COMMITTER_DATE=@{1_700_000_000 + gone} git commit -qm work", sess)
+        sh("git switch -q sess", sess)
+    for branch in ("feat-a", "feat-b", "feat-c"):
+        git.merge_into(lead.repo_root, sess, branch, squash=branch == "feat-c")
+    _commit(sess, "app.py", "print('hi')\nprint('lead')\n")
+    # feat-a's worker is still there; feat-b's workspace is gone, its report kept; feat-c has neither.
+    db.add_workspace(Workspace("proj/w-a", lead.repo_root, "feat-a", "worktree", "feat-a", "sess", str(sess),
+                               None, "brindle-a", time.time()))
+    db.add_agent(Agent("wa", "proj/w-a", "developer", "claude", "lead", "assign", "idle", "%7", None, time.time()))
+    history.record(db, lead.repo_root, "worker_result", agent_id="wb", branch="feat-b", profile="developer-codex")
+    code, got = _send("GET", "/v1/sessions/lead/file?path=b.py")
+    assert code == 200 and got["content"] == "b.py\n"
+    code, edited = _send("PUT", "/v1/sessions/lead/file?path=b.py", {"content": "b.py\nmine\n", "base": got["base"]})
+    assert code == 200 and sh("git log -1 --format=%s", sess) == "review edits: b.py"
+    code, d = _send("GET", "/v1/sessions/lead/diff")
+    assert code == 200, d
+    assert {f["path"]: f["authors"] for f in d["files"]} == {
+        "a.py": ["wa"], "app.py": ["supervisor"], "b.py": ["wb", "you"], "c.py": ["feat-c"],
+        "shared.py": ["wa", "wb"]}
+    assert [h["authors"] for f in d["files"] for h in f["hunks"] if f["path"] == "shared.py"] == [["wa"], ["wb"]]
+    assert [(w["id"], w["kind"], w["branch"]) for w in d["workers"]] == [
+        ("wa", "worker", "feat-a"), ("supervisor", "supervisor", "sess"), ("wb", "worker", "feat-b"),
+        ("you", "you", None), ("feat-c", "worker", "feat-c")]
+
+
+@pytest.mark.parametrize("path,body,setup,status", [
+    ("app.py", {"content": "print('bye')\n"}, None, 200),
+    ("app.py", {}, "delete", 200),
+    ("new/deep/n.py", {"content": "n\n"}, "hook-refuses", 409),    # the file and its new directories go
+    ("app.py", {"content": "x\n"}, "exists", 409),                  # a create where a file already is
+    ("app.py", {"content": "print('bye')\n"}, "busy", 409),
+    ("app.py", {"content": "print('bye')\n"}, "merging", 409),
+], ids=["edit", "delete", "create-refused", "exists", "busy", "merging"])
+def test_session_review_edits_commit_on_the_session_branch(db, repo, lead, path, body, setup, status):
+    from brindle import git
+
+    sess = Path(lead.path)
+    head = sh("git rev-parse HEAD", sess)
+    base = git.hash_blob(sess, (sess / "app.py").read_bytes(), "app.py")
+    if setup == "busy":
+        db.set_status("lead", "processing")
+    if setup == "hook-refuses":
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+    body = body if setup in ("hook-refuses", "exists") else {**body, "base": base}
+    with pipeline.base_lock(lead.repo_root, "sess") if setup == "merging" else contextlib.nullcontext():
+        code, reply = _send("DELETE" if setup == "delete" else "PUT", f"/v1/sessions/lead/file?path={path}", body)
+    assert code == status, reply
+    if status != 200:
+        assert sh("git rev-parse HEAD", sess) == head and not (sess / "new").exists()
+        assert sh("git status --porcelain", sess) == "" and bus.tail(db, kinds=("session.edited",)) == []
+        return
+    assert sh("git log -1 --format=%s", sess) == "review edits: app.py" and reply["commit"] == sh(
+        "git rev-parse HEAD", sess)
+    assert sh("git ls-files app.py", sess) == ("" if setup == "delete" else "app.py")
+
+
+def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_path, monkeypatch):
+    sess, called = Path(lead.path), tmp_path / "gh-called"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})
+    assert (code, reply["error"]["code"]) == (409, "not_ready") and reply["reasons"]
+    assert not called.exists()
+    autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
+    autopilot.clear_finished_goal(db, "lead")       # reached: what's left is what the session announced
+    db.update_autopilot("lead", state="done")
+    _commit(sess, "a.py", "a\n")
+    code, draft = _send("GET", "/v1/sessions/lead/pr/draft")
+    assert code == 200 and draft["title"] == "Ship it" and "- tests pass" in draft["body"]
+    code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": draft["title"], "body": draft["body"]})
+    assert code == 202, reply
+    done = bus.tail(db, kinds=("job.done", "job.failed"))
+    assert done[-1]["payload"]["result"]["url"] == "https://github.com/o/r/pull/7"
+    assert "--base main --head sess --title Ship it --body" in called.read_text()
+
+
+def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
+    """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
+    monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)
+    monkeypatch.setattr(providers, "claude_onboarded", REAL_ONBOARDED)
+    for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN"):
+        (tmp_path / env).write_text("")
+        monkeypatch.setenv(env, str(tmp_path / env))
+    claude = tmp_path / "claude-config" / ".claude.json"
+    claude.parent.mkdir()
+    claude.write_text(json.dumps({"hasCompletedOnboarding": True} if onboarded else {"numStartups": 1}))
+    (tmp_path / "codex-home").mkdir()
+    return claude, tmp_path / "codex-home" / "config.toml"
+
+
+def _codex_trust(codex, repo, level):
+    import os
+
+    # Quoted and commented as a person might: still the repo's own table.
+    codex.write_text(f"model = \"x\"\n\n[projects.'{os.path.realpath(repo)}'] # mine\ntrust_level = \"{level}\"\n")
+
+
+@pytest.mark.parametrize("how,provider,setup,blocked", [
+    ("/v1/sessions", "claude", "signed-out", ["signin"]),
+    ("/v1/sessions", "codex", None, []),            # Codex's trust is recorded silently, then it launches
+    ("/v1/sessions", "codex", "untrusted", ["trust"]),   # the person's own answer to Codex is never overridden
+    # Signed in by the key brindle stores for it, which Claude Code then asks about.
+    ("/v1/sessions", "claude", "stored-key", ["consent"]),
+    # "open" a session that has since exited: a fresh one would start, so it's checked.
+    ("/v1/sessions?open", "claude", "signed-out", ["signin"]),
+    ("/v1/sessions/sup/continue", "claude", "signed-out", ["signin"]),
+    ("/v1/agents/wk/rewind", "claude", "signed-out", ["signin"]),
+    # A worker started any way (assign, handoff, a queued task) goes through the same launch.
+    ("assign", "claude", "fresh", ["consent"]),
+    ("assign", "codex", "untrusted", ["trust"]),
+    # The session's own key (its session_credentials), not brindle's: approving it clears the worker.
+    ("assign", "claude", "session-key", ["consent"]),
+    ("attached", "claude", "session-key", ["consent"]),   # the same, for a worker in a repo attached to it
+    ("interactive", "claude", "fresh", []),         # a chat in a terminal: the person answers it there
+], ids=["start", "start-trusts-silently", "start-untrusted", "start-stored-key", "stale-open", "continue",
+        "rewind", "worker-consent", "worker-untrusted", "worker-session-key", "worker-session-key-attached",
+        "terminal-chat"])
+def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, how, provider, setup,
+                                                        blocked):
+    from brindle import keystore
+
+    _, codex = _provider_setup(tmp_path, monkeypatch, onboarded=setup != "fresh")
+    if setup == "untrusted":
+        _codex_trust(codex, world.repo_root, "untrusted")
+    if setup == "stored-key":
+        keystore.set_key("ANTHROPIC_API_KEY", SECRET)
+    if setup == "session-key":
+        db.set_session_credential("sup", "ANTHROPIC_API_KEY", SECRET)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-0000000000abcd")
+    before = codex.read_text() if codex.exists() else None
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: "Claude Code isn't signed in" if (
+        p == "claude" and setup in ("signed-out", "stored-key") and not (env or {}).get("ANTHROPIC_API_KEY")) else None)
+    opened = []
+
+    def open_window(*a, **k):
+        opened.append(a)
+        raise agents.AgentError("stopped at the window")
+
+    monkeypatch.setattr(agents, "_open_window", open_window)
+    if how.startswith("/"):
+        path, _, opening = how.partition("?")
+        body = {"repo": world.repo_root, "provider": provider, "to": 1}
+        code, reply = _send("POST", path, {**body, "choice": "o", "session_id": "sup"} if opening else body)
+        assert code == 409 and SECRET not in json.dumps(reply), reply
+        kinds = [i["kind"] for i in reply.get("preflight", [])]
+        assert all(i["action"]["path"].startswith(f"/v1/providers/{provider}/") for i in reply.get("preflight", []))
+    else:
+        from brindle import repos
+        from brindle.pro import license
+
+        ws, worker = world, how in ("assign", "attached")
+        for name in ("other", "unrelated") if setup == "session-key" else ():
+            sh(f"git init -q -b main {tmp_path / name} && git -C {tmp_path / name} commit -q --allow-empty -m init",
+               tmp_path)
+        if how == "attached":
+            monkeypatch.setattr(license, "has", lambda feature: feature == "multi_repo")
+            ws = repos.target_workspace(db, repos.attach(db, "sup", str(tmp_path / "other")).repo_root)
+
+        def spawn():
+            with pytest.raises(agents.AgentError) as e:
+                agents.spawn(db, ws, "developer" if worker else "supervisor", provider_name=provider,
+                             mode="assign" if worker else how, parent_id="sup" if worker else None, prompt="go")
+            return getattr(e.value, "items", [])
+
+        items = spawn()
+        kinds = [i.kind for i in items]
+        if setup == "session-key":
+            action = items[0].action
+            assert "wxyz" in items[0].detail and action.body["session"] == "sup"
+            assert action.body["repo"] == ws.repo_root
+            confirm = {**action.body, "accept": True}
+            assert _send("POST", action.path, {**confirm, "key": "0" * 16})[0] == 409   # some other key
+            assert _send("POST", action.path, {**confirm, "session": "wk"})[0] == 409   # not a session root
+            # A repo that is neither the session's own nor attached to it.
+            assert _send("POST", action.path, {**confirm, "repo": str(tmp_path / "unrelated")})[0] == 409
+            assert _send("POST", action.path, confirm)[0] == 200
+            assert providers.api_key_approved(SECRET)
+            assert not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+            assert spawn() == [] and len(opened) == 1      # the same worker now launches
+            opened.clear()
+    assert kinds == blocked and len(opened) == (0 if blocked else 1)
+    if blocked:
+        assert (codex.read_text() if codex.exists() else None) == before
+    elif provider == "codex":
+        assert providers.codex_trust(world.repo_root) == "trusted"
+
+
+@pytest.mark.parametrize("provider,setup,item", [
+    ("claude", "missing", "claude.install"),
+    ("antigravity", "gemini", "key.GEMINI_API_KEY"),
+    ("claude", "fresh", "claude.onboarding"),
+    ("claude", "key", "claude.api_key"),
+    ("codex", "untrusted", "codex.trust"),
+], ids=["setup", "key", "consent-onboarding", "consent-api-key", "trust"])
+def test_preflight_lists_each_blocking_item_and_only_the_person_clears_it(db, world, tmp_path, monkeypatch,
+                                                                          provider, setup, item):
+    claude, codex = _provider_setup(tmp_path, monkeypatch, onboarded=setup != "fresh")
+    probed = []
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: probed.append(env or {}))
+    # The repo's own supervisor profile sets a variable that would run code in
+    # the CLI's status check: asking (a GET) must never hand it over.
+    agents_dir = Path(world.repo_root) / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    # (Declaring it as the profile's key name doesn't get it through either.)
+    # The "key" setup: the profile's own key, with a different one in brindle's environment.
+    (agents_dir / "supervisor.md").write_text(
+        f"---\nname: supervisor\nprovider: {provider}\napi_key_env: NODE_OPTIONS\n"
+        f"env.NODE_OPTIONS: --require ./x.js\n{'env.ANTHROPIC_API_KEY: ' + SECRET + chr(10) if setup == 'key' else ''}"
+        "---\nYou supervise.\n")
+    if setup == "missing":
+        monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(tmp_path / "nowhere" / "claude"))
+    if setup == "gemini":
+        settings = tmp_path / "agy-home" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text('{"modelProvider": "gemini"}')
+    if setup == "key":
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-0000000000abcd")
+    if setup == "untrusted":
+        _codex_trust(codex, world.repo_root, "untrusted")
+    configs = lambda: [p.read_text() if p.exists() else None for p in (claude, codex)]  # noqa: E731
+    before = configs()
+    query = f"/v1/providers/{provider}/preflight?repo={world.repo_root}"
+    code, items = _send("GET", query)
+    assert code == 200, items
+    found = next(i for i in items if i["id"] == item)
+    assert SECRET not in json.dumps(items) and configs() == before     # asking changes nothing
+    assert all("NODE_OPTIONS" not in env for env in probed)
+    action = found["action"]
+    if action is None or action["name"] == "set_key":
+        return
+    if found["kind"] == "consent":
+        assert found["link"] or found["detail"]
+        # Nothing records a consent but the person's own confirmation.
+        assert _send(action["method"], action["path"], action["body"])[0] == 400 and configs() == before
+    if setup == "key":
+        assert "wxyz" in found["detail"]        # the profile's key, not brindle's own
+        # A confirmation of some other key than the one shown records nothing.
+        stale = {**action["body"], "accept": True, "key": "0" * 16}
+        assert _send(action["method"], action["path"], stale)[0] == 409 and configs() == before
+    code, reply = _send(action["method"], action["path"], {**action["body"], "accept": True})
+    assert code == 200, reply
+    assert item not in [i["id"] for i in _send("GET", query)[1]]
+    if setup == "key":
+        assert providers.api_key_approved(SECRET) and not providers.api_key_approved("sk-ant-ambient-0000000000abcd")
+    if setup == "untrusted":
+        assert codex.read_text().startswith('model = "x"\n')
+
+
+@pytest.mark.parametrize("exit_code", [0, 1], ids=["done", "failed"])
+def test_upgrade_runs_in_the_background_and_reports_on_the_bus(db, world, monkeypatch, exit_code):
+    output = "\n".join(f"uv line {i}" for i in range(30))
+    runs, again = [], []
+
+    def run():
+        runs.append(1)
+        again.append(_send("POST", "/v1/engine/upgrade"))      # pressed again while it runs
+        return exit_code, output
+
+    monkeypatch.setattr(routes_actions, "_run_upgrade", run)
+    code, reply = _send("POST", "/v1/engine/upgrade")
+    assert code == 202 and runs == [1] and again == [(202, reply)]
+    events = bus.tail(db, kinds=("job.progress", "job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["job"]) for e in events] == [
+        ("job.progress", reply["job"]), ("job.done" if exit_code == 0 else "job.failed", reply["job"])]
+    if exit_code == 0:
+        assert "uv line" not in json.dumps(events)
+    else:
+        error = events[-1]["payload"]["error"]
+        assert error["code"] == "upgrade_failed" and error["tail"] == [f"uv line {i}" for i in range(10, 30)]

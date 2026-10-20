@@ -3,8 +3,10 @@ service layer or the engine function the CLI or MCP tool already uses.
 
 Every route takes a JSON body (or none) and answers JSON. A service
 ``Conflict`` (a choice the person has to make first) answers 409 with the
-choices; any other refusal is a ``ServiceError`` with its own status. A long
-action (a merge, a PR, a rewind, milestone checks, a sign-in) answers 202
+choices, and a launch its provider's CLI would stop on answers 409 with
+``preflight`` items (brindle.preflight); any other refusal is a
+``ServiceError`` with its own status. A long action (a merge, a PR, a
+rewind, milestone checks, a sign-in, an engine upgrade) answers 202
 with a job id at once and runs on its own: ``job.done`` or ``job.failed``
 (carrying that id) arrives on the bus when it ends, ``job.progress`` while
 it runs. Milestone checks run in the engine's existing detached helper, so
@@ -33,8 +35,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, tmux, workspaces
+from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, preflight, tmux, workspaces
 from brindle import sessions as sessions_mod
+from brindle.daemon import session_review as review
 from brindle.daemon import terminal
 from brindle.db import DB, Agent, Workspace
 from brindle.service import inbox
@@ -61,10 +64,10 @@ def _spawn(target: Callable[[], None]) -> None:
     threading.Thread(target=target, daemon=True).start()
 
 
-def start_job(kind: str, work: Callable[[DB, Job], Any], **fields) -> Job:
+def start_job(kind: str, work: Callable[[DB, Job], Any], job: Job | None = None, **fields) -> Job:
     """Run ``work`` on its own thread (with its own DB connection) and
     publish how it ended. ``fields``: the event's ids (workspace_id, root_id ...)."""
-    job = Job(secrets.token_hex(8), kind)
+    job = job or Job(secrets.token_hex(8), kind)
 
     def run() -> None:
         db = DB()
@@ -127,13 +130,17 @@ def _endpoint(fn: Action):
         if not isinstance(body, dict):
             return _error(ServiceError("invalid", "the body must be a JSON object"))
         try:
-            got = await asyncio.to_thread(_call, fn, dict(request.path_params), body)
+            # The query (?path= on a file route) is the params' too; the path's own win.
+            params = {**request.query_params, **request.path_params}
+            got = await asyncio.to_thread(_call, fn, params, body)
+        except agents.PreflightBlocked as e:      # a launch on the way: as if asked first
+            return JSONResponse(preflight.Blocked(e.items).to_json(), 409)
         except Exception as e:  # noqa: BLE001 - mapped to a status below
             err = from_exception(e)
             if err.code == "internal":
                 log.exception("daemon action %s failed", request.url.path)
             return _error(err)
-        if isinstance(got, svc.Conflict):
+        if isinstance(got, (svc.Conflict, preflight.Blocked)):
             return JSONResponse(got.to_json(), 409)
         if isinstance(got, Job):
             return JSONResponse(got.to_json(), 202)
@@ -185,8 +192,47 @@ def _notes(notes: list[svc.Note]) -> list[dict[str, str]]:
 # -- sessions --------------------------------------------------------------------
 
 
+def _blocked(launches: list[tuple[Agent, Workspace]], keys_only: bool = False) -> preflight.Blocked | None:
+    """What would stop any of these launches (agent, where) before its first
+    turn, each item once, judged with the identity each runs as."""
+    items: dict[str, preflight.Item] = {}
+    for a, ws in launches:
+        for item in agents.launch_blockers(a, ws, keys_only=keys_only):
+            items.setdefault(item.id, item)
+    return preflight.Blocked(list(items.values())) if items else None
+
+
+def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool = False) -> preflight.Blocked | None:
+    """What would stop a new supervisor chat in ``repo`` (on ``provider``, else
+    its profile's) before its first turn. ``read_only`` (a GET): the checkout
+    isn't registered, and the sign-in check sees only credentials (see
+    agents.launch_blockers)."""
+    from brindle.profiles import load_profile
+
+    if read_only:
+        top = git.toplevel(repo)
+        ws = db.workspace_by_path(top) or Workspace("preflight", git.main_repo_root(repo), "main", "main",
+                                                    "HEAD", None, top, None, "", 0.0)
+    else:
+        ws = workspaces.adopt_root(db, repo)
+    provider = provider or load_profile(agents.SUPERVISOR, ws.repo_root).provider
+    chat = Agent("", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
+    return _blocked([(chat, ws)], keys_only=read_only)
+
+
 def start_session(db: DB, params: dict, body: Body) -> Any:
-    got = svc.start(db, _get(body, "repo", required=True), provider=_get(body, "provider"),
+    """A 409 ``{"preflight": [...]}`` instead of a chat opening on its CLI's
+    sign-in or first-run screen (see brindle.preflight). Only opening a
+    session that is running now launches nothing, so only that isn't checked."""
+    repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
+    opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
+               and any(s.root.id == session_id
+                       for s in sessions_mod.live(db, workspaces.adopt_root(db, repo).repo_root)))
+    if not opening:
+        blocked = session_blockers(db, repo, _get(body, "provider"))
+        if blocked:
+            return blocked
+    got = svc.start(db, repo, provider=_get(body, "provider"),
                     prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
                     autopilot=_get(body, "autopilot", bool), branch=_get(body, "branch"),
                     worktree=_get(body, "worktree"), choice=_get(body, "choice"),
@@ -200,6 +246,10 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
 
 def continue_session(db: DB, params: dict, body: Body) -> Any:
     _, ws = _root(db, params["root"])
+    blocked = _blocked([(a, db.get_workspace(a.workspace_id) or ws)
+                        for a in agents.tree(db, params["root"]) if a.status != "done"])
+    if blocked:
+        return blocked
     got = svc.continue_(db, svc.continue_workspace(db, ws.path), params["root"])
     return got if isinstance(got, svc.Conflict) else {**got.to_json(), "notes": _notes(got.notes)}
 
@@ -291,6 +341,15 @@ def rewind_agent(db: DB, params: dict, body: Body) -> Any:
     identity_lock.ensure(a)
     to = _get(body, "to", int, required=True)
     profile, note = _get(body, "profile"), _get(body, "note")
+    ws = _workspace(db, a.workspace_id)
+    fresh = a
+    if profile:
+        from brindle.profiles import load_profile
+
+        fresh = dataclasses.replace(a, profile=profile, provider=load_profile(profile, ws.repo_root).provider)
+    blocked = _blocked([(fresh, ws)])
+    if blocked:
+        return blocked
 
     def work(db: DB, job: Job) -> Any:
         fresh = rewind.rewind(db, a.id, to, profile=profile, note=note)
@@ -365,26 +424,48 @@ BUSY = ("starting", "processing", "waiting")
 MAX_EDIT_BYTES = 1 << 20       # a file the review sheet can edit inline
 
 
-def _edit_dir(ws: Workspace, rel: str) -> tuple[str, int, str]:
+def _edit_dir(ws: Workspace, rel: str, made: list[str] | None = None) -> tuple[str, int, str]:
     """``rel`` normalized, an open descriptor of its directory, and the
     file's own name in it: a relative path with no ``..`` and nothing in
     .git, its directories opened one at a time from the worktree without
-    following a symlink, so nothing swapped in later can redirect a write."""
+    following a symlink, so nothing swapped in later can redirect a write.
+    With ``made``, missing directories are created and their paths appended."""
     parts = PurePosixPath(rel).parts
     if (not parts or PurePosixPath(rel).is_absolute() or "\\" in rel
             or any(p == ".." or p.lower() == ".git" for p in parts)):
         raise ServiceError("invalid", f"{rel!r} isn't a path inside the worktree")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(ws.path, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for part in parts[:-1]:
-            fd, parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd), fd
-            os.close(parent)
+        for i, part in enumerate(parts[:-1]):
+            try:
+                child = os.open(part, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if made is None:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=fd)
+                made.append("/".join(parts[:i + 1]))
+                child = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
     except OSError as e:
         os.close(fd)
         if isinstance(e, FileNotFoundError):
             raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
         raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
     return "/".join(parts), fd, parts[-1]
+
+
+def _unmake(ws: Workspace, made: list[str]) -> None:
+    """Remove the directories :func:`_edit_dir` made, deepest first, each
+    through its parent opened as it opens them (so never outside)."""
+    for path in reversed(made):
+        with contextlib.suppress(OSError, ServiceError):
+            _, fd, leaf = _edit_dir(ws, path)
+            try:
+                os.rmdir(leaf, dir_fd=fd)
+            finally:
+                os.close(fd)
 
 
 def read_edit_target(ws: Workspace, rel: str) -> tuple[str, int, str, bytes, int]:
@@ -437,6 +518,96 @@ def _replace(dir_fd: int, leaf: str, data: bytes, mode: int) -> None:
         raise
 
 
+def _content(body: Body) -> bytes:
+    data = _get(body, "content", required=True).encode()
+    if len(data) > MAX_EDIT_BYTES:
+        raise ServiceError("too_large", f"an edit is at most {MAX_EDIT_BYTES // 1024} KB", 413)
+    if b"\0" in data:
+        raise ServiceError("binary", "an edit is UTF-8 text; edit binary files in an editor", 415)
+    return data
+
+
+def commit_edit(ws: Workspace, rel: str, data: bytes | None, base: str | None,
+                message: str) -> tuple[str, str | None]:
+    """``data`` becomes ``rel`` in ``ws``'s checkout and is committed alone,
+    as ``<message>: <path>``; None deletes it. ``base`` is the blob sha the
+    app showed (abbreviated is fine): if the file has changed since, the edit
+    is refused (409). None creates the file (and its directories), which
+    must not exist yet. git makes the commit (its hooks and locks included);
+    if it refuses, the file and its index entries go back exactly as they
+    were. The caller holds the checkout's lock. Returns the normalized path
+    and the commit (None when nothing needed committing)."""
+    if git.current_branch(ws.path) != ws.branch:
+        raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
+    made: list[str] = []
+    before: bytes | None = None
+    try:
+        if base is None:
+            name, dir_fd, leaf = _edit_dir(ws, rel, made)
+            mode = 0o644
+            try:
+                os.stat(leaf, dir_fd=dir_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                os.close(dir_fd)
+                raise ServiceError("stale", f"{rel} already exists; reload it", 409)
+        else:
+            name, dir_fd, leaf, before, mode = read_edit_target(ws, rel)
+    except BaseException:
+        _unmake(ws, made)
+        raise
+    try:
+        if base is not None and (len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base)):
+            raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
+        if data is None:
+            os.unlink(leaf, dir_fd=dir_fd)
+        else:
+            _replace(dir_fd, leaf, data, mode)
+        commit = None
+        # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.
+        lit = ["--literal-pathspecs"]
+        # This path's index entries as they are (none when untracked or its deletion is staged).
+        listed = git.out([*lit, "ls-files", "-s", "-z", "--", name], ws.path).split("\0")
+        entries = [e for e in listed if e.partition("\t")[2] == name]
+        tracked = bool(entries)
+        try:
+            # git reads the path itself: a directory swapped for a symlink meanwhile would commit what it points at.
+            if os.path.realpath(os.path.join(ws.path, name)) != os.path.join(os.path.realpath(ws.path), name):
+                raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
+            # An untracked file deleted changes nothing on the branch.
+            if tracked or data is not None:
+                if not tracked:
+                    git.run([*lit, "add", "--", name], ws.path)     # commit --only needs git to know a new file
+                if git.ok([*lit, "diff", "--quiet", "HEAD", "--", name], ws.path):
+                    # Back to HEAD's content: nothing to commit, but the index drops what was staged for it.
+                    git.run([*lit, "add", "--", name], ws.path)
+                else:
+                    # --only commits just this path: what is staged elsewhere is left alone,
+                    # and a refused commit leaves the index as it was.
+                    git.run([*lit, "commit", "-q", "--only", "-m", f"{message}: {name}", "--", name], ws.path)
+                    commit = git.out(["rev-parse", "HEAD"], ws.path)
+        except (git.GitError, ServiceError):
+            # Refused (a hook, say): the index entry and the file exactly as they were.
+            try:
+                git.run(["update-index", "--force-remove", "--", name], ws.path)
+                if entries:
+                    git.run(["update-index", "-z", "--index-info"], ws.path, input="\0".join(entries) + "\0")
+            finally:
+                if before is None:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(leaf, dir_fd=dir_fd)
+                else:
+                    _replace(dir_fd, leaf, before, mode)
+            raise
+    except BaseException:
+        os.close(dir_fd)
+        _unmake(ws, made)
+        raise
+    os.close(dir_fd)
+    return name, commit
+
+
 def edit_file(db: DB, params: dict, body: Body) -> Any:
     """The person's edit from the review sheet: ``content`` becomes ``path``
     in the worker's worktree, committed on its branch. ``base`` is the blob
@@ -448,57 +619,77 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
     if ws.kind != "worktree":
         raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be edited")
     identity_lock.ensure_workspace(db, ws)
-    rel, content = _get(body, "path", required=True), _get(body, "content", required=True)
+    rel, data = _get(body, "path", required=True), _content(body)
     base = _get(body, "base", required=True).strip().lower()
-    if len(data := content.encode()) > MAX_EDIT_BYTES:
-        raise ServiceError("too_large", f"an edit is at most {MAX_EDIT_BYTES // 1024} KB", 413)
     with git.checkout_lock(ws.path, timeout=10):
         if busy := [a.id for a in db.list_agents(ws.id) if a.status in BUSY]:
             raise ServiceError("busy", f"{', '.join(busy)} is working in {ws.id}; edit once it has stopped", 409)
-        if git.current_branch(ws.path) != ws.branch:
-            raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
-        name, dir_fd, leaf, before, mode = read_edit_target(ws, rel)
-        try:
-            if len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base):
-                raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
-            _replace(dir_fd, leaf, data, mode)
-            commit = None
-            # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.
-            lit = ["--literal-pathspecs"]
-            # This path's index entries as they are (none when untracked or its deletion is staged).
-            listed = git.out([*lit, "ls-files", "-s", "-z", "--", name], ws.path).split("\0")
-            entries = [e for e in listed if e.partition("\t")[2] == name]
-            tracked = bool(entries)
-            try:
-                # git reads the path itself: a directory swapped for a symlink meanwhile would commit what it points at.
-                if os.path.realpath(os.path.join(ws.path, name)) != os.path.join(os.path.realpath(ws.path), name):
-                    raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
-                if not tracked:
-                    git.run([*lit, "add", "--", name], ws.path)     # commit --only needs git to know a new file
-                if git.ok([*lit, "diff", "--quiet", "HEAD", "--", name], ws.path):
-                    # Back to HEAD's content: nothing to commit, but the index drops what was staged for it.
-                    git.run([*lit, "add", "--", name], ws.path)
-                else:
-                    # --only commits just this path: what the worker has staged elsewhere is left alone,
-                    # and a refused commit leaves the index as it was.
-                    git.run([*lit, "commit", "-q", "--only", "-m", f"edit from review: {name}", "--", name],
-                            ws.path)
-                    commit = git.out(["rev-parse", "HEAD"], ws.path)
-            except (git.GitError, ServiceError):
-                # Refused (a hook, say): the index entry and the file exactly as the worker had them.
-                try:
-                    git.run(["update-index", "--force-remove", "--", name], ws.path)
-                    if entries:
-                        git.run(["update-index", "-z", "--index-info"], ws.path, input="\0".join(entries) + "\0")
-                finally:
-                    _replace(dir_fd, leaf, before, mode)
-                raise
-        finally:
-            os.close(dir_fd)
+        name, commit = commit_edit(ws, rel, data, base, "edit from review")
     blob = git.hash_blob(ws.path, data, name)
     bus.publish_ws(db, "workspace.edited", ws, path=name, commit=commit)
     return {"workspace_id": ws.id, "path": name, "commit": commit, "blob": blob,
             "stat": git.diff(ws.path, workspaces.require_base(ws), stat=True)}
+
+
+# -- a session's review ------------------------------------------------------------
+
+
+def _edit_session(db: DB, params: dict, body: Body, data: bytes | None) -> Any:
+    """The person's edit of any file on the session branch, from the session
+    review: committed there as ``review edits: <path>``, with the workspace
+    edit's checks. Refused while the supervisor is mid-turn or a merge into
+    the session branch is under way."""
+    root, ws = review.session(db, params["root"])
+    identity_lock.ensure(root)
+    rel = params.get("path") or _get(body, "path", required=True)
+    base = _get(body, "base", required=data is None)
+    with contextlib.ExitStack() as held:
+        try:
+            held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
+            held.enter_context(git.checkout_lock(ws.path, timeout=1))
+        except (BlockingIOError, git.GitError):
+            raise ServiceError("busy", f"a merge into {ws.branch} is under way; edit once it's done", 409) from None
+        if (root := _agent(db, root.id)).status in BUSY:
+            raise ServiceError("busy", f"the supervisor {root.id} is working; edit once it has stopped", 409)
+        before = git.out(["rev-parse", "HEAD"], ws.path)
+        name, commit = commit_edit(ws, rel, data, base.strip().lower() if base else None, review.EDIT_MESSAGE)
+        # Record only the one commit this edit made, directly on top of what was there: a hook that
+        # added commits of its own leaves them unrecorded, so they still need an audit.
+        # and touching only the edited path (a formatter hook may change its content, never other files).
+        if commit and git.out(["rev-parse", f"{commit}^"], ws.path) == before and git.run(
+                ["diff-tree", "--no-commit-id", "-r", "--name-only", "-z", commit], ws.path).stdout == name + "\0":
+            db.conn.execute("INSERT OR IGNORE INTO review_edits (workspace_id, sha) VALUES (?, ?)", (ws.id, commit))
+            db.conn.commit()
+    bus.publish_agent(db, "session.edited", root.id, path=name, commit=commit, deleted=data is None)
+    return {"root_id": root.id, "path": name, "commit": commit,
+            "blob": git.hash_blob(ws.path, data, name) if data is not None else None}
+
+
+def put_session_file(db: DB, params: dict, body: Body) -> Any:
+    """``content`` becomes the file; ``base`` is the blob sha GET .../file
+    gave (leave it out to create a new file)."""
+    return _edit_session(db, params, body, _content(body))
+
+
+def delete_session_file(db: DB, params: dict, body: Body) -> Any:
+    """``base`` (required) is the blob sha GET .../file gave."""
+    return _edit_session(db, params, body, None)
+
+
+def open_session_pr(db: DB, params: dict, body: Body) -> Any:
+    """Push the session branch and open its PR (``title``, ``body``,
+    ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
+    unless the session is ready. The job's result carries the URL."""
+    root, ws = review.session(db, params["root"])
+    identity_lock.ensure(root)
+    review.require_ready(db, root, ws)
+    title, text, draft = _get(body, "title"), _get(body, "body"), _get(body, "draft", bool, False)
+
+    def work(db: DB, job: Job) -> Any:
+        url = workspaces.pull_request(ws, title, draft, body=text)
+        return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
+
+    return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
 
 
 # -- goal ------------------------------------------------------------------------
@@ -756,6 +947,32 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env)
 
 
+def provider_trust(db: DB, params: dict, body: Body) -> Any:
+    """The person chose in the app to trust ``repo`` in this provider's CLI
+    (a preflight ``trust`` item): recorded where the CLI keeps its answer."""
+    repo = _get(body, "repo", required=True)
+    if not preflight.trust(params["provider"], repo):
+        raise ServiceError("not_stored", f"couldn't record {params['provider']}'s trust for {repo}", 422)
+    return {"provider": params["provider"], "repo": repo, "trusted": True}
+
+
+def provider_consent(db: DB, params: dict, body: Body) -> Any:
+    """The person accepted a preflight ``consent`` item (``id``) in the app:
+    brindle records it as the CLI does. Only this route, on the person's own
+    confirmation, ever records one."""
+    if _get(body, "accept", bool) is not True:
+        raise ServiceError("invalid", "accept must be true: only the person's confirmation records a consent")
+    item, repo, profile = _get(body, "id", required=True), _get(body, "repo"), _get(body, "profile")
+    env = None
+    if repo and profile:    # the launch it was asked for (the item's action names it): the same identity
+        env = agents.consent_identity(db, repo, profile, params["provider"], _get(body, "session"))
+    try:
+        preflight.record_consent(params["provider"], item, env, _get(body, "key"))
+    except preflight.StaleConsent as e:
+        raise ServiceError("conflict", str(e), 409) from None
+    return {"provider": params["provider"], "id": item, "recorded": True}
+
+
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
@@ -806,8 +1023,58 @@ def set_key(db: DB, params: dict, body: Body) -> Any:
     return terminal.open_action(f"key {name}", [*providers.brindle_invocation(), "keys", "set", name], cwd=repo)
 
 
+# -- engine ----------------------------------------------------------------------
+
+
+UPGRADE_TAIL = 20
+_upgrading: Job | None = None
+_upgrade_lock = threading.Lock()
+
+
+def _run_upgrade() -> tuple[int, str]:
+    """``uv tool upgrade brindle``: its exit status and output. uv is looked
+    up where its installer puts it too, since an app-started daemon's PATH
+    may not have it."""
+    import shutil
+    from pathlib import Path
+
+    uv = shutil.which("uv") or next((str(p) for p in (Path.home() / ".local/bin/uv", Path.home() / ".cargo/bin/uv")
+                                     if p.is_file()), None)
+    if uv is None:
+        return 127, "uv isn't installed: see https://docs.astral.sh/uv/"
+    try:
+        out = subprocess.run([uv, "tool", "upgrade", "brindle"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        return 124, "uv tool upgrade brindle took over 15 minutes and was stopped"
+    return out.returncode, out.stdout or ""
+
+
 def upgrade_engine(db: DB, params: dict, body: Body) -> Any:
-    return terminal.open_action("upgrade", ["uv", "tool", "upgrade", "brindle"])
+    """Upgrade brindle in the background, no terminal: ``job.progress``
+    (stage "upgrading") when it starts, then ``job.done`` or ``job.failed``,
+    the failure carrying the last lines of uv's output (the only time any of
+    it goes on the bus). A press while one runs gets that job back."""
+    global _upgrading
+    with _upgrade_lock:
+        if _upgrading is not None:
+            return _upgrading
+        _upgrading = job = Job(secrets.token_hex(8), "engine.upgrade")
+
+    def work(db: DB, job: Job) -> Any:
+        global _upgrading
+        try:
+            bus.publish(db, "job.progress", job=job.id, stage="upgrading")
+            code, output = _run_upgrade()
+        finally:
+            with _upgrade_lock:
+                _upgrading = None
+        if code != 0:
+            raise ServiceError("upgrade_failed", f"uv tool upgrade brindle exited {code}", 500,
+                               tail=output.splitlines()[-UPGRADE_TAIL:])
+        return {"upgraded": True}
+
+    return start_job("engine.upgrade", work, job=job)
 
 
 def _post(path: str, fn: Action) -> Route:
@@ -819,6 +1086,10 @@ ROUTES = [
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/handover", handover_session),
+    # GET on the file path reads (routes_read); agent callers are refused by the guard.
+    Route("/v1/sessions/{root:path}/file", _endpoint(put_session_file), methods=["PUT"]),
+    Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
+    _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
     _post("/agents/{id}/close", close_agent),
@@ -846,6 +1117,8 @@ ROUTES = [
     _post("/account/switch-org", account_switch_org),
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
+    _post("/providers/{provider}/trust", provider_trust),
+    _post("/providers/{provider}/consent", provider_consent),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
     _post("/terminals/{id}/input", terminal_input),

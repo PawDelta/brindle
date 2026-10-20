@@ -31,6 +31,7 @@ from brindle import (
     view,
     workspaces,
 )
+from brindle.daemon import session_review
 from brindle.daemon.routes_actions import read_edit_target
 from brindle.db import DB
 from brindle.service import inbox
@@ -39,6 +40,7 @@ from brindle.service.dto import (
     AgentDTO,
     DecisionDTO,
     GoalDTO,
+    PreflightItemDTO,
     ProfileDTO,
     RoutingDTO,
     RoutingProfileDTO,
@@ -150,6 +152,48 @@ def workspace_file(request: Request) -> Any:
     ws = DB().get_workspace(request.path_params["id"])
     if ws is None:
         raise ServiceError("not_found", "no such workspace", 404)
+    rel = request.query_params.get("path")
+    if not rel:
+        raise ServiceError("invalid", "path is required", 400)
+    name, dir_fd, _, data, _ = read_edit_target(ws, rel)
+    os.close(dir_fd)
+    return {"path": name, "content": data.decode(), "base": git.hash_blob(ws.path, data, name)}
+
+
+@_json
+def session_readiness(request: Request) -> Any:
+    """Whether brindle judges the session ready for a PR; ``reasons``: what
+    is missing, in plain words (none when it is ready)."""
+    db = DB()
+    root, ws = session_review.session(db, request.path_params["root"])
+    why = session_review.reasons(db, root, ws)
+    return {"root_id": root.id, "ready": not why, "reasons": why}
+
+
+@_json
+def session_diff(request: Request) -> Any:
+    """The session branch against its PR base, each file and hunk with its
+    authors (worker ids, "supervisor", "you") and the authors for filtering.
+    409 with ``reasons`` unless the session is ready."""
+    db = DB()
+    root, ws = session_review.session(db, request.path_params["root"])
+    session_review.require_ready(db, root, ws)
+    return session_review.diff(db, root, ws)
+
+
+@_json
+def session_pr_draft(request: Request) -> Any:
+    db = DB()
+    root, ws = session_review.session(db, request.path_params["root"])
+    session_review.require_ready(db, root, ws)
+    return session_review.draft(db, root, ws)
+
+
+@_json
+def session_file(request: Request) -> Any:
+    """``?path=``: any file in the session's checkout, read with the same
+    checks as ``PUT .../file``. ``base`` is the blob sha PUT and DELETE take."""
+    root, ws = session_review.session(DB(), request.path_params["root"])
     rel = request.query_params.get("path")
     if not rel:
         raise ServiceError("invalid", "path is required", 400)
@@ -286,6 +330,26 @@ def get_doctor(request: Request) -> Any:
 
 
 @_json
+def provider_preflight(request: Request) -> Any:
+    """What would stop a session on this provider in ``repo`` before its first
+    turn: the items POST /v1/sessions answers 409 with, for the identity its
+    chat would run as (see brindle.preflight). Native, which runs no chat,
+    and a request without ``repo`` get the provider's checks as brindle sees it."""
+    from brindle import preflight
+    from brindle.daemon.routes_actions import session_blockers
+
+    provider, repo = request.path_params["provider"], _repo(request)
+    if repo is None or provider == "native":
+        items = preflight.check(provider, repo)
+    else:
+        if provider not in preflight.PROVIDERS:
+            raise ServiceError("invalid", f"provider must be one of {', '.join(preflight.PROVIDERS)}")
+        blocked = session_blockers(DB(), repo, provider, read_only=True)
+        items = blocked.items if blocked else []
+    return [PreflightItemDTO(**i.to_json()).to_json() for i in items]
+
+
+@_json
 def account(request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
@@ -341,6 +405,11 @@ ROUTES = [
     Route("/v1/workspaces/{id:path}/diff", diff),
     # PUT on the same path is the edit (routes_actions); agent callers are refused by the guard.
     Route("/v1/workspaces/{id:path}/file", workspace_file),
+    Route("/v1/sessions/{root:path}/pr/readiness", session_readiness),
+    Route("/v1/sessions/{root:path}/pr/draft", session_pr_draft),
+    Route("/v1/sessions/{root:path}/diff", session_diff),
+    # PUT and DELETE on the same path edit (routes_actions).
+    Route("/v1/sessions/{root:path}/file", session_file),
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
@@ -349,6 +418,7 @@ ROUTES = [
     Route("/v1/config", get_config),
     Route("/v1/routing", get_routing),
     Route("/v1/doctor", get_doctor),
+    Route("/v1/providers/{provider}/preflight", provider_preflight),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
 ]
