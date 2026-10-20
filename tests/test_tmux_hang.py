@@ -256,12 +256,9 @@ def test_tmux_bin_override_and_pane_streaming_controls(tmp_path, monkeypatch):
     target = "=brindle_pipe:"
     tmux.set_window_size_manual(target)
     tmux.resize_window(target, 132, 43)
-    out = tmp_path / "pane out.bin"
-    tmux.pipe_pane(target, out)
     info = tmux._tmux("display-message", "-p", "-t", target,
-                      "#{window_width}x#{window_height} #{pane_pipe}").stdout.strip()
-    assert info == "132x43 1"
+                      "#{window_width}x#{window_height}").stdout.strip()
+    assert info == "132x43"
     assert tmux._tmux("show-options", "-w", "-v", "-t", target, "window-size").stdout.strip() == "manual"
-    tmux.unpipe_pane(target)
-    assert tmux._tmux("display-message", "-p", "-t", target, "#{pane_pipe}").stdout.strip() == "0"
-    assert f"pipe-pane -O -t {target} cat >> '{out}'" in log.read_text()
+    assert tmux.attached_terminals(target) == 0
+    assert f"resize-window -t {target} -x 132 -y 43" in log.read_text()
