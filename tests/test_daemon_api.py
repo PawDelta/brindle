@@ -5,9 +5,13 @@ import shutil
 import socket
 import stat
 import tempfile
+import threading
+from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
+from wsproto import ConnectionType, WSConnection
+from wsproto.events import AcceptConnection, CloseConnection, Request, TextMessage
 
 from brindle import cost, doctor, identity_lock, keystore, knowledge, procs, tmux, workspaces
 from brindle import kb as kb_mod
@@ -85,7 +89,7 @@ def test_websocket_token_is_its_first_frame(query, frame, reached):
         assert seen == [] and sent[-1] == {"type": "websocket.close", "code": WS_UNAUTHORIZED}
 
 
-def test_start_binds_loopback_and_keeps_its_files_private():
+def test_tcp_start_binds_loopback_only_and_keeps_its_files_private(monkeypatch):
     # A short directory: a Unix socket's path is limited to ~104 bytes.
     d = Path(tempfile.mkdtemp(prefix="bd-"))
     try:
@@ -103,6 +107,56 @@ def test_start_binds_loopback_and_keeps_its_files_private():
             lifecycle.cleanup(info)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+    monkeypatch.setattr(lifecycle, "HOST", "0.0.0.0")
+    with pytest.raises(lifecycle.DaemonError, match="loopback only"):
+        lifecycle.bind_tcp()
+
+
+def _ws_over_tcp(port: int, first: str) -> object:
+    """Open WS /v1/events on the daemon's TCP port and send ``first`` as the
+    first frame: the close code, or the type of the first message back."""
+    ws = WSConnection(ConnectionType.CLIENT)
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+        s.sendall(ws.send(Request(host=f"127.0.0.1:{port}", target="/v1/events?since=999999")))
+        while True:
+            ws.receive_data(s.recv(4096) or None)
+            for event in ws.events():
+                if isinstance(event, AcceptConnection):
+                    s.sendall(ws.send(TextMessage(first)))
+                elif isinstance(event, CloseConnection):
+                    return event.code
+                elif isinstance(event, TextMessage):
+                    return json.loads(event.data)["type"]
+
+
+def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(monkeypatch):
+    # The Windows app's way in: WSL2 forwards 127.0.0.1, and the token is read from daemon.json over \\wsl$.
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
+    socks, info = lifecycle.prepare(TOKEN, unix=False, tcp=True)
+    conn = lifecycle.connection(lifecycle.read_info())
+    assert conn["url"] == f"http://127.0.0.1:{info['port']}" and "token" not in conn
+    assert conn["windows_info_path"] == "\\\\wsl$\\Ubuntu" + str(lifecycle.info_path()).replace("/", "\\")
+    socks[0].listen()   # connections made before the server is up wait in the backlog
+    server = lifecycle.make_server(build_app(TOKEN, port=info["port"]))
+    thread = threading.Thread(target=asyncio.run, args=(server.serve(sockets=socks),))
+    thread.start()
+    try:
+        codes = []
+        for headers in ({}, {"Authorization": "Bearer wrong"}, AUTH):
+            http = HTTPConnection("127.0.0.1", info["port"], timeout=5)
+            http.request("GET", "/v1/meta", headers=headers)
+            codes.append(http.getresponse().status)
+            http.close()
+        assert codes == [401, 401, 200]
+        assert _ws_over_tcp(info["port"], "wrong") == WS_UNAUTHORIZED
+        assert _ws_over_tcp(info["port"], TOKEN) == "resnapshot"
+    finally:
+        server.should_exit = True
+        thread.join(10)
+        for s in socks:
+            s.close()
+        lifecycle.cleanup(info)
 
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
