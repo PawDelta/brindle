@@ -3,6 +3,7 @@ job whose end arrives on the bus, and a choice the person must make is a 409."""
 
 import asyncio
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -132,11 +133,11 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
             autopilot.choose_profile(db, "sup", str(repo), weight="light")
 
 
-@pytest.mark.parametrize("acc,why", [
-    (Access(org_id="acme", allowed_providers=("claude",)), "doesn't allow Codex"),
-    (Access(org_id="acme", error="couldn't read the policy"), "couldn't read the policy"),
+@pytest.mark.parametrize("acc", [
+    Access(org_id="acme", allowed_providers=("claude",)),
+    Access(org_id="acme", error="couldn't read the policy"),
 ], ids=["forbidden", "unreadable"])
-def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, acc, why):
+def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, acc):
     from brindle.pro import managed_models, team_policy
 
     monkeypatch.setattr(team_policy, "access", lambda repo: acc)
@@ -144,7 +145,7 @@ def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, a
     before = config._read_json(config.scope_paths(str(repo))["user"])
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "user",
                                                "tiers": {"light": ["developer-codex"]}})
-    assert (code, reply["error"]["code"]) == (403, "forbidden") and why in reply["error"]["message"]
+    assert (code, reply["error"]["code"]) == (403, "forbidden") and reply["error"]["message"]
     assert config._read_json(config.scope_paths(str(repo))["user"]) == before
 
 
@@ -154,22 +155,39 @@ def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, a
     ("/v1/engine/upgrade", 200, "upgrade"),
     ("/v1/keys/BRINDLE_TOKEN/set", 400, None),
 ], ids=["login", "key", "upgrade", "bad-key"])
-def test_login_and_secret_actions_open_a_terminal_the_app_streams(world, monkeypatch, path, status, command):
+def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeypatch, path, status, command):
     from brindle import providers, tmux
     from brindle.daemon import terminal
 
-    windows = {}
+    windows = {}            # terminal id -> [window name, argv, alive]
+    second: list = []       # a second press, made while the first is creating its window
+
+    def ensure_session(session, cwd, env):
+        if not second:
+            t = threading.Thread(target=lambda: second.append(_send("POST", path)))
+            t.start()
+            t.join(0.5)     # it must wait for the first window rather than make its own
+            second.append(t)
+
+    def new_window(session, name, cwd, argv, env, tag):
+        windows[tag[1]] = [name, argv, True]
+        return f"%{len(windows)}"
+
     monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
-    monkeypatch.setattr(tmux, "ensure_session", lambda session, cwd, env: None)
-    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag: windows.setdefault(
-        tag[1], (session, argv)) and "%9")
-    monkeypatch.setattr(tmux, "tagged_pane", lambda session, key, value: "%9" if value in windows else None)
-    monkeypatch.setattr(tmux, "window_alive", lambda target: True)
+    monkeypatch.setattr(tmux, "ensure_session", ensure_session)
+    monkeypatch.setattr(tmux, "new_window", new_window)
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
+        (f"%{i + 1}", name, alive, tid) for i, (tid, (name, _, alive)) in enumerate(windows.items())])
     code, reply = _send("POST", path)
     assert code == status, reply
     if command is None:
-        assert windows == {}
+        assert windows == {} and second == []
         return
-    session, argv = windows[reply["terminal"]]
-    assert session == terminal.ACTION_SESSION and command in argv
-    assert terminal._find(reply["terminal"])["target"] == "%9"
+    thread = second.pop(0)
+    thread.join(5)
+    assert second == [(200, {"terminal": reply["terminal"], "started": False})]
+    assert reply["started"] and len(windows) == 1 and command in windows[reply["terminal"]][1]
+    assert terminal._find(reply["terminal"])["target"] == "%1"
+    windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
+    code, again = _send("POST", path)
+    assert (code, again["started"], len(windows)) == (200, True, 2)

@@ -580,8 +580,10 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
 
 
 # -- terminals: the real command in a terminal the app shows -------------------------
-# Each answers {"terminal": id} for WS /v1/terminal/{id}. The person signs in or
-# types the secret there; the daemon never automates a sign-in or sees a key.
+# Each answers {"terminal": id, "started": bool} for WS /v1/terminal/{id}; while
+# the same action is still running, a second press gets its terminal (started
+# False). The person signs in or types the secret there; the daemon never
+# automates a sign-in or sees a key.
 
 
 def provider_login(db: DB, params: dict, body: Body) -> Any:
@@ -594,7 +596,7 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"provider must be one of {', '.join(CLI_NAMES)}")
     browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
     env = {"BROWSER": browser["BROWSER"]} if browser else {}
-    return {"terminal": terminal.open_action(f"login {provider}", picker._login_command(provider), env=env)}
+    return terminal.open_action(f"login {provider}", picker._login_command(provider), env=env)
 
 
 def set_key(db: DB, params: dict, body: Body) -> Any:
@@ -606,12 +608,11 @@ def set_key(db: DB, params: dict, body: Body) -> Any:
         keystore.check_name(name, repo)
     except keystore.CredentialError as e:
         raise ServiceError("invalid", str(e)) from e
-    return {"terminal": terminal.open_action(f"key {name}", [*providers.brindle_invocation(), "keys", "set", name],
-                                             cwd=repo)}
+    return terminal.open_action(f"key {name}", [*providers.brindle_invocation(), "keys", "set", name], cwd=repo)
 
 
 def upgrade_engine(db: DB, params: dict, body: Body) -> Any:
-    return {"terminal": terminal.open_action("upgrade", ["uv", "tool", "upgrade", "brindle"])}
+    return terminal.open_action("upgrade", ["uv", "tool", "upgrade", "brindle"])
 
 
 def _post(path: str, fn: Action) -> Route:

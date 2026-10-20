@@ -279,21 +279,31 @@ def test_routing_shows_each_tier_and_setting_with_its_source(seeded, monkeypatch
 
 
 def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch):
+    from brindle import providers
     from brindle.pro import managed_models, team_policy
 
-    acc = team_policy.Access(org_id="acme", allowed_providers=("claude",), deny_personal_keys=True)
+    # The org allows one Bedrock id, which its enforced Claude route pins opus to (developer-heavy's model).
+    route_id = "us.anthropic.claude-opus-x-v1:0"
+    setup = team_policy.AgentSetup(claude=team_policy.ClaudeSetup(
+        route="bedrock", models=team_policy.ModelsSetup(opus=route_id)), enforce=True)
+    acc = team_policy.Access(org_id="acme", allowed_providers=("claude",), allowed_models=(route_id,),
+                             deny_personal_keys=True, agent_setup=setup)
     monkeypatch.setattr(team_policy, "access", lambda repo: acc)
     monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
     _, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
     policy = body["policy"]
     assert (policy["applies"], policy["editable"], policy["allowed_providers"]) == (True, True, ["claude"])
     assert {(lock["kind"], lock["name"]) for lock in policy["locked"]} == {
         ("provider", "codex"), ("provider", "antigravity"), ("provider", "opencode"), ("keys", "personal_api_keys")}
     rows = {p["name"]: p for p in body["profiles"]}
-    assert rows["developer"]["allowed"] and "doesn't allow Codex" in rows["developer-codex"]["refusal"]
-    medium = body["tiers"]["medium"]["models"][0]
-    assert (medium["provider_name"], medium["allowed"]) == ("Claude Code", True)
-    assert medium["profile"] in policy["models"][medium["model"]]
+    assert rows["developer-heavy"]["allowed"] and rows["developer-heavy"]["refusal"] is None
+    for refused in ("developer-light", "developer-codex"):      # a model, then a provider, the org doesn't allow
+        assert not rows[refused]["allowed"] and rows[refused]["refusal"]
+    assert "developer-heavy" in policy["models"][route_id] and "developer-light" not in policy["models"][route_id]
+    heavy = [m for t in body["tiers"].values() for m in t["models"] if m["profile"] == "developer-heavy"]
+    assert heavy and all((m["model"], m["provider_name"], m["allowed"]) == (route_id, "Claude Code", True)
+                         for m in heavy)
 
 
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):

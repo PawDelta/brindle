@@ -38,6 +38,7 @@ import json
 import logging
 import re
 import secrets
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,7 @@ RESET = b"\x1bc"                # RIS: the client's terminal starts from a clean
 ACTION_SESSION = "brindle-app"  # the daemon's own tmux session: the app's action terminals
 ACTION_TAG = "@brindle_terminal"
 ACTION_ID = re.compile(r"t-[0-9a-f]{16}")
+_opening = threading.Lock()
 
 
 class Ring:
@@ -498,24 +500,34 @@ class Hub:
 
 
 def open_action(kind: str, command: list[str], cwd: str | None = None,
-                env: dict[str, str] | None = None) -> str:
-    """Run ``command`` in a new window of the daemon's own tmux session
-    (ACTION_SESSION) and return its terminal id, which ``WS
-    /v1/terminal/{id}`` streams like an agent's pane. The person types into
-    it there (a sign-in, a secret): nothing they type passes through the API.
-    The pane stays after the command exits, so its last words can be read."""
-    terminal_id = "t-" + secrets.token_hex(8)
-    cwd = cwd or str(Path.home())
-    tmux.ensure_session(ACTION_SESSION, cwd, {})
-    tmux.new_window(ACTION_SESSION, kind, cwd, command, env or {}, tag=(ACTION_TAG, terminal_id))
-    return terminal_id
+                env: dict[str, str] | None = None) -> dict:
+    """Run ``command`` in a new window (named ``kind``: the action and what
+    it acts on, e.g. "login codex") of the daemon's own tmux session
+    (ACTION_SESSION) and return ``{"terminal": id, "started": True}``; the id
+    is what ``WS /v1/terminal/{id}`` streams like an agent's pane. While a
+    window for ``kind`` is still running, a second press gets that one
+    (``started`` False) rather than a second sign-in or upgrade racing it;
+    once it has exited, a new one starts. The person types into it there (a
+    sign-in, a secret): nothing they type passes through the API. The pane
+    stays after the command exits, so its last words can be read."""
+    with _opening:      # find-or-create as one step: two presses at once start one
+        for _pane, name, alive, terminal_id in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG):
+            if alive and name == kind:
+                return {"terminal": terminal_id, "started": False}
+        terminal_id = "t-" + secrets.token_hex(8)
+        cwd = cwd or str(Path.home())
+        tmux.ensure_session(ACTION_SESSION, cwd, {})
+        tmux.new_window(ACTION_SESSION, kind, cwd, command, env or {}, tag=(ACTION_TAG, terminal_id))
+        return {"terminal": terminal_id, "started": True}
 
 
 def _find_action(terminal_id: str) -> dict:
-    pane = tmux.tagged_pane(ACTION_SESSION, ACTION_TAG, terminal_id)
-    if pane is None:
+    found = [(pane, alive) for pane, _, alive, tag in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG)
+             if tag == terminal_id]
+    if not found:
         return {"type": "error", "code": "not_found", "message": f"no terminal {terminal_id}"}
-    if tmux.window_alive(pane):
+    pane, alive = found[0]
+    if alive:
         return {"type": "terminal", "terminal": terminal_id, "target": pane, "server": tmux.current_server()}
     try:
         text = tmux.capture(pane, lines=SEED_LINES, escapes=True)

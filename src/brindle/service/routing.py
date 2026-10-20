@@ -39,13 +39,19 @@ class RoutingPolicy:
     def applies(self) -> bool:
         return self.access.org_id is not None or self.access.error is not None
 
-    def runs(self, profile: str) -> tuple[str | None, str | None]:
-        """(provider, model) a worker on ``profile`` runs, as check_assign resolves them."""
+    def _fields(self, profile: str) -> tuple[str | None, str | None]:
+        """(provider, model) of ``profile`` as check_assign is given them (an alias kept)."""
         if profile not in self._runs:
             from brindle.policy import _profile_fields
 
             self._runs[profile] = _profile_fields(profile, self.repo_root)
         return self._runs[profile]
+
+    def runs(self, profile: str) -> tuple[str | None, str | None]:
+        """(provider, model) a worker on ``profile`` runs: an alias the org's
+        Claude route pins is named by its route id, as the policy names it."""
+        provider, model = self._fields(profile)
+        return provider, self.access.route_model(provider, model)
 
     def refusal(self, profile) -> str | None:
         """Why the org won't let a worker run on ``profile`` (a Profile), or None."""
@@ -54,12 +60,13 @@ class RoutingPolicy:
         acc = self.access
         if acc.error:
             return acc.error
-        provider, model = self.runs(profile.name)
+        provider, model = self._fields(profile.name)
         if not provider:
             return f"brindle can't tell which agent profile {profile.name!r} runs"
         if why := acc.refusal(provider):
             return why
-        if not acc.allows_model(model):
+        if not acc.allows_run(provider, model):
+            model = acc.route_model(provider, model)
             return (f"profile {profile.name!r} runs {model or 'no declared model'}; org {acc.org_id} "
                     f"allows only {', '.join(acc.allowed_models or ()) or 'no models'}")
         if acc.allowed_profiles is not None and profile.name not in acc.allowed_profiles:

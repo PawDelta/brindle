@@ -555,17 +555,19 @@ def get_pane_tag(pane: str, key: str) -> str | None:
     return proc.stdout.strip() or None
 
 
-def tagged_pane(session: str, key: str, value: str) -> str | None:
-    """The pane of ``session`` whose pane-level user option ``key`` is
-    ``value``, or None (no such pane, or no such session)."""
-    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F", f"#{{pane_id}}\t#{{{key}}}", check=False)
+def tagged_panes(session: str, key: str) -> list[tuple[str, str, bool, str]]:
+    """(pane id, window name, alive, value) of each pane of ``session`` that
+    sets the pane-level user option ``key``; empty when there is no such session."""
+    fmt = f"#{{pane_id}}\t#{{window_name}}\t#{{pane_dead}}\t#{{{key}}}"
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F", fmt, check=False)
     if proc.returncode != 0:
-        return None
+        return []
+    out = []
     for line in proc.stdout.splitlines():
-        pane, _, tag = line.partition("\t")
-        if tag == value:
-            return pane
-    return None
+        pane, name, dead, tag = (line.split("\t") + ["", "", ""])[:4]
+        if tag:
+            out.append((pane, name, dead.strip() == "0", tag))
+    return out
 
 
 def agent_pane_in_window(window: str, sidebar: str | None) -> str | None:
