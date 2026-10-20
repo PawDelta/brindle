@@ -580,7 +580,9 @@ def commit_edit(ws: Workspace, rel: str, data: bytes | None, base: str | None,
                 else:
                     # --only commits just this path: what is staged elsewhere is left alone,
                     # and a refused commit leaves the index as it was.
-                    git.run([*lit, "commit", "-q", "--only", "-m", f"{message}: {name}", "--", name], ws.path)
+                    trailer = ["-m", review.EDIT_TRAILER] if message == review.EDIT_MESSAGE else []
+                    git.run([*lit, "commit", "-q", "--only", "-m", f"{message}: {name}", *trailer, "--", name],
+                            ws.path)
                     commit = git.out(["rev-parse", "HEAD"], ws.path)
         except (git.GitError, ServiceError):
             # Refused (a hook, say): the index entry and the file exactly as they were.
