@@ -13,6 +13,7 @@
 #
 #   DEMO_COLS / DEMO_ROWS   terminal size recorded (default 150x45)
 #   DEMO_TIMEOUT            hard stop, seconds (default 1200)
+#   DEMO_PROJECT            brindle checkout to run the demo from (default: this one)
 #   DEMO_SECONDS            target GIF length in seconds (default 20); sets the speed
 #   DEMO_SPEED              agg playback speed (default: whatever gives DEMO_SECONDS)
 #   DEMO_FONTS              agg font list (default: a monospace font, then Apple Symbols,
@@ -26,6 +27,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-"$ROOT/assets/brindle-demo.gif"}
+PROJECT=${DEMO_PROJECT:-$ROOT}
 COLS=${DEMO_COLS:-150}
 ROWS=${DEMO_ROWS:-45}
 TIMEOUT=${DEMO_TIMEOUT:-1200}
@@ -127,7 +129,7 @@ env -u TMUX -u TMUX_PANE TERM=xterm-256color COLORTERM=truecolor \
     asciinema rec --headless --quiet --overwrite \
     --window-size "${COLS}x${ROWS}" \
     --title "brindle demo" \
-    --command "uv run --project '$ROOT' brindle demo" \
+    --command "uv run --project '$PROJECT' brindle demo" \
     "$CAST" &
 REC_PID=$!
 
@@ -144,7 +146,7 @@ SESSION="brindle_${name//./_}_root"
 echo "record_demo: demo repo $DEMO (tmux session $SESSION)"
 
 progress() {
-    (cd "$DEMO" && uv run --project "$ROOT" brindle autopilot 2>/dev/null) || true
+    (cd "$DEMO" && uv run --project "$PROJECT" brindle autopilot 2>/dev/null) || true
 }
 
 # Poll the goal until every milestone is verified, or the hard timeout hits.
@@ -197,6 +199,18 @@ events = [json.loads(l) for l in lines[1:] if l.strip()]
 last = max((i for i, e in enumerate(events) if e[1] == "o" and "\x1b[?1049l" in e[2]), default=None)
 if last is not None:
     events = events[:last]
+# End on the goal reached: keep half a second after the sidebar first draws
+# "N of N verified" (time for its repaint to finish), then cut, so the GIF
+# ends on the finished dashboard rather than the supervisor's wrap-up.
+done = re.compile(r"\b(\d+) of \1 verified")
+t, stop = 0.0, None
+for i, e in enumerate(events):
+    t += e[0]
+    if stop is None and e[1] == "o" and done.search(e[2]):
+        stop = t + 0.5
+    if stop is not None and t > stop:
+        events = events[:i]
+        break
 # Drop any output that shows your home directory (a startup warning quoting
 # your own ~/.claude/settings.json, say), keeping the timing: later frames
 # repaint those cells anyway.
