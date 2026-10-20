@@ -60,7 +60,7 @@ def reviewers(db, monkeypatch):
     """Reviews start without a process; the list holds the reviewers started."""
     started: list[Agent] = []
 
-    def fake_review(db_, caller, ws, profile=None, focus=None, cfg=None, check_summary=None):
+    def fake_review(db_, caller, ws, profile=None, focus=None, cfg=None, check_summary=None, **kw):
         a = Agent(f"rev{len(started)}", ws.id, "reviewer", "claude", caller.id, "review",
                   "processing", "@r", None, time.time(), task=check_summary)   # task: what its prompt carried
         db_.add_agent(a)

@@ -597,6 +597,8 @@ def retry_reviewer(db, agent, ws):
             f"the automatic retry could not start ({type(exc).__name__}). Check launch configuration.") from exc
     # This attempt is over once a replacement exists. Keep its failure log for
     # diagnostics, but never let it compete with later reviews or helpers.
+    db.conn.execute("UPDATE review_claims SET agent_id=? WHERE workspace_id=? AND agent_id=?",
+                    (replacement.id, ws.id, agent.id))   # the commit's one reviewer now
     db.set_result(agent.id, f"Superseded by reviewer {replacement.id} after MCP startup failed.")
     return replacement
 
