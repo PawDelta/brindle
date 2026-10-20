@@ -436,17 +436,27 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
             _replace(dir_fd, leaf, data, mode)
             commit = None
             # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.
-            # --only commits just this path and leaves what the worker has staged alone.
+            lit = ["--literal-pathspecs"]
+            tracked = git.ok([*lit, "ls-files", "--error-unmatch", "--", name], ws.path)
             try:
                 # git reads the path itself: a directory swapped for a symlink meanwhile would commit what it points at.
                 if os.path.realpath(os.path.join(ws.path, name)) != os.path.join(os.path.realpath(ws.path), name):
                     raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
-                if not git.ok(["--literal-pathspecs", "diff", "--quiet", "HEAD", "--", name], ws.path):
-                    git.run(["--literal-pathspecs", "commit", "-q", "--only", "-m", f"edit from review: {name}",
-                             "--", name], ws.path)
+                if not tracked:
+                    git.run([*lit, "add", "--", name], ws.path)     # commit --only needs git to know a new file
+                if git.ok([*lit, "diff", "--quiet", "HEAD", "--", name], ws.path):
+                    # Back to HEAD's content: nothing to commit, but the index drops what was staged for it.
+                    git.run([*lit, "add", "--", name], ws.path)
+                else:
+                    # --only commits just this path: what the worker has staged elsewhere is left alone,
+                    # and a refused commit leaves the index as it was.
+                    git.run([*lit, "commit", "-q", "--only", "-m", f"edit from review: {name}", "--", name],
+                            ws.path)
                     commit = git.out(["rev-parse", "HEAD"], ws.path)
             except (git.GitError, ServiceError):
                 _replace(dir_fd, leaf, before, mode)    # refused (a hook, say): the file as the worker had it
+                if not tracked:
+                    git.run([*lit, "rm", "-q", "--cached", "--ignore-unmatch", "--", name], ws.path, check=False)
                 raise
         finally:
             os.close(dir_fd)

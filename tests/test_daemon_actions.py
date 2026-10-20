@@ -101,6 +101,8 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
     ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
     ("app.py", "shown", "busy", 409),
     ("app.py", "shown", "hook-refuses", 409),   # the file goes back; the worker's index survives
+    ("new.txt", "shown", None, 200),            # a file git doesn't track yet
+    ("app.py", "shown", "to-head", 200),        # back to HEAD's content: no commit, the staged version goes
     pytest.param("app.py", "shown", "agent", 403, marks=pytest.mark.variant("an agent holding the token")),
     ("../proj/app.py", "shown", None, 400),
     ("out/m.py", "shown", None, 400),           # a symlinked directory leading out of the worktree
@@ -109,8 +111,8 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
                  marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
     pytest.param("pkg/m.py", "shown", "swap", 400,
                  marks=pytest.mark.variant("a directory swapped for an escaping symlink mid-edit")),
-], ids=["edit-commits", "edit-stale", "edit-busy", "edit-refused", "edit-agent", "edit-dotdot", "edit-symlink",
-        "edit-git", "edit-pathspec", "edit-swap"])
+], ids=["edit-commits", "edit-stale", "edit-busy", "edit-refused", "edit-new-file", "edit-to-head", "edit-agent",
+        "edit-dotdot", "edit-symlink", "edit-git", "edit-pathspec", "edit-swap"])
 def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, monkeypatch,
                                                            path, base, setup, status):
     from brindle import git
@@ -126,6 +128,7 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
     (wt / "abc.txt").write_text("wip\n")
     sh("git add app.py abc.txt", wt)
     (wt / "app.py").write_text("print('working')\n")
+    (wt / "new.txt").write_text("draft\n")
     outside.mkdir()
     (outside / "m.py").write_text("outside\n")
     (wt / "out").symlink_to(outside)
@@ -149,10 +152,11 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
 
         monkeypatch.setattr(git, "hash_blob", swap_then_hash)
     head, staged = sh("git rev-parse HEAD", wt), sh("git diff --cached", wt)
-    shown = sh(f"git hash-object {'app.py' if path == 'app.py' else 'pkg/m.py'}", wt)[:7]
+    shown = sh(f"git hash-object {path if path in ('app.py', 'new.txt') else 'pkg/m.py'}", wt)[:7]
+    content = "print('hi')\n" if setup == "to-head" else "print('bye')\n"
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent ew")
     code, reply = _send("PUT", "/v1/workspaces/proj/w-e/file",
-                        {"path": path, "content": "print('bye')\n", "base": shown if base == "shown" else base},
+                        {"path": path, "content": content, "base": shown if base == "shown" else base},
                         310 if setup == "agent" else None)
     assert code == status, reply
     edited = bus.tail(db, kinds=("workspace.edited",))
@@ -163,12 +167,15 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
         if setup == "swap":     # the write went to the file it opened, and was put back
             assert (wt / "pkg.moved" / "m.py").read_text() == "print('hi')\n"
         return
+    cached = sh("git diff --cached --name-only", wt).splitlines()
+    assert "abc.txt" in cached and path not in cached and (wt / path).read_text() == content
+    if setup == "to-head":
+        assert reply["commit"] is None and sh("git rev-parse HEAD", wt) == head
+        return
     assert sh("git log -1 --format=%s rev", wt) == f"edit from review: {path}"
     assert sh("git diff-tree --no-commit-id --name-only -r HEAD", wt) == path
     assert sh(f"git show 'rev:{path}'", wt) == "print('bye')"
-    cached = sh("git diff --cached --name-only", wt).splitlines()
-    assert "abc.txt" in cached and path not in cached
-    assert (wt / path).read_text() == "print('bye')\n" and path in reply["stat"]
+    assert path in reply["stat"]
     assert reply["commit"] == sh("git rev-parse HEAD", wt)
     assert [e["workspace_id"] for e in edited] == ["proj/w-e"]
 
