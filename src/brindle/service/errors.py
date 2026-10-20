@@ -8,6 +8,7 @@ from typing import Any
 
 from brindle import (
     agents,
+    autopilot,
     coordinator,
     git,
     profiles,
@@ -39,7 +40,7 @@ _MAP: tuple[tuple[tuple[type[BaseException], ...], str, int], ...] = (
     ((agents.StillRunning,), "still_running", 409),
     ((CostNotEntitled, LicenseNotEntitled), "not_entitled", 402),
     ((AuthError,), "signed_out", 401),
-    ((profiles.ProfileError, coordinator.CoordinatorError), "invalid", 400),
+    ((profiles.ProfileError, coordinator.CoordinatorError, autopilot.AutopilotError), "invalid", 400),
     ((agents.AgentError, workspaces.WorkspaceError, rewind.RewindError, scratch.ScratchError,
       repos_mod.RepoError, git.GitError), "conflict", 409),
     ((tmux.TmuxError,), "terminal_unavailable", 503),

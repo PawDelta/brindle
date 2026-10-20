@@ -643,6 +643,26 @@ def set_enabled(db: DB, root_id: str, on: bool) -> None:
     db.update_autopilot(root_id, **fields)
 
 
+def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]:
+    """``set_goal``'s milestones from their JSON form, {"title", "check",
+    "detail", "profile", "repo"}; a check may name its repo as "@<alias>: <command>"."""
+    from brindle import repos
+
+    items = []
+    for m in milestones:
+        title = str(m.get("title", "")).strip()
+        if not title:
+            raise AutopilotError("Every milestone needs a title.")
+        repo_alias, check = repos.split_check(str(m.get("check") or ""))
+        repo_alias = str(m.get("repo") or "").strip() or repo_alias
+        if repo_alias and repos.resolve_attached(db, root_id, repo_alias) is None:
+            raise AutopilotError(f"Milestone {title!r} names repo {repo_alias!r}, which isn't attached "
+                                 "to this session (list_repos shows what is).")
+        items.append((title, check, (str(m.get("detail") or "").strip() or None),
+                      (str(m.get("profile") or "").strip() or None), repo_alias))
+    return items
+
+
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo]])``.
@@ -1171,10 +1191,13 @@ def _detach(args: list[str]) -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | None) -> str:
+def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | None,
+                        detach=None) -> str:
     """Start the milestone checks detached and return at once. The result is
     delivered to the session root's inbox (see cli._check_milestones). A full
-    suite can outrun an MCP call's time limit, and nothing should wait on it."""
+    suite can outrun an MCP call's time limit, and nothing should wait on it.
+    ``detach`` starts the helper's argv (the daemon passes one that also
+    reports when it exits)."""
     from brindle.providers import brindle_invocation
 
     ap = db.get_autopilot(root_id)
@@ -1185,7 +1208,7 @@ def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | Non
     args = [*brindle_invocation(), "_check-milestones", root_id, ws.id]
     if position is not None:
         args += ["--position", str(position)]
-    _detach(args)
+    (detach or _detach)(args)
     which = f"milestone {position}" if position else "every milestone"
     return (f"Checking {which} in the background (the checks run in your checkout; results "
             "already recorded for this commit are reused). The result arrives as a message; "
