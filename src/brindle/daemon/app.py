@@ -8,13 +8,14 @@ import shutil
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
 from starlette.types import ASGIApp
 
 import brindle
 from brindle import airgap
 from brindle.config import db_path
 from brindle.daemon.auth import Guard
+from brindle.daemon.events import events
 from brindle.daemon.routes_actions import ROUTES as ACTIONS
 
 API_VERSION = "1.0"
@@ -32,7 +33,10 @@ async def meta(request: Request) -> JSONResponse:
     })
 
 
-def build_app(token: str, port: int | None = None) -> ASGIApp:
+def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
     """The daemon's ASGI app. ``port``: its TCP port, if it listens on one
-    (pages served from there count as its own Origin)."""
-    return Guard(Starlette(routes=[Route("/v1/meta", meta), *ACTIONS]), token, port)
+    (pages served from there count as its own Origin). ``poller``: the Pro
+    status poller whose bar text and notices ``/v1/events`` relays."""
+    app = Starlette(routes=[Route("/v1/meta", meta), WebSocketRoute("/v1/events", events), *ACTIONS])
+    app.state.poller = poller
+    return Guard(app, token, port)
