@@ -349,6 +349,19 @@ def test_add_dir_is_never_the_last_flag():
     assert argv[last + 2].startswith("--"), argv[last:]
 
 
+@pytest.mark.parametrize("configured, expected", [(None, "default"), ("auto", "auto")])
+def test_claude_permission_mode_defaults_to_the_user_config(configured, expected):
+    from dataclasses import replace
+
+    from brindle import config
+
+    if configured:
+        config.set_user("claude_permission_mode", configured)
+    profile = replace(load_profile("developer"), permission_mode=None)
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    assert argv[argv.index("--permission-mode") + 1] == expected
+
+
 def test_repo_read_dirs_become_read_only_allow_rules(ws):
     """worker_extra_read_dirs reach Claude Code as Read allow rules, never --add-dir (which also writes)."""
     from pathlib import Path
