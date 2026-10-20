@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle import agents, git, history, knowledge, pool, scratch, tmux, workspaces
+from brindle import agents, bus, git, history, knowledge, pool, scratch, tmux, workspaces
 from brindle.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -166,6 +166,7 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
     _repoint_orphaned_tasks(db, new.id)
+    bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
         agents.pause(db, old_root_id, stop_local_models=False)
     return new
