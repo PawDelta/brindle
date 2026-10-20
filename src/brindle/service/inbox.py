@@ -304,10 +304,12 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
         return None
     menu = read_menu(screen)
     fp = menu.fingerprint
-    # What the hook recorded is this prompt only when the screen names it, and
+    # What the hook recorded is this prompt only when it is the newest request
+    # recorded, the prompt's own lines (not the transcript) show all of it, and
     # it wasn't first shown as another prompt (an older request, asked again).
-    row = next((r for r in rows if r["request"] != "null" and r["fingerprint"] in (None, fp)
-                and _on_screen(recorded(r), menu.wording)), None)   # the prompt's own lines, not the transcript
+    newest = next((r for r in rows if r["request"] != "null"), None)
+    row = newest if (newest is not None and newest["fingerprint"] in (None, fp)
+                     and _on_screen(recorded(newest), menu.wording)) else None
     if row is not None and row["fingerprint"] is None:
         db.note_permission_fingerprint(agent.id, row["tool_use_id"], fp)
         row["fingerprint"] = fp
@@ -325,12 +327,20 @@ def pending_permission(db: DB, agent: Agent) -> Pending | None:
 
 
 def _on_screen(req: permissions.Request, wording: str) -> bool:
-    """Whether the prompt's ``wording`` names what ``req`` asks for: the
-    start of its command or URL, or its file's name (CLIs shorten paths)."""
-    text = " ".join(wording.split())
-    lines = req.target().strip().splitlines()
-    head = " ".join(lines[0].split())[:80] if lines else ""
-    return bool(head) and head in text or bool(req.path) and os.path.basename(req.path) in text
+    """Whether the prompt's ``wording`` shows all of what ``req`` asks for:
+    its whole command or URL (whitespace aside), or its whole path, as given
+    or relative to where the agent works (CLIs shorten paths to that). Part
+    of it is not enough: the person must see what they approve."""
+    def flat(s: str) -> str:
+        return " ".join(s.split())
+
+    text = flat(wording)
+    if req.path:
+        base = req.cwd or req.worktree
+        shown = [req.path, *([os.path.relpath(req.path, base)] if base else [])]
+        return any(flat(p) and flat(p) in text for p in shown)
+    target = flat(req.command or req.url or req.tool or "")
+    return bool(target) and target in text
 
 
 def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
