@@ -195,7 +195,10 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
 
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
-    activity = Activity(build_app(token, port=info["port"]))
+    from brindle.daemon.events import start_poller
+
+    poller = start_poller()
+    activity = Activity(build_app(token, port=info["port"], poller=poller))
     server = uvicorn.Server(uvicorn.Config(activity, lifespan="off", log_level="warning",
                                            access_log=False))
 
