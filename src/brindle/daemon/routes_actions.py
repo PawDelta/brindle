@@ -13,6 +13,7 @@ they finish even if the daemon exits first."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import io
@@ -25,8 +26,8 @@ import subprocess
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO
+from pathlib import PurePosixPath
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -358,92 +359,43 @@ def remove_workspace(db: DB, params: dict, body: Body) -> Any:
 BUSY = ("starting", "processing", "waiting")
 
 
-def _open_edit_target(ws: Workspace, rel: str) -> tuple[str, BinaryIO]:
-    """``rel`` (normalized) and its file opened for reading and writing: a
-    relative path with no ``..`` and nothing in .git, opened one directory
-    at a time from the worktree without following a symlink anywhere, so
-    nothing swapped in after this check can redirect the write."""
+def _edit_dir(ws: Workspace, rel: str) -> tuple[str, int, str]:
+    """``rel`` normalized, an open descriptor of its directory, and the
+    file's own name in it: a relative path with no ``..`` and nothing in
+    .git, its directories opened one at a time from the worktree without
+    following a symlink, so nothing swapped in later can redirect a write."""
     parts = PurePosixPath(rel).parts
     if (not parts or PurePosixPath(rel).is_absolute() or "\\" in rel
             or any(p == ".." or p.lower() == ".git" for p in parts)):
         raise ServiceError("invalid", f"{rel!r} isn't a path inside the worktree")
-    dirs = [os.open(ws.path, os.O_RDONLY | os.O_DIRECTORY)]
+    fd = os.open(ws.path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         for part in parts[:-1]:
-            dirs.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dirs[-1]))
-        fd = os.open(parts[-1], os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirs[-1])
-    except FileNotFoundError:
-        raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
-    except OSError:     # a symlink (ELOOP, ENOTDIR) or not a file
-        raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
-    finally:
-        for d in dirs:
-            os.close(d)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+            fd, parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd), fd
+            os.close(parent)
+    except OSError as e:
         os.close(fd)
-        raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
-    return "/".join(parts), os.fdopen(fd, "r+b")
+        if isinstance(e, FileNotFoundError):
+            raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
+        raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
+    return "/".join(parts), fd, parts[-1]
 
 
-def _build_commit(ws: Workspace, head: str, entry: str) -> str | None:
-    """A commit on ``head`` that differs only by index ``entry``
-    (``mode,blob,name``), built in a scratch index so the worker's own index
-    is left alone and nothing reads the name as a pathspec. None when
-    ``head`` has it already. Nothing moves the branch here."""
-    index = Path(git.out(["rev-parse", "--absolute-git-dir"], ws.path)) / "brindle-edit.index"
-    env = {**os.environ, "GIT_INDEX_FILE": str(index)}
+def _replace(dir_fd: int, leaf: str, data: bytes, mode: int) -> None:
+    """Put ``data`` at ``leaf`` by writing a temp file beside it and renaming
+    it over, so the file there stays whole until the rename."""
+    tmp = f".{leaf}.brindle-edit-{secrets.token_hex(4)}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
     try:
-        git.run_env(["read-tree", head], ws.path, env)
-        git.run_env(["update-index", "--add", "--cacheinfo", entry], ws.path, env)
-        tree = git.run_env(["write-tree"], ws.path, env).stdout.strip()
-    finally:
-        index.unlink(missing_ok=True)
-    if tree == git.out(["rev-parse", f"{head}^{{tree}}"], ws.path):
-        return None
-    return git.out(["commit-tree", tree, "-p", head, "-m", f"edit from review: {entry.split(',', 2)[2]}"],
-                   ws.path)
-
-
-def _index_entry(ws: Workspace, name: str) -> str | None:
-    """The worker's index entry for ``name`` as ``mode,blob,name``, or None
-    if it isn't in the index. A path with a merge conflict is refused."""
-    listed = git.out(["--literal-pathspecs", "ls-files", "--stage", "-z", "--", name], ws.path)
-    entries = [e.partition("\t")[0].split() for e in listed.split("\0") if e]
-    if any(stage != "0" for _, _, stage in entries):
-        raise ServiceError("conflict", f"{name} has a merge conflict; resolve it first", 409)
-    return f"{entries[0][0]},{entries[0][1]},{name}" if entries else None
-
-
-def _rewrite(fh: BinaryIO, data: bytes) -> None:
-    fh.seek(0)
-    fh.truncate()
-    fh.write(data)
-    fh.flush()
-
-
-def _land(ws: Workspace, fh: BinaryIO, entry: str, head: str, commit: str | None, before: bytes,
-          data: bytes) -> None:
-    """Move the worker's index, then its branch (only if it is still at
-    ``head``), then the file to the edit; when a step fails, the ones before
-    it are undone, so a refused edit leaves all three as they were."""
-    name = entry.split(",", 2)[2]
-    old = _index_entry(ws, name)
-    ref, undo = f"refs/heads/{ws.branch}", []
-    try:
-        git.run(["update-index", "--add", "--cacheinfo", entry], ws.path)
-        undo.append(lambda: git.run(["update-index", "--add", "--cacheinfo", old] if old
-                                    else ["update-index", "--force-remove", "--", name], ws.path))
-        if commit:
-            git.run(["update-ref", "-m", f"edit from review: {name}", ref, commit, head], ws.path)
-            undo.append(lambda: git.run(["update-ref", ref, head, commit], ws.path))
-        undo.append(lambda: _rewrite(fh, before))
-        _rewrite(fh, data)
-    except (git.GitError, OSError):
-        for step in reversed(undo):
-            try:
-                step()
-            except (git.GitError, OSError):
-                log.exception("undoing an edit of %s in %s", name, ws.id)
+        with os.fdopen(fd, "wb") as fh:
+            os.fchmod(fh.fileno(), mode)
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, leaf, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp, dir_fd=dir_fd)
         raise
 
 
@@ -452,7 +404,8 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
     in the worker's worktree, committed on its branch. ``base`` is the blob
     sha the app showed (the diff's ``index`` line, abbreviated is fine); if
     the file has changed since, the edit is refused (409), as it is while
-    any agent in the workspace is busy, or if the branch moves meanwhile."""
+    any agent in the workspace is busy. git makes the commit (its hooks and
+    locks included); if it refuses, the file goes back as it was."""
     ws = _workspace(db, params["id"])
     if ws.kind != "worktree":
         raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be edited")
@@ -464,20 +417,40 @@ def edit_file(db: DB, params: dict, body: Body) -> Any:
             raise ServiceError("busy", f"{', '.join(busy)} is working in {ws.id}; edit once it has stopped", 409)
         if git.current_branch(ws.path) != ws.branch:
             raise ServiceError("conflict", f"{ws.id} isn't on its branch {ws.branch}", 409)
-        name, fh = _open_edit_target(ws, rel)
-        with fh:
-            before = fh.read()
+        name, dir_fd, leaf = _edit_dir(ws, rel)
+        try:
+            try:
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+            except FileNotFoundError:
+                raise ServiceError("not_found", f"no file {rel} in {ws.id}", 404) from None
+            except OSError:     # a symlink (ELOOP)
+                raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree") from None
+            with os.fdopen(fd, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                before = fh.read() if stat.S_ISREG(st.st_mode) else None
+            if before is None:
+                raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
             if len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base):
                 raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
-            data = content.encode()
-            mode = "100755" if os.fstat(fh.fileno()).st_mode & 0o111 else "100644"
-            blob = git.hash_blob(ws.path, data, name, write=True)
-            # Pinned first: the commit is built on it, and lands only if the branch is still there.
-            head = git.out(["rev-parse", "--verify", f"refs/heads/{ws.branch}"], ws.path)
-            # The index takes the edit too, so it doesn't show as staged undoing it.
-            entry = f"{mode},{blob},{name}"
-            commit = _build_commit(ws, head, entry)
-            _land(ws, fh, entry, head, commit, before, data)
+            data, mode = content.encode(), stat.S_IMODE(st.st_mode)
+            _replace(dir_fd, leaf, data, mode)
+            commit = None
+            # Literal: a name like ':(glob)*' is that file, not a pattern matching other work.
+            # --only commits just this path and leaves what the worker has staged alone.
+            try:
+                # git reads the path itself: a directory swapped for a symlink meanwhile would commit what it points at.
+                if os.path.realpath(os.path.join(ws.path, name)) != os.path.join(os.path.realpath(ws.path), name):
+                    raise ServiceError("invalid", f"{rel!r} isn't a file inside the worktree")
+                if not git.ok(["--literal-pathspecs", "diff", "--quiet", "HEAD", "--", name], ws.path):
+                    git.run(["--literal-pathspecs", "commit", "-q", "--only", "-m", f"edit from review: {name}",
+                             "--", name], ws.path)
+                    commit = git.out(["rev-parse", "HEAD"], ws.path)
+            except (git.GitError, ServiceError):
+                _replace(dir_fd, leaf, before, mode)    # refused (a hook, say): the file as the worker had it
+                raise
+        finally:
+            os.close(dir_fd)
+    blob = git.hash_blob(ws.path, data, name)
     bus.publish_ws(db, "workspace.edited", ws, path=name, commit=commit)
     return {"workspace_id": ws.id, "path": name, "commit": commit, "blob": blob,
             "stat": git.diff(ws.path, workspaces.require_base(ws), stat=True)}
