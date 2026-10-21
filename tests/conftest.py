@@ -290,6 +290,16 @@ def brindle_home(tmp_path, monkeypatch):
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    # brindle's own config homes for the CLIs (provider_homes): the same folders,
+    # so nothing is copied and nothing outside the test is written.
+    monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(tmp_path / "claude-config"))
+    monkeypatch.setenv("BRINDLE_CODEX_CONFIG_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("BRINDLE_OPENCODE_CONFIG_HOME", str(tmp_path / "opencode-config"))
+    # Nor does a test find the machine's own CLIs in the makers' standard places
+    # (Homebrew, ~/.local/bin ...): only PATH, as the test sets it.
+    from brindle import providers_install
+
+    monkeypatch.setattr(providers_install, "STANDARD", {p: [] for p in providers_install.PROVIDERS})
     # ... nor agy's real settings.
     monkeypatch.setenv("BRINDLE_AGY_SETTINGS", str(tmp_path / "agy-home" / "settings.json"))
     # The shell provider runs $SHELL. The person's own shell reads their dotfiles,

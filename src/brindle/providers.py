@@ -201,14 +201,39 @@ def _permission_hook_timeout(cwd: str | None) -> int:
 
 
 def claude_binary() -> str:
-    """BRINDLE_CLAUDE_BIN, else `claude` on PATH."""
-    return os.environ.get("BRINDLE_CLAUDE_BIN") or "claude"
+    """BRINDLE_CLAUDE_BIN, else the install picked in the app, else `claude`
+    on PATH, else one in the maker's standard places (providers_install)."""
+    from brindle import providers_install
+
+    explicit = os.environ.get("BRINDLE_CLAUDE_BIN") or providers_install.selected("claude")
+    if explicit:
+        return explicit
+    return "claude" if which_cli("claude") else providers_install.found("claude") or "claude"
+
+
+def claude_config_dir() -> str:
+    """The config folder brindle runs Claude Code with (provider_homes):
+    brindle's own once it is in use, else ``$CLAUDE_CONFIG_DIR`` or ~/.claude."""
+    from brindle import provider_homes
+
+    return str(provider_homes.effective_home("claude"))
+
+
+def codex_home() -> str:
+    """The ``CODEX_HOME`` brindle runs Codex with (provider_homes): brindle's
+    own once it is in use, else the environment's or ~/.codex."""
+    from brindle import provider_homes
+
+    return str(provider_homes.effective_home("codex"))
 
 
 def claude_global_config() -> str:
     """Claude Code's global state file, where it records trusted folders:
-    ``$CLAUDE_CONFIG_DIR/.claude.json``, else ``~/.claude.json``."""
-    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    ``.claude.json`` in its config folder when that is moved (brindle's own,
+    or ``$CLAUDE_CONFIG_DIR``), else ``~/.claude.json``."""
+    from brindle import provider_homes
+
+    config = provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
     return os.path.join(config, ".claude.json") if config else os.path.expanduser("~/.claude.json")
 
 
@@ -529,7 +554,7 @@ class ClaudeCode(Provider):
         # (also what /hooks writes) turns off from any settings file Claude
         # Code loads, as does a managed allowManagedHooksOnly. --setting-sources
         # limits which of the person's own files it loads; managed ones always count.
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = claude_config_dir()
         files = [(p, ("disableAllHooks", "allowManagedHooksOnly")) for p in managed_settings_paths()]
         sources = {"user": [os.path.join(config, "settings.json")]}
         if cwd:
@@ -563,7 +588,7 @@ class ClaudeCode(Provider):
         was never saved exits at once with "No conversation found"."""
         import glob
 
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = claude_config_dir()
         return bool(glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(session_id)}.jsonl")))
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
@@ -952,11 +977,14 @@ def which_cli(name: str) -> str | None:
 
 
 def codex_binary() -> str:
-    """BRINDLE_CODEX_BIN, else `codex` on PATH, else the ChatGPT app's copy."""
+    """BRINDLE_CODEX_BIN, else the install picked in the app, else `codex` on
+    PATH, else one in the maker's standard places or the ChatGPT app's copy."""
+    from brindle import providers_install
+
     explicit = os.environ.get("BRINDLE_CODEX_BIN")
     if explicit:
         return explicit
-    return which_cli("codex") or (CODEX_BUNDLED if os.path.exists(CODEX_BUNDLED) else "codex")
+    return providers_install.found("codex") or "codex"
 
 
 
@@ -1023,7 +1051,10 @@ def subscription_login(provider: str = "claude") -> bool:
     provider's environment credentials left out so a key can't stand in for it."""
     if provider != "claude":
         return False
-    env = {k: v for k, v in os.environ.items() if k not in _ENV_AUTH["claude"]}
+    from brindle import provider_homes
+
+    env = {**{k: v for k, v in os.environ.items() if k not in _ENV_AUTH["claude"]},
+           **provider_homes.launch_env("claude")}
     res = _auth_probe([claude_binary(), "auth", "status"], env)
     if not res:
         return False
@@ -1117,7 +1148,7 @@ def codex_auth_path() -> str:
     override = os.environ.get("BRINDLE_CODEX_AUTH")
     if override:
         return os.path.expanduser(override)
-    return os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "auth.json")
+    return os.path.join(codex_home(), "auth.json")
 
 
 def codex_chatgpt_login() -> bool:
@@ -1135,7 +1166,7 @@ def codex_chatgpt_login() -> bool:
 
 
 def codex_config_path() -> str:
-    return os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "config.toml")
+    return os.path.join(codex_home(), "config.toml")
 
 
 def codex_trust(repo_root: str) -> str | None:
@@ -1337,11 +1368,14 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     CLI opens on its login screen, and the prompt brindle types in lands there.
     ``env`` is a profile's ``env.NAME: value`` lines: the agent runs with them
     over brindle's own environment, so a key set there counts, and the probe
-    sees them too."""
-    full_env = {**os.environ, **env} if env else os.environ
+    sees them too, as it sees brindle's config home for the CLI (provider_homes)."""
+    from brindle import provider_homes
+
+    homes = provider_homes.launch_env(provider)
+    full_env = {**os.environ, **homes, **(env or {})}
     if any(full_env.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
-    key = _signed_in_key(provider, env)
+    key = _signed_in_key(provider, {**homes, **(env or {})} or None)   # an answer is the home's it was asked in
     seen = _SIGNED_IN.get(key)
     inv = _last_invalidated(provider)
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
@@ -1405,8 +1439,10 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
     ``env`` is a profile's own environment, as for signed_out."""
     import shutil
 
-    from brindle import antigravity, opencode
+    from brindle import antigravity, opencode, providers_install
 
+    if providers_install.turned_off(provider):
+        return f"{provider} is turned off in brindle"
     binary = {"claude": claude_binary, "codex": codex_binary,
               "antigravity": antigravity.binary, "opencode": opencode.binary}.get(provider)
     if binary:
@@ -1871,7 +1907,7 @@ def get_provider(name: str) -> Provider:
 def _own_status_line(project_dir: str | None) -> str | None:
     """The status line command the person configured for Claude Code, if any:
     project settings first, then user settings (as Claude Code orders them)."""
-    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    config = claude_config_dir()
     candidates = []
     if project_dir:
         candidates += [os.path.join(project_dir, ".claude", "settings.local.json"),

@@ -361,6 +361,18 @@ def provider_preflight(db: DB, request: Request) -> Any:
 
 
 @_json
+def providers_installed(db: DB, request: Request) -> Any:
+    """Each provider CLI as a terminal would find it (PATH, then the makers'
+    standard places): ``state`` "installed", "missing" or "off" (turned off
+    in brindle), the path brindle runs and its version, whether it is signed
+    in where that is cheap to know (else null), every install found, and
+    brindle's config home for it (null for Antigravity, which shares ~/.gemini)."""
+    from brindle import providers_install
+
+    return providers_install.statuses()
+
+
+@_json
 def account(db: DB, request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
@@ -472,6 +484,8 @@ ROUTES = [
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/routing", get_routing),
     Route("/v1/doctor", get_doctor),
+    # Before the action routes' DELETE /v1/providers/{provider}.
+    Route("/v1/providers/installed", providers_installed),
     Route("/v1/providers/{provider}/preflight", provider_preflight),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
