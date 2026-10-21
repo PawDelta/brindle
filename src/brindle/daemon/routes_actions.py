@@ -1091,6 +1091,9 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         elif kind == "reviewer" and model is not None:
             reviewer = model
         elif kind == "supervisor" and model is not None:
+            # The supervisor pick is a CLI (provider) id, as the picker stores it.
+            if model not in providers.PROVIDERS:
+                raise ServiceError("invalid", f"supervisor must be one of {', '.join(providers.PROVIDERS)}, not {model!r}")
             supervisor = model
     by_name = {p.name: p for p in profiles.list_profiles(repo)}
     known = set(by_name)
@@ -1131,14 +1134,15 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         path = write("exclude_providers", excluded)
         updated.append("exclude_providers")
     if lock_changes:
-        found = config._read_json(config.scope_paths(repo)[scope]).get("routing_locked")
-        locked_now = set(found) if isinstance(found, list) else set()
-        path = write("routing_locked", sorted((locked_now | {k for k, v in lock_changes.items() if v})
-                                              - {k for k, v in lock_changes.items() if not v}))
+        # Per kind, so editing one row leaves the others (and what lower scopes lock) as they are.
+        mine = config.locked_kinds(config._read_json(config.scope_paths(repo)[scope]).get("routing_locked"))
+        path = write("routing_locked", {**mine, **lock_changes})
         updated.append("routing_locked")
     if supervisor is not None:
         path = config.set_user(config.SUPERVISOR_KEY, supervisor)
         updated.append("supervisor")
+    if reviewer is not None and kinds.get("reviewer", {}).get("model") and config.load_repo_config(repo).review_profile:
+        write("review_profile", reviewer)   # it would win over `reviewer`, so the new choice must replace it
     if not updated:
         raise ServiceError("invalid", "give tiers, reviewer, exclude_providers or kinds")
     return {"updated": updated, "path": str(path)}

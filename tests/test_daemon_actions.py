@@ -292,13 +292,34 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
         "heavy": {"model": "developer-heavy", "fallbacks": ["developer-codex"], "locked": False}}})
     assert code == 200, reply
     cfg = config.load_repo_config(str(repo))
-    assert (cfg.routing["medium"], cfg.routing_locked) == (["developer", "developer-codex"], ["medium"])
+    assert (cfg.routing["medium"], cfg.routing_locked) == (["developer", "developer-codex"],
+                                                         {"medium": True, "heavy": False})
+    # Editing one row in another scope leaves the lock a lower scope set on a different row alone.
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local",
+                                               "kinds": {"light": {"model": "developer-light"}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    assert cfg.routing_locked == {"medium": True, "heavy": False, "light": True}
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local",
+                                               "kinds": {"supervisor": {"model": "developer-heavy"}}})
+    assert code == 400 and config.supervisor_pick() is None     # a profile isn't a supervisor CLI
 
     assert autopilot._route_by_weight(db, cfg, str(repo), "medium", None, None)[:2] == ("developer", False)
     assert autopilot._route_by_weight(db, cfg, str(repo), "heavy", None, None)[:2] == ("developer-codex", True)
     kinds = routes_read._routing_kinds(db, cfg, str(repo))
     assert (kinds["medium"].locked, kinds["medium"].learned) == (True, None)
     assert (kinds["heavy"].model, kinds["heavy"].learned) == ("developer-heavy", "developer-codex")
+
+    # A candidate routing excludes can't be what learning runs; an explicit review_profile isn't a learned one.
+    config.set_repo(str(repo), "exclude_providers", ["codex"])
+    config.set_repo(str(repo), "review_profile", "reviewer-codex")
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "repo",
+                                               "kinds": {"reviewer": {"model": "reviewer"}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert kinds["heavy"].learned is None
+    assert (cfg.review_profile, kinds["reviewer"].model, kinds["reviewer"].locked) == ("reviewer", "reviewer", True)
 
 
 PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),

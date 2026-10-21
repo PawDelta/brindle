@@ -231,7 +231,12 @@ def kb_search(db: DB, request: Request) -> Any:
 
 @_json
 def list_profiles(db: DB, request: Request) -> Any:
-    return [ProfileDTO.from_profile(p).to_json() for p in profiles.list_profiles(_repo(request))]
+    repo = _repo(request)
+    out = []
+    for p in profiles.list_profiles(repo):
+        errors, warnings = profiles.lint_profile(p.name, repo)
+        out.append(ProfileDTO.from_profile(p, lint_errors=errors, lint_warnings=warnings).to_json())
+    return out
 
 
 @_json
@@ -266,7 +271,7 @@ def get_profile(db: DB, request: Request) -> Any:
         except (KeyError, profiles.ProfileError):
             break
     prompt = f"{p.prompt.strip()}\n\n{profiles.rules_prompt(packs)}".strip() if packs else p.prompt.strip()
-    return {**ProfileDTO.from_profile(p).to_json(),
+    return {**ProfileDTO.from_profile(p, errors, warnings).to_json(),
             "source": profiles.profile_source(name, repo), "extends": chain,
             "rules": [{"name": k.name, "description": k.description, "source": k.source} for k in packs],
             "prompt": prompt, "lint": {"errors": errors, "warnings": warnings}}
@@ -340,10 +345,10 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, Routi
     """Per kind of work: the owner's pick, its ordered fallbacks, whether it
     is locked, and the different profile hosted learning runs for it now.
     A locked kind is never overridden, so it never reports one."""
-    from brindle import agents, learning
+    from brindle import agents, autopilot
 
     def learned(kind: str, run) -> str | None:
-        if kind in cfg.routing_locked:
+        if cfg.routing_locked.get(kind):
             return None
         try:
             return run()
@@ -352,19 +357,28 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, Routi
             return None
 
     kinds = {}
+    def weight_pick(t: str) -> str | None:
+        # The dispatch's own resolution, so an excluded or unavailable candidate is never reported.
+        name, learned_pick, _ = autopilot._route_by_weight(db, cfg, repo, t, None, None)
+        return name if learned_pick else None
+
     for t in config.WEIGHTS:
         names = cfg.routing[t]
-        kinds[t] = RoutingKindDTO(
-            model=names[0] if names else None, fallbacks=names[1:], locked=t in cfg.routing_locked,
-            learned=learned(t, lambda: learning.choose(db, cfg, repo, weight=t, candidates=names,
-                                                       default=names[0] if names else None)))
+        kinds[t] = RoutingKindDTO(model=names[0] if names else None, fallbacks=names[1:],
+                                  locked=bool(cfg.routing_locked.get(t)),
+                                  learned=learned(t, lambda t=t: weight_pick(t)))
+
     def reviewer_pick() -> str | None:
+        if cfg.review_profile:      # the owner's explicit choice, not a learned one
+            return None
         pick = agents.default_review_profile(cfg, None, db, repo)
         return pick if pick != cfg.reviewer else None
 
-    kinds["reviewer"] = RoutingKindDTO(model=cfg.reviewer, locked="reviewer" in cfg.routing_locked,
+    kinds["reviewer"] = RoutingKindDTO(model=cfg.review_profile or cfg.reviewer,
+                                       locked=bool(cfg.routing_locked.get("reviewer")),
                                        learned=learned("reviewer", reviewer_pick))
-    kinds["supervisor"] = RoutingKindDTO(model=config.supervisor_pick(), locked="supervisor" in cfg.routing_locked)
+    kinds["supervisor"] = RoutingKindDTO(model=config.supervisor_pick(),
+                                         locked=bool(cfg.routing_locked.get("supervisor")))
     return kinds
 
 

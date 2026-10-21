@@ -800,7 +800,7 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
                 decision["demoted_from"] = first
     if not remaining:
         return None, False, f"every {weight} candidate was out ({'; '.join(skipped) or 'none configured'})"
-    if weight in cfg.routing_locked:
+    if cfg.routing_locked.get(weight):
         pick, reason = None, None   # the owner pinned this tier: learning never overrides it
     else:
         pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,

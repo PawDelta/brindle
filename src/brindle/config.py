@@ -210,7 +210,9 @@ class RepoConfig:
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
     exclude_providers: list[str] = field(default_factory=list)  # providers weight routing never picks
-    routing_locked: list[str] = field(default_factory=list)  # kinds of work (a weight or "reviewer") hosted learning never overrides
+    # Kind of work -> whether hosted learning may never override it. Per kind, so a scope can
+    # unlock one a lower scope locked and a write to one kind leaves the others as they are.
+    routing_locked: dict[str, bool] = field(default_factory=dict)
     # Model prices in $/MTok that add to or override brindle's built-in ones (see brindle.pricing):
     # {"model": {"input", "output", "cache_write"?, "cache_read"?}}, merged per model: user, then repo, then config.local.json.
     pricing: dict[str, dict] = field(default_factory=dict)
@@ -295,6 +297,16 @@ def host_check_concurrency() -> int:
     return max(2, min(cores // 2, by_ram, CHECK_CONCURRENCY_CAP))
 
 
+def locked_kinds(found: object) -> dict[str, bool]:
+    """A ``routing_locked`` setting as {kind: locked}: a {kind: bool} map, or a
+    list of locked kinds."""
+    if isinstance(found, dict):
+        return {k: v for k, v in found.items() if k in ROUTING_KINDS and isinstance(v, bool)}
+    if isinstance(found, list):
+        return {k: True for k in found if k in ROUTING_KINDS}
+    return {}
+
+
 def load_repo_config(repo_root: str | Path) -> RepoConfig:
     base = config_root(repo_root) / CONFIG_DIR
     shared = _read_json(base / CONFIG_FILE)
@@ -313,8 +325,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "agy_approvals",
-                "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
-                "routing_locked"):
+                "learned_rules_repeats", "learned_rules_profile", "exclude_providers"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -348,6 +359,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 if norm_tier in WEIGHTS and isinstance(names, list):
                     cfg.routing[norm_tier] = [n for n in names if isinstance(n, str)]
                     cfg.routing_sources[norm_tier] = str(path)
+    for source in (user, shared, local):  # per kind, a later scope overriding an earlier one
+        cfg.routing_locked.update(locked_kinds(source.get("routing_locked")))
     from brindle import worker_models
 
     worker_models.apply(cfg, user, str(repo_root))   # the models picked on the picker's workers screen

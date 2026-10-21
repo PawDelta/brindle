@@ -204,13 +204,16 @@ class ProfileDTO(_DTO):
     headless: bool = False
     local: bool = False
     fallback: list[str] = []
+    lint_errors: list[str] = []     # the profile's automatic check (`brindle profile lint`)
+    lint_warnings: list[str] = []
 
     @classmethod
-    def from_profile(cls, p: Profile) -> ProfileDTO:
+    def from_profile(cls, p: Profile, lint_errors: list[str] = (), lint_warnings: list[str] = ()) -> ProfileDTO:
         # env is left out: its values can be secrets.
         return cls(name=p.name, description=p.description, provider=p.provider, model=p.model,
                    permission_mode=p.permission_mode, effort=p.effort, headless=p.headless,
-                   local=p.local, fallback=list(p.fallback))
+                   local=p.local, fallback=list(p.fallback),
+                   lint_errors=list(lint_errors), lint_warnings=list(lint_warnings))
 
 
 class RoutingSettingDTO(_DTO):

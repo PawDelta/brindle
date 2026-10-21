@@ -1517,6 +1517,22 @@
           "title": "Headless",
           "type": "boolean"
         },
+        "lint_errors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Errors",
+          "type": "array"
+        },
+        "lint_warnings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Warnings",
+          "type": "array"
+        },
         "local": {
           "default": false,
           "title": "Local",
