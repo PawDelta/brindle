@@ -1076,6 +1076,8 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
             if not isinstance(locked, bool):
                 raise ServiceError("invalid", f"{kind}: locked must be true or false")
             lock_changes[kind] = locked
+        elif model is not None or fallbacks is not None:
+            lock_changes[kind] = True   # the owner just chose it: learning must not undo that
         if model is not None and not (isinstance(model, str) and model):
             raise ServiceError("invalid", f"{kind}: model must be a name")
         if fallbacks is not None and (kind not in config.WEIGHTS or not isinstance(fallbacks, list)

@@ -288,7 +288,7 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
     monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
     config.set_repo(str(repo), "learning", "cloud")
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "repo", "kinds": {
-        "medium": {"model": "developer", "fallbacks": ["developer-codex"], "locked": True},
+        "medium": {"model": "developer", "fallbacks": ["developer-codex"]},      # a choice locks it
         "heavy": {"model": "developer-heavy", "fallbacks": ["developer-codex"], "locked": False}}})
     assert code == 200, reply
     cfg = config.load_repo_config(str(repo))
