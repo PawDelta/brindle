@@ -9,6 +9,7 @@ import re
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
 from brindle import agents, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
@@ -20,6 +21,10 @@ from brindle.view import last_activity
 
 MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
+
+STALE_NOTICE = "brindle was updated since this session started; run /mcp to reconnect"
+_install = upgrade.InstallWatch()    # this server's code is the install as of its start
+
 
 def _calling_agent() -> Agent | None:
     agent_id = os.environ.get("BRINDLE_AGENT_ID")
@@ -35,7 +40,10 @@ class _Server(MCPServer):
         refused = coordinator.refusal(_calling_agent(), name)
         if refused:
             raise ToolError(refused)
-        return await super().call_tool(name, arguments, context)
+        result = await super().call_tool(name, arguments, context)
+        if _install.changed() and hasattr(result, "content"):
+            result.content.append(TextContent(type="text", text=STALE_NOTICE))
+        return result
 
     async def list_tools(self):
         agent = _calling_agent()

@@ -107,3 +107,24 @@ def test_a_brindle_package_in_the_cwd_is_not_what_brindle_runs_again(monkeypatch
     run = subprocess.run([*brindle_invocation(), "--version"], cwd=tmp_path, capture_output=True, text=True)
     assert "decoy" not in run.stderr
     assert run.returncode == 0
+
+
+def test_mcp_tool_replies_say_brindle_was_updated_once_the_install_changed(monkeypatch):
+    class FakeWatch:
+        def __init__(self):
+            self.is_changed = False
+
+        def changed(self):
+            return self.is_changed
+
+    fake = FakeWatch()
+    monkeypatch.setattr(mcp_server, "_install", fake)
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, SimpleNamespace(repo_root=None)))
+
+    def texts():
+        result = asyncio.run(mcp_server.mcp.call_tool("list_repos", {}))
+        return [c.text for c in result.content]
+
+    assert not any("updated since" in t for t in texts())
+    fake.is_changed = True
+    assert "brindle was updated since this session started; run /mcp to reconnect" in texts()
