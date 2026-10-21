@@ -948,6 +948,80 @@ def patch_config(db: DB, params: dict, body: Body) -> Any:
     return {"updated": sorted(values), "path": str(path)}
 
 
+# -- knowledge sources (brindle kb add / sync / remove) -----------------------------
+
+
+def _kb_source(db: DB, params: dict, ref: str) -> tuple[str, str, str]:
+    """(repo, repo key, source id) for a source named by id, prefix or folder."""
+    from brindle import kb
+
+    repo = params.get("repo")
+    if not repo:
+        raise ServiceError("invalid", "repo is required")
+    key = knowledge.repo_key(repo)
+    try:
+        return repo, key, kb.find_source(db, key, ref)
+    except KeyError:
+        raise ServiceError("not_found", f"no such source: {ref}", 404) from None
+
+
+_kb_syncing: dict[str, Job] = {}
+_kb_sync_lock = threading.Lock()
+
+
+def _kb_sync_job(kind: str, repo: str, source_id: str) -> Job:
+    """The source's indexing job; one already running for it is returned
+    instead of a second, so two indexers never overlap."""
+    from brindle import codemap, kb
+
+    with _kb_sync_lock:
+        if source_id in _kb_syncing:
+            return _kb_syncing[source_id]
+        _kb_syncing[source_id] = job = Job(secrets.token_hex(8), kind)
+
+    def work(db: DB, job: Job) -> Any:
+        try:
+            return kb.sync(db, source_id, codemap.graph_path(repo))
+        except ValueError as e:
+            raise ServiceError("invalid", str(e)) from None
+        finally:
+            with _kb_sync_lock:
+                _kb_syncing.pop(source_id, None)
+
+    return start_job(kind, work, job=job, source=source_id, repo_root=repo)
+
+
+def add_kb_source(db: DB, params: dict, body: Body) -> Any:
+    """Add a folder as a source and index it in the background."""
+    from pathlib import Path
+
+    from brindle import kb
+
+    repo = params.get("repo")
+    if not repo:
+        raise ServiceError("invalid", "repo is required")
+    path = _get(body, "path", required=True)
+    if not Path(path).expanduser().is_dir():
+        raise ServiceError("invalid", f"not a folder: {path}")
+    private = _get(body, "private", bool, default=False)
+    source_id = kb.add_source(db, knowledge.repo_key(repo), kb.FOLDER, path,
+                              visibility="personal" if private else "repo")
+    return _kb_sync_job("kb.add", repo, source_id)
+
+
+def sync_kb_source(db: DB, params: dict, body: Body) -> Any:
+    repo, _, source_id = _kb_source(db, params, params["id"])
+    return _kb_sync_job("kb.sync", repo, source_id)
+
+
+def remove_kb_source(db: DB, params: dict, body: Body) -> Any:
+    from brindle import kb
+
+    _, _, source_id = _kb_source(db, params, params["id"])
+    kb.remove_source(db, source_id)
+    return {"removed": source_id}
+
+
 PERMISSION_MODES = ("default", "auto")
 
 
@@ -1312,6 +1386,9 @@ ROUTES = [
     _post("/goal/enabled", enable_goal),
     _post("/decisions", record_decision),
     _post("/coordinator/undo", coordinator_undo),
+    _post("/kb/sources", add_kb_source),
+    Route("/v1/kb/sources/{id}", _endpoint(remove_kb_source), methods=["DELETE"]),
+    _post("/kb/sources/{id}/sync", sync_kb_source),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),

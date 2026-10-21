@@ -2713,6 +2713,18 @@
       "path": "/v1/kb/sources"
     },
     {
+      "method": "POST",
+      "path": "/v1/kb/sources"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/kb/sources/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/kb/sources/{id}/sync"
+    },
+    {
       "method": "PUT",
       "path": "/v1/keys/{name}"
     },
