@@ -320,7 +320,8 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for kind, spec in (found.items() if isinstance(found, dict) else ()):
         if kind in ROUTING_KINDS and isinstance(spec, dict):
-            kept = {k: v for k, v in spec.items() if k in KIND_OVERRIDE_FIELDS and isinstance(v, str) and v.strip()}
+            kept = {k: v for k, v in spec.items() if k in KIND_OVERRIDE_FIELDS and isinstance(v, str) and v.strip()
+                    and (k != "effort" or v in EFFORTS)}   # a hand-edited file can't pass anything else to the CLI
             if kept:
                 out[kind] = kept
     return out
