@@ -222,6 +222,8 @@ def render_autopilot(pilot: dict, width: int) -> list[Line]:
     lines += [Line(t, state[1] if state else "dim") for t in _wrap(" · ".join(parts), width, "  ")]
     if pilot["state"] in ("blocked", "stalled") and pilot.get("note"):
         lines += [Line(t, "dim") for t in _wrap(pilot["note"], width, "  ")]
+    if pilot.get("wait"):
+        lines += [Line(t, "dim") for t in _wrap(pilot["wait"], width, "  ")]
     u = pilot.get("usage")
     if "quota" in pilot:
         # The per-provider notes (Claude's included); a near-full one is an alert.

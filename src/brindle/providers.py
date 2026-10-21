@@ -1402,10 +1402,11 @@ class Codex(Provider):
         ]
         # brindle's permission policy, when it's on and the person has trusted
         # brindle's hook once (`brindle permissions install-codex-hook`; see
-        # brindle.codex_hook). Otherwise Codex prompts as usual.
+        # brindle.codex_hook). Otherwise Codex prompts as usual. A reviewer gets
+        # a trusted hook with the policy off too (#241).
         from brindle import codex_hook
 
-        argv += codex_hook.launch_flags(ctx.cwd)
+        argv += codex_hook.launch_flags(ctx.cwd, review=ctx.mode == "review")
         if ctx.mode in ("handoff", "handoff_detached", "assign", "review"):
             # Supported by Codex 0.162.1. Workers cannot act on an update
             # notice; omit this extra startup UI from automated launches.
