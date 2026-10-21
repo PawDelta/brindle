@@ -37,7 +37,8 @@ agy has no hook for "waiting for approval": that is read from the screen.
 Hooks can't approve anything in agy (a hook's "allow" is ignored), so with the
 policy on brindle mirrors the allow rules agy's syntax can express into the
 person's agy settings (``permissions.allow``; see sync_permissions), touching
-only the entries it added itself.
+only the entries it added itself. A worker on agy's own prompts gets its
+profile's allowed_tools there too, while it runs.
 """
 
 from __future__ import annotations
@@ -675,11 +676,15 @@ def _apply(store, desired: dict[str, list[str]]) -> tuple[list[str], list[str]]:
 
 
 def sync_permissions(repo_root: str | None = None, on: bool | None = None,
-                     checks: list[str] | None = None) -> tuple[list[str], list[str]]:
+                     checks: list[str] | None = None,
+                     agent: tuple[str, list[str]] | None = None) -> tuple[list[str], list[str]]:
     """Mirror brindle's rules into agy's settings.json. With ``repo_root``,
     first record whether that repo's policy is ``on`` (and its ``checks``);
     the mirror covers every repo recorded as on, and once none is, every
-    entry brindle added is taken out again. Returns (added, removed)."""
+    entry brindle added is taken out again. ``agent`` (its id and its
+    profile's allowed_tools in agy's syntax, see permissions.mirror_profile_agy)
+    is an agy worker starting on agy's own prompts: its entries stay in the
+    mirror until it has ended. Returns (added, removed)."""
     from brindle import permissions
 
     with permissions.editing() as store:
@@ -688,12 +693,38 @@ def sync_permissions(repo_root: str | None = None, on: bool | None = None,
                 store.agy_repos[repo_root] = list(checks or [])
             else:
                 store.agy_repos.pop(repo_root, None)
+        if agent is not None:
+            agent_id, entries = agent
+            if entries:
+                store.agy_agents[agent_id] = list(entries)
+            else:
+                store.agy_agents.pop(agent_id, None)
+        _forget_ended_agents(store, keep=agent[0] if agent else None)
         if store.agy_repos:
             all_checks = list(dict.fromkeys(c for cs in store.agy_repos.values() for c in cs))
             desired = permissions.mirror_agy([*permissions.DEFAULT_RULES, *store.rules], all_checks)
         else:
             desired = {"allow": [], "deny": []}
+        for entries in store.agy_agents.values():
+            desired["allow"] += [e for e in entries if e not in desired["allow"]]
         return _apply(store, desired)
+
+
+def _forget_ended_agents(store, keep: str | None) -> None:
+    """agy's settings apply to every agy session, so a worker's profile
+    entries leave the mirror once that worker has ended."""
+    if not store.agy_agents:
+        return
+    from brindle.agents import alive_or_starting
+    from brindle.db import DB
+
+    db = DB()
+    for agent_id in list(store.agy_agents):
+        if agent_id == keep:
+            continue
+        agent = db.get_agent(agent_id)
+        if agent is None or not alive_or_starting(agent):
+            del store.agy_agents[agent_id]
 
 
 def resync_permissions() -> None:
@@ -732,10 +763,13 @@ def strict_on(workspace: str) -> bool:
     return cfg.permission_policy == "on" and cfg.agy_approvals == "brindle"
 
 
-def sync_for_launch(workspace: str, checks: list[str] | None) -> None:
+def sync_for_launch(workspace: str, checks: list[str] | None, agent_id: str | None = None,
+                    profile=None) -> None:
     """An agy worker is starting in ``workspace``: bring agy's settings in
-    line with the repo's policy (``checks`` is None when it's off). Never
-    raises; nothing is written when the policy is off and brindle never added
+    line with the repo's policy (``checks`` is None when it's off) and, with
+    ``profile`` (agy prompts on its own allow list, not brindle's hook), what
+    the profile's allowed_tools let agent ``agent_id`` run. Never raises;
+    nothing is written when there's nothing to add and brindle never added
     anything."""
     from brindle import git, permissions
 
@@ -744,9 +778,35 @@ def sync_for_launch(workspace: str, checks: list[str] | None) -> None:
             root = git.main_repo_root(workspace)
         except git.GitError:
             root = workspace
+        entries = permissions.mirror_profile_agy(profile)[0] if profile is not None else []
         store = permissions.load_store()
-        if checks is None and root not in store.agy_repos and not (store.agy_managed and not store.agy_repos):
+        if (checks is None and not entries and agent_id not in store.agy_agents and root not in store.agy_repos
+                and not (store.agy_managed and not store.agy_repos)):
             return
-        sync_permissions(root, on=checks is not None, checks=checks)
+        sync_permissions(root, on=checks is not None, checks=checks,
+                         agent=(agent_id, entries) if agent_id else None)
     except Exception as e:  # noqa: BLE001
         print(f"brindle: couldn't update agy's permission settings: {e}", file=sys.stderr)
+
+
+def launch_warning(agent, ws) -> str | None:
+    """The profile's allowed_tools an agy worker in workspace ``ws`` still
+    gets asked about (agy's allow list can't say them no wider than the
+    profile does), or None. Under agy_approvals "brindle" or dontAsk
+    brindle's hook decides every call instead."""
+    from brindle import permissions
+    from brindle.profiles import load_profile
+
+    if agent.provider != "antigravity":
+        return None
+    try:
+        profile = load_profile(agent.profile, ws.repo_root)
+    except KeyError:
+        return None
+    if profile.permission_mode == "dontAsk" or strict_on(ws.path):
+        return None
+    left_out = permissions.mirror_profile_agy(profile)[1]
+    if not left_out:
+        return None
+    return (f"this Antigravity worker still asks before using these allowed_tools of profile "
+            f"{profile.name}, which agy's allow list can't express: {', '.join(left_out)}")

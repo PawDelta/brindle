@@ -808,19 +808,37 @@ def test_agy_sync_leaves_a_file_it_cannot_read(agy_settings, ws):
     assert agy_settings.read_text() == "{ not json"
 
 
-def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
+def test_agy_launch_mirrors_the_policy_and_the_profiles_allowed_tools(agy_settings, db, ws, monkeypatch):
+    # GitHub #233: under agy_approvals "prompt" agy runs only what its own
+    # allow list covers (a hook's allow is ignored), so a profile's
+    # allowed_tools never reached an agy worker, which stalled on prompts.
     from brindle.profiles import load_profile
     from brindle.providers import Antigravity, LaunchContext
 
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
-    ctx = LaunchContext("g1", load_profile("developer"), "hi", cwd=ws.path)
+    agents_dir = os.path.join(ws.repo_root, ".brindle", "agents")
+    os.makedirs(agents_dir)
+    with open(os.path.join(agents_dir, "gem.md"), "w") as f:
+        f.write("---\nname: gem\nprovider: antigravity\nallowed_tools: Bash(uv run:*), Bash(pwd), WebFetch\n---\nhi\n")
+    worker(db, ws, provider="antigravity", id_="g1")
+    db.update_agent("g1", profile="gem")
+    ctx = LaunchContext("g1", load_profile("gem", ws.repo_root), "hi", cwd=ws.path)
     Antigravity().command(ctx)
-    assert not agy_settings.exists()  # off: never touched
+    simple = "[A-Za-z0-9_\\-./:=@%+, ]"
+    # The profile's shell rules and nothing wider, with the policy off.
+    assert json.loads(agy_settings.read_text())["permissions"]["allow"] == [
+        "command(regex:^uv run$)", f"command(regex:^uv run {simple}*$)", "command(regex:^pwd$)"]
+    assert antigravity.launch_warning(db.get_agent("g1"), ws).endswith("can't express: WebFetch")
     turn_on(ws)
     Antigravity().command(ctx)
     assert "command(regex:^git log$)" in json.loads(agy_settings.read_text())["permissions"]["allow"]
     set_local(ws.repo_root, "permission_policy", "off")
     Antigravity().command(ctx)
+    assert "command(regex:^git log$)" not in json.loads(agy_settings.read_text())["permissions"]["allow"]
+    # Once the worker has ended, its entries leave agy's settings, which
+    # every agy session reads.
+    db.delete_agent("g1")
+    Antigravity().command(LaunchContext("g2", load_profile("reviewer-gemini"), "hi", cwd=ws.path))
     assert not agy_settings.exists()
 
 

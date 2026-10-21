@@ -1519,7 +1519,9 @@ class Antigravity(Provider):
             strict = ctx.profile.permission_mode == "dontAsk" or (
                 policy is not None and antigravity.strict_on(ctx.cwd))
             antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
-            antigravity.sync_for_launch(ctx.cwd, policy)
+            # Prompting, agy runs only what its own allow list covers (a
+            # hook's allow is ignored), so the profile's allowed_tools go there.
+            antigravity.sync_for_launch(ctx.cwd, policy, ctx.agent_id, None if strict else ctx.profile)
         argv = [antigravity.binary()]
         if strict:
             # agy ignores a hook's "allow" (google-antigravity/antigravity-cli#1053)
@@ -1530,9 +1532,12 @@ class Antigravity(Provider):
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
             argv += ["--effort", ctx.profile.effort]
-        if ctx.profile.permission_mode in ("acceptEdits", "accept-edits", "auto"):
-            # agy has no classifier mode; accepting edits is the closest.
+        if ctx.profile.permission_mode in ("acceptEdits", "accept-edits"):
             argv += ["--mode", "accept-edits"]
+        elif ctx.profile.permission_mode == "auto":
+            # agy's Auto mode, like Claude Code's: edits and commands a
+            # separate review judges safe run, the rest still asks.
+            argv += ["--mode", "auto"]
         elif ctx.profile.permission_mode == "plan":
             argv += ["--mode", "plan"]
         if ctx.resume:

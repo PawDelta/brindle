@@ -913,15 +913,17 @@ def profile_bash_allows(profile) -> list[Rule]:
     ``--allowedTools`` never reaches: ``Bash(git status)`` is that exact
     command, ``Bash(uv run:*)`` it alone or followed by arguments. Like
     every bash allow, a compound or quoted command never matches."""
-    out = []
-    for entry in getattr(profile, "allowed_tools", None) or []:
-        m = PROFILE_BASH.fullmatch(entry.strip())
-        if not m:
-            continue
-        command = m.group(1).strip()
-        out.append(Rule("bash", command, "exact", "allow", "profile"))
-        if m.group(2):
-            out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
+    return [rule for entry in getattr(profile, "allowed_tools", None) or [] for rule in _profile_bash(entry)]
+
+
+def _profile_bash(entry: str) -> list[Rule]:
+    m = PROFILE_BASH.fullmatch(entry.strip())
+    if not m:
+        return []
+    command = m.group(1).strip()
+    out = [Rule("bash", command, "exact", "allow", "profile")]
+    if m.group(2):
+        out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
     return out
 
 
@@ -1023,10 +1025,13 @@ class Store:
     agy_repos: dict[str, list] = field(default_factory=dict)
     # The Codex hook the person trusted (brindle.codex_hook): command, key, hash.
     codex_hook: dict[str, str] = field(default_factory=dict)
+    # agent id -> its profile's allowed_tools in agy's syntax, for each agy
+    # worker that runs on agy's own prompts: in the mirror while it runs.
+    agy_agents: dict[str, list] = field(default_factory=dict)
 
     def to_json(self) -> str:
         data: dict = {"version": 1, "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
-        for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook"):
+        for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook", "agy_agents"):
             if getattr(self, name):
                 data[name] = getattr(self, name)
         return json.dumps(data, indent=2) + "\n"
@@ -1062,7 +1067,9 @@ def load_store() -> Store:
     repos = {k: strings(v) for k, v in repos.items()} if isinstance(repos, dict) else {}
     codex = data.get("codex_hook")
     codex = {k: v for k, v in codex.items() if isinstance(v, str)} if isinstance(codex, dict) else {}
-    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex)
+    running = data.get("agy_agents")
+    running = {k: strings(v) for k, v in running.items()} if isinstance(running, dict) else {}
+    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex, running)
 
 
 @contextmanager
@@ -1274,3 +1281,18 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
         else:
             add(rule.decision, _agy_entry(rule))
     return out
+
+
+def mirror_profile_agy(profile) -> tuple[list[str], list[str]]:
+    """A profile's ``allowed_tools`` as agy allow entries (the shell ones,
+    no wider than ``profile_bash_allows``: a prefix takes only simple
+    characters after it), and the ``allowed_tools`` entries agy can't be
+    given, which it keeps asking about."""
+    entries: list[str] = []
+    left_out: list[str] = []
+    for spec in getattr(profile, "allowed_tools", None) or []:
+        mirrored = [e for e in (_agy_entry(rule) for rule in _profile_bash(spec)) if e]
+        if not mirrored:
+            left_out.append(spec)
+        entries += [e for e in mirrored if e not in entries]
+    return entries, left_out

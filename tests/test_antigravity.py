@@ -27,7 +27,7 @@ def test_command_passes_the_profiles_model_and_effort(db, ws, repo, monkeypatch)
     monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
     profile = dataclasses.replace(load_profile("developer"), model="gemini-3.1-pro-high", effort="high")
     argv = Antigravity().command(LaunchContext("g1", profile, None, cwd=str(repo)))
-    assert argv[:5] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high"]
+    assert argv[:7] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high", "--mode", "auto"]
 
 
 def test_resume_uses_the_conversation(db, ws, repo):
