@@ -155,11 +155,17 @@ PERMISSION_GUIDANCE = (
 def is_review_profile(profile_name: str, repo_root: str) -> bool:
     """Whether ``profile_name`` is a reviewer (or extends one): it reads a
     branch and reports, so it has nothing to commit, test or merge."""
-    try:
-        profile = load_profile(profile_name, repo_root)
-    except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
-        return False
-    return any(n.startswith("reviewer") for n in (profile.name, profile.extends or ""))
+    name: str | None = profile_name
+    seen: set[str] = set()
+    while name and name not in seen:
+        if name.startswith("reviewer"):
+            return True
+        seen.add(name)
+        try:
+            name = load_profile(name, repo_root).extends   # one step up the chain
+        except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
+            return False
+    return False
 
 
 def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
