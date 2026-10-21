@@ -1,21 +1,25 @@
 import asyncio
 import json
 import os
+import resource
 import shutil
 import socket
+import sqlite3
 import stat
 import tempfile
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Request, TextMessage
 
 from brindle import cost, doctor, identity_lock, keystore, knowledge, procs, tmux, workspaces
 from brindle import kb as kb_mod
-from brindle.daemon import lifecycle, peer
+from brindle.daemon import events, lifecycle, peer, terminal
 from brindle.daemon.app import build_app
 from brindle.daemon.auth import WS_UNAUTHORIZED, Guard
 from brindle.db import Agent
@@ -179,7 +183,7 @@ def seeded(db, repo, monkeypatch):
     knowledge.record_decision(db, key, "storage", "use sqlite", "simple")
     kb_mod.add_source(db, key, "folder", str(repo))
     monkeypatch.setattr(identity_lock, "locked_by", lambda a: "other@example.com" if a == "w2" else None)
-    monkeypatch.setattr(doctor, "checks", lambda r: [doctor.Check("ok", "python", "3.12")])
+    monkeypatch.setattr(doctor, "checks", lambda r, db=None: [doctor.Check("ok", "python", "3.12")])
     monkeypatch.setattr(cost, "require_entitled", lambda: None)
     panes = tmux.PaneSnapshot(tmux.current_server())
     panes.update({"@1": True, "@2": True, "@3": True})
@@ -215,6 +219,125 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     code, body = _get(path.format(ws=seeded["ws"]), AUTH, f"repo={seeded['repo']}")
     assert code in (200, 404)
     assert check(body, seeded)
+
+
+@pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events", "doctor", "doctor-owned",
+                                  "preflight", "spend-events", "slow-check"])
+def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, kind):
+    opened, closed = [], []
+    connect = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def close(self):
+            super().close()
+            closed.append(self)
+
+    def tracked_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs, factory=Connection)
+        opened.append(conn)   # retain connections so GC cannot hide a leak
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot(tmux.current_server()))
+    if kind == "read":
+        for _ in range(30):
+            assert _get("/v1/repos", AUTH) == (200, [])
+            assert _get("/v1/agents/missing", AUTH)[0] == 404
+    elif kind == "idle":
+        assert lifecycle._agents_running() is False
+    elif kind == "peer":
+        assert peer._agent_panes() == {}
+    elif kind == "terminal":
+        assert terminal._find("missing")["code"] == "not_found"
+    elif kind == "preflight":
+        from brindle import git, preflight
+
+        repo = str(brindle_home.parent)
+        monkeypatch.setattr(git, "toplevel", lambda path: repo)
+        monkeypatch.setattr(git, "main_repo_root", lambda path: repo)
+        monkeypatch.setattr(preflight, "check", lambda *a, **k: [])
+        for _ in range(10):
+            assert _get("/v1/providers/claude/preflight", AUTH, f"repo={repo}") == (200, [])
+    elif kind == "spend-events":
+        from brindle import budget, config
+        from brindle import events as spend_events
+
+        monkeypatch.setattr(license, "has", lambda feature: True)
+        monkeypatch.setattr(budget, "worker_spend", lambda *a: 1.0)
+        monkeypatch.setattr(spend_events, "_dispatch", lambda *a: None)
+        ws = SimpleNamespace(id="ws", repo_root=str(brindle_home.parent), branch="main")
+        worker = Agent("w", "ws", "", "", None, "assign", "done", "", None, 0.0)
+        spend_events.emit(config.RepoConfig(), "remove", ws, worker)
+        spend_events.emit_periodic_cost(config.RepoConfig(), ws.repo_root)
+    elif kind == "slow-check":
+        from brindle import gates
+
+        ws = SimpleNamespace(id="missing")
+        gates._report_slow(str(brindle_home / "brindle.db"), ws, "check", 1.0, 2.0, 10)
+    elif kind.startswith("doctor"):
+        from brindle import company_identity, legacy, signin_pause, updates
+
+        # Keep the actual database probes; fake unrelated CLI/network diagnostics.
+        monkeypatch.setattr(doctor, "_tool", lambda *a, **k: doctor.Check("ok", a[0], ""))
+        for name in ("signin_checks", "credential_checks", "daemon_checks", "native_checks",
+                     "override_checks", "quota_checks", "airgap_checks", "pro_checks", "managed_checks"):
+            monkeypatch.setattr(doctor, name, lambda *a, **k: [])
+        monkeypatch.setattr(company_identity, "checks", lambda: [])
+        monkeypatch.setattr(signin_pause, "checks", lambda: [])
+        monkeypatch.setattr(updates, "notice", lambda **k: None)
+        monkeypatch.setattr(legacy, "findings", lambda repo: [])
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        monkeypatch.setattr(procs, "table", lambda: {})
+        if kind == "doctor":
+            for _ in range(10):
+                assert _get("/v1/doctor", AUTH)[0] == 200
+            assert len(opened) == 10    # each route's DB serves both database probes
+        else:
+            assert doctor.checks(None)
+    else:
+        incoming = [{"type": "websocket.connect"}, {"type": "websocket.disconnect", "code": 1000}]
+
+        async def receive():
+            return incoming.pop(0)
+
+        async def send(message):
+            if message["type"] == "websocket.send":
+                raise WebSocketDisconnect()   # failure sending the initial replay
+
+        ws = WebSocket({"type": "websocket", "path": "/v1/events", "headers": [],
+                        "query_string": b"since=999", "app": SimpleNamespace(state=SimpleNamespace())}, receive, send)
+        asyncio.run(events.events(ws))
+    assert opened and set(opened) == set(closed)
+
+
+@pytest.mark.parametrize("soft,hard,refused", [
+    (256, 4096, False), (256, resource.RLIM_INFINITY, False),
+    (256, 4096, True), (100000, 100000, False),
+])
+def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, refused):
+    limit = [soft, hard]
+
+    def setlimit(which, value):
+        if refused:
+            raise OSError("not permitted")
+        limit[:] = value
+
+    class Started(Exception):
+        pass
+
+    def prepare(*args, **kwargs):
+        if refused or soft == hard:
+            assert limit[0] == soft
+        else:
+            assert soft < limit[0] <= (hard if hard != resource.RLIM_INFINITY else 65536)
+        assert limit[1] == hard
+        raise Started()
+
+    monkeypatch.setattr(resource, "getrlimit", lambda which: tuple(limit))
+    monkeypatch.setattr(resource, "setrlimit", setlimit)
+    monkeypatch.setattr(lifecycle, "prepare", prepare)
+    with pytest.raises(Started):
+        lifecycle.serve()
 
 
 @pytest.mark.parametrize("caller,refused_as,holds_for", [

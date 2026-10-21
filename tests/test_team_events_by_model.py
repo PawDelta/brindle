@@ -43,6 +43,10 @@ def _row(agent_id, model, tokens, profile="dev"):
 class FakeDB:
     def __init__(self, rows):
         self.rows = rows
+        self.conn = self
+
+    def close(self):
+        pass
 
     def list_history(self, repo_root, agent_id, limit):
         return self.rows
