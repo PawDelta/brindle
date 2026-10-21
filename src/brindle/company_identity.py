@@ -241,19 +241,22 @@ def _remember_launch(key: str) -> None:
         pass  # a cache that can't be written only means the next launch probes
 
 
-def _probe(argv: list[str], cache: bool = True) -> tuple[int, str] | None:
+def _probe(argv: list[str], cache: bool = True, home: dict[str, str] | None = None) -> tuple[int, str] | None:
     """(returncode, output) of a status command; None when its CLI isn't
-    installed or the command couldn't run or timed out."""
+    installed or the command couldn't run or timed out. ``home``: the config
+    home the CLI's agents run with (provider_homes.launch_env), so the
+    probe asks the same login; a cached answer is that home's only."""
     if not company_login.which(argv[0]):
         return None
-    key = tuple(argv)
+    key = (*argv, *sorted((home or {}).items()))
+    env = {**os.environ, **home} if home else None
     now = time.monotonic()
     hit = _cache.get(key) if cache else None
     if hit and now - hit[0] < CACHE_SECONDS:
         return hit[1]
-    code, out = company_login.run_cmd(argv, PROBE_TIMEOUT)
+    code, out = company_login.run_cmd(argv, PROBE_TIMEOUT, env=env)
     if code == 124:     # a healthy CLI can miss the timeout on a loaded machine: once more, longer
-        code, out = company_login.run_cmd(argv, PROBE_TIMEOUT * RETRY_FACTOR)
+        code, out = company_login.run_cmd(argv, PROBE_TIMEOUT * RETRY_FACTOR, env=env)
     if code in (124, 127):
         return None
     _cache[key] = (now, (code, out))
@@ -314,8 +317,10 @@ def claude_identity(org_id: str, claude, cache: bool = True) -> Identity:
 def _claude_login(claude, route, cache) -> Identity:
     from brindle import providers
 
+    from brindle import provider_homes
+
     exe = providers.claude_binary()
-    got = _probe([exe, "auth", "status"], cache)
+    got = _probe([exe, "auth", "status"], cache, provider_homes.launch_env("claude"))
     if got is None:
         return _unknown("claude", "claude", exe=exe)
     status = _json(got[1])
@@ -449,7 +454,9 @@ def _az(claude, cache) -> Identity:
 
 def codex_identity(cache: bool = True) -> Identity:
     """Codex can't be verified beyond signed in: its status line, as information."""
-    got = _probe(["codex", "login", "status"], cache)
+    from brindle import provider_homes
+
+    got = _probe(["codex", "login", "status"], cache, provider_homes.launch_env("codex"))
     if got is None:
         return _unknown("codex", "codex")
     text = next((ln.strip() for ln in got[1].splitlines() if ln.strip()), "")

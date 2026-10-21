@@ -905,6 +905,13 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         upgrade.check_launch()
     except upgrade.StaleInstall as e:
         raise AgentError(str(e)) from e
+    from brindle import preflight
+
+    # A provider the person turned off in brindle never starts, and nothing
+    # below (model check, identity probe) runs its CLI either.
+    off = preflight.turned_off(agent.provider)
+    if off:
+        raise PreflightBlocked([off])
     m = managed(ws.repo_root)   # read once for this launch
     profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)

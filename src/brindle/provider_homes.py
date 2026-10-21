@@ -23,6 +23,7 @@ copy, brindle's changes stay in brindle's copy."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -69,17 +70,90 @@ def source(provider: str) -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
 
 
-def launch_env(provider: str) -> dict[str, str]:
-    """The variable that points ``provider``'s CLI at brindle's config home,
-    after the one-time copy of the person's files. Empty for Antigravity."""
+# Isolation never strands a working setup: until the person has signed in to
+# a CLI inside brindle (its login run with brindle's home, then a status check
+# with that home saying signed in), brindle runs the CLI with the person's own
+# home, as before. OpenCode keeps its sign-in outside its config folder
+# (~/.local/share/opencode), so its config is isolated from the start.
+SIGNED_IN = ".brindle-signed-in"            # a status check with brindle's home said signed in
+LOGIN_STARTED = ".brindle-login-started"    # brindle ran the CLI's login with brindle's home
+CONFIRM_EVERY = 10.0
+_confirmed_at: dict[str, float] = {}
+
+
+def _confirm(provider: str, where: Path) -> bool:
+    """Ask the CLI, with brindle's home and no key from the environment,
+    whether it is signed in there; at most every CONFIRM_EVERY seconds."""
+    from brindle import providers
+
+    now = time.monotonic()
+    if now - _confirmed_at.get(provider, -CONFIRM_EVERY) < CONFIRM_EVERY:
+        return False
+    _confirmed_at[provider] = now
+    env = {**{k: v for k, v in os.environ.items() if k not in providers._ENV_AUTH.get(provider, ())},
+           VARIABLE[provider]: str(where)}
+    if provider == "claude":
+        res = providers._auth_probe([providers.claude_binary(), "auth", "status"], env)
+        try:
+            ok = bool(res) and json.loads(res[1]).get("loggedIn") is True
+        except (ValueError, AttributeError):
+            ok = False
+    else:
+        res = providers._auth_probe([providers.codex_binary(), "login", "status"], env)
+        ok = bool(res) and res[0] == 0
+    if ok:
+        (where / SIGNED_IN).write_text(f"{time.time()}\n")
+        (where / LOGIN_STARTED).unlink(missing_ok=True)
+    return ok
+
+
+def isolated(provider: str) -> bool:
+    """Whether brindle runs ``provider``'s CLI with brindle's own config home now."""
     where = home(provider)
     if where is None:
-        return {}
+        return False
+    if provider == "opencode" or (where / SIGNED_IN).exists():
+        return True
+    return (where / LOGIN_STARTED).exists() and _confirm(provider, where)
+
+
+def effective_home(provider: str) -> Path | None:
+    """The config folder ``provider``'s CLI runs with under brindle: brindle's
+    own once it is in use, else the person's own (None for Antigravity)."""
+    if home(provider) is None:
+        return None
+    return home(provider) if isolated(provider) else source(provider)
+
+
+def _prepared(provider: str, where: Path) -> dict[str, str]:
     try:
         ensure(provider)
     except OSError:      # never stop a launch over the copy; it is tried again next time
         log.warning("brindle: couldn't copy the setup for %s into %s", provider, where, exc_info=True)
     return {VARIABLE[provider]: str(where)}
+
+
+def launch_env(provider: str) -> dict[str, str]:
+    """What points ``provider``'s CLI at brindle's config home once it is in
+    use (after the one-time copy of the person's files); empty while the CLI
+    still runs with the person's own home, and for Antigravity."""
+    where = home(provider)
+    return _prepared(provider, where) if where is not None and isolated(provider) else {}
+
+
+def login_env(provider: str) -> dict[str, str]:
+    """The environment for the CLI's own login inside brindle: always
+    brindle's home, which brindle starts using once a status check there says
+    signed in. Empty for Antigravity."""
+    where = home(provider)
+    if where is None:
+        return {}
+    env = _prepared(provider, where)
+    if provider != "opencode" and not (where / SIGNED_IN).exists():
+        where.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (where / LOGIN_STARTED).write_text(f"{time.time()}\n")
+        _confirmed_at.pop(provider, None)
+    return env
 
 
 # -- the copy --------------------------------------------------------------------

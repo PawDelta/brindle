@@ -12,7 +12,6 @@ from unittest.mock import Mock
 import pytest
 
 from brindle import model_availability as ma
-from brindle import provider_homes
 from brindle.profiles import Profile
 
 
@@ -456,7 +455,7 @@ def test_provisioning_checks_managed_model_and_exact_pane_environment(db, repo, 
     assert request.cwd == ws.path
     assert request.env["CUSTOM"] == "managed-value"
     assert request.env["OPENAI_API_KEY"] == "org-key"  # org exemptions survive subscription/deny
-    assert request.env["CODEX_HOME"] == str(provider_homes.home("codex"))  # brindle's own, not the server's
+    assert request.env["CODEX_HOME"] == "/effective-account"
     assert "DENIED" not in request.env
     assert request.env["STORED_KEY"] == "stored"
 
@@ -489,7 +488,7 @@ def test_existing_tmux_environment_excludes_launcher_only_credentials_and_accoun
     monkeypatch.setattr(agents, "_model_checker", check)
     assert agents.model_problem("test", workspaces.adopt_root(db, str(repo))) is None
     request = discover.call_args.args[0]
-    assert "OPENAI_API_KEY" not in request.env and request.env["CODEX_HOME"] == str(provider_homes.home("codex"))
+    assert "OPENAI_API_KEY" not in request.env and request.env["CODEX_HOME"] == "/server-account"
     assert request.env["CUSTOM"] == "explicit"
     from brindle import launch_health, model_access
     model_access.refuse("test", model_access.LAUNCH_AUTH, repo_root=str(repo),

@@ -339,8 +339,8 @@ def sign_in(provider: str, *, run=None, confirm: Callable[..., bool] = typer.con
     echo(f"Opening {name}'s sign-in; come back here when you're done.")
     from brindle import provider_homes
 
-    # The CLI signs in to brindle's config home for it, where its agents and probes look.
-    homes, browser = provider_homes.launch_env(provider), _wsl_browser_env()
+    # The CLI signs in to brindle's config home for it, which brindle uses from then on.
+    homes, browser = provider_homes.login_env(provider), _wsl_browser_env()
     env = {**(browser or os.environ), **homes} if homes or browser else None
     run(_login_command(provider), timeout=LOGIN_TIMEOUT, interactive=True, env=env)
     if provider in doctor.signed_in_providers():

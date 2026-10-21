@@ -6,14 +6,17 @@ home; nothing real is installed or run."""
 import asyncio
 import json
 import os
+import shutil
 import threading
+import time
 
 import pytest
 
-from brindle import bus, doctor, picker, provider_homes, providers
+from brindle import agents, bus, company_identity, company_login, doctor, picker, provider_homes, providers, workspaces
 from brindle import providers_install as pi
 from brindle.daemon import routes_actions
 from brindle.daemon.app import build_app
+from brindle.db import Agent
 
 TOKEN = "t" * 43
 # conftest stubs these for every test; the sign-in test asks its fake claude for real.
@@ -155,29 +158,50 @@ def test_only_instructions_and_markdown_are_copied_once_and_never_through_a_link
     elsewhere.mkdir()
     (elsewhere / "agent.md").write_text("fixture-through-a-link")
     (src / "agents").symlink_to(elsewhere, target_is_directory=True)        # a linked parent folder
-    provider_homes.launch_env("claude")
+    provider_homes.login_env("claude")                                      # brindle's home first used: its sign-in
     copied = sorted(p.relative_to(brindle_home).as_posix() for p in brindle_home.rglob("*") if p.is_file())
-    assert copied == [provider_homes.MARKER, "CLAUDE.md", "commands/review.md"]
+    assert copied == [provider_homes.LOGIN_STARTED, provider_homes.MARKER, "CLAUDE.md", "commands/review.md"]
     (brindle_home / "CLAUDE.md").write_text("brindle's own")
     (src / "commands" / "later.md").write_text("added later")
-    provider_homes.launch_env("claude")                                     # a second launch: no copy again
+    provider_homes.login_env("claude")                                      # used again: no copy again
     assert (brindle_home / "CLAUDE.md").read_text() == "brindle's own"
     assert not (brindle_home / "commands" / "later.md").exists()
 
 
-def test_sign_in_and_its_check_use_brindles_config_home(machine, tmp_path, monkeypatch):
+def test_the_persons_home_runs_until_a_sign_in_inside_brindle_then_brindles_does(machine, tmp_path, monkeypatch):
     home, bin_dir = machine
     brindle_home = tmp_path / "brindle-claude"
     monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(brindle_home))
     monkeypatch.setattr(providers, "_auth_probe", REAL_PROBE)
     monkeypatch.setattr(doctor, "signed_in_providers", REAL_SIGNED_IN)
-    _exe(bin_dir / "claude", 'if [ -f "$CLAUDE_CONFIG_DIR/signed" ]; then echo \'{"loggedIn": true}\'; '
-                             'else echo \'{"loggedIn": false}\'; fi')
-    assert providers.signed_out("claude") is not None
+    monkeypatch.setattr(company_login, "which", shutil.which)     # conftest hides claude from identity probes
+    company_identity.reset()
+    # One identity per home: the person's own (an existing setup), and brindle's once signed in there.
+    _exe(bin_dir / "claude",
+         f'if [ "$CLAUDE_CONFIG_DIR" != "{brindle_home}" ]; then echo \'{{"loggedIn": true, "orgId": "person-org"}}\'; '
+         f'elif [ -f "{brindle_home}/signed" ]; then echo \'{{"loggedIn": true, "orgId": "brindle-org"}}\'; '
+         "else echo '{\"loggedIn\": false}'; fi")
+    # Nobody signed in inside brindle yet: launches keep the person's working setup.
+    assert provider_homes.launch_env("claude") == {}
+    assert providers.signed_out("claude") is None
+    assert "person-org" in company_identity.claude_identity("org", None).line
 
     def login(argv, env=None, **kw):        # the CLI's own login, writing where it is pointed
         open(os.path.join(env["CLAUDE_CONFIG_DIR"], "signed"), "w").close()
         return 0, ""
 
     assert picker.sign_in("claude", run=login, echo=lambda *a, **k: None) is True
-    assert (brindle_home / "signed").exists()
+    # Signed in inside brindle: from now on its home, and the identity check asks that one.
+    assert provider_homes.launch_env("claude") == {"CLAUDE_CONFIG_DIR": str(brindle_home)}
+    assert "brindle-org" in company_identity.claude_identity("org", None).line
+
+
+def test_a_turned_off_provider_never_launches(machine, db, repo, monkeypatch):
+    ws = workspaces.adopt_root(db, str(repo))
+    agent = Agent("w1", ws.id, "developer", "claude", None, "assign", "idle", "", None, time.time())
+    db.add_agent(agent)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: pytest.fail("ran the CLI's model check"))
+    assert _send("DELETE", "/v1/providers/claude")[0] == 200
+    with pytest.raises(agents.PreflightBlocked) as blocked:
+        agents._launch(db, agent, ws, prompt="go", resume=None, watch_pane=False)
+    assert [i.id for i in blocked.value.items] == ["claude.off"]

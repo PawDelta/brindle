@@ -50,7 +50,7 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     saved = tmp_path / "claude" / "projects" / "p"
     saved.mkdir(parents=True)
     (saved / "sess-boss.jsonl").write_text("{}")
-    monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(tmp_path / "claude"))   # brindle's config home for it
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
     launched = []
     monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append((a.id, kw)))
     add(db, root, "boss")
@@ -72,7 +72,7 @@ def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, 
     """a.task is stored raw (see agents.decorate_worker_prompt); a fresh
     restart needs the finish line, WORKER_FOOTER and /goal wrapper rebuilt,
     same as at the first launch."""
-    monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(tmp_path / "claude"))  # no saved session
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))  # no saved session
     w1 = Agent("w1", root.id, "developer", "claude", "boss", "assign", "paused", "", None,
               time.time(), time.time(), "Add input validation.", "sess-w1",
               done_when="tests/test_x.py passes")

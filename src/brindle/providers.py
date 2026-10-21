@@ -212,23 +212,29 @@ def claude_binary() -> str:
 
 
 def claude_config_dir() -> str:
-    """The config home brindle runs Claude Code with (provider_homes)."""
+    """The config folder brindle runs Claude Code with (provider_homes):
+    brindle's own once it is in use, else ``$CLAUDE_CONFIG_DIR`` or ~/.claude."""
     from brindle import provider_homes
 
-    return str(provider_homes.home("claude"))
+    return str(provider_homes.effective_home("claude"))
 
 
 def codex_home() -> str:
-    """The ``CODEX_HOME`` brindle runs Codex with (provider_homes)."""
+    """The ``CODEX_HOME`` brindle runs Codex with (provider_homes): brindle's
+    own once it is in use, else the environment's or ~/.codex."""
     from brindle import provider_homes
 
-    return str(provider_homes.home("codex"))
+    return str(provider_homes.effective_home("codex"))
 
 
 def claude_global_config() -> str:
     """Claude Code's global state file, where it records trusted folders:
-    ``.claude.json`` in brindle's config home for it (CLAUDE_CONFIG_DIR)."""
-    return os.path.join(claude_config_dir(), ".claude.json")
+    ``.claude.json`` in its config folder when that is moved (brindle's own,
+    or ``$CLAUDE_CONFIG_DIR``), else ``~/.claude.json``."""
+    from brindle import provider_homes
+
+    config = provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
+    return os.path.join(config, ".claude.json") if config else os.path.expanduser("~/.claude.json")
 
 
 def trust_folder(path: str) -> bool:
@@ -1365,10 +1371,11 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     sees them too, as it sees brindle's config home for the CLI (provider_homes)."""
     from brindle import provider_homes
 
-    full_env = {**os.environ, **provider_homes.launch_env(provider), **(env or {})}
+    homes = provider_homes.launch_env(provider)
+    full_env = {**os.environ, **homes, **(env or {})}
     if any(full_env.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
-    key = _signed_in_key(provider, env)
+    key = _signed_in_key(provider, {**homes, **(env or {})} or None)   # an answer is the home's it was asked in
     seen = _SIGNED_IN.get(key)
     inv = _last_invalidated(provider)
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
