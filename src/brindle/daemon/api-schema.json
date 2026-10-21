@@ -1584,6 +1584,18 @@
         "RoutingKindDTO": {
           "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
           "properties": {
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Effort"
+            },
             "fallbacks": {
               "default": [],
               "items": {
@@ -1591,6 +1603,18 @@
               },
               "title": "Fallbacks",
               "type": "array"
+            },
+            "instructions": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Instructions"
             },
             "learned": {
               "anyOf": [
@@ -2016,6 +2040,18 @@
     "RoutingKindDTO": {
       "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
       "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
         "fallbacks": {
           "default": [],
           "items": {
@@ -2023,6 +2059,18 @@
           },
           "title": "Fallbacks",
           "type": "array"
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Instructions"
         },
         "learned": {
           "anyOf": [
@@ -2470,6 +2518,30 @@
         "profile"
       ],
       "title": "RoutingTierModelDTO",
+      "type": "object"
+    },
+    "RuleDTO": {
+      "description": "A rule pack that can be given to an agent.",
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "source"
+      ],
+      "title": "RuleDTO",
       "type": "object"
     },
     "SessionDTO": {
@@ -3024,6 +3096,10 @@
       "path": "/v1/profiles"
     },
     {
+      "method": "POST",
+      "path": "/v1/profiles"
+    },
+    {
       "method": "GET",
       "path": "/v1/profiles/{name}"
     },
@@ -3078,6 +3154,10 @@
     {
       "method": "PUT",
       "path": "/v1/routing"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/rules"
     },
     {
       "method": "GET",

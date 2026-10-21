@@ -62,6 +62,8 @@ def user_config_path() -> Path:
 
 WEIGHTS = ("light", "medium", "heavy", "advanced")
 ROUTING_KINDS = (*WEIGHTS, "reviewer", "supervisor")   # the kinds of work the app routes and can lock
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+KIND_OVERRIDE_FIELDS = ("effort", "instructions")   # what the owner can set per kind, on top of its profile
 WEIGHT_ALIASES = {
     "reasoning": "advanced",
     "complex": "advanced",
@@ -213,6 +215,9 @@ class RepoConfig:
     # Kind of work -> whether hosted learning may never override it. Per kind, so a scope can
     # unlock one a lower scope locked and a write to one kind leaves the others as they are.
     routing_locked: dict[str, bool] = field(default_factory=dict)
+    # Kind of work -> {"effort", "instructions"} applied to whatever runs that kind at launch,
+    # merged per kind and field: user, then repo, then config.local.json.
+    routing_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
     reviewer_fallbacks: list[str] = field(default_factory=list)   # reviewer profiles to try, in order, when the reviewer can't run
     supervisor_profile: str | None = None      # the profile whose provider the supervisor runs on (None: the supervisor profile's own)
     supervisor_fallbacks: list[str] = field(default_factory=list)  # tried in order when that provider can't run it
@@ -310,6 +315,18 @@ def locked_kinds(found: object) -> dict[str, bool]:
     return {}
 
 
+def kind_overrides(found: object) -> dict[str, dict[str, str]]:
+    """A ``routing_overrides`` setting as {kind: {effort?, instructions?}}, keeping only what is valid."""
+    out: dict[str, dict[str, str]] = {}
+    for kind, spec in (found.items() if isinstance(found, dict) else ()):
+        if kind in ROUTING_KINDS and isinstance(spec, dict):
+            kept = {k: v for k, v in spec.items() if k in KIND_OVERRIDE_FIELDS and isinstance(v, str) and v.strip()
+                    and (k != "effort" or v in EFFORTS)}   # a hand-edited file can't pass anything else to the CLI
+            if kept:
+                out[kind] = kept
+    return out
+
+
 def load_repo_config(repo_root: str | Path) -> RepoConfig:
     base = config_root(repo_root) / CONFIG_DIR
     shared = _read_json(base / CONFIG_FILE)
@@ -365,6 +382,9 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                     cfg.routing_sources[norm_tier] = str(path)
     for source in (user, shared, local):  # per kind, a later scope overriding an earlier one
         cfg.routing_locked.update(locked_kinds(source.get("routing_locked")))
+    for source in (user, shared, local):
+        for kind, fields in kind_overrides(source.get("routing_overrides")).items():
+            cfg.routing_overrides.setdefault(kind, {}).update(fields)
     from brindle import worker_models
 
     worker_models.apply(cfg, user, str(repo_root))   # the models picked on the picker's workers screen

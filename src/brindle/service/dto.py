@@ -259,6 +259,15 @@ class RoutingKindDTO(_DTO):
     fallbacks: list[str] = []
     locked: bool = False
     learned: str | None = None
+    effort: str | None = None          # the owner's effort for whatever runs this kind (None: its profile's own)
+    instructions: str | None = None    # text added to the prompt of whatever runs this kind
+
+
+class RuleDTO(_DTO):
+    """A rule pack that can be given to an agent."""
+    name: str
+    description: str
+    source: str
 
 
 class RoutingLockDTO(_DTO):

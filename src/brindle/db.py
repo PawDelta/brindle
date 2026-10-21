@@ -629,6 +629,7 @@ class Agent:
     review_restarted: float | None = None  # the wait in review whose review was started again (pipeline.restart_review)
     merge_failed: str | None = None        # why the pipeline couldn't merge its approved branch (pipeline.review_state)
     config_home: str | None = None         # its CLI's config home, decided once at spawn (provider_homes); '' the person's own
+    weight: str | None = None              # the weight its task was routed as, known from launch (agents.spawn)
 
 
 @dataclass
@@ -904,7 +905,8 @@ class DB:
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
-                          ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT")):
+                          ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT"),
+                          ("weight", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}

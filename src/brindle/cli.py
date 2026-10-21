@@ -1698,13 +1698,6 @@ profile_app = typer.Typer(no_args_is_help=True,
                                "(its `extends` parent and rule packs folded in).")
 app.add_typer(profile_app, name="profile")
 
-PROFILE_TEMPLATE = """---
-name: {name}
-description: {description}
-{extends}{rules}---
-{prompt}
-"""
-
 
 @profile_app.command("new")
 def profile_new(
@@ -1716,9 +1709,9 @@ def profile_new(
 ) -> None:
     """Write a new profile file to .brindle/agents/ (or ~/.brindle/agents with --user)."""
     from brindle.config import user_profiles_dir
-    from brindle.profiles import ProfileError, load_profile, load_rule_pack
+    from brindle.profiles import PROFILE_NAME, ProfileError, load_profile, load_rule_pack, profile_text
 
-    if not _PROFILE_NAME.match(name):
+    if not PROFILE_NAME.match(name):
         _fail(f"profile name {name!r}: use letters, digits, '-', '_' and '.'")
     repo = _here_repo()
     if user:
@@ -1745,20 +1738,11 @@ def profile_new(
         prompt = ("Additional instructions for this role go here; they follow the parent's prompt.")
     else:
         prompt = "You are an agent running under brindle. Describe the role here."
-    text = PROFILE_TEMPLATE.format(
-        name=name,
-        description=description or f"A {name} agent",
-        extends=f"extends: {extends}\n" if extends else "provider: claude\n",
-        rules=f"rules: {', '.join(packs)}\n" if packs else "",
-        prompt=prompt,
-    )
+    text = profile_text(name, description, prompt, extends=extends, rules=packs)
     target_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     typer.echo(f"✓ wrote {target}")
     typer.echo(f"  check it with: brindle profile show {name}")
-
-
-_PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @profile_app.command("lint")

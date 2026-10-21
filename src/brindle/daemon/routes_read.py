@@ -49,6 +49,7 @@ from brindle.service.dto import (
     RoutingSettingDTO,
     RoutingTierDTO,
     RoutingTierModelDTO,
+    RuleDTO,
     SessionDTO,
     WorkspaceDTO,
 )
@@ -240,6 +241,20 @@ def list_profiles(db: DB, request: Request) -> Any:
 
 
 @_json
+def list_rules(db: DB, request: Request) -> Any:
+    """Every rule pack an agent can be given, with its one-line description and where it comes from."""
+    repo = _need_repo(request)
+    out = []
+    for name in profiles.list_rule_packs(repo):
+        try:
+            pack = profiles.load_rule_pack(name, repo)
+        except (KeyError, profiles.ProfileError):
+            continue    # listed but unreadable: `brindle profile lint` reports it
+        out.append(RuleDTO(name=name, description=pack.description, source=pack.source).to_json())
+    return out
+
+
+@_json
 def get_profile(db: DB, request: Request) -> Any:
     """One profile as ``brindle profile show`` resolves it (its fields, where
     it is read from, the extends chain, its rule packs and the full prompt;
@@ -356,6 +371,9 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, Routi
             log.exception("brindle: couldn't ask the learner about %s", kind)
             return None
 
+    def tuned(kind: str) -> dict[str, str | None]:
+        return {k: cfg.routing_overrides.get(kind, {}).get(k) for k in config.KIND_OVERRIDE_FIELDS}
+
     kinds = {}
     def weight_pick(t: str) -> str | None:
         # The dispatch's own resolution, so an excluded or unavailable candidate is never reported.
@@ -366,7 +384,7 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, Routi
         names = cfg.routing[t]
         kinds[t] = RoutingKindDTO(model=names[0] if names else None, fallbacks=names[1:],
                                   locked=bool(cfg.routing_locked.get(t)),
-                                  learned=learned(t, lambda t=t: weight_pick(t)))
+                                  learned=learned(t, lambda t=t: weight_pick(t)), **tuned(t))
 
     def reviewer_pick() -> str | None:
         if cfg.review_profile:      # the owner's explicit choice, not a learned one
@@ -377,9 +395,9 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, Routi
     kinds["reviewer"] = RoutingKindDTO(model=cfg.review_profile or cfg.reviewer,
                                        fallbacks=cfg.reviewer_fallbacks,
                                        locked=bool(cfg.routing_locked.get("reviewer")),
-                                       learned=learned("reviewer", reviewer_pick))
+                                       learned=learned("reviewer", reviewer_pick), **tuned("reviewer"))
     kinds["supervisor"] = RoutingKindDTO(model=cfg.supervisor_profile, fallbacks=cfg.supervisor_fallbacks,
-                                         locked=bool(cfg.routing_locked.get("supervisor")))
+                                         locked=bool(cfg.routing_locked.get("supervisor")), **tuned("supervisor"))
     return kinds
 
 
@@ -528,6 +546,7 @@ ROUTES = [
     Route("/v1/kb/search", kb_search),
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
+    Route("/v1/rules", list_rules),
     Route("/v1/config", get_config),
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/routing", get_routing),

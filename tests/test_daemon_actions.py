@@ -381,6 +381,80 @@ def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo
         agents._review_profile(db, world, "reviewer-opencode", cfg)
 
 
+def test_routing_effort_and_instructions_are_kept_per_kind_and_applied_at_launch(db, repo, world, monkeypatch):
+    from brindle.daemon import routes_read
+
+    def put(**kinds):
+        return _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": kinds})
+
+    assert put(supervisor={"effort": "max", "instructions": "Be brief."},
+               reviewer={"instructions": "Check tests."})[0] == 200
+    assert put(supervisor={"effort": "turbo"})[0] == 400
+    assert put(supervisor={"instructions": 3})[0] == 400
+    cfg = config.load_repo_config(str(repo))
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert (kinds["supervisor"].effort, kinds["supervisor"].instructions) == ("max", "Be brief.")
+    assert (kinds["reviewer"].effort, kinds["reviewer"].instructions) == (None, "Check tests.")
+
+    db.add_agent(Agent("rv", "w-1", "reviewer", "claude", "sup", "review", "idle", "%3", None, time.time()))
+    sup = agents._profile_for(db, db.get_agent("sup"), world)
+    rev = agents._profile_for(db, db.get_agent("rv"), world)
+    assert (sup.effort, "Be brief." in sup.prompt) == ("max", True)
+    assert "Check tests." in rev.prompt and "Be brief." not in rev.prompt
+
+    assert put(supervisor={"effort": None, "instructions": None})[0] == 200     # null clears
+    assert agents._profile_for(db, db.get_agent("sup"), world).prompt.count("Be brief.") == 0
+
+    # A worker launches with its weight's overrides from the first launch, before any task row links it.
+    assert put(heavy={"effort": "low", "instructions": "Go deep."})[0] == 200
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, agent, ws, **kw: launched.append(agent))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    _, wws = agents.delegate(db, db.get_agent("sup"), world, "developer", "do it", "assign",
+                             isolate=False, weight="heavy")
+    got = agents._profile_for(db, launched[-1], wws)
+    assert (launched[-1].weight, got.effort, "Go deep." in got.prompt) == ("heavy", "low", True)
+    agents.delegate(db, db.get_agent("sup"), world, "developer", "do it", "assign", isolate=False)
+    assert "Go deep." not in agents._profile_for(db, launched[-1], wws).prompt
+    assert routes_read._routing_kinds(db, config.load_repo_config(str(repo)), str(repo))["reviewer"].instructions \
+        == "Check tests."
+
+
+def test_creating_a_profile_writes_the_user_agent_file_and_refuses_what_is_wrong(world, repo, monkeypatch):
+    from brindle import providers
+    from brindle.profiles import load_profile
+
+    monkeypatch.setattr(providers, "unusable", lambda p, env=None: "down" if p == "codex" else None)
+    body = {"repo": str(repo), "name": "my-agent", "description": "Mine", "provider": "claude",
+            "model": "sonnet", "effort": "high", "instructions": "Do it well.", "rules": ["style/minimal-diff"]}
+    code, reply = _send("POST", "/v1/profiles", body)
+    assert code == 200, reply
+    path = config.user_profiles_dir() / "my-agent.md"
+    assert reply == {"name": "my-agent", "path": str(path)}
+    p = load_profile("my-agent", str(repo))
+    assert (p.provider, p.model, p.effort, p.rules, p.prompt, p.description) == (
+        "claude", "sonnet", "high", ["style/minimal-diff"], "Do it well.", "Mine")
+    before = path.read_text()
+    for bad in ({"name": "../x"}, {"model": "sonnet\nprovider: codex\npermission_mode: bypassPermissions"}, {"provider": "codex"}, {"provider": "nope"}, {"rules": ["no/such"]},
+                {"effort": "turbo"}):
+        code, reply = _send("POST", "/v1/profiles", {**body, "name": "other", **bad})
+        assert code == 400, (bad, reply)
+    assert [f.name for f in config.user_profiles_dir().iterdir()] == ["my-agent.md"]
+    code, _ = _send("POST", "/v1/profiles", {**body, "instructions": "Overwritten?"})
+    assert (code, path.read_text()) == (409, before)
+
+
+def test_creating_a_profile_refuses_a_model_the_org_does_not_allow(world, repo, monkeypatch):
+    from brindle.pro import team_policy
+
+    monkeypatch.setattr(team_policy, "access", lambda repo: Access(org_id="acme", allowed_models=("opus",)))
+    body = {"repo": str(repo), "name": "my-agent", "description": "", "provider": "claude",
+            "effort": None, "instructions": "x", "rules": []}
+    assert _send("POST", "/v1/profiles", {**body, "model": "haiku"})[0] == 403
+    assert not (config.user_profiles_dir() / "my-agent.md").exists()
+    assert _send("POST", "/v1/profiles", {**body, "model": "opus"})[0] == 200
+
+
 PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),
                     enforce=True)
 

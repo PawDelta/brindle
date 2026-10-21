@@ -131,3 +131,37 @@ def test_pause_and_resume_keep_subagent_records(db, boss, monkeypatch):
         ("session.paused", "boss", True), ("session.resumed", "boss", True)]
     assert [e["payload"]["status"] for e in bus.tail(db, kinds=("agent.status",))
             if e["agent_id"] == open_one.id][-2:] == ["paused", "processing"]
+
+
+def test_a_weights_effort_and_instructions_reach_every_way_a_worker_starts(db, boss, repo, monkeypatch):
+    from brindle import tasks
+
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(
+        '{"pipeline": false, "routing_overrides": {"heavy": {"effort": "low", "instructions": "Go deep."}}}')
+    launched = []
+
+    def launch(db_, agent, ws, **kw):    # before the task is linked to the worker, as the CLI first starts
+        launched.append((agent, agents._profile_for(db_, agent, ws)))
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+
+    def launches(i):    # as first launched, then as a resume reloads the worker
+        agent, first = launched[i]
+        return first, agents._profile_for(db, db.get_agent(agent.id), db.get_workspace(agent.workspace_id))
+
+    out = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", weight="heavy"))
+    assert "Started worker" in out
+    for profile in launches(-1):
+        assert (profile.effort, "Go deep." in profile.prompt) == ("low", True)
+
+    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=["feat-a"], weight="heavy"))
+    [queued] = db.list_tasks(str(repo), state="pending")
+    worker = tasks.start_queued(db, queued)
+    assert launched[-1][0].id == worker.id
+    for profile in launches(-1):
+        assert (profile.effort, "Go deep." in profile.prompt) == ("low", True)
+
+    asyncio.run(mcp_server.handoff("subagent", "do C", branch="feat-c", weight="heavy"))
+    assert "Go deep." in _started(db).task
