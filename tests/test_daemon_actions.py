@@ -104,12 +104,20 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
         assert [(e["kind"], e["payload"]["job"]) for e in done] == [("job.done", reply["job"])]
 
 
-def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(db, world, monkeypatch):
+def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(db, tmp_path, monkeypatch):
     from brindle import procs, tmux
     from brindle import sessions as sessions_mod
 
-    db.add_agent(Agent("wk2", "proj/w-2", "developer", "claude", "sup", "assign", "idle", "%3", None,
-                       time.time()))
+    repo = str(tmp_path / "proj")
+    for wid, name, kind, branch in [("proj/root", "root", "main", "main"), ("w-1", "feat", "worktree", "feat"),
+                                    ("w-2", "feat2", "worktree", "feat2")]:
+        db.add_workspace(Workspace(wid, repo, name, kind, branch, "main", f"{repo}/{name}", None,
+                                   f"brindle-{name}", time.time()))
+    db.add_agent(Agent("sup", "proj/root", "supervisor", "claude", None, "interactive", "idle", "%1",
+                       None, time.time()))
+    for n in (1, 2):
+        db.add_agent(Agent(f"wk{n}", f"w-{n}", "developer", "claude", "sup", "assign", "idle", f"%{n + 1}",
+                           None, time.time()))
     stopped = []
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id not in stopped)
@@ -120,11 +128,11 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
     for _ in range(2):         # the second close finds nothing left to do
         code, reply = _send("POST", "/v1/sessions/sup/close")
         assert code == 200, reply
-    assert sorted(stopped) == ["sup", "wk", "wk2"]
+    assert sorted(stopped) == ["sup", "wk1", "wk2"]
     assert all(db.get_agent(i).dismissed_at for i in stopped)
     assert reply == {"closed": [], "stopped": []}
-    assert {w.branch for w in (db.get_workspace("w-1"), db.get_workspace("proj/w-2"))} == {"feat", "feat2"}
-    code, listed = _send("GET", f"/v1/sessions?repo={world.repo_root}")
+    assert {db.get_workspace(w).branch for w in ("w-1", "w-2")} == {"feat", "feat2"}
+    code, listed = _send("GET", f"/v1/sessions?repo={repo}")
     assert code == 200 and "sup" not in [s["id"] for s in listed]
 
 
