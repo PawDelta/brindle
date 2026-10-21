@@ -209,6 +209,28 @@ def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     assert autopilot.on_stop(db, agent, {}) is None
 
 
+def test_a_reached_goal_is_kept_with_its_milestones_and_autopilot_idles(db, root, repo):
+    from brindle.daemon import session_review
+    from brindle.service.dto import GoalDTO
+
+    agent, ws = root
+    with_goal(db)
+    (repo / "api.txt").write_text("")
+    (repo / "ui.txt").write_text("")
+    out = autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+    assert "goal is reached" in out
+    ap = db.get_autopilot("boss")
+    dto = GoalDTO.from_autopilot(ap, db.milestones("boss"), None, session_review.goal_phase(db, "boss"))
+    assert dto.goal == "Settings page" and dto.goal_phase == "done"
+    assert [m.status for m in dto.milestones] == ["passed", "passed"]
+    assert "reached" in autopilot.progress(db, "boss")
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"goal_audit": false}')
+    assert autopilot.on_stop(db, agent, {}) is None and db.get_autopilot("boss").state == "done"
+    with_goal(db)   # a new set_goal replaces it
+    assert db.get_autopilot("boss").state == "running"
+
+
 def _crash(*a, **k):
     raise RuntimeError("boom")
 
@@ -338,9 +360,9 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
                                          "autopilot.audit_started", "autopilot.audit"))] == [
         ("autopilot.goal", None), ("autopilot.checked", True), ("autopilot.checked", True),
         ("autopilot.audit_started", None), ("autopilot.audit", True)]
-    # The finished goal goes: its file and the session's goal and milestones.
+    # The finished goal's file goes; the goal and milestones stay for the app.
     assert not goals.exists()
-    assert db.get_autopilot("boss").goal is None and db.milestones("boss") == []
+    assert db.get_autopilot("boss").goal == "Settings page" and len(db.milestones("boss")) == 2
     assert autopilot.on_stop(db, agent, {}) is None
 
 

@@ -888,9 +888,9 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     assert (code, reply["error"]["code"]) == (409, "not_ready") and reply["reasons"]
     assert not called.exists()
     autopilot.set_goal(db, "lead", "Ship it", [("tests pass", "true", None)])
-    autopilot.clear_finished_goal(db, "lead")       # reached: what's left is what the session announced
-    db.update_autopilot("lead", state="done")
-    _commit(sess, "a.py", "a\n")
+    db.record_check(db.milestones("lead")[0].id, True, "", "sha", passed_sha="sha")
+    autopilot.clear_finished_goal(db, "lead")       # reached: the goal and its milestones stay
+    db.update_autopilot("lead", state="done", audit_sha=_commit(sess, "a.py", "a\n"), audit_ok=1)
     code, draft = _send("GET", "/v1/sessions/lead/pr/draft")
     assert code == 200 and draft["title"] == "Ship it" and "- tests pass" in draft["body"]
     code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": draft["title"], "body": draft["body"]})
