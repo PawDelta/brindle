@@ -1012,19 +1012,27 @@ def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
     _tmux("set-option", "-w", "-u", "-t", target, "window-size", check=False, server=server)
 
 
-VIEW_FORMAT = "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{window_id}"
+# The DEC private modes a pane's program can have set that a copy of its
+# screen doesn't carry, in VIEW_FORMAT's order after the window: the alternate
+# screen, mouse reports (button, button-event, any-event; SGR encoded) and
+# application cursor keys.
+VIEW_MODES = (1049, 1000, 1002, 1003, 1006, 1)
+VIEW_FORMAT = ("#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{window_id}"
+               " #{alternate_on} #{mouse_standard_flag} #{mouse_button_flag}"
+               " #{mouse_any_flag} #{mouse_sgr_flag} #{keypad_cursor_flag}")
 
 
 @dataclass(frozen=True)
 class View:
-    """Where a pane's cursor is (column, row), how big the pane is, and the
-    window it is in."""
+    """Where a pane's cursor is (column, row), how big the pane is, the
+    window it is in, and the VIEW_MODES its program has set."""
 
     x: int
     y: int
     cols: int
     rows: int
     window: str
+    modes: tuple[int, ...] = ()
 
 
 def pane_view(target: str, server: object = _THIS_SERVER) -> View | None:
@@ -1037,8 +1045,9 @@ def pane_view(target: str, server: object = _THIS_SERVER) -> View | None:
 def parse_view(line: str) -> View | None:
     """A VIEW_FORMAT line as a View, or None when it isn't one."""
     try:
-        x, y, cols, rows, window = line.split()
-        return View(int(x), int(y), int(cols), int(rows), window)
+        x, y, cols, rows, window, *flags = line.split()
+        modes = tuple(mode for mode, flag in zip(VIEW_MODES, flags) if flag == "1")
+        return View(int(x), int(y), int(cols), int(rows), window, modes)
     except ValueError:
         return None
 

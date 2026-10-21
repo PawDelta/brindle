@@ -29,6 +29,7 @@ class FakeTmux:
         self.lines: list[str] = []
         self.procs: list[FakeControl] = []
         self.screen = b"hello\nworld"
+        self.view = VIEW
         self.attached = 0
         self.print_during_capture = b""
         self.cond = threading.Condition()
@@ -44,7 +45,7 @@ class FakeTmux:
             return subprocess.CompletedProcess(args, 1, "", "")
         out = ""
         if args[0] == "display-message":
-            out = {"#{session_name}": "sess", tmux.VIEW_FORMAT: VIEW}.get(args[-1], "0")
+            out = {"#{session_name}": "sess", tmux.VIEW_FORMAT: self.view}.get(args[-1], "0")
         elif args[0] == "capture-pane":
             out = self.screen.decode() + "\n"
         elif args[0] == "list-clients":
@@ -80,7 +81,7 @@ class FakeTmux:
                 self.print_during_capture = b""
             proc.reply(self.screen.split(b"\n"))
         elif words[0] == "display-message":
-            proc.reply([VIEW.encode()])
+            proc.reply([self.view.encode()])
         elif words[0] == "list-clients":
             proc.reply([f.encode() for f in self.flags()])
         else:
@@ -185,6 +186,24 @@ def test_viewers_share_one_control_client_whose_seeds_are_ordered_with_its_strea
     assert [p.argv[-4:] for p in fake.procs] == [["-C", "attach-session", "-t", "=sess"]]
     assert fake.lines[0] == "refresh-client -f ignore-size"
     assert sum(line.startswith("capture-pane") for line in fake.lines) == 2
+
+
+def test_a_seed_sets_the_modes_its_program_set_again_after_the_reset(fake):
+    # Claude Code's: the alternate screen, any-event mouse reports, SGR encoded.
+    fake.view = "3 1 80 24 @1 1 0 0 1 1 0"
+    with TestClient(build_app(TOKEN)) as client:
+        sock = connect(client, "w1")
+        sock.receive_json()
+        assert sock.receive_bytes() == \
+            b"\x1bc\x1b[?1049h\x1b[?1003h\x1b[?1006hhello\r\nworld\x1b[0m\x1b[2;4H"
+        sock.__exit__(None, None, None)
+
+
+def test_parse_view_reads_the_modes_and_a_view_without_them():
+    assert tmux.parse_view("3 1 80 24 @1 1 0 0 1 1 1").modes == (1049, 1003, 1006, 1)
+    assert tmux.parse_view("3 1 80 24 @1 0 1 0 0 0 0").modes == (1000,)
+    assert tmux.parse_view("3 1 80 24 @1") == tmux.View(3, 1, 80, 24, "@1")
+    assert tmux.parse_view("3 1 80") is None
 
 
 @pytest.mark.parametrize("attached", [0, 1])
