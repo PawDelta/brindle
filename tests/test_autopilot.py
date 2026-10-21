@@ -648,18 +648,25 @@ def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
     (0, False, ["reviewer"], ["in_review", "in_progress"]),
     (0, False, ["reviewing", "building"], ["in_progress", "in_progress"]),  # still building
     (0, False, [], ["in_progress", "in_progress"]),                       # nothing under way
+    (0, False, ["reviewing", "ready"], ["in_review", "in_progress"]),     # a ready branch doesn't veto
+    (0, False, ["reviewing", "gone"], ["in_review", "in_progress"]),      # reported, process exited
 ])
 def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expected):
     _, ws = root
     with_goal(db)
     first = db.milestones("boss")[0]
     db.record_check(first.id, bool(passed), "" if passed else "nope")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a: a.status != "idle")
     if checking:
         db.update_autopilot("boss", checking_since=time.time())
     for i, kind in enumerate(workers):
-        add_agent(db, ws, f"w{i}", mode="review" if kind == "reviewer" else "assign", parent="boss")
-        if kind == "reviewing":
+        add_agent(db, ws, f"w{i}", mode="review" if kind == "reviewer" else "assign", parent="boss",
+                  status="idle" if kind in ("ready", "gone") else "processing")
+        if kind in ("reviewing", "ready"):
+            db.update_agent(f"w{i}", pipeline=kind)
+        if kind in ("ready", "gone"):
+            db.update_agent(f"w{i}", result="done")
+        if kind == "gone":
             db.update_agent(f"w{i}", pipeline="reviewing")
     phases = autopilot.milestone_phases(db, "boss")
     assert [phases[m.id] for m in db.milestones("boss")] == expected

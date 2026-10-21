@@ -453,6 +453,11 @@
               "default": null,
               "title": "Output"
             },
+            "phase": {
+              "default": "in_progress",
+              "title": "Phase",
+              "type": "string"
+            },
             "position": {
               "title": "Position",
               "type": "integer"
@@ -996,6 +1001,11 @@
           ],
           "default": null,
           "title": "Output"
+        },
+        "phase": {
+          "default": "in_progress",
+          "title": "Phase",
+          "type": "string"
         },
         "position": {
           "title": "Position",

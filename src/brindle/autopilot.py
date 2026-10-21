@@ -1604,9 +1604,21 @@ def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
         if ap is not None and checking(ap):
             in_review = True
         else:
-            live = active_workers(db, root_id)
-            reviewing = [a for a in live if a.mode == "review" or a.pipeline == "reviewing"]
-            in_review = bool(reviewing) and len(reviewing) == len(live)
+            from brindle import agents
+
+            # Session rows only: a reported worker's branch stays in review or
+            # checks after its process exits.
+            live = [a for a in agents.tree(db, root_id)[1:]
+                    if a.mode in agents.REPORTING_MODES and a.status not in ("paused", "done")]
+            reviewing = building = False
+            for a in live:
+                if a.mode == "review":
+                    reviewing |= a.result is None and not agents.review_moot(db, a)
+                elif a.pipeline == "reviewing":
+                    reviewing = True
+                elif a.pipeline != "ready" and (a.result is None or a.status in BUSY or a.pipeline):
+                    building = True
+            in_review = reviewing and not building
     return {m.id: "done" if m.state == "passed" else
             "in_review" if in_review and m is current else "in_progress" for m in ms}
 
