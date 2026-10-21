@@ -203,6 +203,7 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
         session_creds = {}
+        db_inst = None
         try:
             from brindle.db import DB
             db_inst = DB()
@@ -217,6 +218,9 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             session_creds = db_inst.get_session_credentials_with_timestamps(curr_id or root_id)
         except Exception:
             pass
+        finally:
+            if db_inst is not None:
+                db_inst.conn.close()
 
         from brindle import keystore, secrets
         guarded = _guarded_profile(agent, ws)

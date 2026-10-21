@@ -221,7 +221,8 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
-@pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events", "doctor", "doctor-owned"])
+@pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events", "doctor", "doctor-owned",
+                                  "preflight", "spend-events", "slow-check"])
 def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, kind):
     opened, closed = [], []
     connect = sqlite3.connect
@@ -248,6 +249,31 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
         assert peer._agent_panes() == {}
     elif kind == "terminal":
         assert terminal._find("missing")["code"] == "not_found"
+    elif kind == "preflight":
+        from brindle import git, preflight
+
+        repo = str(brindle_home.parent)
+        monkeypatch.setattr(git, "toplevel", lambda path: repo)
+        monkeypatch.setattr(git, "main_repo_root", lambda path: repo)
+        monkeypatch.setattr(preflight, "check", lambda *a, **k: [])
+        for _ in range(10):
+            assert _get("/v1/providers/claude/preflight", AUTH, f"repo={repo}") == (200, [])
+    elif kind == "spend-events":
+        from brindle import budget, config
+        from brindle import events as spend_events
+
+        monkeypatch.setattr(license, "has", lambda feature: True)
+        monkeypatch.setattr(budget, "worker_spend", lambda *a: 1.0)
+        monkeypatch.setattr(spend_events, "_dispatch", lambda *a: None)
+        ws = SimpleNamespace(id="ws", repo_root=str(brindle_home.parent), branch="main")
+        worker = Agent("w", "ws", "", "", None, "assign", "done", "", None, 0.0)
+        spend_events.emit(config.RepoConfig(), "remove", ws, worker)
+        spend_events.emit_periodic_cost(config.RepoConfig(), ws.repo_root)
+    elif kind == "slow-check":
+        from brindle import gates
+
+        ws = SimpleNamespace(id="missing")
+        gates._report_slow(str(brindle_home / "brindle.db"), ws, "check", 1.0, 2.0, 10)
     elif kind.startswith("doctor"):
         from brindle import company_identity, legacy, signin_pause, updates
 
