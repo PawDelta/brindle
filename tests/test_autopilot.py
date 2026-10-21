@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -110,6 +111,70 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     assert agents._stop_decision(db, agent, {}, via_inbox=True) is None
     db.read_held("boss")
     assert autopilot.on_stop(db, agent, {}) is not None
+
+
+@pytest.mark.parametrize("condition", ["pid", "until", "path"])
+def test_outside_wait_holds_nudges_until_job_ends(db, root, monkeypatch, condition):
+    from brindle import mcp_server, procs
+
+    agent, ws = root
+    with_goal(db)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", agent.id)
+    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
+    clock, live = [time.time()], [True]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    monkeypatch.setattr(procs, "alive", lambda pid: live[0])
+    deadline = clock[0] + 10 * autopilot.NUDGE_BACKOFF
+    mcp_server.wait_on(**{"path": "", condition: {"pid": 1234, "until": deadline, "path": "training.done"}[condition]},
+                       note="GPU training")
+    saved = db.get_autopilot(agent.id).external_wait
+    # Calling twice must not replace an in-flight job with a new wait.
+    mcp_server.wait_on(until=clock[0], note="replacement")
+    assert db.get_autopilot(agent.id).external_wait == saved
+    db.update_autopilot(agent.id, nudges=2, nudged_at=db.get_autopilot(agent.id).progress)
+    for _ in range(4):
+        clock[0] += autopilot.NUDGE_BACKOFF
+        assert autopilot.on_stop(db, agent, {}) is None
+        assert autopilot.usage_sweep(db, clock[0]) == []
+        assert db.get_autopilot(agent.id).nudges == 2
+        assert db.get_autopilot(agent.id).state == "running"
+    if condition == "pid":
+        live[0] = False
+    elif condition == "until":
+        clock[0] = deadline
+    else:
+        (Path(ws.path) / "training.done").touch()
+    snapshot = db.get_autopilot(agent.id)
+    ended = autopilot.on_stop(db, agent, {})
+    assert ended and "job you were waiting on has ended" in ended["reason"]
+    assert "GPU training" in ended["reason"]
+    assert db.get_autopilot(agent.id).external_wait is None
+    assert autopilot.wait_ended(db, snapshot) is None  # a concurrent sweep saw the old row
+    assert autopilot.on_stop(db, agent, {}) is None
+    assert autopilot.usage_sweep(db, clock[0]) == []
+    clock[0] += autopilot.NUDGE_BACKOFF
+    assert "job you were waiting on has ended" not in autopilot.on_stop(db, agent, {})["reason"]
+
+
+def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
+    from brindle import procs
+
+    agent, _ = root
+    with_goal(db)
+    monkeypatch.setattr(agents, "is_alive", lambda *a, **k: True)
+    monkeypatch.setattr(agents, "pulls_messages", lambda *a: False)
+    monkeypatch.setattr(procs, "alive", lambda pid: True)
+    db.update_agent(agent.id, headless=1, status="idle")
+    # The deadline ends a wait even if its process remains alive.
+    autopilot.wait_on(db, agent.id, pid=1234, until=time.time() - 1, note="training deadline")
+    autopilot.need_user(db, agent.id, "Choose dataset", ask=True)
+    assert autopilot.usage_sweep(db) == []
+    assert db.get_autopilot(agent.id).external_wait is not None
+    autopilot.answered(db, agent.id)
+    assert len(autopilot.usage_sweep(db)) == 1
+    assert autopilot.usage_sweep(db) == []
+    assert db.pending_count(agent.id) == 1
+    assert db.get_autopilot(agent.id).external_wait is None
 
 
 def test_no_nudge_while_brindle_asks_the_user_to_approve_checks(db, root, monkeypatch):

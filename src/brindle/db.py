@@ -107,7 +107,8 @@ CREATE TABLE IF NOT EXISTS autopilot (
     audit_history TEXT,            -- persistent audit notes and prior accepted decisions
     question TEXT,                 -- the supervisor's open need_user question (held while note matches)
     nudged_time REAL,              -- when the last nudge was sent
-    proposal TEXT                  -- JSON: checks awaiting the user's answer in brindle's dialog
+    proposal TEXT,                 -- JSON: checks awaiting the user's answer in brindle's dialog
+    external_wait TEXT             -- JSON {pid, until, path, note}: an outside job
 );
 CREATE TABLE IF NOT EXISTS milestones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -607,6 +608,7 @@ class Autopilot:
     question: str | None = None        # the open need_user question the user hasn't answered
     nudged_time: float | None = None   # when the last nudge was sent; never cleared, the backoff ignores it once progress moves past nudged_at
     proposal: str | None = None        # JSON {checks, rules, at}: checks awaiting the user's answer
+    external_wait: str | None = None   # JSON {pid, until, path, note}: an outside job
 
 
 @dataclass
@@ -849,7 +851,7 @@ class DB:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_paused_ids TEXT")
         for col, kind in (("goal_sha", "TEXT"), ("auditor_id", "TEXT"), ("audit_sha", "TEXT"),
                           ("audit_ok", "INTEGER"), ("audit_history", "TEXT"), ("question", "TEXT"),
-                          ("nudged_time", "REAL"), ("proposal", "TEXT")):
+                          ("nudged_time", "REAL"), ("proposal", "TEXT"), ("external_wait", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE autopilot ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
@@ -1431,6 +1433,19 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
+
+    def set_external_wait(self, root_id: str, wait: str) -> None:
+        """A repeated declaration must leave the existing wait intact."""
+        with self.tx() as c:
+            c.execute("UPDATE autopilot SET external_wait=? WHERE root_id=? AND external_wait IS NULL",
+                      (wait, root_id))
+
+    def finish_external_wait(self, root_id: str, wait: str, now: float) -> bool:
+        """Only one concurrent hook/sweep may announce this wait's completion."""
+        with self.tx() as c:
+            return bool(c.execute(
+                "UPDATE autopilot SET external_wait=NULL, nudges=0, nudged_at=progress, nudged_time=? "
+                "WHERE root_id=? AND external_wait=?", (now, root_id, wait)).rowcount)
 
     def bump_progress(self, root_id: str) -> None:
         with self.tx() as c:

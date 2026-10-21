@@ -335,6 +335,7 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
         "goal": ap.goal,
         "state": ap.state,
         "note": ap.note,
+        "wait": autopilot.wait_summary(ap),
         "usage_resets_at": ap.usage_resets_at,
         "milestones": [{"position": m.position, "title": m.title,
                         "status": w if m.status == "failed" and w else m.status,
