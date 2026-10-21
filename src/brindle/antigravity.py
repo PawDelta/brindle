@@ -424,9 +424,11 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             pass
     decision = permissions.decide(req, checks=cfg.checks, rules=rules)
     if strict and decision.decision == "ask":
-        # A compound or quoted command whose every part is allowed, read as
-        # Claude Code's hook reads a profile's allowed_tools.
-        decision = permissions.allowlist_decision(req, rules, cfg.checks, cd_root=ws.path) or decision
+        # A part a rule denies is a deny, never escalated; else a compound or
+        # quoted command whose every part is allowed, read as Claude Code's
+        # hook reads a profile's allowed_tools.
+        decision = ((req is not None and permissions.deny_in_parts(req, checks=cfg.checks, rules=rules))
+                    or permissions.allowlist_decision(req, rules, cfg.checks, cd_root=ws.path) or decision)
     spaces = payload.get("workspacePaths")
     spaces = [s for s in spaces if isinstance(s, str) and s] if isinstance(spaces, list) else []
     if strict:

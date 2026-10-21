@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from conftest import sh
 
-from brindle import antigravity, autopilot, workspaces
+from brindle import antigravity, autopilot, permissions, workspaces
 from brindle.cli import app
 from brindle.config import set_local
 from brindle.db import Agent
@@ -264,7 +264,8 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert answer("w1", "git commit -m wip") == "allow"
     compound = "touch one.txt && touch two.txt"
     long_a, long_b = "touch " + "x" * 250 + "a", "touch " + "x" * 250 + "b"  # one summary
-    for command in (compound, compound, long_a, long_b, "git push"):
+    permissions.add_rule("bash", "rm protected.txt", "deny")
+    for command in (compound, compound, long_a, long_b, "git push", "touch one.txt || rm protected.txt"):
         assert answer("w1", command) == "deny"
     stored = db.conn.execute("SELECT request FROM permission_requests WHERE agent_id='w1'").fetchall()
     assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b])
