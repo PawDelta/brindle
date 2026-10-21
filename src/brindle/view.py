@@ -324,13 +324,17 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
             a = parent
         return a.id in hidden_roots
 
-    out = []
+    listed = []
     for ws, everyone in found:
         shown = [a for a in everyone if a.dismissed_at is None and not hidden(a)]
         if everyone and not shown and ws.kind != "main":
             continue
         if retired(db, ws, alive, now, everyone):
             continue
+        listed.append((ws, shown))
+    status_cache.warm([(ws.path, ws.base_branch) for ws, _ in listed if os.path.isdir(ws.path)], now=now)
+    out = []
+    for ws, shown in listed:
         entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
                                 panes=panes, agent_list=shown, alive=alive)
         review = db.last_review(ws.id)

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -1011,24 +1012,35 @@ def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
     _tmux("set-option", "-w", "-u", "-t", target, "window-size", check=False, server=server)
 
 
-CURSOR_FORMAT = "#{cursor_x} #{cursor_y}"
+VIEW_FORMAT = "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{window_id}"
 
 
-def pane_view(target: str, server: object = _THIS_SERVER) -> tuple[int, int] | None:
-    """``target``'s cursor column and row; None when the pane is gone.
-    ``server`` as for capture."""
-    proc = _tmux("display-message", "-p", "-t", target, CURSOR_FORMAT, check=False,
+@dataclass(frozen=True)
+class View:
+    """Where a pane's cursor is (column, row), how big the pane is, and the
+    window it is in."""
+
+    x: int
+    y: int
+    cols: int
+    rows: int
+    window: str
+
+
+def pane_view(target: str, server: object = _THIS_SERVER) -> View | None:
+    """``target``'s View; None when the pane is gone. ``server`` as for capture."""
+    proc = _tmux("display-message", "-p", "-t", target, VIEW_FORMAT, check=False,
                  server=server)
-    return parse_cursor(proc.stdout) if proc.returncode == 0 else None
+    return parse_view(proc.stdout) if proc.returncode == 0 else None
 
 
-def parse_cursor(line: str) -> tuple[int, int] | None:
-    """A CURSOR_FORMAT line as (column, row), or None when it isn't one."""
+def parse_view(line: str) -> View | None:
+    """A VIEW_FORMAT line as a View, or None when it isn't one."""
     try:
-        x, y = (int(v) for v in line.split())
+        x, y, cols, rows, window = line.split()
+        return View(int(x), int(y), int(cols), int(rows), window)
     except ValueError:
         return None
-    return x, y
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:

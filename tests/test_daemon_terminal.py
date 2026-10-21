@@ -15,6 +15,7 @@ from brindle.daemon.terminal import WS_NOT_FOUND
 from brindle.db import Agent
 
 TOKEN = "t" * 43
+VIEW = "3 1 80 24 @1"       # %1's cursor, size and window
 
 
 class FakeTmux:
@@ -43,7 +44,7 @@ class FakeTmux:
             return subprocess.CompletedProcess(args, 1, "", "")
         out = ""
         if args[0] == "display-message":
-            out = {"#{session_name}": "sess", tmux.CURSOR_FORMAT: "3 1"}.get(args[-1], "0")
+            out = {"#{session_name}": "sess", tmux.VIEW_FORMAT: VIEW}.get(args[-1], "0")
         elif args[0] == "capture-pane":
             out = self.screen.decode() + "\n"
         elif args[0] == "list-clients":
@@ -79,7 +80,7 @@ class FakeTmux:
                 self.print_during_capture = b""
             proc.reply(self.screen.split(b"\n"))
         elif words[0] == "display-message":
-            proc.reply([b"3 1"])
+            proc.reply([VIEW.encode()])
         elif words[0] == "list-clients":
             proc.reply([f.encode() for f in self.flags()])
         else:
@@ -163,7 +164,7 @@ def connect(client, agent):
 def test_viewers_share_one_control_client_whose_seeds_are_ordered_with_its_stream(fake):
     with TestClient(build_app(TOKEN)) as client:
         a = connect(client, "w1")
-        assert a.receive_json() == {"type": "terminal", "agent": "w1", "shared": False}
+        assert a.receive_json() == {"type": "terminal", "agent": "w1", "shared": False, "cols": 80, "rows": 24}
         assert a.receive_bytes() == b"\x1bchello\r\nworld\x1b[0m\x1b[2;4H"
         fake.print(b"\x1b[31mli", b"ve\\")       # handed over together: one frame
         assert a.receive_bytes() == b"\x1b[31mlive\\"
@@ -199,13 +200,15 @@ def test_control_frames_reach_the_pane(fake, attached):
         sock.send_json({"type": "paste", "text": "-a\nb"})   # "-a": data, not a set-buffer option
         for cols in (80, 100, 120):
             sock.send_json({"type": "resize", "cols": cols, "rows": 40})
-        if attached:    # a terminal is attached: its size rules, nothing is resized
+        if attached:    # a terminal shares it: its size rules until the app's view is focused
             fake.wait_for(lambda: sum(l.startswith("list-clients") for l in fake.lines) >= 2)
-        else:       # the first size at once, the last after the throttle, then viewers reseeded
-            fake.wait_for(lambda: ("resize-window", "-t", "%1", "-x", "120", "-y", "40") in fake.calls)
-            fake.wait_for(lambda: sum(l.startswith("capture-pane") for l in fake.lines) >= 2)
-            assert sock.receive_json() == {"type": "resync"}
-            assert sock.receive_bytes().startswith(b"\x1bc")
+            assert not [c for c in fake.calls if c[0] == "resize-window"]
+            sock.send_json({"type": "focus"})
+        # The first size at once, the last after the throttle, then viewers reseeded.
+        fake.wait_for(lambda: ("resize-window", "-t", "%1", "-x", "120", "-y", "40") in fake.calls)
+        fake.wait_for(lambda: sum(l.startswith("capture-pane") for l in fake.lines) >= 2)
+        assert sock.receive_json() == {"type": "resync", "cols": 80, "rows": 24}
+        assert sock.receive_bytes().startswith(b"\x1bc")
         sent = [l for l in fake.lines if l.split()[0] in ("send-keys", "set-buffer", "paste-buffer")]
         name = sent[2].split()[2]
         assert sent == [
@@ -214,10 +217,42 @@ def test_control_frames_reach_the_pane(fake, attached):
             f'set-buffer -b {name} -- "-a\\012b"',
             f"paste-buffer -p -d -b {name} -t %1",
         ]
-        assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == (
-            [] if attached else [("set-option", "-w", "-t", "%1", "window-size", "manual"),
-                                 ("resize-window", "-t", "%1", "-x", "80", "-y", "40"),
-                                 ("resize-window", "-t", "%1", "-x", "120", "-y", "40")])
+        assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == [
+            ("set-option", "-w", "-t", "%1", "window-size", "manual"),
+            *[("resize-window", "-t", "%1", "-x", "80", "-y", "40")] * (not attached),
+            ("resize-window", "-t", "%1", "-x", "120", "-y", "40")]
+        if attached:
+            two_viewers(fake, client, sock)     # and closes sock
+        else:
+            sock.__exit__(None, None, None)
+
+
+def two_viewers(fake, client, sock):
+    """``sock``'s viewer blurs: the terminal's size rules again. Then two
+    viewers: the most recently focused one's size applies; the other's waits
+    for its focus, and when it leaves the first's is back. The sockets close
+    whatever happens, so a failure can't hang the TestClient."""
+    def sized():
+        return [c[4:7:2] for c in fake.calls if c[0] == "resize-window"]
+    other = None
+    try:
+        sock.send_json({"type": "blur"})
+        fake.wait_for(lambda: ("set-option", "-w", "-u", "-t", "%1", "window-size") in fake.calls)
+        sock.send_json({"type": "focus"})
+        fake.wait_for(lambda: sized().count(("120", "40")) == 2)
+        other = connect(client, "w1")
+        other.receive_json()
+        for cols in (90, 91):                   # not focused: kept, not applied
+            other.send_json({"type": "resize", "cols": cols, "rows": 30})
+        other.send_json({"type": "focus"})
+        fake.wait_for(lambda: ("91", "30") in sized())
+        other.__exit__(None, None, None)
+        other = None
+        fake.wait_for(lambda: sized().count(("120", "40")) == 3)
+        assert ("90", "30") not in sized()
+    finally:
+        if other is not None:
+            other.__exit__(None, None, None)
         sock.__exit__(None, None, None)
 
 
@@ -238,6 +273,7 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
 
     async def go():
         pane, clock, sized = terminal.Pane("%1", None, None), Clock(), []
+        pane.window = "@1"
         pane._loop = clock
 
         gated, state, ops = {}, {"attached": 0}, []
@@ -358,12 +394,45 @@ def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processe
         sock = connect(client, "w1")
         sock.receive_json()
         assert sock.receive_bytes() == b"\x1bchello\r\nworld\x1b[0m\x1b[2;4H"
+        # After a seed the next poll redraws every row.
+        assert sock.receive_bytes().count(b"\x1b[2K") == 2
         fake.screen = b"hello\nthere"
         assert sock.receive_bytes() == b"\x1b[?25l\x1b[2;1H\x1b[0m\x1b[2Kthere\x1b[0m\x1b[2;4H\x1b[?25h"
         sock.send_json({"type": "key", "text": "x"})
         fake.wait_for(lambda: ("send-keys", "-t", "%1", "-l", "--", "x") in fake.calls)
         sock.__exit__(None, None, None)
     assert fake.procs == []
+
+    # The screen changes while a seed is being taken: the poll that sees it
+    # waits for the seed, and its redraw comes after where the viewer starts.
+    async def interleaved():
+        pane, screen, gate = terminal.Pane("%1", None, None), {"rows": "old"}, asyncio.Event()
+        pane._screen = ["old"]
+
+        async def run(fn, target, *args, **kwargs):
+            if fn is tmux.pane_view:
+                return tmux.View(0, 0, 80, 24, "@1")
+            rows = screen["rows"]
+            if args[0] == terminal.SEED_LINES:      # the seed's capture, held
+                await gate.wait()
+            return rows + "\n"
+        async def settle():
+            for _ in range(20):
+                await asyncio.sleep(0)
+        pane.run, viewer = run, pane.add()
+        seeding = asyncio.ensure_future(pane.seed(viewer))
+        await settle()                          # it has captured "old"
+        screen["rows"] = "new"
+        polling = asyncio.ensure_future(pane._poll_screen())
+        await settle()
+        gate.set()
+        seed, _ = await seeding
+        await settle()
+        polling.cancel()
+        assert b"old" in seed and b"new" in pane.ring.since(viewer.pos)
+
+    monkeypatch.setattr(terminal, "POLL_SECONDS", 0)
+    asyncio.run(interleaved())
 
 
 def test_control_quote_is_one_argument_tmux_reads_back_as_the_text():

@@ -1,11 +1,12 @@
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from brindle import agents, git, status_cache, tmux, view, workspaces
+from brindle import agents, git, sessions, status_cache, tmux, view, workspaces
 
 from conftest import sh
 
@@ -116,6 +117,10 @@ def test_snapshot_subprocess_counts_cold_and_warm(db, repo, monkeypatch, capsys)
 
         git_calls = count_calls(monkeypatch, git, "run")
         tmux_calls = count_calls(monkeypatch, tmux, "_tmux")
+        # Cold, each worktree's status waits for the others': read one after another, they'd never meet.
+        status_cache.clear()
+        together, compute = threading.Barrier(len(wss), timeout=5), status_cache._compute_status
+        monkeypatch.setattr(status_cache, "_compute_status", lambda *a: (together.wait(), compute(*a))[1])
         view.snapshot(db, str(repo))
         cold_git, cold_tmux = len(git_calls), len(tmux_calls)
 
@@ -130,6 +135,9 @@ def test_snapshot_subprocess_counts_cold_and_warm(db, repo, monkeypatch, capsys)
         assert warm_git == 0
         assert cold_git > warm_git
         assert warm_tmux == 1  # one shared list-panes call per snapshot, even warm
+
+        tmux_calls.clear()      # the app's session list: one list-panes, not a call per agent
+        assert len(sessions.live(db, str(repo))) == len(spawned) and len(tmux_calls) == 1
     finally:
         for ws in wss:
             tmux.kill_session(ws.tmux_session)
