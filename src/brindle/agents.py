@@ -2245,6 +2245,12 @@ def _stop(db: DB, agent: Agent) -> None:
     # Only a window on the server brindle is using: another server's pane
     # ids mean other panes here (see same_server).
     window = agent.tmux_window if same_server(agent) and owns_pane(db, agent) else ""
+    if window:
+        from brindle.sidebar_follow import rescue_sidebar_from_window
+
+        # Before the pids are read: a moved pane keeps its process, and the
+        # sidebar's would otherwise be stopped with the agent's.
+        rescue_sidebar_from_window(db, agent)
     pane_pids = tmux.window_pids(window) if window else []
     if window:
         tmux.kill_window(window)

@@ -196,6 +196,54 @@ def rescue_sidebar(db: DB, ws: Workspace) -> None:
         pass
 
 
+def _home_session(db: DB, root_id: str, sidebar: str) -> str | None:
+    """The brindle session whose agent window ``sidebar`` sits in. Not
+    ``tmux.pane_session``: a window the app linked into its own
+    ``brindle-view-*`` session reports that one, and that session being
+    attached says nothing about the person's terminal on the brindle session."""
+    window = tmux.pane_window(sidebar)
+    for agent in db.list_agents():
+        if (window and agent.tmux_window and root_of(db, agent.id) == root_id
+                and tmux.pane_window(agent.tmux_window) == window):
+            ws = db.get_workspace(agent.workspace_id)
+            if ws is not None:
+                return ws.tmux_session
+    return tmux.pane_session(sidebar)
+
+
+def rescue_sidebar_from_window(db: DB, agent: Agent) -> None:
+    """Call before ``agent``'s tmux window is killed: if its root's sidebar is
+    a pane in that window, move it to a window of the root's session that
+    survives (the root's active one, else any other agent's there: a worker
+    sharing the root's workspace has its window in the same session). Never
+    raises."""
+    try:
+        if not agent.tmux_window:
+            return
+        root_id = root_of(db, agent.id)
+        root = db.get_agent(root_id)
+        root_ws = db.get_workspace(root.workspace_id) if root else None
+        if root is None or root_ws is None or agent.id == root_id:
+            return
+        with _sidebar_lock(root_id):
+            sidebar = db.get_sidebar_pane(root_id)
+            doomed = tmux.pane_window(agent.tmux_window)
+            if not (_valid_sidebar(sidebar, root_id) and doomed
+                    and tmux.pane_window(sidebar) == doomed):
+                return
+            candidates = [tmux.active_window(root_ws.tmux_session)]
+            candidates += [tmux.pane_window(a.tmux_window) for a in db.list_agents(root_ws.id)
+                           if a.tmux_window and a.status not in ("paused", "done")]
+            for window in candidates:
+                target_pane = window and window != doomed and tmux.agent_pane_in_window(window, sidebar)
+                if target_pane:
+                    _note_sidebar_move(f"rescue to {root_ws.tmux_session}", sidebar, target_pane)
+                    tmux.move_pane(sidebar, target_pane, SIDEBAR_COLUMNS, _sidebar_position(root_ws))
+                    return
+    except Exception:  # noqa: BLE001 - cleanup must not fail because of the sidebar
+        pass
+
+
 def sidebar_follow(db: DB, session: str) -> None:
     ws = db.workspace_by_tmux_session(session)
     if ws is None:
@@ -244,7 +292,7 @@ def sidebar_follow(db: DB, session: str) -> None:
         # person's own switch-client leaves that session first, so it reads
         # unattached by now. A second client (the app's, attached to a
         # worker's session) changing windows must not pull it from their terminal.
-        home = tmux.pane_session(sidebar)
+        home = _home_session(db, root_id, sidebar)
         if home and home != session and tmux.session_attached(home):
             return
         target_pane = tmux.agent_pane_in_window(window, sidebar)
