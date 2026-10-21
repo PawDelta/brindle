@@ -948,6 +948,21 @@ def patch_config(db: DB, params: dict, body: Body) -> Any:
     return {"updated": sorted(values), "path": str(path)}
 
 
+PERMISSION_MODES = ("default", "auto")
+
+
+def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
+    """``claude_permission_mode`` ("default" or "auto") into ~/.brindle/config.json;
+    its other keys are kept."""
+    from brindle import config
+
+    mode = _get(body, "claude_permission_mode", required=True)
+    if mode not in PERMISSION_MODES:
+        raise ServiceError("invalid", f"claude_permission_mode must be one of: {', '.join(PERMISSION_MODES)}")
+    config.set_user("claude_permission_mode", mode)
+    return {"claude_permission_mode": config.claude_permission_mode()}
+
+
 def put_routing(db: DB, params: dict, body: Body) -> Any:
     """``tiers`` (tier -> profiles to try, in order), ``reviewer`` and
     ``exclude_providers`` into ~/.brindle/config.json (scope "user"), the
@@ -1299,6 +1314,7 @@ ROUTES = [
     _post("/coordinator/undo", coordinator_undo),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
+    Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),
     Route("/v1/routing", _endpoint(put_routing), methods=["PUT"]),
     _post("/permissions", change_permissions),
     _post("/account/login", account_login),

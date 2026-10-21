@@ -418,7 +418,9 @@ def set_user(key: str, value: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = _read_json(path)
     data[key] = value
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")   # replace, so a reader never sees half a file
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
     _sync_setting(key)
     return path
 
