@@ -221,6 +221,38 @@ def test_strict_allows_compound_commands_covered_by_allowlist(db, ws, command, e
     assert strict(db, ws, "run_command", {"CommandLine": command})["decision"] == expected
 
 
+def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monkeypatch):
+    # GitHub #225: agy has no dontAsk mode, so reviewer-gemini sat at a prompt
+    # for `git ls-tree` with nobody to answer it, the repo's policy off.
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
+
+    def launch(profile):
+        argv = Antigravity().command(LaunchContext("r1", load_profile(profile), None, cwd=ws.path))
+        hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
+        return argv, hooks["PreToolUse"][0]["hooks"][0]["command"]
+
+    argv, hook = launch("reviewer-gemini")
+    assert antigravity.SKIP_FLAG in argv and antigravity.STRICT_EVENT in hook
+
+    def answer(agent_id, command):
+        monkeypatch.setenv("BRINDLE_AGENT_ID", agent_id)
+        stdin = json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": command}},
+                            "workspacePaths": [ws.path]})
+        return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))["decision"]
+
+    strict(db, ws, "list_dir", {})   # adds r1, the reviewer
+    assert answer("r1", "git ls-tree -r --name-only main") == "deny"
+    assert answer("r1", "git diff main...HEAD") == "allow"
+    # Its worker relaunching in the same checkout keeps the reviewer's gate,
+    # and, started without the flag, still gets agy's own prompt.
+    argv, hook = launch("developer")
+    assert antigravity.SKIP_FLAG not in argv and antigravity.STRICT_EVENT in hook
+    add_agent(db, ws, agent_id="w1", mode="assign", profile="developer")
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: False)
+    assert answer("w1", "git ls-tree -r --name-only main") == "ask"
+
+
 def test_strict_allows_reading_agy_instructions(db, ws, monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     instructions = tmp_path / ".gemini" / "antigravity-cli" / "mcp" / "brindle" / "instructions.md"
