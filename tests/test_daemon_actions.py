@@ -1190,3 +1190,97 @@ def test_upgrade_runs_in_the_background_and_reports_on_the_bus(db, world, monkey
     else:
         error = events[-1]["payload"]["error"]
         assert error["code"] == "upgrade_failed" and error["tail"] == [f"uv line {i}" for i in range(10, 30)]
+
+
+def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monkeypatch, tmp_path):
+    monkeypatch.delenv("BRINDLE_HOME", raising=False)
+    monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / ".brindle" / "config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"delegation": "fast"}))
+
+    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default"})
+    assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "yolo"})[0] == 400
+    assert _send("PATCH", "/v1/user-settings", {})[0] == 400
+    assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto"})[0] == 200
+    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto"})
+    assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto"}
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_kb_sources_add_sync_and_remove_a_folder(db, repo, world, tmp_path, monkeypatch):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("# Alpha\n\nThe first note.\n")
+    q = f"?repo={repo}"
+
+    assert _send("POST", "/v1/kb/sources" + q, {"path": str(tmp_path / "nope")})[0] == 400
+    assert _send("POST", "/v1/kb/sources", {"path": str(docs)})[0] == 400      # no repo
+    code, added = _send("POST", "/v1/kb/sources" + q, {"path": str(docs), "private": True})
+    assert code == 202
+    (source,) = _send("GET", "/v1/kb/sources" + q)[1]
+    assert source["docs"] == 1 and source["visibility"] == "personal"
+
+    (docs / "b.md").write_text("# Beta\n\nThe second note.\n")
+    code, synced = _send("POST", f"/v1/kb/sources/{source['id'][:8]}/sync" + q)
+    assert code == 202
+    assert _send("GET", "/v1/kb/sources" + q)[1][0]["docs"] == 2
+    done = {e["payload"]["job"]: e["payload"]["result"] for e in bus.tail(db, kinds=("job.done",))}
+    assert done[synced["job"]]["indexed"] == 1 and added["job"] in done
+
+    queued = []                                     # a job still running: add and sync share it
+    monkeypatch.setattr(routes_actions, "_spawn", queued.append)
+    again = _send("POST", f"/v1/kb/sources/{source['id']}/sync" + q)[1]
+    assert _send("POST", f"/v1/kb/sources/{source['id']}/sync" + q)[1] == again
+    assert _send("POST", "/v1/kb/sources" + q, {"path": str(docs)})[1] == again and len(queued) == 1
+    queued[0]()
+    assert _send("POST", f"/v1/kb/sources/{source['id']}/sync" + q)[1] != again
+
+    assert _send("DELETE", "/v1/kb/sources/nope" + q)[0] == 404
+    assert _send("DELETE", f"/v1/kb/sources/{source['id']}" + q)[0] == 200
+    assert _send("GET", "/v1/kb/sources" + q)[1] == []
+
+
+def test_set_user_overlapping_writes_keep_both_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path))
+    monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+    real_replace, second = os.replace, threading.Thread(target=config.set_user, args=("b", 2))
+
+    def replace(src, dst):
+        if not second.is_alive() and second.ident is None:
+            second.start()
+            second.join(0.3)        # a second writer arriving mid-write
+        real_replace(src, dst)
+
+    monkeypatch.setattr(config.os, "replace", replace)
+    config.set_user("a", 1)
+    second.join()
+    assert json.loads((tmp_path / "config.json").read_text()) == {"a": 1, "b": 2}
+    assert [p.name for p in tmp_path.iterdir()] == ["config.json"]
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["done", "failed"])
+def test_setup_codex_hook_trusts_it_in_the_background(db, world, monkeypatch, tmp_path, fails):
+    from brindle import codex_hook
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    trusted, again = [], []
+    state = SimpleNamespace(command="hook")
+    monkeypatch.setattr(codex_hook, "inspect", lambda binary, command=None: state)
+
+    def trust(binary, st):
+        trusted.append(st)
+        again.append(_send("POST", "/v1/setup/codex-hook"))      # pressed again while it runs
+        if fails:
+            raise codex_hook.CodexHookError("Codex didn't answer")
+
+    monkeypatch.setattr(codex_hook, "trust", trust)
+    code, reply = _send("POST", "/v1/setup/codex-hook")
+    assert code == 202 and trusted == [state] and again == [(202, reply)]
+    events = bus.tail(db, kinds=("job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["job"]) for e in events] == [
+        ("job.failed" if fails else "job.done", reply["job"])]
+    if fails:
+        assert events[0]["payload"]["error"]["code"] == "codex_hook_failed"

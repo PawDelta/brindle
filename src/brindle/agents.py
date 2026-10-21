@@ -22,7 +22,7 @@ import time
 import uuid
 from types import SimpleNamespace
 
-from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
+from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
@@ -896,6 +896,10 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
     whatever the mode: a worker, a reviewer, a subagent or the chat itself."""
+    try:
+        upgrade.check_launch()
+    except upgrade.StaleInstall as e:
+        raise AgentError(str(e)) from e
     m = managed(ws.repo_root)   # read once for this launch
     profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)

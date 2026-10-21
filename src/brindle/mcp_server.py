@@ -9,6 +9,7 @@ import re
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
 from brindle import agents, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
@@ -21,6 +22,9 @@ from brindle.view import last_activity
 MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
 
+STALE_NOTICE = "brindle was updated since this session started; run /mcp to reconnect"
+
+
 def _calling_agent() -> Agent | None:
     agent_id = os.environ.get("BRINDLE_AGENT_ID")
     return DB().get_agent(agent_id) if agent_id else None
@@ -32,10 +36,18 @@ class _Server(MCPServer):
     coordinator's allowlist is enforced here, never left to its prompt."""
 
     async def call_tool(self, name, arguments, context=None):
-        refused = coordinator.refusal(_calling_agent(), name)
-        if refused:
-            raise ToolError(refused)
-        return await super().call_tool(name, arguments, context)
+        try:
+            refused = coordinator.refusal(_calling_agent(), name)
+            if refused:
+                raise ToolError(refused)
+            result = await super().call_tool(name, arguments, context)
+        except ToolError as e:
+            if upgrade.install.changed():
+                raise ToolError(f"{e}\n{STALE_NOTICE}") from e
+            raise
+        if upgrade.install.changed() and hasattr(result, "content"):
+            result.content.append(TextContent(type="text", text=STALE_NOTICE))
+        return result
 
     async def list_tools(self):
         agent = _calling_agent()
