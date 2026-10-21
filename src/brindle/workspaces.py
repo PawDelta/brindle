@@ -767,6 +767,18 @@ def existing_pull_request(ws: Workspace) -> str | None:
     return existing.stdout.strip() if existing.returncode == 0 and existing.stdout.strip() else None
 
 
+def pull_request_merged(url: str, cwd: str) -> bool:
+    """Whether ``gh`` reports the PR at ``url`` merged (False when it can't tell)."""
+    if not shutil.which("gh"):
+        return False
+    try:
+        out = subprocess.run(["gh", "pr", "view", url, "--json", "state", "-q", ".state"],
+                             cwd=cwd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and out.stdout.strip() == "MERGED"
+
+
 def compare_url(ws: Workspace) -> str:
     """The browser page for opening ``ws``'s PR by hand."""
     web = git.remote_web_url(ws.repo_root)

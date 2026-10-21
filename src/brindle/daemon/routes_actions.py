@@ -781,7 +781,10 @@ def _end_pr_work(key: tuple[str, str]) -> None:
 def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None, auto: bool) -> None:
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, auto, opened_at)"
                     " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
-                    " url = excluded.url, pushed_sha = excluded.pushed_sha",
+                    " url = excluded.url, pushed_sha = excluded.pushed_sha,"
+                    # a different PR on the branch starts afresh; the same one keeps its merge
+                    " merged_at = CASE WHEN url = excluded.url THEN merged_at END,"
+                    " opened_at = CASE WHEN url = excluded.url THEN opened_at ELSE excluded.opened_at END",
                     (*key, url, pushed, int(auto), time.time()))
     bus.publish_agent(db, "session.pr_opened", key[0], url=url, auto=auto)
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from brindle import agents, autopilot, bus, git, knowledge, pipeline, tasks, workspaces
@@ -136,6 +137,67 @@ def needs_you(db: DB, root: Agent, ap) -> list[str]:
     if (login := db.get_login_state(root.id)) and login.state == "auth_paused":
         out.append("the session's cloud login has expired")
     return out
+
+
+def has_pr_target(ws: Workspace) -> bool:
+    """Whether the session's branch could be opened as a PR: it is on a branch
+    with a base and has commits ahead of it (unlike ``reasons``, whatever
+    only temporarily blocks a PR doesn't count)."""
+    return bool(ws.base_branch) and ws.branch not in ("", "HEAD") and bool(
+        git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1])
+
+
+def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
+    """The session goal's one path: (``in_progress`` | ``in_review`` |
+    ``ready_for_pr`` | ``pr_open`` | ``done``, the PR's URL or None).
+    ``done`` needs brindle's own decision that the goal is reached (autopilot
+    state done: the audit approved it, or goal_audit is off); passing
+    milestones alone don't. A PR-backed goal is done only once its PR is
+    merged: an audit-approved goal with an open PR stays ``pr_open``. A
+    session with no PR to open (no base branch, or no commits ahead of it) is
+    done on that decision alone; any other reached goal awaits its PR, however
+    temporarily it isn't ready (dirty checkout, workers running)."""
+    ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
+    pr = db.conn.execute("SELECT url, merged_at FROM session_prs WHERE root_id = ? AND url IS NOT NULL"
+                         " ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
+    # Brindle's own decision that the goal is reached (the audit approved it, or
+    # goal_audit is off): passing milestones alone aren't it.
+    reached = ap is not None and ap.state == "done"
+    if pr:
+        return ("done" if pr["merged_at"] and reached else "pr_open"), pr["url"]
+    if ap is not None and (reached or ms and all(m.status == "passed" for m in ms)):
+        try:
+            root, ws = session(db, root_id)
+            if not reasons(db, root, ws):
+                return "ready_for_pr", None
+            if reached and not has_pr_target(ws):
+                return "done", None
+        except (ServiceError, git.GitError, workspaces.WorkspaceError):
+            pass
+    return ("in_review" if "in_review" in autopilot.milestone_phases(db, root_id).values()
+            else "in_progress"), None
+
+
+MERGE_POLL_SECONDS = 60.0
+_merge_polled = 0.0
+
+
+def poll_merged(db: DB) -> None:
+    """Record, at most once a minute, the open session PRs ``gh`` reports merged."""
+    global _merge_polled
+    if time.monotonic() - _merge_polled < MERGE_POLL_SECONDS:
+        return
+    _merge_polled = time.monotonic()
+    for row in db.conn.execute("SELECT root_id, branch, url FROM session_prs"
+                               " WHERE url IS NOT NULL AND merged_at IS NULL").fetchall():
+        root = db.get_agent(row["root_id"])
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws is not None and workspaces.pull_request_merged(row["url"], ws.repo_root):
+            # Only the PR that was asked about: a replacement recorded meanwhile has its own state.
+            if db.conn.execute("UPDATE session_prs SET merged_at = ? WHERE root_id = ? AND branch = ?"
+                               " AND url = ?", (time.time(), row["root_id"], row["branch"],
+                                                row["url"])).rowcount:
+                bus.publish_agent(db, "session.pr_merged", row["root_id"], url=row["url"])
 
 
 def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
@@ -371,6 +433,7 @@ class ReadinessWatch:
 
     def sweep(self, db: DB) -> list[str]:
         """The sessions that just became ready (each announced on the bus)."""
+        poll_merged(db)
         now: dict[str, bool] = {}
         for (root_id,) in db.conn.execute("SELECT root_id FROM autopilot").fetchall():
             ap, ms = db.get_autopilot(root_id), db.milestones(root_id)

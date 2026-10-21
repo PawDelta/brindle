@@ -441,6 +441,7 @@ CREATE TABLE IF NOT EXISTS session_prs (
     pushed_sha TEXT,
     auto INTEGER NOT NULL DEFAULT 0,
     opened_at REAL NOT NULL,
+    merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
     PRIMARY KEY (root_id, branch)
 );
 -- The one reviewer of a workspace's commit (agents.request_review): only the
@@ -978,6 +979,8 @@ class DB:
                           ("hold_until", "REAL")):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
+        if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
+            self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
         if "token" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN token TEXT NOT NULL DEFAULT ''")

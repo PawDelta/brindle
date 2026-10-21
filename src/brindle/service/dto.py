@@ -162,15 +162,19 @@ class GoalDTO(_DTO):
     note: str | None = None
     progress: int
     usage_resets_at: float | None = None
+    goal_phase: str = "in_progress"  # in_progress | in_review | ready_for_pr | pr_open | done (session_review.goal_phase)
+    pr_url: str | None = None        # the session's PR, from pr_open on
     milestones: list[MilestoneDTO] = []
 
     @classmethod
     def from_autopilot(cls, ap: Autopilot, milestones: list[Milestone],
-                       phases: dict[int, str] | None = None) -> GoalDTO:
+                       phases: dict[int, str] | None = None,
+                       goal_phase: tuple[str, str | None] = ("in_progress", None)) -> GoalDTO:
         phases = phases or {}
         return cls(root_id=ap.root_id, enabled=bool(ap.enabled), goal=ap.goal, detail=ap.detail,
                    state=ap.state, note=ap.note, progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,
+                   goal_phase=goal_phase[0], pr_url=goal_phase[1],
                    milestones=[MilestoneDTO.from_row(m, phases.get(m.id, "in_progress"))
                                for m in milestones])
 
