@@ -270,6 +270,37 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
             autopilot.choose_profile(db, "sup", str(repo), weight="light")
 
 
+def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_reports_it(db, repo, world, monkeypatch):
+    from brindle import learning, plugins, quota
+    from brindle.daemon import routes_read
+    from brindle.pro import learning as pro_learning
+
+    class Prefers(learning.LearningPlugin):
+        def record(self, task, outcome):
+            pass
+
+        def suggest(self, task, candidates, default=None):
+            return "developer-codex"
+
+    plugins.reset()
+    monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: Prefers())
+    monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
+    monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
+    config.set_repo(str(repo), "learning", "cloud")
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "repo", "kinds": {
+        "medium": {"model": "developer", "fallbacks": ["developer-codex"], "locked": True},
+        "heavy": {"model": "developer-heavy", "fallbacks": ["developer-codex"], "locked": False}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    assert (cfg.routing["medium"], cfg.routing_locked) == (["developer", "developer-codex"], ["medium"])
+
+    assert autopilot._route_by_weight(db, cfg, str(repo), "medium", None, None)[:2] == ("developer", False)
+    assert autopilot._route_by_weight(db, cfg, str(repo), "heavy", None, None)[:2] == ("developer-codex", True)
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert (kinds["medium"].locked, kinds["medium"].learned) == (True, None)
+    assert (kinds["heavy"].model, kinds["heavy"].learned) == ("developer-heavy", "developer-codex")
+
+
 PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),
                     enforce=True)
 

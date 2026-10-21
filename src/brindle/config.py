@@ -61,6 +61,7 @@ def user_config_path() -> Path:
 
 
 WEIGHTS = ("light", "medium", "heavy", "advanced")
+ROUTING_KINDS = (*WEIGHTS, "reviewer", "supervisor")   # the kinds of work the app routes and can lock
 WEIGHT_ALIASES = {
     "reasoning": "advanced",
     "complex": "advanced",
@@ -209,6 +210,7 @@ class RepoConfig:
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
     exclude_providers: list[str] = field(default_factory=list)  # providers weight routing never picks
+    routing_locked: list[str] = field(default_factory=list)  # kinds of work (a weight or "reviewer") hosted learning never overrides
     # Model prices in $/MTok that add to or override brindle's built-in ones (see brindle.pricing):
     # {"model": {"input", "output", "cache_write"?, "cache_read"?}}, merged per model: user, then repo, then config.local.json.
     pricing: dict[str, dict] = field(default_factory=dict)
@@ -311,7 +313,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "agy_approvals",
-                "learned_rules_repeats", "learned_rules_profile", "exclude_providers"):
+                "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
+                "routing_locked"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])

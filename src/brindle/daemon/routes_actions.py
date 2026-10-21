@@ -1064,6 +1064,32 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", "scope must be user, local or repo")
     tiers, reviewer = _get(body, "tiers", dict), _get(body, "reviewer")
     excluded = _get(body, "exclude_providers", list)
+    kinds = _get(body, "kinds", dict) or {}
+    lock_changes: dict[str, bool] = {}
+    supervisor = None
+    current = config.load_repo_config(repo).routing
+    for kind, spec in kinds.items():
+        if kind not in config.ROUTING_KINDS or not isinstance(spec, dict):
+            raise ServiceError("invalid", f"kind must be one of {', '.join(config.ROUTING_KINDS)}, not {kind!r}")
+        model, fallbacks, locked = spec.get("model"), spec.get("fallbacks"), spec.get("locked")
+        if locked is not None:
+            if not isinstance(locked, bool):
+                raise ServiceError("invalid", f"{kind}: locked must be true or false")
+            lock_changes[kind] = locked
+        if model is not None and not (isinstance(model, str) and model):
+            raise ServiceError("invalid", f"{kind}: model must be a name")
+        if fallbacks is not None and (kind not in config.WEIGHTS or not isinstance(fallbacks, list)
+                                      or not all(isinstance(n, str) for n in fallbacks)):
+            raise ServiceError("invalid", f"{kind}: fallbacks must be a list of profile names, for a weight only")
+        if kind in config.WEIGHTS and (model is not None or fallbacks is not None):
+            old = current[kind]
+            names = [model if model is not None else old[0] if old else None,
+                     *(fallbacks if fallbacks is not None else old[1:])]
+            tiers = {**(tiers or {}), kind: [n for n in dict.fromkeys(names) if n]}
+        elif kind == "reviewer" and model is not None:
+            reviewer = model
+        elif kind == "supervisor" and model is not None:
+            supervisor = model
     by_name = {p.name: p for p in profiles.list_profiles(repo)}
     known = set(by_name)
     named = [reviewer] if reviewer is not None else []
@@ -1102,8 +1128,17 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     if excluded is not None:
         path = write("exclude_providers", excluded)
         updated.append("exclude_providers")
+    if lock_changes:
+        found = config._read_json(config.scope_paths(repo)[scope]).get("routing_locked")
+        locked_now = set(found) if isinstance(found, list) else set()
+        path = write("routing_locked", sorted((locked_now | {k for k, v in lock_changes.items() if v})
+                                              - {k for k, v in lock_changes.items() if not v}))
+        updated.append("routing_locked")
+    if supervisor is not None:
+        path = config.set_user(config.SUPERVISOR_KEY, supervisor)
+        updated.append("supervisor")
     if not updated:
-        raise ServiceError("invalid", "give tiers, reviewer or exclude_providers")
+        raise ServiceError("invalid", "give tiers, reviewer, exclude_providers or kinds")
     return {"updated": updated, "path": str(path)}
 
 

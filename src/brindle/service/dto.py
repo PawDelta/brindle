@@ -243,6 +243,19 @@ class RoutingProfileDTO(_DTO):
     cost_tier: str           # "low", "medium" or "high"
     allowed: bool = True     # whether the org's policy lets a worker run on it
     refusal: str | None = None
+    lint_errors: list[str] = []     # the profile's automatic check (`brindle profile lint`)
+    lint_warnings: list[str] = []
+
+
+class RoutingKindDTO(_DTO):
+    """One kind of work (light, medium, heavy, advanced, reviewer, supervisor):
+    the owner's pick and its ordered fallbacks, whether it is locked against
+    hosted learning, and the different profile learning is running for it now
+    (``learned``; None when it keeps the owner's pick)."""
+    model: str | None = None
+    fallbacks: list[str] = []
+    locked: bool = False
+    learned: str | None = None
 
 
 class RoutingLockDTO(_DTO):
@@ -275,6 +288,7 @@ class RoutingDTO(_DTO):
     exclude_providers: RoutingSettingDTO
     profiles: list[RoutingProfileDTO]
     policy: RoutingPolicyDTO = RoutingPolicyDTO()
+    kinds: dict[str, RoutingKindDTO] = {}
 
 
 class AccountOrgDTO(_DTO):

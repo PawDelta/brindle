@@ -2429,7 +2429,7 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
         return cfg.review_profile
     if cfg.reviewer and cfg.reviewer != "reviewer":
         return cfg.reviewer
-    if db is None or not repo_root:
+    if db is None or not repo_root or "reviewer" in cfg.routing_locked:
         return cfg.reviewer
     from brindle import learning
 

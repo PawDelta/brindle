@@ -44,6 +44,7 @@ from brindle.service.dto import (
     PreflightItemDTO,
     ProfileDTO,
     RoutingDTO,
+    RoutingKindDTO,
     RoutingProfileDTO,
     RoutingSettingDTO,
     RoutingTierDTO,
@@ -239,10 +240,8 @@ def get_profile(db: DB, request: Request) -> Any:
     it is read from, the extends chain, its rule packs and the full prompt;
     never env, whose values can be secrets) with ``brindle profile lint``'s
     findings for it: ``{**ProfileDTO, source, extends, rules, prompt, lint}``."""
-    from brindle.cli import _lint_one   # the lint `brindle profile lint` runs; one definition
-
     repo, name = _repo(request), request.path_params["name"]
-    errors, warnings = _lint_one(name, repo)
+    errors, warnings = profiles.lint_profile(name, repo)   # the lint `brindle profile lint` runs
     try:
         p = profiles.load_profile(name, repo)
     except (KeyError, profiles.ProfileError) as e:
@@ -321,7 +320,9 @@ def get_routing(db: DB, request: Request) -> Any:
     for p in every:
         # A provider with no CLI of its own (native) is always there.
         here = p.provider not in doctor.CLI_INSTALL or p.provider in installed
+        errors, warnings = profiles.lint_profile(p.name, repo)
         rows.append(RoutingProfileDTO(
+            lint_errors=errors, lint_warnings=warnings,
             name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
             model=autopilot.effective_profile_model(p, repo) or None,
             installed=here, signed_in=here and providers.signed_out(p.provider, p.env) is None,
@@ -332,7 +333,39 @@ def get_routing(db: DB, request: Request) -> Any:
         reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=config.setting_source(repo, "reviewer")),
         exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers,
                                             source=config.setting_source(repo, "exclude_providers")),
-        profiles=rows, policy=policy.to_dto(every)).to_json()
+        profiles=rows, policy=policy.to_dto(every), kinds=_routing_kinds(db, cfg, repo)).to_json()
+
+
+def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, RoutingKindDTO]:
+    """Per kind of work: the owner's pick, its ordered fallbacks, whether it
+    is locked, and the different profile hosted learning runs for it now.
+    A locked kind is never overridden, so it never reports one."""
+    from brindle import agents, learning
+
+    def learned(kind: str, run) -> str | None:
+        if kind in cfg.routing_locked:
+            return None
+        try:
+            return run()
+        except Exception:  # noqa: BLE001 - a read never fails on the learner
+            log.exception("brindle: couldn't ask the learner about %s", kind)
+            return None
+
+    kinds = {}
+    for t in config.WEIGHTS:
+        names = cfg.routing[t]
+        kinds[t] = RoutingKindDTO(
+            model=names[0] if names else None, fallbacks=names[1:], locked=t in cfg.routing_locked,
+            learned=learned(t, lambda: learning.choose(db, cfg, repo, weight=t, candidates=names,
+                                                       default=names[0] if names else None)))
+    def reviewer_pick() -> str | None:
+        pick = agents.default_review_profile(cfg, None, db, repo)
+        return pick if pick != cfg.reviewer else None
+
+    kinds["reviewer"] = RoutingKindDTO(model=cfg.reviewer, locked="reviewer" in cfg.routing_locked,
+                                       learned=learned("reviewer", reviewer_pick))
+    kinds["supervisor"] = RoutingKindDTO(model=config.supervisor_pick(), locked="supervisor" in cfg.routing_locked)
+    return kinds
 
 
 @_json
