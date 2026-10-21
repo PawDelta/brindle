@@ -672,6 +672,33 @@ def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expec
     assert [phases[m.id] for m in db.milestones("boss")] == expected
 
 
+@pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected", [
+    (0, False, False, False, False, False, "in_progress"),
+    (0, True, False, False, False, False, "in_review"),                  # a milestone check is running
+    (2, False, True, False, False, True, "ready_for_pr"),                # all pass, session review ready
+    (2, False, False, False, False, False, "in_progress"),               # all pass, review not ready
+    (2, False, True, True, False, True, "pr_open"),                      # audit approved, PR still open
+    (2, False, True, True, True, True, "done"),                          # PR merged
+    (1, False, False, True, True, False, "pr_open"),                     # merged but goal not reached
+])
+def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, goal_done, expected):
+    from brindle.daemon import session_review
+
+    with_goal(db)
+    for m in db.milestones("boss")[:passed]:
+        db.record_check(m.id, True, "")
+    if checking:
+        db.update_autopilot("boss", checking_since=time.time())
+    if goal_done:
+        db.update_autopilot("boss", state="done", audit_ok=1)
+    if pr:
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at, merged_at)"
+                        " VALUES ('boss', 'feat', 'https://x/pr/1', 1, ?)", (2 if merged else None,))
+    monkeypatch.setattr(session_review, "session", lambda db, root_id: (None, None))
+    monkeypatch.setattr(session_review, "reasons", lambda db, root, ws: [] if ready else ["not yet"])
+    assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)
+
+
 @pytest.mark.parametrize("flight, expected", [
     ("processing", "working"),
     ("waiting", "waiting"),

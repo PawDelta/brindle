@@ -122,7 +122,8 @@ def goal(db: DB, request: Request) -> Any:
     from brindle.autopilot import milestone_phases
 
     return GoalDTO.from_autopilot(ap, db.milestones(ap.root_id),
-                                  milestone_phases(db, ap.root_id)).to_json()
+                                  milestone_phases(db, ap.root_id),
+                                  session_review.goal_phase(db, ap.root_id)).to_json()
 
 
 @_json

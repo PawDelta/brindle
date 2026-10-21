@@ -558,6 +558,11 @@
           "default": null,
           "title": "Goal"
         },
+        "goal_phase": {
+          "default": "in_progress",
+          "title": "Goal Phase",
+          "type": "string"
+        },
         "milestones": {
           "default": [],
           "items": {
@@ -577,6 +582,18 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "pr_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pr Url"
         },
         "progress": {
           "title": "Progress",
