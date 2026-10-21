@@ -652,6 +652,37 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
     return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why, ask=ask)}
 
 
+def _allow_specs(rules: list[Rule], checks: list[str] | None) -> list[str]:
+    """The bash allow rules and checks as uncovered_part's specs."""
+    specs = [c.strip() for c in checks or []]
+    for rule in rules:
+        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip():
+            if rule.match_type == "exact":
+                specs.append(rule.match.strip())
+            elif rule.match_type == "prefix":
+                specs.append(rule.match.strip() + ":*")
+    return specs
+
+
+def bash_grants(req: Request, rules: list[Rule], checks: list[str] | None = None,
+                cd_root: str | None = None) -> list[str] | None:
+    """The exact bash allows that would let ``req`` through allowlist_decision
+    on a retry: one per simple command no rule covers yet. None when no exact
+    allow can (``$(...)``, a redirection that writes, a heredoc, a word with
+    spaces in it, a cd it can't vouch for, ...)."""
+    from brindle.native.permissions import uncovered_part
+
+    if req.kind != "bash" or not req.command:
+        return None
+    specs, grants = _allow_specs(rules, checks), []
+    while (part := uncovered_part(specs, req.command, cd_root=cd_root)) is not None:
+        if part in grants:
+            return None  # granting it didn't cover it
+        grants.append(part)
+        specs.append(part)
+    return grants
+
+
 def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str] | None = None,
                        cd_root: str | None = None) -> Decision | None:
     """For a shell command no rule allows as a whole: allow it when every
@@ -667,14 +698,7 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
 
     if req is None or req.kind != "bash" or not req.command:
         return None
-    specs = [c.strip() for c in checks or []]
-    for rule in rules:
-        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip():
-            if rule.match_type == "exact":
-                specs.append(rule.match.strip())
-            elif rule.match_type == "prefix":
-                specs.append(rule.match.strip() + ":*")
-    if uncovered_part(specs, req.command, cd_root=cd_root) is not None:
+    if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
     for part in split_commands(req.command):
         denied = decide(replace(req, command=part), checks=checks, rules=rules)

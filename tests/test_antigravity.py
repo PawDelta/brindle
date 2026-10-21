@@ -1,13 +1,17 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 
 import pytest
+from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import agents, antigravity, autopilot, permissions, workspaces
+
+from brindle import antigravity, autopilot, workspaces
+from brindle.cli import app
 from brindle.config import set_local
 from brindle.db import Agent
 from brindle.profiles import load_profile
@@ -250,20 +254,26 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     # GitHub #233: with agy_approvals unset, a worker on any profile runs under
     # the same gate, its profile's allowed_tools applied as for a Claude
     # worker, and an uncovered command denied rather than left at a prompt:
-    # its supervisor is told once (never about the dontAsk reviewer's), and
-    # once the user allows it the worker's retry runs.
+    # its supervisor is told once per distinct request (never about the
+    # dontAsk reviewer's or a hard deny), and once the user runs the allow
+    # commands it was given, the worker's retry runs.
     add_agent(db, ws, agent_id="boss", window="")  # not running: the message waits in its inbox
     add_agent(db, ws, agent_id="w1", mode="assign", profile="developer", parent="boss")
     argv, _ = launch("developer")
     assert antigravity.SKIP_FLAG in argv
     assert answer("w1", "git commit -m wip") == "allow"
-    assert answer("w1", "touch should_not_exist.txt") == "deny"
-    assert answer("w1", "touch should_not_exist.txt") == "deny"
-    [told] = db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'").fetchall()
-    assert "brindle permissions allow bash -- 'touch should_not_exist.txt'" in told["body"]
-    assert "should_not_exist" in agents.pending_permission(db, "w1")
-    permissions.add_rule("bash", "touch should_not_exist.txt", "allow")
-    assert answer("w1", "touch should_not_exist.txt") == "allow"
+    compound = "touch one.txt && touch two.txt"
+    long_a, long_b = "touch " + "x" * 250 + "a", "touch " + "x" * 250 + "b"  # one summary
+    for command in (compound, compound, long_a, long_b, "git push"):
+        assert answer("w1", command) == "deny"
+    stored = db.conn.execute("SELECT request FROM permission_requests WHERE agent_id='w1'").fetchall()
+    assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b])
+    told = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
+    assert len(told) == 3
+    for line in told[0].splitlines():
+        if line.startswith("brindle permissions allow "):
+            assert CliRunner().invoke(app, shlex.split(line)[1:]).exit_code == 0
+    assert answer("w1", compound) == "allow"
     assert antigravity.SKIP_FLAG not in launch("developer", mode="interactive")[0]  # a person answers
     # An explicit "prompt" keeps agy's own prompt, beside the reviewer's gate.
     set_local(ws.repo_root, "agy_approvals", "prompt")

@@ -960,8 +960,11 @@ repo's checks), brindle's own tools and agy's tools that act only on the
 conversation, and denies everything else. A call no rule covers (not one a
 rule denies) is what a Claude Code worker would wait on you for: brindle
 records it as the worker's pending request and tells its supervisor, once per
-request in a turn, with the `brindle permissions allow ...` command that allows
-it; once you run that, the worker's retry goes through. A `dontAsk` profile (a
+request in a turn, with the `brindle permissions allow ...` commands that allow
+it (one per part of a compound command that no rule covers yet); once you run
+them, the worker's retry goes through. A command no rule can allow as written
+(`$(...)`, a redirection that writes, a heredoc) comes with that instead, so
+the worker can split it into simple commands. A `dontAsk` profile (a
 reviewer) and an agent with no supervisor are only told to ask. Any failure
 in the hook is a deny, and a tool brindle doesn't know is denied. Nobody can
 approve a prompt in the agent's pane in this mode, so a worker never waits at
