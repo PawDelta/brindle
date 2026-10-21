@@ -308,6 +308,10 @@ def test_doctor_shows_a_saved_route_until_account_route_reset(monkeypatch):
     assert str(config.user_config_path()) in c.detail
     config.forget_user("agent_setup")       # the env alone still routes panes: still shown
     assert len(self_serve.checks()) == 1
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "abc123")
+    assert ProAccount(out=io.StringIO(), err=io.StringIO()).run(["route", "--reset"]) == 1
+    assert len(self_serve.checks()) == 1      # an agent can't remove the person's route
+    monkeypatch.delenv("BRINDLE_AGENT_ID")
     assert ProAccount(out=io.StringIO()).run(["route", "--reset"]) == 0
     assert self_serve.checks() == [] and company_login.stored_env() == {}
     assert "company_claude_env" not in config.user_settings()

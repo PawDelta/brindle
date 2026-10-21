@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -725,6 +726,10 @@ class ProAccount(_OrgCommands):
         from brindle import self_serve
 
         if reset:
+            if os.environ.get("BRINDLE_AGENT_ID"):
+                # The person's own choice: an agent's CLI call doesn't change it (as config.set_user).
+                print("brindle: running as an agent, so the self-serve route was not changed", file=self.err)
+                return 1
             self._say("Removed the self-serve Claude route; Claude panes use your own login again."
                       if self_serve.reset() else "No self-serve Claude route is saved.")
             return 0
