@@ -44,9 +44,11 @@ candidate is out, the repo's `default_agent` runs. The reply to the supervisor
 says what was picked and why, for example
 `weight medium -> developer (Codex at 93%, skipped developer-codex)`.
 
-A single agent can also name its own backup with `fallback:` in its profile
-(for example `developer-local` falls back to `developer-light` when its local
-model isn't available).
+A `native` profile that runs a local model can also name a backup with
+`fallback:` in its profile (for example `developer-local` falls back to
+`developer-light` when its local model isn't available). `fallback:` only
+applies to local models; for any other provider, put the backups in the
+ordered `routing` list instead.
 
 To change the order, set a tier in `.brindle/config.json` (shared with your
 team), `.brindle/config.local.json` (just you, this repo) or
@@ -184,6 +186,11 @@ Your choices are never overridden. To keep a choice fixed:
   always wins over learning.
 - **List one agent for the kind.** Learning only chooses between two or more
   candidates, so `{"routing": {"heavy": ["developer-heavy"]}}` pins that kind.
+- **Pin the reviewer.** Learning can also change which agent reviews a
+  branch, and neither of the above locks that. The `reviewer` key sets the
+  baseline reviewer, which learning may still replace; to fix it, set
+  `review_profile`, which keeps learning enabled for everything else:
+  `{"review_profile": "reviewer"}` (or another reviewer profile).
 - **Turn learning off** with `"learning": "off"` in `.brindle/config.json` or
   `~/.brindle/config.json`.
 
