@@ -53,6 +53,10 @@ HINT = re.compile(r"(?i)\benter to (?:confirm|continue|select|proceed)\b|\bpress
 # A CLI's own input box and footer: the CLI is ready (or busy), not asking.
 INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt"
                        r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
+# A turn under way: a spinner before its timer shows ("✻ Pondering…"), or a
+# tool call or reply ("⏺ Read(…)", "⎿ Running…"). No startup prompt has these.
+WORKING = re.compile(r"(?m)^\s*(?:[·✢✳✶✻✽*]\s*[^\W\d_][\w-]*…|[⏺⎿])")
+BRIEF_LETTERS = 10   # fewest letters in a screen line taken as part of the brief
 # Only the person answers these, whatever the model makes of them: their
 # accounts and data, anything that widens what the agent may run (a
 # project's MCP servers or hooks, skipping permission checks, installing).
@@ -124,6 +128,12 @@ def plain(screen: str) -> str:
     return ANSI.sub("", screen)
 
 
+def _letters(text: str) -> str:
+    """``text``'s letters and digits, casefolded: what survives a CLI's
+    markdown rendering, wrapping and indenting of it."""
+    return re.sub(r"[\W_]+", "", plain(text)).casefold()
+
+
 def _tail(screen: str, n: int = 25) -> list[str]:
     return [ln.rstrip() for ln in plain(screen).rstrip().splitlines()][-n:]
 
@@ -158,10 +168,10 @@ def brief_draft(screen: str, brief: str) -> bool:
 def looks_like_prompt(screen: str) -> bool:
     """Whether the bottom of ``screen`` is a menu or question waiting for an
     answer: a selected menu line next to another option, or an "Enter to
-    continue" hint. Never the CLI's own input box."""
+    continue" hint. Never the CLI's own input box, nor a turn under way."""
     lines = _tail(screen)
     text = "\n".join(lines)
-    if INPUT_BOX.search(text):
+    if INPUT_BOX.search(text) or WORKING.search(text):
         return False
     if HINT.search(text):
         return True
@@ -388,39 +398,28 @@ class Startup:
         self.brief = " ".join(((row["submitted_prompt"] if row else "") or "").split())
 
     def _past_brief(self, screen: str) -> str:
-        """``screen`` after the brief brindle sent, which the CLI echoes as
-        "❯ <brief>" with wrapped lines: that echo is not a prompt. Unchanged
-        when the brief isn't on screen (a real prompt comes before it)."""
-        lines = screen.splitlines()
-        for i, line in enumerate(lines if self.brief else ()):
-            text = " ".join(re.sub(rf"^\s*[{CURSOR}]", "", plain(line)).split())
-            if len(text) >= 20 and self.brief.startswith(text) or text and text == self.brief:
-                seen = text
-                j = i + 1
-                while j < len(lines) and len(seen) < len(self.brief):
-                    part = " ".join(plain(lines[j]).split())
-                    if part and not self.brief[len(seen):].lstrip().startswith(part):
-                        break
-                    seen = (seen + " " + part).strip() if part else seen
-                    j += 1
-                return "\n".join(lines[j:])
-        return self._without_brief_lines(screen)
+        """``screen`` without the brief brindle sent, which the CLI echoes as
+        "❯ <brief>" with wrapped lines: that echo is not a prompt, nor is its
+        tail when the start has scrolled off (a numbered list, "press enter").
+        Lines are compared by their letters and digits only, since Claude Code
+        renders the echo as markdown (no backticks) and wraps it anywhere."""
+        brief = _letters(self.brief)
+        if not brief:
+            return screen
+        keep, rest = [], ""   # rest: the brief still to come, inside its echo
+        for line in screen.splitlines():
+            text = _letters(line)
+            if rest and rest.startswith(text):
+                rest = rest[len(text):]
+            elif len(text) >= BRIEF_LETTERS and text in brief:
+                rest = brief[brief.index(text) + len(text):]
+            else:
+                rest = ""
+                keep.append(line)
+        return "\n".join(keep)
 
     def draft(self, screen: str) -> bool:
         return brief_draft(screen, self.brief)
-
-    def _without_brief_lines(self, screen: str) -> str:
-        """``screen`` without the lines that are a piece of the brief: a long
-        brief has scrolled its first line off the capture, leaving only its
-        tail, whose words (a numbered list, "press enter") read as a prompt."""
-        if not self.brief:
-            return screen
-        keep = []
-        for line in screen.splitlines():
-            text = " ".join(re.sub(rf"^\s*[{CURSOR}]", "", plain(line)).split())
-            if not (len(text) >= BRIEF_LINE and text in self.brief):
-                keep.append(line)
-        return "\n".join(keep)
 
     def _spend_call(self) -> bool:
         """Count one model call against the launch's budget; False when it's spent."""

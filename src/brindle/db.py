@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS agents (
     reviewing_since REAL,          -- when its last report put its branch in review (pipeline.on_report)
     review_restarted REAL,         -- the wait in review whose dead check run was started again (pipeline.restart_review)
     merge_failed TEXT,             -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
-    config_home TEXT               -- the CLI config home it runs with, decided once at spawn (provider_homes): '' the person's own
+    config_home TEXT,              -- the CLI config home it runs with, decided once at spawn (provider_homes): '' the person's own
+    review_slot TEXT               -- the review claim slot a reviewer was started in (gates.standing_reviews)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,7 +111,8 @@ CREATE TABLE IF NOT EXISTS autopilot (
     audit_history TEXT,            -- persistent audit notes and prior accepted decisions
     question TEXT,                 -- the supervisor's open need_user question (held while note matches)
     nudged_time REAL,              -- when the last nudge was sent
-    proposal TEXT                  -- JSON: checks awaiting the user's answer in brindle's dialog
+    proposal TEXT,                 -- JSON: checks awaiting the user's answer in brindle's dialog
+    external_wait TEXT             -- JSON {pid, until, path, note}: an outside job
 );
 CREATE TABLE IF NOT EXISTS milestones (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -630,6 +632,7 @@ class Agent:
     merge_failed: str | None = None        # why the pipeline couldn't merge its approved branch (pipeline.review_state)
     config_home: str | None = None         # its CLI's config home, decided once at spawn (provider_homes); '' the person's own
     weight: str | None = None              # the weight its task was routed as, known from launch (agents.spawn)
+    review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
 
 
 @dataclass
@@ -656,6 +659,7 @@ class Autopilot:
     question: str | None = None        # the open need_user question the user hasn't answered
     nudged_time: float | None = None   # when the last nudge was sent; never cleared, the backoff ignores it once progress moves past nudged_at
     proposal: str | None = None        # JSON {checks, rules, at}: checks awaiting the user's answer
+    external_wait: str | None = None   # JSON {pid, until, path, note}: an outside job
 
 
 @dataclass
@@ -906,7 +910,7 @@ class DB:
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
                           ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT"),
-                          ("weight", "TEXT")):
+                          ("weight", "TEXT"), ("review_slot", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
@@ -925,7 +929,7 @@ class DB:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_paused_ids TEXT")
         for col, kind in (("goal_sha", "TEXT"), ("auditor_id", "TEXT"), ("audit_sha", "TEXT"),
                           ("audit_ok", "INTEGER"), ("audit_history", "TEXT"), ("question", "TEXT"),
-                          ("nudged_time", "REAL"), ("proposal", "TEXT")):
+                          ("nudged_time", "REAL"), ("proposal", "TEXT"), ("external_wait", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE autopilot ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
@@ -1269,18 +1273,20 @@ class DB:
             bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
                               merge_failed=bool(fields.get("merge_failed")))
 
-    def claim_idle(self, agent_id: str) -> bool:
+    def claim_idle(self, agent_id: str) -> float | None:
         """Atomically flip idle -> processing. Only the caller that wins may type
-        into the agent's terminal, so two senders never interleave keystrokes."""
+        into the agent's terminal, so two senders never interleave keystrokes.
+        Return this claim's status_since for rollback, or None if already busy."""
         with self.tx() as c:
+            claimed_at = time.time()
             cur = c.execute(
                 "UPDATE agents SET status='processing', status_since=? WHERE id=? AND status='idle'",
-                (time.time(), agent_id),
+                (claimed_at, agent_id),
             )
             claimed = cur.rowcount == 1
         if claimed:
             bus.publish_agent(self, "agent.status", agent_id, status="processing")
-        return claimed
+        return claimed_at if claimed else None
 
     _STAMP = "status_since = CASE WHEN status = ? THEN status_since ELSE ? END"
 
@@ -1390,6 +1396,19 @@ class DB:
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
             return _load(Message, row)
 
+    def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
+        """Release the caller's failed delivery claim without creating a second message.
+
+        Restore idle only if this delivery still owns the processing status;
+        a newer hook or pause must keep its status. Both releases are atomic.
+        """
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                      (message_id, agent_id))
+            c.execute("UPDATE agents SET status='idle', status_since=? "
+                      "WHERE id=? AND status='processing' AND status_since=?",
+                      (time.time(), agent_id, idle_since))
+
     def drop_pending(self, agent_id: str, sender_id: str) -> int:
         with self.tx() as c:
             cur = c.execute(
@@ -1469,6 +1488,15 @@ class DB:
             (agent_id,),
         ).fetchone()
         return int(row[0])
+
+    def outstanding(self, agent_id: str, text: str) -> bool:
+        """Whether a message containing ``text`` is still queued for the agent
+        or held unread."""
+        row = self.conn.execute(
+            "SELECT 1 FROM inbox WHERE agent_id=? AND delivered_at IS NULL AND instr(body, ?) > 0 LIMIT 1",
+            (agent_id, text),
+        ).fetchone()
+        return row is not None
 
     NOTICE_TTL = 120.0  # seconds a notice counts as outstanding before another may go
 
@@ -1569,6 +1597,23 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
+
+    def set_external_wait(self, root_id: str, wait: str) -> None:
+        """A repeated declaration must leave the existing wait intact."""
+        with self.tx() as c:
+            c.execute("UPDATE autopilot SET external_wait=? WHERE root_id=? AND external_wait IS NULL",
+                      (wait, root_id))
+
+    def finish_external_wait(self, root_id: str, wait: str, now: float, message: str) -> bool:
+        """Atomically replace a wait with its durable completion notice."""
+        with self.tx() as c:
+            changed = c.execute(
+                "UPDATE autopilot SET external_wait=NULL, nudges=0, nudged_at=progress, nudged_time=? "
+                "WHERE root_id=? AND external_wait=?", (now, root_id, wait)).rowcount
+            if changed:
+                c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,NULL,?,?)",
+                          (root_id, message, now))
+            return bool(changed)
 
     def bump_progress(self, root_id: str) -> None:
         with self.tx() as c:

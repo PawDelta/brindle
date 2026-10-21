@@ -250,3 +250,18 @@ def test_first_pr_offers_to_delete_merged_branches_on_github(repo, tmp_path, mon
     assert log.read_text() == ""
 
 
+@pytest.mark.variant("#199 incident input: parse the full owner PID in per-test server names; startup parsing lives in unmeasured conftest.py")
+@pytest.mark.parametrize("name, alive, reaped", [
+    ("brindle-test-1234-7", False, True),      # a dead owner's per-test server
+    ("brindle-test-12345-7", True, False),     # a live owner whose pid starts with the same digits
+])
+def test_startup_reaper_parses_the_owner_pid(monkeypatch, name, alive, reaped):
+    import conftest
+    from brindle import procs
+
+    seen = []
+    monkeypatch.setattr(tmux, "other_servers", lambda prefix="brindle-": [name])
+    monkeypatch.setattr(procs, "alive", lambda pid: alive and pid == 12345)
+    monkeypatch.setattr(tmux, "reap_server", seen.append)
+    conftest._reap_dead_test_servers()
+    assert seen == ([name] if reaped else [])

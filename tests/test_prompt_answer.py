@@ -192,6 +192,38 @@ def test_the_delivered_brief_is_never_the_prompt(db, launch, monkeypatch):
     assert db.get_agent("w1").status != "waiting"
 
 
+@pytest.mark.parametrize("spinner", [
+    "",   # echoed, the turn not yet showing
+    pytest.param("✻ Pondering…\n", marks=pytest.mark.variant("the captured screen from #203")),
+])
+def test_a_goal_brief_rendered_as_markdown_is_never_the_prompt(db, launch, monkeypatch, spinner):
+    # Claude Code echoes a worker's /goal brief rendered as markdown (no
+    # backticks), wrapped anywhere, and its footer names the MCP server.
+    from brindle import launch_health
+
+    brief = ("/goal Finish line: `uv run pytest tests/test_x.py -q` passes. The work is committed on branch "
+             "`fix/x` and reported with the brindle report_result tool.\n\nTask:\nFix the login bug in "
+             "`src/app.py`.\n\n---\nYou are running as a brindle worker (agent id w1) on branch `fix/x`.\n"
+             "When you have finished:\n1. Commit your work to this branch with a clear message.\n"
+             "2. Call the `report_result` tool from the `brindle` MCP server.")
+    launch(TRUST, ["Not now", "Allow this folder"], {"kind": "trust", "option": "Allow this folder"},
+           provider="claude", status="processing")
+    db.update_agent("w1", task="fix")
+    launch_health.prepare(db, db.get_agent("w1"), "fp", submitted_prompt=brief)
+    screen = ("❯ /goal Finish line: uv run pytest tests/test_x.py -q passes. The work is committed on bran\n"
+              "  ch fix/x and reported with the brindle report_result tool.\n\n"
+              "  Task:\n  Fix the login bug in src/app.py.\n\n  ───\n"
+              "  You are running as a brindle worker (agent id w1) on branch fix/x.\n"
+              "  When you have finished:\n"
+              "  1. Commit your work to this branch with a clear message.\n"
+              "  2. Call the report_result tool from the brindle MCP server.\n\n"
+              f"{spinner}\n────\n❯ \n────\n  /goal active\n")
+    monkeypatch.setattr(tmux, "capture", lambda target, **k: screen)
+    prompt_answer.finish_launch(db, db.get_agent("w1"))
+    assert db.pending_count("boss") == 0
+    assert db.get_agent("w1").status != "waiting"
+
+
 def test_brief_not_prompt_when_its_start_has_scrolled_off(db, launch, monkeypatch):
     # Only the tail of a long brief is on screen: a numbered list, "press
     # enter" and key/budget words, with no first line to match it by.
@@ -213,9 +245,11 @@ def test_brief_not_prompt_when_its_start_has_scrolled_off(db, launch, monkeypatc
     prompt_answer.finish_launch(db, db.get_agent("w1"))
     assert db.pending_count("boss") == 0
     assert db.get_agent("w1").status != "waiting"
-    # The same menu-like lines above a busy spinner are a working agent, not a prompt.
-    assert not prompt_answer.looks_like_prompt(
-        "  1. Run the unit tests first\n❯ 2. Fix any failures you find\n\n✳ Clauding… (1m 37s)\n\n❯ \n")
+    # The same menu-like lines above a busy spinner (timed or not yet) or a
+    # tool call are a working agent, not a prompt.
+    for working in ("✳ Clauding… (1m 37s)", "✻ Pondering…", "⏺ Read(src/app.py)"):
+        assert not prompt_answer.looks_like_prompt(
+            f"  1. Run the unit tests first\n❯ 2. Fix any failures you find\n\n{working}\n\n❯ \n")
 
 
 @pytest.mark.variant("race: the selection moves during the model call; the only test of the re-capture")

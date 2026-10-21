@@ -50,11 +50,42 @@ def claude_payload(tool, tool_input, cwd=None):
 # -- the engine -------------------------------------------------------------------------------
 
 
-def test_a_bash_allow_rule_never_covers_metacharacters(ws):
-    rule = Rule("bash", "git", "prefix", "allow")
-    for cmd in ("git status; rm -rf /", "git diff | sh", "git log $(rm x)", "git log `id`",
-                "git status && curl x", "git show > out", "git status\nrm x"):
-        assert decide(bash(ws, cmd), rules=[rule]).decision == "ask", cmd
+def _bypass(command, why):
+    return pytest.param(command, "ask", marks=pytest.mark.variant(why))
+
+
+@pytest.mark.parametrize("command, decision", [
+    ('tmux -L sock list-panes -a -F "#{pane_id} #{pane_pid} #{pane_start_command}"', "allow"),
+    pytest.param('tmux -L sock list-panes -F "#{pane_id}"', "allow",
+                 marks=pytest.mark.variant("a tmux format without spaces is still literal")),
+    _bypass('tmux -L sock list-panes -F "#{pane_id}" $(id)', "substitution after a quoted format"),
+    _bypass('tmux -L sock list-panes -F "#{pane_id}" `id`', "backticks after a quoted format"),
+    _bypass('tmux -L sock list-panes -F "#{pane_id}" > out', "redirection after a quoted format"),
+    _bypass('tmux -L sock list-panes -F {pane_id,pane_pid}', "unquoted brace expansion is not literal"),
+    ('git show main:a.sql && echo "=== B ===" && git show main:b.sql; git log | git show', "allow"),
+    ("git status; rm -rf /", "ask"),
+    ("git status && git push", "deny"),
+    _bypass("git diff | sh", "a pipe into an uncovered command"),
+    _bypass("git log $(rm x)", "command substitution"),
+    _bypass("git log `id`", "backticks"),
+    _bypass("git status && (rm x)", "a subshell"),
+    _bypass("git diff <(rm x)", "process substitution"),
+    _bypass("git show > out", "a redirection that writes a file"),
+    _bypass("git status && echo x >> out", "an append after an allowed part"),
+    _bypass("git show < ~/.ssh/id_rsa", "input from a file no read rule saw"),
+    pytest.param('echo "a; rm -rf /"', "allow",
+                 marks=pytest.mark.variant("a quoted separator is a literal argument")),
+    _bypass('"./check --safe" && git status', "a quoted executable with spaces is another program"),
+    _bypass("./check\\ --safe; git status", "so is an escaped one"),
+    _bypass("git status || rm x", "an operator other than && ; |"),
+    _bypass("git status & rm x", "backgrounding"),
+    _bypass("git status\nrm x", "a newline"),
+])
+def test_a_compound_command_is_allowed_only_when_every_part_is(ws, command, decision):
+    rules = [Rule("bash", "git", "prefix", "allow"), Rule("bash", "echo", "prefix", "allow"),
+             Rule("bash", "tmux", "prefix", "allow"),
+             Rule("bash", "./check --safe", "exact", "allow"), Rule("bash", "git push", "prefix", "deny")]
+    assert decide(bash(ws, command), rules=rules).decision == decision
 
 
 # -- the defaults -----------------------------------------------------------------------------

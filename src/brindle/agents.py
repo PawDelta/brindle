@@ -65,6 +65,15 @@ When you have finished:
    supervisor should check.
 """
 
+REPORT_ONLY_FOOTER = """
+
+---
+You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
+{guidance}
+You don't edit or commit anything: when you have finished, call the
+`report_result` tool from the `brindle` MCP server with your findings.
+"""
+
 REVIEW_FOOTER = """
 
 ---
@@ -143,9 +152,26 @@ PERMISSION_GUIDANCE = (
 )
 
 
-def worker_guidance(ws: Workspace) -> str:
+def is_review_profile(profile_name: str, repo_root: str) -> bool:
+    """Whether ``profile_name`` is a reviewer (or extends one): it reads a
+    branch and reports, so it has nothing to commit, test or merge."""
+    name: str | None = profile_name
+    seen: set[str] = set()
+    while name and name not in seen:
+        if name.startswith("reviewer"):
+            return True
+        seen.add(name)
+        try:
+            name = load_profile(name, repo_root).extends   # one step up the chain
+        except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
+            return False
+    return False
+
+
+def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
     """How a worker should find code (the code map, if any), test it, and
-    stay within its pre-approved commands."""
+    stay within its pre-approved commands. A report-only worker gets no
+    testing instructions."""
     from brindle import codemap
     from brindle.config import load_repo_config
 
@@ -153,7 +179,7 @@ def worker_guidance(ws: Workspace) -> str:
         checks = load_repo_config(ws.repo_root).checks
     except ValueError:
         checks = []
-    parts = (codemap.guidance(ws), test_guidance(checks),
+    parts = (codemap.guidance(ws), "" if report_only else test_guidance(checks),
              PERMISSION_GUIDANCE.format(root=ws.repo_root))
     return "\n".join(p for p in parts if p)
 
@@ -300,7 +326,7 @@ plan is approved; if it comes back with feedback, revise it and call
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
                            provider, headless: bool, plan_first: bool = False,
-                           decisions: str = "", chunks: str = "") -> str:
+                           decisions: str = "", chunks: str = "", report_only: bool = False) -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
@@ -315,8 +341,9 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
         prompt += PLAN_FIRST_NOTE
-    prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch,
-                                   guidance=worker_guidance(ws))
+    footer = REPORT_ONLY_FOOTER if report_only else WORKER_FOOTER
+    prompt += footer.format(agent_id=agent_id, branch=ws.branch,
+                            guidance=worker_guidance(ws, report_only))
     if (done_when and provider.name == "claude" and not headless
             and not provider.hooks_disabled(ws.path)):
         # /goal is an interactive command that Claude Code refuses when hooks
@@ -395,6 +422,7 @@ def spawn(
         from brindle import codemap
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
                                         plan_first=plan_first,
+                                        report_only=is_review_profile(profile.name, ws.repo_root),
                                         decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
                                         chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
                                                                       codemap.graph_path(ws)))
@@ -1107,6 +1135,13 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first),
                                           mcp_recovery=mcp_recovery))
+    if provider.name == "codex":
+        from brindle import codex_hook
+
+        try:
+            codex_hook.tell_untrusted(db, agent, ws.path)  # launched without the hook it couldn't trust
+        except Exception:  # noqa: BLE001 - never stop a launch over this
+            pass
     if prompt or db.pending_count(agent.id):
         _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
                               submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
@@ -1507,6 +1542,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
             prompt = decorate_worker_prompt(
                 a.task, a.id, ws, a.done_when, provider, bool(a.headless),
                 plan_first=bool(a.plan_first) and a.plan_state != "approved",
+                report_only=is_review_profile(a.profile, ws.repo_root),
                 decisions=knowledge.replay_decisions(db, a.id),
                 chunks=knowledge.replay_chunks(db, a.id)) + RESUME_NOTE
         else:
@@ -1831,7 +1867,14 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
 
     if login_pause.holding(db, agent.id):
         return "queued"  # its session waits on an expired cloud login
-    if _deliver_to_inbox(db, agent, message_id, text, sender_id):
+    from brindle import wake
+
+    if wake.enabled(agent):
+        # A chat with brindle's waiter never gets the inbox, where Claude Code
+        # would wrap the message as another session's (see brindle.wake).
+        if wake.live(agent):
+            return "delivered"  # the waiter wakes it with this
+    elif _deliver_to_inbox(db, agent, message_id, text, sender_id):
         return "delivered"
     reconcile(db, agent)
     if db.message_delivered(message_id):
@@ -1974,18 +2017,23 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
 
 def flush(db: DB, agent_id: str) -> bool:
     """Deliver the agent's oldest pending message: through its inbox if it
-    has one, else typed into its pane once it's idle. Returns True if
-    something was delivered."""
+    has one, else typed into its pane once it's idle. A chat with a live
+    waiter (brindle.wake) is left to it, and one that runs a waiter never
+    uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
     from brindle import launch_health
     from brindle import login_pause
+    from brindle import wake
 
     agent = db.get_agent(agent_id)
     if agent is None or agent.headless:
         return False  # its runner takes messages from the inbox itself
     if login_pause.holding(db, agent_id):
         return False  # its session waits on an expired cloud login; resuming flushes it
-    if inbox.usable(agent):
+    waits = wake.enabled(agent)
+    if waits and wake.live(agent):
+        return False  # its waiter hands the queue over (brindle.wake)
+    if not waits and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
             baseline = launch_health.before_delivery(db, agent)
@@ -1998,7 +2046,10 @@ def flush(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
-    if db.pending_count(agent_id) == 0 or not db.claim_idle(agent_id):
+    if db.pending_count(agent_id) == 0:
+        return False
+    claimed_at = db.claim_idle(agent_id)
+    if claimed_at is None:
         return False
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
@@ -2013,9 +2064,15 @@ def flush(db: DB, agent_id: str) -> bool:
     assert agent is not None
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
-    baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
-    tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-               server=server_of(agent))
+    try:
+        baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
+        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+                   server=server_of(agent))
+    except BaseException:
+        # pop_pending claimed this row before the external send. Release the
+        # same row and our idle claim so the next flush can retry it once.
+        db.retry_pending(msg.id, agent_id, claimed_at)
+        raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
     return True
@@ -2326,6 +2383,9 @@ def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
     is piped, else to the supervisor, then close the reviewer."""
     from brindle import pipeline
 
+    # Before a merge removes the workspace, and with it this reviewer's
+    # record: the link to its root, whose sidebar close_removed may rescue.
+    root_id = root_of(db, reviewer_id)
     try:
         caller, ws = db.get_agent(reviewer_id), db.get_workspace(ws_id)
         review = next((r for r in reversed(db.workspace_reviews(ws_id))
@@ -2344,7 +2404,46 @@ def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
 
             learned_rules.refresh_later(ws.repo_root)   # the finding just landed in the history
     finally:
+        # A merge removes the workspace but leaves the session this reviewer
+        # runs in; once the reviewer is gone nobody else would end it.
+        if ws and db.get_workspace(ws_id) is None:
+            _closing_session(reviewer_id).write_text(f"{ws.tmux_session}\n{root_id}")
         close_later(reviewer_id)
+
+
+def _closing_session(agent_id: str):
+    from brindle.config import brindle_home
+
+    d = brindle_home() / "closing"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / agent_id
+
+
+def close_removed(db: DB, agent_id: str) -> None:
+    """Kill an agent and, when its workspace was removed with the session left
+    running (noted by ``finish_review``, with the root it belonged to), that
+    session too: only brindle's own, unattached session of a workspace that no
+    longer exists."""
+    note = _closing_session(agent_id)
+    try:
+        session, _, root_id = note.read_text().strip().partition("\n")
+        note.unlink()
+    except OSError:
+        session = root_id = ""
+    # The workspace's removal took the agent's record, and with it the link to
+    # its root, unless the note kept it.
+    root_id = root_id.strip() or root_of(db, agent_id)
+    try:
+        kill(db, agent_id)
+    except AgentError:
+        pass
+    if session and db.workspace_by_tmux_session(session) is None \
+            and not tmux.session_attached(session):
+        # A sidebar left in this session would go down with it.
+        sidebar = db.get_sidebar_pane(root_id)
+        if sidebar and sidebar != SIDEBAR_DISMISSED and tmux.pane_session(sidebar) == session:
+            sidebar_come_home(db, root_id, sidebar)
+        tmux.kill_session(session)
 
 
 def close_later(agent_id: str, delay: float = 5.0) -> None:
@@ -2367,6 +2466,12 @@ def _stop(db: DB, agent: Agent) -> None:
     # Only a window on the server brindle is using: another server's pane
     # ids mean other panes here (see same_server).
     window = agent.tmux_window if same_server(agent) and owns_pane(db, agent) else ""
+    if window:
+        from brindle.sidebar_follow import rescue_sidebar_from_window
+
+        # Before the pids are read: a moved pane keeps its process, and the
+        # sidebar's would otherwise be stopped with the agent's.
+        rescue_sidebar_from_window(db, agent)
     pane_pids = tmux.window_pids(window) if window else []
     if window:
         tmux.kill_window(window)
@@ -2784,9 +2889,12 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             if _live_reviewer(db, ws, sha, profile):
                 return None
             try:
-                summary = gates.check_summary(
-                    db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
-                    or not _review_requested(ws.id, profile, request_id))
+                # In the check queue as of the report (#186): a run restarted
+                # or requested again later doesn't lose its turn.
+                with gates.queue_place(since or time.time()):
+                    summary = gates.check_summary(
+                        db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
+                        or not _review_requested(ws.id, profile, request_id))
             except gates.Abandoned:
                 summary = None
             except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
@@ -2966,6 +3074,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                          mode="review", background_setup=True, review_sha=sha)
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
+    # Kept on the reviewer too: the claim names only its latest holder, and
+    # which verdict replaces which goes by slot (gates.standing_reviews).
+    if reviewer is not None:
+        db.update_agent(reviewer.id, review_slot=slot)
     return reviewer
 
 
@@ -3117,9 +3229,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
     policy (brindle.permissions) answers allow or deny, or None to let the CLI
     prompt the person as usual (ask). Off unless the repo or user config
-    sets ``permission_policy: "on"``. A request left to the person is held
-    for the app's answer while the app is open (_hold_for_app; a Claude one
-    is recorded with the policy off too). Never raises: any failure is ask."""
+    sets ``permission_policy: "on"``, except for a Codex reviewer, whose hook
+    allows what its profile's allowed_tools cover and leaves the rest to
+    Codex (#241). A request left to the person is held for the app's answer
+    while the app is open (_hold_for_app; a Claude one is recorded with the
+    policy off too). Never raises: any failure is ask."""
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -3130,7 +3244,12 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return None
         cfg = load_repo_config(ws.repo_root)
         policy = cfg.permission_policy == "on"
-        if not policy and provider != "claude":
+        # Policy off: of the other CLIs only a Codex reviewer has the hook
+        # (codex_hook.launch_flags). Nobody watches it, so it gets what its
+        # allowed_tools cover and nothing else of brindle's: every other
+        # answer is Codex's own.
+        review_only = not policy and provider == "codex"
+        if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         if provider == "codex":
@@ -3151,7 +3270,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 profile = None  # deleted profile: no extra allowances
             if profile is not None:
                 rules += permissions.profile_bash_allows(profile)
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
+                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>)
                 # wins before any part-by-part allow below.
@@ -3183,6 +3303,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                         "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
                         "never asks (permission_mode dontAsk). Don't retry it: do without it, or ask "
                         "your supervisor with the send_message tool (brindle MCP server)")
+            if review_only and decision.decision != "allow":
+                return None  # as Codex would without brindle: its own prompt or refusal
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
@@ -3360,12 +3482,15 @@ def pending_permission(db: DB, agent_id: str) -> str | None:
         return None
 
 
-def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False) -> dict | None:
+def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
+                   waiter: bool = False) -> dict | None:
     """What the Stop hook decides: a "block" with the reason to carry on, or
     None to let the agent stop. ``via_inbox``: the reason will be sent as an
-    inbox message rather than block the stop, so ``stop_hook_active`` never
-    caps a repeat; the unread-mail reminder is then limited to one per
-    NOTICE_TTL (DB.claim_stop_reminder)."""
+    inbox message (or handed to its waiter) rather than block the stop, so
+    ``stop_hook_active`` never caps a repeat; the unread-mail reminder is
+    then limited to one per NOTICE_TTL (DB.claim_stop_reminder). ``waiter``:
+    the agent runs brindle's waiter (brindle.wake), which this Stop has just
+    started: queued messages stay queued for it."""
     if agent.mode == "interactive":
         # Every supervisor turn ends here: start any queued task a cut-off or
         # manual merge left waiting (its "Started" note is delivered below).
@@ -3375,7 +3500,10 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False)
             tasks.sweep(db)
         except Exception:  # noqa: BLE001 -- must never break the Stop hook
             log.exception("brindle: queued-task sweep failed")
-    msg = db.pop_pending(agent.id)
+    if waiter and db.pending_count(agent.id):
+        db.set_status(agent.id, "processing")
+        return None
+    msg = None if waiter else db.pop_pending(agent.id)
     if msg:
         db.set_status(agent.id, "processing")
         return {"decision": "block", "reason": msg.body}
@@ -3552,9 +3680,18 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         snapshot_turn(db, agent)
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
-        # Where a person watches (an interactive agent with an inbox), brindle
-        # lets the stop happen and sends the same text through the inbox
-        # instead: it arrives as a message from brindle and starts the next turn.
+        # Where a person watches (an interactive agent), brindle lets the stop
+        # happen and hands the same text to the waiter this Stop just started
+        # (brindle.wake), which wakes the model with it as one "Stop hook
+        # feedback" line; a session without a waiter gets it through its
+        # inbox, as a message from another session.
+        from brindle import wake
+
+        if agent.mode == "interactive" and wake.enabled(agent):
+            decision = _stop_decision(db, agent, payload, via_inbox=True, waiter=True)
+            if decision:
+                db.enqueue(agent_id, decision["reason"], None)
+            return None
         if agent.mode == "interactive" and inbox.usable(agent):
             decision = _stop_decision(db, agent, payload, via_inbox=True)
             if decision and inbox.send(agent, decision["reason"]):

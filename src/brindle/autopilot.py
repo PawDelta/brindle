@@ -10,7 +10,9 @@ When the supervisor stops while milestones are still unverified and no worker
 is running, its Stop hook tells it to keep going. It stops pushing when:
 - every milestone's check passes (the goal is done),
 - the supervisor calls ``need_user`` (blocked on a decision only the user can
-  make), until the user next types something,
+  make), until the user next types something or, for its own question,
+  until the supervisor says it's answered,
+- the supervisor calls ``wait_on`` for an outside job, until it ends,
 - it has nudged MAX_NUDGES times in a row with no progress (stalled), or
 - Claude usage is near its limit.
 
@@ -37,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -55,6 +58,8 @@ GOALS_FILE = "goals.md"
 GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's own goal
 MAX_NUDGES = 3
 NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
+NUDGE_HEAD = "[brindle autopilot] The goal isn't reached yet, and no workers are running."
+WAIT_ENDED_HEAD = "[brindle autopilot] The job you were waiting on has ended"
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
 OUTPUT_TAIL_LINES = 30
 
@@ -116,6 +121,12 @@ to be asked each step.
   depend on it: call `need_user` with the question, ask it, keep working the
   rest, and report the blocked item with it. Stop only when nothing else is
   left; once the user answers, call `need_user(answered=true)`.
+- If the next step waits on an outside job, call `wait_on(pid=..., note=...)`
+  or `wait_on(until=..., note=...)` (Unix timestamp in seconds); `path=...`
+  can watch for a completion file. Autopilot holds reminders and stall counting,
+  then wakes you once when the process exits, the time arrives, or the file
+  appears. If several are given, the first to finish ends the wait. An existing
+  wait is kept if you call again. Keep working on independent steps meanwhile.
 - When a milestone passes, tell the user in one line.
 - If a message says autopilot is off, stop driving: wait for the user's
   instructions.
@@ -433,7 +444,7 @@ def _adopt_legacy(db: DB, root_id: str) -> None:
 
 
 def remove_goals_file(db: DB, root_id: str) -> None:
-    """The session's goal is done, handed over or dropped: remove its file."""
+    """The session's goal is handed over or dropped: remove its file."""
     _adopt_legacy(db, root_id)
     path = session_goals_path(db, root_id)
     if path is not None:
@@ -585,21 +596,6 @@ def sync_goals_file(db: DB, root_id: str) -> None:
         _replace(path, new)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't sync milestone status to the session's goal file")
-
-
-def clear_finished_goal(db: DB, root_id: str) -> None:
-    """The goal is reached: remove the session's goal file but KEEP the goal
-    and its milestones (state ``done`` marks it reached) so the app can keep
-    showing them; only the next set_goal replaces them. Never raises: a file
-    we can't write must not fail the verdict."""
-    try:
-        ap = db.get_autopilot(root_id)
-        if not ap or not ap.goal:
-            return
-        remove_goals_file(db, root_id)
-        db.update_autopilot(root_id, goals_file=None, auditor_id=None, note=None, audit_history=None)
-    except Exception:  # noqa: BLE001
-        log.exception("brindle: couldn't clear the finished goal")
 
 
 # -- sessions ----------------------------------------------------------------
@@ -907,6 +903,8 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
         m = effective_profile_model(p, repo_root).lower()
         if any(h in m for h in ("fable", "opus", "o3", "deepseek-r1", "astra")):
             return "heavy"
+        if "sonnet" in m:
+            return "medium"
         if getattr(p, "effort", None) in ("high", "xhigh", "max"):
             return "heavy"
         if "-heavy" in name:
@@ -944,8 +942,9 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                    weight: str | None = None, why: list[str] | None = None,
                    decision: dict | None = None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
-    ``requested`` if given, else the first unverified milestone's profile in
-    the caller's session, else the repo's routing for ``weight`` (available
+    ``requested`` if given, else (when no ``weight`` is given) the first
+    unverified milestone's profile in the caller's session, else the repo's
+    routing for ``weight`` (available
     candidates only, the hosted learner choosing among them), else the hosted
     learner's pick among ``learning_candidates``, else the repo's
     ``default_agent``. Raises AutopilotError if it doesn't exist. An
@@ -970,7 +969,10 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     routed: dict = {}
     if not name:
         pending = next((m for m in db.milestones(root_of(db, caller_id)) if m.status != "passed"), None)
-        if pending and pending.profile:
+        if pending and pending.profile and weight:
+            if why is not None:
+                why.append(f"weight {weight} overrides milestone profile {pending.profile.strip()}")
+        elif pending and pending.profile:
             m_profile = pending.profile.strip()
             if ceiling and weight_order[profile_weight(m_profile, cfg, repo_root)] > weight_order[ceiling]:
                 candidates = cfg.routing.get(ceiling, [cfg.default_agent])
@@ -1101,13 +1103,55 @@ def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
     question (``ask``) holds only the work that depends on it, until the
     supervisor says it's answered."""
     note = question.strip()[:500]
-    fields: dict[str, object] = {"state": "blocked", "note": note, "nudges": 0,
-                                 "question": note if ask else None}
-    if ask:
-        ap = db.get_autopilot(root_id)
-        fields["nudged_at"] = ap.progress if ap else None
-    db.update_autopilot(root_id, **fields)
+    db.update_autopilot(root_id, state="blocked", note=note, nudges=0,
+                        question=note if ask else None)
     bus.publish_agent(db, "autopilot.need_user", root_id, question=note, ask=ask)
+
+
+def wait_on(db: DB, root_id: str, pid: int | None = None, until: float | None = None,
+            note: str = "", path: str | None = None) -> None:
+    """Declare a session wait; any supplied completion condition ends it."""
+    if pid is None and until is None and not path:
+        raise AutopilotError("Give a pid, an until Unix timestamp, or a completion file path.")
+    if pid is not None and not 0 < pid <= 2**31 - 1:
+        raise AutopilotError("pid must be a positive process id.")
+    if until is not None and (not math.isfinite(until) or until < 0):
+        raise AutopilotError("until must be a finite Unix timestamp in seconds.")
+    db.set_external_wait(root_id, json.dumps({"pid": pid, "until": until,
+                                            "path": path or None, "note": note.strip()[:500]}))
+
+
+def wait_summary(ap: Autopilot) -> str | None:
+    if not ap.external_wait:
+        return None
+    wait = json.loads(ap.external_wait)
+    parts = []
+    if wait["pid"] is not None:
+        parts.append(f"pid {wait['pid']}")
+    if wait["until"] is not None:
+        parts.append(f"until {wait['until']:g}")
+    if wait["path"]:
+        parts.append(f"file {wait['path']}")
+    return f"waiting on {wait['note'] or 'outside job'} ({', '.join(parts)})"
+
+
+def wait_ended(db: DB, ap: Autopilot, now: float | None = None) -> str | None:
+    """Queue one durable completion notice from either a Stop hook or sweep."""
+    from brindle import agents, identity_lock, procs
+
+    if not ap.external_wait:
+        return None
+    now = time.time() if now is None else now
+    wait = json.loads(ap.external_wait)
+    ended = ((wait["until"] is not None and now >= wait["until"])
+             or (wait["path"] is not None and Path(wait["path"]).exists())
+             or (wait["pid"] is not None and not procs.alive(wait["pid"])))
+    if not ended:
+        return None
+    identity_lock.ensure(agents.get(db, ap.root_id))
+    note = f": {wait['note']}" if wait["note"] else ""
+    message = f"{WAIT_ENDED_HEAD}{note}. Continue with the next step."
+    return message if db.finish_external_wait(ap.root_id, ap.external_wait, now, message) else None
 
 
 def held(ap: Autopilot) -> bool:
@@ -1124,12 +1168,11 @@ def answered(db: DB, root_id: str) -> None:
 def user_spoke(db: DB, agent: Agent) -> None:
     """The user typed into the supervisor's chat: whatever blocked autopilot
     is theirs to have answered, so it may drive again. An open question stays
-    open (the message may be about something else), but the supervisor gets
-    one more reminder of it."""
+    open (the message may be about something else) until the supervisor says
+    it's answered. Nothing here re-arms a reminder (#209): brindle can't
+    always tell the user from whatever else woke the chat."""
     ap = db.get_autopilot(agent.id)
-    if ap and held(ap):
-        db.update_autopilot(agent.id, nudges=0, nudged_at=None)
-    elif ap and ap.state in ("blocked", "stalled"):
+    if ap and ap.state in ("blocked", "stalled") and not held(ap):
         db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0)
     elif ap:
         db.update_autopilot(agent.id, nudges=0)
@@ -1223,6 +1266,8 @@ def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | Non
     from brindle.providers import brindle_invocation
 
     ap = db.get_autopilot(root_id)
+    if ap and ap.state == "done":
+        return progress(db, root_id, in_flight=False)
     if ap and checking(ap):
         return ("A milestone check is already running; its result arrives as a message. "
                 "Carry on with other work meanwhile.")
@@ -1248,6 +1293,11 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     so a flaky check can't keep resetting the nudge limit."""
     from brindle import git, repos, workspaces
 
+    # Completed goals are historical records. Only set_goal starts work again;
+    # a late helper or repeated check request must not overwrite their results.
+    ap = db.get_autopilot(root_id)
+    if ap and ap.state == "done":
+        return progress(db, root_id, in_flight=False)
     cfg = cfg or load_repo_config(ws.repo_root)
     ms = db.milestones(root_id)
     if not ms:
@@ -1360,13 +1410,12 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         positions = ", ".join(str(m.position) for m in regressed)
         verb = "was passing but now fails" if len(regressed) == 1 else "were passing but now fail"
         lines.append(f"REGRESSED: milestone {positions} {verb}.")
-    lines.append(progress(db, root_id))
+    lines.append(progress(db, root_id, in_flight=False))
     for m in shown:
         if m.output and m.status == "failed":
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
     if done and audit is None:
         lines.append("\n" + GOAL_REACHED)
-        clear_finished_goal(db, root_id)
     elif done:
         lines.append("\n" + AUDIT_HOLD[audit].format(note=(ap.note if ap else None) or ""))
     return "\n".join(lines)
@@ -1548,7 +1597,6 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
         db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None,
                             audit_history=new_history)
         db.bump_progress(root_id)
-        clear_finished_goal(db, root_id)
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
                 f"\n\n{summary}")
@@ -1581,7 +1629,7 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 # -- progress -----------------------------------------------------------------
 
 MARK = {"passed": "✓", "failed": "✗", "not_done": "○", "regressed": "✗", "pending": "○",
-        "working": "◐", "waiting": "◌"}
+        "working": "◐", "waiting": "◌", "checking": "◌"}
 
 
 def state_text(m: Milestone) -> str | None:
@@ -1633,7 +1681,7 @@ def counts(db: DB, root_id: str) -> tuple[int, int]:
 
 
 def work_state(db: DB, root_id: str) -> str | None:
-    """Display-only: "working" or "waiting" while the session has work in
+    """Display-only: "checking", "working" or "waiting" while the session has work in
     flight, else None. A failed milestone's last check is stale then, so it
     shouldn't read as a plain failure. Never stored on the milestone.
 
@@ -1642,7 +1690,9 @@ def work_state(db: DB, root_id: str) -> str | None:
     from brindle import login_pause
 
     ap = db.get_autopilot(root_id)
-    if (ap is not None and ap.state == "usage_paused") or login_pause.paused(db, root_id):
+    if ap is not None and checking(ap):
+        return "checking"
+    if (ap is not None and (ap.state == "usage_paused" or ap.external_wait)) or login_pause.paused(db, root_id):
         return "waiting"
     live = active_workers(db, root_id)
     if any(a.status != "waiting" for a in live):
@@ -1653,7 +1703,12 @@ def work_state(db: DB, root_id: str) -> str | None:
     return None
 
 
-def progress(db: DB, root_id: str) -> str:
+def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
+    """Render live progress, or recorded results for a completed check report.
+
+    A completed report must not inherit the background flag: the helper keeps
+    it set until delivery finishes, so concurrent readers still see checking.
+    """
     ap = db.get_autopilot(root_id)
     if ap is None:
         return "Autopilot is not set up for this session."
@@ -1663,8 +1718,10 @@ def progress(db: DB, root_id: str) -> str:
                 "user's request (ask what we're building only if there is no request).")
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
+    if waiting := wait_summary(ap):
+        lines.append(waiting)
     ms = db.milestones(root_id)
-    w = work_state(db, root_id) if any(m.status == "failed" for m in ms) else None
+    w = work_state(db, root_id) if in_flight and any(m.status == "failed" for m in ms) else None
     for m in ms:
         where = f"@{m.repo}: " if m.repo else ""
         how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
@@ -1672,7 +1729,11 @@ def progress(db: DB, root_id: str) -> str:
         who = f", profile: {m.profile}" if m.profile else ""
         shown = w if m.status == "failed" and w else (m.state or m.status)
         label = state_text(m)
-        stale = f", last check: {label}" if label and shown != m.state else (f", {label}" if label else "")
+        if shown == "checking":
+            stale = ", checking…"
+            when = ""
+        else:
+            stale = f", last check: {label}" if label and shown != m.state else (f", {label}" if label else "")
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
     if ap.state == "done":
         lines.append("Goal reached: every milestone passes. Nothing left to do; tell the user.")
@@ -1905,7 +1966,10 @@ def usage_resume(db: DB, root_id: str, now: float | None = None) -> str | None:
 
 def usage_sweep(db: DB, now: float | None = None) -> list[str]:
     """One pass over every autopilot session: stop workers at the limit,
-    resume them after the reset. Called from the cull sweep."""
+    resume them after the reset, and wake completed outside waits.
+    Called from the cull sweep."""
+    from brindle import agents, identity_lock, login_pause, tmux
+
     done = []
     for root in db.list_agents():
         if root.mode != "interactive" or root.status in ("paused", "done"):
@@ -1918,6 +1982,20 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
             cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
             if over_limit(db, root.id, cfg):
                 done.append(f"usage limit reached: {root.id} is {db.get_autopilot(root.id).state}")
+            elif ((ap.external_wait or db.outstanding(root.id, WAIT_ENDED_HEAD))
+                  and not login_pause.paused(db, root.id) and not proposing(ap)):
+                try:
+                    message = wait_ended(db, ap, now)
+                    if db.outstanding(root.id, WAIT_ENDED_HEAD):
+                        identity_lock.ensure(root)
+                        if agents.is_alive(root):
+                            agents.flush(db, root.id)
+                    if message:
+                        done.append(message)
+                except (agents.AgentError, tmux.TmuxError):
+                    # Keep the wait, or its already queued notice, for retry.
+                    # Other sessions and the cull sweep's login recovery must run.
+                    log.debug("outside wait delivery deferred for %s", root.id, exc_info=True)
         elif ap.state == "usage_paused":
             line = usage_resume(db, root.id, now)
             if line:
@@ -1953,10 +2031,9 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
                 return None
         else:
             return None
-    elif held(ap):
-        if ap.nudged_at == ap.progress:
-            return None  # reminded of the open question since the last step or user message
     elif ap.state != "running":
+        # An open need_user question included (#209): reminding the supervisor
+        # of it re-armed on anything that woke the chat, a nudge every ~2 s.
         return None
 
     ws = db.get_workspace(agent.workspace_id)
@@ -1968,6 +2045,12 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
 
     if over_limit(db, agent.id, cfg):
         return None  # workers included: they'd keep burning usage
+    if ap.external_wait:
+        try:
+            wait_ended(db, ap)
+        except agents.AgentError:
+            log.debug("outside wait completion deferred for %s", agent.id, exc_info=True)
+        return None  # the durable inbox notice wakes it, including after a failed delivery
     if checking(ap):
         return None  # the check's result arrives as a message and wakes it up
     working, stalled = split_workers(db, agent.id, screen=True)
@@ -1976,10 +2059,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
-    if held(ap):
-        # One reminder per step: never counts toward stalling.
-        db.update_autopilot(agent.id, nudges=0, nudged_at=ap.progress)
-        return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
+    if db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD):
+        return None  # (#209) the last reminder is still queued or unread: never pile up another
     now = time.time()
     if (ap.nudged_at == ap.progress and ap.nudged_time is not None
             and now - ap.nudged_time < NUDGE_BACKOFF):
@@ -2023,18 +2104,14 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
         pending += ("Every milestone's check passes, but the completion audit hasn't approved "
                     "the current commit. Close any gaps it found, commit, and call "
                     "check_milestone: that starts a fresh audit.\n\n")
-    if held(ap):
-        pending += (f"Waiting on the user for: {ap.question}. Work only on what doesn't depend "
-                    "on it; if nothing is left, stop. When they've answered, call "
-                    "need_user(answered=true).\n\n")
     return (
-        "[brindle autopilot] The goal isn't reached yet, and no workers are running.\n"
-        f"{progress(db, ap.root_id)}\n\n{pending}{stuck}"
+        f"{NUDGE_HEAD}\n{progress(db, ap.root_id)}\n\n{pending}{stuck}"
         "Keep going without waiting for the user: plan the next tasks for the first "
         f"unverified milestone and assign workers (at most {cfg.max_agents or 'any number'} "
         "at once), get finished branches reviewed and merged, and call check_milestone. "
         "If you need a decision only the user can make, call need_user with the question, "
-        "then ask it."
+        "then ask it. If the next step waits on an outside job, call wait_on with its pid, "
+        "an until Unix timestamp, or a completion file path, and a note."
     )
 
 

@@ -92,6 +92,40 @@ def test_merges_refresh_the_graph(mapped, monkeypatch):
     assert started == [["graphify", "update", str(mapped), "--force"]]
 
 
+@pytest.mark.parametrize("tracked", [True, False])
+def test_automatic_rebuild_preserves_tracked_graph_or_can_be_disabled(mapped, monkeypatch, tracked):
+    from brindle import git
+
+    graph = mapped / codemap.GRAPH
+    _fake_graph(graph, "Semantic hub")
+    for name in ("graph.html", "GRAPH_REPORT.md", "manifest.json"):
+        (graph.parent / name).write_text("semantic graph artifact")
+    original = {p: p.read_bytes() for p in graph.parent.iterdir()}
+    # Model the git index without spawning git; graphify would downgrade all artifacts.
+    monkeypatch.setattr(git, "paths", lambda *a, **kw: [str(p.relative_to(mapped)) for p in original] if tracked else [])
+    if not tracked:
+        config = mapped / ".brindle"
+        config.mkdir(exist_ok=True)
+        (config / "config.json").write_text(json.dumps({"graphify_auto_refresh": False}))
+
+    started = []
+
+    def rebuild(argv, **kw):
+        started.append(argv)
+        for path in original:
+            path.write_text('{"nodes": []}')
+
+    monkeypatch.setattr(codemap.subprocess, "Popen", rebuild)
+    for refresh in (codemap.refresh, codemap.refresh_later):
+        refresh(str(mapped), repo_root=str(mapped))
+        assert {p: p.read_bytes() for p in original} == original
+    assert codemap.graph_path(mapped) == graph  # Queries remain available.
+    graph.unlink()
+    assert codemap.seed_session(mapped, repo_root=str(mapped)) is False
+    assert not graph.exists()
+    assert not started
+
+
 def test_prune_stores_removes_old_graph_store_and_keeps_fresh_one(tmp_path, monkeypatch):
     home = tmp_path / "brindle"
     monkeypatch.setattr("brindle.config.brindle_home", lambda: home)

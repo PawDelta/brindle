@@ -85,8 +85,8 @@ def normalize_weight(weight: str | None) -> str | None:
 # Nothing here prefers another provider for its own sake: all-Claude, all-Codex
 # or all-Gemini may well be best, and that's the learner's call.
 DEFAULT_ROUTING = {
-    "light": ["developer-light", "developer", "developer-codex", "developer-local"],
-    "medium": ["developer", "developer-codex", "developer-heavy"],
+    "light": ["developer-sonnet", "developer-light", "developer", "developer-codex", "developer-local"],
+    "medium": ["developer-sonnet", "developer", "developer-codex", "developer-heavy"],
     "heavy": ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
     "advanced": ["developer-fable", "developer-heavy", "developer-gemini"],
 }
@@ -119,6 +119,7 @@ class RepoConfig:
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
+    graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
@@ -154,10 +155,11 @@ class RepoConfig:
     #   Native       brindle's own loop: no timeout but this; no prompt of its
     #                own, so on timeout the call is refused.
     permission_hold_seconds: int = 86400
-    # "brindle": with the policy on, agy workers run with
-    # --dangerously-skip-permissions and brindle's hook allows or denies every
-    # call (see brindle.antigravity). "prompt" (default): agy asks as usual.
-    agy_approvals: str = "prompt"
+    # "brindle": agy agents run with --dangerously-skip-permissions and
+    # brindle's hook allows or denies every call (see brindle.antigravity).
+    # "prompt": agy asks as usual. None (unset): "brindle" for agents brindle
+    # runs, "prompt" for an interactive one, where a person answers.
+    agy_approvals: str | None = None
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.
     overlap: str | None = None
@@ -340,7 +342,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
-                "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
+                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
                 "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",

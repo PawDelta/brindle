@@ -310,7 +310,7 @@ def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
     assert db.get_agent(a.id).status == "paused"
 
 
-def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
+def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws, monkeypatch):
     from brindle.providers import get_provider
 
     prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
@@ -322,6 +322,29 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
     assert "Don't run the full suite yourself" in prompt and "`uv run pytest -q`" in prompt
     sub = agents.subagent_prompt("You are a subagent.", "add a flag", ws, None)
     assert "Don't run the full suite yourself" in sub
+    agents_dir = Path(ws.repo_root) / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "my-auditor.md").write_text("---\nname: my-auditor\nextends: backend-auditor\n---\nAudit.\n")
+    for name, review in [("reviewer-gemini", True), ("developer", False),
+                         ("my-auditor", True),   # reviewer -> backend-auditor -> my-auditor
+                         ("no-such-profile", False)]:
+        assert agents.is_review_profile(name, ws.repo_root) is review
+    # A review profile gets the report-only footer, whichever way it is launched.
+    seen = []
+
+    class Launched(Exception):
+        pass
+
+    def decorate(*a, report_only=False, **k):
+        seen.append(report_only)
+        raise Launched
+
+    monkeypatch.setattr(agents, "decorate_worker_prompt", decorate)
+    monkeypatch.setattr("brindle.providers.trust_folder", lambda path: None)
+    for name in ("my-auditor", "developer"):
+        with pytest.raises(Launched):
+            agents.spawn(db, ws, name, prompt="hi", mode="assign")
+    assert seen == [True, False]
 
 
 def test_no_goal_command_when_hooks_are_disabled(db, ws):

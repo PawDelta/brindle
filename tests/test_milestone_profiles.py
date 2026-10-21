@@ -23,6 +23,17 @@ def test_resolution_prefers_current_milestone_then_default(db, root):
     assert autopilot.resolve_profile(db, "boss", ws.repo_root) == RepoConfig().default_agent
 
 
+def test_weight_overrides_milestone_profile(db, root):
+    agent, ws = root
+    # What weight routing picks depends on which CLIs are installed, so compare
+    # against the same routing with no milestone profile in the way.
+    routed, _ = autopilot.choose_profile(db, "boss", ws.repo_root, weight="medium")
+    set_goal(db, [("A", "true", None, "developer-heavy")])
+    assert autopilot.resolve_profile(db, "boss", ws.repo_root) == "developer-heavy"
+    name, _ = autopilot.choose_profile(db, "boss", ws.repo_root, weight="medium")
+    assert name == routed != "developer-heavy"
+
+
 def test_unknown_profile_errors_clearly(db, root):
     agent, ws = root
     set_goal(db, [("A", "true", None, "no-such-profile")])

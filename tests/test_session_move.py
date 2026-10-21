@@ -64,6 +64,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     db.record_check(m1.id, True, "ok", "abc")
     db.add_task(Task("t1", str(repo), None, "old", root.id, "developer", "later", "assign", 1, None,
                      None, None, '["w1"]', "pending", time.time()))
+    autopilot.wait_on(db, "old", until=time.time() + 60, note="training")
 
     spawned = {}
 
@@ -93,6 +94,12 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     assert not db.get_autopilot("old").enabled
     assert [(e["root_id"], e["payload"]) for e in bus.tail(db, kinds=("session.handover",))] == [
         ("new", {"from_root": "old"})]
+    # The wait went with the session: once it ends, one notice, to the new supervisor.
+    for root_id in ("old", "new"):
+        autopilot.wait_ended(db, db.get_autopilot(root_id), now=time.time() + 120)
+    told = db.conn.execute("SELECT agent_id FROM inbox WHERE instr(body, ?) > 0",
+                           (autopilot.WAIT_ENDED_HEAD,)).fetchall()
+    assert [r["agent_id"] for r in told] == ["new"]
 
 
 def test_checkout_for_target_reads_a_slashed_name_as_a_branch(db, repo, monkeypatch):

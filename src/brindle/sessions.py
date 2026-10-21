@@ -40,10 +40,22 @@ class Session:
 
 
 def paused(db: DB, repo_root: str) -> list[Session]:
-    """Paused sessions whose chat ran in ``repo_root``, newest first."""
+    """Paused sessions whose chat ran in ``repo_root``, newest first. A
+    "failed" chat whose pane is still running isn't one: that status also
+    marks a live chat (a brief whose delivery wasn't confirmed, an auth error
+    on one turn), and dropping it (see enforce) would close it mid-session."""
     out = []
+    panes = owners = None
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
+            if a.mode == "interactive" and a.status == "failed":
+                if panes is None:
+                    panes = tmux.list_panes()
+                    owners = agents.pane_owners(db, panes)
+                # On another server, its own server's panes say whose its pane is.
+                mine = owners if agents.same_server(a, panes) else None
+                if agents.is_alive(a, panes) and agents.owns_pane(db, a, mine):
+                    continue
             if a.mode == "interactive" and a.status in ("paused", "failed"):
                 members = agents.tree(db, a.id)
                 branches = []
@@ -150,9 +162,17 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                 db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
                                 passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
                                 ever_passed=prev.ever_passed)
+            if ap.state == "done":
+                # Copying a historical result is not a fresh check.
+                with db.tx() as c:
+                    c.execute("UPDATE milestones SET checked_at=? WHERE id=?", (prev.checked_at, m.id))
         db.update_autopilot(new.id, goal_sha=ap.goal_sha, audit_history=ap.audit_history)   # the audit reviews the whole goal's work
+        if ap.state == "done":
+            # Handover changes the supervisor, not the completed goal's verdict.
+            db.update_autopilot(new.id, state="done", audit_sha=ap.audit_sha, audit_ok=ap.audit_ok)
         db.update_autopilot(old_root_id, enabled=0)   # the old session stops syncing its goal file
-        pilot.remove_goals_file(db, old_root_id)      # the goal lives in the new session's file now
+        if ap.state != "done":
+            pilot.remove_goals_file(db, old_root_id)  # active work lives in the new session's file
         pilot.sync_goals_file(db, new.id)
     with db.tx() as c:
         c.execute("UPDATE agents SET parent_id=? WHERE parent_id=?", (new.id, old_root_id))
@@ -168,6 +188,15 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                   "SELECT ?, alias, repo_root, added_at FROM session_repos WHERE root_id=?",
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
+        # So does an outside job it waits on (wait_on), or the notice of one
+        # that just ended: the old session's autopilot is off, so nobody would
+        # be told. In this transaction, so the wait is finished once, by one side.
+        if c.execute("UPDATE autopilot SET external_wait=(SELECT external_wait FROM autopilot "
+                     "WHERE root_id=?) WHERE root_id=? AND external_wait IS NULL",
+                     (old_root_id, new.id)).rowcount:
+            c.execute("UPDATE autopilot SET external_wait=NULL WHERE root_id=?", (old_root_id,))
+        c.execute("UPDATE inbox SET agent_id=? WHERE agent_id=? AND delivered_at IS NULL "
+                  "AND instr(body, ?) > 0", (new.id, old_root_id, pilot.WAIT_ENDED_HEAD))
     _repoint_orphaned_tasks(db, new.id)
     bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
@@ -208,6 +237,9 @@ def _forget(db: DB, s: Session) -> None:
         # some other pane here (see agents.same_server).
         if (a.tmux_window and agents.same_server(a, panes) and agents.is_alive(a, panes)
                 and agents.owns_pane(db, a, owners)):
+            from brindle.sidebar_follow import rescue_sidebar_from_window
+
+            rescue_sidebar_from_window(db, a)
             tmux.kill_window(a.tmux_window)
         ws = db.get_workspace(a.workspace_id)
         if ws and ws.kind == "worktree":

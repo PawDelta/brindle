@@ -129,38 +129,18 @@ def _reentrant_lock(name: str, wait: bool = True):
             held.discard(name)
 
 
-def _review_run_file(ws_id: str):
-    from brindle.config import brindle_home
-
-    lock_dir = brindle_home() / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    return lock_dir / ("review-run-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16] + ".lock")
-
-
-@contextmanager
 def review_run(ws_id: str):
     """Held by each run that checks workspace ``ws_id`` and then starts its
     reviewer (``agents.review_after_checks``), for as long as it lives. Shared:
     two such runs (a second review, a newer report) don't wait on each other.
     The lock goes with a run that dies, so ``review_running`` tells a run
     that is at work from one that is gone."""
-    with open(_review_run_file(ws_id), "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-        try:
-            yield
-        finally:
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    return gates.marker("review-run", ws_id)
 
 
 def review_running(ws_id: str) -> bool:
     """Whether a run holds ``review_run`` for workspace ``ws_id`` right now."""
-    with open(_review_run_file(ws_id), "w") as f:
-        try:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-        return False
+    return gates.marked("review-run", ws_id)
 
 
 def _settled(db: DB, ws: Workspace) -> str | None:
@@ -333,11 +313,36 @@ def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace)
     profile = second_profile(db, cfg, worker, ws)
     if profile is None:
         return False
-    reviews = db.reviews_at(ws.id, gates.head(ws))
-    if not reviews or not all(r.approved for r in reviews) or len(reviews) < 2:
+    reviews = gates.standing_reviews(db, ws.id, gates.head(ws))   # as the merge gate counts them
+    if not reviews or not all(r.approved for r in reviews):
         return True   # one is missing, or one asked for changes (the worker is fixing it)
-    reviewers = [db.get_agent(r.reviewer_id) for r in reviews]
-    return not any(a is not None and a.profile == profile for a in reviewers)
+    # An approval in each slot: the commit's review ("") and the second
+    # review's (its profile). Two in one slot are one review.
+    slots = {_review_slot(db, a) for r in reviews
+             if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
+    return not {"", profile} <= slots
+
+
+def _review_slot(db: DB, reviewer: Agent) -> str | None:
+    """The review claim slot ``reviewer`` was started in, whatever its
+    profile; None for one with no slot on record (started before slots were
+    recorded), which counts for neither review."""
+    if reviewer.review_slot is not None:
+        return reviewer.review_slot
+    return db.review_slot(reviewer.id)
+
+
+def _report_only(worker: Agent, ws: Workspace) -> bool:
+    """A review profile's worker, or one whose branch finished with no commits
+    and no tracked edits: there is nothing for the pipeline to review or merge."""
+    if agents.is_review_profile(worker.profile, ws.repo_root):
+        return True
+    try:
+        if git.ahead_behind(ws.path, workspaces.require_base(ws))[1]:
+            return False
+    except Exception:  # noqa: BLE001 - can't tell: let the pipeline decide as before
+        return False
+    return not git.dirty_files(ws.path, tracked_only=True)
 
 
 def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
@@ -352,13 +357,17 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if parent is None:
         return False
-    if git.dirty_files(ws.path, tracked_only=True):   # untracked scratch files don't travel with the branch
+    if _report_only(worker, ws):
+        return False   # nothing to review or merge: the report goes straight to the supervisor
+    dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
+    if dirty:
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
+        shown = ", ".join(dirty[:5]) + (f" and {len(dirty) - 5} more" if len(dirty) > 5 else "")
         _tell(db, parent.id,
               agents.condense(
                   f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
-                  "changes, so it can't be reviewed or merged. "
+                  f"changes ({shown}), so it can't be reviewed or merged. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
     # Before the check run starts: it reads this report's claim (see review_claim).
@@ -369,19 +378,24 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
 
 def review_state(db: DB, ws: Workspace) -> str | None:
     """#186: where the branch in ``ws`` stands in review, so silence can be
-    told apart: ``checks running``, ``reviewer running (id)``, nothing at
-    work on a branch in review, the latest verdict and its commit, or
-    ``merge failed: why``. None when the branch has no worker, is merged, or
-    has not been through review."""
+    told apart: ``waiting for checks`` (a check slot), ``checks running``,
+    ``reviewer running (id)``, nothing at work on a branch in review, the
+    latest verdict and its commit (with the merge's own checks, once
+    approved), or ``merge failed: why``. None when the branch has no worker,
+    is merged, or has not been through review."""
     worker = piped_worker(db, ws)
     if worker is None or db.merged_sha(ws.id):
         return None
     if worker.merge_failed and not worker.pipeline:
         why = " ".join(worker.merge_failed.split())
         return "merge failed: " + (why if len(why) <= 200 else why[:199] + "…")
+    checks = "checks running" if gates.marked("checks-running", ws.id) else "waiting for checks"
+    if worker.pipeline == "ready":
+        merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
+        return f"approved, {merging}"
     if worker.pipeline == "reviewing":
         if review_running(ws.id):
-            return "checks running"
+            return checks
         for a in db.list_agents(ws.id):
             if a.mode == "review" and a.status != "done" and a.result is None \
                     and a.dismissed_at is None:
@@ -803,13 +817,42 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             db.update_agent(worker.id, pipeline=None)
         return True, False
     worker = piped_worker(db, ws)
-    if worker is None or not worker.pipeline:
+    if worker is None:
         return False, False
     parent_id = worker.parent_id
     try:
         cfg = load_repo_config(ws.repo_root)
     except ValueError:
         cfg = RepoConfig()
+    if not worker.pipeline:
+        # #217: a worker that never reported (no brindle connection, say)
+        # whose branch the supervisor had reviewed itself. Its approval is
+        # the pipeline's to merge like any other, once the worker is done.
+        if not (approved and worker.result is None and ws.kind == "worktree" and parent_id):
+            return False, False
+        try:
+            standing = gates.verdict(db, ws.id, gates.head(ws))
+        except git.GitError:
+            standing = None
+        if standing is None or not standing.approved:
+            return False, False   # the verdicts on record don't approve it: the supervisor's call
+        if not enabled(cfg, worker, ws):
+            # Not the pipeline's to merge (a handoff, or "pipeline" off): say so.
+            _tell(db, parent_id,
+                  agents.condense(
+                      f"[brindle] `{ws.branch}` approved; {worker.id} never reported, and brindle "
+                      f"doesn't merge it on its own here. This needs you: merge it with "
+                      f"merge_workspace(\"{ws.id}\").",
+                      f"Review ({reviewer.id}): approved.\n{summary}"), reviewer.id)
+            return True, False
+        if busy_worker(db, ws, None):
+            _tell(db, parent_id,
+                  f"[brindle pipeline] `{ws.branch}` approved, but {worker.id} never reported and "
+                  f"is still running in its worktree, so it wasn't merged. This needs you: merge it with "
+                  f"merge_workspace(\"{ws.id}\") once {worker.id} is done.", reviewer.id)
+            return True, False
+        db.update_agent(worker.id, pipeline="reviewing")
+        worker = db.get_agent(worker.id)
     report = worker.result or ""
     if approved:
         if not cfg.auto_merge_default_branch and ws.base_branch \
@@ -831,19 +874,22 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         # worker may have committed since the reviewer read the branch, or
         # a later verdict may have overruled this one.
         try:
-            recorded = db.latest_review(ws.id, gates.head(ws))
+            recorded = gates.verdict(db, ws.id, gates.head(ws))
         except git.GitError:
             recorded = None
-        if recorded is None or not recorded.approved:
+        if recorded is not None and not recorded.approved:
+            # Another reviewer's standing request for changes (#216): its own
+            # verdict sent the branch back to the worker, or to the supervisor.
+            return True, False
+        if recorded is None:
             db.update_agent(worker.id, pipeline=None)
             _escalate(db, ws, worker)
-            why = ("its latest commit hasn't been reviewed" if recorded is None
-                   else "a later review of that commit requested changes")
             _tell(db, parent_id,
                   agents.condense(
                       f"[brindle pipeline] `{ws.branch}` approved but not merged. This needs you: "
                       f"request_review(\"{ws.id}\") again, then merge_workspace(\"{ws.id}\")",
-                      f"Why: {reviewer.id} approved, but {why}.\n\nWorker: {agents.first_line(report)}",
+                      f"Why: {reviewer.id} approved, but its latest commit hasn't been reviewed."
+                      f"\n\nWorker: {agents.first_line(report)}",
                       f"Worker's report:\n{report}",
                       f"Review ({reviewer.id}): approved.\n{summary}"), worker.id)
             return True, False
@@ -937,7 +983,7 @@ def _finish(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None) -> str
     and its supervisor. Under the branch's lock from the first look at its
     state: a branch that stopped being ready since it was listed (its worker
     reported new commits, a supervisor merged it by hand) is left alone."""
-    with merge_lock(ws.id):
+    with merge_lock(ws.id), gates.marker("merge-run", ws.id):
         current = db.get_agent(worker.id)
         if current is None or current.pipeline != "ready":
             return f"Skipped {ws.branch}: no longer ready."
@@ -953,17 +999,31 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         cfg = RepoConfig()
     report = worker.result or ""
     try:
-        review = db.latest_review(ws.id, gates.head(ws))
+        review = gates.verdict(db, ws.id, gates.head(ws))
     except git.GitError:
         review = None
     reviewed_by = review.reviewer_id if review and review.reviewer_id else (reviewer.id if reviewer else "?")
     verdict = f"Review ({reviewed_by}): approved.\n{review.summary or ''}" if review else ""
     conflicting: list[str] = []
-    text = _try_merge(db, parent, ws, conflicting)
+    told: list[str] = []
+
+    def waiting_on_checks(sha: str) -> None:
+        # #217: an approved branch whose merge waits on its checks mustn't look stuck.
+        if told:
+            return
+        told.append(sha)
+        wait = agents.expected_check_wait(db, ws, cfg)
+        usually = f" (usually {wait / 60:.0f} min, plus any wait for a check slot)" if wait else ""
+        _tell(db, parent_id,
+              f"[brindle pipeline] `{ws.branch}` was approved; its merge is waiting on the repo's "
+              f"checks{usually}, for {sha[:8]}. Nothing to do: brindle merges it when they pass, "
+              "and tells you either way.", worker.id)
+
+    text = _try_merge(db, parent, ws, conflicting, waiting_on_checks)
     if text.startswith("Not merged. "):
         # A gate failed on an approved branch. That has been a flaky check
         # often enough (#186) to try once more before anyone is asked.
-        text = _try_merge(db, parent, ws, conflicting)
+        text = _try_merge(db, parent, ws, conflicting, waiting_on_checks)
     if text.startswith((ALREADY_MERGED, GONE)):
         if db.get_agent(worker.id):
             db.update_agent(worker.id, pipeline=None)   # reported when it merged; nothing to add
@@ -1017,9 +1077,10 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
     return text
 
 
-def _try_merge(db: DB, parent: Agent | None, ws: Workspace, conflicting: list[str]) -> str:
+def _try_merge(db: DB, parent: Agent | None, ws: Workspace, conflicting: list[str],
+               waiting_on_checks=None) -> str:
     try:
-        return merge(db, parent, ws, conflicts_out=conflicting)
+        return merge(db, parent, ws, conflicts_out=conflicting, waiting_on_checks=waiting_on_checks)
     except workspaces.WorkspaceError as e:   # one branch's trouble mustn't stall the others
         return f"Not merged: {e}"
 
@@ -1247,20 +1308,22 @@ def busy_worker(db: DB, ws: Workspace, exclude_id: str | None) -> Agent | None:
 
 
 def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
-          conflicts_out: list[str] | None = None) -> str:
+          conflicts_out: list[str] | None = None, waiting_on_checks=None) -> str:
     """Sync the branch with its base, run the merge gates, and merge. The
     reply starts with "Merged" on success, else "Not merged: ...". Merging is
     idempotent: a branch that already merged at its current commit gets
     "Already merged: ...", and one whose worktree is gone "Nothing to merge:
     ...", without a gate or a merge being run. When the sync with the base
     conflicts, the conflicting files are appended to ``conflicts_out``.
+    ``waiting_on_checks(sha)`` is called before checks with no passing
+    result for the commit yet start to run.
     One merge into a base at a time (see ``base_lock``)."""
     with merge_lock(ws.id), base_lock(ws.repo_root, ws.base_branch):
-        return _merge(db, caller, ws, squash, conflicts_out)
+        return _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
 
 
 def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
-           conflicts_out: list[str] | None = None) -> str:
+           conflicts_out: list[str] | None = None, waiting_on_checks=None) -> str:
     settled = _settled(db, ws)
     if settled:
         return settled
@@ -1291,12 +1354,13 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
         # The branch's own commits are unchanged: an approval of them
         # carries over the merge commit, and the checks below still run
         # on the merged result. Only an unreviewed branch needs a review.
-        prior = db.latest_review(ws.id, sync_result.old_sha) if sync_result.old_sha else None
-        if prior and prior.approved:
-            db.add_review(ws.id, sync_result.new_sha, prior.reviewer_id, True,
-                          f"Carried over from the approved review of {sync_result.old_sha[:8]}: "
-                          f"{ws.base_branch} merged in cleanly (commit {sync_result.new_sha[:8]}), "
-                          "and the checks run on the merged result below.")
+        prior = gates.standing_reviews(db, ws.id, sync_result.old_sha) if sync_result.old_sha else []
+        if prior and all(r.approved for r in prior):
+            for r in prior:   # each reviewer's, so a later verdict of any of them still counts (#216)
+                db.add_review(ws.id, sync_result.new_sha, r.reviewer_id, True,
+                              f"Carried over from the approved review of {sync_result.old_sha[:8]}: "
+                              f"{ws.base_branch} merged in cleanly (commit {sync_result.new_sha[:8]}), "
+                              "and the checks run on the merged result below.")
         else:
             return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
                     f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
@@ -1305,6 +1369,10 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     # wait for this lock) fails them for no reason of the branch's: that is
     # "gone", not a failed check.
     try:
+        if waiting_on_checks is not None and cfg.checks:
+            sha = gates.head(ws)
+            if any(not (c := db.get_check(ws.id, sha, cmd)) or not c.ok for cmd in cfg.checks):
+                waiting_on_checks(sha)
         report = gates.run(db, ws, cfg, review_required=review)
         if not report.ok:
             return _settled(db, ws) or f"Not merged. {report.problem}"

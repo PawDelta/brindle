@@ -1,11 +1,12 @@
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, bus, gates, watch, workspaces
+from brindle import agents, autopilot, bus, gates, git, watch, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.providers import status_line
@@ -58,9 +59,18 @@ def test_enable_loads_goals_md(db, repo):
     assert autopilot.enable(db, "first", ws) is None and db.get_autopilot("first").goal is None
     assert autopilot.parse_goals(autopilot.session_goals_path(db, "old").read_text()).goal == "Updated goal"
     seed.write_text(GOALS)
+    sh("git add -A && git commit -qm goals", repo)   # a committed seed, as in `brindle demo`
     add_agent(db, ws, "boss")
     plan = autopilot.enable(db, "boss", ws)
     assert plan and db.get_autopilot("boss").goal == "Settings page"
+    # Its deletion is brindle's bookkeeping: it never blocks a merge; other changes still do.
+    assert not seed.exists() and git.dirty_files(str(repo), tracked_only=True) == []
+    sh("git checkout -qb work && echo x > api.txt && git add api.txt && git commit -qm api && git checkout -q main", repo)
+    git.merge_into(str(repo), str(repo), "work", squash=True)
+    (repo / "app.py").write_text("print('bye')\n")
+    with pytest.raises(git.GitError, match="uncommitted changes"):
+        git.merge_into(str(repo), str(repo), "work", squash=True)
+    sh("git checkout -q app.py", repo)
     assert [m.title for m in db.milestones("boss")] == ["Settings API", "Settings UI"]
     assert "2 milestones" in autopilot.kickoff(plan, "boss")
     # A second session in the same checkout never gets the first's goal, and
@@ -90,7 +100,139 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     # The user replies: autopilot drives again.
     autopilot.user_spoke(db, db.get_agent("boss"))
     assert db.get_autopilot("boss").state == "running"
+    out = autopilot.on_stop(db, agent, {})
+    assert out is not None
+    # (#209) A supervisor that pulls its messages holds that reminder unread:
+    # past the backoff, once the unread-mail reminder has gone out, its stops
+    # still get no second one until it reads the first.
+    db.enqueue_held("boss", out["reason"], None)
+    clock[0] += autopilot.NUDGE_BACKOFF
+    assert "unread messages" in agents._stop_decision(db, agent, {}, via_inbox=True)["reason"]
+    assert agents._stop_decision(db, agent, {}, via_inbox=True) is None
+    db.read_held("boss")
     assert autopilot.on_stop(db, agent, {}) is not None
+
+
+@pytest.mark.parametrize("condition", ["pid", "until", "path"])
+def test_outside_wait_holds_nudges_until_job_ends(db, root, monkeypatch, condition):
+    from brindle import mcp_server, procs
+
+    agent, ws = root
+    with_goal(db)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", agent.id)
+    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
+    clock, live = [time.time()], [True]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    monkeypatch.setattr(procs, "alive", lambda pid: live[0])
+    deadline = clock[0] + 10 * autopilot.NUDGE_BACKOFF
+    mcp_server.wait_on(**{"path": "", condition: {"pid": 1234, "until": deadline, "path": "training.done"}[condition]},
+                       note="GPU training")
+    saved = db.get_autopilot(agent.id).external_wait
+    # Calling twice must not replace an in-flight job with a new wait.
+    mcp_server.wait_on(until=clock[0], note="replacement")
+    assert db.get_autopilot(agent.id).external_wait == saved
+    db.update_autopilot(agent.id, nudges=2, nudged_at=db.get_autopilot(agent.id).progress)
+    for _ in range(4):
+        clock[0] += autopilot.NUDGE_BACKOFF
+        assert autopilot.on_stop(db, agent, {}) is None
+        assert autopilot.usage_sweep(db, clock[0]) == []
+        assert db.get_autopilot(agent.id).nudges == 2
+        assert db.get_autopilot(agent.id).state == "running"
+    if condition == "pid":
+        live[0] = False
+    elif condition == "until":
+        clock[0] = deadline
+    else:
+        (Path(ws.path) / "training.done").touch()
+    snapshot = db.get_autopilot(agent.id)
+    assert autopilot.on_stop(db, agent, {}) is None
+    assert db.pending_count(agent.id) == 1
+    ended = db.pop_pending(agent.id)
+    assert ended and "job you were waiting on has ended" in ended.body
+    assert "GPU training" in ended.body
+    assert db.get_autopilot(agent.id).external_wait is None
+    assert autopilot.wait_ended(db, snapshot) is None  # a concurrent sweep saw the old row
+    assert autopilot.on_stop(db, agent, {}) is None
+    assert autopilot.usage_sweep(db, clock[0]) == []
+    clock[0] += autopilot.NUDGE_BACKOFF
+    assert "job you were waiting on has ended" not in autopilot.on_stop(db, agent, {})["reason"]
+
+
+def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
+    from brindle import identity_lock, inbox, launch_health, procs, tmux, wake
+
+    agent, _ = root
+    with_goal(db)
+    monkeypatch.setattr(agents, "is_alive", lambda *a, **k: True)
+    monkeypatch.setattr(procs, "alive", lambda pid: True)
+    db.update_agent(agent.id, status="idle")
+    monkeypatch.setattr(wake, "enabled", lambda a: False)
+    monkeypatch.setattr(inbox, "usable", lambda a: False)
+    monkeypatch.setattr(launch_health, "before_delivery", lambda *a: "")
+    monkeypatch.setattr(launch_health, "verify_delivery", lambda *a: None)
+    delivered, claimed, broken = [], [], [True]
+    clock = [time.time()]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+
+    def paste_blocked(a):
+        if broken[0] == "reclaimed":
+            clock[0] += 1
+            db.set_status(a.id, "idle")
+            clock[0] += 1
+            db.set_status(a.id, "processing")
+        return False
+
+    monkeypatch.setattr(agents, "_paste_blocked", paste_blocked)
+
+    def paste(target, body, **kw):
+        assert db.pending_count(agent.id) == 0  # fail after dequeue, not before dispatch
+        rows = db.conn.execute("SELECT id FROM inbox WHERE agent_id=?", (agent.id,)).fetchall()
+        assert len(rows) == 1
+        claimed.append(rows[0][0])
+        assert agents.flush(db, agent.id) is False  # another sender cannot take this claim
+        if broken[0]:
+            if broken[0] == "paused":
+                db.set_status(agent.id, "paused")
+            raise tmux.TmuxError("delivery unavailable")
+        delivered.append(body)
+
+    monkeypatch.setattr(tmux, "paste", paste)
+    # The deadline ends a wait even if its process remains alive.
+    autopilot.wait_on(db, agent.id, pid=1234, until=time.time() - 1, note="training deadline")
+    autopilot.need_user(db, agent.id, "Choose dataset", ask=True)
+    assert autopilot.usage_sweep(db) == []
+    assert db.get_autopilot(agent.id).external_wait is not None
+    autopilot.answered(db, agent.id)
+    locked = [True]
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "another account" if locked[0] else None)
+    assert autopilot.usage_sweep(db) == []
+    assert autopilot.on_stop(db, db.get_agent(agent.id), {}) is None
+    assert db.get_autopilot(agent.id).external_wait is not None
+    assert db.pending_count(agent.id) == 0
+    locked[0] = False
+    # A failure after enqueue must keep the one notice durable for retry.
+    assert autopilot.usage_sweep(db) == []
+    assert db.pending_count(agent.id) == 1
+    assert db.get_agent(agent.id).status == "idle"
+    assert db.get_autopilot(agent.id).external_wait is None
+    assert autopilot.on_stop(db, db.get_agent(agent.id), {}) is None
+    broken[0] = "paused"
+    assert autopilot.usage_sweep(db) == []
+    assert db.get_agent(agent.id).status == "paused"  # don't undo a concurrent pause
+    assert db.pending_count(agent.id) == 1
+    db.set_status(agent.id, "idle")
+    broken[0] = "reclaimed"
+    assert autopilot.usage_sweep(db) == []
+    assert db.get_agent(agent.id).status == "processing"
+    assert db.get_agent(agent.id).status_since == clock[0]
+    assert db.pending_count(agent.id) == 1
+    db.set_status(agent.id, "idle")
+    broken[0] = False
+    assert autopilot.usage_sweep(db) == []
+    assert autopilot.usage_sweep(db) == []
+    assert db.pending_count(agent.id) == 0
+    assert len(claimed) == 4 and len(set(claimed)) == 1
+    assert len(delivered) == 1 and "training deadline" in delivered[0]
 
 
 def test_no_nudge_while_brindle_asks_the_user_to_approve_checks(db, root, monkeypatch):
@@ -169,20 +311,18 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
 
 def test_need_user_question_holds_until_answered_and_publishes_events(db, root, monkeypatch):
     # A question holds only the work that depends on it: an unrelated user
-    # message doesn't cancel it, and the supervisor is reminded once per step.
+    # message doesn't cancel it, and autopilot doesn't nudge while it's open.
+    # (#209) Anything that woke the chat without brindle's tag (a watcher's
+    # event on a log) re-armed a reminder of it: one every ~2 s, for hours.
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
     autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    assert autopilot.on_stop(db, agent, {}) is None
-    autopilot.user_spoke(db, agent)
+    for _ in range(3):
+        agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "queue: epoch 3 done"})
+        assert agents.handle_hook(db, "boss", "stop", {}) is None
     assert db.get_autopilot("boss").state == "blocked"
-    out = autopilot.on_stop(db, agent, {})
-    assert out and out["decision"] == "block"
-    assert "Waiting on the user for: Postgres or SQLite?" in out["reason"]
-    assert autopilot.on_stop(db, agent, {}) is None
     db.bump_progress("boss")
-    assert autopilot.on_stop(db, agent, {}) is not None
     assert autopilot.on_stop(db, agent, {}) is None
     autopilot.answered(db, "boss")
     ap = db.get_autopilot("boss")
@@ -204,6 +344,9 @@ def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     out = autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
     assert "goal is reached" in out
     assert db.get_autopilot("boss").state == "done"
+    assert db.get_autopilot("boss").goal == "Settings page"
+    assert all(m.status == "passed" for m in db.milestones("boss"))
+    assert autopilot.session_goals_path(db, "boss").is_file()
     (repo / ".brindle").mkdir(exist_ok=True)   # the session's goal file lives in it
     (repo / ".brindle" / "config.json").write_text('{"goal_audit": false}')
     assert autopilot.on_stop(db, agent, {}) is None
@@ -227,7 +370,6 @@ def test_a_reached_goal_is_kept_with_its_milestones_and_autopilot_idles(db, tmp_
     for m in db.milestones("boss"):
         db.record_check(m.id, True, "", "sha", passed_sha="sha")
     db.update_autopilot("boss", state="done")
-    autopilot.clear_finished_goal(db, "boss")
     ap = db.get_autopilot("boss")
     dto = GoalDTO.from_autopilot(ap, db.milestones("boss"), None, session_review.goal_phase(db, "boss"))
     assert dto.goal == "Settings page" and (dto.goal_phase, dto.state) == ("done", "done")
@@ -359,6 +501,7 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
 
     goals = autopilot.session_goals_path(db, "boss")
     assert "status: passed" in goals.read_text()
+    milestones, contents = db.milestones("boss"), goals.read_text()
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert "goal is reached" in out and db.get_autopilot("boss").state == "done"
     assert [(e["kind"], e["payload"].get("done", e["payload"].get("approved")))
@@ -366,10 +509,26 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
                                          "autopilot.audit_started", "autopilot.audit"))] == [
         ("autopilot.goal", None), ("autopilot.checked", True), ("autopilot.checked", True),
         ("autopilot.audit_started", None), ("autopilot.audit", True)]
-    # The finished goal's file goes; the goal and milestones stay for the app.
-    assert not goals.exists()
-    assert db.get_autopilot("boss").goal == "Settings page" and len(db.milestones("boss")) == 2
+    # The finished goal stays, with its file and milestones, for the app.
+    assert db.get_autopilot("boss").goal == "Settings page"
+    assert db.milestones("boss") == milestones and goals.read_text() == contents
+    assert db.get_autopilot("boss").goal_sha == start
+    assert db.get_autopilot("boss").audit_ok == 1
+    # Later chat and checkout changes must leave the completed record alone.
+    (repo / "api.txt").unlink()
+    autopilot.user_spoke(db, agent)
     assert autopilot.on_stop(db, agent, {}) is None
+    monkeypatch.setattr(autopilot, "_detach", lambda *a: pytest.fail("completed goal launched checks"))
+    autopilot.check_in_background(db, "boss", ws, None)
+    autopilot.check_milestones(db, "boss", ws)
+    assert db.milestones("boss") == milestones and db.get_autopilot("boss").state == "done"
+    from brindle import view
+
+    entry = view.autopilot_entry(db, ws.repo_root, root_id="boss")
+    assert entry["goal"] == "Settings page" and entry["state"] == "done"
+    autopilot.set_goal(db, "boss", "Next goal", [("Next step", "true", None)])
+    assert db.get_autopilot("boss").state == "running"
+    assert autopilot.parse_goals(goals.read_text()).goal == "Next goal"
 
 
 def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
@@ -608,19 +767,17 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch)
     agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "SQLite"})
     assert db.get_autopilot("boss").state == "running"
 
-    # Live incident: the reminder of an open question went out through the
-    # inbox, its prompt-submit counted as the user speaking, and that re-armed
-    # the reminder about once a minute. Wrapped, or as the unread-mail
-    # reminder (never recorded as delivered), it must not re-arm either.
+    # brindle's own reminders arrive as prompts too, wrapped (the inbox) or
+    # never recorded as delivered (the unread-mail one): none is the user
+    # telling a stalled autopilot to drive again.
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    autopilot.user_spoke(db, agent)
     sent = agents._stop_decision(db, agent, {}, via_inbox=True)
     assert sent
-    for prompt in (sent["reason"], f"<message>{sent['reason']}</message>",
+    db.update_autopilot("boss", state="stalled")
+    for prompt in (f"<message>{sent['reason']}</message>",
                    "[brindle autopilot] You have unread messages. Call read_messages before you stop."):
         agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
-        assert autopilot.on_stop(db, agent, {}) is None
+        assert db.get_autopilot("boss").state == "stalled"
 
 
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
@@ -748,6 +905,7 @@ def test_a_replacement_pr_does_not_inherit_the_old_merge(db, root):
     ("waiting", "waiting"),
     ("pending_task", "waiting"),
     ("usage_paused", "waiting"),
+    ("checking", "checking"),
     (None, "not_done"),
 ])
 def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
@@ -765,6 +923,20 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
                          None, None, None, None, "pending", time.time()))
     elif flight == "usage_paused":
         db.update_autopilot("boss", state="usage_paused")
+    elif flight == "checking":
+        db.update_autopilot("boss", checking_since=time.time())
     entry = view.autopilot_entry(db, ws.repo_root, root_id="boss")
     assert entry["milestones"][0]["status"] == expected
     assert entry["milestones"][1]["status"] == "pending"
+    if flight == "checking":
+        text = autopilot.progress(db, "boss")
+        assert "◌" in text and "checking" in text and "failed" not in text
+        assert any("checking" in line.text for line in watch.render_autopilot(entry, 80))
+        monkeypatch.setattr(gates, "run_checked", lambda *a, **k: (False, "new failure"))
+        finished = autopilot.check_milestones(db, "boss", ws)
+        assert "not done yet" in finished and "checking" not in finished and "new failure" in finished
+        assert "checking" in autopilot.progress(db, "boss")
+        db.record_check(db.milestones("boss")[0].id, True, "passed")
+        db.update_autopilot("boss", checking_since=None)
+        assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["milestones"][0]["status"] == "passed"
+        assert "✓" in autopilot.progress(db, "boss") and "failed" not in autopilot.progress(db, "boss")

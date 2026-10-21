@@ -136,9 +136,9 @@ def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monke
     why = []
     assert choose(db, repo, weight="medium", why=why) == ("developer-codex", True)
     task, candidates = plugin.asked[0]
-    assert candidates == ["developer", "developer-codex", "developer-heavy"] and task.weight == "medium"
+    assert candidates == ["developer-sonnet", "developer", "developer-codex", "developer-heavy"] and task.weight == "medium"
     assert "learning picked it: its record is better" in why[0]
-    assert plugin.defaults == ["developer"]
+    assert plugin.defaults == ["developer-sonnet"]
 
 
 def test_all_out_falls_back_to_the_default_agent_and_says_why(db, repo, boss, monkeypatch):
@@ -156,9 +156,9 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     config(repo, pipeline=False)
     out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
     assert "Started worker" in out
-    assert "weight medium -> developer" in out and "Codex at 93%, skipped developer-codex" in out
+    assert "weight medium -> developer-sonnet" in out and "Codex at 93%, skipped developer-codex" in out
     [t] = db.list_tasks(str(repo), state="started")
-    assert t.weight == "medium" and t.profile == "developer"
+    assert t.weight == "medium" and t.profile == "developer-sonnet"
 
 
 def test_learning_outcomes_carry_the_weight(db, repo, boss, monkeypatch):

@@ -21,6 +21,11 @@ Claude Code presents the text as a message from a peer named ``from``. It
 respects the session's ``crossSessionInbound`` setting: ``accept`` (the
 default) delivers, ``hold`` asks the person first, ``refuse`` drops. Typing
 into the pane remains the fallback whenever the socket isn't there.
+
+An interactive chat (a supervisor) doesn't use it: Claude Code shows each
+such message under a block of peer-session safety text, which fills the
+person's chat. Its messages go through brindle's own waiter hook instead
+(brindle.wake).
 """
 
 from __future__ import annotations
