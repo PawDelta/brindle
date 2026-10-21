@@ -14,11 +14,12 @@ or token file, never a Keychain entry: the person signs in through the CLI's
 own login inside brindle. What is copied is vetted, failing closed:
 
 - folders: only Markdown files, never through a link at any depth;
-- JSON and TOML settings: parsed (unparsable files aren't copied), every key
-  whose name says credential dropped, every value that looks like one
-  (a token, a URL with a password or a key in its query, a ``--token`` flag
-  and what follows it) dropped with its key; an MCP server entry holding one
-  anywhere is dropped whole, since its credential can't be separated safely.
+- JSON and TOML settings: parsed (unparsable files aren't copied) and written
+  back as valid JSON or TOML. Every ``env`` and ``headers`` table is dropped,
+  as is every key whose name contains token, key, secret, password or auth,
+  and every value that looks like a credential (a token, a URL with a
+  password or a key in its query, a ``--token`` flag and what follows it),
+  with its key; an MCP server entry still holding one is dropped whole.
 
 After that one copy, brindle's changes stay in brindle's copy."""
 
@@ -86,8 +87,10 @@ def launch_env(provider: str) -> dict[str, str]:
 
 # -- what counts as a credential -------------------------------------------------
 
-SECRET_NAME = re.compile(r"(?i)(api[_-]?key|token|secret|passw(or)?d|passwd|credential|bearer|authorization|"
-                         r"private[_-]?key|cookie|session[_-]?key|access[_-]?key|^auth$|^\.env)")
+# A name containing any of these is taken to hold a credential (broad on purpose).
+SECRET_NAME = re.compile(r"(?i)(token|key|secret|passw|auth|credential|bearer|cookie|^\.env)")
+# Tables that carry environment variables or HTTP headers are dropped whole.
+DROPPED_TABLES = {"env", "environment", "headers", "http_headers", "env_http_headers"}
 SECRET_VALUE = re.compile(
     r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|xox[abposr]-[\w-]{10,}"
     r"|glpat-[\w-]{16,}|AKIA[0-9A-Z]{16}|AIza[\w-]{30,}|eyJ[\w-]{8,}\.[\w-]{8,}\.|-----BEGIN [A-Z ]*PRIVATE KEY"
@@ -123,10 +126,13 @@ def scrub(value: dict) -> dict:
     """``value`` without anything that holds a credential (see the module doc)."""
     out = {}
     for k, v in value.items():
-        if SECRET_NAME.search(str(k)):
+        if SECRET_NAME.search(str(k)) or str(k).lower() in DROPPED_TABLES:
             continue
         if k in MCP_KEYS and isinstance(v, dict):
-            out[k] = {name: entry for name, entry in v.items() if not has_secret(entry)}
+            # Each server without its env/headers; one with a credential left anywhere goes whole.
+            entries = {name: {f: x for f, x in e.items() if str(f).lower() not in DROPPED_TABLES}
+                       if isinstance(e, dict) else e for name, e in v.items()}
+            out[k] = {name: e for name, e in entries.items() if not has_secret(e)}
         elif isinstance(v, dict):
             out[k] = scrub(v)
         elif not has_secret(v):

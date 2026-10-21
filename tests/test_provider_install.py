@@ -175,11 +175,12 @@ def test_setup_is_copied_once_and_never_a_credential(machine, tmp_path, monkeypa
     assert "review the diff" in copied[f"{md.name}/review.md"]
     assert not any("fixture" in text for text in copied.values())
     if provider == "claude":
-        assert json.loads(copied["settings.json"]) == {"model": "opus", "env": {"FOO": "1"}, "statusLine": {}}
+        assert json.loads(copied["settings.json"]) == {"model": "opus", "statusLine": {}}
         assert json.loads(copied[".claude.json"]) == {"mcpServers": {"ok": {"command": "srv", "args": ["--port", "1"]}}}
     else:
-        assert tomllib.loads(copied["config.toml"]) == {"model": "o4", "notify": {"SAFE": "#"},
-                                                        "mcp_servers": {"ok": {"command": "srv"}}}
+        assert tomllib.loads(copied["config.toml"]) == {   # parses: valid TOML out
+            "model": "o4", "notify": {"SAFE": "#"},
+            "mcp_servers": {"ok": {"command": "srv"}, "gh": {"command": "gh"}}}   # env tables gone
     (brindle_home / md.name / "review.md").write_text("brindle's own")
     (md / "later.md").write_text("added later")
     provider_homes.launch_env(provider)                             # a second launch: no copy again
