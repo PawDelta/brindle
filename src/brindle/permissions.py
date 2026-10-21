@@ -501,6 +501,8 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "can allow it with `brindle permissions allow`.")
 ASK_SUPERVISOR = "tell your supervisor with send_message what you need and why"
 ASK_PERSON = "say what you need and why in your reply to the person running brindle"
+TOLD_SUPERVISOR = ("carry on with other work and retry it once your supervisor says it's allowed: "
+                   "brindle has told your supervisor")
 
 
 def _lexically_within(literal: str, root: str) -> bool:
@@ -608,7 +610,7 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
                       workspaces: list[str] | None = None,
                       protected_roots: list[str] | None = None,
                       readable: list[str] | None = None,
-                      has_supervisor: bool = True) -> dict:
+                      has_supervisor: bool = True, escalated: bool = False) -> dict:
     """agy's PreToolUse answer under ``agy_approvals: "brindle"``, where agy
     runs with --dangerously-skip-permissions: a hook's "ask" then runs the
     call without a prompt, so brindle answers allow or deny, never ask.
@@ -617,7 +619,8 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
     inside one of ``readable``, brindle's own tools, and agy's
     conversation-only tools. Everything else is denied with a reason that
     tells the agent to try a simpler way, then ask its supervisor (or, with
-    no supervisor, the person)."""
+    no supervisor, the person); ``escalated``, brindle tells the supervisor
+    itself (brindle.antigravity._escalate)."""
     if decision is not None and decision.decision == "deny":
         return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
     if decision is not None and decision.decision == "allow":
@@ -645,8 +648,39 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
             return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
     why = decision.reason if decision is not None else "brindle couldn't read the request"
     why = why.removesuffix("; asking the user")  # nobody is asked here
-    ask = ASK_SUPERVISOR if has_supervisor else ASK_PERSON
+    ask = TOLD_SUPERVISOR if escalated else ASK_SUPERVISOR if has_supervisor else ASK_PERSON
     return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why, ask=ask)}
+
+
+def _allow_specs(rules: list[Rule], checks: list[str] | None) -> list[str]:
+    """The bash allow rules and checks as uncovered_part's specs."""
+    specs = [c.strip() for c in checks or []]
+    for rule in rules:
+        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip():
+            if rule.match_type == "exact":
+                specs.append(rule.match.strip())
+            elif rule.match_type == "prefix":
+                specs.append(rule.match.strip() + ":*")
+    return specs
+
+
+def bash_grants(req: Request, rules: list[Rule], checks: list[str] | None = None,
+                cd_root: str | None = None) -> list[str] | None:
+    """The exact bash allows that would let ``req`` through allowlist_decision
+    on a retry: one per simple command no rule covers yet. None when no exact
+    allow can (``$(...)``, a redirection that writes, a heredoc, a word with
+    spaces in it, a cd it can't vouch for, ...)."""
+    from brindle.native.permissions import uncovered_part
+
+    if req.kind != "bash" or not req.command:
+        return None
+    specs, grants = _allow_specs(rules, checks), []
+    while (part := uncovered_part(specs, req.command, cd_root=cd_root)) is not None:
+        if part in grants:
+            return None  # granting it didn't cover it
+        grants.append(part)
+        specs.append(part)
+    return grants
 
 
 def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str] | None = None,
@@ -664,14 +698,7 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
 
     if req is None or req.kind != "bash" or not req.command:
         return None
-    specs = [c.strip() for c in checks or []]
-    for rule in rules:
-        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip():
-            if rule.match_type == "exact":
-                specs.append(rule.match.strip())
-            elif rule.match_type == "prefix":
-                specs.append(rule.match.strip() + ":*")
-    if uncovered_part(specs, req.command, cd_root=cd_root) is not None:
+    if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
     for part in split_commands(req.command):
         denied = decide(replace(req, command=part), checks=checks, rules=rules)
@@ -913,15 +940,17 @@ def profile_bash_allows(profile) -> list[Rule]:
     ``--allowedTools`` never reaches: ``Bash(git status)`` is that exact
     command, ``Bash(uv run:*)`` it alone or followed by arguments. Like
     every bash allow, a compound or quoted command never matches."""
-    out = []
-    for entry in getattr(profile, "allowed_tools", None) or []:
-        m = PROFILE_BASH.fullmatch(entry.strip())
-        if not m:
-            continue
-        command = m.group(1).strip()
-        out.append(Rule("bash", command, "exact", "allow", "profile"))
-        if m.group(2):
-            out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
+    return [rule for entry in getattr(profile, "allowed_tools", None) or [] for rule in _profile_bash(entry)]
+
+
+def _profile_bash(entry: str) -> list[Rule]:
+    m = PROFILE_BASH.fullmatch(entry.strip())
+    if not m:
+        return []
+    command = m.group(1).strip()
+    out = [Rule("bash", command, "exact", "allow", "profile")]
+    if m.group(2):
+        out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
     return out
 
 
@@ -1274,3 +1303,10 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
         else:
             add(rule.decision, _agy_entry(rule))
     return out
+
+
+def profile_agy_entries(spec: str) -> list[str]:
+    """One ``allowed_tools`` entry in agy's settings syntax, no wider than
+    ``profile_bash_allows`` (a prefix takes only simple characters after
+    it), or [] when agy can't say it."""
+    return [e for e in (_agy_entry(rule) for rule in _profile_bash(spec)) if e]

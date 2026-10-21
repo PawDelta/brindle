@@ -579,8 +579,7 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
 
     assert decision("run_command", {"CommandLine": "git push"}) == "deny"
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
-    out = strict_answer(db, ws, "run_command", {"CommandLine": "curl https://example.com"})
-    assert out["decision"] == "deny" and "send_message" in out["reason"]
+    assert decision("run_command", {"CommandLine": "curl https://example.com"}) == "deny"
     assert decision("view_file", {"AbsolutePath": str(outside)}) == "deny"
     assert decision("read_url_content", {"Url": "https://example.com"}) == "deny"
     assert decision("call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue"}) == "deny"
@@ -694,11 +693,8 @@ def test_agy_strict_launch_skips_prompts_and_hooks_every_tool(db, ws, monkeypatc
 
     set_local(ws.repo_root, "agy_approvals", "brindle")
     set_local(ws.repo_root, "permission_policy", "off")
-    argv, pre = launch()
-    assert antigravity.SKIP_FLAG not in argv and pre is None  # needs the policy on
-    turn_on(ws)
     argv, [entry] = launch()
-    assert antigravity.SKIP_FLAG in argv
+    assert antigravity.SKIP_FLAG in argv  # whatever the policy says
     assert entry["matcher"] == "*" and "agy-pre-tool-strict" in entry["hooks"][0]["command"]
     set_local(ws.repo_root, "agy_approvals", "prompt")
     argv, _ = launch()
@@ -822,6 +818,34 @@ def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
     set_local(ws.repo_root, "permission_policy", "off")
     Antigravity().command(ctx)
     assert not agy_settings.exists()
+
+
+def test_agy_profile_rules_stay_out_of_shared_settings_and_are_named(agy_settings, db, ws, monkeypatch):
+    # GitHub #233: under an explicit agy_approvals "prompt" agy applies only its own
+    # settings, which every agy session shares, so a profile's allowed_tools
+    # can't be given to one worker alone. They're named instead, and a second
+    # profile never inherits the first's.
+    from brindle.config import user_profiles_dir
+    from brindle.profiles import load_profile
+    from brindle.providers import Antigravity, LaunchContext
+
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
+    user_profiles_dir().mkdir(parents=True, exist_ok=True)
+    for name, tools in (("gem-a", "Bash(git commit:*)"), ("gem-b", "Bash(pwd), Bash(ls), WebFetch")):
+        (user_profiles_dir() / f"{name}.md").write_text(
+            f"---\nname: {name}\nprovider: antigravity\nallowed_tools: {tools}\n---\nhi\n")
+    agy_settings.parent.mkdir(parents=True)
+    agy_settings.write_text(json.dumps({"permissions": {"allow": ["command(regex:^pwd$)"]}}))
+    set_local(ws.repo_root, "agy_approvals", "prompt")
+    for id_, name in (("a1", "gem-a"), ("b1", "gem-b")):
+        worker(db, ws, provider="antigravity", id_=id_)
+        db.update_agent(id_, profile=name)
+        Antigravity().command(LaunchContext(id_, load_profile(name, ws.repo_root), "hi", cwd=ws.path))
+    assert json.loads(agy_settings.read_text())["permissions"]["allow"] == ["command(regex:^pwd$)"]
+    assert antigravity.unapplied_rules(load_profile("gem-b", ws.repo_root)) == ["Bash(ls)", "WebFetch"]
+    assert "Bash(git commit:*)" in antigravity.launch_warning(db.get_agent("a1"), ws)
+    set_local(ws.repo_root, "agy_approvals", "brindle")
+    assert antigravity.launch_warning(db.get_agent("a1"), ws) is None  # brindle's hook applies them
 
 
 def test_agy_mirror_never_widens_an_allow():
