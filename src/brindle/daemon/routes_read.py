@@ -119,7 +119,10 @@ def goal(db: DB, request: Request) -> Any:
     ap = entry and db.get_autopilot(entry["root_id"])
     if not ap:
         return None
-    return GoalDTO.from_autopilot(ap, db.milestones(ap.root_id)).to_json()
+    from brindle.autopilot import milestone_phases
+
+    return GoalDTO.from_autopilot(ap, db.milestones(ap.root_id),
+                                  milestone_phases(db, ap.root_id)).to_json()
 
 
 @_json

@@ -1590,6 +1590,41 @@ def state_text(m: Milestone) -> str | None:
     return {"not_done": "not done yet", "regressed": "regressed"}.get(m.state or "")
 
 
+def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
+    """Each milestone's user-facing phase by id: ``done`` (its check passed),
+    ``in_review`` or ``in_progress``. Only the session's current milestone
+    (the first unverified) can be in review: while a milestone check runs for
+    the session, or once every worker has reported and a branch is still in
+    review or checks. Regressed, not-done and failed milestones are in progress."""
+    ms = db.milestones(root_id)
+    current = next((m for m in ms if m.status != "passed"), None)
+    ap = db.get_autopilot(root_id)
+    in_review = False
+    if current is not None:
+        if ap is not None and checking(ap):
+            in_review = True
+        else:
+            from brindle import agents
+
+            # Session rows only: a reported worker's branch stays in review or
+            # checks after its process exits.
+            live = [a for a in agents.tree(db, root_id)[1:]
+                    if a.mode in agents.REPORTING_MODES]
+            reviewing = building = False
+            for a in live:
+                closed = a.status in ("paused", "done")
+                if a.mode == "review":
+                    reviewing |= not closed and a.result is None and not agents.review_moot(db, a)
+                elif a.pipeline == "reviewing":
+                    reviewing = True      # a closed worker's branch is still in checks
+                elif not closed and a.pipeline != "ready" and (
+                        a.result is None or a.status in BUSY or a.pipeline):
+                    building = True
+            in_review = reviewing and not building
+    return {m.id: "done" if m.state == "passed" else
+            "in_review" if in_review and m is current else "in_progress" for m in ms}
+
+
 def counts(db: DB, root_id: str) -> tuple[int, int]:
     ms = db.milestones(root_id)
     return sum(m.status == "passed" for m in ms), len(ms)
