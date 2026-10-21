@@ -690,10 +690,6 @@ class Milestone:
 
 
 _EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
-# Exit codes (128 + n) a shell reports for a process that died of a crash signal.
-_SIGNALS = {128 + int(getattr(signal, name)): int(getattr(signal, name))
-            for name in ("SIGILL", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGSEGV", "SIGSYS")
-            if hasattr(signal, name)}
 
 
 def check_state(passed: bool, output: str, had_passed: bool) -> tuple[str, str | None]:
@@ -708,8 +704,9 @@ def check_state(passed: bool, output: str, had_passed: bool) -> tuple[str, str |
         code = int(m.group(1))
         if code in (126, 127):
             return "failed", "command not found" if code == 127 else "command not runnable"
-        if code < 0 or code in _SIGNALS:
-            return "failed", f"crashed: killed by signal {-code if code < 0 else _SIGNALS[code]}"
+        # Negative: killed by that signal; 128+n: how a shell reports the same.
+        if code < 0 or (code > 128 and code - 128 in signal.valid_signals()):
+            return "failed", f"crashed: killed by signal {-code if code < 0 else code - 128}"
     if t := re.search(r"\(timed out after (\d+)s\)\s*$", output or ""):
         return "failed", f"timed out after {t.group(1)}s"
     return ("regressed" if had_passed else "not_done"), None

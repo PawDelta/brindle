@@ -221,6 +221,8 @@ def _crash(*a, **k):
     (False, (False, "$ c\n(exit 126)"), "failed", "couldn't run: command not runnable"),
     (False, (False, "$ c\n(timed out after 5s)"), "failed", "couldn't run: timed out after 5s"),
     (False, (False, "$ c\n(exit -11)"), "failed", "couldn't run: crashed: killed by signal 11"),
+    pytest.param(False, (False, "$ c\n(exit 133)"), "failed", "couldn't run: crashed: killed by signal 5",
+                 marks=pytest.mark.variant("SIGTRAP: any 128+n shell signal exit is a crash")),
     (False, _crash, "failed", "couldn't run: crashed: boom"),
 ])
 def test_check_records_a_state_in_plain_words(db, root, monkeypatch, had_passed, result, state, label):
