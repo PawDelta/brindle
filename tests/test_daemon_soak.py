@@ -4,6 +4,7 @@ connection they open, and keystrokes sent after all that must still reach the
 pane."""
 
 import contextlib
+import faulthandler
 import json
 import os
 import signal
@@ -50,9 +51,12 @@ def wall_clock(seconds: float):
 
     old = signal.signal(signal.SIGALRM, expire)
     signal.setitimer(signal.ITIMER_REAL, seconds)
+    # Should the raise itself be swallowed or cleanup block, print where and kill the run.
+    faulthandler.dump_traceback_later(seconds + 5, exit=True)
     try:
         yield
     finally:
+        faulthandler.cancel_dump_traceback_later()
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
 
