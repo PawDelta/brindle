@@ -145,9 +145,11 @@ def test_outside_wait_holds_nudges_until_job_ends(db, root, monkeypatch, conditi
     else:
         (Path(ws.path) / "training.done").touch()
     snapshot = db.get_autopilot(agent.id)
-    ended = autopilot.on_stop(db, agent, {})
-    assert ended and "job you were waiting on has ended" in ended["reason"]
-    assert "GPU training" in ended["reason"]
+    assert autopilot.on_stop(db, agent, {}) is None
+    assert db.pending_count(agent.id) == 1
+    ended = db.pop_pending(agent.id)
+    assert ended and "job you were waiting on has ended" in ended.body
+    assert "GPU training" in ended.body
     assert db.get_autopilot(agent.id).external_wait is None
     assert autopilot.wait_ended(db, snapshot) is None  # a concurrent sweep saw the old row
     assert autopilot.on_stop(db, agent, {}) is None
@@ -157,24 +159,48 @@ def test_outside_wait_holds_nudges_until_job_ends(db, root, monkeypatch, conditi
 
 
 def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
-    from brindle import procs
+    from brindle import identity_lock, inbox, launch_health, procs, tmux, wake
 
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(agents, "is_alive", lambda *a, **k: True)
-    monkeypatch.setattr(agents, "pulls_messages", lambda *a: False)
     monkeypatch.setattr(procs, "alive", lambda pid: True)
-    db.update_agent(agent.id, headless=1, status="idle")
+    db.update_agent(agent.id, status="idle")
+    monkeypatch.setattr(wake, "enabled", lambda a: False)
+    monkeypatch.setattr(launch_health, "before_delivery", lambda *a: "")
+    monkeypatch.setattr(launch_health, "delivered", lambda *a: None)
+    delivered, broken = [], [True]
+
+    def usable(a):
+        if broken[0]:
+            raise tmux.TmuxError("delivery unavailable")
+        return True
+
+    monkeypatch.setattr(inbox, "usable", usable)
+    monkeypatch.setattr(inbox, "send", lambda a, body, **kw: delivered.append(body) or True)
     # The deadline ends a wait even if its process remains alive.
     autopilot.wait_on(db, agent.id, pid=1234, until=time.time() - 1, note="training deadline")
     autopilot.need_user(db, agent.id, "Choose dataset", ask=True)
     assert autopilot.usage_sweep(db) == []
     assert db.get_autopilot(agent.id).external_wait is not None
     autopilot.answered(db, agent.id)
-    assert len(autopilot.usage_sweep(db)) == 1
+    locked = [True]
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "another account" if locked[0] else None)
+    assert autopilot.usage_sweep(db) == []
+    assert autopilot.on_stop(db, db.get_agent(agent.id), {}) is None
+    assert db.get_autopilot(agent.id).external_wait is not None
+    assert db.pending_count(agent.id) == 0
+    locked[0] = False
+    # A failure after enqueue must keep the one notice durable for retry.
     assert autopilot.usage_sweep(db) == []
     assert db.pending_count(agent.id) == 1
     assert db.get_autopilot(agent.id).external_wait is None
+    assert autopilot.on_stop(db, db.get_agent(agent.id), {}) is None
+    broken[0] = False
+    assert autopilot.usage_sweep(db) == []
+    assert autopilot.usage_sweep(db) == []
+    assert db.pending_count(agent.id) == 0
+    assert len(delivered) == 1 and "training deadline" in delivered[0]
 
 
 def test_no_nudge_while_brindle_asks_the_user_to_approve_checks(db, root, monkeypatch):

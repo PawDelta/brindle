@@ -59,6 +59,7 @@ GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's ow
 MAX_NUDGES = 3
 NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
 NUDGE_HEAD = "[brindle autopilot] The goal isn't reached yet, and no workers are running."
+WAIT_ENDED_HEAD = "[brindle autopilot] The job you were waiting on has ended"
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
 OUTPUT_TAIL_LINES = 30
 
@@ -1084,8 +1085,8 @@ def wait_summary(ap: Autopilot) -> str | None:
 
 
 def wait_ended(db: DB, ap: Autopilot, now: float | None = None) -> str | None:
-    """Claim one completion notice, shared by the Stop hook and periodic sweep."""
-    from brindle import procs
+    """Queue one durable completion notice from either a Stop hook or sweep."""
+    from brindle import agents, identity_lock, procs
 
     if not ap.external_wait:
         return None
@@ -1094,10 +1095,12 @@ def wait_ended(db: DB, ap: Autopilot, now: float | None = None) -> str | None:
     ended = ((wait["until"] is not None and now >= wait["until"])
              or (wait["path"] is not None and Path(wait["path"]).exists())
              or (wait["pid"] is not None and not procs.alive(wait["pid"])))
-    if not ended or not db.finish_external_wait(ap.root_id, ap.external_wait, now):
+    if not ended:
         return None
+    identity_lock.ensure(agents.get(db, ap.root_id))
     note = f": {wait['note']}" if wait["note"] else ""
-    return f"[brindle autopilot] The job you were waiting on has ended{note}. Continue with the next step."
+    message = f"{WAIT_ENDED_HEAD}{note}. Continue with the next step."
+    return message if db.finish_external_wait(ap.root_id, ap.external_wait, now, message) else None
 
 
 def held(ap: Autopilot) -> bool:
@@ -1843,7 +1846,7 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
     """One pass over every autopilot session: stop workers at the limit,
     resume them after the reset, and wake completed outside waits.
     Called from the cull sweep."""
-    from brindle import agents, login_pause
+    from brindle import agents, identity_lock, login_pause, tmux
 
     done = []
     for root in db.list_agents():
@@ -1857,10 +1860,20 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
             cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
             if over_limit(db, root.id, cfg):
                 done.append(f"usage limit reached: {root.id} is {db.get_autopilot(root.id).state}")
-            elif ap.external_wait and not login_pause.paused(db, root.id) and not proposing(ap):
-                if message := wait_ended(db, ap, now):
-                    agents.send_message(db, root.id, message)
-                    done.append(message)
+            elif ((ap.external_wait or db.outstanding(root.id, WAIT_ENDED_HEAD))
+                  and not login_pause.paused(db, root.id) and not proposing(ap)):
+                try:
+                    message = wait_ended(db, ap, now)
+                    if db.outstanding(root.id, WAIT_ENDED_HEAD):
+                        identity_lock.ensure(root)
+                        if agents.is_alive(root):
+                            agents.flush(db, root.id)
+                    if message:
+                        done.append(message)
+                except (agents.AgentError, tmux.TmuxError):
+                    # Keep the wait, or its already queued notice, for retry.
+                    # Other sessions and the cull sweep's login recovery must run.
+                    log.debug("outside wait delivery deferred for %s", root.id, exc_info=True)
         elif ap.state == "usage_paused":
             line = usage_resume(db, root.id, now)
             if line:
@@ -1911,8 +1924,11 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if over_limit(db, agent.id, cfg):
         return None  # workers included: they'd keep burning usage
     if ap.external_wait:
-        message = wait_ended(db, ap)
-        return {"decision": "block", "reason": message} if message else None
+        try:
+            wait_ended(db, ap)
+        except agents.AgentError:
+            log.debug("outside wait completion deferred for %s", agent.id, exc_info=True)
+        return None  # the durable inbox notice wakes it, including after a failed delivery
     if checking(ap):
         return None  # the check's result arrives as a message and wakes it up
     working, stalled = split_workers(db, agent.id, screen=True)
@@ -1921,7 +1937,7 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
-    if db.outstanding(agent.id, NUDGE_HEAD):
+    if db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD):
         return None  # (#209) the last reminder is still queued or unread: never pile up another
     now = time.time()
     if (ap.nudged_at == ap.progress and ap.nudged_time is not None

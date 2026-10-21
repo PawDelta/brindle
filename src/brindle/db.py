@@ -1440,12 +1440,16 @@ class DB:
             c.execute("UPDATE autopilot SET external_wait=? WHERE root_id=? AND external_wait IS NULL",
                       (wait, root_id))
 
-    def finish_external_wait(self, root_id: str, wait: str, now: float) -> bool:
-        """Only one concurrent hook/sweep may announce this wait's completion."""
+    def finish_external_wait(self, root_id: str, wait: str, now: float, message: str) -> bool:
+        """Atomically replace a wait with its durable completion notice."""
         with self.tx() as c:
-            return bool(c.execute(
+            changed = c.execute(
                 "UPDATE autopilot SET external_wait=NULL, nudges=0, nudged_at=progress, nudged_time=? "
-                "WHERE root_id=? AND external_wait=?", (now, root_id, wait)).rowcount)
+                "WHERE root_id=? AND external_wait=?", (now, root_id, wait)).rowcount
+            if changed:
+                c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,NULL,?,?)",
+                          (root_id, message, now))
+            return bool(changed)
 
     def bump_progress(self, root_id: str) -> None:
         with self.tx() as c:
