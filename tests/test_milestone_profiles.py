@@ -23,6 +23,16 @@ def test_resolution_prefers_current_milestone_then_default(db, root):
     assert autopilot.resolve_profile(db, "boss", ws.repo_root) == RepoConfig().default_agent
 
 
+def test_weight_overrides_milestone_profile(db, root):
+    agent, ws = root
+    set_goal(db, [("A", "true", None, "developer-heavy")])
+    assert autopilot.resolve_profile(db, "boss", ws.repo_root) == "developer-heavy"
+    why: list[str] = []
+    name, _ = autopilot.choose_profile(db, "boss", ws.repo_root, weight="medium", why=why)
+    assert name == "developer-sonnet"
+    assert "weight medium overrides milestone profile developer-heavy" in why
+
+
 def test_unknown_profile_errors_clearly(db, root):
     agent, ws = root
     set_goal(db, [("A", "true", None, "no-such-profile")])
