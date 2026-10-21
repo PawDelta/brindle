@@ -147,6 +147,7 @@ def test_sidebar_survives_stopping_the_worker_whose_window_it_sits_in(db, monkey
     monkeypatch.setattr(tm, "window_alive", lambda pane: True)
     monkeypatch.setattr(tm, "get_pane_tag", lambda pane, tag: "root1")
     monkeypatch.setattr(tm, "pane_session", lambda pane: worker_session)
+    monkeypatch.setattr(tm, "session_attached", lambda session: False)
     monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%root" if window == "@r" else None)
     monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: windows.update({pane: windows[target]}))
     monkeypatch.setattr(agents, "same_server", lambda *a, **k: True)
