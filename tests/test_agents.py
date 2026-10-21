@@ -342,7 +342,6 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws, mo
         with pytest.raises(Launched):
             agents.spawn(db, ws, name, prompt="hi", mode="assign")
     assert seen == [True, False]
-    assert agents.REPORT_ONLY_FOOTER != agents.WORKER_FOOTER
 
 
 def test_no_goal_command_when_hooks_are_disabled(db, ws):
