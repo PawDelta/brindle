@@ -4,10 +4,9 @@ caller answers, and the answer is what the next call does."""
 import time
 
 import pytest
-from conftest import sh
 
-from brindle import agents, doctor, procs, workspaces
-from brindle.db import Agent, Workspace
+from brindle import agents, doctor, workspaces
+from brindle.db import Agent
 from brindle.service import sessions as svc
 from brindle.service.errors import ServiceError
 
@@ -50,27 +49,6 @@ def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, 
     else:
         assert got.workspace.branch == branch and got.to_json()["id"] == "sup2"
     assert running == paused
-
-
-def test_closing_a_session_dismisses_and_stops_every_agent_and_keeps_the_branches(db, repo, monkeypatch):
-    root = workspaces.adopt_root(db, str(repo))
-    sup = add(db, root, "sup")
-    for n in (1, 2):
-        sh(f"git branch feat-{n}", repo)
-        db.add_workspace(Workspace(f"w-{n}", root.repo_root, f"feat-{n}", "worktree", f"feat-{n}", "main",
-                                   str(repo) + f"-{n}", None, "brindle-x", time.time()))
-        db.add_agent(Agent(f"wk{n}", f"w-{n}", "developer", "claude", sup.id, "assign", "idle", f"%w{n}",
-                           None, time.time()))
-    stopped = []
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id not in stopped)
-    monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
-    monkeypatch.setattr(procs, "stop", lambda *a, **k: None)
-    closed = svc.close_session(db, "sup")
-    assert sorted(a.id for a, _ in closed) == ["sup", "wk1", "wk2"] and all(was for _, was in closed)
-    assert sorted(stopped) == ["sup", "wk1", "wk2"]
-    assert all(db.get_agent(i).dismissed_at for i in ("sup", "wk1", "wk2"))
-    assert {"feat-1", "feat-2"} <= set(sh("git branch --format='%(refname:short)'", repo).split())
-    assert svc.close_session(db, "sup") == []     # already closed: nothing to do
 
 
 def test_continue_refuses_to_pause_the_session_running_it(db, repo, monkeypatch):

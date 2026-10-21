@@ -104,6 +104,30 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
         assert [(e["kind"], e["payload"]["job"]) for e in done] == [("job.done", reply["job"])]
 
 
+def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(db, world, monkeypatch):
+    from brindle import procs, tmux
+    from brindle import sessions as sessions_mod
+
+    db.add_agent(Agent("wk2", "proj/w-2", "developer", "claude", "sup", "assign", "idle", "%3", None,
+                       time.time()))
+    stopped = []
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id not in stopped)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a, **k: True)
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
+    monkeypatch.setattr(procs, "stop", lambda *a, **k: None)
+    monkeypatch.setattr(sessions_mod, "live", lambda *a, **k: [])     # no tmux to ask
+    for _ in range(2):         # the second close finds nothing left to do
+        code, reply = _send("POST", "/v1/sessions/sup/close")
+        assert code == 200, reply
+    assert sorted(stopped) == ["sup", "wk", "wk2"]
+    assert all(db.get_agent(i).dismissed_at for i in stopped)
+    assert reply == {"closed": [], "stopped": []}
+    assert {w.branch for w in (db.get_workspace("w-1"), db.get_workspace("proj/w-2"))} == {"feat", "feat2"}
+    code, listed = _send("GET", f"/v1/sessions?repo={world.repo_root}")
+    assert code == 200 and "sup" not in [s["id"] for s in listed]
+
+
 @pytest.mark.parametrize("path,base,setup,status", [
     ("app.py", "shown", None, 200),
     ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
