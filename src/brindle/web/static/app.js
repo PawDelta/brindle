@@ -28,7 +28,7 @@ function el(tag, attrs, ...children) {
 
 function statusClass(status) {
   if (!status) return "";
-  if (status === "processing" || status === "working") return "s-busy";
+  if (status === "processing" || status === "working" || status === "checking") return "s-busy";
   if (status === "waiting" || status === "blocked" || status.startsWith("locked")) return "s-alert";
   if (status === "done" || status === "passed") return "s-ok";
   if (status === "failed" || status === "exited") return "s-bad";
