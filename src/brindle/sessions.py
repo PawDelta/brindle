@@ -224,6 +224,9 @@ def _forget(db: DB, s: Session) -> None:
         # some other pane here (see agents.same_server).
         if (a.tmux_window and agents.same_server(a, panes) and agents.is_alive(a, panes)
                 and agents.owns_pane(db, a, owners)):
+            from brindle.sidebar_follow import rescue_sidebar_from_window
+
+            rescue_sidebar_from_window(db, a)
             tmux.kill_window(a.tmux_window)
         ws = db.get_workspace(a.workspace_id)
         if ws and ws.kind == "worktree":
