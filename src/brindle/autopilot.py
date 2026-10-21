@@ -1590,6 +1590,27 @@ def state_text(m: Milestone) -> str | None:
     return {"not_done": "not done yet", "regressed": "regressed"}.get(m.state or "")
 
 
+def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
+    """Each milestone's user-facing phase by id: ``done`` (its check passed),
+    ``in_review`` or ``in_progress``. Only the session's current milestone
+    (the first unverified) can be in review: while a milestone check runs for
+    the session, or once every worker has reported and a branch is still in
+    review or checks. Regressed, not-done and failed milestones are in progress."""
+    ms = db.milestones(root_id)
+    current = next((m for m in ms if m.status != "passed"), None)
+    ap = db.get_autopilot(root_id)
+    in_review = False
+    if current is not None:
+        if ap is not None and checking(ap):
+            in_review = True
+        else:
+            live = active_workers(db, root_id)
+            reviewing = [a for a in live if a.mode == "review" or a.pipeline == "reviewing"]
+            in_review = bool(reviewing) and len(reviewing) == len(live)
+    return {m.id: "done" if m.state == "passed" else
+            "in_review" if in_review and m is current else "in_progress" for m in ms}
+
+
 def counts(db: DB, root_id: str) -> tuple[int, int]:
     ms = db.milestones(root_id)
     return sum(m.status == "passed" for m in ms), len(ms)
