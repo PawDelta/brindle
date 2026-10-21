@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -73,6 +74,8 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   seats N [--org ORG]  set a Team or Enterprise org's seat count (billing admin); Stripe
             prorates the change on your next invoice
   sync      sync your user-wide settings (~/.brindle/config.json) with your account now
+  route [--reset]  show the self-serve Claude route (Bedrock, Vertex, ...) Claude panes use;
+            --reset removes it, so they use your own login again
   org list          list the orgs you belong to
   org create <name> create a team org you own (then `upgrade --team`)
   org invite <email> [--admin]  invite someone to the current org; prints the code
@@ -481,7 +484,8 @@ class ProAccount(_OrgCommands):
                     "org": _take(args, "--org"), "admin": _take(args, "--admin", value=False),
                     "device": _take(args, "--device", value=False),
                     "pack": _take(args, "--pack", value=False),
-                    "pinned": _take(args, "--pinned", value=False), "name": _take(args, "--name")}
+                    "pinned": _take(args, "--pinned", value=False), "name": _take(args, "--name"),
+                    "reset": _take(args, "--reset", value=False)}
             seats = int(opts["seats"]) if opts["seats"] is not None else None
         except ValueError:
             print(USAGE, file=self.err)
@@ -499,7 +503,8 @@ class ProAccount(_OrgCommands):
             and (seats is None or seats >= 1 or opts["enterprise"])
             and (opts["org"] is None or bool(opts["team"] or opts["enterprise"]))
             and (not opts["trial"] or bool(opts["enterprise"])),
-            "portal": not rest, "sync": not rest, "savings": not rest, "seats": len(rest) == 1,
+            "portal": not rest, "sync": not rest, "savings": not rest, "route": not rest,
+            "seats": len(rest) == 1,
             "org": (sub in ("list", "policy") and len(rest) <= 1)
             or (sub in ("use", "invite", "join") and len(rest) == 2)
             or (sub == "learning-share" and len(rest) <= 2 and rest[1:] in ([], ["on"], ["off"]))
@@ -515,7 +520,7 @@ class ProAccount(_OrgCommands):
             "license": (sub in ("status", "remove") and len(rest) <= 1)
             or (sub == "install" and len(rest) == 2),
         }.get(cmd, False)
-        flags_ok = {"upgrade": ("team", "enterprise", "trial", "seats", "org"), "portal": ("org",), "seats": ("org",), "login": ("device",),
+        flags_ok = {"upgrade": ("team", "enterprise", "trial", "seats", "org"), "portal": ("org",), "seats": ("org",), "login": ("device",), "route": ("reset",),
                     "org": ("org", "admin") if sub == "invite"
                     else ("org",) if sub in ("ci-token", "learning-share", "company", "member")
                     else ("org", "pack", "pinned", "name") if sub == "profiles" and rest[1:2] == ["push"]
@@ -551,6 +556,8 @@ class ProAccount(_OrgCommands):
                 return self.cmd_seats(base, rest[0], org=opts["org"])
             if cmd == "login":
                 return self.cmd_login(base, device=bool(opts["device"]))
+            if cmd == "route":
+                return self.cmd_route(reset=bool(opts["reset"]))
             return getattr(self, "cmd_" + cmd)(base)
         except (auth.AuthError, license.LicenseError, credentials.CredentialError) as e:
             print(f"brindle account: {e}", file=self.err)
@@ -712,6 +719,22 @@ class ProAccount(_OrgCommands):
         company_login.clear_federation()
         cloud_credential.take_reauth()      # a deliberate logout leaves no org to return to
         self._say("Logged out of brindle Pro.")
+        return 0
+
+    def cmd_route(self, reset: bool = False) -> int:
+        """The self-serve Claude route (no org setup needed), or remove it."""
+        from brindle import self_serve
+
+        if reset:
+            if os.environ.get("BRINDLE_AGENT_ID"):
+                # The person's own choice: an agent's CLI call doesn't change it (as config.set_user).
+                print("brindle: running as an agent, so the self-serve route was not changed", file=self.err)
+                return 1
+            self._say("Removed the self-serve Claude route; Claude panes use your own login again."
+                      if self_serve.reset() else "No self-serve Claude route is saved.")
+            return 0
+        found = self_serve.checks()
+        self._say(f"Claude: {found[0].detail}" if found else "No self-serve Claude route is saved.")
         return 0
 
     def cmd_status(self, base: str | None) -> int:

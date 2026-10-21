@@ -649,6 +649,7 @@ Autopilot, merge gates and cleanup:
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
+| `graphify_auto_refresh` | `true` | automatically rebuild untracked code maps; `false` disables rebuilds while keeping queries available |
 | `stale_after` | `30` | minutes before a worker that reported and sat idle is closed, or `brindle prune` closes a stale paused/exited agent whose workspace is merged or gone (`0`: never) |
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
@@ -1452,7 +1453,11 @@ knowledge graph (`graphify-out/graph.json`, built with `/graphify`) and `graphif
 installed, brindle tells the supervisor and every worker to find code with
 `graphify query` before grepping or reading whole files. Those commands are
 pre-approved, and brindle refreshes the graph's code (`graphify update`, no LLM) in
-the background after each merge.
+the background after each merge. Automatic rebuilds skip checkouts with any
+git-tracked files under `graphify-out/`, preserving richer semantic graphs and
+their generated reports. Update tracked graphs explicitly with graphify.
+Set `"graphify_auto_refresh": false` in `.brindle/config.json` to also disable
+automatic rebuilds and session seeding for untracked graphs while keeping queries.
 
 When `pool_size` is greater than `0`, a claimed worktree keeps the path and
 port block it was built with -- it's never moved, and its port block is fixed

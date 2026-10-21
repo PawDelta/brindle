@@ -5,7 +5,7 @@ import sys
 import pytest
 
 import brindle
-from brindle import git, providers, workspaces
+from brindle import git, mcp_server, providers, workspaces
 from brindle.config import load_repo_config
 
 from conftest import sh
@@ -68,6 +68,21 @@ def test_remove_refuses_dirty_and_keeps_branch(db, repo):
     assert git.branch_exists(str(repo), "feature")
     assert not os.path.exists(ws.path)
     assert db.get_workspace(ws.id) is None
+
+
+@pytest.mark.parametrize("ref", ["worker", "missing-worker"])
+def test_remove_workspace_accepts_agent_id_and_unknown(db, repo, monkeypatch, ref):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    add(db, ws, "worker", "assign", result="finished")
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, ws))
+    reply = mcp_server.remove_workspace(ref, delete_branch=False)
+    if ref == "missing-worker":
+        assert all(part in reply for part in (ref, "agent id", "workspace id", "name", "branch"))
+        assert db.get_workspace(ws.id) is not None
+        return
+    assert db.get_workspace(ws.id) is None
+    assert db.get_agent("worker") is None
+    assert not os.path.exists(ws.path)
 
 
 @pytest.mark.variant("incident: 8 merged workspaces kept their rows after a reviewer's "
