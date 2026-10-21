@@ -28,7 +28,10 @@ Precedence: any matching deny wins; else any matching allow; else ask.
 Specificity never matters. An allow rule for bash only ever applies to a
 single simple command (letters, digits, spaces and ``_-./:=@%+,`` only): a
 command with any other character (``;``, ``|``, ``&``, ``$``, quotes, globs,
-redirections, newlines...) is never auto-allowed. Anything unknown or
+redirections, newlines...) is never auto-allowed as a whole. A list of
+commands joined only by ``&&``, ``;`` or ``|`` is allowed when an allow rule
+covers every part (read with quotes removed) and nothing else can run or write
+(see compound_parts); a deny on any part denies it. Anything unknown or
 unparseable is ask.
 
 Where rules come from (``source``): ``default`` (built in, below), ``repo``
@@ -73,6 +76,8 @@ FILE = "permissions.json"
 # A command an allow rule may cover: one simple command, nothing the shell
 # would treat specially.
 SIMPLE_COMMAND = re.compile(r"[A-Za-z0-9_\-./:=@%+, ]+")
+# The operators a compound command may join its parts with ("" ends it).
+COMPOUND_SEPARATORS = ("&&", ";", "|", "")
 READONLY_GIT = ("status", "diff", "log", "show")
 # Options that make an otherwise read-only git command write or read files
 # outside the repo.
@@ -686,6 +691,27 @@ def simple_argv(command: str | None) -> list[str] | None:
     return argv or None
 
 
+def compound_parts(command: str) -> list[str] | None:
+    """The simple commands of a list joined only by ``&&``, ``;`` or ``|``,
+    each re-joined from its words, when every one is a simple command an
+    allow rule could cover; else None. Nothing beyond those commands may run
+    or write: no command substitution, backticks, subshell, process
+    substitution, heredoc, input from a file (a read no read rule saw) or
+    redirection other than an fd dup or output to /dev/null."""
+    from brindle.native.permissions import _joined, _simple_commands, _tokens
+
+    if "$(" in command or "`" in command:
+        return None
+    tokens = _tokens(command)
+    if tokens is None or any(is_op and "<" in text for is_op, text in tokens):
+        return None
+    parsed = _simple_commands(command)
+    if not parsed or any(after not in COMPOUND_SEPARATORS for _, after in parsed):
+        return None
+    parts = [_joined(words) for words, _ in parsed]
+    return parts if all(simple_argv(part) for part in parts) else None
+
+
 def _inside(path: str, root: str) -> str | None:
     """``path``'s location relative to ``root`` (both resolved), if inside."""
     if not root:
@@ -895,6 +921,14 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
                 verb = "denied" if wanted == "deny" else "allowed"
                 return Decision(wanted, f"{verb} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
+        parts = compound_parts(req.command)
+        if parts:
+            answers = [decide(replace(req, command=part), checks=checks, rules=rules) for part in parts]
+            for answer in answers:
+                if answer.decision == "deny":
+                    return answer
+            if all(answer.decision == "allow" for answer in answers):
+                return Decision("allow", "every part of the command is allowed by a rule")
         why = "the command isn't a single simple command, so no allow rule applies"
     elif req.kind == "read" and req.path:
         why = "not a file git tracks in the worktree, and no rule allows it"

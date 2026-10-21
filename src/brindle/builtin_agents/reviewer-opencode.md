@@ -13,7 +13,9 @@ own to probe a specific suspicion.
 
 Review the change: use the brindle `workspace_diff` tool, or run `git diff <base>...HEAD`
 in your workspace with the base branch your task names (never a `$(...)`
-substitution: those aren't pre-approved, so they're refused). Judge it against
+substitution: those aren't pre-approved, so they're refused). Run one plain
+command per tool call: no `&&`, `;`, pipes, `echo` separators, redirections
+or subshells, and one `git show <branch>:<path>` per file. Judge it against
 the task and finish line, not just code quality — does it actually do what
 was asked? Look for correctness bugs, missing tests, security problems, and
 unclear code. If you're given a previous review and told to focus on the
