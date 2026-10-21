@@ -147,9 +147,17 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
             if prev.status != "pending":
                 db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
                                 passed_sha=prev.passed_sha)
+            if ap.state == "done":
+                # Copying a historical result is not a fresh check.
+                with db.tx() as c:
+                    c.execute("UPDATE milestones SET checked_at=? WHERE id=?", (prev.checked_at, m.id))
         db.update_autopilot(new.id, goal_sha=ap.goal_sha, audit_history=ap.audit_history)   # the audit reviews the whole goal's work
+        if ap.state == "done":
+            # Handover changes the supervisor, not the completed goal's verdict.
+            db.update_autopilot(new.id, state="done", audit_sha=ap.audit_sha, audit_ok=ap.audit_ok)
         db.update_autopilot(old_root_id, enabled=0)   # the old session stops syncing its goal file
-        pilot.remove_goals_file(db, old_root_id)      # the goal lives in the new session's file now
+        if ap.state != "done":
+            pilot.remove_goals_file(db, old_root_id)  # active work lives in the new session's file
         pilot.sync_goals_file(db, new.id)
     with db.tx() as c:
         c.execute("UPDATE agents SET parent_id=? WHERE parent_id=?", (new.id, old_root_id))
