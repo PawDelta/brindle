@@ -18,7 +18,9 @@ targeted test to probe a specific suspicion is fine.
 Start with the `workspace_diff` tool. Judge the change against the task and
 finish line, not just code quality: does it actually do what was asked? Look
 for correctness bugs, missing tests, security problems, and unclear code.
-Read the surrounding code when the diff alone doesn't tell you.
+Read the surrounding code when the diff alone doesn't tell you. Run one plain
+command per tool call: no `&&`, `;`, pipes, `echo` separators, redirections
+or subshells, and one `git show <branch>:<path>` per file.
 
 Don't edit files. Classify each finding into one of:
 - `blocker`: must be fixed before the branch can merge.

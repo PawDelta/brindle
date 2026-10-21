@@ -84,6 +84,8 @@ def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(bri
                  marks=pytest.mark.variant("unquoted patterns could expand into option-like filenames")),
     ("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
      ["git -C /otherworktree status"], "allow"),
+    ("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
+     ["git  -C /otherworktree\t status"], "allow"),
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ("git -C /otherworktree status", "git -C /otherworktree checkout status file"), "ask",
                  marks=pytest.mark.variant("same callID with changed command must still prompt; approvals expire and are single-use")),
@@ -119,10 +121,13 @@ def test_permission_mode_and_model_map_onto_opencode(brindle_home, tmp_path, mod
         assert got["bash"]["*"] == perm["*"] and got["bash"]["uv run *"] == "allow"
         # OpenCode 1.19.3 emits one pattern per simple command in ; / && lists,
         # retaining git's -C option. The last matching rule wins for each one.
+        # A brindle approval runs the command respelled, and the plugin answers OpenCode's ask once.
+        approved = opencode.readonly_git(profile, "; ".join(patterns), str(cwd), str(tmp_path / "repo"))
+        seen = [opencode.squeezed(command) for command in patterns] if approved else patterns
         decisions = [next(action for pattern, action in reversed(got["bash"].items())
-                          if fnmatch.fnmatchcase(command, pattern)) for command in patterns]
-        if opencode.readonly_git(profile, "; ".join(patterns), str(cwd), str(tmp_path / "repo")):
-            decisions = ["allow"]
+                          if fnmatch.fnmatchcase(command, pattern)) for command in seen]
+        if approved:
+            decisions = ["allow" if action == "ask" else action for action in decisions]
         if plugin_case:
             # Execute the real JS hooks with in-memory IPC/client fakes; no
             # OpenCode process, tmux, shell commands, or timing sleeps.
@@ -217,7 +222,10 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     assert pre("bash", {"command": f"git -C {target} branch -D victim"}) == ""
     db.update_agent("o1", profile="reviewer-opencode")
     assert json.loads(pre("bash", {"command": f"git -C {target} status"}))["decision"] == "allow"
-    assert json.loads(pre("bash", {"command": f"ls; git -C {target} checkout status file"}))["decision"] == "deny"
+    # Respelled as OpenCode's rules match it; quoted spacing is an argument and stays.
+    answer = json.loads(pre("bash", {"command": f"git  -C {target} log --grep='a  b' --grep=\"c  \\\" d\""}))
+    assert answer["command"] == f"git -C {target} log --grep='a  b' --grep=\"c  \\\" d\""
+    assert json.loads(pre("bash", {"command": f"ls; git  -C {target} checkout status file"}))["decision"] == "deny"
     permissions.add_rule("bash", "git status", "deny")
     assert json.loads(pre("bash", {"command": f"git -C {target} status"}))["decision"] == "deny"
     # A denied part of a compound command, and a denied file in an apply_patch (GPT-5 models).
