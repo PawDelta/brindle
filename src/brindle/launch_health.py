@@ -181,13 +181,19 @@ def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
     # paste_blocked deliberately treats everything after it as a possible
     # draft; delivery can instead use fresh, structured turn output.
     prompts = [i for i, line in enumerate(lines) if provider.INPUT_LINE.match(line)]
-    if prompts:
-        start = prompts[-1]
-        heading = provider.INPUT_LINE.match(lines[start]).group(1).strip()
-        if not heading or " ".join(heading.split()) not in " ".join(prompt.split()):
-            lines = lines[:start]  # exclude the current composer and its draft
     prompt_text = " ".join(prompt.split())
-    for line in lines:
+    matching = [i for i in prompts
+                if (heading := " ".join(provider.INPUT_LINE.match(lines[i]).group(1).split()))
+                and prompt_text.startswith(heading)]
+    if not matching:
+        return False
+    # A resume may replay old tool output with no baseline at all. Only
+    # output following this brief, before the next composer/turn, proves
+    # acceptance. Choose the last match so a repeated brief still in the
+    # composer cannot inherit evidence from an earlier submission.
+    start = matching[-1]
+    end = next((i for i in prompts if i > start), len(lines))
+    for line in lines[start + 1:end]:
         if line in old or " ".join(line.split()) in prompt_text:
             continue
         # Match Codex's own row markers, not bare keyboard-help prose.

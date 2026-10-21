@@ -901,25 +901,28 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, False),
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", True, False),
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, True),
+    ("• Ran git status --short\n  └ clean", False, "history"),
 ])
 def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypatch, output, stale, draft):
     lh, a, _, _, _, reports = health
     # #236: submitted brief and turn output above the captured Codex footer,
     # without a second › separating the transcript from the composer.
     screen = f"› {a.task}\n\n{output}\n\n" + CODEX_EMPTY_PANE.split("\n", 1)[1]
-    if draft:
+    if draft == "history":
+        screen = f"› previous task\n\n{output}\n\n› {a.task}\n\n  90% context left\n"
+    elif draft:
         screen = screen.replace(a.task, "an unrelated draft quoting tool output")
     cleared = []
     monkeypatch.setattr(lh, "capture", lambda a: screen)
     monkeypatch.setattr(tmux, "paste", lambda *a, **k: pytest.fail("brief submitted twice"))
     monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: cleared.append(a))
-    lh.verify_delivery(db, a, a.task, baseline=screen if stale else CODEX_EMPTY_PANE)
+    lh.verify_delivery(db, a, a.task, baseline=screen if stale else "")
     lh.verify_pending(db, a.id, a._launch_health_token)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
     assert (row["delivered_at"] is not None) == (not stale and not draft)
-    assert (row["outcome"] == "delivery-failed") == (stale or draft)
-    assert bool(reports) == (stale or draft)
-    assert bool(cleared) == (stale or draft)
+    assert (row["outcome"] == "delivery-failed") == bool(stale or draft)
+    assert bool(reports) == bool(stale or draft)
+    assert bool(cleared) == bool(stale or draft)
 
 
 @pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])
