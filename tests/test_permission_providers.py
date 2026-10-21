@@ -101,6 +101,8 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     a = worker(db, ws)
     payload = json.dumps(codex_payload("Bash", {"command": "git push"}, ws.path))
     assert agents.hook_main(db, a.id, "codex-permission-request", payload) == ""  # policy off
+    covered = json.dumps(codex_payload("Bash", {"command": "git status"}, ws.path))
+    assert agents.hook_main(db, a.id, "codex-permission-request", covered) == ""  # ...even in allowed_tools
     turn_on(ws)
     assert agents.hook_main(db, a.id, "codex-permission-request", "{not json") == ""
     assert agents.hook_main(db, a.id, "codex-permission-request", "[1, 2]") == ""
@@ -141,21 +143,23 @@ def test_codex_checks_and_profile_commands(db, ws, command, expected):
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
-@pytest.mark.parametrize("command,expected", [
-    ("gh issue view 239 --repo PawDelta/brindle", "allow"),
-    pytest.param("gh pr diff 5 --repo PawDelta/brindle", "allow",
+@pytest.mark.parametrize("policy,command,expected", [
+    ("on", "gh issue view 239 --repo PawDelta/brindle", "allow"),
+    pytest.param("on", "gh pr diff 5 --repo PawDelta/brindle", "allow",
                  marks=pytest.mark.variant("each read-only gh subcommand is its own allow rule")),
-    ("gh pr merge 5 --repo PawDelta/brindle", "deny"),  # dontAsk: writes stay refused
-    pytest.param("gh api -X POST repos/PawDelta/brindle/issues", "deny",
+    ("on", "gh pr merge 5 --repo PawDelta/brindle", "deny"),  # dontAsk: writes stay refused
+    pytest.param("on", "gh api -X POST repos/PawDelta/brindle/issues", "deny",
                  marks=pytest.mark.variant("gh api writes are a distinct bypass attempt")),
+    ("off", "gh issue view 239 --repo PawDelta/brindle", "allow"),  # #241: nobody watches its prompt
+    ("off", "gh pr merge 5 --repo PawDelta/brindle", None),  # ...the rest stays Codex's own
 ])
-def test_codex_reviewer_reads_github_but_cannot_write(db, ws, command, expected):
-    turn_on(ws)
+def test_codex_reviewer_reads_github_but_cannot_write(db, ws, policy, command, expected):
+    set_local(ws.repo_root, "permission_policy", policy)
     a = Agent("r1", ws.id, "reviewer-codex", "codex", "boss", "review", "processing", "%r1", None, time.time())
     db.add_agent(a)
     out = agents.hook_main(db, a.id, "codex-permission-request",
                           json.dumps(codex_payload("Bash", {"command": command}, ws.path)))
-    assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == expected
+    assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
 @pytest.mark.parametrize("command,expected", [("git push", "deny")])
@@ -406,14 +410,19 @@ def launch_argv(ws, mode=None):
 
 def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monkeypatch):
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    FakeAppServer.calls = []
     flag = codex_hook.config_flags()[1]
     assert flag not in launch_argv(ws)  # off: nothing trusted, nothing passed
-    assert codex_hook.status() == codex_hook.NEW
+    assert flag not in launch_argv(ws, mode="review")  # ...not even to a reviewer (#241)
+    assert codex_hook.status() == codex_hook.NEW and FakeAppServer.calls == []
     turn_on(ws)
     a = launch_argv(ws)  # on: brindle trusts its own hook the first time
     assert a[a.index(flag) - 1] == "-c"
     assert "--agent" not in flag  # one command for every agent: one trust
     assert codex_hook.status() == codex_hook.TRUSTED
+    set_local(ws.repo_root, "permission_policy", "off")
+    assert flag in launch_argv(ws, mode="review")  # off, but trusted: a reviewer has it
+    assert flag not in launch_argv(ws)  # workers unchanged
 
 
 def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatch):

@@ -2930,7 +2930,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
     policy (brindle.permissions) answers allow or deny, or None to let the CLI
     prompt the person as usual (ask). Off unless the repo or user config
-    sets ``permission_policy: "on"``. Never raises: any failure is ask."""
+    sets ``permission_policy: "on"``, except for a Codex reviewer, whose hook
+    allows what its profile's allowed_tools cover and leaves the rest to
+    Codex (#241). Never raises: any failure is ask."""
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -2940,7 +2942,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if ws is None:
             return None
         cfg = load_repo_config(ws.repo_root)
-        if cfg.permission_policy != "on":
+        # Policy off: only a Codex reviewer has the hook (codex_hook.launch_flags).
+        # Nobody watches it, so it gets what its allowed_tools cover and
+        # nothing else of brindle's: every other answer is Codex's own.
+        review_only = cfg.permission_policy != "on"
+        if review_only and not (provider == "codex" and agent.mode == "review"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         if provider == "codex":
@@ -2961,7 +2967,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 profile = None  # deleted profile: no extra allowances
             if profile is not None:
                 rules += permissions.profile_bash_allows(profile)
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
+                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>)
                 # wins before any part-by-part allow below.
@@ -2993,6 +3000,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                         "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
                         "never asks (permission_mode dontAsk). Don't retry it: do without it, or ask "
                         "your supervisor with the send_message tool (brindle MCP server)")
+            if review_only and decision.decision != "allow":
+                return None  # as Codex would without brindle: its own prompt or refusal
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
