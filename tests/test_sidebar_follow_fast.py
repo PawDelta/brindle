@@ -117,3 +117,39 @@ def test_sidebar_survives_a_second_client_changing_a_workers_window(db, monkeypa
     sidebar_follow.sidebar_follow(db, "worker_s")
 
     assert moved == []
+
+
+def test_sidebar_survives_stopping_the_worker_whose_window_it_sits_in(db, monkeypatch):
+    """The sidebar followed the person into a worker's window; stopping that
+    worker closes the window, so the sidebar goes home to the root's session first."""
+    from brindle import agents, procs
+
+    for ws_id, session in (("rootws", "root_s"), ("workerws", "worker_s")):
+        db.add_workspace(Workspace(ws_id, "/repo", ws_id, "worktree", ws_id, "main", f"/{ws_id}",
+                                   None, session, time.time()))
+    db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
+                       "%root", None, time.time()))
+    worker = Agent("w1", "workerws", "developer", "claude", "root1", "assign", "idle",
+                   "%worker", None, time.time())
+    db.add_agent(worker)
+    db.set_sidebar_pane("root1", "%sidebar")
+    windows = {"%root": "@r", "%worker": "@w", "%sidebar": "@w"}
+    events = []
+    tm = sidebar_follow.tmux
+    monkeypatch.setattr(tm, "active_window", {"root_s": "@r", "worker_s": "@w"}.get)
+    monkeypatch.setattr(tm, "pane_window", windows.get)
+    monkeypatch.setattr(tm, "window_alive", lambda pane: True)
+    monkeypatch.setattr(tm, "get_pane_tag", lambda pane, tag: "root1")
+    monkeypatch.setattr(tm, "pane_session", {"%sidebar": "worker_s", "%worker": "worker_s"}.get)
+    monkeypatch.setattr(tm, "session_attached", lambda session: False)
+    monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%root")
+    monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: events.append(("move", pane, target)))
+    monkeypatch.setattr(agents, "same_server", lambda *a, **k: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a, **k: True)
+    monkeypatch.setattr(agents.tmux, "window_pids", lambda w: [])
+    monkeypatch.setattr(agents.tmux, "kill_window", lambda w: events.append(("kill", w)))
+    monkeypatch.setattr(procs, "stop", lambda *a, **k: None)
+
+    agents._stop(db, worker)
+
+    assert events == [("move", "%sidebar", "%root"), ("kill", "%worker")]

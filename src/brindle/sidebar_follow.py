@@ -196,6 +196,27 @@ def rescue_sidebar(db: DB, ws: Workspace) -> None:
         pass
 
 
+def rescue_sidebar_from_window(db: DB, agent: Agent) -> None:
+    """Call before ``agent``'s tmux window is killed: if its root's sidebar is
+    a pane in that window, move it back to the root's own session first.
+    Never raises."""
+    try:
+        if not agent.tmux_window:
+            return
+        root_id = root_of(db, agent.id)
+        root = db.get_agent(root_id)
+        root_ws = db.get_workspace(root.workspace_id) if root else None
+        if root_ws is None:
+            return
+        sidebar = db.get_sidebar_pane(root_id)
+        if (_valid_sidebar(sidebar, root_id)
+                and tmux.pane_window(sidebar) == tmux.pane_window(agent.tmux_window)
+                and tmux.pane_session(sidebar) != root_ws.tmux_session):
+            bring_sidebar(db, root_id, root_ws.tmux_session)
+    except Exception:  # noqa: BLE001 - cleanup must not fail because of the sidebar
+        pass
+
+
 def sidebar_follow(db: DB, session: str) -> None:
     ws = db.workspace_by_tmux_session(session)
     if ws is None:
