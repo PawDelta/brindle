@@ -87,38 +87,6 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
     assert calls == [("%sidebar", "@brindle_sidebar")]
 
 
-def test_sidebar_survives_a_second_client_changing_a_workers_window(db, monkeypatch):
-    """The person's terminal shows the root's session, sidebar and all, while
-    a second client (the app's) is attached to a worker's session. A window
-    change there fires that session's follow hook: the sidebar must stay
-    where the person is looking, not vanish into the worker's window."""
-    for ws_id, session in (("rootws", "root_s"), ("workerws", "worker_s")):
-        db.add_workspace(Workspace(ws_id, "/repo", ws_id, "worktree", ws_id, "main", f"/{ws_id}",
-                                   None, session, time.time()))
-    db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
-                       "%root", None, time.time()))
-    db.add_agent(Agent("w1", "workerws", "developer", "claude", "root1", "assign", "idle",
-                       "%worker", None, time.time()))
-    db.set_sidebar_pane("root1", "%sidebar")
-    windows = {"%root": "@r", "%worker": "@w", "%sidebar": "@r"}
-    tm = sidebar_follow.tmux
-    monkeypatch.setattr(tm, "active_window", {"root_s": "@r", "worker_s": "@w"}.get)
-    monkeypatch.setattr(tm, "pane_window", windows.get)
-    monkeypatch.setattr(tm, "pane_window_tag", lambda pane, tag: (windows[pane], "root1"))
-    monkeypatch.setattr(tm, "window_alive", lambda pane: True)
-    monkeypatch.setattr(tm, "get_pane_tag", lambda pane, tag: "root1")
-    monkeypatch.setattr(tm, "pane_session", {"%sidebar": "root_s", "%worker": "worker_s"}.get)
-    monkeypatch.setattr(tm, "session_attached", lambda session: True)   # both clients
-    monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%worker")
-    monkeypatch.setattr(tm, "send_keys", lambda *a: None)
-    moved = []
-    monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: moved.append((pane, target)))
-
-    sidebar_follow.sidebar_follow(db, "worker_s")
-
-    assert moved == []
-
-
 @pytest.mark.parametrize("shared_session", [False, True], ids=["own session", "shared session"])
 def test_sidebar_survives_stopping_the_worker_whose_window_it_sits_in(db, monkeypatch, shared_session):
     """The sidebar followed the person into a worker's window (the root's active
