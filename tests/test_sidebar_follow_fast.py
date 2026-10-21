@@ -153,3 +153,35 @@ def test_sidebar_survives_stopping_the_worker_whose_window_it_sits_in(db, monkey
     agents._stop(db, worker)
 
     assert events == [("move", "%sidebar", "%root"), ("kill", "%worker")]
+
+
+@pytest.mark.variant("the app views the root's chat through its own brindle-view session")
+def test_sidebar_survives_only_while_the_brindle_session_is_attached(db, monkeypatch):
+    """pane_session reports the app's brindle-view-* session for a linked
+    window, and that session is attached: the sidebar must still follow the
+    person's terminal, which left the root's own (now unattached) session."""
+    for ws_id, session in (("rootws", "root_s"), ("workerws", "worker_s")):
+        db.add_workspace(Workspace(ws_id, "/repo", ws_id, "worktree", ws_id, "main", f"/{ws_id}",
+                                   None, session, time.time()))
+    db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
+                       "%root", None, time.time()))
+    db.add_agent(Agent("w1", "workerws", "developer", "claude", "root1", "assign", "idle",
+                       "%worker", None, time.time()))
+    db.set_sidebar_pane("root1", "%sidebar")
+    windows = {"%root": "@r", "%worker": "@w", "%sidebar": "@r"}
+    tm = sidebar_follow.tmux
+    monkeypatch.setattr(tm, "active_window", {"root_s": "@r", "worker_s": "@w"}.get)
+    monkeypatch.setattr(tm, "pane_window", windows.get)
+    monkeypatch.setattr(tm, "pane_window_tag", lambda pane, tag: (windows[pane], "root1"))
+    monkeypatch.setattr(tm, "window_alive", lambda pane: True)
+    monkeypatch.setattr(tm, "get_pane_tag", lambda pane, tag: "root1")
+    monkeypatch.setattr(tm, "pane_session", {"%sidebar": "brindle-view-1", "%worker": "worker_s"}.get)
+    monkeypatch.setattr(tm, "session_attached", lambda session: session == "brindle-view-1")
+    monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%worker")
+    monkeypatch.setattr(tm, "send_keys", lambda *a: None)
+    moved = []
+    monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: moved.append((pane, target)))
+
+    sidebar_follow.sidebar_follow(db, "worker_s")
+
+    assert moved == [("%sidebar", "%worker")]
