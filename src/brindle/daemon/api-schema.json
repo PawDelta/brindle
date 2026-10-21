@@ -2949,6 +2949,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/usage"
+    },
+    {
+      "method": "GET",
       "path": "/v1/user-settings"
     },
     {
