@@ -169,12 +169,44 @@ def _check_slot(limit: int, cancel=None):
             f.close()   # closing releases the slot
 
 
+def _marker_file(kind: str, ws_id: str):
+    from brindle.config import brindle_home
+
+    lock_dir = brindle_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / (f"{kind}-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16] + ".lock")
+
+
+@contextmanager
+def marker(kind: str, ws_id: str):
+    """Mark something of ``kind`` at work on workspace ``ws_id`` for as long
+    as this is held (``marked`` tells). Shared, so two holders don't wait on
+    each other, and the lock goes with a holder that dies."""
+    with open(_marker_file(kind, ws_id), "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def marked(kind: str, ws_id: str) -> bool:
+    """Whether anything holds ``marker(kind, ws_id)`` right now."""
+    with open(_marker_file(kind, ws_id), "w") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return False
+
+
 def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
                 cancel=None) -> tuple[bool, str]:
     """Run ``cmd`` once a slot is free (``timeout`` covers the run, not the
     wait). A run that goes far past the command's last passing duration in
     this repo is reported to the supervisor while it is still running."""
-    with _check_slot(_concurrency(ws), cancel):
+    with _check_slot(_concurrency(ws), cancel), marker("checks-running", ws.id):
         last = db.check_duration(ws.repo_root, cmd)
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
@@ -340,17 +372,8 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
 
     sha = r.sha = head(ws)
     if review_required:
-        review = db.latest_review(ws.id, sha)
-        if review is None:
-            return r.fail(
-                f"{ws.branch} at {sha[:8]} hasn't been reviewed. Call request_review "
-                f"(workspace=\"{ws.id}\") and merge once it approves."
-            )
-        if not review.approved:
-            return r.fail(
-                f"The review of {ws.branch} at {sha[:8]} requested changes:\n{review.summary or ''}\n"
-                "Send these to the worker, then request another review."
-            )
+        if problem := _review_problem(db, ws, sha):
+            return r.fail(problem)
         r.passed.append(f"review approved {sha[:8]}")
 
     if cfg.pre_commit and (problem := _pre_commit(db, ws, cfg)):
@@ -372,7 +395,49 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
         if not ok:
             return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
         r.passed.append(f"`{cmd}` passed")
+    # A verdict recorded while the checks ran (a second reviewer's, #216)
+    # counts as much as one recorded before them.
+    if review_required and (problem := _review_problem(db, ws, sha)):
+        return r.fail(problem)
     return r
+
+
+def standing_reviews(db: DB, ws_id: str, sha: str) -> list:
+    """The verdicts on ``sha`` that stand (#216): each reviewer's latest one,
+    an approval carried over from the commit before a sync included, less any
+    a later reviewer superseded: one started in the same review claim slot
+    (``agents._request_review``: the commit's review, or the required second
+    review), whatever its profile, after that verdict was recorded, that has
+    given its own since. A reviewer with no recorded slot supersedes nothing."""
+    reviews = db.reviews_at(ws_id, sha)
+    reviewers = {r.reviewer_id: a for r in reviews
+                 if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
+
+    def supersedes(s, r) -> bool:
+        new, old = reviewers.get(s.reviewer_id), reviewers.get(r.reviewer_id)
+        return (new is not None and old is not None and new.review_slot is not None
+                and new.review_slot == old.review_slot
+                and new.created_at > r.created_at and s.created_at > r.created_at)
+
+    return [r for r in reviews if not any(supersedes(s, r) for s in reviews)]
+
+
+def verdict(db: DB, ws_id: str, sha: str):
+    """The review that decides whether ``sha`` may merge: the first standing
+    verdict that isn't an approval, else the latest approval, else None."""
+    standing = standing_reviews(db, ws_id, sha)
+    return next((r for r in standing if not r.approved), standing[-1] if standing else None)
+
+
+def _review_problem(db: DB, ws: Workspace, sha: str) -> str | None:
+    review = verdict(db, ws.id, sha)
+    if review is None:
+        return (f"{ws.branch} at {sha[:8]} hasn't been reviewed. Call request_review "
+                f"(workspace=\"{ws.id}\") and merge once it approves.")
+    if not review.approved:
+        return (f"The review of {ws.branch} at {sha[:8]} requested changes:\n{review.summary or ''}\n"
+                "Send these to the worker, then request another review.")
+    return None
 
 
 def _has_pre_commit(ws: Workspace) -> bool:

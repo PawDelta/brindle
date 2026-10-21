@@ -2756,6 +2756,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                          mode="review", background_setup=True, review_sha=sha)
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
+    # Kept on the reviewer too: the claim names only its latest holder, and
+    # which verdict replaces which goes by slot (gates.standing_reviews).
+    if reviewer is not None:
+        db.update_agent(reviewer.id, review_slot=slot)
     return reviewer
 
 

@@ -209,6 +209,7 @@ def test_mcp_failure_replaces_reviewer_once_per_commit(db, mcp_review, monkeypat
         launch_health.check_mcp(db, old)
     new = agents.request_review(db, boss, ws, "reviewer")
     assert new.id != old.id and new.review_sha == old.review_sha
+    assert db.get_agent(new.id).review_slot == "" == old.review_slot   # its verdict replaces in the same slot
     assert new.task == old.task and new.parent_id == old.parent_id
     assert db.get_agent(old.id).status == "done"
     launch_health.check_mcp(db, old)  # stale hook must respect the replacement
