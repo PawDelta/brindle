@@ -146,7 +146,7 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         for prev, m in zip(old_ms, db.milestones(new.id)):
             if prev.status != "pending":
                 db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
-                                passed_sha=prev.passed_sha)
+                                passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why)
         db.update_autopilot(new.id, goal_sha=ap.goal_sha, audit_history=ap.audit_history)   # the audit reviews the whole goal's work
         db.update_autopilot(old_root_id, enabled=0)   # the old session stops syncing its goal file
         pilot.remove_goals_file(db, old_root_id)      # the goal lives in the new session's file now

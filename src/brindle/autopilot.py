@@ -46,7 +46,7 @@ from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config
 from brindle import bus, escapes, knowledge
-from brindle.db import DB, Agent, Autopilot, Milestone, Workspace
+from brindle.db import DB, Agent, Autopilot, Milestone, Workspace, check_state
 from brindle.profiles import load_profile
 
 log = logging.getLogger(__name__)
@@ -489,7 +489,7 @@ def load_goals_file(root: str) -> Plan | None:
 
 # A status line is what sync_goals_file writes under each milestone. The
 # format is strict so user prose is never mistaken for one.
-STATUS_RE = re.compile(r"^status: (passed|failed|pending)( at [0-9a-f]{7,40})?( \(\d{4}-\d{2}-\d{2}\))?\s*$")
+STATUS_RE = re.compile(r"^status: (passed|failed|not_done|regressed|pending)( at [0-9a-f]{7,40})?( \(\d{4}-\d{2}-\d{2}\))?\s*$")
 
 
 def status_line(m: Milestone) -> str:
@@ -498,7 +498,7 @@ def status_line(m: Milestone) -> str:
     if m.status not in ("passed", "failed"):
         return "status: pending"
     sha = (m.passed_sha if m.status == "passed" else None) or m.checked_sha
-    out = f"status: {m.status}"
+    out = f"status: {m.state or m.status}"
     if sha and re.fullmatch(r"[0-9a-f]{7,40}", sha):
         out += f" at {sha[:7]}"
     if m.checked_at:
@@ -691,7 +691,7 @@ def set_goal(db: DB, root_id: str, goal: str,
         prev = old.get((m.title, m.check_cmd))
         if prev and prev.status != "pending":
             db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
-                            passed_sha=prev.passed_sha)
+                            passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why)
     db.bump_progress(root_id)
     bus.publish_agent(db, "autopilot.goal", root_id, goal=goal.strip(), milestones=len(milestones))
     write_goals_file(db, root_id)
@@ -1286,13 +1286,20 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
                 continue
             at = site(m.repo)
             if isinstance(at, str):
-                db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n{at}", None)
+                db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n{at}", None,
+                                state="failed", state_why="repo isn't attached")
                 continue
             checkout, repo_cfg, sha = at
             # Cached by commit when the checkout is clean, so a check that
             # already passed at this HEAD (as a merge gate, say) isn't re-run.
-            ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout),
-                                        repo_cfg.check_timeout)
+            try:
+                ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout),
+                                            repo_cfg.check_timeout)
+            except Exception as e:
+                db.record_check(m.id, False, f"$ {m.check_cmd}\n(crashed: {e})", sha,
+                                state="failed", state_why=f"crashed: {e}")
+                continue
+            state, why = check_state(ok, out, m.status == "passed" or bool(m.passed_sha))
             # Not if it already passed at this very commit: a flaky check
             # flipping back isn't progress.
             newly_passed |= ok and m.status != "passed" and (sha is None or m.passed_sha != sha)
@@ -1301,7 +1308,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
                 # between got past its reviewer.
                 escapes.milestone_regressed(db, checkout.repo_root, checkout.path, m.title,
                                             m.checked_sha, sha)
-            db.record_check(m.id, ok, out, sha)
+            db.record_check(m.id, ok, out, sha, state=state, state_why=why)
 
     run(chosen)
     ms = db.milestones(root_id)
@@ -1562,7 +1569,16 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 # -- progress -----------------------------------------------------------------
 
-MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌"}
+MARK = {"passed": "✓", "failed": "✗", "not_done": "○", "regressed": "✗", "pending": "○",
+        "working": "◐", "waiting": "◌"}
+
+
+def state_text(m: Milestone) -> str | None:
+    """The plain words for a milestone's last check, or None if it passed or
+    was never checked."""
+    if m.state == "failed":
+        return f"couldn't run: {m.state_why}" if m.state_why else "couldn't run"
+    return {"not_done": "not done yet", "regressed": "regressed"}.get(m.state or "")
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
@@ -1608,8 +1624,9 @@ def progress(db: DB, root_id: str) -> str:
         how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
         who = f", profile: {m.profile}" if m.profile else ""
-        shown = w if m.status == "failed" and w else m.status
-        stale = ", last check failed" if shown != m.status else ""
+        shown = w if m.status == "failed" and w else (m.state or m.status)
+        label = state_text(m)
+        stale = f", last check: {label}" if label and shown != m.state else (f", {label}" if label else "")
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
     if ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
@@ -1634,7 +1651,8 @@ def check_summary(db: DB, root_id: str, position: int | None, text: str) -> str:
     parts = []
     for m in chosen if position is not None else [m for m in ms if m.status == "failed"]:
         if m.status == "failed":
-            parts.append(f"Milestone {m.position} ✗ failed: {first_line(m.output or 'no output')}")
+            parts.append(f"Milestone {m.position} {MARK.get(m.state or 'failed')} "
+                         f"{state_text(m) or 'not done yet'}: {first_line(m.output or 'no output')}")
         else:
             parts.append(f"Milestone {m.position} {MARK.get(m.status, '·')} {m.status}")
     head = "; ".join(parts) or "Milestone check"

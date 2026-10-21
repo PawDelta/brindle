@@ -7,6 +7,7 @@ transaction.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -122,7 +123,9 @@ CREATE TABLE IF NOT EXISTS milestones (
     checked_sha TEXT,              -- the checkout's HEAD when it was last checked
     passed_sha TEXT,               -- the checkout's HEAD when it last passed
     profile TEXT,                  -- default worker profile for assign
-    repo TEXT                      -- alias of the attached repo the check runs in (brindle.repos); NULL: the session's own
+    repo TEXT,                     -- alias of the attached repo the check runs in (brindle.repos); NULL: the session's own
+    state TEXT,                    -- last check: passed | not_done | regressed | failed (couldn't run); NULL: never checked
+    state_why TEXT                 -- for failed: why the check couldn't run
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
@@ -679,6 +682,24 @@ class Milestone:
     passed_sha: str | None = None
     profile: str | None = None
     repo: str | None = None
+    state: str | None = None
+    state_why: str | None = None
+
+
+_NOT_RUNNABLE = re.compile(r"\(exit (126|127)\)\s*$")
+
+
+def check_state(passed: bool, output: str, had_passed: bool) -> tuple[str, str | None]:
+    """A milestone check's state and, for ``failed`` (the check couldn't be
+    done), why. A non-zero exit is ``not_done``, or ``regressed`` if the
+    milestone had passed before; only exit 126/127 or a timeout couldn't run."""
+    if passed:
+        return "passed", None
+    if m := _NOT_RUNNABLE.search(output or ""):
+        return "failed", "command not found" if m.group(1) == "127" else "command not runnable"
+    if t := re.search(r"\(timed out after (\d+)s\)\s*$", output or ""):
+        return "failed", f"timed out after {t.group(1)}s"
+    return ("regressed" if had_passed else "not_done"), None
 
 
 @dataclass
@@ -896,6 +917,14 @@ class DB:
         for col in ("checked_sha", "passed_sha", "profile", "repo"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
+        for col in ("state", "state_why"):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
+        # Rows checked before states were stored: work them out from what was recorded.
+        for r in self.conn.execute("SELECT id, status, output, passed_sha FROM milestones "
+                                   "WHERE state IS NULL AND status IN ('passed', 'failed')").fetchall():
+            state, why = check_state(r["status"] == "passed", r["output"] or "", bool(r["passed_sha"]))
+            self.conn.execute("UPDATE milestones SET state=?, state_why=? WHERE id=?", (state, why, r["id"]))
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(login_state)")}
         for col in ("interrupted", "account"):
             if col not in cols:
@@ -1542,14 +1571,20 @@ class DB:
         return [_load(Milestone, r) for r in rows]
 
     def record_check(self, milestone_id: int, passed: bool, output: str,
-                     sha: str | None = None, *, passed_sha: str | None = None) -> None:
-        """``passed_sha`` defaults to ``sha`` on a pass and is kept on a fail."""
+                     sha: str | None = None, *, passed_sha: str | None = None,
+                     state: str | None = None, state_why: str | None = None) -> None:
+        """``passed_sha`` defaults to ``sha`` on a pass and is kept on a fail.
+        ``state`` (see ``check_state``) defaults to the one the output implies;
+        ``status`` stays passed/failed for everything that only asks whether
+        the milestone is done."""
+        if state is None:
+            state, state_why = check_state(passed, output, False)
         with self.tx() as c:
             c.execute(
                 "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, "
-                "passed_sha=COALESCE(?, passed_sha) WHERE id=?",
+                "passed_sha=COALESCE(?, passed_sha), state=?, state_why=? WHERE id=?",
                 ("passed" if passed else "failed", time.time(), output, sha,
-                 passed_sha or (sha if passed else None), milestone_id),
+                 passed_sha or (sha if passed else None), state, state_why, milestone_id),
             )
 
     # -- reviews -------------------------------------------------------------
