@@ -51,9 +51,12 @@ class FakeTmux:
             out = "".join(f"{f}\n" for f in self.flags())
         return subprocess.CompletedProcess(args, 0, out, "")
 
+    async def no_latch(self, argv, tty):
+        raise OSError("no latch here")
+
     def flags(self) -> list[str]:
-        return ["attached,focused,control-mode,UTF-8 0 @1 client-1"] * bool(self.procs) + \
-            ["attached,UTF-8 0 @1 /dev/ttys1"] * self.attached
+        return ["attached,focused,control-mode,UTF-8 @1 client-1"] * bool(self.procs) + \
+            ["attached,UTF-8 @1 /dev/ttys1"] * self.attached
 
     async def spawn(self, argv: list[str]) -> "FakeControl":
         proc = FakeControl(self, argv)
@@ -152,6 +155,7 @@ def fake(db, repo, tmp_path, monkeypatch):
     fake = FakeTmux()
     monkeypatch.setattr(tmux, "_tmux", fake)
     monkeypatch.setattr(terminal, "spawn", fake.spawn)
+    monkeypatch.setattr(terminal, "spawn_latch", fake.no_latch)
     return fake
 
 
@@ -245,7 +249,7 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
 
         async def run(fn, target, *args):
             if fn is tmux.attached_terminals:
-                return [("/dev/ttys1", 0, "@1")] * state["attached"]
+                return [("/dev/ttys1", "@1")] * state["attached"]
             if fn is tmux.set_window_size_manual:
                 ops.append("manual")
                 if "manual" in gated:
@@ -359,12 +363,45 @@ def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processe
         sock = connect(client, "w1")
         sock.receive_json()
         assert sock.receive_bytes() == b"\x1bchello\r\nworld\x1b[0m\x1b[2;4H"
+        # After a seed the next poll redraws every row.
+        assert sock.receive_bytes().count(b"\x1b[2K") == 2
         fake.screen = b"hello\nthere"
         assert sock.receive_bytes() == b"\x1b[?25l\x1b[2;1H\x1b[0m\x1b[2Kthere\x1b[0m\x1b[2;4H\x1b[?25h"
         sock.send_json({"type": "key", "text": "x"})
         fake.wait_for(lambda: ("send-keys", "-t", "%1", "-l", "--", "x") in fake.calls)
         sock.__exit__(None, None, None)
     assert fake.procs == []
+
+    # The screen changes while a seed is being taken: the poll that sees it
+    # waits for the seed, and its redraw comes after where the viewer starts.
+    async def interleaved():
+        pane, screen, gate = terminal.Pane("%1", None, None), {"rows": "old"}, asyncio.Event()
+        pane._screen = ["old"]
+
+        async def run(fn, target, *args, **kwargs):
+            if fn is tmux.pane_view:
+                return tmux.View(0, 0, 80, 24, "@1")
+            rows = screen["rows"]
+            if args[0] == terminal.SEED_LINES:      # the seed's capture, held
+                await gate.wait()
+            return rows + "\n"
+        async def settle():
+            for _ in range(20):
+                await asyncio.sleep(0)
+        pane.run, viewer = run, pane.add()
+        seeding = asyncio.ensure_future(pane.seed(viewer))
+        await settle()                          # it has captured "old"
+        screen["rows"] = "new"
+        polling = asyncio.ensure_future(pane._poll_screen())
+        await settle()
+        gate.set()
+        seed, _ = await seeding
+        await settle()
+        polling.cancel()
+        assert b"old" in seed and b"new" in pane.ring.since(viewer.pos)
+
+    monkeypatch.setattr(terminal, "POLL_SECONDS", 0)
+    asyncio.run(interleaved())
 
 
 def test_control_quote_is_one_argument_tmux_reads_back_as_the_text():

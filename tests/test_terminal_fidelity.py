@@ -149,26 +149,31 @@ def test_the_apps_terminal_shows_what_tmux_shows_and_keys_land_at_its_cursor(tmp
         wait(lambda: tmux._tmux("select-window", "-t", pane, check=False).returncode == 0
              and tmux_view(pane)[2] == (shared[0], shared[1] - 1))
     with TestClient(build_app(TOKEN)) as http:
-        if shared:
-            # tmux keeps input times to the second: start a new one, so the
-            # terminal's attaching is in the last one and the app's input
-            # and the terminal's key below share this one.
-            threading.Event().wait(1.02 - time.time() % 1)
         sock = http.websocket_connect(f"/v1/terminal/{tid}").__enter__()
         sock.send_text(TOKEN)
         try:
             app = App(sock)
             see(app, pane, APP)     # the app's size, from its resize, shared or not
+            typed = ""
             if shared:
-                # The terminal types in the same second: like tmux's latest
-                # client it takes the window; the app shows it at its size.
-                os.write(client.master, b"t")
-                see(app, pane, (shared[0], shared[1] - 1), "t")
+                # Like tmux's latest client, whoever typed last has the window
+                # and the app shows it at that size: the terminal, the app,
+                # the terminal again, all within a second (which tmux's
+                # whole-second input times can't order), from its start.
+                threading.Event().wait(1.02 - time.time() % 1)
+                theirs = (shared[0], shared[1] - 1)
+                for key, size in (("t", theirs), ("h", APP), ("u", theirs)):
+                    if size == APP:
+                        sock.send_json({"type": "key", "text": key})
+                    else:
+                        os.write(client.master, key.encode())
+                    typed += key
+                    see(app, pane, size, typed)
                 client.size(100, 35)
-                see(app, pane, (100, 34), "t")
+                see(app, pane, (100, 34), typed)
             # Keys typed in the app land at the cursor (and take the window back).
             sock.send_json({"type": "key", "text": "hi"})
-            see(app, pane, APP, "thi" if shared else "hi")
+            see(app, pane, APP, typed + "hi")
         finally:
             sock.__exit__(None, None, None)
         # The daemon lets its control client go before the loop does.

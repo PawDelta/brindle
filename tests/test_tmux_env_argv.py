@@ -1,6 +1,7 @@
 """An agent's environment (a profile's API key, the federation proxy's token)
 must never be a tmux ``-e NAME=VALUE`` argument: any user can read those in
 ``ps``. It reaches the pane through a private launch script instead."""
+import subprocess
 import time
 
 import pytest
@@ -39,3 +40,10 @@ def test_a_stored_key_never_reaches_argv_or_the_tmux_environment(db, repo, monke
 def test_a_bad_variable_name_is_refused(brindle_home):
     with pytest.raises(tmux.TmuxError):
         tmux._short(["true"], {"A B; rm -rf /": "x"})
+
+
+def test_switching_this_terminal_never_picks_the_daemons_hidden_client(monkeypatch):
+    monkeypatch.setenv("TMUX_PANE", "%3")
+    clients = "/dev/ttys7 attached,focused,ignore-size,UTF-8\n/dev/ttys2 attached,focused,UTF-8\n"
+    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: subprocess.CompletedProcess(a, 0, clients, ""))
+    assert tmux.own_client() == "/dev/ttys2"
