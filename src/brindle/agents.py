@@ -2574,9 +2574,12 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             if _live_reviewer(db, ws, sha, profile):
                 return None
             try:
-                summary = gates.check_summary(
-                    db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
-                    or not _review_requested(ws.id, profile, request_id))
+                # In the check queue as of the report (#186): a run restarted
+                # or requested again later doesn't lose its turn.
+                with gates.queue_place(since or time.time()):
+                    summary = gates.check_summary(
+                        db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
+                        or not _review_requested(ws.id, profile, request_id))
             except gates.Abandoned:
                 summary = None
             except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
