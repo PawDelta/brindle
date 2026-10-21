@@ -119,40 +119,49 @@ def test_sidebar_survives_a_second_client_changing_a_workers_window(db, monkeypa
     assert moved == []
 
 
-def test_sidebar_survives_stopping_the_worker_whose_window_it_sits_in(db, monkeypatch):
-    """The sidebar followed the person into a worker's window; stopping that
-    worker closes the window, so the sidebar goes home to the root's session first."""
+@pytest.mark.parametrize("shared_session", [False, True], ids=["own session", "shared session"])
+def test_sidebar_survives_stopping_the_worker_whose_window_it_sits_in(db, monkeypatch, shared_session):
+    """The sidebar followed the person into a worker's window (the root's active
+    window too, when the worker shares the root's session); stopping that worker
+    closes the window, so the sidebar moves to a surviving root window first and
+    its process is not among those stopped."""
     from brindle import agents, procs
 
-    for ws_id, session in (("rootws", "root_s"), ("workerws", "worker_s")):
+    worker_ws, worker_session = ("rootws", "root_s") if shared_session else ("workerws", "worker_s")
+    for ws_id, session in {"rootws": "root_s", worker_ws: worker_session}.items():
         db.add_workspace(Workspace(ws_id, "/repo", ws_id, "worktree", ws_id, "main", f"/{ws_id}",
                                    None, session, time.time()))
     db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
                        "%root", None, time.time()))
-    worker = Agent("w1", "workerws", "developer", "claude", "root1", "assign", "idle",
+    worker = Agent("w1", worker_ws, "developer", "claude", "root1", "assign", "idle",
                    "%worker", None, time.time())
     db.add_agent(worker)
     db.set_sidebar_pane("root1", "%sidebar")
-    windows = {"%root": "@r", "%worker": "@w", "%sidebar": "@w"}
-    events = []
+    windows = {"%root": "@r", "%worker": "@w", "%sidebar": "@w"}   # pane -> window, moved with the sidebar
+    pane_pid = {"%worker": 5001, "%sidebar": 5002}
+    killed = set()
     tm = sidebar_follow.tmux
-    monkeypatch.setattr(tm, "active_window", {"root_s": "@r", "worker_s": "@w"}.get)
-    monkeypatch.setattr(tm, "pane_window", windows.get)
+    monkeypatch.setattr(tm, "active_window", {"root_s": "@w" if shared_session else "@r",
+                                              "worker_s": "@w"}.get)
+    monkeypatch.setattr(tm, "pane_window", lambda pane: windows.get(pane, pane))
     monkeypatch.setattr(tm, "window_alive", lambda pane: True)
     monkeypatch.setattr(tm, "get_pane_tag", lambda pane, tag: "root1")
-    monkeypatch.setattr(tm, "pane_session", {"%sidebar": "worker_s", "%worker": "worker_s"}.get)
-    monkeypatch.setattr(tm, "session_attached", lambda session: False)
-    monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%root")
-    monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: events.append(("move", pane, target)))
+    monkeypatch.setattr(tm, "pane_session", lambda pane: worker_session)
+    monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%root" if window == "@r" else None)
+    monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: windows.update({pane: windows[target]}))
     monkeypatch.setattr(agents, "same_server", lambda *a, **k: True)
     monkeypatch.setattr(agents, "owns_pane", lambda *a, **k: True)
-    monkeypatch.setattr(agents.tmux, "window_pids", lambda w: [])
-    monkeypatch.setattr(agents.tmux, "kill_window", lambda w: events.append(("kill", w)))
-    monkeypatch.setattr(procs, "stop", lambda *a, **k: None)
+    monkeypatch.setattr(agents.tmux, "window_pids",
+                        lambda w: [pid for pane, pid in pane_pid.items() if windows[pane] == windows[w]])
+    monkeypatch.setattr(agents.tmux, "kill_window", lambda w: windows.update(
+        {p: "" for p, win in windows.items() if win == windows[w]}))
+    monkeypatch.setattr(procs, "table", lambda: {pid: procs.Proc(pid, 1, "sh") for pid in (5001, 5002)})
+    monkeypatch.setattr(procs, "terminate", lambda pids, grace=3.0: killed.update(pids) or len(pids))
 
     agents._stop(db, worker)
 
-    assert events == [("move", "%sidebar", "%root"), ("kill", "%worker")]
+    assert windows["%sidebar"] == "@r"
+    assert killed == {5001}
 
 
 @pytest.mark.variant("the app views the root's chat through its own brindle-view session")

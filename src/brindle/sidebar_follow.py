@@ -213,21 +213,33 @@ def _home_session(db: DB, root_id: str, sidebar: str) -> str | None:
 
 def rescue_sidebar_from_window(db: DB, agent: Agent) -> None:
     """Call before ``agent``'s tmux window is killed: if its root's sidebar is
-    a pane in that window, move it back to the root's own session first.
-    Never raises."""
+    a pane in that window, move it to a window of the root's session that
+    survives (the root's active one, else any other agent's there: a worker
+    sharing the root's workspace has its window in the same session). Never
+    raises."""
     try:
         if not agent.tmux_window:
             return
         root_id = root_of(db, agent.id)
         root = db.get_agent(root_id)
         root_ws = db.get_workspace(root.workspace_id) if root else None
-        if root_ws is None:
+        if root is None or root_ws is None or agent.id == root_id:
             return
-        sidebar = db.get_sidebar_pane(root_id)
-        if (_valid_sidebar(sidebar, root_id)
-                and tmux.pane_window(sidebar) == tmux.pane_window(agent.tmux_window)
-                and _home_session(db, root_id, sidebar) != root_ws.tmux_session):
-            bring_sidebar(db, root_id, root_ws.tmux_session)
+        with _sidebar_lock(root_id):
+            sidebar = db.get_sidebar_pane(root_id)
+            doomed = tmux.pane_window(agent.tmux_window)
+            if not (_valid_sidebar(sidebar, root_id) and doomed
+                    and tmux.pane_window(sidebar) == doomed):
+                return
+            candidates = [tmux.active_window(root_ws.tmux_session)]
+            candidates += [tmux.pane_window(a.tmux_window) for a in db.list_agents(root_ws.id)
+                           if a.tmux_window and a.status not in ("paused", "done")]
+            for window in candidates:
+                target_pane = window and window != doomed and tmux.agent_pane_in_window(window, sidebar)
+                if target_pane:
+                    _note_sidebar_move(f"rescue to {root_ws.tmux_session}", sidebar, target_pane)
+                    tmux.move_pane(sidebar, target_pane, SIDEBAR_COLUMNS, _sidebar_position(root_ws))
+                    return
     except Exception:  # noqa: BLE001 - cleanup must not fail because of the sidebar
         pass
 
