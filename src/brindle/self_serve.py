@@ -99,33 +99,36 @@ def save_local(setup) -> None:
     config.set_user(LOCAL_KEY, to_json(setup))
 
 
-def _saved_route() -> str | None:
-    """The route of the saved self-serve setup, else of the self-serve env
-    Claude panes get; None when neither is saved."""
+def route_status() -> tuple[str, bool] | None:
+    """(the self-serve Claude route, whether Claude panes use it now), or None
+    when none is saved. In use means the stored env panes get is the self-serve
+    one: an org's route replacing it, Claude Code's managed settings, or a
+    sign-in that failed before it was stored leave the saved setup unused."""
     try:
-        saved = config.user_settings()
+        stored = config.user_settings().get(company_login.ENV_KEY)
     except (OSError, ValueError):
         return None
-    setup = local_setup() if saved.get(LOCAL_KEY) is not None else None
+    env = company_login.stored_env() if isinstance(stored, dict) and stored.get("self_serve") else {}
+    if env:
+        return next((route for var, route in ENV_ROUTES if env.get(var)), "subscription"), True
+    setup = local_setup()
     if setup is not None and setup.claude is not None:
-        return setup.claude.route
-    stored = saved.get(company_login.ENV_KEY)
-    env = stored.get("env") if isinstance(stored, dict) and stored.get("self_serve") else None
-    if not isinstance(env, dict) or not env:
-        return None
-    return next((route for var, route in ENV_ROUTES if env.get(var)), "subscription")
+        return setup.claude.route, False
+    return None
 
 
 def checks() -> list:
-    """`brindle doctor`: the self-serve Claude route, while one is saved, and where."""
+    """`brindle doctor`: the self-serve Claude route, while one is saved: where,
+    and whether Claude panes use it."""
     from brindle.doctor import OK, Check
 
-    route = _saved_route()
-    if route is None:
+    got = route_status()
+    if got is None:
         return []
-    return [Check(OK, "claude route", f"{ROUTE_LABELS.get(route, route)} (self-serve, saved in "
-                  f"{config.user_config_path()}): every Claude pane uses it; "
-                  "undo with `brindle account route --reset`")]
+    label = f"{ROUTE_LABELS.get(got[0], got[0])} (self-serve, saved in {config.user_config_path()})"
+    use = ("every Claude pane uses it" if got[1] else
+           "not in use (an org's setup or Claude Code's managed settings come first, or its sign-in didn't finish)")
+    return [Check(OK, "claude route", f"{label}: {use}; undo with `brindle account route --reset`")]
 
 
 def reset() -> bool:
@@ -410,4 +413,4 @@ def run(say: Callable[[str], None], repo_root: str | None = None, ask=None,
     return offer(say, repo_root, ask, info)
 
 
-__all__ = ["checks", "detect", "local_setup", "offer", "reset", "run", "save_local"]
+__all__ = ["checks", "detect", "local_setup", "offer", "reset", "route_status", "run", "save_local"]

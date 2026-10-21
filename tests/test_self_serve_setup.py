@@ -302,19 +302,23 @@ def test_removing_the_local_setup_drops_its_env(monkeypatch):
 def test_doctor_shows_a_saved_route_until_account_route_reset(monkeypatch):
     from brindle.pro.account import ProAccount
 
-    self_serve.save_local(AgentSetup(claude=ClaudeSetup(route="vertex", gcp=team_policy.GcpSetup("p", "us-east5"))))
-    company_login.store_env(self_serve.SELF_ORG, {"CLAUDE_CODE_USE_VERTEX": "1"}, self_serve=True)
-    [c] = self_serve.checks()
-    assert str(config.user_config_path()) in c.detail
-    config.forget_user("agent_setup")       # the env alone still routes panes: still shown
-    assert len(self_serve.checks()) == 1
+    setup = AgentSetup(claude=ClaudeSetup(route="vertex", gcp=team_policy.GcpSetup("acme-ml-123", "us-east5")))
+    self_serve.save_local(setup)
+    assert self_serve.local_setup() == setup
+    assert self_serve.route_status() == ("vertex", False)      # saved, its sign-in never stored a route
+    company_login.store_env("acme", {"ANTHROPIC_BASE_URL": "https://gw.example.com"})
+    assert self_serve.route_status() == ("vertex", False)      # an org's route replaced it
+    company_login.store_env(self_serve.SELF_ORG, company_login.claude_env(self_serve.SELF_ORG, setup.claude),
+                            self_serve=True)
+    assert self_serve.route_status() == ("vertex", True)
+    assert str(config.user_config_path()) in self_serve.checks()[0].detail
     monkeypatch.setenv("BRINDLE_AGENT_ID", "abc123")
     assert ProAccount(out=io.StringIO(), err=io.StringIO()).run(["route", "--reset"]) == 1
-    assert len(self_serve.checks()) == 1      # an agent can't remove the person's route
+    assert self_serve.route_status() == ("vertex", True)       # an agent can't remove the person's route
     monkeypatch.delenv("BRINDLE_AGENT_ID")
     assert ProAccount(out=io.StringIO()).run(["route", "--reset"]) == 0
-    assert self_serve.checks() == [] and company_login.stored_env() == {}
-    assert "company_claude_env" not in config.user_settings()
+    assert self_serve.route_status() is None and self_serve.checks() == []
+    assert not {"agent_setup", "company_claude_env"} & set(config.user_settings())
 
 
 # -- doctor labels ---------------------------------------------------------------------------
