@@ -9,13 +9,14 @@ import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from brindle.service.errors import ServiceError
 
 # Tests only: lets a file:// URL (a local bare repo) through. Production refuses it.
 ALLOW_FILE_URLS = False
 
-_REMOTE = re.compile(r"^(?:https://|ssh://|git@)[^\s\x00-\x1f\x7f-]\S*$")
+_SCP = re.compile(r"^git@[^\s/:@-][^\s/:@]*:[^\s:]\S*$")      # git@<host>:<path>, never a relative local path
 _AUTH_FAILURE = re.compile(r"authentication failed|permission denied|could not read (?:username|password)|"
                            r"terminal prompts disabled|access denied|invalid username or password", re.I)
 TAIL = 20
@@ -26,9 +27,14 @@ def validate_url(url: str) -> str:
     option (a leading '-') or anything with whitespace or control characters."""
     if ALLOW_FILE_URLS and url.startswith("file://") and url.isprintable() and " " not in url:
         return url
-    if not _REMOTE.match(url):
-        raise ServiceError("invalid", "url must be an https, ssh or git@ address of a repository")
-    return url
+    if url.isascii() and url.isprintable() and " " not in url:
+        if _SCP.match(url):
+            return url
+        if url.startswith(("https://", "ssh://")):
+            host = urlsplit(url).hostname
+            if host and not host.startswith("-"):
+                return url
+    raise ServiceError("invalid", "url must be an https, ssh or git@host:path address of a repository")
 
 
 def repo_name(url: str) -> str:

@@ -29,7 +29,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from starlette.requests import Request
@@ -1375,23 +1375,45 @@ def clone_repo(db: DB, params: dict, body: Body) -> Any:
     from brindle import clone
 
     url = _get(body, "url", required=True)
-    dest = clone.destination(url, _get(body, "parent_dir", required=True))
+    parent = _get(body, "parent_dir", required=True)
+    key = str(Path(parent).expanduser().resolve() / clone.repo_name(clone.validate_url(url)))
+    job = Job(secrets.token_hex(8), "repo.clone")
+    with _CLONE_LOCK:
+        running = _CLONING.get(key)
+        if running:
+            if running[1] != url:
+                raise ServiceError("exists", f"{key} is being cloned from another address", 409)
+            return running[0]                  # pressed again: the one already running
+        clone.destination(url, parent)
+        _CLONING[key] = (job, url)
+    dest = Path(key)
 
     def work(db: DB, job: Job) -> Any:
         def progress(text: str) -> None:
             bus.publish(db, "job.progress", job=job.id, text=text)
 
-        return {"path": clone.clone(url, dest, progress)}
+        try:
+            return {"path": clone.clone(url, dest, progress)}
+        finally:
+            with _CLONE_LOCK:
+                _CLONING.pop(key, None)
 
-    return start_job("repo.clone", work)
+    try:
+        return start_job("repo.clone", work, job=job)
+    except BaseException:
+        with _CLONE_LOCK:
+            _CLONING.pop(key, None)
+        raise
+
+
+_CLONE_LOCK = threading.Lock()
+_CLONING: dict[str, tuple[Job, str]] = {}      # destination -> (its clone job, the url)
 
 
 def open_repo(db: DB, params: dict, body: Body) -> Any:
     """Register the folder ``path`` as session start does (workspaces.adopt_root).
     A folder that isn't a git repo is refused (409 ``not_a_repo``) unless the
     body says ``init``: then ``git init`` makes it one first."""
-    from pathlib import Path
-
     path = Path(_get(body, "path", required=True)).expanduser()
     if not path.is_dir():
         raise ServiceError("invalid", f"not a folder: {path}")

@@ -1340,8 +1340,27 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     assert (again, err["error"]["code"]) == (409, "exists")
 
 
-@pytest.mark.parametrize("url", ["-u/bin/sh", "/tmp/some/repo", "file:///tmp/x.git", "http://example.com/a.git",
-                                 "https://-oProxyCommand=x/a.git", "https://example.com/a b.git"])
+def test_a_second_clone_press_gets_the_job_already_queued(db, cloning, tmp_path, monkeypatch):
+    queued = []
+    monkeypatch.setattr(routes_actions, "_spawn", queued.append)
+    body = {"url": cloning, "parent_dir": str(tmp_path)}
+    (c1, first), (c2, second) = _send("POST", "/v1/repos/clone", body), _send("POST", "/v1/repos/clone", body)
+    assert (c1, c2, second["job"], len(queued)) == (202, 202, first["job"], 1)
+    other, err = _send("POST", "/v1/repos/clone", {**body, "url": cloning.removesuffix(".git")})
+    assert (other, err["error"]["code"]) == (409, "exists")
+    queued[0]()
+    assert [e["kind"] for e in bus.tail(db, kinds=("job.done", "job.failed"))] == ["job.done"]
+
+
+@pytest.mark.parametrize("url", [
+    "/tmp/some/repo",
+    pytest.param("-u/bin/sh", marks=pytest.mark.variant("an option smuggled in as the url")),
+    pytest.param("file:///tmp/x.git", marks=pytest.mark.variant("file:// stays refused in production")),
+    pytest.param("git@local.git", marks=pytest.mark.variant("git@ without a host:path is a relative local path")),
+    pytest.param("git@folder/repo.git", marks=pytest.mark.variant("a slash before any colon is a local path")),
+    pytest.param("https://-oProxyCommand=x/a.git", marks=pytest.mark.variant("an option as the host")),
+    pytest.param("https://example.com/a b.git", marks=pytest.mark.variant("whitespace in the url")),
+])
 def test_a_clone_refuses_what_is_not_a_remote_url(world, tmp_path, url):
     code, reply = _send("POST", "/v1/repos/clone", {"url": url, "parent_dir": str(tmp_path)})
     assert (code, reply["error"]["code"]) == (400, "invalid"), reply
