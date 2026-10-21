@@ -218,6 +218,9 @@ def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     out = autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
     assert "goal is reached" in out
     assert db.get_autopilot("boss").state == "done"
+    assert db.get_autopilot("boss").goal == "Settings page"
+    assert all(m.status == "passed" for m in db.milestones("boss"))
+    assert autopilot.session_goals_path(db, "boss").is_file()
     (repo / ".brindle").mkdir(exist_ok=True)   # the session's goal file lives in it
     (repo / ".brindle" / "config.json").write_text('{"goal_audit": false}')
     assert autopilot.on_stop(db, agent, {}) is None
@@ -255,12 +258,28 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
 
     goals = autopilot.session_goals_path(db, "boss")
     assert "status: passed" in goals.read_text()
+    milestones, contents = db.milestones("boss"), goals.read_text()
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert "goal is reached" in out and db.get_autopilot("boss").state == "done"
-    # The finished goal goes: its file and the session's goal and milestones.
-    assert not goals.exists()
-    assert db.get_autopilot("boss").goal is None and db.milestones("boss") == []
+    assert db.get_autopilot("boss").goal == "Settings page"
+    assert db.milestones("boss") == milestones and goals.read_text() == contents
+    assert db.get_autopilot("boss").goal_sha == start
+    assert db.get_autopilot("boss").audit_ok == 1
+    # Later chat and checkout changes must leave the completed record alone.
+    (repo / "api.txt").unlink()
+    autopilot.user_spoke(db, agent)
     assert autopilot.on_stop(db, agent, {}) is None
+    monkeypatch.setattr(autopilot, "_detach", lambda *a: pytest.fail("completed goal launched checks"))
+    autopilot.check_in_background(db, "boss", ws, None)
+    autopilot.check_milestones(db, "boss", ws)
+    assert db.milestones("boss") == milestones and db.get_autopilot("boss").state == "done"
+    from brindle import view
+
+    entry = view.autopilot_entry(db, ws.repo_root, root_id="boss")
+    assert entry["goal"] == "Settings page" and entry["state"] == "done"
+    autopilot.set_goal(db, "boss", "Next goal", [("Next step", "true", None)])
+    assert db.get_autopilot("boss").state == "running"
+    assert autopilot.parse_goals(goals.read_text()).goal == "Next goal"
 
 
 def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
