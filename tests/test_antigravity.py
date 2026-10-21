@@ -260,7 +260,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert answer("w1", "touch should_not_exist.txt") == "deny"
     assert answer("w1", "touch should_not_exist.txt") == "deny"
     [told] = db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'").fetchall()
-    assert "brindle permissions allow bash 'touch should_not_exist.txt'" in told["body"]
+    assert "brindle permissions allow bash -- 'touch should_not_exist.txt'" in told["body"]
     assert "should_not_exist" in agents.pending_permission(db, "w1")
     permissions.add_rule("bash", "touch should_not_exist.txt", "allow")
     assert answer("w1", "touch should_not_exist.txt") == "allow"
