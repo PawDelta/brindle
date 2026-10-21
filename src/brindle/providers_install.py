@@ -26,8 +26,7 @@ Verification per provider (each as its maker publishes it):
 - Claude Code: ``downloads.claude.ai`` binary, SHA-256 from the release's
   manifest.json, whose detached GPG signature is checked against Anthropic's
   release key (by fingerprint) with ``gpg`` in a throwaway keyring. Without
-  gpg, on macOS the binary's Apple code signature must name Anthropic
-  instead; elsewhere the install is refused.
+  gpg the install is refused, on every platform.
 - Codex: the GitHub release tarball, against the release API's ``digest`` or
   the release's SHA256SUMS.
 - OpenCode 1.x: the GitHub release archive, against the API's sha256 digest.
@@ -478,18 +477,6 @@ def claude_signature(manifest: Path, signature: Path, staging: Path) -> bool:
     return True
 
 
-def codesigned_by_anthropic(path: Path) -> bool:
-    """macOS: the binary's Apple code signature is valid and names Anthropic."""
-    try:
-        ok = subprocess.run(["codesign", "--verify", "--strict", str(path)], capture_output=True, timeout=60)
-        info = subprocess.run(["codesign", "-dv", "--verbose=2", str(path)], capture_output=True, text=True,
-                              timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return ok.returncode == 0 and any(line.startswith("Authority=") and "Anthropic" in line
-                                      for line in info.stderr.splitlines())
-
-
 def _verify(provider: str, rel: Release, file: Path, got: str, staging: Path) -> None:
     expected = rel.digest
     if expected is None and rel.sums_url:
@@ -507,10 +494,8 @@ def _verify(provider: str, rel: Release, file: Path, got: str, staging: Path) ->
         manifest.write_bytes(rel.manifest)
         sig.write_bytes(rel.signature)
         if not claude_signature(manifest, sig, staging):
-            if sys.platform != "darwin":
-                raise InstallError("gpg is needed to check Claude Code's signed manifest: install gpg, then try again")
-            if not codesigned_by_anthropic(file):
-                raise InstallError("Claude Code's binary isn't code-signed by Anthropic: refused")
+            raise InstallError("gpg is needed to check Claude Code's signed manifest: install gpg "
+                               "(on macOS: brew install gnupg), then try again")
 
 
 # -- unpack ----------------------------------------------------------------------
@@ -630,18 +615,29 @@ def update(provider: str, progress: Progress = _quiet) -> dict[str, Any]:
     return {**install(provider, latest, progress), "updated": True, "previous": st["version"]}
 
 
-def use_mine(provider: str, path: str | None = None) -> dict[str, Any]:
+def use_mine(provider: str, path: str | None = None, off_limits: list[str] | None = None) -> dict[str, Any]:
     """Run the person's own copy (``path``, else the one brindle finds) instead
-    of brindle's. brindle's copy stays on disk until removed."""
+    of brindle's. brindle's copy stays on disk until removed. A pinned path
+    must be named as the CLI is (``claude``, ``codex`` ...) and lie outside
+    brindle's own folders and ``off_limits`` (agents' workspaces), where an
+    agent could have written it. Nothing is run here."""
+    from brindle.config import brindle_home
+
     _check(provider)
     mine = os.path.abspath(os.path.expanduser(path)) if path else own_copy(provider)
     if not mine or not os.path.isfile(mine) or not os.access(mine, os.X_OK):
         raise InstallError(f"no executable {NAMES[provider]} CLI at {path}" if path
                            else f"{NAMES[provider]} isn't installed outside brindle")
-    if Path(mine).resolve().is_relative_to(_dir(provider).resolve()):
+    real = Path(mine).resolve()
+    if real.is_relative_to(_dir(provider).resolve()):
         raise InstallError("that is brindle's own copy, not yours")
+    if path:
+        if os.path.basename(mine) != _CLI[provider]:
+            raise InstallError(f"{NAMES[provider]}'s CLI is named {_CLI[provider]}, not {os.path.basename(mine)}")
+        if any(real.is_relative_to(Path(d).resolve()) for d in [str(root()), str(brindle_home()), *(off_limits or [])]):
+            raise InstallError("that path is inside brindle's or an agent's folder: not a copy of yours")
     _save(provider, {**state(provider), "active": "mine", "mine": mine})
-    return {"provider": provider, "state": "mine", "path": mine, "version": probe_version(mine)}
+    return {"provider": provider, "state": "mine", "path": mine}
 
 
 def remove(provider: str) -> dict[str, Any]:

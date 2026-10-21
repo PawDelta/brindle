@@ -1302,8 +1302,10 @@ def use_my_provider(db: DB, params: dict, body: Body) -> Any:
 
     provider = _install_provider(params)
     _not_installing(provider)
+    # Agents write in their workspaces: a CLI pinned from one would run as the person's.
+    ws_paths = [ws.path for ws in db.find_workspaces(None) if ws.path]
     try:
-        return providers_install.use_mine(provider, _get(body, "path"))
+        return providers_install.use_mine(provider, _get(body, "path"), ws_paths)
     except providers_install.InstallError as e:
         raise ServiceError("not_found", str(e), 404) from None
 

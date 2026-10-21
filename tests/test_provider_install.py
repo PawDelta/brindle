@@ -17,6 +17,7 @@ from brindle import antigravity, bus, opencode, providers
 from brindle import providers_install as pi
 from brindle.daemon import routes_actions
 from brindle.daemon.app import build_app
+from brindle.db import Workspace
 
 TOKEN = "t" * 43
 
@@ -208,13 +209,18 @@ def test_update_replaces_the_version_and_keeps_brindles_settings(server, inline,
     assert settings.read_text() == '{"model": "changed in brindle"}'
 
 
-def test_use_mine_runs_the_persons_copy_and_delete_removes_brindles(server, inline, tmp_path):
+def test_use_mine_runs_the_persons_copy_and_delete_removes_brindles(server, inline, tmp_path, db):
     publish(server, "codex", "1.2.3")
     _send("POST", "/v1/providers/codex/install")
-    mine = tmp_path / "mine" / "codex"
-    mine.parent.mkdir()
-    mine.write_text("#!/bin/sh\n")
-    mine.chmod(0o755)
+    planted, mine = tmp_path / "wt" / "codex", tmp_path / "mine" / "codex"
+    for exe in (planted, mine):
+        exe.parent.mkdir()
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    # A CLI an agent could have written in its worktree is never pinned.
+    db.add_workspace(Workspace("w-1", str(tmp_path), "feat", "worktree", "feat", "main", str(planted.parent),
+                               None, "brindle-x", 0.0))
+    assert _send("POST", "/v1/providers/codex/use-mine", {"path": str(planted)})[0] == 404
     code, reply = _send("POST", "/v1/providers/codex/use-mine", {"path": str(mine)})
     assert code == 200
     assert (_installed("codex")["state"], providers.codex_binary()) == ("mine", str(mine))
