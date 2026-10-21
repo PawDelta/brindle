@@ -142,9 +142,11 @@ def test_codex_checks_and_profile_commands(db, ws, command, expected):
 
 @pytest.mark.parametrize("command,expected", [
     ("gh issue view 239 --repo PawDelta/brindle", "allow"),
-    ("gh pr diff 5 --repo PawDelta/brindle", "allow"),
+    pytest.param("gh pr diff 5 --repo PawDelta/brindle", "allow",
+                 marks=pytest.mark.variant("each read-only gh subcommand is its own allow rule")),
     ("gh pr merge 5 --repo PawDelta/brindle", "deny"),  # dontAsk: writes stay refused
-    ("gh api -X POST repos/PawDelta/brindle/issues", "deny"),
+    pytest.param("gh api -X POST repos/PawDelta/brindle/issues", "deny",
+                 marks=pytest.mark.variant("gh api writes are a distinct bypass attempt")),
 ])
 def test_codex_reviewer_reads_github_but_cannot_write(db, ws, command, expected):
     turn_on(ws)
@@ -160,15 +162,15 @@ def test_codex_reviewer_launch_allows_sandbox_network_only_with_the_hook(ws, mon
     from brindle.providers import Codex, LaunchContext
 
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
-    flag = "sandbox_workspace_write.network_access=true"
+    flags = ["sandbox_workspace_write.network_access=true", 'approval_policy="untrusted"']
 
     def argv(profile, mode):
         return Codex().command(LaunchContext("c1", load_profile(profile), None, cwd=ws.path, mode=mode))
 
-    assert flag not in argv("reviewer-codex", "review")  # policy off: no hook gating the commands
+    assert not set(flags) & set(argv("reviewer-codex", "review"))  # policy off: no hook gating the commands
     turn_on(ws)
-    assert flag in argv("reviewer-codex", "review")
-    assert flag not in argv("developer", "assign")
+    assert set(flags) <= set(argv("reviewer-codex", "review"))  # network, and Codex asks the hook for the rest
+    assert not set(flags) & set(argv("developer", "assign"))
 
 
 @pytest.mark.parametrize("command,expected", [("git push", "deny")])

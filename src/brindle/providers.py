@@ -1414,8 +1414,11 @@ class Codex(Provider):
         if ctx.mode == "review" and hook_flags:
             # The reviewer's read-only `gh issue view` / `gh pr view` need the
             # network, which Codex's sandbox blocks. Only open it while brindle's
-            # hook is active, so allowed_tools gates what runs.
-            argv += ["-c", "sandbox_workspace_write.network_access=true"]
+            # hook is active, and make Codex ask (so the hook decides) for every
+            # command outside its own read-only safe list, so a `gh` write can't
+            # run unasked in the now-networked sandbox.
+            argv += ["-c", "sandbox_workspace_write.network_access=true",
+                     "-c", 'approval_policy="untrusted"']
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
