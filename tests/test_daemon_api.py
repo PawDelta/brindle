@@ -278,7 +278,7 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
     elif kind == "peer":
         assert peer._agent_panes() == {}
     elif kind == "terminal":
-        monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [])
+        monkeypatch.setattr(tmux, "tagged_pane_ids", lambda keys, server=None: [])
         assert terminal.reset_window_sizes() == 0
     elif kind == "preflight":
         from brindle import git, preflight
@@ -413,33 +413,43 @@ def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db,
     db.add_agent(Agent("w1", "ws", "developer", "claude", None, "assign", "idle", "%1", None, 1.0))
     db.add_agent(Agent("w2", "ws", "developer", "claude", None, "assign", "idle", "%1", None, 1.0,
                        tmux_server="other"))
+    db.add_agent(Agent("w3", "ws", "developer", "claude", None, "assign", "done", "%2", None, 1.0,
+                       tmux_server="gone"))
     here = tmux.current_server()
-    tags = {here: {"%1": {tmux.AGENT_TAG: "w1"}, "%4": {tmux.SIDEBAR_TAG: "root"}},
-            "other": {"%1": {tmux.AGENT_TAG: "w2"}}}
-    manual = {(here, "%1"), ("other", "%1"), (here, "%4"), (here, "%5"), (here, "%9")}   # %5: not brindle's
+    # list-panes rows: pane, its agent tag, its action-terminal tag (%4 a sidebar, %5 not brindle's)
+    panes = {here: ["%1\tw1\t", "%4\t\t", "%5\t\t", "%9\t\tt-1"], "other": ["%1\tw2\t"]}
+    manual = {(here, "%1"), ("other", "%1"), (here, "%4"), (here, "%5"), (here, "%9")}
+    refused: set = set()        # (server, command) tmux fails
     ran = []
-
-    def list_panes(server=None):
-        snap = tmux.PaneSnapshot(server)
-        snap.tags = tags.get(server, {})
-        return snap
 
     def fake_tmux(*args, server=None, check=True, **kw):
         ran.append((server, *args))
-        set_here = args[0] == "show-options" and (server, args[4]) in manual
-        return SimpleNamespace(returncode=0, stdout="manual\n" if set_here else "", stderr="")
+        out, code, err = "", 0, ""
+        if (server, args[0]) in refused:
+            code, err = 1, "lost server"
+        elif args[0] == "list-panes":
+            out, code, err = ("\n".join(panes[server]), 0, "") if server in panes \
+                else ("", 1, "no server running on /tmp/tmux-1/gone")
+        elif args[0] == "show-options":
+            out = "manual\n" if (server, args[4]) in manual else ""
+        elif args[0] == "set-option":
+            manual.discard((server, args[4]))
+        if check and code:
+            raise tmux.TmuxError(err)
+        return SimpleNamespace(returncode=code, stdout=out, stderr=err)
 
-    monkeypatch.setattr(tmux, "list_panes", list_panes)
-    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [("%9", "login claude", False, "t-1")])
     monkeypatch.setattr(tmux, "_tmux", fake_tmux)
-    assert terminal.reset_window_sizes() == 3
-    unset = sorted(r for r in ran if r[1] == "set-option")
-    assert unset == sorted([(here, "set-option", "-w", "-u", "-t", "%1", "window-size"),
-                            ("other", "set-option", "-w", "-u", "-t", "%1", "window-size"),
-                            (here, "set-option", "-w", "-u", "-t", "%9", "window-size")])
+    brindles = {(here, "%1"), ("other", "%1"), (here, "%9")}
+    # A server that can't be asked, then a refused unset: nothing is taken as done.
+    for refused in ({("other", "list-panes")}, {(here, "set-option")}):
+        terminal.reset_window_sizes()
+        assert {(here, "%1"), (here, "%9")} <= manual
+    refused = set()
+    assert terminal.reset_window_sizes() >= 2
+    assert manual == {(here, "%4"), (here, "%5")} and not brindles & manual
     assert not any("-g" in r for r in ran)      # never a global option
     ran.clear()
-    assert terminal.reset_window_sizes() == 0 and ran == []     # one-time
+    assert terminal.reset_window_sizes() == 0 and ran == []     # done once, it never runs again
 
 
 def test_committed_api_schema_matches_the_routes_and_dtos():

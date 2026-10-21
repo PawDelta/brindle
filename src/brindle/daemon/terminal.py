@@ -85,8 +85,10 @@ def reset_window_sizes() -> int:
     streamed it, so the terminals showing it size it again. Only brindle's
     own panes (tagged as an agent's or an action terminal's, on any tmux
     server brindle's agents use) and only the option set on that window,
-    never a session's or the global one. Returns how many it reset. A tmux
-    server that can't be asked leaves it to the next daemon start."""
+    never a session's or the global one. Returns how many it reset. It is
+    marked done only once every such window was read and reset: any tmux
+    call that fails (a server that can't be asked, a refused command) leaves
+    it to the next daemon start."""
     from brindle import agents
     from brindle.config import brindle_home
     from brindle.db import DB
@@ -99,19 +101,17 @@ def reset_window_sizes() -> int:
         servers = {agents.server_of(a) for a in db.list_agents() if a.tmux_window}
     finally:
         db.conn.close()
-    here = tmux.current_server()
+    reset = 0
     try:
-        targets = [(pane, server) for server in {here, *servers}
-                   for pane, tags in tmux.list_panes(server).tags.items() if tags.get(tmux.AGENT_TAG)]
-        targets += [(pane, here) for pane, *_ in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG)]
-        reset = 0
+        targets = [(pane, server) for server in {tmux.current_server(), *servers}
+                   for pane in tmux.tagged_pane_ids((tmux.AGENT_TAG, ACTION_TAG), server=server)]
         for pane, server in targets:
             if tmux.window_size_option(pane, server=server) == "manual":
                 tmux.unset_window_size(pane, server=server)
                 reset += 1
     except tmux.TmuxError:
         log.debug("brindle: can't reset window sizes yet", exc_info=True)
-        return 0
+        return reset
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("")
     return reset

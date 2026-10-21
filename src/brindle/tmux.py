@@ -929,18 +929,32 @@ def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
     _tmux("send-keys", "-t", target, *keys, server=server)
 
 
+def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[str]:
+    """Every pane on ``server`` (as for capture) that sets one of the pane
+    options ``keys``; empty when no server runs there. Raises TmuxError when
+    the server can't be asked, so an answer it never gave isn't read as "none"."""
+    keys = list(keys)
+    fmt = "\t".join(["#{pane_id}", *(f"#{{{k}}}" for k in keys)])
+    proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
+    if proc.returncode != 0:
+        if "no server running" in proc.stderr or "error connecting to" in proc.stderr:
+            return []
+        raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    return [pane for pane, *tags in rows if any(tags)]
+
+
 def window_size_option(target: str, server: object = _THIS_SERVER) -> str | None:
     """The ``window-size`` set on ``target``'s window itself (not one it
-    inherits from the global options); None when it sets none or the pane is
-    gone. ``server`` as for capture."""
-    proc = _tmux("show-options", "-w", "-v", "-t", target, "window-size", check=False, server=server)
-    return (proc.stdout.strip() or None) if proc.returncode == 0 else None
+    inherits from the global options); None when it sets none. Raises
+    TmuxError when tmux can't say. ``server`` as for capture."""
+    return _tmux("show-options", "-w", "-v", "-t", target, "window-size", server=server).stdout.strip() or None
 
 
 def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
     """Unset the ``window-size`` set on ``target``'s window: it is sized by
     tmux's own rule again. Never the global option. ``server`` as for capture."""
-    _tmux("set-option", "-w", "-u", "-t", target, "window-size", check=False, server=server)
+    _tmux("set-option", "-w", "-u", "-t", target, "window-size", server=server)
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:
