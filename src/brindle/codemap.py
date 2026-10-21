@@ -17,6 +17,9 @@ LLM, and copies the result to the store.
 
 ``graphify`` in ``.brindle/config.json``: true or false to force it on or off;
 unset, it's on whenever the graph and the command are there.
+``graphify_auto_refresh: false`` disables automatic rebuilds but keeps queries.
+Automatic rebuilds always skip tracked graphify-out/ artifacts: a code-only
+update can discard semantic nodes and rewrite the report, HTML and manifest.
 """
 
 from __future__ import annotations
@@ -176,12 +179,40 @@ def supervisor_map(target: Workspace | str | Path) -> str | None:
     )
 
 
+def _automatic_rebuild_allowed(checkout: str | Path) -> bool:
+    """Only rebuild disposable graphs, and only when the repo permits it.
+
+    Checking before graphify starts avoids even transient changes to tracked
+    artifacts that a concurrent worker commit could pick up. We cannot know
+    the rebuilt node count before running graphify, so leave all tracked
+    graphs to explicit updates by the user, including partially tracked output.
+    """
+    from brindle import git
+    from brindle.config import load_repo_config
+
+    try:
+        cfg = load_repo_config(checkout)
+    except ValueError:
+        # An unreadable config must not start an unsolicited writer.
+        return False
+    if cfg.graphify is False or cfg.graphify_auto_refresh is False:
+        return False
+    try:
+        tracked = git.paths(["ls-files", str(GRAPH.parent)], checkout)
+    except git.GitError:
+        # If tracking cannot be determined, preserve the checkout.
+        return False
+    return not tracked
+
+
 def seed_session(checkout: str | Path, repo_root: str | None = None) -> bool:
     """When a session checkout has no graph, seed it from the store if present
     and run graphify update in the background. Returns True if update was started."""
     from brindle.config import brindle_home, load_repo_config
 
     checkout_str = str(checkout)
+    if not _automatic_rebuild_allowed(checkout_str):
+        return False
     try:
         setting = load_repo_config(checkout_str).graphify
     except ValueError:
@@ -312,6 +343,8 @@ def copy_to_store(graph_path: Path, repo_root: str) -> None:
 
 def refresh(checkout: str, repo_root: str | None = None) -> None:
     """Synchronous graph refresh: run graphify update --force, carry community names, copy to store."""
+    if not _automatic_rebuild_allowed(checkout):
+        return
     if graph_path(checkout) is None:
         return
     from brindle.config import brindle_home
@@ -352,6 +385,8 @@ def refresh(checkout: str, repo_root: str | None = None) -> None:
 
 def refresh_later(checkout: str, repo_root: str | None = None) -> None:
     """Rebuild the code part of the graph in the background, after a merge."""
+    if not _automatic_rebuild_allowed(checkout):
+        return
     if graph_path(checkout) is None:
         return
     from brindle.config import brindle_home

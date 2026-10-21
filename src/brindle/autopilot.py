@@ -435,7 +435,7 @@ def _adopt_legacy(db: DB, root_id: str) -> None:
 
 
 def remove_goals_file(db: DB, root_id: str) -> None:
-    """The session's goal is done, handed over or dropped: remove its file."""
+    """The session's goal is handed over or dropped: remove its file."""
     _adopt_legacy(db, root_id)
     path = session_goals_path(db, root_id)
     if path is not None:
@@ -587,22 +587,6 @@ def sync_goals_file(db: DB, root_id: str) -> None:
         _replace(path, new)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't sync milestone status to the session's goal file")
-
-
-def clear_finished_goal(db: DB, root_id: str) -> None:
-    """The goal is reached: remove the session's goal file and clear its
-    goal. Never raises: a file we can't write must not fail the verdict."""
-    try:
-        ap = db.get_autopilot(root_id)
-        if not ap or not ap.goal:
-            return
-        remove_goals_file(db, root_id)
-        db.set_milestones(root_id, [])
-        db.update_autopilot(root_id, goal=None, detail=None, goals_file=None, goal_sha=None,
-                            audit_sha=None, audit_ok=None, auditor_id=None, note=None,
-                            audit_history=None)
-    except Exception:  # noqa: BLE001
-        log.exception("brindle: couldn't clear the finished goal")
 
 
 # -- sessions ----------------------------------------------------------------
@@ -1172,6 +1156,8 @@ def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | Non
     from brindle.providers import brindle_invocation
 
     ap = db.get_autopilot(root_id)
+    if ap and ap.state == "done":
+        return progress(db, root_id, in_flight=False)
     if ap and checking(ap):
         return ("A milestone check is already running; its result arrives as a message. "
                 "Carry on with other work meanwhile.")
@@ -1197,6 +1183,11 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     so a flaky check can't keep resetting the nudge limit."""
     from brindle import git, repos, workspaces
 
+    # Completed goals are historical records. Only set_goal starts work again;
+    # a late helper or repeated check request must not overwrite their results.
+    ap = db.get_autopilot(root_id)
+    if ap and ap.state == "done":
+        return progress(db, root_id, in_flight=False)
     cfg = cfg or load_repo_config(ws.repo_root)
     ms = db.milestones(root_id)
     if not ms:
@@ -1297,7 +1288,6 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
     if done and audit is None:
         lines.append("\n" + GOAL_REACHED)
-        clear_finished_goal(db, root_id)
     elif done:
         lines.append("\n" + AUDIT_HOLD[audit].format(note=(ap.note if ap else None) or ""))
     return "\n".join(lines)
@@ -1475,7 +1465,6 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
         db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None,
                             audit_history=new_history)
         db.bump_progress(root_id)
-        clear_finished_goal(db, root_id)
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
                 f"\n\n{summary}")
@@ -1570,6 +1559,8 @@ def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
     if ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
+    elif ap.state == "done":
+        lines.append("Completed: the goal is reached.")
     elif ap.state == "auditing":
         lines.append("Completion audit running: the goal isn't reached until it approves.")
     elif ap.audit_ok == 0 and ap.note:
