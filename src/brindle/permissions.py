@@ -30,7 +30,8 @@ single simple command (letters, digits, spaces and ``_-./:=@%+,`` only): a
 command with any other character (``;``, ``|``, ``&``, ``$``, quotes, globs,
 redirections, newlines...) is never auto-allowed as a whole. A list of
 commands joined only by ``&&``, ``;`` or ``|`` is allowed when an allow rule
-covers every part (word by word, as the shell will run it) and nothing else can run or write
+covers every part (word by word, as the shell will run it, with quoted or
+escaped characters treated literally) and nothing else can run or write
 (see compound_parts); a deny on any part denies it. Anything unknown or
 unparseable is ask.
 
@@ -693,8 +694,9 @@ def simple_argv(command: str | None) -> list[str] | None:
 
 def compound_parts(command: str) -> list[list[str]] | None:
     """The words of each simple command in a list joined only by ``&&``,
-    ``;`` or ``|``, when every word is plain text (SIMPLE_COMMAND; a quoted
-    word may hold spaces); else None. Nothing beyond those commands may run
+    ``;`` or ``|``, when unquoted word characters are plain text
+    (SIMPLE_COMMAND; quoted or escaped characters are literal); else None.
+    Nothing beyond those commands may run
     or write: no command substitution, backticks, subshell, process
     substitution, heredoc, input from a file (a read no read rule saw) or
     redirection other than an fd dup or output to /dev/null."""
@@ -702,14 +704,13 @@ def compound_parts(command: str) -> list[list[str]] | None:
 
     if "$(" in command or "`" in command:
         return None
-    tokens = _tokens(command)
+    tokens = _tokens(command, word_pattern=SIMPLE_COMMAND)
     if tokens is None or any(is_op and "<" in text for is_op, text in tokens):
         return None
     parsed = _simple_commands(command)
     if not parsed or any(after not in COMPOUND_SEPARATORS for _, after in parsed):
         return None
-    parts = [words for words, _ in parsed]
-    return parts if all(SIMPLE_COMMAND.fullmatch(word) for words in parts for word in words) else None
+    return [words for words, _ in parsed]
 
 
 def _part_decision(req: Request, words: list[str], checks: list[str] | None,
@@ -719,14 +720,16 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     words as the shell will run them: ``"./check --safe"`` is one word,
     a different program from ``./check --safe``. Words without spaces
     re-join to exactly that; a word with spaces can only fall in the
-    arguments of a prefix rule whose words come before it."""
+    arguments of a prefix rule whose words come before it. The same holds
+    for literal metacharacters: re-parsing them without their quotes would
+    mistake argument text for shell syntax."""
     from brindle.native.permissions import _joined
 
     denied = decide(replace(req, command=_joined(words)), checks=checks,
                     rules=[rule for rule in rules if rule.decision == "deny"])
     if denied.decision == "deny":
         return denied
-    if not any(" " in word for word in words):
+    if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
         return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules)
     for rule in rules:
         head = rule.match.split()

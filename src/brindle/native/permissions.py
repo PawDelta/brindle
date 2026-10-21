@@ -242,7 +242,7 @@ def _harmless_redirect(op: str, target: str) -> bool:
     return op == "<"  # reads a file, as the command itself could
 
 
-def _tokens(command: str) -> list[tuple[bool, str]] | None:
+def _tokens(command: str, word_pattern: re.Pattern[str] | None = None) -> list[tuple[bool, str]] | None:
     """``(is_operator, text)`` for each word (quotes removed) and each run of
     operator characters outside quotes, or None for input whose quoting the
     shell may read differently: an unclosed quote, a ``$`` starting quoting
@@ -250,7 +250,9 @@ def _tokens(command: str) -> list[tuple[bool, str]] | None:
     its own quoting rules; see _expands), or a # starting a word (a comment
     to bash, a plain word to interactive zsh: either way a quote after it
     pairs differently). An fd number written against a redirection (the 2
-    of ``2>&1``) belongs to it and is dropped."""
+    of ``2>&1``) belongs to it and is dropped. With ``word_pattern``, each
+    unquoted, unescaped word character must match it; quoted and escaped
+    characters are literal arguments, not shell syntax."""
     out: list[tuple[bool, str]] = []
     word: list[str] | None = None  # None between words
     quoted = False
@@ -304,6 +306,8 @@ def _tokens(command: str) -> list[tuple[bool, str]] | None:
                 quoted = True
             i += 2
         else:
+            if word_pattern is not None and not word_pattern.fullmatch(c):
+                return None
             word.append(c)
             i += 1
     if word is not None and (word or quoted):
