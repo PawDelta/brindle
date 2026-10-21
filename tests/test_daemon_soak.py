@@ -6,6 +6,7 @@ pane."""
 import contextlib
 import json
 import os
+import signal
 import sqlite3
 import threading
 import time
@@ -37,6 +38,23 @@ READ_PATHS = {
     "/v1/doctor": 200, "/v1/providers/claude/preflight?repo={repo}": 200, "/v1/account": 200,
     "/v1/cost": 402,    # Pro-gated: refused after the route opened its DB
 }
+
+
+@contextlib.contextmanager
+def wall_clock(seconds: float):
+    """Interrupt the test thread after ``seconds`` wherever it is waiting (a
+    handshake, an HTTP call, a receive, cleanup): the client's own waits have
+    no timeout. The serial pass runs tests on the main thread, where alarms land."""
+    def expire(signum, frame):
+        raise TimeoutError(f"the daemon soak took over {seconds:.0f}s: it is stalled")
+
+    old = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
 
 
 class Tracked(sqlite3.Connection):
@@ -127,7 +145,7 @@ def test_daemon_leaks_nothing_under_load_and_keys_still_reach_the_pane(db, repo,
                 socks.receive(sock)     # seed
 
     deadline = time.monotonic() + DEADLINE
-    with TestClient(build_app(TOKEN)) as client:
+    with wall_clock(DEADLINE), TestClient(build_app(TOKEN)) as client:
         socks = Sockets(client, deadline)
         hammer(client, socks)   # warm-up: lazily opened files and thread pools are not leaks
         fds = settled(open_fds)
