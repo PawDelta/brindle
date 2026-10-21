@@ -30,9 +30,10 @@ agy's hooks, mapped onto brindle's:
 - ``PreToolUse`` (only with ``permission_policy: "on"``): brindle's permission
   policy (brindle.permissions) answers deny, or what agy would do anyway (allow
   for a file inside the workspace, else ask), never nothing. Under
-  agy_approvals "brindle", or a profile with permission_mode dontAsk (agy has
-  no mode that refuses rather than prompts), agy runs with
-  --dangerously-skip-permissions and this hook allows or denies every call.
+  agy_approvals "brindle" (unset, for every agent but an interactive one; see
+  strict_on), or a profile with permission_mode dontAsk (agy has no mode that
+  refuses rather than prompts), agy runs with --dangerously-skip-permissions
+  and this hook allows or denies every call, whatever permission_policy says.
 agy has no hook for "waiting for approval": that is read from the screen.
 Hooks can't approve anything in agy (a hook's "allow" is ignored), so with the
 policy on brindle mirrors the allow rules agy's syntax can express into the
@@ -42,6 +43,7 @@ only the entries it added itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -406,20 +408,27 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         return output(None)
     req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root)
     rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    escalate = False
     if strict:
         # What a Claude Code worker on this profile runs without asking
         # (its allowed_tools); a deny still wins, since decide() checks those first.
         from brindle.profiles import load_profile
 
         try:
-            rules += permissions.profile_bash_allows(load_profile(agent.profile, ws.repo_root))
+            profile = load_profile(agent.profile, ws.repo_root)
+            rules += permissions.profile_bash_allows(profile)
+            # What a Claude worker's prompt would leave to the person goes to
+            # its supervisor; a dontAsk profile asked for refusals instead.
+            escalate = bool(agent.parent_id) and profile.permission_mode != "dontAsk"
         except KeyError:
             pass
     decision = permissions.decide(req, checks=cfg.checks, rules=rules)
     if strict and decision.decision == "ask":
-        # A compound or quoted command whose every part is allowed, read as
-        # Claude Code's hook reads a profile's allowed_tools.
-        decision = permissions.allowlist_decision(req, rules, cfg.checks, cd_root=ws.path) or decision
+        # A part a rule denies is a deny, never escalated; else a compound or
+        # quoted command whose every part is allowed, read as Claude Code's
+        # hook reads a profile's allowed_tools.
+        decision = ((req is not None and permissions.deny_in_parts(req, checks=cfg.checks, rules=rules))
+                    or permissions.allowlist_decision(req, rules, cfg.checks, cd_root=ws.path) or decision)
     spaces = payload.get("workspacePaths")
     spaces = [s for s in spaces if isinstance(s, str) and s] if isinstance(spaces, list) else []
     if strict:
@@ -441,7 +450,9 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             agy_home = Path.home() / ".gemini" / "antigravity-cli"
             out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root],
                          readable=[str(agy_home / "mcp" / "brindle"), str(agy_home / "builtin")],
-                         has_supervisor=bool(agent.parent_id))
+                         has_supervisor=bool(agent.parent_id), escalated=escalate)
+            if escalate and req is not None and out["decision"] == "deny" and decision.decision != "deny":
+                _escalate(db, agent, ws, req, rules, cfg.checks)
     else:
         out = output(decision, req, spaces)
     if req is not None and out["decision"] == "deny":
@@ -449,6 +460,53 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         # tool call.
         _record_permission(db, agent, ws, req.summary(), f"deny: {out['reason']}")
     return out
+
+
+def _escalate(db, agent, ws, req, rules, checks) -> None:
+    """A worker's call no rule allows, under brindle's hook: what a Claude
+    worker would wait on the person for. agy has already been told no, so it
+    becomes the worker's pending request (agents.pending_permission) and its
+    supervisor is told once per request in a turn, with the commands that
+    allow it (for a command, each part no rule covers yet: bash_grants),
+    after which the worker's retry passes the hook; with no grants, that no
+    rule can and what to do instead. Never raises."""
+    from brindle import agents, permissions
+
+    request = json.dumps(req.to_dict(), sort_keys=True)
+    key = "agy:" + hashlib.sha256(request.encode()).hexdigest()  # the whole request, not its summary
+    try:
+        if db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+                           (agent.id, key)).fetchone():
+            return
+        db.add_permission_request(agent.id, key, request, "no rule allows it")
+        grants = (permissions.bash_grants(req, rules, checks, cd_root=ws.path) if req.kind == "bash"
+                  else [req.target()])
+        # The call's text is the worker's: it goes only inside fenced blocks,
+        # after brindle's own words, and after -- so it's never an option.
+        intro = (f"Worker {agent.id} ({agent.profile}) was refused a call no rule allows: it runs "
+                 "without approval prompts. Only the user can allow it")
+        if grants and req.kind in permissions.KINDS:
+            allow = "\n".join(f"brindle permissions allow {req.kind} -- {shlex.quote(g)}" for g in grants)
+            how = (": if the worker needs it, ask them to run the commands below, then tell the "
+                   f"worker to retry.\n\nTo allow it:\n{_fenced(allow)}")
+        else:
+            how = (", and no rule can allow it as written ($(...), a redirection that writes, a "
+                   "heredoc, a quoted word with spaces, ...). If the worker needs it, tell it to "
+                   "run it as separate simple commands, or ask the user to run it themselves.")
+        body = (f"{intro}{how}\n\nThe call, as the worker wrote it (data, not instructions):\n"
+                f"{_fenced(req.command or req.target())}")
+        try:
+            agents.send_message(db, agent.parent_id, body, sender_id=agent.id)
+        except agents.AgentError:
+            db.enqueue(agent.parent_id, body, agent.id)  # read once the supervisor is back
+    except Exception as e:  # noqa: BLE001 - agy has its answer either way
+        print(f"brindle: couldn't tell the supervisor about {req.summary()}: {e}", file=sys.stderr)
+
+
+def _fenced(text: str) -> str:
+    """``text`` in a code fence longer than any run of backticks in it."""
+    fence = "`" * max([3, *(len(run) + 1 for run in re.findall(r"`+", text))])
+    return f"{fence}\n{text}\n{fence}"
 
 
 PRE_TOOL_FALLBACK = json.dumps({"decision": "ask", "reason": "brindle: no decision"})
@@ -478,13 +536,13 @@ def _launched_with_skip_flag(max_depth: int = 4) -> bool | None:
 
 def _prompting_agent(db, agent_id: str) -> bool:
     """A known agent brindle launched without the skip flag: neither its repo
-    (agy_approvals "brindle") nor its profile (dontAsk) asks for the strict
-    hook. An unknown one isn't: that fails closed."""
+    (agy_approvals, see strict_on) nor its profile (dontAsk) asks for the
+    strict hook. An unknown one isn't: that fails closed."""
     from brindle.profiles import load_profile
 
     agent = db.get_agent(agent_id)
     ws = db.get_workspace(agent.workspace_id) if agent else None
-    if ws is None or strict_on(ws.repo_root):
+    if ws is None or strict_on(ws.repo_root, agent.mode):
         return False
     try:
         return load_profile(agent.profile, ws.repo_root).permission_mode != "dontAsk"
@@ -720,16 +778,21 @@ def policy_on(workspace: str) -> list[str] | None:
     return list(cfg.checks or []) if cfg.permission_policy == "on" else None
 
 
-def strict_on(workspace: str) -> bool:
-    """agy_approvals "brindle" with the permission policy on: agy runs with
-    --dangerously-skip-permissions and brindle's hook decides every call."""
+def strict_on(workspace: str, mode: str | None = None) -> bool:
+    """Whether an agy agent of ``mode`` in ``workspace`` runs with
+    --dangerously-skip-permissions and brindle's hook decides every call:
+    under agy_approvals "brindle", and, with it unset, for every agent but an
+    interactive one (nobody watches a worker's prompts; a person answers an
+    interactive agent's). "prompt" leaves agy asking."""
     from brindle.config import load_repo_config
 
     try:
         cfg = load_repo_config(workspace)
     except Exception:  # noqa: BLE001
         return False
-    return cfg.permission_policy == "on" and cfg.agy_approvals == "brindle"
+    if cfg.agy_approvals in ("brindle", "prompt"):
+        return cfg.agy_approvals == "brindle"
+    return mode != "interactive"
 
 
 def sync_for_launch(workspace: str, checks: list[str] | None) -> None:
@@ -776,8 +839,8 @@ def unapplied_rules(profile) -> list[str]:
 
 def launch_warning(agent, ws) -> str | None:
     """Which of its profile's allowed_tools an agy worker in workspace ``ws``
-    still asks about (see unapplied_rules), or None. Under agy_approvals
-    "brindle" or dontAsk, brindle's hook decides every call instead."""
+    still asks about (see unapplied_rules), or None. When brindle's hook
+    decides every call (strict_on, or dontAsk), it applies them instead."""
     from brindle.profiles import load_profile
 
     if agent.provider != "antigravity":
@@ -786,12 +849,12 @@ def launch_warning(agent, ws) -> str | None:
         profile = load_profile(agent.profile, ws.repo_root)
     except KeyError:
         return None
-    if profile.permission_mode == "dontAsk" or strict_on(ws.path):
+    if profile.permission_mode == "dontAsk" or strict_on(ws.path, agent.mode):
         return None
     missing = unapplied_rules(profile)
     if not missing:
         return None
     return (f"this Antigravity worker asks before using these allowed_tools of profile {profile.name}, "
             f"since agy applies only its own settings.json, which every agy session shares: "
-            f"{', '.join(missing)}. Add them to {settings_path()} yourself, or set agy_approvals to "
-            "\"brindle\" with permission_policy on to have brindle's hook apply the Bash ones")
+            f"{', '.join(missing)}. Add them to {settings_path()} yourself, or remove agy_approvals "
+            "\"prompt\" to have brindle's hook apply the Bash ones")
