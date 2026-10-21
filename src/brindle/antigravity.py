@@ -710,6 +710,32 @@ def sync_permissions(repo_root: str | None = None, on: bool | None = None,
         return _apply(store, desired)
 
 
+def forget_agent(agent_id: str) -> None:
+    """Agent ``agent_id`` was removed: its profile's entries leave agy's
+    settings now. Never raises."""
+    from brindle import permissions
+
+    try:
+        if agent_id in permissions.load_store().agy_agents:
+            sync_permissions(agent=(agent_id, []))
+    except Exception as e:  # noqa: BLE001
+        print(f"brindle: couldn't update agy's permission settings: {e}", file=sys.stderr)
+
+
+def forget_ended_agents() -> list[str]:
+    """The sweep's step: take ended agy workers' profile entries out of agy's
+    settings, one line on what it did. Never raises."""
+    from brindle import permissions
+
+    try:
+        if not permissions.load_store().agy_agents:
+            return []
+        removed = sync_permissions()[1]
+    except Exception as e:  # noqa: BLE001
+        return [f"couldn't update agy's permission settings: {e}"]
+    return [f"removed {len(removed)} ended agy worker(s)' allow rule(s) from agy's settings"] if removed else []
+
+
 def _forget_ended_agents(store, keep: str | None) -> None:
     """agy's settings apply to every agy session, so a worker's profile
     entries leave the mirror once that worker has ended."""
@@ -778,7 +804,7 @@ def sync_for_launch(workspace: str, checks: list[str] | None, agent_id: str | No
             root = git.main_repo_root(workspace)
         except git.GitError:
             root = workspace
-        entries = permissions.mirror_profile_agy(profile)[0] if profile is not None else []
+        entries = profile_entries(profile, root)[0] if profile is not None else []
         store = permissions.load_store()
         if (checks is None and not entries and agent_id not in store.agy_agents and root not in store.agy_repos
                 and not (store.agy_managed and not store.agy_repos)):
@@ -794,7 +820,6 @@ def launch_warning(agent, ws) -> str | None:
     gets asked about (agy's allow list can't say them no wider than the
     profile does), or None. Under agy_approvals "brindle" or dontAsk
     brindle's hook decides every call instead."""
-    from brindle import permissions
     from brindle.profiles import load_profile
 
     if agent.provider != "antigravity":
@@ -805,8 +830,44 @@ def launch_warning(agent, ws) -> str | None:
         return None
     if profile.permission_mode == "dontAsk" or strict_on(ws.path):
         return None
-    left_out = permissions.mirror_profile_agy(profile)[1]
+    _, left_out, from_repo = profile_entries(profile, ws.repo_root)
     if not left_out:
         return None
+    why = ("it comes from this repo's .brindle/agents, and brindle copies only your own, the org's "
+           "and built-in profiles' rules into agy's settings, which every agy session reads"
+           if from_repo else "agy's allow list can't express them")
     return (f"this Antigravity worker still asks before using these allowed_tools of profile "
-            f"{profile.name}, which agy's allow list can't express: {', '.join(left_out)}")
+            f"{profile.name}, since {why}: {', '.join(left_out)}")
+
+
+def profile_entries(profile, repo_root: str | None) -> tuple[list[str], list[str], bool]:
+    """permissions.mirror_profile_agy for a profile brindle may copy into
+    agy's settings, which every agy session reads: a built-in, the user's own
+    or the org's. One read from (or built on) a repo's ``.brindle/agents``
+    isn't, as for a repo's checks: anyone who can commit there would allow
+    its commands everywhere. Then all its allowed_tools are left out, and
+    the third value is True."""
+    from brindle import permissions
+
+    entries, left_out = permissions.mirror_profile_agy(profile)
+    if entries and not _trusted(profile, repo_root):
+        return [], list(profile.allowed_tools or []), True
+    return entries, left_out, False
+
+
+def _trusted(profile, repo_root: str | None) -> bool:
+    """Whether ``profile`` and every profile it extends come from outside the repo."""
+    from brindle.config import user_profiles_dir
+    from brindle.profiles import MAX_EXTENDS_DEPTH, load_profile, profile_source
+
+    user = os.path.realpath(user_profiles_dir()) + os.sep
+    p = profile
+    for _ in range(MAX_EXTENDS_DEPTH + 1):
+        source = profile_source(p.name, repo_root) or ""
+        if not (source.startswith(("built-in profile ", "org profile "))
+                or os.path.realpath(source).startswith(user)):
+            return False
+        if not p.extends:
+            return True
+        p = load_profile(p.extends, repo_root)
+    return False

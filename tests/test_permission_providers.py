@@ -815,30 +815,43 @@ def test_agy_launch_mirrors_the_policy_and_the_profiles_allowed_tools(agy_settin
     from brindle.profiles import load_profile
     from brindle.providers import Antigravity, LaunchContext
 
+    from brindle.config import user_profiles_dir
+
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
-    agents_dir = os.path.join(ws.repo_root, ".brindle", "agents")
-    os.makedirs(agents_dir)
-    with open(os.path.join(agents_dir, "gem.md"), "w") as f:
-        f.write("---\nname: gem\nprovider: antigravity\nallowed_tools: Bash(uv run:*), Bash(pwd), WebFetch\n---\nhi\n")
-    worker(db, ws, provider="antigravity", id_="g1")
-    db.update_agent("g1", profile="gem")
-    ctx = LaunchContext("g1", load_profile("gem", ws.repo_root), "hi", cwd=ws.path)
-    Antigravity().command(ctx)
+    gem = "---\nname: gem\nprovider: antigravity\nallowed_tools: Bash(uv run:*), Bash(pwd), WebFetch\n---\nhi\n"
+    repo_agents = os.path.join(ws.repo_root, ".brindle", "agents")
+    for folder, name in ((str(user_profiles_dir()), "gem"), (repo_agents, "repo-gem")):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, f"{name}.md"), "w") as f:
+            f.write(gem)
+    for id_, name in (("g1", "gem"), ("g2", "gem"), ("g3", "repo-gem")):
+        worker(db, ws, provider="antigravity", id_=id_)
+        db.update_agent(id_, profile=name)
+    running = {"g1", "g2", "g3"}
+    monkeypatch.setattr(agents, "alive_or_starting", lambda a: a.id in running)
+
+    def launch(id_):
+        agent = db.get_agent(id_)
+        Antigravity().command(LaunchContext(id_, load_profile(agent.profile, ws.repo_root), "hi", cwd=ws.path))
+        return json.loads(agy_settings.read_text())["permissions"]["allow"] if agy_settings.exists() else None
+
+    # A repo's own profile could allow anything in every agy session: kept out, and said so.
+    assert launch("g3") is None
+    assert "comes from this repo's .brindle/agents" in antigravity.launch_warning(db.get_agent("g3"), ws)
     simple = "[A-Za-z0-9_\\-./:=@%+, ]"
     # The profile's shell rules and nothing wider, with the policy off.
-    assert json.loads(agy_settings.read_text())["permissions"]["allow"] == [
-        "command(regex:^uv run$)", f"command(regex:^uv run {simple}*$)", "command(regex:^pwd$)"]
-    assert antigravity.launch_warning(db.get_agent("g1"), ws).endswith("can't express: WebFetch")
+    assert launch("g1") == ["command(regex:^uv run$)", f"command(regex:^uv run {simple}*$)", "command(regex:^pwd$)"]
+    assert antigravity.launch_warning(db.get_agent("g1"), ws).endswith("can't express them: WebFetch")
     turn_on(ws)
-    Antigravity().command(ctx)
-    assert "command(regex:^git log$)" in json.loads(agy_settings.read_text())["permissions"]["allow"]
+    assert "command(regex:^git log$)" in launch("g2")
     set_local(ws.repo_root, "permission_policy", "off")
-    Antigravity().command(ctx)
-    assert "command(regex:^git log$)" not in json.loads(agy_settings.read_text())["permissions"]["allow"]
-    # Once the worker has ended, its entries leave agy's settings, which
-    # every agy session reads.
-    db.delete_agent("g1")
-    Antigravity().command(LaunchContext("g2", load_profile("reviewer-gemini"), "hi", cwd=ws.path))
+    assert "command(regex:^git log$)" not in launch("g2")
+    # Once both workers have ended (one removed, one found gone by the
+    # sweep), their entries leave agy's settings, which every agy session reads.
+    agents.forget_files(db.get_agent("g1"))
+    assert set(permissions.load_store().agy_agents) == {"g2"} and agy_settings.exists()
+    running.discard("g2")
+    assert antigravity.forget_ended_agents()
     assert not agy_settings.exists()
 
 

@@ -2157,10 +2157,13 @@ modes (`auto` to agy's Auto mode, `acceptEdits` to accept-edits, `plan` to plan;
 Its `allowed_tools` shell entries (`Bash(git status)`, `Bash(uv run:*)`) are added to
 `permissions.allow` in `~/.gemini/antigravity-cli/settings.json` while a worker on
 that profile runs, written no wider than the profile (a `:*` prefix takes only plain
-arguments: no quotes, `$`, `;` or pipes), and taken out once it has ended. agy's
-settings apply to every agy session, yours included, while they're there. Entries agy
-can't express (`WebFetch`, `Read`, a `*` mid-command) keep asking, and `assign` and
-`handoff` say which. To let agents run more without asking, add rules there
+arguments: no quotes, `$`, `;` or pipes), and taken out once it has ended (when brindle
+removes the agent, or at its next sweep). agy's settings apply to every agy session,
+yours included, while they're there, so this covers only built-in profiles, your own
+(`~/.brindle/agents/`) and your org's: a profile from a repo's `.brindle/agents/`, or
+one built on it, could allow anything, so its rules keep asking. So do entries agy
+can't express (`WebFetch`, `Read`, a `*` mid-command); `assign` and `handoff` say
+which. To let agents run more without asking, add rules there
 yourself, for example:
 
 ```json
