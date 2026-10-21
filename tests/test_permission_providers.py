@@ -425,6 +425,7 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert flag not in launch_argv(ws)  # workers unchanged
 
 
+@pytest.mark.variant("live incident #239: upgrading 0.4.1 to 0.4.2 left the old trust, and a Codex reviewer stopped at Hooks need review")
 def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatch):
     """#239: the trust on record was for the same command with another timeout
     (a build with the day-long hold), and the upgraded build's hook has the
