@@ -965,16 +965,30 @@ def _kb_source(db: DB, params: dict, ref: str) -> tuple[str, str, str]:
         raise ServiceError("not_found", f"no such source: {ref}", 404) from None
 
 
+_kb_syncing: dict[str, Job] = {}
+_kb_sync_lock = threading.Lock()
+
+
 def _kb_sync_job(kind: str, repo: str, source_id: str) -> Job:
+    """The source's indexing job; one already running for it is returned
+    instead of a second, so two indexers never overlap."""
     from brindle import codemap, kb
+
+    with _kb_sync_lock:
+        if source_id in _kb_syncing:
+            return _kb_syncing[source_id]
+        _kb_syncing[source_id] = job = Job(secrets.token_hex(8), kind)
 
     def work(db: DB, job: Job) -> Any:
         try:
             return kb.sync(db, source_id, codemap.graph_path(repo))
         except ValueError as e:
             raise ServiceError("invalid", str(e)) from None
+        finally:
+            with _kb_sync_lock:
+                _kb_syncing.pop(source_id, None)
 
-    return start_job(kind, work, source=source_id, repo_root=repo)
+    return start_job(kind, work, job=job, source=source_id, repo_root=repo)
 
 
 def add_kb_source(db: DB, params: dict, body: Body) -> Any:

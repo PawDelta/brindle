@@ -1209,7 +1209,7 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     assert not list(path.parent.glob("*.tmp"))
 
 
-def test_kb_sources_add_sync_and_remove_a_folder(db, repo, world, tmp_path):
+def test_kb_sources_add_sync_and_remove_a_folder(db, repo, world, tmp_path, monkeypatch):
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "a.md").write_text("# Alpha\n\nThe first note.\n")
@@ -1228,6 +1228,14 @@ def test_kb_sources_add_sync_and_remove_a_folder(db, repo, world, tmp_path):
     assert _send("GET", "/v1/kb/sources" + q)[1][0]["docs"] == 2
     done = {e["payload"]["job"]: e["payload"]["result"] for e in bus.tail(db, kinds=("job.done",))}
     assert done[synced["job"]]["indexed"] == 1 and added["job"] in done
+
+    queued = []                                     # a job still running: add and sync share it
+    monkeypatch.setattr(routes_actions, "_spawn", queued.append)
+    again = _send("POST", f"/v1/kb/sources/{source['id']}/sync" + q)[1]
+    assert _send("POST", f"/v1/kb/sources/{source['id']}/sync" + q)[1] == again
+    assert _send("POST", "/v1/kb/sources" + q, {"path": str(docs)})[1] == again and len(queued) == 1
+    queued[0]()
+    assert _send("POST", f"/v1/kb/sources/{source['id']}/sync" + q)[1] != again
 
     assert _send("DELETE", "/v1/kb/sources/nope" + q)[0] == 404
     assert _send("DELETE", f"/v1/kb/sources/{source['id']}" + q)[0] == 200
