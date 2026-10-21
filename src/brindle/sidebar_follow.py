@@ -240,10 +240,13 @@ def sidebar_follow(db: DB, session: str) -> None:
         if tmux.pane_window(sidebar) == window:
             _repaint(sidebar)
             return
-        if not tmux.session_attached(session):
-            home = tmux.pane_session(sidebar)
-            if home and home != session and tmux.session_attached(home):
-                return
+        # Never take it out of another session someone still looks at: the
+        # person's own switch-client leaves that session first, so it reads
+        # unattached by now. A second client (the app's, attached to a
+        # worker's session) changing windows must not pull it from their terminal.
+        home = tmux.pane_session(sidebar)
+        if home and home != session and tmux.session_attached(home):
+            return
         target_pane = tmux.agent_pane_in_window(window, sidebar)
         if not target_pane:
             return
