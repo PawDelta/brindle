@@ -262,23 +262,10 @@ def supervisor_provider(repo_root: str, provider: str | None = None) -> str | No
     the owner's ``supervisor_profile`` (then ``supervisor_fallbacks``, in
     order), the first that exists, the org's policy allows and can run here;
     None when none is set or none can (the supervisor profile's own then)."""
-    from brindle.config import load_repo_config
-    from brindle.profiles import ProfileError, load_profile
-    from brindle.providers import unusable
-    from brindle.service.routing import RoutingPolicy
-
     if provider:
         return provider
-    cfg = load_repo_config(repo_root)
-    policy = RoutingPolicy.load(repo_root)
-    for name in [cfg.supervisor_profile, *cfg.supervisor_fallbacks]:
-        try:
-            p = load_profile(name, repo_root) if name else None
-        except (KeyError, ProfileError):
-            continue
-        if p is not None and policy.refusal(p) is None and unusable(p.provider, p.env) is None:
-            return p.provider
-    return None
+    choice = agents.supervisor_choice(repo_root)
+    return choice.provider if choice else None
 
 
 def launch(db: DB, ws: Workspace, *, provider: str | None = None, prompt: str | None = None,

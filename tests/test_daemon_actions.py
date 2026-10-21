@@ -322,6 +322,7 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
 def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo, world, monkeypatch):
     from brindle import providers
     from brindle.daemon import routes_read
+    from brindle.profiles import load_profile
     from brindle.service import sessions as svc
 
     before = config._read_json(config.scope_paths(str(repo))["local"])
@@ -329,25 +330,55 @@ def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo
         "supervisor": {"model": "nope"}}})
     assert code == 400 and config._read_json(config.scope_paths(str(repo))["local"]) == before   # nothing written
 
+    agent_dir = repo / ".brindle" / "agents"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "chat-alt.md").write_text(
+        "---\nname: chat-alt\nextends: developer\nprovider: codex\nmodel: gpt-test\neffort: high\n---\nHi.\n")
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
-        "supervisor": {"model": "developer-codex", "fallbacks": ["developer-gemini", "supervisor"]},
-        "reviewer": {"model": "reviewer-codex", "fallbacks": ["reviewer-gemini", "reviewer"]}}})
+        "supervisor": {"model": "chat-alt", "fallbacks": ["developer-gemini", "supervisor"]},
+        "reviewer": {"model": "reviewer-opencode", "fallbacks": ["reviewer-codex", "reviewer-gemini"]}}})
     assert code == 200, reply
     cfg = config.load_repo_config(str(repo))
     kinds = routes_read._routing_kinds(db, cfg, str(repo))
     assert (kinds["supervisor"].model, kinds["supervisor"].fallbacks, kinds["supervisor"].locked) == (
-        "developer-codex", ["developer-gemini", "supervisor"], True)
-    assert kinds["reviewer"].fallbacks == ["reviewer-gemini", "reviewer"]
+        "chat-alt", ["developer-gemini", "supervisor"], True)
+    assert kinds["reviewer"].fallbacks == ["reviewer-codex", "reviewer-gemini"]
     # Written to the scope asked for only.
     assert "supervisor_profile" not in config._read_json(config.scope_paths(str(repo))["repo"])
 
-    # A new chat runs on the first of them that can run; a review uses the order too.
-    for dead, provider, reviewer in ([], "codex", "reviewer-codex"), (["codex"], "antigravity", "reviewer-gemini"):
-        monkeypatch.setattr(providers, "unusable", lambda p, env=None, dead=dead: "down" if p in dead else None)
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, agent, ws, **kw: launched.append(agent))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(svc, "preflight", lambda *a, **kw: [])
+    monkeypatch.setattr(svc, "cull_detached", lambda root: None)
+    monkeypatch.setattr("brindle.policy.check_assign",
+                        lambda cfg, root, name, *a: SimpleNamespace(allowed=name != "reviewer-codex", reason="no"))
+
+    def unusable(dead):
+        monkeypatch.setattr(providers, "unusable", lambda p, env=None: "down" if p in dead else None)
         monkeypatch.setattr(agents, "unusable", providers.unusable)
-        assert svc.supervisor_provider(str(repo)) == provider
-        assert agents._review_profile(db, world, None, cfg) == reviewer
-    assert svc.supervisor_provider(str(repo), "claude") == "claude"      # asked for by name: kept
+
+    # A new chat launches as the supervisor on the first choice that can run, with its model and effort.
+    unusable([])
+    svc.start(db, str(repo), autopilot=False)
+    chat = launched[-1]
+    got = agents._profile_for(db, chat, world)
+    assert (chat.profile, chat.provider, got.provider, got.model, got.effort) == (
+        "supervisor", "codex", "codex", "gpt-test", "high")
+    unusable(["codex"])                       # then the next in order: its own provider's defaults
+    svc.start(db, str(repo), autopilot=False)
+    assert (launched[-1].provider, agents._profile_for(db, launched[-1], world).model) == (
+        "antigravity", load_profile("developer-gemini", str(repo)).model)
+    svc.start(db, str(repo), provider="claude", autopilot=False)       # asked for by name: kept
+    assert agents._profile_for(db, launched[-1], world).model == load_profile("supervisor", str(repo)).model
+
+    # A review walks the pick and then the fallbacks: an unavailable provider and a policy denial are skipped.
+    unusable([])
+    assert agents._review_profile(db, world, None, cfg) == "reviewer-opencode"
+    unusable(["opencode"])
+    assert agents._review_profile(db, world, None, cfg) == "reviewer-gemini"
+    with pytest.raises(agents.AgentError, match="can't run"):       # asked for by name: no substitute
+        agents._review_profile(db, world, "reviewer-opencode", cfg)
 
 
 PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),
