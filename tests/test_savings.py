@@ -103,7 +103,7 @@ def test_the_shared_prior_flag_is_kept_and_counted(db, repo, boss, monkeypatch):
     asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
     install(monkeypatch, Picker(prefer="developer-codex"))          # an older server: no flag
     asyncio.run(mcp_server.assign(task="do B", branch="feat-b", weight="medium"))
-    install(monkeypatch, Picker(prefer="developer", prior=True))    # kept the default: not a pick
+    install(monkeypatch, Picker(prefer="developer-sonnet", prior=True))    # kept the default: not a pick
     asyncio.run(mcp_server.assign(task="do C", branch="feat-c", weight="medium"))
     assert [(d.learned, d.prior) for d in db.list_routing_decisions(str(repo))] == [
         (1, 1), (1, 0), (0, 0)]
@@ -138,7 +138,7 @@ def test_a_baseline_pick_is_recorded_too(db, repo, boss, monkeypatch):
     asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
     asyncio.run(mcp_server.assign(agent_profile="reviewer", task="do B", branch="feat-b"))
     a, b = db.list_routing_decisions(str(repo))
-    assert (a.baseline_profile, a.profile, a.learned, a.weight) == ("developer", "developer", 0, "medium")
+    assert (a.baseline_profile, a.profile, a.learned, a.weight) == ("developer-sonnet", "developer-sonnet", 0, "medium")
     assert (b.baseline_profile, b.profile, b.learned, b.weight) == ("reviewer", "reviewer", 0, None)
 
 

@@ -155,7 +155,7 @@ def test_queued_task_rerouted_when_ceiling_lowered_before_launch(db, repo, monke
     assert len(delegated) == 1
     # Profile must be rerouted to a medium profile, NOT developer-heavy!
     assert delegated[0] != "developer-heavy"
-    assert delegated[0] in ["developer", "developer-codex"]
+    assert delegated[0] in ["developer-sonnet", "developer", "developer-codex"]
     # Task metadata in DB should be updated
     updated_t = db.get_task(task.id)
     assert updated_t.profile == delegated[0]
