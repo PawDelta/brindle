@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 import brindle
-from brindle import procs
+from brindle import procs, upgrade
 from brindle.config import brindle_home
 
 HOST = "127.0.0.1"
@@ -260,6 +260,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     poller = start_poller()
     activity = Activity(build_app(token, port=info["port"], poller=poller))
     server = make_server(activity)
+    upgrade.on_stale_launch = lambda: setattr(server, "should_exit", True)
 
     async def run() -> None:
         watcher = asyncio.create_task(_watch(server, activity, idle_exit))
