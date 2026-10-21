@@ -141,10 +141,16 @@ class MilestoneDTO(_DTO):
     repo: str | None = None
     checked_at: float | None = None
     output: str | None = None
+    state: str | None = None       # passed | not_done | regressed | failed (couldn't run); None: never checked
+    state_why: str | None = None
+    label: str | None = None       # plain words for state: "not done yet", "regressed", "couldn't run: <why>"
+    phase: str = "in_progress"     # done | in_review | in_progress (autopilot.milestone_phases)
 
     @classmethod
-    def from_row(cls, m: Milestone) -> MilestoneDTO:
-        return cls.model_validate(vars(m))
+    def from_row(cls, m: Milestone, phase: str = "in_progress") -> MilestoneDTO:
+        from brindle.autopilot import state_text
+
+        return cls.model_validate({**vars(m), "label": state_text(m), "phase": phase})
 
 
 class GoalDTO(_DTO):
@@ -159,11 +165,14 @@ class GoalDTO(_DTO):
     milestones: list[MilestoneDTO] = []
 
     @classmethod
-    def from_autopilot(cls, ap: Autopilot, milestones: list[Milestone]) -> GoalDTO:
+    def from_autopilot(cls, ap: Autopilot, milestones: list[Milestone],
+                       phases: dict[int, str] | None = None) -> GoalDTO:
+        phases = phases or {}
         return cls(root_id=ap.root_id, enabled=bool(ap.enabled), goal=ap.goal, detail=ap.detail,
                    state=ap.state, note=ap.note, progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,
-                   milestones=[MilestoneDTO.from_row(m) for m in milestones])
+                   milestones=[MilestoneDTO.from_row(m, phases.get(m.id, "in_progress"))
+                               for m in milestones])
 
 
 class DecisionDTO(_DTO):
