@@ -362,13 +362,14 @@ def provider_preflight(db: DB, request: Request) -> Any:
 
 @_json
 def providers_installed(db: DB, request: Request) -> Any:
-    """Per provider CLI: whether brindle installed it (``state`` "brindle",
-    version, its config home), runs the person's own copy ("mine", path and
-    version) or finds none ("missing"), and ``update``: the latest version
-    known and whether it is newer. ``?check=1`` asks each maker's source now."""
+    """Each provider CLI as a terminal would find it (PATH, then the makers'
+    standard places): ``state`` "installed", "missing" or "off" (turned off
+    in brindle), the path brindle runs and its version, whether it is signed
+    in where that is cheap to know (else null), every install found, and
+    brindle's config home for it (null for Antigravity, which shares ~/.gemini)."""
     from brindle import providers_install
 
-    return providers_install.statuses(check=request.query_params.get("check") in ("1", "true"))
+    return providers_install.statuses()
 
 
 @_json

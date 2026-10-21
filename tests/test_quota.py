@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from brindle import providers_install, quota
+from brindle import quota
 from brindle.config import RepoConfig
 
 
@@ -128,7 +128,4 @@ def test_auth_and_token_files_are_never_read(tmp_path, monkeypatch):
     quota.refresh_codex()
     assert opened
     assert not [p for p in opened if "auth" in os.path.basename(p) or "token" in os.path.basename(p)]
-    # brindle's own install record says which CODEX_HOME its Codex uses (providers_install).
-    install_state = str(providers_install.root() / "codex" / "state.json")
-    assert all(p.endswith(".jsonl") or os.path.basename(p).startswith("quota.json") or p == install_state
-               for p in opened)
+    assert all(p.endswith(".jsonl") or os.path.basename(p).startswith("quota.json") for p in opened)

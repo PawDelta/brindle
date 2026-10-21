@@ -201,36 +201,34 @@ def _permission_hook_timeout(cwd: str | None) -> int:
 
 
 def claude_binary() -> str:
-    """BRINDLE_CLAUDE_BIN, else the copy brindle installed or the person
-    pinned (providers_install), else `claude` on PATH."""
+    """BRINDLE_CLAUDE_BIN, else the install picked in the app, else `claude`
+    on PATH, else one in the maker's standard places (providers_install)."""
     from brindle import providers_install
 
-    return os.environ.get("BRINDLE_CLAUDE_BIN") or providers_install.binary("claude") or "claude"
-
-
-def _install_home(provider: str) -> str | None:
-    from brindle import providers_install
-
-    return providers_install.config_home(provider)
+    explicit = os.environ.get("BRINDLE_CLAUDE_BIN") or providers_install.selected("claude")
+    if explicit:
+        return explicit
+    return "claude" if which_cli("claude") else providers_install.found("claude") or "claude"
 
 
 def claude_config_dir() -> str:
-    """Where the Claude Code brindle runs keeps its settings and sessions:
-    brindle's own copy's config home, else ``$CLAUDE_CONFIG_DIR``, else ~/.claude."""
-    return _install_home("claude") or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    """The config home brindle runs Claude Code with (provider_homes)."""
+    from brindle import provider_homes
+
+    return str(provider_homes.home("claude"))
 
 
 def codex_home() -> str:
-    """The Codex brindle runs's ``CODEX_HOME``: brindle's own copy's, else the environment's, else ~/.codex."""
-    return _install_home("codex") or os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")
+    """The ``CODEX_HOME`` brindle runs Codex with (provider_homes)."""
+    from brindle import provider_homes
+
+    return str(provider_homes.home("codex"))
 
 
 def claude_global_config() -> str:
     """Claude Code's global state file, where it records trusted folders:
-    ``<config dir>/.claude.json`` when the config dir is moved (brindle's own
-    copy, or ``$CLAUDE_CONFIG_DIR``), else ``~/.claude.json``."""
-    config = _install_home("claude") or os.environ.get("CLAUDE_CONFIG_DIR")
-    return os.path.join(config, ".claude.json") if config else os.path.expanduser("~/.claude.json")
+    ``.claude.json`` in brindle's config home for it (CLAUDE_CONFIG_DIR)."""
+    return os.path.join(claude_config_dir(), ".claude.json")
 
 
 def trust_folder(path: str) -> bool:
@@ -973,14 +971,14 @@ def which_cli(name: str) -> str | None:
 
 
 def codex_binary() -> str:
-    """BRINDLE_CODEX_BIN, else the copy brindle installed or the person pinned
-    (providers_install), else `codex` on PATH, else the ChatGPT app's copy."""
+    """BRINDLE_CODEX_BIN, else the install picked in the app, else `codex` on
+    PATH, else one in the maker's standard places or the ChatGPT app's copy."""
     from brindle import providers_install
 
-    explicit = os.environ.get("BRINDLE_CODEX_BIN") or providers_install.binary("codex")
+    explicit = os.environ.get("BRINDLE_CODEX_BIN")
     if explicit:
         return explicit
-    return which_cli("codex") or (CODEX_BUNDLED if os.path.exists(CODEX_BUNDLED) else "codex")
+    return providers_install.found("codex") or "codex"
 
 
 
@@ -1047,7 +1045,10 @@ def subscription_login(provider: str = "claude") -> bool:
     provider's environment credentials left out so a key can't stand in for it."""
     if provider != "claude":
         return False
-    env = {k: v for k, v in os.environ.items() if k not in _ENV_AUTH["claude"]}
+    from brindle import provider_homes
+
+    env = {**{k: v for k, v in os.environ.items() if k not in _ENV_AUTH["claude"]},
+           **provider_homes.launch_env("claude")}
     res = _auth_probe([claude_binary(), "auth", "status"], env)
     if not res:
         return False
@@ -1361,14 +1362,13 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     CLI opens on its login screen, and the prompt brindle types in lands there.
     ``env`` is a profile's ``env.NAME: value`` lines: the agent runs with them
     over brindle's own environment, so a key set there counts, and the probe
-    sees them too, over brindle's own copy's config home (providers_install)."""
-    from brindle import providers_install
+    sees them too, as it sees brindle's config home for the CLI (provider_homes)."""
+    from brindle import provider_homes
 
-    installed = providers_install.launch_env(provider)
-    full_env = {**os.environ, **installed, **(env or {})} if env or installed else os.environ
+    full_env = {**os.environ, **provider_homes.launch_env(provider), **(env or {})}
     if any(full_env.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
-    key = _signed_in_key(provider, {**installed, **(env or {})} or None)   # each copy's login its own
+    key = _signed_in_key(provider, env)
     seen = _SIGNED_IN.get(key)
     inv = _last_invalidated(provider)
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
@@ -1432,8 +1432,10 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
     ``env`` is a profile's own environment, as for signed_out."""
     import shutil
 
-    from brindle import antigravity, opencode
+    from brindle import antigravity, opencode, providers_install
 
+    if providers_install.turned_off(provider):
+        return f"{provider} is turned off in brindle"
     binary = {"claude": claude_binary, "codex": codex_binary,
               "antigravity": antigravity.binary, "opencode": opencode.binary}.get(provider)
     if binary:
@@ -1776,15 +1778,12 @@ class OpenCode(Provider):
         return opencode.can_resume(session_id)
 
     def command(self, ctx: LaunchContext) -> list[str]:
-        from brindle import opencode, providers_install
+        from brindle import opencode
 
         # OpenCode takes brindle's MCP server, plugin, instructions and
         # permissions from the environment (see brindle.opencode), and
         # merges them over the person's own config.
-        config = opencode.config(ctx)
-        if providers_install.brindle_copy("opencode"):      # brindle's own copy updates only through brindle
-            config["autoupdate"] = False
-        argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(config)]
+        argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(opencode.config(ctx))]
         from brindle.codex_hook import policy_on
 
         if policy_on(ctx.cwd):   # the plugin asks brindle before each tool call

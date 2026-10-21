@@ -106,16 +106,14 @@ class AntigravityError(RuntimeError):
 
 
 def binary() -> str:
-    """BRINDLE_AGY_BIN, else the copy brindle installed or the person pinned
-    (providers_install), else `agy` on PATH, else where Google's installer puts it."""
-    from brindle import providers_install
-
-    explicit = os.environ.get("BRINDLE_AGY_BIN") or providers_install.binary("antigravity")
+    """BRINDLE_AGY_BIN, else the install picked in the app, else `agy` on PATH,
+    else one in the maker's standard places (providers_install)."""
+    explicit = os.environ.get("BRINDLE_AGY_BIN")
     if explicit:
         return explicit
-    from brindle.providers import which_cli
+    from brindle import providers_install
 
-    return which_cli("agy") or (BUNDLED if os.path.exists(BUNDLED) else "agy")
+    return providers_install.found("antigravity") or "agy"
 
 
 def tool_names() -> list[str]:

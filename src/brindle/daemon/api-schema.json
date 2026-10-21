@@ -2877,10 +2877,6 @@
     },
     {
       "method": "POST",
-      "path": "/v1/providers/{provider}/update"
-    },
-    {
-      "method": "POST",
       "path": "/v1/providers/{provider}/use-mine"
     },
     {
