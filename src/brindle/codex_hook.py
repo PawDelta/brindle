@@ -154,13 +154,22 @@ def policy_on(cwd: str | None) -> bool:
         return False
 
 
-def launch_flags(cwd: str | None) -> list[str]:
+def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
     """The flags a Codex agent in ``cwd`` launches with: brindle's hook when the
-    repo's policy is on and the person trusted the hook; else none."""
+    repo's policy is on and the person trusted the hook; else none. A reviewer
+    gets it with the policy off too (nobody watches its prompts; the hook only
+    allows what its allowed_tools cover, #241), but only a hook trusted
+    already: with the policy off brindle never trusts a NEW one itself, and a
+    REMOVED trust stays removed."""
     try:
         if not policy_on(cwd):
-            return []
-        command = hook_command()
+            if not review:
+                return []
+            command = hook_command()
+            if status(command) not in (TRUSTED, MOVED):
+                return []
+        else:
+            command = hook_command()
         return config_flags(command) if ensure(command=command) == TRUSTED else []
     except Exception:  # noqa: BLE001 - never stop a launch over this
         return []
