@@ -178,20 +178,18 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
 
 def test_need_user_question_holds_until_answered(db, root, monkeypatch):
     # A question holds only the work that depends on it: an unrelated user
-    # message doesn't cancel it, and the supervisor is reminded once per step.
+    # message doesn't cancel it, and autopilot doesn't nudge while it's open.
+    # (#209) Anything that woke the chat without brindle's tag (a watcher's
+    # event on a log) re-armed a reminder of it: one every ~2 s, for hours.
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
     autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    assert autopilot.on_stop(db, agent, {}) is None
-    autopilot.user_spoke(db, agent)
+    for _ in range(3):
+        agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "queue: epoch 3 done"})
+        assert agents.handle_hook(db, "boss", "stop", {}) is None
     assert db.get_autopilot("boss").state == "blocked"
-    out = autopilot.on_stop(db, agent, {})
-    assert out and out["decision"] == "block"
-    assert "Waiting on the user for: Postgres or SQLite?" in out["reason"]
-    assert autopilot.on_stop(db, agent, {}) is None
     db.bump_progress("boss")
-    assert autopilot.on_stop(db, agent, {}) is not None
     assert autopilot.on_stop(db, agent, {}) is None
     autopilot.answered(db, "boss")
     ap = db.get_autopilot("boss")
@@ -491,19 +489,17 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch)
     agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "SQLite"})
     assert db.get_autopilot("boss").state == "running"
 
-    # Live incident: the reminder of an open question went out through the
-    # inbox, its prompt-submit counted as the user speaking, and that re-armed
-    # the reminder about once a minute. Wrapped, or as the unread-mail
-    # reminder (never recorded as delivered), it must not re-arm either.
+    # brindle's own reminders arrive as prompts too, wrapped (the inbox) or
+    # never recorded as delivered (the unread-mail one): none is the user
+    # telling a stalled autopilot to drive again.
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    autopilot.user_spoke(db, agent)
     sent = agents._stop_decision(db, agent, {}, via_inbox=True)
     assert sent
-    for prompt in (sent["reason"], f"<message>{sent['reason']}</message>",
+    db.update_autopilot("boss", state="stalled")
+    for prompt in (f"<message>{sent['reason']}</message>",
                    "[brindle autopilot] You have unread messages. Call read_messages before you stop."):
         agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
-        assert autopilot.on_stop(db, agent, {}) is None
+        assert db.get_autopilot("boss").state == "stalled"
 
 
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
