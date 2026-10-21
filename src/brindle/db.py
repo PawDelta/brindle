@@ -8,6 +8,7 @@ transaction.
 from __future__ import annotations
 
 import re
+import signal
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -689,7 +690,10 @@ class Milestone:
 
 
 _EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
-_SIGNALS = {134: 6, 137: 9, 139: 11}   # exit codes a shell reports for SIGABRT, SIGKILL, SIGSEGV
+# Exit codes (128 + n) a shell reports for a process that died of a crash signal.
+_SIGNALS = {128 + int(getattr(signal, name)): int(getattr(signal, name))
+            for name in ("SIGILL", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGSEGV", "SIGSYS")
+            if hasattr(signal, name)}
 
 
 def check_state(passed: bool, output: str, had_passed: bool) -> tuple[str, str | None]:

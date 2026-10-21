@@ -266,6 +266,22 @@ def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, 
     autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
     assert [(m.state, m.state_why) for m in db.milestones("boss")] == [
         ("failed", "checkout missing"), ("not_done", None)]
+    # Checking only milestone 2 rechecks a passed milestone whose checkout is gone.
+    db.record_check(db.milestones("boss")[0].id, True, "ok", None)
+    autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
+    assert db.milestones("boss")[0].state == "failed"
+
+
+def test_shell_reported_crash_signal_is_couldnt_run(monkeypatch):
+    import signal
+
+    from brindle.db import check_state
+
+    fake = SimpleNamespace(stdout="", stderr="Floating point exception (core dumped)",
+                           returncode=128 + signal.SIGFPE)
+    monkeypatch.setattr(autopilot.subprocess, "run", lambda *a, **k: fake)
+    ok, out = autopilot.run_check("c", ".", {}, 5)
+    assert check_state(ok, out, False) == ("failed", f"crashed: killed by signal {signal.SIGFPE}")
 
 
 def test_old_milestone_rows_get_a_state(db, root):

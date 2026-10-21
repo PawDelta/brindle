@@ -1321,7 +1321,10 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     regressed: list[Milestone] = []
     if position is not None and len(ms) > 1:
         def moved(m: Milestone) -> bool:
-            at = site(m.repo)
+            try:
+                at = site(m.repo)
+            except Exception:
+                return True   # run() records why the checkout can't be used
             sha = at[2] if not isinstance(at, str) else None
             return sha is None or m.checked_sha != sha
 
