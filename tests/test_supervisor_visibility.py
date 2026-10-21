@@ -3,7 +3,7 @@ import os
 import time
 from types import SimpleNamespace
 
-from brindle import git, mcp_server
+from brindle import git, mcp_server, tmux
 from brindle.db import Agent, Workspace
 
 
@@ -76,3 +76,9 @@ def test_list_agents_marks_stale_progress(db, tmp_path, monkeypatch):
     assert mcp_server.list_agents().count("no progress for 5 min") == 1
     monkeypatch.setattr("brindle.tmux.window_activity", lambda *a, **k: None)
     assert "no progress" not in mcp_server.list_agents()
+
+    def timeout(*a, **k):
+        raise tmux.TmuxTimeout("unresponsive server")
+    monkeypatch.setattr(tmux, "window_activity", timeout)
+    out = mcp_server.list_agents()
+    assert len(out.splitlines()) == 5 and "shell dev/shell unknown" in out and "no progress" not in out

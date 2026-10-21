@@ -244,7 +244,10 @@ def _stall_indicator(db: DB, a: Agent) -> str:
             continue  # a transcript may disappear during cleanup
         last = max(last or modified, modified)
     if last is None and a.tmux_window and not a.headless:
-        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        try:
+            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        except tmux.TmuxError:
+            pass  # an unavailable server is not evidence of a stalled worker
     if last is None:
         return ""
     # A resumed turn gets its own grace period even before its first output.
