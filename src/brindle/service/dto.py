@@ -125,6 +125,7 @@ class InboxItemDTO(_DTO):
     root_id: str | None = None     # the agent's session: with agent_id, where the app links to
     detail: str | None = None
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
+    fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
 

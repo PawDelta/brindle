@@ -46,6 +46,11 @@ def _login(db, root, worker, mp):
     db.set_login_state(root, state="auth_paused", refresh_cmd="aws sso login")
 
 
+def _hook_trust_removed(db, root, worker, mp):
+    from brindle import codex_hook
+    mp.setattr(codex_hook, "status", lambda command=None: codex_hook.REMOVED)
+
+
 def _notice(db, root, worker, mp):
     org_status.save(org_status.Saved(org_id="org1", status=org_status.Status(
         notices=[{"id": "n1", "text": "maintenance tonight", "from_role": "admin",
@@ -63,6 +68,7 @@ def _notice(db, root, worker, mp):
     ("proposed_checks", _checks, [("r1", "pytest -q")]),
     ("proposed_checks", _locked_checks, []),
     ("login", _login, [("r1", "aws sso login")]),
+    ("setup", _hook_trust_removed, [(None, None)]),
     ("org_notice", _notice, [(None, "admin")]),
 ])
 def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, kind, setup, expected):
@@ -78,6 +84,7 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, kind, setup, expec
     # Each agent's item links into its session; a sign-in carries the login the app can start.
     assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")
+    assert all((i.fix, i.action.path) == ("codex_hook_trust", "/v1/setup/codex-hook") for i in got if kind == "setup")
 
 
 PROMPT = """ Bash command

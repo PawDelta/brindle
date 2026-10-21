@@ -105,6 +105,22 @@ def _org_notices() -> list[InboxItemDTO]:
             for n in notices]
 
 
+def _setup_items() -> list[InboxItemDTO]:
+    """Setup problems the app can repair itself (a ``fix`` names the repair)."""
+    from brindle import codex_hook
+
+    try:
+        state = codex_hook.status()
+    except Exception:  # noqa: BLE001 - an extra: never break the inbox
+        return []
+    if state not in (codex_hook.REMOVED, codex_hook.MOVED):
+        return []
+    why = "was removed from" if state == codex_hook.REMOVED else "changed in"
+    return [InboxItemDTO(kind="setup", fix="codex_hook_trust",
+                         reason=f"Codex's trust of brindle's permission hook {why} Codex's config",
+                         action=InboxActionDTO(method="POST", path="/v1/setup/codex-hook"))]
+
+
 def _sign_in(provider: str) -> InboxActionDTO | None:
     """The provider CLI's own sign-in the app can start (routes_actions.provider_login)."""
     from brindle.pro.team_policy import CLI_NAMES
@@ -158,7 +174,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    return out + _org_notices()
+    return out + _setup_items() + _org_notices()
 
 
 # -- permission requests ---------------------------------------------------------------------
