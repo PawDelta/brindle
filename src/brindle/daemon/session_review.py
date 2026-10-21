@@ -148,13 +148,19 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
     pr = db.conn.execute("SELECT url, merged_at FROM session_prs WHERE root_id = ? AND url IS NOT NULL"
                          " ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
+    # Brindle's own decision that the goal is reached (the audit approved it, or
+    # goal_audit is off): passing milestones alone aren't it.
+    reached = ap is not None and ap.state == "done"
     if pr:
-        reached = ap is not None and (ap.state == "done" or bool(ms) and all(m.status == "passed" for m in ms))
         return ("done" if pr["merged_at"] and reached else "pr_open"), pr["url"]
-    if ap is not None and (ap.state == "done" or ms and all(m.status == "passed" for m in ms)):
+    if ap is not None and (reached or ms and all(m.status == "passed" for m in ms)):
         try:
-            if not reasons(db, *session(db, root_id)):
+            root, ws = session(db, root_id)
+            if not reasons(db, root, ws):
                 return "ready_for_pr", None
+            # Without a PR flow (no auto-PR) a reached goal with nothing to open a PR for is done.
+            if reached and not auto_pr(ws.repo_root):
+                return "done", None
         except (ServiceError, git.GitError, workspaces.WorkspaceError):
             pass
     return ("in_review" if "in_review" in autopilot.milestone_phases(db, root_id).values()
@@ -176,9 +182,11 @@ def poll_merged(db: DB) -> None:
         root = db.get_agent(row["root_id"])
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is not None and workspaces.pull_request_merged(row["url"], ws.repo_root):
-            db.conn.execute("UPDATE session_prs SET merged_at = ? WHERE root_id = ? AND branch = ?",
-                            (time.time(), row["root_id"], row["branch"]))
-            bus.publish_agent(db, "session.pr_merged", row["root_id"], url=row["url"])
+            # Only the PR that was asked about: a replacement recorded meanwhile has its own state.
+            if db.conn.execute("UPDATE session_prs SET merged_at = ? WHERE root_id = ? AND branch = ?"
+                               " AND url = ?", (time.time(), row["root_id"], row["branch"],
+                                                row["url"])).rowcount:
+                bus.publish_agent(db, "session.pr_merged", row["root_id"], url=row["url"])
 
 
 def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
