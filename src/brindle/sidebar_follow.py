@@ -196,6 +196,21 @@ def rescue_sidebar(db: DB, ws: Workspace) -> None:
         pass
 
 
+def _home_session(db: DB, root_id: str, sidebar: str) -> str | None:
+    """The brindle session whose agent window ``sidebar`` sits in. Not
+    ``tmux.pane_session``: a window the app linked into its own
+    ``brindle-view-*`` session reports that one, and that session being
+    attached says nothing about the person's terminal on the brindle session."""
+    window = tmux.pane_window(sidebar)
+    for agent in db.list_agents():
+        if (window and agent.tmux_window and root_of(db, agent.id) == root_id
+                and tmux.pane_window(agent.tmux_window) == window):
+            ws = db.get_workspace(agent.workspace_id)
+            if ws is not None:
+                return ws.tmux_session
+    return tmux.pane_session(sidebar)
+
+
 def rescue_sidebar_from_window(db: DB, agent: Agent) -> None:
     """Call before ``agent``'s tmux window is killed: if its root's sidebar is
     a pane in that window, move it back to the root's own session first.
@@ -211,7 +226,7 @@ def rescue_sidebar_from_window(db: DB, agent: Agent) -> None:
         sidebar = db.get_sidebar_pane(root_id)
         if (_valid_sidebar(sidebar, root_id)
                 and tmux.pane_window(sidebar) == tmux.pane_window(agent.tmux_window)
-                and tmux.pane_session(sidebar) != root_ws.tmux_session):
+                and _home_session(db, root_id, sidebar) != root_ws.tmux_session):
             bring_sidebar(db, root_id, root_ws.tmux_session)
     except Exception:  # noqa: BLE001 - cleanup must not fail because of the sidebar
         pass
@@ -265,7 +280,7 @@ def sidebar_follow(db: DB, session: str) -> None:
         # person's own switch-client leaves that session first, so it reads
         # unattached by now. A second client (the app's, attached to a
         # worker's session) changing windows must not pull it from their terminal.
-        home = tmux.pane_session(sidebar)
+        home = _home_session(db, root_id, sidebar)
         if home and home != session and tmux.session_attached(home):
             return
         target_pane = tmux.agent_pane_in_window(window, sidebar)
