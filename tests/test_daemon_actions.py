@@ -1209,6 +1209,24 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     assert not list(path.parent.glob("*.tmp"))
 
 
+def test_set_user_overlapping_writes_keep_both_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path))
+    monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+    real_replace, second = os.replace, threading.Thread(target=config.set_user, args=("b", 2))
+
+    def replace(src, dst):
+        if not second.is_alive() and second.ident is None:
+            second.start()
+            second.join(0.3)        # a second writer arriving mid-write
+        real_replace(src, dst)
+
+    monkeypatch.setattr(config.os, "replace", replace)
+    config.set_user("a", 1)
+    second.join()
+    assert json.loads((tmp_path / "config.json").read_text()) == {"a": 1, "b": 2}
+    assert [p.name for p in tmp_path.iterdir()] == ["config.json"]
+
+
 @pytest.mark.parametrize("fails", [False, True], ids=["done", "failed"])
 def test_setup_codex_hook_trusts_it_in_the_background(db, world, monkeypatch, tmp_path, fails):
     from brindle import codex_hook

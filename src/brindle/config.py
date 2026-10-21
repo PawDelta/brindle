@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -408,6 +410,9 @@ def claude_permission_mode() -> str:
     return mode if isinstance(mode, str) and mode else "default"
 
 
+_USER_WRITE = threading.Lock()
+
+
 def set_user(key: str, value: object) -> Path:
     """Set one key in ``~/.brindle/config.json`` (other keys are kept)."""
     path = user_config_path()
@@ -416,11 +421,18 @@ def set_user(key: str, value: object) -> Path:
         print("brindle: running as an agent, so ~/.brindle/config.json was not changed", file=sys.stderr)
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = _read_json(path)
-    data[key] = value
-    tmp = path.with_name(path.name + ".tmp")   # replace, so a reader never sees half a file
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    with _USER_WRITE:   # daemon actions run in threads: one read-modify-replace at a time
+        data = _read_json(path)
+        data[key] = value
+        # A unique temp file replaced into place, so a reader never sees half a file.
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
     _sync_setting(key)
     return path
 
