@@ -57,7 +57,9 @@ class CodexHookError(RuntimeError):
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    from brindle import providers
+
+    return Path(providers.codex_home())
 
 
 def _stable_invocation() -> list[str]:

@@ -688,6 +688,9 @@ When a workspace is created (including from the pool), brindle starts one contai
 
 ### Routing by weight
 
+For a walkthrough of agents, routing, rules and org limits, see
+[Agents and routing](docs/agents-and-routing.md).
+
 The supervisor sizes a task and passes `weight` (`"light"`, `"medium"`,
 `"heavy"` or `"advanced"`, with `"reasoning"` and `"complex"` accepted as aliases) to
 `assign`/`handoff`; brindle picks an available profile for that tier.

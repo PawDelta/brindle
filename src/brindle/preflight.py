@@ -46,7 +46,7 @@ class Action:
 
 @dataclass(frozen=True)
 class Item:
-    kind: str           # signin | key | trust | consent | setup
+    kind: str           # signin | key | trust | consent | setup | off (turned off in brindle)
     id: str             # stable, e.g. "claude.onboarding": what a consent names when recorded
     provider: str
     title: str
@@ -115,6 +115,19 @@ def _binary(provider: str) -> str:
             "antigravity": antigravity.binary, "opencode": opencode.binary}[provider]()
 
 
+def turned_off(provider: str) -> Item | None:
+    """The item that stops every launch on ``provider`` while the person has
+    it turned off in brindle (DELETE /v1/providers/{provider}), or None."""
+    from brindle import doctor, providers_install
+
+    if provider not in providers_install.PROVIDERS or not providers_install.turned_off(provider):
+        return None
+    name = doctor.CLI_INSTALL[provider][0]
+    return Item("off", f"{provider}.off", provider, f"Turn {name} back on",
+                f"{name} is turned off in brindle, so nothing runs on it: pick an install of it "
+                "(or install it) in brindle's provider settings to turn it back on")
+
+
 def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | None = None,
           signed_in: bool = False, profile=None, launch: dict[str, str] | None = None) -> list[Item]:
     """What would stop a session on ``provider`` in ``repo_root`` before its
@@ -130,6 +143,9 @@ def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | 
         raise ValueError(f"provider must be one of {', '.join(PROVIDERS)}")
     if provider == "native":
         return _native(repo_root, profile)
+    off = turned_off(provider)
+    if off:
+        return [off]
     items = []
     if not shutil.which("tmux"):
         items.append(Item("setup", "tmux", provider, "Install tmux",

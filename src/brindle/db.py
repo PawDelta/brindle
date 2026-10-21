@@ -74,7 +74,8 @@ CREATE TABLE IF NOT EXISTS agents (
     hooks_off TEXT,                -- why its CLI runs none of brindle's hooks, shown on its sidebar row (agents.screen_status)
     reviewing_since REAL,          -- when its last report put its branch in review (pipeline.on_report)
     review_restarted REAL,         -- the wait in review whose dead check run was started again (pipeline.restart_review)
-    merge_failed TEXT              -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    merge_failed TEXT,             -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    config_home TEXT               -- the CLI config home it runs with, decided once at spawn (provider_homes): '' the person's own
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -627,6 +628,7 @@ class Agent:
     reviewing_since: float | None = None   # when its last report put its branch in review (pipeline.on_report)
     review_restarted: float | None = None  # the wait in review whose review was started again (pipeline.restart_review)
     merge_failed: str | None = None        # why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    config_home: str | None = None         # its CLI's config home, decided once at spawn (provider_homes); '' the person's own
 
 
 @dataclass
@@ -902,7 +904,7 @@ class DB:
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
-                          ("merge_failed", "TEXT"), ("plan_text", "TEXT")):
+                          ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
@@ -1224,13 +1226,13 @@ class DB:
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
                 "headless, transcript_path, done_when, inbox_socket, inbox_token, review_sha, "
-                "tmux_server) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "tmux_server, config_home) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
                  a.status_since or a.created_at, a.task, a.session_ref, a.headless,
                  a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha,
-                 a.tmux_server),
+                 a.tmux_server, a.config_home),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:

@@ -3028,8 +3028,20 @@
       "path": "/v1/profiles/{name}"
     },
     {
+      "method": "GET",
+      "path": "/v1/providers/installed"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/providers/{provider}"
+    },
+    {
       "method": "POST",
       "path": "/v1/providers/{provider}/consent"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/install"
     },
     {
       "method": "POST",
@@ -3042,6 +3054,10 @@
     {
       "method": "POST",
       "path": "/v1/providers/{provider}/trust"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/use-mine"
     },
     {
       "method": "GET",

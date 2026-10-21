@@ -66,6 +66,18 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _home_env(provider: str | None, login: bool = False) -> dict[str, str] | None:
+    """The full environment for a provider CLI's status check (the config
+    home its agents run with) or, ``login``, its sign-in (brindle's own home,
+    which brindle uses from then on); None: inherit."""
+    if provider is None:
+        return None
+    from brindle import provider_homes
+
+    extra = (provider_homes.login_env if login else provider_homes.launch_env)(provider)
+    return {**os.environ, **extra} if extra else None
+
+
 def run_cmd(argv: list[str], timeout: float = CHECK_TIMEOUT, interactive: bool = False,
             cwd: str | None = None, env=None, stdin: str | None = None):
     """Run ``argv`` (no shell) with a timeout; (returncode, stdout+stderr). A
@@ -307,13 +319,15 @@ class Login:
         self.say(f"{tool} isn't installed; install it with: {install_hint(tool)}")
         return False
 
-    def _ensure(self, tool: str, check: list[str], login: list[str], what: str) -> bool:
-        """Sign in with ``login`` unless ``check`` says already signed in."""
-        if run_cmd(check)[0] == 0:
+    def _ensure(self, tool: str, check: list[str], login: list[str], what: str, provider: str | None = None) -> bool:
+        """Sign in with ``login`` unless ``check`` says already signed in. For
+        a provider CLI, the check asks the config home its agents run with, and
+        a sign-in goes to brindle's own (provider_homes)."""
+        if run_cmd(check, env=_home_env(provider))[0] == 0:
             self.say(f"{what}: already signed in")
             return True
         self.say(f"{what}: signing in ({' '.join(login)})")
-        if run_cmd(login, LOGIN_TIMEOUT, interactive=True)[0] != 0:
+        if run_cmd(login, LOGIN_TIMEOUT, interactive=True, env=_home_env(provider, login=True))[0] != 0:
             self.say(f"{what}: sign-in didn't finish; run `{' '.join(login)}` and try again")
             return False
         return True
@@ -414,13 +428,13 @@ class Login:
         if r in ("subscription", "console"):
             if not self._need("claude"):
                 return False
-            code, out = run_cmd(["claude", "auth", "status"])
+            code, out = run_cmd(["claude", "auth", "status"], env=_home_env("claude"))
             if code == 0 and c.org_id and c.org_id.lower() in out.lower():
                 self.say("Claude: already signed in to your organization")
                 return True
             login = ["claude", "auth", "login", "--sso" if r == "subscription" else "--console"]
             self.say(f"Claude: signing in ({' '.join(login)})")
-            if run_cmd(login, LOGIN_TIMEOUT, interactive=True)[0] != 0:
+            if run_cmd(login, LOGIN_TIMEOUT, interactive=True, env=_home_env("claude", login=True))[0] != 0:
                 self.say(f"Claude: sign-in didn't finish; run `{' '.join(login)}` and try again")
                 return False
             return True
@@ -430,7 +444,7 @@ class Login:
         if c.route == "chatgpt":
             if not self._need("codex"):
                 return False
-            return self._ensure("codex", ["codex", "login", "status"], ["codex", "login"], "Codex")
+            return self._ensure("codex", ["codex", "login", "status"], ["codex", "login"], "Codex", "codex")
         if c.route == "api_key":
             self.say("Codex: sign in with your key: run `codex login --with-api-key`")
         return True     # azure, gateway: panes get the endpoint (OPENAI_BASE_URL); no sign-in here
