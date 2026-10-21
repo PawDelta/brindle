@@ -29,7 +29,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from starlette.requests import Request
@@ -1174,9 +1174,9 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
 
 
 # -- terminals: the real command in a terminal the app shows -------------------------
-# Each answers {"terminal": id, "started": bool} for WS /v1/terminal/{id}; while
-# the same action is still running, a second press gets its terminal (started
-# False). The person signs in or types the secret there; the daemon never
+# Each answers an ActionTerminalDTO: the pane and tmux server the app's own tmux
+# client attaches to, and the id for POST /terminals/{id}/input. While the same
+# action is still running, a second press gets its terminal (started False). The person signs in or types the secret there; the daemon never
 # automates a sign-in. The app may instead send a key the person typed to
 # PUT /v1/keys/{name} (write-only), or a code they pasted to a terminal's input.
 
@@ -1423,6 +1423,71 @@ def setup_codex_hook(db: DB, params: dict, body: Body) -> Any:
     return start_job("setup.codex_hook", work, job=job)
 
 
+# -- projects: the app's picker ----------------------------------------------------
+
+
+def clone_repo(db: DB, params: dict, body: Body) -> Any:
+    """``git clone <url>`` into ``parent_dir/<repo name>`` as the person's own
+    git would (their credentials and SSH keys; brindle handles none). Git's
+    progress lines go out as ``job.progress`` ``text``; ``job.done`` carries
+    ``{"path": ...}``, and a failure carries git's message (code ``auth_failed``
+    when it was refused for credentials). An existing destination is refused (409)."""
+    from brindle import clone
+
+    url = _get(body, "url", required=True)
+    parent = _get(body, "parent_dir", required=True)
+    key = str(Path(parent).expanduser().resolve() / clone.repo_name(clone.validate_url(url)))
+    job = Job(secrets.token_hex(8), "repo.clone")
+    with _CLONE_LOCK:
+        running = _CLONING.get(key)
+        if running:
+            if running[1] != url:
+                raise ServiceError("exists", f"{key} is being cloned from another address", 409)
+            return running[0]                  # pressed again: the one already running
+        clone.destination(url, parent)
+        _CLONING[key] = (job, url)
+    dest = Path(key)
+
+    def work(db: DB, job: Job) -> Any:
+        def progress(text: str) -> None:
+            bus.publish(db, "job.progress", job=job.id, text=text)
+
+        try:
+            return {"path": clone.clone(url, dest, progress)}
+        finally:
+            with _CLONE_LOCK:
+                _CLONING.pop(key, None)
+
+    try:
+        return start_job("repo.clone", work, job=job)
+    except BaseException:
+        with _CLONE_LOCK:
+            _CLONING.pop(key, None)
+        raise
+
+
+_CLONE_LOCK = threading.Lock()
+_CLONING: dict[str, tuple[Job, str]] = {}      # destination -> (its clone job, the url)
+
+
+def open_repo(db: DB, params: dict, body: Body) -> Any:
+    """Register the folder ``path`` as session start does (workspaces.adopt_root).
+    A folder that isn't a git repo is refused (409 ``not_a_repo``) unless the
+    body says ``init``: then ``git init`` makes it one first."""
+    path = Path(_get(body, "path", required=True)).expanduser()
+    if not path.is_dir():
+        raise ServiceError("invalid", f"not a folder: {path}")
+    initialized = False
+    if git.run(["rev-parse", "--show-toplevel"], path, check=False).returncode != 0:
+        if not _get(body, "init", bool, False):
+            raise ServiceError("not_a_repo", f"{path} isn't a git repository", 409)
+        git.run(["init", "-q"], path)
+        initialized = True
+    ws = workspaces.adopt_root(db, str(path))
+    return {"workspace_id": ws.id, "repo_root": ws.repo_root, "path": ws.path, "branch": ws.branch,
+            "initialized": initialized}
+
+
 def _post(path: str, fn: Action) -> Route:
     return Route(f"/v1{path}", _endpoint(fn), methods=["POST"])
 
@@ -1477,6 +1542,8 @@ ROUTES = [
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
     _post("/terminals/{id}/input", terminal_input),
+    _post("/repos/clone", clone_repo),
+    _post("/repos/open", open_repo),
     _post("/engine/upgrade", upgrade_engine),
     _post("/setup/codex-hook", setup_codex_hook),
 ]

@@ -342,7 +342,6 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 ], ids=["login", "key", "bad-key"])
 def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeypatch, path, status, command):
     from brindle import providers, tmux
-    from brindle.daemon import terminal
 
     windows = {}            # terminal id -> [window name, argv, alive]
     second: list = []       # a second press, made while the first is creating its window
@@ -370,9 +369,11 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
         return
     thread = second.pop(0)
     thread.join(5)
-    assert second == [(200, {"terminal": reply["terminal"], "started": False})]
-    assert reply["started"] and len(windows) == 1 and command in windows[reply["terminal"]][1]
-    assert terminal._find(reply["terminal"])["target"] == "%1"
+    # Where the app's own tmux client attaches: the pane, on the daemon's server.
+    attach = {"target": "%1", "server": tmux.current_server()}
+    assert second == [(200, {"terminal": reply["terminal"], "started": False, **attach})]
+    assert reply == {"terminal": reply["terminal"], "started": True, **attach}
+    assert len(windows) == 1 and command in windows[reply["terminal"]][1]
     windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
     code, again = _send("POST", path)
     assert (code, again["started"], len(windows)) == (200, True, 2)
@@ -385,7 +386,7 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     monkeypatch.setattr(providers, "claude_binary", lambda: "claude")
     monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
     monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
-                        windows.setdefault(tag[1], argv))
+                        windows.setdefault(tag[1], argv) and f"%{len(windows)}")
     monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
         (f"%{i + 1}", "login claude", True, tid) for i, tid in enumerate(windows)])
     monkeypatch.setattr(tmux, "send_keys", lambda target, *keys, **kw: typed.append((target, *keys)))
@@ -1316,3 +1317,70 @@ def test_setup_codex_hook_trusts_it_in_the_background(db, world, monkeypatch, tm
         ("job.failed" if fails else "job.done", reply["job"])]
     if fails:
         assert events[0]["payload"]["error"]["code"] == "codex_hook_failed"
+
+
+@pytest.fixture
+def cloning(world, repo, monkeypatch):
+    from brindle import clone
+
+    monkeypatch.setattr(clone, "ALLOW_FILE_URLS", True)       # tests only: production refuses file://
+    return f"file://{repo.parent / 'origin.git'}"
+
+
+def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
+    assert code == 202, reply
+    done = bus.tail(db, kinds=("job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["result"]) for e in done] == [
+        ("job.done", {"path": str(parent / "origin")})]
+    assert (parent / "origin" / "app.py").is_file()
+    assert any(e["payload"]["job"] == reply["job"] for e in bus.tail(db, kinds=("job.progress",)))
+    again, err = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
+    assert (again, err["error"]["code"]) == (409, "exists")
+
+
+def test_a_second_clone_press_gets_the_job_already_queued(db, cloning, tmp_path, monkeypatch):
+    queued = []
+    monkeypatch.setattr(routes_actions, "_spawn", queued.append)
+    body = {"url": cloning, "parent_dir": str(tmp_path)}
+    (c1, first), (c2, second) = _send("POST", "/v1/repos/clone", body), _send("POST", "/v1/repos/clone", body)
+    assert (c1, c2, second["job"], len(queued)) == (202, 202, first["job"], 1)
+    other, err = _send("POST", "/v1/repos/clone", {**body, "url": cloning.removesuffix(".git")})
+    assert (other, err["error"]["code"]) == (409, "exists")
+    queued[0]()
+    assert [e["kind"] for e in bus.tail(db, kinds=("job.done", "job.failed"))] == ["job.done"]
+
+
+@pytest.mark.parametrize("url", [
+    "/tmp/some/repo",
+    pytest.param("-u/bin/sh", marks=pytest.mark.variant("an option smuggled in as the url")),
+    pytest.param("file:///tmp/x.git", marks=pytest.mark.variant("file:// stays refused in production")),
+    pytest.param("git@local.git", marks=pytest.mark.variant("git@ without a host:path is a relative local path")),
+    pytest.param("git@folder/repo.git", marks=pytest.mark.variant("a slash before any colon is a local path")),
+    pytest.param("https://-oProxyCommand=x/a.git", marks=pytest.mark.variant("an option as the host")),
+    pytest.param("https://example.com/a b.git", marks=pytest.mark.variant("whitespace in the url")),
+])
+def test_a_clone_refuses_what_is_not_a_remote_url(world, tmp_path, url):
+    code, reply = _send("POST", "/v1/repos/clone", {"url": url, "parent_dir": str(tmp_path)})
+    assert (code, reply["error"]["code"]) == (400, "invalid"), reply
+
+
+def test_a_clone_that_git_refuses_fails_the_job_with_its_message(db, cloning, tmp_path):
+    code, _ = _send("POST", "/v1/repos/clone", {"url": "file:///nonexistent/gone.git", "parent_dir": str(tmp_path)})
+    assert code == 202
+    failed = bus.tail(db, kinds=("job.failed",))
+    assert failed and failed[0]["payload"]["error"]["code"] == "clone_failed"
+    assert "gone.git" in failed[0]["payload"]["error"]["message"]
+
+
+def test_opening_a_folder_registers_a_repo_and_offers_git_init_for_a_plain_one(db, world, repo, tmp_path):
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(repo)})
+    assert (code, reply["repo_root"], reply["initialized"]) == (200, str(repo), False)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(plain)})
+    assert (code, reply["error"]["code"]) == (409, "not_a_repo")
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(plain), "init": True})
+    assert (code, reply["initialized"], db.workspace_by_path(str(plain)) is not None) == (200, True, True)

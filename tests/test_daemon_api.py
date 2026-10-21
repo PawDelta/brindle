@@ -22,7 +22,7 @@ from brindle import kb as kb_mod
 from brindle.daemon import events, lifecycle, peer, terminal
 from brindle.daemon.app import build_app
 from brindle.daemon.auth import WS_UNAUTHORIZED, Guard
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
 from brindle.pro import license
 
 TOKEN = "t" * 43
@@ -268,7 +268,7 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
         return conn
 
     monkeypatch.setattr(sqlite3, "connect", tracked_connect)
-    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot(tmux.current_server()))
+    monkeypatch.setattr(tmux, "list_panes", lambda *a: tmux.PaneSnapshot(tmux.current_server()))
     if kind == "read":
         for _ in range(30):
             assert _get("/v1/repos", AUTH) == (200, [])
@@ -278,7 +278,8 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
     elif kind == "peer":
         assert peer._agent_panes() == {}
     elif kind == "terminal":
-        assert terminal._find("missing")["code"] == "not_found"
+        monkeypatch.setattr(tmux, "tagged_pane_ids", lambda keys, server=None: [])
+        assert terminal.reset_window_sizes() == 0
     elif kind == "preflight":
         from brindle import git, preflight
 
@@ -404,6 +405,54 @@ def test_peer_pid_names_the_unix_socket_caller():
     a, b = socket.socketpair(socket.AF_UNIX)
     with a, b:
         assert peer.peer_pid(a) == os.getpid()
+
+
+def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db, monkeypatch):
+    # The old streaming daemon left window-size manual on windows it sized.
+    db.add_workspace(Workspace("ws", "/r", "root", "main", "main", None, "/r", None, "brindle-root", 1.0))
+    db.add_agent(Agent("w1", "ws", "developer", "claude", None, "assign", "idle", "%1", None, 1.0))
+    db.add_agent(Agent("w2", "ws", "developer", "claude", None, "assign", "idle", "%1", None, 1.0,
+                       tmux_server="other"))
+    db.add_agent(Agent("w3", "ws", "developer", "claude", None, "assign", "done", "%2", None, 1.0,
+                       tmux_server="gone"))
+    here = tmux.current_server()
+    # list-panes rows: pane, its agent tag, its action-terminal tag (%4 a sidebar, %5 not brindle's)
+    panes = {here: ["%1\tw1\t", "%4\t\t", "%5\t\t", "%9\t\tt-1"], "other": ["%1\tw2\t"]}
+    manual = {(here, "%1"), ("other", "%1"), (here, "%4"), (here, "%5"), (here, "%9")}
+    refused: dict = {}          # (server, command) tmux fails -> what it says
+    ran = []
+
+    def fake_tmux(*args, server=None, check=True, **kw):
+        ran.append((server, *args))
+        out, code, err = "", 0, ""
+        if (server, args[0]) in refused:
+            code, err = 1, refused[server, args[0]]
+        elif args[0] == "list-panes":
+            out, code, err = ("\n".join(panes[server]), 0, "") if server in panes \
+                else ("", 1, "no server running on /tmp/tmux-1/gone")
+        elif args[0] == "show-options":
+            out = "manual\n" if (server, args[4]) in manual else ""
+        elif args[0] == "set-option":
+            manual.discard((server, args[4]))
+        if check and code:
+            raise tmux.TmuxError(err)
+        return SimpleNamespace(returncode=code, stdout=out, stderr=err)
+
+    monkeypatch.setattr(tmux, "_tmux", fake_tmux)
+    brindles = {(here, "%1"), ("other", "%1"), (here, "%9")}
+    # A server that can't be asked (lost, or a socket it may not open), then a
+    # refused unset: nothing is taken as done.
+    for refused in ({("other", "list-panes"): "lost server"},
+                    {("other", "list-panes"): "error connecting to /tmp/tmux-501/other (Permission denied)"},
+                    {(here, "set-option"): "refused"}):
+        terminal.reset_window_sizes()
+        assert {(here, "%1"), (here, "%9")} <= manual
+    refused = {}
+    assert terminal.reset_window_sizes() >= 2
+    assert manual == {(here, "%4"), (here, "%5")} and not brindles & manual
+    assert not any("-g" in r for r in ran)      # never a global option
+    ran.clear()
+    assert terminal.reset_window_sizes() == 0 and ran == []     # done once, it never runs again
 
 
 def test_committed_api_schema_matches_the_routes_and_dtos():

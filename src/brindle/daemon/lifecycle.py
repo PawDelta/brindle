@@ -227,6 +227,16 @@ async def _watch(server, activity: Activity, idle_exit: bool) -> None:
             server.should_exit = True
 
 
+def _reset_window_sizes() -> None:
+    """terminal.reset_window_sizes, off the daemon's way: a failure is only logged."""
+    from brindle.daemon import terminal
+
+    try:
+        terminal.reset_window_sizes()
+    except Exception:
+        log.warning("brindle: couldn't reset the old daemon's window sizes", exc_info=True)
+
+
 def _exit(sig, frame) -> None:
     raise SystemExit(0)
 
@@ -264,10 +274,12 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
 
     async def run() -> None:
         watcher = asyncio.create_task(_watch(server, activity, idle_exit))
+        resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
         try:
             await server.serve(sockets=socks)
         finally:
             watcher.cancel()
+            resizer.cancel()
 
     # uvicorn shuts down gracefully on SIGTERM, then raises it again with the
     # handler it found: make that an exit that still runs the cleanup below.

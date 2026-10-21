@@ -124,6 +124,42 @@
       "title": "AccountOrgDTO",
       "type": "object"
     },
+    "ActionTerminalDTO": {
+      "description": "An action terminal (a sign-in, ``brindle keys set``; see\nbrindle.daemon.terminal.open_action). The app's tmux client attaches to\nthe pane ``target`` on ``server`` (``tmux -L server``; None: the default\nserver); ``terminal`` is the id POST /terminals/{id}/input takes.\n``started`` is False when a press found one still running.",
+      "properties": {
+        "server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server"
+        },
+        "started": {
+          "title": "Started",
+          "type": "boolean"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "terminal": {
+          "title": "Terminal",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminal",
+        "started",
+        "target"
+      ],
+      "title": "ActionTerminalDTO",
+      "type": "object"
+    },
     "AgentDTO": {
       "$defs": {
         "NativeSubagentDTO": {
@@ -2884,6 +2920,14 @@
       "path": "/v1/repos"
     },
     {
+      "method": "POST",
+      "path": "/v1/repos/clone"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/repos/open"
+    },
+    {
       "method": "GET",
       "path": "/v1/routing"
     },
@@ -2954,10 +2998,6 @@
     {
       "method": "GET",
       "path": "/v1/snapshot"
-    },
-    {
-      "method": "WS",
-      "path": "/v1/terminal/{agent}"
     },
     {
       "method": "POST",

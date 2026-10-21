@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -930,126 +929,38 @@ def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
     _tmux("send-keys", "-t", target, *keys, server=server)
 
 
-def control_argv(session: str, server: object = _THIS_SERVER) -> list[str]:
-    """The command of a control-mode client (``tmux -C``) attached to
-    ``session``: one ordered stream of what every pane of the session prints
-    (``%output`` lines, see decode_output) and of the replies to the commands
-    written to its stdin, one per line (arguments quoted with control_quote).
-    ``server`` as for capture."""
-    base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
-    return [*base, "-C", "attach-session", "-t", f"={session}"]
+# What tmux says when no server listens on the socket (it is missing, or
+# stale): older tmux names the errno. Any other "error connecting to" (a
+# socket it may not open) says nothing about the server's windows.
+_NO_SERVER = re.compile(r"no server running|error connecting to .*\((No such file or directory|Connection refused)\)")
 
 
-def control_env() -> dict[str, str]:
-    """The environment for control_argv: tmux refuses to attach from inside
-    one of its own panes (``sessions should be nested with care``) unless
-    TMUX is unset, and a control client, which has no terminal, can't nest."""
-    return {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
-
-
-def control_quote(text: str) -> str:
-    """``text`` as one double-quoted argument on a control-mode command line.
-    tmux's parser undoes ``\\\\``, ``\\"`` and ``\\$`` (``$name`` would be
-    expanded) and turns ``\\ooo`` into the byte, which is how newlines and
-    other control characters travel on a line-based channel; the parser
-    passes bytes over 127 through, so non-ASCII text goes as UTF-8. A NUL
-    would end the argument early (tmux keeps C strings), so it is dropped."""
-    out = bytearray(b'"')
-    for b in text.encode():
-        if b in b'\\"$':
-            out += b"\\%c" % b
-        elif b == 0:
-            continue
-        elif b < 0x20 or b == 0x7F:
-            out += b"\\%03o" % b
-        else:
-            out.append(b)
-    out += b'"'
-    return out.decode()
-
-
-def decode_output(data: bytes) -> bytes:
-    """The bytes of a ``%output`` line's payload: tmux writes bytes below 32
-    and the backslash as ``\\ooo`` octal and everything else as is."""
-    return _OCTAL.sub(lambda m: bytes([int(m.group(1), 8)]), data)
-
-
-_OCTAL = re.compile(rb"\\([0-7]{3})")
-
-
-def attached_terminals(target: str, server: object = _THIS_SERVER) -> int | None:
-    """How many terminals show ``target``'s session (0: nobody is looking at
-    it), not counting control-mode clients such as the daemon's own, which
-    ``#{session_attached}`` would. None when the pane is gone. ``server`` as
-    for capture."""
-    proc = _tmux("list-clients", "-t", target, "-F", "#{client_flags}", check=False,
-                 server=server)
+def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[str]:
+    """Every pane on ``server`` (as for capture) that sets one of the pane
+    options ``keys``; empty when no server runs there. Raises TmuxError when
+    the server can't be asked, so an answer it never gave isn't read as "none"."""
+    keys = list(keys)
+    fmt = "\t".join(["#{pane_id}", *(f"#{{{k}}}" for k in keys)])
+    proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
     if proc.returncode != 0:
-        return None
-    return count_terminals(proc.stdout.splitlines())
+        if _NO_SERVER.search(proc.stderr):
+            return []
+        raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    return [pane for pane, *tags in rows if any(tags)]
 
 
-def count_terminals(flags: Iterable[str]) -> int:
-    """The non-control clients among ``flags``, one client's
-    ``#{client_flags}`` per item."""
-    return sum(1 for f in flags if f and "control-mode" not in f.split(","))
-
-
-def set_window_size_manual(target: str, server: object = _THIS_SERVER) -> None:
-    """Let ``resize_window`` set ``target``'s size without a client attached.
-    ``server`` as for capture."""
-    _tmux("set-option", "-w", "-t", target, "window-size", "manual", server=server)
-
-
-def resize_window(target: str, cols: int, rows: int, server: object = _THIS_SERVER) -> None:
-    """Resize ``target``'s window to ``cols`` by ``rows``. ``server`` as for capture."""
-    _tmux("resize-window", "-t", target, "-x", str(cols), "-y", str(rows), server=server)
+def window_size_option(target: str, server: object = _THIS_SERVER) -> str | None:
+    """The ``window-size`` set on ``target``'s window itself (not one it
+    inherits from the global options); None when it sets none. Raises
+    TmuxError when tmux can't say. ``server`` as for capture."""
+    return _tmux("show-options", "-w", "-v", "-t", target, "window-size", server=server).stdout.strip() or None
 
 
 def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
-    """Undo ``set_window_size_manual``: ``target``'s window is sized by tmux's
-    own rule again. ``server`` as for capture."""
-    _tmux("set-option", "-w", "-u", "-t", target, "window-size", check=False, server=server)
-
-
-# The DEC private modes a pane's program can have set that a copy of its
-# screen doesn't carry, in VIEW_FORMAT's order after the window: the alternate
-# screen, mouse reports (button, button-event, any-event; SGR encoded) and
-# application cursor keys.
-VIEW_MODES = (1049, 1000, 1002, 1003, 1006, 1)
-VIEW_FORMAT = ("#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{window_id}"
-               " #{alternate_on} #{mouse_standard_flag} #{mouse_button_flag}"
-               " #{mouse_any_flag} #{mouse_sgr_flag} #{keypad_cursor_flag}")
-
-
-@dataclass(frozen=True)
-class View:
-    """Where a pane's cursor is (column, row), how big the pane is, the
-    window it is in, and the VIEW_MODES its program has set."""
-
-    x: int
-    y: int
-    cols: int
-    rows: int
-    window: str
-    modes: tuple[int, ...] = ()
-
-
-def pane_view(target: str, server: object = _THIS_SERVER) -> View | None:
-    """``target``'s View; None when the pane is gone. ``server`` as for capture."""
-    proc = _tmux("display-message", "-p", "-t", target, VIEW_FORMAT, check=False,
-                 server=server)
-    return parse_view(proc.stdout) if proc.returncode == 0 else None
-
-
-def parse_view(line: str) -> View | None:
-    """A VIEW_FORMAT line as a View, or None when it isn't one."""
-    try:
-        x, y, cols, rows, window, *flags = line.split()
-        modes = tuple(mode for mode, flag in zip(VIEW_MODES, flags) if flag == "1")
-        return View(int(x), int(y), int(cols), int(rows), window, modes)
-    except ValueError:
-        return None
+    """Unset the ``window-size`` set on ``target``'s window: it is sized by
+    tmux's own rule again. Never the global option. ``server`` as for capture."""
+    _tmux("set-option", "-w", "-u", "-t", target, "window-size", server=server)
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:
