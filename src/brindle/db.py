@@ -1168,15 +1168,17 @@ class DB:
         with self.tx() as c:
             c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
 
-    def claim_idle(self, agent_id: str) -> bool:
+    def claim_idle(self, agent_id: str) -> float | None:
         """Atomically flip idle -> processing. Only the caller that wins may type
-        into the agent's terminal, so two senders never interleave keystrokes."""
+        into the agent's terminal, so two senders never interleave keystrokes.
+        Return this claim's status_since for rollback, or None if already busy."""
         with self.tx() as c:
+            claimed_at = time.time()
             cur = c.execute(
                 "UPDATE agents SET status='processing', status_since=? WHERE id=? AND status='idle'",
-                (time.time(), agent_id),
+                (claimed_at, agent_id),
             )
-            return cur.rowcount == 1
+            return claimed_at if cur.rowcount == 1 else None
 
     _STAMP = "status_since = CASE WHEN status = ? THEN status_since ELSE ? END"
 

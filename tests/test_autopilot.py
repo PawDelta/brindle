@@ -168,10 +168,21 @@ def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
     db.update_agent(agent.id, status="idle")
     monkeypatch.setattr(wake, "enabled", lambda a: False)
     monkeypatch.setattr(inbox, "usable", lambda a: False)
-    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
     monkeypatch.setattr(launch_health, "before_delivery", lambda *a: "")
     monkeypatch.setattr(launch_health, "verify_delivery", lambda *a: None)
     delivered, claimed, broken = [], [], [True]
+    clock = [time.time()]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+
+    def paste_blocked(a):
+        if broken[0] == "reclaimed":
+            clock[0] += 1
+            db.set_status(a.id, "idle")
+            clock[0] += 1
+            db.set_status(a.id, "processing")
+        return False
+
+    monkeypatch.setattr(agents, "_paste_blocked", paste_blocked)
 
     def paste(target, body, **kw):
         assert db.pending_count(agent.id) == 0  # fail after dequeue, not before dispatch
@@ -210,11 +221,17 @@ def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
     assert db.get_agent(agent.id).status == "paused"  # don't undo a concurrent pause
     assert db.pending_count(agent.id) == 1
     db.set_status(agent.id, "idle")
+    broken[0] = "reclaimed"
+    assert autopilot.usage_sweep(db) == []
+    assert db.get_agent(agent.id).status == "processing"
+    assert db.get_agent(agent.id).status_since == clock[0]
+    assert db.pending_count(agent.id) == 1
+    db.set_status(agent.id, "idle")
     broken[0] = False
     assert autopilot.usage_sweep(db) == []
     assert autopilot.usage_sweep(db) == []
     assert db.pending_count(agent.id) == 0
-    assert len(claimed) == 3 and len(set(claimed)) == 1
+    assert len(claimed) == 4 and len(set(claimed)) == 1
     assert len(delivered) == 1 and "training deadline" in delivered[0]
 
 

@@ -1801,7 +1801,10 @@ def flush(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
-    if db.pending_count(agent_id) == 0 or not db.claim_idle(agent_id):
+    if db.pending_count(agent_id) == 0:
+        return False
+    claimed_at = db.claim_idle(agent_id)
+    if claimed_at is None:
         return False
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
@@ -1823,7 +1826,7 @@ def flush(db: DB, agent_id: str) -> bool:
     except BaseException:
         # pop_pending claimed this row before the external send. Release the
         # same row and our idle claim so the next flush can retry it once.
-        db.retry_pending(msg.id, agent_id, agent.status_since)
+        db.retry_pending(msg.id, agent_id, claimed_at)
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
