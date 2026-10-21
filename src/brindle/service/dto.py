@@ -293,6 +293,18 @@ class AccountDTO(_DTO):
     orgs: list[AccountOrgDTO] = []
 
 
+class ActionTerminalDTO(_DTO):
+    """An action terminal (a sign-in, ``brindle keys set``; see
+    brindle.daemon.terminal.open_action). The app's tmux client attaches to
+    the pane ``target`` on ``server`` (``tmux -L server``; None: the default
+    server); ``terminal`` is the id POST /terminals/{id}/input takes.
+    ``started`` is False when a press found one still running."""
+    terminal: str
+    started: bool
+    target: str
+    server: str | None = None
+
+
 class PreflightActionDTO(_DTO):
     name: str                # login | set_key | trust | consent | open_provider_once
     method: str
