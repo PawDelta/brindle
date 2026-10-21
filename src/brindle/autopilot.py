@@ -1294,7 +1294,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         positions = ", ".join(str(m.position) for m in regressed)
         verb = "was passing but now fails" if len(regressed) == 1 else "were passing but now fail"
         lines.append(f"REGRESSED: milestone {positions} {verb}.")
-    lines.append(progress(db, root_id))
+    lines.append(progress(db, root_id, in_flight=False))
     for m in shown:
         if m.output and m.status == "failed":
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
@@ -1510,7 +1510,8 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 # -- progress -----------------------------------------------------------------
 
-MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌"}
+MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌",
+        "checking": "◌"}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
@@ -1519,7 +1520,7 @@ def counts(db: DB, root_id: str) -> tuple[int, int]:
 
 
 def work_state(db: DB, root_id: str) -> str | None:
-    """Display-only: "working" or "waiting" while the session has work in
+    """Display-only: "checking", "working" or "waiting" while the session has work in
     flight, else None. A failed milestone's last check is stale then, so it
     shouldn't read as a plain failure. Never stored on the milestone.
 
@@ -1528,6 +1529,8 @@ def work_state(db: DB, root_id: str) -> str | None:
     from brindle import login_pause
 
     ap = db.get_autopilot(root_id)
+    if ap is not None and checking(ap):
+        return "checking"
     if (ap is not None and ap.state == "usage_paused") or login_pause.paused(db, root_id):
         return "waiting"
     live = active_workers(db, root_id)
@@ -1539,7 +1542,12 @@ def work_state(db: DB, root_id: str) -> str | None:
     return None
 
 
-def progress(db: DB, root_id: str) -> str:
+def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
+    """Render live progress, or recorded results for a completed check report.
+
+    A completed report must not inherit the background flag: the helper keeps
+    it set until delivery finishes, so concurrent readers still see checking.
+    """
     ap = db.get_autopilot(root_id)
     if ap is None:
         return "Autopilot is not set up for this session."
@@ -1550,14 +1558,18 @@ def progress(db: DB, root_id: str) -> str:
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
     ms = db.milestones(root_id)
-    w = work_state(db, root_id) if any(m.status == "failed" for m in ms) else None
+    w = work_state(db, root_id) if in_flight and any(m.status == "failed" for m in ms) else None
     for m in ms:
         where = f"@{m.repo}: " if m.repo else ""
         how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
         who = f", profile: {m.profile}" if m.profile else ""
         shown = w if m.status == "failed" and w else m.status
-        stale = ", last check failed" if shown != m.status else ""
+        if shown == "checking":
+            stale = ", checking…"
+            when = ""
+        else:
+            stale = ", last check failed" if shown != m.status else ""
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
     if ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
