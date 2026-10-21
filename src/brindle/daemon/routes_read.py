@@ -26,6 +26,7 @@ from brindle import (
     keystore,
     knowledge,
     profiles,
+    quota,
     sessions,
     tmux,
     view,
@@ -405,6 +406,43 @@ def get_cost(db: DB, request: Request) -> Any:
             "by_model": {m: bucket(b) for m, b in s.by_model.items()}}
 
 
+USAGE_NEAR_PERCENT = 80.0
+USAGE_NEAR_RESET_SECONDS = 3600
+
+
+@_json
+def get_usage(db: DB, request: Request) -> Any:
+    """Each provider's quota windows, and ``near``: the providers that are
+    limited, past 80% of their fullest window or about to reset it within the
+    hour, worst first. Providers brindle knows nothing current about come back
+    with ``known: false``."""
+    now = time.time()
+    providers, near = [], []
+    for name in quota.PROVIDERS:
+        q = quota.get(name)
+        if q is None:
+            providers.append({"provider": name, "known": False, "limited": False, "windows": [],
+                              "limited_until": None, "updated_at": None})
+            continue
+        limited = bool(q.limited_until and q.limited_until > now)
+        providers.append({
+            "provider": name, "known": True, "limited": limited, "limited_until": q.limited_until,
+            "updated_at": q.updated_at,
+            "windows": [{"used": w.used, "resets_at": w.resets_at, "minutes": w.minutes,
+                         "name": w.name or quota.window_name(w.minutes), "short": w.name or quota.window_short(w.minutes)}
+                        for w in q.windows]})
+        top = quota.fullest(q)
+        reason = ("limited" if limited
+                  else "high" if top and top.used >= USAGE_NEAR_PERCENT
+                  else "resets_soon" if top and top.resets_at and top.resets_at - now <= USAGE_NEAR_RESET_SECONDS
+                  else None)
+        if reason:
+            near.append({"provider": name, "reason": reason, "used": top.used if top else None,
+                         "resets_at": top.resets_at if top else q.limited_until})
+    near.sort(key=lambda n: (n["reason"] != "limited", -(n["used"] or 0)))
+    return {"providers": providers, "near": near}
+
+
 ROUTES = [
     Route("/v1/repos", repos),
     Route("/v1/sessions", list_sessions),
@@ -432,4 +470,5 @@ ROUTES = [
     Route("/v1/providers/{provider}/preflight", provider_preflight),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
+    Route("/v1/usage", get_usage),
 ]
