@@ -557,6 +557,7 @@ def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
     ("waiting", "waiting"),
     ("pending_task", "waiting"),
     ("usage_paused", "waiting"),
+    ("checking", "checking"),
     (None, "failed"),
 ])
 def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
@@ -574,6 +575,16 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
                          None, None, None, None, "pending", time.time()))
     elif flight == "usage_paused":
         db.update_autopilot("boss", state="usage_paused")
+    elif flight == "checking":
+        db.update_autopilot("boss", checking_since=time.time())
     entry = view.autopilot_entry(db, ws.repo_root, root_id="boss")
     assert entry["milestones"][0]["status"] == expected
     assert entry["milestones"][1]["status"] == "pending"
+    if flight == "checking":
+        text = autopilot.progress(db, "boss")
+        assert "◌" in text and "checking" in text and "failed" not in text
+        assert any("checking" in line.text for line in watch.render_autopilot(entry, 80))
+        db.record_check(db.milestones("boss")[0].id, True, "passed")
+        db.update_autopilot("boss", checking_since=None)
+        assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["milestones"][0]["status"] == "passed"
+        assert "✓" in autopilot.progress(db, "boss") and "failed" not in autopilot.progress(db, "boss")

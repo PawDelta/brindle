@@ -1510,7 +1510,8 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 # -- progress -----------------------------------------------------------------
 
-MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌"}
+MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌",
+        "checking": "◌"}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
@@ -1519,7 +1520,7 @@ def counts(db: DB, root_id: str) -> tuple[int, int]:
 
 
 def work_state(db: DB, root_id: str) -> str | None:
-    """Display-only: "working" or "waiting" while the session has work in
+    """Display-only: "checking", "working" or "waiting" while the session has work in
     flight, else None. A failed milestone's last check is stale then, so it
     shouldn't read as a plain failure. Never stored on the milestone.
 
@@ -1528,6 +1529,8 @@ def work_state(db: DB, root_id: str) -> str | None:
     from brindle import login_pause
 
     ap = db.get_autopilot(root_id)
+    if ap is not None and checking(ap):
+        return "checking"
     if (ap is not None and ap.state == "usage_paused") or login_pause.paused(db, root_id):
         return "waiting"
     live = active_workers(db, root_id)
@@ -1557,7 +1560,11 @@ def progress(db: DB, root_id: str) -> str:
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
         who = f", profile: {m.profile}" if m.profile else ""
         shown = w if m.status == "failed" and w else m.status
-        stale = ", last check failed" if shown != m.status else ""
+        if shown == "checking":
+            stale = ", checking…"
+            when = ""
+        else:
+            stale = ", last check failed" if shown != m.status else ""
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
     if ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
