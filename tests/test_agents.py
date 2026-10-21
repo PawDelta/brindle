@@ -319,6 +319,11 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
     assert "Don't run the full suite yourself" in prompt and "`uv run pytest -q`" in prompt
     sub = agents.subagent_prompt("You are a subagent.", "add a flag", ws, None)
     assert "Don't run the full suite yourself" in sub
+    review = agents.decorate_worker_prompt("review it", "w1", ws, None, get_provider("claude"),
+                                           headless=False, report_only=True)
+    assert "report_result" in review and "Commit" not in review and "full suite" not in review
+    assert agents.is_review_profile("reviewer-gemini", ws.repo_root)
+    assert not agents.is_review_profile("developer", ws.repo_root)
 
 
 def test_no_goal_command_when_hooks_are_disabled(db, ws):
