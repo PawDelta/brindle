@@ -168,6 +168,36 @@ def verify_delivery(db, agent, text: str | None = None, baseline: str | None = N
     agents._detach([*brindle_invocation(), "_launch-health", agent.id, "--token", token, "--verify"])
 
 
+def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
+    """Recognize acceptance without requiring Codex's turn-complete notify."""
+    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+        return True
+    if provider.name != "codex":
+        return False
+    plain = provider.ANSI_SGR.sub("", screen)
+    old = set(provider.ANSI_SGR.sub("", baseline).splitlines())
+    lines = plain.splitlines()
+    # A submitted brief can be the last › on screen while Codex works.
+    # paste_blocked deliberately treats everything after it as a possible
+    # draft; delivery can instead use fresh, structured turn output.
+    prompts = [i for i, line in enumerate(lines) if provider.INPUT_LINE.match(line)]
+    if prompts:
+        start = prompts[-1]
+        heading = provider.INPUT_LINE.match(lines[start]).group(1).strip()
+        if not heading or " ".join(heading.split()) not in " ".join(prompt.split()):
+            lines = lines[:start]  # exclude the current composer and its draft
+    prompt_text = " ".join(prompt.split())
+    for line in lines:
+        if line in old or " ".join(line.split()) in prompt_text:
+            continue
+        # Match Codex's own row markers, not bare keyboard-help prose.
+        if re.fullmatch(r"• Working \([^\n]*[Ee]sc to interrupt\)", line):
+            return True
+        if re.match(r"^• (?:Ran|Edited) \S", line):
+            return True
+    return False
+
+
 def verify_pending(db, agent_id: str, token: str | None) -> None:
     """Detached turn observation; retry once, fenced to this launch.
 
@@ -205,7 +235,7 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
             if fresh is None:
                 return
             screen = capture(fresh)
-            if (provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing"
+            if (_turn_running(provider, screen, baseline, text)
                     or failure(screen, baseline=baseline, task=agent.task or "",
                                submitted_prompt=text, provider=agent.provider)):
                 delivered(db, agent, baseline)
@@ -230,7 +260,7 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
                     if fresh is None:
                         return
                     screen = capture(fresh)
-                    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+                    if _turn_running(provider, screen, baseline, text):
                         delivered(db, agent, baseline)
                         return
                     if provider.input_ready(screen) and not provider.paste_blocked(screen, True):
