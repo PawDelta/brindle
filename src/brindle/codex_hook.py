@@ -78,17 +78,11 @@ def hook_command() -> str:
     return assigns + " ".join(shlex.quote(a) for a in [*_stable_invocation(), "_hook", EVENT])
 
 
-def config_flags(command: str | None = None, timeout: int | str | None = None) -> list[str]:
+def config_flags(command: str | None = None) -> list[str]:
     """``-c`` arguments that give a Codex session brindle's hook."""
     command = command or hook_command()
-    hooks = f'[{{hooks=[{{type="command",command={json.dumps(command)},timeout={timeout or TIMEOUT}}}]}}]'
+    hooks = f'[{{hooks=[{{type="command",command={json.dumps(command)},timeout={TIMEOUT}}}]}}]'
     return ["-c", f"hooks.PermissionRequest={hooks}"]
-
-
-def _recorded_definition(rec: dict) -> str:
-    """The hook definition a recorded trust was for. Records from before
-    ``definition`` was kept name only the command (and maybe the timeout)."""
-    return rec.get("definition") or config_flags(rec["command"], rec.get("timeout") or 30)[1]
 
 
 TRUSTED, MOVED, NEW, REMOVED = "trusted", "moved", "new", "removed"
@@ -120,8 +114,10 @@ def status(command: str | None = None) -> str:
     if not (isinstance(entry, dict) and entry.get("trusted_hash") == rec["hash"]):
         return REMOVED
     # Codex's hash covers the whole definition, not just the command: a trust
-    # recorded for another timeout (another build of brindle) is for another hook.
-    return TRUSTED if _recorded_definition(rec) == config_flags(command)[1] else MOVED
+    # recorded for another timeout (another build of brindle) is for another
+    # hook, and so is one recorded before brindle kept the definition (it can't
+    # tell what that was for), so ensure() trusts it again once.
+    return TRUSTED if rec.get("definition") == config_flags(command)[1] else MOVED
 
 
 def trusted(command: str | None = None) -> bool:
