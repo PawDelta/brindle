@@ -7,7 +7,6 @@ import asyncio
 import json
 import os
 import threading
-import tomllib
 
 import pytest
 
@@ -139,53 +138,29 @@ def test_a_second_install_press_gets_the_running_job(machine, db, monkeypatch, t
     assert ended["kind"] == "job.done"
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex"])
-def test_setup_is_copied_once_and_never_a_credential(machine, tmp_path, monkeypatch, provider):
+def test_only_instructions_and_markdown_are_copied_once_and_never_through_a_link(machine, tmp_path, monkeypatch):
     home, _ = machine
-    src = home / (".claude" if provider == "claude" else ".codex")
+    src, brindle_home = home / ".claude", tmp_path / "brindle-claude"
     monkeypatch.delenv("CLAUDE_CONFIG_DIR")
-    monkeypatch.delenv("CODEX_HOME")
-    brindle_home = tmp_path / f"brindle-{provider}"
-    monkeypatch.setenv(f"BRINDLE_{provider.upper()}_CONFIG_HOME", str(brindle_home))
-    md = src / ("agents" if provider == "claude" else "prompts")
-    md.mkdir(parents=True)
-    (md / "review.md").write_text("review the diff")
-    (md / ".env").write_text("SECRET=fixture-env")
-    secret_file = src / (".credentials.json" if provider == "claude" else "auth.json")
-    secret_file.write_text('{"token": "fixture-file"}')
-    (md / "notes.md").symlink_to(secret_file)                     # a benign name, a credential behind it
-    (md / "linked").symlink_to(src, target_is_directory=True)
-    if provider == "claude":
-        (src / "settings.json").write_text(json.dumps({
-            "model": "opus", "env": {"ANTHROPIC_API_KEY": "fixture-key", "FOO": "1"},
-            "statusLine": {"command": "curl -H 'Authorization: Bearer fixture-hdr' x"}}))
-        (home / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "fixture@mail"}, "mcpServers": {
-            "ok": {"command": "srv", "args": ["--port", "1"]},
-            "flag": {"command": "gh", "args": ["--token", "fixture-arg"]},
-            "url": {"url": "https://user:fixture-pass@mcp.example"}}}))
-    else:
-        (src / "config.toml").write_text(
-            'model = "o4"\n'
-            'notify = { SAFE = "#", API_KEY = "fixture-inline" }\n'
-            '[mcp_servers.ok]\ncommand = "srv"\n'
-            '[mcp_servers.gh]\ncommand = "gh"\n[mcp_servers.gh.env]\nTOKEN = """\nfixture-multi\n"""\n')
-    env = provider_homes.launch_env(provider)
-    assert env == {provider_homes.VARIABLE[provider]: str(brindle_home)}
-    copied = {p.relative_to(brindle_home).as_posix(): p.read_text() for p in brindle_home.rglob("*") if p.is_file()}
-    assert "review the diff" in copied[f"{md.name}/review.md"]
-    assert not any("fixture" in text for text in copied.values())
-    if provider == "claude":
-        assert json.loads(copied["settings.json"]) == {"model": "opus", "statusLine": {}}
-        assert json.loads(copied[".claude.json"]) == {"mcpServers": {"ok": {"command": "srv", "args": ["--port", "1"]}}}
-    else:
-        assert tomllib.loads(copied["config.toml"]) == {   # parses: valid TOML out
-            "model": "o4", "notify": {"SAFE": "#"},
-            "mcp_servers": {"ok": {"command": "srv"}, "gh": {"command": "gh"}}}   # env tables gone
-    (brindle_home / md.name / "review.md").write_text("brindle's own")
-    (md / "later.md").write_text("added later")
-    provider_homes.launch_env(provider)                             # a second launch: no copy again
-    assert (brindle_home / md.name / "review.md").read_text() == "brindle's own"
-    assert not (brindle_home / md.name / "later.md").exists()
+    monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(brindle_home))
+    (src / "commands").mkdir(parents=True)
+    (src / "CLAUDE.md").write_text("house rules")
+    (src / "commands" / "review.md").write_text("review the diff")
+    (src / "settings.json").write_text('{"env": {"ANTHROPIC_API_KEY": "fixture-key"}}')
+    (src / ".credentials.json").write_text('{"token": "fixture-file"}')
+    (src / "commands" / "notes.md").symlink_to(src / ".credentials.json")    # a linked file
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "agent.md").write_text("fixture-through-a-link")
+    (src / "agents").symlink_to(elsewhere, target_is_directory=True)        # a linked parent folder
+    provider_homes.launch_env("claude")
+    copied = sorted(p.relative_to(brindle_home).as_posix() for p in brindle_home.rglob("*") if p.is_file())
+    assert copied == [provider_homes.MARKER, "CLAUDE.md", "commands/review.md"]
+    (brindle_home / "CLAUDE.md").write_text("brindle's own")
+    (src / "commands" / "later.md").write_text("added later")
+    provider_homes.launch_env("claude")                                     # a second launch: no copy again
+    assert (brindle_home / "CLAUDE.md").read_text() == "brindle's own"
+    assert not (brindle_home / "commands" / "later.md").exists()
 
 
 def test_sign_in_and_its_check_use_brindles_config_home(machine, tmp_path, monkeypatch):
