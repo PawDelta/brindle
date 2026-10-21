@@ -90,9 +90,11 @@ export const Brindle = async ({ client }) => {
       if (input.tool === "bash" && typeof input.sessionID === "string" && input.sessionID
           && typeof input.callID === "string" && input.callID
           && answer?.decision === "allow" && typeof output.args.command === "string") {
+        // OpenCode matches its rules against the text as written: run brindle's respelling.
+        if (typeof answer.command === "string") output.args.command = answer.command
         approvals.set(id, { command: output.args.command, expires: Date.now() + 30000 })
       }
-      else if (dontAsk && /git (?:-C |branch --list )/.test(output.args.command || "")) {
+      else if (dontAsk && /git\\s+(?:-C|branch\\s+--list)\\s/.test(output.args.command || "")) {
         throw new Error("read-only git request could not be approved")
       }
     },
@@ -227,6 +229,36 @@ def _bash_patterns(allowed_tools: list[str] | None) -> list[str]:
         else:
             out.append(command)
     return list(dict.fromkeys(out))
+
+
+_GIT_REQUEST = re.compile(r"git\s+(?:-C|branch\s+--list)\s")
+
+
+def squeezed(command: str) -> str:
+    """``command`` with each run of spaces and tabs outside quotes cut to one
+    space and none at either end. Words stay the same, but OpenCode matches
+    its bash rules against each command's text as written: ``git  -C x
+    status`` misses ``git -C *`` and, under dontAsk, falls to the deny."""
+    out: list[str] = []
+    quote, space, i = "", False, 0
+    while i < len(command):
+        c = command[i]
+        if not quote and c in " \t":
+            space = True
+            i += 1
+            continue
+        if space and out:
+            out.append(" ")
+        space = False
+        if c == "\\" and quote != "'" and i + 1 < len(command):
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if c in "'\"" and quote in ("", c):
+            quote = "" if quote else c
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def readonly_git(profile, command: str, cwd: str, repo_root: str, *, workdir: str | None = None) -> bool:
@@ -399,8 +431,9 @@ def pre_tool(db, agent_id: str, payload: dict) -> str:
             if denied:
                 return json.dumps(denied)
         answer = {"decision": "allow"}
-    elif profile.permission_mode == "dontAsk" and (
-            "git -C " in command or "git branch --list " in command):
+        if (spelling := squeezed(command)) != command:
+            answer["command"] = spelling
+    elif profile.permission_mode == "dontAsk" and _GIT_REQUEST.search(command):
         answer = {"decision": "deny", "reason": "command is not an allowed read-only git request"}
     return json.dumps(answer) if answer else ""
 

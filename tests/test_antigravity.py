@@ -223,7 +223,8 @@ def test_strict_allows_compound_commands_covered_by_allowlist(db, ws, command, e
 
 def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monkeypatch):
     # GitHub #225: agy has no dontAsk mode, so reviewer-gemini sat at a prompt
-    # for `git ls-tree` with nobody to answer it, the repo's policy off.
+    # for an uncovered command (`touch should_not_exist.txt` here) with nobody
+    # to answer it, the repo's policy off.
     monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
 
@@ -242,7 +243,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
         return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))["decision"]
 
     strict(db, ws, "list_dir", {})   # adds r1, the reviewer
-    assert answer("r1", "git ls-tree -r --name-only main") == "deny"
+    assert answer("r1", "touch should_not_exist.txt") == "deny"
     assert answer("r1", "git diff main...HEAD") == "allow"
     # Its worker relaunching in the same checkout keeps the reviewer's gate,
     # and, started without the flag, still gets agy's own prompt.
@@ -250,7 +251,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert antigravity.SKIP_FLAG not in argv and antigravity.STRICT_EVENT in hook
     add_agent(db, ws, agent_id="w1", mode="assign", profile="developer")
     monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: False)
-    assert answer("w1", "git ls-tree -r --name-only main") == "ask"
+    assert answer("w1", "touch should_not_exist.txt") == "ask"
 
 
 def test_strict_allows_reading_agy_instructions(db, ws, monkeypatch, tmp_path):
