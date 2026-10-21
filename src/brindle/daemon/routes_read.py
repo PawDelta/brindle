@@ -432,13 +432,18 @@ def get_usage(db: DB, request: Request) -> Any:
                          "name": w.name or quota.window_name(w.minutes), "short": w.name or quota.window_short(w.minutes)}
                         for w in q.windows]})
         top = quota.fullest(q)
-        reason = ("limited" if limited
-                  else "high" if top and top.used >= USAGE_NEAR_PERCENT
-                  else "resets_soon" if top and top.resets_at and top.resets_at - now <= USAGE_NEAR_RESET_SECONDS
-                  else None)
-        if reason:
-            near.append({"provider": name, "reason": reason, "used": top.used if top else None,
-                         "resets_at": top.resets_at if top else q.limited_until})
+        # Any plan window about to reset counts, not just the fullest one.
+        soon = min((w for w in q.windows if w.name is None and w.resets_at
+                    and w.resets_at - now <= USAGE_NEAR_RESET_SECONDS),
+                   key=lambda w: w.resets_at, default=None)
+        if limited:
+            near.append({"provider": name, "reason": "limited", "used": top.used if top else None,
+                         "resets_at": q.limited_until})
+        elif top and top.used >= USAGE_NEAR_PERCENT:
+            near.append({"provider": name, "reason": "high", "used": top.used, "resets_at": top.resets_at})
+        elif soon:
+            near.append({"provider": name, "reason": "resets_soon", "used": soon.used,
+                         "resets_at": soon.resets_at})
     near.sort(key=lambda n: (n["reason"] != "limited", -(n["used"] or 0)))
     return {"providers": providers, "near": near}
 
