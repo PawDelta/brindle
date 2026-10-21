@@ -499,6 +499,31 @@ def _with_supervisor_choice(profile, provider: str, repo_root: str):
     return replace(profile, provider=choice.provider, model=choice.model, effort=choice.effort)
 
 
+def _with_kind_overrides(db: DB, profile, agent: Agent, repo_root: str):
+    """``profile`` with the effort and instructions the owner set for the kind
+    of work ``agent`` does (its task's weight, a review, or the supervisor chat)."""
+    from dataclasses import replace
+
+    from brindle import learning
+    from brindle.config import WEIGHTS, load_repo_config, normalize_weight
+
+    if agent.mode == "review":
+        kind = "reviewer"
+    elif agent.profile == SUPERVISOR and agent.mode == "interactive":
+        kind = "supervisor"
+    else:
+        weight = learning._task_files(db, agent, repo_root)[1]
+        kind = normalize_weight(weight) if weight else None
+        if kind not in WEIGHTS:
+            return profile
+    tuned = load_repo_config(repo_root).routing_overrides.get(kind, {})
+    if effort := tuned.get("effort"):
+        profile = replace(profile, effort=effort)
+    if text := tuned.get("instructions"):
+        profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{text.strip()}".strip())
+    return profile
+
+
 def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     """``agent``'s profile as launched: autopilot sessions add their guide, a
     supervisor gets the rules for acting on findings, the person's standing
@@ -516,6 +541,7 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
     if agent.profile == SUPERVISOR and agent.mode == "interactive":
         profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
+    profile = _with_kind_overrides(db, profile, agent, ws.repo_root)
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.

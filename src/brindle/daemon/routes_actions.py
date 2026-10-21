@@ -1052,6 +1052,8 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     ``exclude_providers`` into ~/.brindle/config.json (scope "user"), the
     repo's .brindle/config.local.json ("local") or its shared
     .brindle/config.json ("repo"). Tiers not given keep their value there.
+    Each kind also takes ``effort`` and ``instructions`` (null clears), applied
+    to whatever runs that kind at launch.
     A profile the org's policy doesn't allow, or any change while the policy
     applies but can't be read, is refused (403)."""
     from brindle import config, profiles, providers
@@ -1067,12 +1069,22 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     excluded = _get(body, "exclude_providers", list)
     kinds = _get(body, "kinds", dict) or {}
     lock_changes: dict[str, bool] = {}
+    overrides: dict[str, dict[str, str | None]] = {}    # kind -> effort / instructions (None clears)
     extra: dict[str, Any] = {}      # supervisor and reviewer settings the kinds ask for
     current = config.load_repo_config(repo).routing
     for kind, spec in kinds.items():
         if kind not in config.ROUTING_KINDS or not isinstance(spec, dict):
             raise ServiceError("invalid", f"kind must be one of {', '.join(config.ROUTING_KINDS)}, not {kind!r}")
         model, fallbacks, locked = spec.get("model"), spec.get("fallbacks"), spec.get("locked")
+        for key in config.KIND_OVERRIDE_FIELDS:
+            if key not in spec:
+                continue
+            value = spec[key]
+            if value is not None and not (isinstance(value, str) and value.strip()):
+                raise ServiceError("invalid", f"{kind}: {key} must be text, or null to clear it")
+            if key == "effort" and value is not None and value not in config.EFFORTS:
+                raise ServiceError("invalid", f"{kind}: effort must be one of {', '.join(config.EFFORTS)}")
+            overrides.setdefault(kind, {})[key] = value
         if locked is not None:
             if not isinstance(locked, bool):
                 raise ServiceError("invalid", f"{kind}: locked must be true or false")
@@ -1142,6 +1154,13 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         mine = config.locked_kinds(config._read_json(config.scope_paths(repo)[scope]).get("routing_locked"))
         path = write("routing_locked", {**mine, **lock_changes})
         updated.append("routing_locked")
+    if overrides:
+        mine = config.kind_overrides(config._read_json(config.scope_paths(repo)[scope]).get("routing_overrides"))
+        for kind, changes in overrides.items():
+            merged = {**mine.get(kind, {}), **changes}
+            mine[kind] = {k: v for k, v in merged.items() if v is not None}
+        path = write("routing_overrides", {k: v for k, v in mine.items() if v})
+        updated.append("routing_overrides")
     for key, value in extra.items():
         path = write(key, value)
         updated.append(key)
@@ -1150,6 +1169,58 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     if not updated:
         raise ServiceError("invalid", "give tiers, reviewer, exclude_providers or kinds")
     return {"updated": updated, "path": str(path)}
+
+
+def create_profile(db: DB, params: dict, body: Body) -> Any:
+    """A custom agent in ~/.brindle/agents/<name>.md, written as
+    `brindle profile new` writes one: ``name``, ``description``, ``provider``
+    (signed in here), ``model`` (one the org's policy allows), ``effort``,
+    ``instructions`` and ``rules`` (known rule packs). An existing name is
+    refused (409)."""
+    from brindle import config, profiles, providers
+    from brindle.service.routing import RoutingPolicy
+
+    repo = _get(body, "repo", required=True)
+    name = _get(body, "name", required=True)
+    provider = _get(body, "provider", required=True)
+    model, effort = _get(body, "model") or None, _get(body, "effort") or None
+    description, instructions = _get(body, "description") or "", _get(body, "instructions") or ""
+    rules = _get(body, "rules", list) or []
+    if not profiles.PROFILE_NAME.match(name):
+        raise ServiceError("invalid", f"name {name!r}: use letters, digits, '-', '_' and '.'")
+    if not all(isinstance(r, str) for r in rules):
+        raise ServiceError("invalid", "rules must be a list of rule pack names")
+    target = config.user_profiles_dir() / f"{name}.md"
+    if target.exists() or name in {p.name for p in profiles.list_profiles(repo)}:
+        raise ServiceError("conflict", f"an agent named {name!r} already exists", 409)
+    if provider not in providers.PROVIDERS:
+        raise ServiceError("invalid", f"provider must be one of {', '.join(providers.PROVIDERS)}")
+    if why := providers.unusable(provider):
+        raise ServiceError("invalid", f"{provider} isn't connected: {why}")
+    if effort is not None and effort not in config.EFFORTS:
+        raise ServiceError("invalid", f"effort must be one of {', '.join(config.EFFORTS)}")
+    for pack in rules:
+        try:
+            profiles.load_rule_pack(pack, repo)
+        except (KeyError, profiles.ProfileError) as e:
+            raise ServiceError("invalid", f"rule {pack}: {e}") from e
+    access = RoutingPolicy.load(repo).access
+    if access.org_id is not None or access.error:
+        why = access.error or access.refusal(provider)
+        if not why and not access.allows_run(provider, model):
+            why = (f"org {access.org_id} allows only the models "
+                   f"{', '.join(access.allowed_models or ()) or '(none)'}, not {model or 'no declared model'}")
+        if why:
+            raise ServiceError("forbidden", why, 403)
+    text = profiles.profile_text(name, description, instructions or "Describe the role here.",
+                                 provider=provider, model=model, effort=effort, rules=rules)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(target, "x", encoding="utf-8") as f:    # a second create of the name loses, not overwrites
+            f.write(text)
+    except FileExistsError as e:
+        raise ServiceError("conflict", f"an agent named {name!r} already exists", 409) from e
+    return {"name": name, "path": str(target)}
 
 
 def change_permissions(db: DB, params: dict, body: Body) -> Any:
@@ -1573,6 +1644,7 @@ ROUTES = [
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),
     Route("/v1/routing", _endpoint(put_routing), methods=["PUT"]),
+    _post("/profiles", create_profile),
     _post("/permissions", change_permissions),
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),

@@ -483,6 +483,16 @@ def test_routing_shows_each_tier_and_setting_with_its_source(seeded, monkeypatch
     assert (rows["developer-light"]["cost_tier"], rows["developer-heavy"]["cost_tier"]) == ("low", "high")
 
 
+def test_rules_lists_every_pack_with_its_description_and_source(seeded):
+    rules = Path(seeded["repo"]) / ".brindle" / "rules"
+    rules.mkdir(parents=True)
+    (rules / "mine.md").write_text("---\ndescription: My rule\n---\nBe kind.\n")
+    code, body = _get("/v1/rules", AUTH, f"repo={seeded['repo']}")
+    rows = {r["name"]: r for r in body}
+    assert code == 200 and rows["mine"] == {"name": "mine", "description": "My rule", "source": str(rules / "mine.md")}
+    assert rows["style/minimal-diff"]["source"].startswith("built-in") and rows["style/minimal-diff"]["description"]
+
+
 ROUTE_ID = "us.anthropic.claude-opus-x-v1:0"     # the Bedrock id the org's route pins opus to
 
 
