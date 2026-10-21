@@ -2159,7 +2159,38 @@ def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
 
             learned_rules.refresh_later(ws.repo_root)   # the finding just landed in the history
     finally:
+        # A merge removes the workspace but leaves the session this reviewer
+        # runs in; once the reviewer is gone nobody else would end it.
+        if ws and db.get_workspace(ws_id) is None:
+            _closing_session(reviewer_id).write_text(ws.tmux_session)
         close_later(reviewer_id)
+
+
+def _closing_session(agent_id: str):
+    from brindle.config import brindle_home
+
+    d = brindle_home() / "closing"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / agent_id
+
+
+def close_removed(db: DB, agent_id: str) -> None:
+    """Kill an agent and, when its workspace was removed with the session left
+    running (noted by ``finish_review``), that session too: only brindle's own,
+    unattached session of a workspace that no longer exists."""
+    note = _closing_session(agent_id)
+    try:
+        session = note.read_text().strip()
+        note.unlink()
+    except OSError:
+        session = ""
+    try:
+        kill(db, agent_id)
+    except AgentError:
+        pass
+    if session and db.workspace_by_tmux_session(session) is None \
+            and not tmux.session_attached(session):
+        tmux.kill_session(session)
 
 
 def close_later(agent_id: str, delay: float = 5.0) -> None:

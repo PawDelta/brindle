@@ -36,6 +36,7 @@ import json
 import os
 import queue
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -228,7 +229,8 @@ class _AppServer:
         self.timeout = timeout
         try:
             self.proc = subprocess.Popen([binary, "app-server", *flags], stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                         start_new_session=True)
         except OSError as e:
             raise CodexHookError(f"couldn't run {binary}: {e}") from e
         self.lines: queue.Queue = queue.Queue()
@@ -279,6 +281,14 @@ class _AppServer:
                 return result
 
     def close(self) -> None:
+        # The app-server leads its own process group (see __init__): kill the
+        # group so nothing it spawned outlives it.
+        pid = getattr(self.proc, "pid", None)
+        if pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
         try:
             self.proc.kill()
         except OSError:
