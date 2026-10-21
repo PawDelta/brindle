@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 
 from brindle import git, mcp_server
+from brindle.db import Agent, Workspace
 
 
 def test_untracked_summary_collapses_noise_and_dirs():
@@ -46,3 +47,32 @@ def test_last_activity_native_and_missing(tmp_path):
     assert " last: bash " in mcp_server._last_activity(SimpleNamespace(transcript_path=str(t)))
     assert mcp_server._last_activity(SimpleNamespace(transcript_path=None)) == ""
     assert mcp_server._last_activity(SimpleNamespace(transcript_path=str(tmp_path / "no"))) == ""
+
+
+def test_list_agents_marks_stale_progress(db, tmp_path, monkeypatch):
+    now = time.time()
+    ws = Workspace("ws", str(tmp_path), "work", "main", "main", None, str(tmp_path), None, "", now)
+    db.add_workspace(ws)
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, ws))
+    monkeypatch.setattr(mcp_server.time, "time", lambda: now)
+    for provider in ("antigravity", "codex", "claude", "native", "shell"):
+        t = tmp_path / f"{provider}.jsonl"
+        t.write_text("{}\n")
+        os.utime(t, (now - 300, now - 300))
+        db.add_agent(Agent(provider, ws.id, "dev", provider, None, "assign", "processing", "",
+                           None, now - 600, transcript_path=str(t)))
+    monkeypatch.setattr("brindle.usage.find_codex_rollout", lambda *a: tmp_path / "codex.jsonl")
+    assert mcp_server.list_agents().count("no progress for 5 min") == 5
+    for a in db.list_agents(ws.id):
+        os.utime(a.transcript_path, (now - 179, now - 179))
+    assert "no progress" not in mcp_server.list_agents()
+    for a in db.list_agents(ws.id):
+        os.utime(a.transcript_path, (now - 300, now - 300))
+        db.update_agent(a.id, status="paused")
+    assert "no progress" not in mcp_server.list_agents()
+    db.update_agent("shell", status="unknown", status_since=now - 600,
+                    transcript_path=None, tmux_window="@fake")
+    monkeypatch.setattr("brindle.tmux.window_activity", lambda *a, **k: now - 300)
+    assert mcp_server.list_agents().count("no progress for 5 min") == 1
+    monkeypatch.setattr("brindle.tmux.window_activity", lambda *a, **k: None)
+    assert "no progress" not in mcp_server.list_agents()
