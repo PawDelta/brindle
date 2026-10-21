@@ -103,7 +103,7 @@ def list_sessions(db: DB, request: Request) -> Any:
     repo = _need_repo(request)
     live = [SessionDTO.from_agent(s.root, s.goal).to_json() for s in sessions.live(db, repo)]
     paused = [SessionDTO.from_agent(s.root, sessions.goal_line(db, s.root)).to_json()
-              for s in sessions.paused(db, repo)]
+              for s in sessions.paused(db, repo) if s.root.dismissed_at is None]
     return live + paused
 
 

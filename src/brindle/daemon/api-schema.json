@@ -2913,6 +2913,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/sessions/{root}/close"
+    },
+    {
+      "method": "POST",
       "path": "/v1/sessions/{root}/continue"
     },
     {

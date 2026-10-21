@@ -104,6 +104,38 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
         assert [(e["kind"], e["payload"]["job"]) for e in done] == [("job.done", reply["job"])]
 
 
+def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(db, tmp_path, monkeypatch):
+    from brindle import procs, tmux
+    from brindle import sessions as sessions_mod
+
+    repo = str(tmp_path / "proj")
+    for wid, name, kind, branch in [("proj/root", "root", "main", "main"), ("w-1", "feat", "worktree", "feat"),
+                                    ("w-2", "feat2", "worktree", "feat2")]:
+        db.add_workspace(Workspace(wid, repo, name, kind, branch, "main", f"{repo}/{name}", None,
+                                   f"brindle-{name}", time.time()))
+    db.add_agent(Agent("sup", "proj/root", "supervisor", "claude", None, "interactive", "idle", "%1",
+                       None, time.time()))
+    for n in (1, 2):
+        db.add_agent(Agent(f"wk{n}", f"w-{n}", "developer", "claude", "sup", "assign", "idle", f"%{n + 1}",
+                           None, time.time()))
+    stopped = []
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: {})
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id not in stopped)
+    monkeypatch.setattr(agents, "owns_pane", lambda *a, **k: True)
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: stopped.append(a.id))
+    monkeypatch.setattr(procs, "stop", lambda *a, **k: None)
+    monkeypatch.setattr(sessions_mod, "live", lambda *a, **k: [])     # no tmux to ask
+    for _ in range(2):         # the second close finds nothing left to do
+        code, reply = _send("POST", "/v1/sessions/sup/close")
+        assert code == 200, reply
+    assert sorted(stopped) == ["sup", "wk1", "wk2"]
+    assert all(db.get_agent(i).dismissed_at for i in stopped)
+    assert reply == {"closed": [], "stopped": []}
+    assert {db.get_workspace(w).branch for w in ("w-1", "w-2")} == {"feat", "feat2"}
+    code, listed = _send("GET", f"/v1/sessions?repo={repo}")
+    assert code == 200 and "sup" not in [s["id"] for s in listed]
+
+
 @pytest.mark.parametrize("path,base,setup,status", [
     ("app.py", "shown", None, 200),
     ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
