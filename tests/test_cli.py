@@ -18,13 +18,17 @@ from conftest import sh
     (["/usr/bin/true"], "/usr/bin/true"),
     (["brindle", "_headless", "abc"], "/usr/bin/true"),
 ])
-def test_unmocked_agent_cli_launch_raises(argv, override, monkeypatch):
+def test_unmocked_agent_cli_launch_raises(argv, override, monkeypatch, tmp_path):
     import subprocess
+
+    from brindle import tmux
 
     if override:
         monkeypatch.setenv("BRINDLE_CLAUDE_BIN", override)
+    launch = ((lambda: tmux.new_window("s", "w", str(tmp_path), argv)) if "_headless" in argv
+              else (lambda: subprocess.Popen(argv)))
     with pytest.raises(AssertionError, match="test_unmocked_agent_cli_launch_raises"):
-        subprocess.Popen(argv)
+        launch()
 
 
 @pytest.mark.parametrize("command", [[], ["new", "feat/provider"], ["start"], ["supervisor"]])

@@ -99,6 +99,16 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     # The user replies: autopilot drives again.
     autopilot.user_spoke(db, db.get_agent("boss"))
     assert db.get_autopilot("boss").state == "running"
+    out = autopilot.on_stop(db, agent, {})
+    assert out is not None
+    # (#209) A supervisor that pulls its messages holds that reminder unread:
+    # past the backoff, once the unread-mail reminder has gone out, its stops
+    # still get no second one until it reads the first.
+    db.enqueue_held("boss", out["reason"], None)
+    clock[0] += autopilot.NUDGE_BACKOFF
+    assert "unread messages" in agents._stop_decision(db, agent, {}, via_inbox=True)["reason"]
+    assert agents._stop_decision(db, agent, {}, via_inbox=True) is None
+    db.read_held("boss")
     assert autopilot.on_stop(db, agent, {}) is not None
 
 
@@ -178,20 +188,18 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
 
 def test_need_user_question_holds_until_answered(db, root, monkeypatch):
     # A question holds only the work that depends on it: an unrelated user
-    # message doesn't cancel it, and the supervisor is reminded once per step.
+    # message doesn't cancel it, and autopilot doesn't nudge while it's open.
+    # (#209) Anything that woke the chat without brindle's tag (a watcher's
+    # event on a log) re-armed a reminder of it: one every ~2 s, for hours.
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
     autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    assert autopilot.on_stop(db, agent, {}) is None
-    autopilot.user_spoke(db, agent)
+    for _ in range(3):
+        agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "queue: epoch 3 done"})
+        assert agents.handle_hook(db, "boss", "stop", {}) is None
     assert db.get_autopilot("boss").state == "blocked"
-    out = autopilot.on_stop(db, agent, {})
-    assert out and out["decision"] == "block"
-    assert "Waiting on the user for: Postgres or SQLite?" in out["reason"]
-    assert autopilot.on_stop(db, agent, {}) is None
     db.bump_progress("boss")
-    assert autopilot.on_stop(db, agent, {}) is not None
     assert autopilot.on_stop(db, agent, {}) is None
     autopilot.answered(db, "boss")
     ap = db.get_autopilot("boss")
@@ -491,19 +499,17 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch)
     agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "SQLite"})
     assert db.get_autopilot("boss").state == "running"
 
-    # Live incident: the reminder of an open question went out through the
-    # inbox, its prompt-submit counted as the user speaking, and that re-armed
-    # the reminder about once a minute. Wrapped, or as the unread-mail
-    # reminder (never recorded as delivered), it must not re-arm either.
+    # brindle's own reminders arrive as prompts too, wrapped (the inbox) or
+    # never recorded as delivered (the unread-mail one): none is the user
+    # telling a stalled autopilot to drive again.
     monkeypatch.setattr(autopilot, "split_workers", lambda *a, **k: ([], []))
-    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    autopilot.user_spoke(db, agent)
     sent = agents._stop_decision(db, agent, {}, via_inbox=True)
     assert sent
-    for prompt in (sent["reason"], f"<message>{sent['reason']}</message>",
+    db.update_autopilot("boss", state="stalled")
+    for prompt in (f"<message>{sent['reason']}</message>",
                    "[brindle autopilot] You have unread messages. Call read_messages before you stop."):
         agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
-        assert autopilot.on_stop(db, agent, {}) is None
+        assert db.get_autopilot("boss").state == "stalled"
 
 
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
@@ -557,6 +563,7 @@ def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
     ("waiting", "waiting"),
     ("pending_task", "waiting"),
     ("usage_paused", "waiting"),
+    ("checking", "checking"),
     (None, "failed"),
 ])
 def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
@@ -574,6 +581,20 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
                          None, None, None, None, "pending", time.time()))
     elif flight == "usage_paused":
         db.update_autopilot("boss", state="usage_paused")
+    elif flight == "checking":
+        db.update_autopilot("boss", checking_since=time.time())
     entry = view.autopilot_entry(db, ws.repo_root, root_id="boss")
     assert entry["milestones"][0]["status"] == expected
     assert entry["milestones"][1]["status"] == "pending"
+    if flight == "checking":
+        text = autopilot.progress(db, "boss")
+        assert "◌" in text and "checking" in text and "failed" not in text
+        assert any("checking" in line.text for line in watch.render_autopilot(entry, 80))
+        monkeypatch.setattr(gates, "run_checked", lambda *a, **k: (False, "new failure"))
+        finished = autopilot.check_milestones(db, "boss", ws)
+        assert "✗" in finished and "checking" not in finished and "new failure" in finished
+        assert "checking" in autopilot.progress(db, "boss")
+        db.record_check(db.milestones("boss")[0].id, True, "passed")
+        db.update_autopilot("boss", checking_since=None)
+        assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["milestones"][0]["status"] == "passed"
+        assert "✓" in autopilot.progress(db, "boss") and "failed" not in autopilot.progress(db, "boss")

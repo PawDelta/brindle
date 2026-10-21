@@ -19,8 +19,10 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 
 import shutil
@@ -133,6 +135,25 @@ def _concurrency(ws: Workspace) -> int:
         return host_check_concurrency()
 
 
+_place = threading.local()
+
+
+@contextmanager
+def queue_place(since: float):
+    """Check runs this thread starts inside this wait in the check queue as
+    if they had arrived at ``since``: each command of one run keeps the run's
+    place, and a review keeps the place of the report it is for (#186). An
+    enclosing place is kept."""
+    outer = getattr(_place, "since", None)
+    if outer is None:
+        _place.since = since
+    try:
+        yield
+    finally:
+        if outer is None:
+            _place.since = None
+
+
 @contextmanager
 def _check_slot(limit: int, cancel=None):
     """Hold one of ``limit`` machine-wide slots for a check run, waiting for
@@ -140,19 +161,29 @@ def _check_slot(limit: int, cancel=None):
     and every run then takes hours. The slots are lock files under the brindle
     home, so every brindle process (the merge gate, ``_review-after-checks``,
     ``_warm-checks``, milestone checks) shares them, and a process that dies
-    gives its slot back. ``limit`` 0 or less means no cap."""
+    gives its slot back. Waiters go first come, first served (see
+    ``queue_place``): a free slot is left to an earlier waiter that can use
+    it, so a run can't be passed over by later arrivals for as long as they
+    keep coming (#186: a review waited 30 min on a 3-second check). ``limit``
+    0 or less means no cap."""
     if limit <= 0:
         yield
         return
     from brindle.config import brindle_home
 
     lock_dir = brindle_home() / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    queue = lock_dir / "check-queue"
+    queue.mkdir(parents=True, exist_ok=True)
     files = [open(lock_dir / f"check-slot-{i}.lock", "w") for i in range(limit)]
+    since = getattr(_place, "since", None) or time.time()
+    ticket = _enqueue(queue, since, limit)
     try:
         held = False
         while not held:
-            for f in files:
+            ahead = _waiting_ahead(queue, ticket.name)
+            for i, f in enumerate(files):
+                if any(i < other for other in ahead):
+                    continue   # an earlier waiter can take this one
                 try:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
@@ -163,10 +194,94 @@ def _check_slot(limit: int, cancel=None):
                 if cancel is not None and cancel():
                     raise Abandoned("slot")
                 time.sleep(SLOT_POLL)
+        _dequeue(ticket)
         yield
     finally:
+        _dequeue(ticket)
         for f in files:
             f.close()   # closing releases the slot
+
+
+class _Ticket:
+    """A waiter's place in the check queue: a file named for its arrival and
+    slot limit, locked for as long as it waits (an unlocked one is a dead
+    waiter's)."""
+
+    def __init__(self, path, f) -> None:
+        self.path, self.name, self.file = path, path.name, f
+
+
+def _enqueue(queue, since: float, limit: int) -> _Ticket:
+    name = f"{int(since * 1_000_000):020d}-{limit}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    staged = queue / ("." + name)
+    f = open(staged, "w")
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    os.replace(staged, queue / name)   # in the queue only once locked, so never taken for dead
+    return _Ticket(queue / name, f)
+
+
+def _dequeue(ticket: _Ticket) -> None:
+    if ticket.file.closed:
+        return
+    try:
+        os.unlink(ticket.path)
+    except FileNotFoundError:
+        pass
+    ticket.file.close()
+
+
+def _waiting_ahead(queue, mine: str) -> list[int]:
+    """The slot limits of the live waiters queued before ``mine``; a dead
+    waiter's ticket is cleared on the way."""
+    ahead = []
+    for name in sorted(os.listdir(queue)):
+        if name >= mine:
+            break
+        if name.startswith("."):
+            continue
+        try:
+            with open(queue / name) as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    ahead.append(int(name.split("-")[1]))
+                    continue
+                os.unlink(queue / name)   # its waiter died without taking it out
+        except (FileNotFoundError, ValueError, IndexError):
+            continue
+    return ahead
+
+
+def _marker_file(kind: str, ws_id: str):
+    from brindle.config import brindle_home
+
+    lock_dir = brindle_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / (f"{kind}-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16] + ".lock")
+
+
+@contextmanager
+def marker(kind: str, ws_id: str):
+    """Mark something of ``kind`` at work on workspace ``ws_id`` for as long
+    as this is held (``marked`` tells). Shared, so two holders don't wait on
+    each other, and the lock goes with a holder that dies."""
+    with open(_marker_file(kind, ws_id), "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def marked(kind: str, ws_id: str) -> bool:
+    """Whether anything holds ``marker(kind, ws_id)`` right now."""
+    with open(_marker_file(kind, ws_id), "w") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return False
 
 
 def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
@@ -174,7 +289,7 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     """Run ``cmd`` once a slot is free (``timeout`` covers the run, not the
     wait). A run that goes far past the command's last passing duration in
     this repo is reported to the supervisor while it is still running."""
-    with _check_slot(_concurrency(ws), cancel):
+    with _check_slot(_concurrency(ws), cancel), marker("checks-running", ws.id):
         last = db.check_duration(ws.repo_root, cmd)
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
@@ -312,22 +427,23 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     env = workspaces.workspace_env(ws)
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
-    for cmd in cfg.checks:
-        if cancel is None:
-            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
-        else:
-            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel=cancel)
-        if ok:
-            lines.append(f"PASS `{cmd}`")
-            continue
-        if budget <= 0:
-            lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
-            continue
-        # Keep the tail, not the head: run_check's own exit-code marker is the
-        # last line, and that's the part a reviewer needs most.
-        shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
-        budget -= len(shown)
-        lines.append(f"FAIL `{cmd}`\n{shown}")
+    with queue_place(time.time()):   # one place in the check queue for all its commands
+        for cmd in cfg.checks:
+            if cancel is None:
+                ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+            else:
+                ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel=cancel)
+            if ok:
+                lines.append(f"PASS `{cmd}`")
+                continue
+            if budget <= 0:
+                lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
+                continue
+            # Keep the tail, not the head: run_check's own exit-code marker is the
+            # last line, and that's the part a reviewer needs most.
+            shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
+            budget -= len(shown)
+            lines.append(f"FAIL `{cmd}`\n{shown}")
     return "\n".join(lines)
 
 
@@ -340,17 +456,8 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
 
     sha = r.sha = head(ws)
     if review_required:
-        review = db.latest_review(ws.id, sha)
-        if review is None:
-            return r.fail(
-                f"{ws.branch} at {sha[:8]} hasn't been reviewed. Call request_review "
-                f"(workspace=\"{ws.id}\") and merge once it approves."
-            )
-        if not review.approved:
-            return r.fail(
-                f"The review of {ws.branch} at {sha[:8]} requested changes:\n{review.summary or ''}\n"
-                "Send these to the worker, then request another review."
-            )
+        if problem := _review_problem(db, ws, sha):
+            return r.fail(problem)
         r.passed.append(f"review approved {sha[:8]}")
 
     if cfg.pre_commit and (problem := _pre_commit(db, ws, cfg)):
@@ -367,12 +474,55 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
         r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
     env = workspaces.workspace_env(ws)
-    for cmd in cfg.checks:
-        ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
-        if not ok:
-            return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
-        r.passed.append(f"`{cmd}` passed")
+    with queue_place(time.time()):
+        for cmd in cfg.checks:
+            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+            if not ok:
+                return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
+            r.passed.append(f"`{cmd}` passed")
+    # A verdict recorded while the checks ran (a second reviewer's, #216)
+    # counts as much as one recorded before them.
+    if review_required and (problem := _review_problem(db, ws, sha)):
+        return r.fail(problem)
     return r
+
+
+def standing_reviews(db: DB, ws_id: str, sha: str) -> list:
+    """The verdicts on ``sha`` that stand (#216): each reviewer's latest one,
+    an approval carried over from the commit before a sync included, less any
+    a later reviewer superseded: one started in the same review claim slot
+    (``agents._request_review``: the commit's review, or the required second
+    review), whatever its profile, after that verdict was recorded, that has
+    given its own since. A reviewer with no recorded slot supersedes nothing."""
+    reviews = db.reviews_at(ws_id, sha)
+    reviewers = {r.reviewer_id: a for r in reviews
+                 if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
+
+    def supersedes(s, r) -> bool:
+        new, old = reviewers.get(s.reviewer_id), reviewers.get(r.reviewer_id)
+        return (new is not None and old is not None and new.review_slot is not None
+                and new.review_slot == old.review_slot
+                and new.created_at > r.created_at and s.created_at > r.created_at)
+
+    return [r for r in reviews if not any(supersedes(s, r) for s in reviews)]
+
+
+def verdict(db: DB, ws_id: str, sha: str):
+    """The review that decides whether ``sha`` may merge: the first standing
+    verdict that isn't an approval, else the latest approval, else None."""
+    standing = standing_reviews(db, ws_id, sha)
+    return next((r for r in standing if not r.approved), standing[-1] if standing else None)
+
+
+def _review_problem(db: DB, ws: Workspace, sha: str) -> str | None:
+    review = verdict(db, ws.id, sha)
+    if review is None:
+        return (f"{ws.branch} at {sha[:8]} hasn't been reviewed. Call request_review "
+                f"(workspace=\"{ws.id}\") and merge once it approves.")
+    if not review.approved:
+        return (f"The review of {ws.branch} at {sha[:8]} requested changes:\n{review.summary or ''}\n"
+                "Send these to the worker, then request another review.")
+    return None
 
 
 def _has_pre_commit(ws: Workspace) -> bool:

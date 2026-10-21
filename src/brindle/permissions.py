@@ -28,7 +28,11 @@ Precedence: any matching deny wins; else any matching allow; else ask.
 Specificity never matters. An allow rule for bash only ever applies to a
 single simple command (letters, digits, spaces and ``_-./:=@%+,`` only): a
 command with any other character (``;``, ``|``, ``&``, ``$``, quotes, globs,
-redirections, newlines...) is never auto-allowed. Anything unknown or
+redirections, newlines...) is never auto-allowed as a whole. A list of
+commands joined only by ``&&``, ``;`` or ``|`` is allowed when an allow rule
+covers every part (word by word, as the shell will run it, with quoted or
+escaped characters treated literally) and nothing else can run or write
+(see compound_parts); a deny on any part denies it. Anything unknown or
 unparseable is ask.
 
 Where rules come from (``source``): ``default`` (built in, below), ``repo``
@@ -73,6 +77,8 @@ FILE = "permissions.json"
 # A command an allow rule may cover: one simple command, nothing the shell
 # would treat specially.
 SIMPLE_COMMAND = re.compile(r"[A-Za-z0-9_\-./:=@%+, ]+")
+# The operators a compound command may join its parts with ("" ends it).
+COMPOUND_SEPARATORS = ("&&", ";", "|", "")
 READONLY_GIT = ("status", "diff", "log", "show")
 # Options that make an otherwise read-only git command write or read files
 # outside the repo.
@@ -686,6 +692,53 @@ def simple_argv(command: str | None) -> list[str] | None:
     return argv or None
 
 
+def compound_parts(command: str) -> list[list[str]] | None:
+    """The words of each simple command in a list joined only by ``&&``,
+    ``;`` or ``|``, when unquoted word characters are plain text
+    (SIMPLE_COMMAND; quoted or escaped characters are literal); else None.
+    Nothing beyond those commands may run
+    or write: no command substitution, backticks, subshell, process
+    substitution, heredoc, input from a file (a read no read rule saw) or
+    redirection other than an fd dup or output to /dev/null."""
+    from brindle.native.permissions import _simple_commands, _tokens
+
+    if "$(" in command or "`" in command:
+        return None
+    tokens = _tokens(command, word_pattern=SIMPLE_COMMAND)
+    if tokens is None or any(is_op and "<" in text for is_op, text in tokens):
+        return None
+    parsed = _simple_commands(command)
+    if not parsed or any(after not in COMPOUND_SEPARATORS for _, after in parsed):
+        return None
+    return [words for words, _ in parsed]
+
+
+def _part_decision(req: Request, words: list[str], checks: list[str] | None,
+                   rules: list[Rule]) -> Decision:
+    """One part of a compound command. A deny reads the words re-joined at
+    every space, so a spaced word can't dodge it. An allow must see the
+    words as the shell will run them: ``"./check --safe"`` is one word,
+    a different program from ``./check --safe``. Words without spaces
+    re-join to exactly that; a word with spaces can only fall in the
+    arguments of a prefix rule whose words come before it. The same holds
+    for literal metacharacters: re-parsing them without their quotes would
+    mistake argument text for shell syntax."""
+    from brindle.native.permissions import _joined
+
+    denied = decide(replace(req, command=_joined(words)), checks=checks,
+                    rules=[rule for rule in rules if rule.decision == "deny"])
+    if denied.decision == "deny":
+        return denied
+    if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
+        return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules)
+    for rule in rules:
+        head = rule.match.split()
+        if (rule.kind == "bash" and rule.decision == "allow" and rule.match_type == "prefix"
+                and head and words[:len(head)] == head):
+            return Decision("allow", f"allowed by {rule.source} rule {rule.id} ({rule.describe()})", rule)
+    return Decision("ask", "no rule allows it")
+
+
 def _inside(path: str, root: str) -> str | None:
     """``path``'s location relative to ``root`` (both resolved), if inside."""
     if not root:
@@ -895,6 +948,14 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
                 verb = "denied" if wanted == "deny" else "allowed"
                 return Decision(wanted, f"{verb} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
+        parts = compound_parts(req.command)
+        if parts:
+            answers = [_part_decision(req, words, checks, rules) for words in parts]
+            for answer in answers:
+                if answer.decision == "deny":
+                    return answer
+            if all(answer.decision == "allow" for answer in answers):
+                return Decision("allow", "every part of the command is allowed by a rule")
         why = "the command isn't a single simple command, so no allow rule applies"
     elif req.kind == "read" and req.path:
         why = "not a file git tracks in the worktree, and no rule allows it"

@@ -4,11 +4,12 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from conftest import full_text, sh
-from brindle import agents, autopilot, gates, workspaces
+from brindle import agents, autopilot, cli, gates, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent
 
@@ -85,6 +86,56 @@ def test_at_most_limit_runs_hold_a_slot_at_once(brindle_home, monkeypatch, limit
 
     in_threads(4, run)
     assert meter.peak == limit
+
+
+@pytest.mark.variant("#186 starvation race: unlike slot-limit/shared-queue tests, a reported review must precede later arrivals")
+def test_a_reported_branch_is_checked_in_turn_however_many_runs_arrive_after(db, session, repo,
+                                                                            monkeypatch):
+    # #186: with one slot, the review a report started waited 30 min on a
+    # 3-second check while runs queued after it kept taking the slot.
+    from test_reviewer_dedupe import run_helper
+
+    root, ws = session
+    configure(repo, checks=["suite"], check_concurrency=1, review_profile="reviewer")
+    monkeypatch.setattr(gates, "SLOT_POLL", 0.2)
+    helpers, order = [], []
+    monkeypatch.setattr(agents, "_detach", helpers.append)
+    monkeypatch.setattr(cli, "_helper_db", DB)
+    monkeypatch.setattr(autopilot, "run_check", lambda *a, **kw: (order.append("review"), (True, ""))[1])
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, profile, **kw: Agent(
+        "rev1", ws_.id, profile, "claude", "boss", "review", "starting", "@0", None, time.time()))
+    polling, seen = threading.Condition(), set()
+
+    def poll(seconds):   # a run waiting for a free slot: say which, then wait as before
+        with polling:
+            seen.add(threading.current_thread().name)
+            polling.notify_all()
+        threading.Event().wait(seconds)
+
+    monkeypatch.setattr(gates, "time", SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=poll))
+
+    def waiting(name):
+        with polling:
+            assert polling.wait_for(lambda: name in seen, timeout=10)
+
+    def queued_after_the_report():
+        with gates._check_slot(1):
+            order.append("queued after the report")
+
+    with gates._check_slot(1):   # another branch's checks hold the only slot
+        agents.report_result(db, "w1", "done")
+        other = threading.Thread(target=queued_after_the_report, name="other")
+        other.start()
+        waiting("other")
+        [argv] = [a for a in helpers if "_review-after-checks" in a]
+        review = threading.Thread(target=run_helper, args=(ws, argv), name="review")
+        review.start()
+        waiting("review")
+    with gates._check_slot(1):   # a run that comes as the slot frees, while the others sleep
+        order.append("arrived last")
+    for t in (other, review):
+        t.join(timeout=30)
+    assert order == ["review", "queued after the report", "arrived last"]
 
 
 @pytest.mark.variant("regression for #169: main's fixed default of 2 fails it")

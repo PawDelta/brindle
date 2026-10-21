@@ -10,7 +10,8 @@ When the supervisor stops while milestones are still unverified and no worker
 is running, its Stop hook tells it to keep going. It stops pushing when:
 - every milestone's check passes (the goal is done),
 - the supervisor calls ``need_user`` (blocked on a decision only the user can
-  make), until the user next types something,
+  make), until the user next types something or, for its own question,
+  until the supervisor says it's answered,
 - it has nudged MAX_NUDGES times in a row with no progress (stalled), or
 - Claude usage is near its limit.
 
@@ -55,6 +56,7 @@ GOALS_FILE = "goals.md"
 GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's own goal
 MAX_NUDGES = 3
 NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
+NUDGE_HEAD = "[brindle autopilot] The goal isn't reached yet, and no workers are running."
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
 OUTPUT_TAIL_LINES = 30
 
@@ -1058,12 +1060,8 @@ def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
     question (``ask``) holds only the work that depends on it, until the
     supervisor says it's answered."""
     note = question.strip()[:500]
-    fields: dict[str, object] = {"state": "blocked", "note": note, "nudges": 0,
-                                 "question": note if ask else None}
-    if ask:
-        ap = db.get_autopilot(root_id)
-        fields["nudged_at"] = ap.progress if ap else None
-    db.update_autopilot(root_id, **fields)
+    db.update_autopilot(root_id, state="blocked", note=note, nudges=0,
+                        question=note if ask else None)
 
 
 def held(ap: Autopilot) -> bool:
@@ -1079,12 +1077,11 @@ def answered(db: DB, root_id: str) -> None:
 def user_spoke(db: DB, agent: Agent) -> None:
     """The user typed into the supervisor's chat: whatever blocked autopilot
     is theirs to have answered, so it may drive again. An open question stays
-    open (the message may be about something else), but the supervisor gets
-    one more reminder of it."""
+    open (the message may be about something else) until the supervisor says
+    it's answered. Nothing here re-arms a reminder (#209): brindle can't
+    always tell the user from whatever else woke the chat."""
     ap = db.get_autopilot(agent.id)
-    if ap and held(ap):
-        db.update_autopilot(agent.id, nudges=0, nudged_at=None)
-    elif ap and ap.state in ("blocked", "stalled"):
+    if ap and ap.state in ("blocked", "stalled") and not held(ap):
         db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0)
     elif ap:
         db.update_autopilot(agent.id, nudges=0)
@@ -1294,7 +1291,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         positions = ", ".join(str(m.position) for m in regressed)
         verb = "was passing but now fails" if len(regressed) == 1 else "were passing but now fail"
         lines.append(f"REGRESSED: milestone {positions} {verb}.")
-    lines.append(progress(db, root_id))
+    lines.append(progress(db, root_id, in_flight=False))
     for m in shown:
         if m.output and m.status == "failed":
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
@@ -1510,7 +1507,8 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 # -- progress -----------------------------------------------------------------
 
-MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌"}
+MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌",
+        "checking": "◌"}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
@@ -1519,7 +1517,7 @@ def counts(db: DB, root_id: str) -> tuple[int, int]:
 
 
 def work_state(db: DB, root_id: str) -> str | None:
-    """Display-only: "working" or "waiting" while the session has work in
+    """Display-only: "checking", "working" or "waiting" while the session has work in
     flight, else None. A failed milestone's last check is stale then, so it
     shouldn't read as a plain failure. Never stored on the milestone.
 
@@ -1528,6 +1526,8 @@ def work_state(db: DB, root_id: str) -> str | None:
     from brindle import login_pause
 
     ap = db.get_autopilot(root_id)
+    if ap is not None and checking(ap):
+        return "checking"
     if (ap is not None and ap.state == "usage_paused") or login_pause.paused(db, root_id):
         return "waiting"
     live = active_workers(db, root_id)
@@ -1539,7 +1539,12 @@ def work_state(db: DB, root_id: str) -> str | None:
     return None
 
 
-def progress(db: DB, root_id: str) -> str:
+def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
+    """Render live progress, or recorded results for a completed check report.
+
+    A completed report must not inherit the background flag: the helper keeps
+    it set until delivery finishes, so concurrent readers still see checking.
+    """
     ap = db.get_autopilot(root_id)
     if ap is None:
         return "Autopilot is not set up for this session."
@@ -1550,14 +1555,18 @@ def progress(db: DB, root_id: str) -> str:
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
     ms = db.milestones(root_id)
-    w = work_state(db, root_id) if any(m.status == "failed" for m in ms) else None
+    w = work_state(db, root_id) if in_flight and any(m.status == "failed" for m in ms) else None
     for m in ms:
         where = f"@{m.repo}: " if m.repo else ""
         how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
         who = f", profile: {m.profile}" if m.profile else ""
         shown = w if m.status == "failed" and w else m.status
-        stale = ", last check failed" if shown != m.status else ""
+        if shown == "checking":
+            stale = ", checking…"
+            when = ""
+        else:
+            stale = ", last check failed" if shown != m.status else ""
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
     if ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
@@ -1835,10 +1844,9 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
                 return None
         else:
             return None
-    elif held(ap):
-        if ap.nudged_at == ap.progress:
-            return None  # reminded of the open question since the last step or user message
     elif ap.state != "running":
+        # An open need_user question included (#209): reminding the supervisor
+        # of it re-armed on anything that woke the chat, a nudge every ~2 s.
         return None
 
     ws = db.get_workspace(agent.workspace_id)
@@ -1858,10 +1866,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
-    if held(ap):
-        # One reminder per step: never counts toward stalling.
-        db.update_autopilot(agent.id, nudges=0, nudged_at=ap.progress)
-        return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
+    if db.outstanding(agent.id, NUDGE_HEAD):
+        return None  # (#209) the last reminder is still queued or unread: never pile up another
     now = time.time()
     if (ap.nudged_at == ap.progress and ap.nudged_time is not None
             and now - ap.nudged_time < NUDGE_BACKOFF):
@@ -1905,13 +1911,8 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
         pending += ("Every milestone's check passes, but the completion audit hasn't approved "
                     "the current commit. Close any gaps it found, commit, and call "
                     "check_milestone: that starts a fresh audit.\n\n")
-    if held(ap):
-        pending += (f"Waiting on the user for: {ap.question}. Work only on what doesn't depend "
-                    "on it; if nothing is left, stop. When they've answered, call "
-                    "need_user(answered=true).\n\n")
     return (
-        "[brindle autopilot] The goal isn't reached yet, and no workers are running.\n"
-        f"{progress(db, ap.root_id)}\n\n{pending}{stuck}"
+        f"{NUDGE_HEAD}\n{progress(db, ap.root_id)}\n\n{pending}{stuck}"
         "Keep going without waiting for the user: plan the next tasks for the first "
         f"unverified milestone and assign workers (at most {cfg.max_agents or 'any number'} "
         "at once), get finished branches reviewed and merged, and call check_milestone. "

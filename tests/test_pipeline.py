@@ -249,6 +249,8 @@ def _reported(db, repo, reviewing_since=None):
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done")
+    (Path(ws.path) / "work.py").write_text("x = 1\n")   # a branch with no commits isn't reviewed
+    sh("git add work.py && git commit -qm work", Path(ws.path))
     if reviewing_since is not None:
         db.update_agent("w1", pipeline="reviewing", reviewing_since=reviewing_since)
     return ws
@@ -342,7 +344,9 @@ def test_issue186_review_state_tells_silence_apart(db, repo, monkeypatch):
     db.update_agent("w1", pipeline="reviewing")
     assert "nothing" in pipeline.review_state(db, ws)
     with pipeline.review_run(ws.id):
-        assert pipeline.review_state(db, ws) == "checks running"
+        assert pipeline.review_state(db, ws) == "waiting for checks"   # queued for a check slot
+        with gates.marker("checks-running", ws.id):
+            assert pipeline.review_state(db, ws) == "checks running"
     add(db, ws, "rev0", "review", "reviewer", parent="boss", status="processing")
     assert pipeline.review_state(db, ws) == "reviewer running (rev0)"
     [line] = [x for x in mcp_server.list_agents().splitlines() if x.startswith("w1 ")]
@@ -354,6 +358,10 @@ def test_issue186_review_state_tells_silence_apart(db, repo, monkeypatch):
     assert pipeline.review_state(db, ws) == f"changes requested at {sha}"
     db.add_review(ws.id, gates.head(ws), "rev0", True, "lgtm")
     assert pipeline.review_state(db, ws) == f"approved at {sha}"
+    db.update_agent("w1", pipeline="ready")
+    with gates.marker("merge-run", ws.id), gates.marker("checks-running", ws.id):
+        assert pipeline.review_state(db, ws) == "approved, merging, checks running"
+    db.update_agent("w1", pipeline=None)
 
     db.update_agent("w1", merge_failed="check `pytest` failed:\nboom\n" + "x" * 300)
     state = pipeline.review_state(db, ws)
