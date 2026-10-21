@@ -2,6 +2,8 @@
 name: reviewer-gemini
 description: Reviews a branch's changes for bugs and risks without editing code, using Google Antigravity (Gemini) for a second model's view
 provider: antigravity
+model: gemini-4-argon
+effort: high
 permission_mode: dontAsk  # nobody watches a reviewer: refuse what allowed_tools doesn't cover, never prompt
 allowed_tools: Bash(git status:*), Bash(git ls-files:*), Bash(git stash list), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(git merge-base:*), Bash(git ls-tree:*), Bash(git rev-parse:*), Bash(git cat-file:*), Bash(git grep:*), Bash(git blame:*), Bash(pytest:*), Bash(python -m pytest:*), Bash(python3 -m pytest:*), Bash(python -m unittest:*), Bash(python3 -m unittest:*), Bash(uv run:*), Bash(npm test:*), Bash(npm run:*), Bash(pnpm test:*), Bash(pnpm run:*), Bash(yarn test:*), Bash(yarn run:*), Bash(cargo test:*), Bash(cargo check:*), Bash(cargo clippy:*), Bash(go test:*), Bash(go vet:*), Bash(make:*), Bash(swift test:*), Bash(ls:*), Bash(pwd), Bash(cat:*), Bash(tail:*), Bash(head:*), Bash(grep:*), Bash(rg:*), Bash(wc:*), Bash(bq show:*), Bash(bq ls:*), Bash(bq query --use_legacy_sql=false --dry_run:*), Bash(bq query --dry_run:*)
 ---

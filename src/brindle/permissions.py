@@ -30,7 +30,7 @@ single simple command (letters, digits, spaces and ``_-./:=@%+,`` only): a
 command with any other character (``;``, ``|``, ``&``, ``$``, quotes, globs,
 redirections, newlines...) is never auto-allowed as a whole. A list of
 commands joined only by ``&&``, ``;`` or ``|`` is allowed when an allow rule
-covers every part (read with quotes removed) and nothing else can run or write
+covers every part (word by word, as the shell will run it) and nothing else can run or write
 (see compound_parts); a deny on any part denies it. Anything unknown or
 unparseable is ask.
 
@@ -691,14 +691,14 @@ def simple_argv(command: str | None) -> list[str] | None:
     return argv or None
 
 
-def compound_parts(command: str) -> list[str] | None:
-    """The simple commands of a list joined only by ``&&``, ``;`` or ``|``,
-    each re-joined from its words, when every one is a simple command an
-    allow rule could cover; else None. Nothing beyond those commands may run
+def compound_parts(command: str) -> list[list[str]] | None:
+    """The words of each simple command in a list joined only by ``&&``,
+    ``;`` or ``|``, when every word is plain text (SIMPLE_COMMAND; a quoted
+    word may hold spaces); else None. Nothing beyond those commands may run
     or write: no command substitution, backticks, subshell, process
     substitution, heredoc, input from a file (a read no read rule saw) or
     redirection other than an fd dup or output to /dev/null."""
-    from brindle.native.permissions import _joined, _simple_commands, _tokens
+    from brindle.native.permissions import _simple_commands, _tokens
 
     if "$(" in command or "`" in command:
         return None
@@ -708,8 +708,32 @@ def compound_parts(command: str) -> list[str] | None:
     parsed = _simple_commands(command)
     if not parsed or any(after not in COMPOUND_SEPARATORS for _, after in parsed):
         return None
-    parts = [_joined(words) for words, _ in parsed]
-    return parts if all(simple_argv(part) for part in parts) else None
+    parts = [words for words, _ in parsed]
+    return parts if all(SIMPLE_COMMAND.fullmatch(word) for words in parts for word in words) else None
+
+
+def _part_decision(req: Request, words: list[str], checks: list[str] | None,
+                   rules: list[Rule]) -> Decision:
+    """One part of a compound command. A deny reads the words re-joined at
+    every space, so a spaced word can't dodge it. An allow must see the
+    words as the shell will run them: ``"./check --safe"`` is one word,
+    a different program from ``./check --safe``. Words without spaces
+    re-join to exactly that; a word with spaces can only fall in the
+    arguments of a prefix rule whose words come before it."""
+    from brindle.native.permissions import _joined
+
+    denied = decide(replace(req, command=_joined(words)), checks=checks,
+                    rules=[rule for rule in rules if rule.decision == "deny"])
+    if denied.decision == "deny":
+        return denied
+    if not any(" " in word for word in words):
+        return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules)
+    for rule in rules:
+        head = rule.match.split()
+        if (rule.kind == "bash" and rule.decision == "allow" and rule.match_type == "prefix"
+                and head and words[:len(head)] == head):
+            return Decision("allow", f"allowed by {rule.source} rule {rule.id} ({rule.describe()})", rule)
+    return Decision("ask", "no rule allows it")
 
 
 def _inside(path: str, root: str) -> str | None:
@@ -923,7 +947,7 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         parts = compound_parts(req.command)
         if parts:
-            answers = [decide(replace(req, command=part), checks=checks, rules=rules) for part in parts]
+            answers = [_part_decision(req, words, checks, rules) for words in parts]
             for answer in answers:
                 if answer.decision == "deny":
                     return answer

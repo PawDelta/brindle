@@ -67,13 +67,15 @@ def _bypass(command, why):
     _bypass("git status && echo x >> out", "an append after an allowed part"),
     _bypass("git show < ~/.ssh/id_rsa", "input from a file no read rule saw"),
     _bypass('echo "a; rm -rf /"', "a quoted separator must not become a part of its own"),
+    _bypass('"./check --safe" && git status', "a quoted executable with spaces is another program"),
+    _bypass("./check\\ --safe; git status", "so is an escaped one"),
     _bypass("git status || rm x", "an operator other than && ; |"),
     _bypass("git status & rm x", "backgrounding"),
     _bypass("git status\nrm x", "a newline"),
 ])
 def test_a_compound_command_is_allowed_only_when_every_part_is(ws, command, decision):
     rules = [Rule("bash", "git", "prefix", "allow"), Rule("bash", "echo", "prefix", "allow"),
-             Rule("bash", "git push", "prefix", "deny")]
+             Rule("bash", "./check --safe", "exact", "allow"), Rule("bash", "git push", "prefix", "deny")]
     assert decide(bash(ws, command), rules=rules).decision == decision
 
 
