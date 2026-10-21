@@ -65,3 +65,29 @@ def test_closing_the_reviewer_of_a_removed_workspace_ends_its_session(db, repo):
     agents.close_removed(db, "r1")
 
     assert not tmux.has_session(session)
+
+
+def test_sidebar_survives_closing_the_reviewer_of_a_removed_workspace(db, monkeypatch):
+    """The sidebar had followed the person into the merged workspace's session;
+    ending that session must not take the sidebar with it."""
+    db.add_workspace(Workspace("rootws", "/repo", "rootws", "worktree", "rootws", "main", "/rootws",
+                               None, "root_s", time.time()))
+    db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
+                       "%root", None, time.time()))
+    db.add_agent(Agent("r1", "rootws", "reviewer", "claude", "root1", "review", "done",
+                       "%review", None, time.time()))
+    db.set_sidebar_pane("root1", "%sidebar")
+    agents._closing_session("r1").write_text("worker_s")
+    where = {"%sidebar": "worker_s"}
+    events = []
+    monkeypatch.setattr(agents, "kill", lambda db, agent_id: db.delete_agent(agent_id))
+    monkeypatch.setattr(agents.tmux, "pane_session", where.get)
+    monkeypatch.setattr(agents.tmux, "session_attached", lambda session: session == "root_s")
+    monkeypatch.setattr(agents, "bring_sidebar",
+                        lambda db, root_id, session: where.update({"%sidebar": session}))
+    monkeypatch.setattr(agents.tmux, "kill_session",
+                        lambda session: events.append((session, where["%sidebar"])))
+
+    agents.close_removed(db, "r1")
+
+    assert events == [("worker_s", "root_s")]

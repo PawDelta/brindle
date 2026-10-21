@@ -267,8 +267,8 @@ def test_sidebar_follow_stays_with_the_person_when_an_unwatched_session_changes_
         agents.sidebar_follow(db, worker_session)
         assert tmux.pane_window(sidebar) == tmux.pane_window(root_win)
 
-        # Once the person switches into the worker's session, it follows.
-        attached[worker_session] = True
+        # Once the person switches into the worker's session (leaving theirs), it follows.
+        attached[session], attached[worker_session] = False, True
         agents.sidebar_follow(db, worker_session)
         assert tmux.pane_window(sidebar) == tmux.pane_window(worker_win)
 

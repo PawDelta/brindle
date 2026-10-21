@@ -2184,12 +2184,17 @@ def close_removed(db: DB, agent_id: str) -> None:
         note.unlink()
     except OSError:
         session = ""
+    root_id = root_of(db, agent_id)   # before kill drops the record that links it
     try:
         kill(db, agent_id)
     except AgentError:
         pass
     if session and db.workspace_by_tmux_session(session) is None \
             and not tmux.session_attached(session):
+        # A sidebar left in this session would go down with it.
+        sidebar = db.get_sidebar_pane(root_id)
+        if sidebar and sidebar != SIDEBAR_DISMISSED and tmux.pane_session(sidebar) == session:
+            sidebar_come_home(db, root_id, sidebar)
         tmux.kill_session(session)
 
 
@@ -2213,6 +2218,12 @@ def _stop(db: DB, agent: Agent) -> None:
     # Only a window on the server brindle is using: another server's pane
     # ids mean other panes here (see same_server).
     window = agent.tmux_window if same_server(agent) and owns_pane(db, agent) else ""
+    if window:
+        from brindle.sidebar_follow import rescue_sidebar_from_window
+
+        # Before the pids are read: a moved pane keeps its process, and the
+        # sidebar's would otherwise be stopped with the agent's.
+        rescue_sidebar_from_window(db, agent)
     pane_pids = tmux.window_pids(window) if window else []
     if window:
         tmux.kill_window(window)
