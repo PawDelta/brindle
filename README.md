@@ -957,8 +957,12 @@ Code worker on it runs without asking), files inside the workspace given as one
 absolute path (writes under `.agents/`, `.git/` and
 `.brindle/` only by a rule, since those hold the hook, git's hooks and the
 repo's checks), brindle's own tools and agy's tools that act only on the
-conversation, and denies everything else, telling the agent to
-ask its supervisor; you allow it with `brindle permissions allow`. Any failure
+conversation, and denies everything else. A call no rule covers (not one a
+rule denies) is what a Claude Code worker would wait on you for: brindle
+records it as the worker's pending request and tells its supervisor, once per
+request in a turn, with the `brindle permissions allow ...` command that allows
+it; once you run that, the worker's retry goes through. A `dontAsk` profile (a
+reviewer) and an agent with no supervisor are only told to ask. Any failure
 in the hook is a deny, and a tool brindle doesn't know is denied. Nobody can
 approve a prompt in the agent's pane in this mode, so a worker never waits at
 one nobody is watching. `"prompt"` leaves agy asking as described above (and
@@ -2163,9 +2167,9 @@ only once a conversation has started.
 brindle runs Antigravity workers with `--dangerously-skip-permissions` and its
 own hook as the only gate (see "Antigravity" under "Permission policy"): a
 profile's `allowed_tools` shell entries and brindle's rules apply as they do
-for a Claude Code worker, and a call nothing allows is denied with a message
-telling the agent to find a simpler way or ask its supervisor, never left at a
-prompt nobody is watching. A profile's `permission_mode` maps to agy's modes
+for a Claude Code worker, and a call nothing allows is denied, with its
+supervisor told how you can allow it (a `brindle permissions allow` you run),
+never left at a prompt nobody is watching. A profile's `permission_mode` maps to agy's modes
 (`auto` to agy's Auto mode, `acceptEdits` to accept-edits, `plan` to plan;
 `dontAsk` runs brindle's hook as the only gate even in an interactive session).
 

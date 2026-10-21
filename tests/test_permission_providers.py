@@ -580,7 +580,7 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert decision("run_command", {"CommandLine": "git push"}) == "deny"
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
     out = strict_answer(db, ws, "run_command", {"CommandLine": "curl https://example.com"})
-    assert out["decision"] == "deny" and "send_message" in out["reason"]
+    assert out["decision"] == "deny" and "told your supervisor" in out["reason"]
     assert decision("view_file", {"AbsolutePath": str(outside)}) == "deny"
     assert decision("read_url_content", {"Url": "https://example.com"}) == "deny"
     assert decision("call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue"}) == "deny"

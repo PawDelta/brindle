@@ -407,13 +407,18 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         return output(None)
     req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root)
     rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    escalate = False
     if strict:
         # What a Claude Code worker on this profile runs without asking
         # (its allowed_tools); a deny still wins, since decide() checks those first.
         from brindle.profiles import load_profile
 
         try:
-            rules += permissions.profile_bash_allows(load_profile(agent.profile, ws.repo_root))
+            profile = load_profile(agent.profile, ws.repo_root)
+            rules += permissions.profile_bash_allows(profile)
+            # What a Claude worker's prompt would leave to the person goes to
+            # its supervisor; a dontAsk profile asked for refusals instead.
+            escalate = bool(agent.parent_id) and profile.permission_mode != "dontAsk"
         except KeyError:
             pass
     decision = permissions.decide(req, checks=cfg.checks, rules=rules)
@@ -442,7 +447,9 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             agy_home = Path.home() / ".gemini" / "antigravity-cli"
             out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root],
                          readable=[str(agy_home / "mcp" / "brindle"), str(agy_home / "builtin")],
-                         has_supervisor=bool(agent.parent_id))
+                         has_supervisor=bool(agent.parent_id), escalated=escalate)
+            if escalate and req is not None and out["decision"] == "deny" and decision.decision != "deny":
+                _escalate(db, agent, ws, req)
     else:
         out = output(decision, req, spaces)
     if req is not None and out["decision"] == "deny":
@@ -450,6 +457,34 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         # tool call.
         _record_permission(db, agent, ws, req.summary(), f"deny: {out['reason']}")
     return out
+
+
+def _escalate(db, agent, ws, req) -> None:
+    """A worker's call no rule allows, under brindle's hook: what a Claude
+    worker would wait on the person for. agy has already been told no, so it
+    becomes the worker's pending request (agents.pending_permission) and its
+    supervisor is told once per request in a turn, with the command that
+    allows it; the worker's retry then passes the hook. Never raises."""
+    from brindle import agents, permissions
+
+    key = f"agy:{req.summary()}"
+    try:
+        if db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+                           (agent.id, key)).fetchone():
+            return
+        db.add_permission_request(agent.id, key, json.dumps(req.to_dict()), "no rule allows it")
+        allow = (f"`brindle permissions allow {req.kind} {shlex.quote(req.target())}`"
+                 if req.kind in permissions.KINDS else "`brindle permissions allow`")
+        body = (f"Worker {agent.id} ({agent.profile}) on branch `{ws.branch}` was refused "
+                f"{req.summary()}: it runs without approval prompts and no rule allows this. "
+                f"Only the user can allow it: if the worker needs it, ask them to run {allow}, "
+                "then tell the worker to retry.")
+        try:
+            agents.send_message(db, agent.parent_id, body, sender_id=agent.id)
+        except agents.AgentError:
+            db.enqueue(agent.parent_id, body, agent.id)  # read once the supervisor is back
+    except Exception as e:  # noqa: BLE001 - agy has its answer either way
+        print(f"brindle: couldn't tell the supervisor about {req.summary()}: {e}", file=sys.stderr)
 
 
 PRE_TOOL_FALLBACK = json.dumps({"decision": "ask", "reason": "brindle: no decision"})

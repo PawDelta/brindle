@@ -501,6 +501,8 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "can allow it with `brindle permissions allow`.")
 ASK_SUPERVISOR = "tell your supervisor with send_message what you need and why"
 ASK_PERSON = "say what you need and why in your reply to the person running brindle"
+TOLD_SUPERVISOR = ("carry on with other work and retry it once your supervisor says it's allowed: "
+                   "brindle has told your supervisor")
 
 
 def _lexically_within(literal: str, root: str) -> bool:
@@ -608,7 +610,7 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
                       workspaces: list[str] | None = None,
                       protected_roots: list[str] | None = None,
                       readable: list[str] | None = None,
-                      has_supervisor: bool = True) -> dict:
+                      has_supervisor: bool = True, escalated: bool = False) -> dict:
     """agy's PreToolUse answer under ``agy_approvals: "brindle"``, where agy
     runs with --dangerously-skip-permissions: a hook's "ask" then runs the
     call without a prompt, so brindle answers allow or deny, never ask.
@@ -617,7 +619,8 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
     inside one of ``readable``, brindle's own tools, and agy's
     conversation-only tools. Everything else is denied with a reason that
     tells the agent to try a simpler way, then ask its supervisor (or, with
-    no supervisor, the person)."""
+    no supervisor, the person); ``escalated``, brindle tells the supervisor
+    itself (brindle.antigravity._escalate)."""
     if decision is not None and decision.decision == "deny":
         return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
     if decision is not None and decision.decision == "allow":
@@ -645,7 +648,7 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
             return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
     why = decision.reason if decision is not None else "brindle couldn't read the request"
     why = why.removesuffix("; asking the user")  # nobody is asked here
-    ask = ASK_SUPERVISOR if has_supervisor else ASK_PERSON
+    ask = TOLD_SUPERVISOR if escalated else ASK_SUPERVISOR if has_supervisor else ASK_PERSON
     return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why, ask=ask)}
 
 
