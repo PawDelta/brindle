@@ -808,51 +808,48 @@ def test_agy_sync_leaves_a_file_it_cannot_read(agy_settings, ws):
     assert agy_settings.read_text() == "{ not json"
 
 
-def test_agy_launch_mirrors_the_policy_and_the_profiles_allowed_tools(agy_settings, db, ws, monkeypatch):
-    # GitHub #233: under agy_approvals "prompt" agy runs only what its own
-    # allow list covers (a hook's allow is ignored), so a profile's
-    # allowed_tools never reached an agy worker, which stalled on prompts.
+def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
     from brindle.profiles import load_profile
     from brindle.providers import Antigravity, LaunchContext
 
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
+    ctx = LaunchContext("g1", load_profile("developer"), "hi", cwd=ws.path)
+    Antigravity().command(ctx)
+    assert not agy_settings.exists()  # off: never touched
+    turn_on(ws)
+    Antigravity().command(ctx)
+    assert "command(regex:^git log$)" in json.loads(agy_settings.read_text())["permissions"]["allow"]
+    set_local(ws.repo_root, "permission_policy", "off")
+    Antigravity().command(ctx)
+    assert not agy_settings.exists()
+
+
+def test_agy_profile_rules_stay_out_of_shared_settings_and_are_named(agy_settings, db, ws, monkeypatch):
+    # GitHub #233: under agy_approvals "prompt" agy applies only its own
+    # settings, which every agy session shares, so a profile's allowed_tools
+    # can't be given to one worker alone. They're named instead, and a second
+    # profile never inherits the first's.
     from brindle.config import user_profiles_dir
+    from brindle.profiles import load_profile
+    from brindle.providers import Antigravity, LaunchContext
 
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
-    gem = "---\nname: gem\nprovider: antigravity\nallowed_tools: Bash(uv run:*), Bash(pwd), WebFetch\n---\nhi\n"
-    repo_agents = os.path.join(ws.repo_root, ".brindle", "agents")
-    for folder, name in ((str(user_profiles_dir()), "gem"), (repo_agents, "repo-gem")):
-        os.makedirs(folder, exist_ok=True)
-        with open(os.path.join(folder, f"{name}.md"), "w") as f:
-            f.write(gem)
-    for id_, name in (("g1", "gem"), ("g2", "gem"), ("g3", "repo-gem")):
+    user_profiles_dir().mkdir(parents=True, exist_ok=True)
+    for name, tools in (("gem-a", "Bash(git commit:*)"), ("gem-b", "Bash(pwd), Bash(ls), WebFetch")):
+        (user_profiles_dir() / f"{name}.md").write_text(
+            f"---\nname: {name}\nprovider: antigravity\nallowed_tools: {tools}\n---\nhi\n")
+    agy_settings.parent.mkdir(parents=True)
+    agy_settings.write_text(json.dumps({"permissions": {"allow": ["command(regex:^pwd$)"]}}))
+    for id_, name in (("a1", "gem-a"), ("b1", "gem-b")):
         worker(db, ws, provider="antigravity", id_=id_)
         db.update_agent(id_, profile=name)
-    running = {"g1", "g2", "g3"}
-    monkeypatch.setattr(agents, "alive_or_starting", lambda a: a.id in running)
-
-    def launch(id_):
-        agent = db.get_agent(id_)
-        Antigravity().command(LaunchContext(id_, load_profile(agent.profile, ws.repo_root), "hi", cwd=ws.path))
-        return json.loads(agy_settings.read_text())["permissions"]["allow"] if agy_settings.exists() else None
-
-    # A repo's own profile could allow anything in every agy session: kept out, and said so.
-    assert launch("g3") is None
-    assert "comes from this repo's .brindle/agents" in antigravity.launch_warning(db.get_agent("g3"), ws)
-    simple = "[A-Za-z0-9_\\-./:=@%+, ]"
-    # The profile's shell rules and nothing wider, with the policy off.
-    assert launch("g1") == ["command(regex:^uv run$)", f"command(regex:^uv run {simple}*$)", "command(regex:^pwd$)"]
-    assert antigravity.launch_warning(db.get_agent("g1"), ws).endswith("can't express them: WebFetch")
+        Antigravity().command(LaunchContext(id_, load_profile(name, ws.repo_root), "hi", cwd=ws.path))
+    assert json.loads(agy_settings.read_text())["permissions"]["allow"] == ["command(regex:^pwd$)"]
+    assert antigravity.unapplied_rules(load_profile("gem-b", ws.repo_root)) == ["Bash(ls)", "WebFetch"]
+    assert "Bash(git commit:*)" in antigravity.launch_warning(db.get_agent("a1"), ws)
+    set_local(ws.repo_root, "agy_approvals", "brindle")
     turn_on(ws)
-    assert "command(regex:^git log$)" in launch("g2")
-    set_local(ws.repo_root, "permission_policy", "off")
-    assert "command(regex:^git log$)" not in launch("g2")
-    # Once both workers have ended (one removed, one found gone by the
-    # sweep), their entries leave agy's settings, which every agy session reads.
-    agents.forget_files(db.get_agent("g1"))
-    assert set(permissions.load_store().agy_agents) == {"g2"} and agy_settings.exists()
-    running.discard("g2")
-    assert antigravity.forget_ended_agents()
-    assert not agy_settings.exists()
+    assert antigravity.launch_warning(db.get_agent("a1"), ws) is None  # brindle's hook applies them
 
 
 def test_agy_mirror_never_widens_an_allow():

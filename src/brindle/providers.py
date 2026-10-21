@@ -1519,9 +1519,7 @@ class Antigravity(Provider):
             strict = ctx.profile.permission_mode == "dontAsk" or (
                 policy is not None and antigravity.strict_on(ctx.cwd))
             antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
-            # Prompting, agy runs only what its own allow list covers (a
-            # hook's allow is ignored), so the profile's allowed_tools go there.
-            antigravity.sync_for_launch(ctx.cwd, policy, ctx.agent_id, None if strict else ctx.profile)
+            antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]
         if strict:
             # agy ignores a hook's "allow" (google-antigravity/antigravity-cli#1053)

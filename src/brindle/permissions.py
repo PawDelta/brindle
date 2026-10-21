@@ -1025,13 +1025,10 @@ class Store:
     agy_repos: dict[str, list] = field(default_factory=dict)
     # The Codex hook the person trusted (brindle.codex_hook): command, key, hash.
     codex_hook: dict[str, str] = field(default_factory=dict)
-    # agent id -> its profile's allowed_tools in agy's syntax, for each agy
-    # worker that runs on agy's own prompts: in the mirror while it runs.
-    agy_agents: dict[str, list] = field(default_factory=dict)
 
     def to_json(self) -> str:
         data: dict = {"version": 1, "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
-        for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook", "agy_agents"):
+        for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook"):
             if getattr(self, name):
                 data[name] = getattr(self, name)
         return json.dumps(data, indent=2) + "\n"
@@ -1067,9 +1064,7 @@ def load_store() -> Store:
     repos = {k: strings(v) for k, v in repos.items()} if isinstance(repos, dict) else {}
     codex = data.get("codex_hook")
     codex = {k: v for k, v in codex.items() if isinstance(v, str)} if isinstance(codex, dict) else {}
-    running = data.get("agy_agents")
-    running = {k: strings(v) for k, v in running.items()} if isinstance(running, dict) else {}
-    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex, running)
+    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex)
 
 
 @contextmanager
@@ -1283,16 +1278,8 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def mirror_profile_agy(profile) -> tuple[list[str], list[str]]:
-    """A profile's ``allowed_tools`` as agy allow entries (the shell ones,
-    no wider than ``profile_bash_allows``: a prefix takes only simple
-    characters after it), and the ``allowed_tools`` entries agy can't be
-    given, which it keeps asking about."""
-    entries: list[str] = []
-    left_out: list[str] = []
-    for spec in getattr(profile, "allowed_tools", None) or []:
-        mirrored = [e for e in (_agy_entry(rule) for rule in _profile_bash(spec)) if e]
-        if not mirrored:
-            left_out.append(spec)
-        entries += [e for e in mirrored if e not in entries]
-    return entries, left_out
+def profile_agy_entries(spec: str) -> list[str]:
+    """One ``allowed_tools`` entry in agy's settings syntax, no wider than
+    ``profile_bash_allows`` (a prefix takes only simple characters after
+    it), or [] when agy can't say it."""
+    return [e for e in (_agy_entry(rule) for rule in _profile_bash(spec)) if e]

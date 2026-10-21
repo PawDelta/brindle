@@ -263,12 +263,6 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # 6. Finished work: merged worktrees and ones whose folder is gone leave
     # the live view, archived (not only when someone runs `brindle prune`).
     done.extend(prune_retired(db, now, cautious=True))
-
-    # 7. Ended agy workers' allowed_tools leave agy's settings, which every
-    # agy session reads.
-    from brindle import antigravity
-
-    done.extend(antigravity.forget_ended_agents())
     return done
 
 

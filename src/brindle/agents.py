@@ -2207,10 +2207,6 @@ def kill(db: DB, agent_id: str) -> None:
 
 def forget_files(agent: Agent) -> None:
     """Files brindle keeps outside the DB for a removed agent."""
-    if agent.provider == "antigravity":
-        from brindle import antigravity
-
-        antigravity.forget_agent(agent.id)
     if agent.provider == "opencode":
         from brindle import opencode
 

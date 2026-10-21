@@ -37,8 +37,7 @@ agy has no hook for "waiting for approval": that is read from the screen.
 Hooks can't approve anything in agy (a hook's "allow" is ignored), so with the
 policy on brindle mirrors the allow rules agy's syntax can express into the
 person's agy settings (``permissions.allow``; see sync_permissions), touching
-only the entries it added itself. A worker on agy's own prompts gets its
-profile's allowed_tools there too, while it runs.
+only the entries it added itself.
 """
 
 from __future__ import annotations
@@ -676,15 +675,11 @@ def _apply(store, desired: dict[str, list[str]]) -> tuple[list[str], list[str]]:
 
 
 def sync_permissions(repo_root: str | None = None, on: bool | None = None,
-                     checks: list[str] | None = None,
-                     agent: tuple[str, list[str]] | None = None) -> tuple[list[str], list[str]]:
+                     checks: list[str] | None = None) -> tuple[list[str], list[str]]:
     """Mirror brindle's rules into agy's settings.json. With ``repo_root``,
     first record whether that repo's policy is ``on`` (and its ``checks``);
     the mirror covers every repo recorded as on, and once none is, every
-    entry brindle added is taken out again. ``agent`` (its id and its
-    profile's allowed_tools in agy's syntax, see permissions.mirror_profile_agy)
-    is an agy worker starting on agy's own prompts: its entries stay in the
-    mirror until it has ended. Returns (added, removed)."""
+    entry brindle added is taken out again. Returns (added, removed)."""
     from brindle import permissions
 
     with permissions.editing() as store:
@@ -693,64 +688,12 @@ def sync_permissions(repo_root: str | None = None, on: bool | None = None,
                 store.agy_repos[repo_root] = list(checks or [])
             else:
                 store.agy_repos.pop(repo_root, None)
-        if agent is not None:
-            agent_id, entries = agent
-            if entries:
-                store.agy_agents[agent_id] = list(entries)
-            else:
-                store.agy_agents.pop(agent_id, None)
-        _forget_ended_agents(store, keep=agent[0] if agent else None)
         if store.agy_repos:
             all_checks = list(dict.fromkeys(c for cs in store.agy_repos.values() for c in cs))
             desired = permissions.mirror_agy([*permissions.DEFAULT_RULES, *store.rules], all_checks)
         else:
             desired = {"allow": [], "deny": []}
-        for entries in store.agy_agents.values():
-            desired["allow"] += [e for e in entries if e not in desired["allow"]]
         return _apply(store, desired)
-
-
-def forget_agent(agent_id: str) -> None:
-    """Agent ``agent_id`` was removed: its profile's entries leave agy's
-    settings now. Never raises."""
-    from brindle import permissions
-
-    try:
-        if agent_id in permissions.load_store().agy_agents:
-            sync_permissions(agent=(agent_id, []))
-    except Exception as e:  # noqa: BLE001
-        print(f"brindle: couldn't update agy's permission settings: {e}", file=sys.stderr)
-
-
-def forget_ended_agents() -> list[str]:
-    """The sweep's step: take ended agy workers' profile entries out of agy's
-    settings, one line on what it did. Never raises."""
-    from brindle import permissions
-
-    try:
-        if not permissions.load_store().agy_agents:
-            return []
-        removed = sync_permissions()[1]
-    except Exception as e:  # noqa: BLE001
-        return [f"couldn't update agy's permission settings: {e}"]
-    return [f"removed {len(removed)} ended agy worker(s)' allow rule(s) from agy's settings"] if removed else []
-
-
-def _forget_ended_agents(store, keep: str | None) -> None:
-    """agy's settings apply to every agy session, so a worker's profile
-    entries leave the mirror once that worker has ended."""
-    if not store.agy_agents:
-        return
-    from brindle.agents import alive_or_starting
-    from brindle.db import DB
-
-    db = DB()
-    for agent_id in list(store.agy_agents):
-        if agent_id == keep:
-            continue
-        agent = db.get_agent(agent_id)
-        if agent is None or not alive_or_starting(agent):
-            del store.agy_agents[agent_id]
 
 
 def resync_permissions() -> None:
@@ -789,13 +732,10 @@ def strict_on(workspace: str) -> bool:
     return cfg.permission_policy == "on" and cfg.agy_approvals == "brindle"
 
 
-def sync_for_launch(workspace: str, checks: list[str] | None, agent_id: str | None = None,
-                    profile=None) -> None:
+def sync_for_launch(workspace: str, checks: list[str] | None) -> None:
     """An agy worker is starting in ``workspace``: bring agy's settings in
-    line with the repo's policy (``checks`` is None when it's off) and, with
-    ``profile`` (agy prompts on its own allow list, not brindle's hook), what
-    the profile's allowed_tools let agent ``agent_id`` run. Never raises;
-    nothing is written when there's nothing to add and brindle never added
+    line with the repo's policy (``checks`` is None when it's off). Never
+    raises; nothing is written when the policy is off and brindle never added
     anything."""
     from brindle import git, permissions
 
@@ -804,22 +744,40 @@ def sync_for_launch(workspace: str, checks: list[str] | None, agent_id: str | No
             root = git.main_repo_root(workspace)
         except git.GitError:
             root = workspace
-        entries = profile_entries(profile, root)[0] if profile is not None else []
         store = permissions.load_store()
-        if (checks is None and not entries and agent_id not in store.agy_agents and root not in store.agy_repos
-                and not (store.agy_managed and not store.agy_repos)):
+        if checks is None and root not in store.agy_repos and not (store.agy_managed and not store.agy_repos):
             return
-        sync_permissions(root, on=checks is not None, checks=checks,
-                         agent=(agent_id, entries) if agent_id else None)
+        sync_permissions(root, on=checks is not None, checks=checks)
     except Exception as e:  # noqa: BLE001
         print(f"brindle: couldn't update agy's permission settings: {e}", file=sys.stderr)
 
 
+def unapplied_rules(profile) -> list[str]:
+    """The profile's ``allowed_tools`` an agy worker on agy's own prompts
+    still asks about: those agy's settings don't already allow exactly. agy
+    reads no hook's allow and has only settings every agy session shares,
+    so brindle never adds a profile's rules there: one worker's grants would
+    be every other's."""
+    from brindle import permissions
+
+    try:
+        data = json.loads(settings_path().read_text(encoding="utf-8"))
+        allow = data["permissions"]["allow"]
+    except (OSError, ValueError, KeyError, TypeError):
+        allow = []
+    allowed = set(allow) if isinstance(allow, list) else set()
+    out = []
+    for spec in profile.allowed_tools or []:
+        entries = permissions.profile_agy_entries(spec)
+        if not entries or not allowed.issuperset(entries):
+            out.append(spec)
+    return out
+
+
 def launch_warning(agent, ws) -> str | None:
-    """The profile's allowed_tools an agy worker in workspace ``ws`` still
-    gets asked about (agy's allow list can't say them no wider than the
-    profile does), or None. Under agy_approvals "brindle" or dontAsk
-    brindle's hook decides every call instead."""
+    """Which of its profile's allowed_tools an agy worker in workspace ``ws``
+    still asks about (see unapplied_rules), or None. Under agy_approvals
+    "brindle" or dontAsk, brindle's hook decides every call instead."""
     from brindle.profiles import load_profile
 
     if agent.provider != "antigravity":
@@ -830,44 +788,10 @@ def launch_warning(agent, ws) -> str | None:
         return None
     if profile.permission_mode == "dontAsk" or strict_on(ws.path):
         return None
-    _, left_out, from_repo = profile_entries(profile, ws.repo_root)
-    if not left_out:
+    missing = unapplied_rules(profile)
+    if not missing:
         return None
-    why = ("it comes from this repo's .brindle/agents, and brindle copies only your own, the org's "
-           "and built-in profiles' rules into agy's settings, which every agy session reads"
-           if from_repo else "agy's allow list can't express them")
-    return (f"this Antigravity worker still asks before using these allowed_tools of profile "
-            f"{profile.name}, since {why}: {', '.join(left_out)}")
-
-
-def profile_entries(profile, repo_root: str | None) -> tuple[list[str], list[str], bool]:
-    """permissions.mirror_profile_agy for a profile brindle may copy into
-    agy's settings, which every agy session reads: a built-in, the user's own
-    or the org's. One read from (or built on) a repo's ``.brindle/agents``
-    isn't, as for a repo's checks: anyone who can commit there would allow
-    its commands everywhere. Then all its allowed_tools are left out, and
-    the third value is True."""
-    from brindle import permissions
-
-    entries, left_out = permissions.mirror_profile_agy(profile)
-    if entries and not _trusted(profile, repo_root):
-        return [], list(profile.allowed_tools or []), True
-    return entries, left_out, False
-
-
-def _trusted(profile, repo_root: str | None) -> bool:
-    """Whether ``profile`` and every profile it extends come from outside the repo."""
-    from brindle.config import user_profiles_dir
-    from brindle.profiles import MAX_EXTENDS_DEPTH, load_profile, profile_source
-
-    user = os.path.realpath(user_profiles_dir()) + os.sep
-    p = profile
-    for _ in range(MAX_EXTENDS_DEPTH + 1):
-        source = profile_source(p.name, repo_root) or ""
-        if not (source.startswith(("built-in profile ", "org profile "))
-                or os.path.realpath(source).startswith(user)):
-            return False
-        if not p.extends:
-            return True
-        p = load_profile(p.extends, repo_root)
-    return False
+    return (f"this Antigravity worker asks before using these allowed_tools of profile {profile.name}, "
+            f"since agy applies only its own settings.json, which every agy session shares: "
+            f"{', '.join(missing)}. Add them to {settings_path()} yourself, or set agy_approvals to "
+            "\"brindle\" with permission_policy on to have brindle's hook apply the Bash ones")
