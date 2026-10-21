@@ -1321,6 +1321,15 @@ class DB:
         ).fetchone()
         return int(row[0])
 
+    def outstanding(self, agent_id: str, text: str) -> bool:
+        """Whether a message containing ``text`` is still queued for the agent
+        or held unread."""
+        row = self.conn.execute(
+            "SELECT 1 FROM inbox WHERE agent_id=? AND delivered_at IS NULL AND instr(body, ?) > 0 LIMIT 1",
+            (agent_id, text),
+        ).fetchone()
+        return row is not None
+
     NOTICE_TTL = 120.0  # seconds a notice counts as outstanding before another may go
 
     def claim_notice(self, agent_id: str) -> list[Message] | None:

@@ -56,6 +56,7 @@ GOALS_FILE = "goals.md"
 GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's own goal
 MAX_NUDGES = 3
 NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
+NUDGE_HEAD = "[brindle autopilot] The goal isn't reached yet, and no workers are running."
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
 OUTPUT_TAIL_LINES = 30
 
@@ -1853,6 +1854,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
+    if db.outstanding(agent.id, NUDGE_HEAD):
+        return None  # (#209) the last reminder is still queued or unread: never pile up another
     now = time.time()
     if (ap.nudged_at == ap.progress and ap.nudged_time is not None
             and now - ap.nudged_time < NUDGE_BACKOFF):
@@ -1897,8 +1900,7 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
                     "the current commit. Close any gaps it found, commit, and call "
                     "check_milestone: that starts a fresh audit.\n\n")
     return (
-        "[brindle autopilot] The goal isn't reached yet, and no workers are running.\n"
-        f"{progress(db, ap.root_id)}\n\n{pending}{stuck}"
+        f"{NUDGE_HEAD}\n{progress(db, ap.root_id)}\n\n{pending}{stuck}"
         "Keep going without waiting for the user: plan the next tasks for the first "
         f"unverified milestone and assign workers (at most {cfg.max_agents or 'any number'} "
         "at once), get finished branches reviewed and merged, and call check_milestone. "

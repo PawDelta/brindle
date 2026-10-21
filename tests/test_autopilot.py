@@ -99,6 +99,16 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     # The user replies: autopilot drives again.
     autopilot.user_spoke(db, db.get_agent("boss"))
     assert db.get_autopilot("boss").state == "running"
+    out = autopilot.on_stop(db, agent, {})
+    assert out is not None
+    # (#209) A supervisor that pulls its messages holds that reminder unread:
+    # past the backoff, once the unread-mail reminder has gone out, its stops
+    # still get no second one until it reads the first.
+    db.enqueue_held("boss", out["reason"], None)
+    clock[0] += autopilot.NUDGE_BACKOFF
+    assert "unread messages" in agents._stop_decision(db, agent, {}, via_inbox=True)["reason"]
+    assert agents._stop_decision(db, agent, {}, via_inbox=True) is None
+    db.read_held("boss")
     assert autopilot.on_stop(db, agent, {}) is not None
 
 
