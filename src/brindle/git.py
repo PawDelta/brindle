@@ -376,7 +376,19 @@ def dirty_files(path: str | Path, tracked_only: bool = False) -> list[str]:
     # which is why this survived.
     untracked = "no" if tracked_only else "all"
     proc = run(["status", "--porcelain", f"--untracked-files={untracked}"], path)
-    return [line[3:] for line in proc.stdout.splitlines() if line]
+    return [line[3:] for line in proc.stdout.splitlines() if line and not _bookkeeping(line)]
+
+
+# Autopilot moves a hand-written .brindle/goals.md to the session's own
+# (git-ignored) .brindle/goals/<session id>.md. When goals.md was committed,
+# that leaves its deletion in the checkout: brindle's bookkeeping, like the
+# ignored goals/ dir, not the person's work, so it never counts as dirty
+# (and never blocks a merge or a milestone's sha).
+CLAIMED_SEED = ".brindle/goals.md"
+
+
+def _bookkeeping(line: str) -> bool:
+    return line[:2] in (" D", "D ") and line[3:] == CLAIMED_SEED
 
 
 def ahead_behind(path: str | Path, ref: str) -> tuple[int, int]:

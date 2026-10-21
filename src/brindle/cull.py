@@ -104,6 +104,9 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     dropped = inbox.drop_foreign(db)
     if dropped:
         done.append(f"forgot the launcher's inbox recorded for {dropped} agent(s)")
+    from brindle import wake
+
+    wake.prune({a.id for a in db.list_agents()})
 
     def alive(a: Agent) -> bool:
         # A pane id a newer agent has since been given isn't this one's.

@@ -146,7 +146,7 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
 
 MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "regressed": ("✗", "bad"),
                   "not_done": ("○", "dim"), "pending": ("○", "dim"),
-                  "working": ("◐", "busy"), "waiting": ("◌", "alert")}
+                  "working": ("◐", "busy"), "waiting": ("◌", "alert"), "checking": ("◌", "busy")}
 
 
 def render_autopilot(pilot: dict, width: int) -> list[Line]:
@@ -160,7 +160,8 @@ def render_autopilot(pilot: dict, width: int) -> list[Line]:
     lines = [Line(t, "accent") for t in _wrap(f"Autopilot · {pilot['goal']}", width, "")]
     for m in pilot["milestones"]:
         mark, style = MILESTONE_MARK.get(m["status"], ("·", "dim"))
-        wrapped = _wrap(m["title"], width - 4, "")
+        title = m["title"] + (" · checking…" if m["status"] == "checking" else "")
+        wrapped = _wrap(title, width - 4, "")
         lines.append(Line(f"  {mark} {wrapped[0]}", style))
         lines += [Line(f"    {t}", style) for t in wrapped[1:]]
         if m.get("label") and m["status"] not in ("working", "waiting"):
@@ -183,6 +184,8 @@ def render_autopilot(pilot: dict, width: int) -> list[Line]:
     lines += [Line(t, state[1] if state else "dim") for t in _wrap(" · ".join(parts), width, "  ")]
     if pilot["state"] in ("blocked", "stalled") and pilot.get("note"):
         lines += [Line(t, "dim") for t in _wrap(pilot["note"], width, "  ")]
+    if pilot.get("wait"):
+        lines += [Line(t, "dim") for t in _wrap(pilot["wait"], width, "  ")]
     u = pilot.get("usage")
     if "quota" in pilot:
         # The per-provider notes (Claude's included); a near-full one is an alert.

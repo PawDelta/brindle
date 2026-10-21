@@ -11,13 +11,20 @@ that exact commit and your checks pass. A goal is done only when its check comma
 exit 0.
 
 ```sh
-curl -fsSL pawdelta.com/brindle/install | sh
+curl -fsSL pawdelta.com/brindle/install | sh   # installs uv and tmux if missing, then brindle
+# or, if you already have uv and tmux:
+uv tool install brindle
+
 brindle demo        # watch it finish a practice repo in a few minutes
 ```
 
-![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://pawdelta.com/brindle/brindle-demo.gif?v=0.0.2)
+brindle is free to use, including at work, under the [brindle License 1.0](LICENSE): you
+may install and run it, but not modify or redistribute it or use it to build a competing
+service ([details](#license)).
 
-*`brindle demo`, recorded on brindle 0.0.2 (sped up 4×): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
+![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
+
+*`brindle demo`, recorded on brindle 0.4.1 (sped up about 2.7×, 20 seconds): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
 
 - **Done means a command passed.** A goal is split into milestones, each with a
   check command that brindle runs itself. A milestone is verified when its check exits
@@ -65,7 +72,7 @@ brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/
 There's also a free brindle desktop app for macOS, Linux, and Windows (via WSL). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.4.1`). A session started before an upgrade keeps
+session shows it too (`brindle 0.4.3`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -86,7 +93,8 @@ as `brindle doctor`. Commit the config so your team gets it too.
 New to brindle? `brindle demo` runs it on a tiny practice repo (under `~/.brindle/demo/`)
 with two failing test files and a two-milestone goal: in a few minutes you watch two
 workers fix them in parallel, each branch get reviewed and merged, and both milestones
-turn green only once their test command passes. `brindle demo --local` keeps the workers
+turn green only once their test command passes (the demo repo's config sets
+`"delegation": "fast"`, so the supervisor always splits the work). `brindle demo --local` keeps the workers
 and reviewers on a local model (Ollama).
 
 `brindle doctor` checks that everything brindle needs is there (tmux, the agent CLIs,
@@ -317,6 +325,11 @@ A session stops writing when it's handed over, paused, or has autopilot off,
 or once its goal was replaced from the chat. From a linked worktree, it writes
 the `goals.md` it loaded (the main checkout's), never another session's. A
 write that fails never fails the check.
+
+A new session takes a hand-written `goals.md` over by moving it to its own
+`.brindle/goals/<session id>.md` (git-ignored). If `goals.md` was committed,
+its deletion is left for you to commit or restore; brindle doesn't count it as
+an uncommitted change, so it never blocks a merge or a milestone's check.
 
 `brindle autopilot` shows progress, `brindle autopilot check` runs the checks
 now, and `brindle autopilot off` (or `on`) hands the wheel back (or takes it
@@ -639,6 +652,7 @@ Autopilot, merge gates and cleanup:
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
+| `graphify_auto_refresh` | `true` | automatically rebuild untracked code maps; `false` disables rebuilds while keeping queries available |
 | `stale_after` | `30` | minutes before a worker that reported and sat idle is closed, or `brindle prune` closes a stale paused/exited agent whose workspace is merged or gone (`0`: never) |
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
@@ -646,7 +660,7 @@ Autopilot, merge gates and cleanup:
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"off"` | `"on"`: brindle answers Claude Code workers' permission prompts from its rules (see "Permission policy" below); off, the prompts behave as they always did |
-| `agy_approvals` | `"prompt"` | `"brindle"`: with the policy on, Antigravity workers run without approval prompts and brindle's hook allows or denies every call (see "Antigravity" under "Permission policy") |
+| `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"` and interactive agy sessions `"prompt"` |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | unset | a task whose `files` overlap a running task's: `"block"` refuses it, `"warn"` starts it with a warning, `"queue"` queues it until that task merges. Unset, it is refused within a session and queued behind another session's task (both sessions' supervisors are told; the other session's work is never cancelled), and the queued task starts from that task's merge commit |
@@ -922,7 +936,8 @@ A session override of `features.hooks=false` reported false. No feature-enable
 flag is needed on these versions, and brindle leaves explicit disablement alone.
 
 **Antigravity.** agy's hook can deny but its "allow" is ignored (an agy bug),
-and it has no "no opinion" answer. So the hook denies what the policy denies,
+and it has no "no opinion" answer. So, where agy prompts (an interactive agy
+session, or any agy agent under `"agy_approvals": "prompt"`), the hook denies what the policy denies,
 answers "allow" for a file inside the workspace (which agy reads and writes
 without asking anyway) and "ask" for everything else, and brindle copies the
 rules agy can express exactly into your `~/.gemini/antigravity-cli/settings.json`
@@ -937,8 +952,10 @@ does it by hand. To undo, turn `permission_policy` off and run `sync-agy`: brind
 removes exactly its own entries. brindle doesn't learn from agy approvals (its
 hook runs for every tool call, so a tool running doesn't mean you approved it).
 
-With `"agy_approvals": "brindle"` (and the policy on), brindle's hook is the
-only gate instead: agy workers start with `--dangerously-skip-permissions`,
+For workers (any agy agent but an interactive one) when `agy_approvals` is
+unset, and for every agy agent under `"agy_approvals": "brindle"`, whether or
+not the policy is on, brindle's hook is the
+only gate instead: they start with `--dangerously-skip-permissions`,
 under which agy still honors a hook's deny, and the hook runs on every tool,
 subagents' calls included. It allows what a rule allows (a repo's checks
 included), the shell commands in the profile's `allowed_tools` (what a Claude
@@ -946,11 +963,20 @@ Code worker on it runs without asking), files inside the workspace given as one
 absolute path (writes under `.agents/`, `.git/` and
 `.brindle/` only by a rule, since those hold the hook, git's hooks and the
 repo's checks), brindle's own tools and agy's tools that act only on the
-conversation, and denies everything else, telling the agent to
-ask its supervisor; you allow it with `brindle permissions allow`. Any failure
+conversation, and denies everything else. A call no rule covers (not one a
+rule denies) is what a Claude Code worker would wait on you for: brindle
+records it as the worker's pending request and tells its supervisor, once per
+request in a turn, with the `brindle permissions allow ...` commands that allow
+it (one per part of a compound command that no rule covers yet); once you run
+them, the worker's retry goes through. A command no rule can allow as written
+(`$(...)`, a redirection that writes, a heredoc) comes with that instead, so
+the worker can split it into simple commands. A `dontAsk` profile (a
+reviewer) and an agent with no supervisor are only told to ask. Any failure
 in the hook is a deny, and a tool brindle doesn't know is denied. Nobody can
-approve a prompt in the agent's pane in this mode. The default, `"prompt"`,
-leaves agy asking as described above.
+approve a prompt in the agent's pane in this mode, so a worker never waits at
+one nobody is watching. `"prompt"` leaves agy asking as described above (and
+`assign`/`handoff` name the profile's `allowed_tools` agy's own settings don't
+already allow).
 
 ## brindle Pro and Team
 
@@ -994,7 +1020,7 @@ brindle account login      # opens your browser to sign in (--device: enter a co
 brindle account status     # your plan, features, hosted learning on or off, when the entitlement expires
 brindle account savings    # what hosted learning's picks gained in this repo, this month and last: estimates, from this machine's records only
 brindle account upgrade    # opens the checkout for brindle Pro (and prints its URL)
-brindle account upgrade --enterprise [--trial] --seats N --org ORG   # brindle Enterprise for a team org; --trial: free trial, at most 10 seats
+brindle account upgrade --enterprise      # brindle Enterprise is set up by contact (prints support@pawdelta.com); not a checkout
 brindle account portal     # opens the billing portal (invoices, payment method, cancellation); --org ORG for a team org
 brindle account seats N    # set a Team or Enterprise org's seat count (billing admin); --org ORG; Stripe prorates the change
 brindle account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
@@ -1445,7 +1471,11 @@ knowledge graph (`graphify-out/graph.json`, built with `/graphify`) and `graphif
 installed, brindle tells the supervisor and every worker to find code with
 `graphify query` before grepping or reading whole files. Those commands are
 pre-approved, and brindle refreshes the graph's code (`graphify update`, no LLM) in
-the background after each merge.
+the background after each merge. Automatic rebuilds skip checkouts with any
+git-tracked files under `graphify-out/`, preserving richer semantic graphs and
+their generated reports. Update tracked graphs explicitly with graphify.
+Set `"graphify_auto_refresh": false` in `.brindle/config.json` to also disable
+automatic rebuilds and session seeding for untracked graphs while keeping queries.
 
 When `pool_size` is greater than `0`, a claimed worktree keeps the path and
 port block it was built with -- it's never moved, and its port block is fixed
@@ -1588,7 +1618,7 @@ When running long, unattended autopilot sessions with API keys:
   - **Recovering failed/blocked workers**: When an agent fails on an expired key or autopilot pauses with a credential error, export the fresh key (or update `brindle keys set`), then run `brindle continue`. This unpauses the session and relaunches paused/failed agents with the new credentials. The replacement credentials are automatically synced to the session credential store, dynamically refreshed by the supervisor's launcher on all subsequent worker delegations (`assign`/`handoff`).
   - **Proactive rotation in live sessions**: For Claude keys rotated outside brindle, set Claude Code's `apiKeyHelper` in `~/.claude/settings.json` or the project's `.claude/settings.json`. Claude Code re-runs the helper every 5 minutes (configurable with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`) and after a 401, so running workers pick up the new key. Don't also export `ANTHROPIC_API_KEY` or set a Claude key with `brindle keys set`, since an environment key takes precedence over the helper. Codex and Antigravity keys still need workers stopped, then `brindle keys set`, then `brindle continue`. Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
   - **Precedence**: Newly stored keys (`brindle keys set`) or session credentials updated during recovery take effect dynamically for all new panes, overriding stale launcher environments. For profile-level overrides, an explicit profile key (`env.NAME`) takes precedence over default provider credentials.
-- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts unless permissions are pre-populated in `settings.json` (see Permissions) or run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
+- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. brindle therefore runs agy workers with `--dangerously-skip-permissions` and its own hook as the gate, applying their profile's `allowed_tools` and denying the rest (see Permissions). Under an explicit `agy_approvals: "prompt"` they instead stall on approval prompts for anything `settings.json` doesn't allow, their profile's `allowed_tools` included.
 
 #### OpenCode
 
@@ -2142,10 +2172,25 @@ you already have them, and won't change one that's committed. Each agent's first
 message is a short warm-up with its instructions, because `agy` connects MCP servers
 only once a conversation has started.
 
-**Permissions.** `agy` doesn't let hooks approve shell commands, so an Antigravity
-agent asks before running anything your own `agy` settings don't already allow, and
-the sidebar shows it as needing you. To let agents run tests and commit without asking,
-add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
+**Permissions.** `agy` doesn't let hooks approve shell commands, so by default
+brindle runs Antigravity workers with `--dangerously-skip-permissions` and its
+own hook as the only gate (see "Antigravity" under "Permission policy"): a
+profile's `allowed_tools` shell entries and brindle's rules apply as they do
+for a Claude Code worker, and a call nothing allows is denied, with its
+supervisor told how you can allow it (a `brindle permissions allow` you run),
+never left at a prompt nobody is watching. A profile's `permission_mode` maps to agy's modes
+(`auto` to agy's Auto mode, `acceptEdits` to accept-edits, `plan` to plan;
+`dontAsk` runs brindle's hook as the only gate even in an interactive session).
+
+An interactive agy session, or any agy agent under `"agy_approvals": "prompt"`,
+asks before running anything your own `agy` settings don't already allow, and
+the sidebar shows it as needing you. There a profile's `allowed_tools` don't
+apply by themselves: agy reads no hook's "allow", and its only allow list,
+`~/.gemini/antigravity-cli/settings.json`, is shared by every agy session, so brindle
+doesn't add one worker's rules there (another worker, or you, would get them too).
+`assign` and `handoff` name the `allowed_tools` that settings file doesn't already
+allow. To let such agents run tests and commit without asking,
+add rules to that file yourself, for example:
 
 ```json
 { "permissions": { "allow": ["command(uv run pytest)", "command(git status)",
@@ -2161,14 +2206,20 @@ add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
   and every agent's MCP server share it. Worktrees live in
   `~/.brindle/worktrees/<repo>/<branch>`, and the base branch is recorded in git
   config as `branch.<b>.brindle-base`.
-- **Messages arrive through Claude Code's own inbox.** Every Claude Code session
-  listens on a socket for messages from other sessions, and tells its hooks where
-  it is; brindle's SessionStart hook records it, and from then on messages go there
-  instead of being typed into the pane. An idle agent starts a new turn with the
-  message; a busy one gets it between tool calls. Typing into the pane is the
-  fallback when there's no socket (Codex, Antigravity, older Claude Code). A
-  `crossSessionInbound` of `hold` or `refuse` in your Claude settings would hold or
-  drop them.
+- **Messages wake a supervisor through brindle's own hook.** Your interactive
+  Claude Code chat runs a small background waiter (an `asyncRewake` hook started
+  at `SessionStart` and at every `Stop`). When a worker reports, or brindle has a
+  "new messages" notice or an autopilot nudge, the waiter hands it over and Claude
+  Code wakes the model with it: an idle chat starts a new turn, a busy one gets it
+  between steps, and the chat shows one "Stop hook feedback" line. Each message
+  is wrapped as `<brindle-msg nonce="..." from="developer agent w1">...</brindle-msg>`
+  with a fresh random nonce every hand-over, and `from` comes from who really sent
+  it, never from its text: a worker can't make its words read as brindle's or yours.
+  A session paused on an expired cloud login gets its mail once the login is back.
+  Workers and older sessions get messages through Claude Code's own inbox
+  (another-session messages; a `crossSessionInbound` of `hold` or `refuse` in your
+  Claude settings would hold or drop them). Typing into the pane is the fallback
+  when neither is there (Codex, Antigravity, older Claude Code).
 - **Agent status comes from hooks, not screen-scraping.** Guessing an agent's
   state by pattern-matching terminal output breaks whenever a CLI redesigns its
   interface. brindle launches Claude Code with `--settings` hooks

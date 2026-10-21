@@ -1,13 +1,18 @@
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 
 import pytest
+from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import antigravity, autopilot, workspaces
+
+from brindle import antigravity, autopilot, permissions, workspaces
+from brindle.cli import app
+from brindle.config import set_local
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import Antigravity, LaunchContext
@@ -18,16 +23,17 @@ def ws(db, repo):
     return workspaces.adopt_root(db, str(repo))
 
 
-def add_agent(db, ws, agent_id="g1", mode="interactive", status="idle", profile="supervisor"):
-    db.add_agent(Agent(agent_id, ws.id, profile, "antigravity", None, mode, status, "@0", None, time.time()))
+def add_agent(db, ws, agent_id="g1", mode="interactive", status="idle", profile="supervisor", parent=None,
+              window="@0"):
+    db.add_agent(Agent(agent_id, ws.id, profile, "antigravity", parent, mode, status, window, None, time.time()))
 
 
 def test_command_passes_the_profiles_model_and_effort(db, ws, repo, monkeypatch):
     import dataclasses
     monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
     profile = dataclasses.replace(load_profile("developer"), model="gemini-3.1-pro-high", effort="high")
-    argv = Antigravity().command(LaunchContext("g1", profile, None, cwd=str(repo)))
-    assert argv[:5] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high"]
+    argv = Antigravity().command(LaunchContext("g1", profile, None, cwd=str(repo), mode="interactive"))
+    assert argv[:7] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high", "--mode", "auto"]
 
 
 def test_resume_uses_the_conversation(db, ws, repo):
@@ -219,6 +225,64 @@ def strict(db, ws, tool, args):
 def test_strict_allows_compound_commands_covered_by_allowlist(db, ws, command, expected):
     os.makedirs(os.path.join(ws.path, "sub"), exist_ok=True)
     assert strict(db, ws, "run_command", {"CommandLine": command})["decision"] == expected
+
+
+def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monkeypatch):
+    # GitHub #225: agy has no dontAsk mode, so reviewer-gemini sat at a prompt
+    # for an uncovered command (`touch should_not_exist.txt` here) with nobody
+    # to answer it, the repo's policy off.
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
+
+    def launch(profile, mode="assign"):
+        argv = Antigravity().command(LaunchContext("r1", load_profile(profile), None, cwd=ws.path, mode=mode))
+        hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
+        return argv, hooks["PreToolUse"][0]["hooks"][0]["command"]
+
+    argv, hook = launch("reviewer-gemini")
+    assert antigravity.SKIP_FLAG in argv and antigravity.STRICT_EVENT in hook
+
+    def answer(agent_id, command):
+        monkeypatch.setenv("BRINDLE_AGENT_ID", agent_id)
+        stdin = json.dumps({"toolCall": {"name": "run_command", "args": {"CommandLine": command}},
+                            "workspacePaths": [ws.path]})
+        return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))["decision"]
+
+    strict(db, ws, "list_dir", {})   # adds r1, the reviewer
+    assert answer("r1", "touch should_not_exist.txt") == "deny"
+    assert answer("r1", "git diff main...HEAD") == "allow"
+    # GitHub #233: with agy_approvals unset, a worker on any profile runs under
+    # the same gate, its profile's allowed_tools applied as for a Claude
+    # worker, and an uncovered command denied rather than left at a prompt:
+    # its supervisor is told once per distinct request (never about the
+    # dontAsk reviewer's or a hard deny), and once the user runs the allow
+    # commands it was given, the worker's retry runs.
+    add_agent(db, ws, agent_id="boss", window="")  # not running: the message waits in its inbox
+    add_agent(db, ws, agent_id="w1", mode="assign", profile="developer", parent="boss")
+    argv, _ = launch("developer")
+    assert antigravity.SKIP_FLAG in argv
+    assert answer("w1", "git commit -m wip") == "allow"
+    compound = "touch one.txt && touch two.txt"
+    long_a, long_b = "touch " + "x" * 250 + "a", "touch " + "x" * 250 + "b"  # one summary
+    permissions.add_rule("bash", "rm protected.txt", "deny")
+    for command in (compound, compound, long_a, long_b, "git push", "touch one.txt || rm protected.txt"):
+        assert answer("w1", command) == "deny"
+    stored = db.conn.execute("SELECT request FROM permission_requests WHERE agent_id='w1'").fetchall()
+    assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b])
+    told = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
+    assert len(told) == 3
+    monkeypatch.delenv("BRINDLE_AGENT_ID")  # the person runs them, from their own terminal
+    for line in told[0].splitlines():
+        if line.startswith("brindle permissions allow "):
+            assert CliRunner().invoke(app, shlex.split(line)[1:]).exit_code == 0
+    assert answer("w1", compound) == "allow"
+    assert antigravity.SKIP_FLAG not in launch("developer", mode="interactive")[0]  # a person answers
+    # An explicit "prompt" keeps agy's own prompt, beside the reviewer's gate.
+    set_local(ws.repo_root, "agy_approvals", "prompt")
+    argv, hook = launch("developer")
+    assert antigravity.SKIP_FLAG not in argv and antigravity.STRICT_EVENT in hook
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: False)
+    assert answer("w1", "touch should_not_exist.txt") == "ask"
 
 
 def test_strict_allows_reading_agy_instructions(db, ws, monkeypatch, tmp_path):

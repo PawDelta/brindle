@@ -15,7 +15,8 @@ and only brindle's own Codex agents get it. The key is then always
 same for every agent (the hook finds its agent from ``BRINDLE_AGENT_ID``, which
 Codex passes through), so one trust covers every worktree brindle ever creates.
 A changed command (brindle installed somewhere else, a different BRINDLE_HOME)
-is a new hook to Codex.
+or timeout (another build of brindle) is a new hook to Codex, so brindle
+records the whole definition it trusted, not just the command.
 
 brindle trusts its own hook the first time a Codex agent needs it (``ensure``),
 and again after it moves, so there's no setup step; it says so once at
@@ -35,6 +36,7 @@ import json
 import os
 import queue
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -96,10 +98,11 @@ TRUSTED, MOVED, NEW, REMOVED = "trusted", "moved", "new", "removed"
 
 
 def status(command: str | None = None) -> str:
-    """Where brindle's hook stands with Codex: TRUSTED (this exact command, and
-    Codex's config still says so), MOVED (trusted, but brindle's command has
-    changed since: a reinstall, another BRINDLE_HOME), NEW (never trusted) or
-    REMOVED (trusted once, then the trust was taken out of Codex's config)."""
+    """Where brindle's hook stands with Codex: TRUSTED (this exact hook, and
+    Codex's config still says so), MOVED (trusted, but brindle's hook has
+    changed since: a reinstall, another BRINDLE_HOME, another timeout), NEW
+    (never trusted) or REMOVED (trusted once, then the trust was taken out of
+    Codex's config)."""
     import tomllib
 
     from brindle import permissions
@@ -119,8 +122,11 @@ def status(command: str | None = None) -> str:
     entry = state.get(rec["key"]) if isinstance(state, dict) else None
     if not (isinstance(entry, dict) and entry.get("trusted_hash") == rec["hash"]):
         return REMOVED
-    # A trust recorded for another timeout (TIMEOUT changed since) is for another hook.
-    return TRUSTED if rec["command"] == command and rec.get("timeout", "30") == str(TIMEOUT) else MOVED
+    # Codex's hash covers the whole definition, not just the command: a trust
+    # recorded for another timeout (another build of brindle) is for another
+    # hook, and so is one recorded before brindle kept the definition (it can't
+    # tell what that was for), so ensure() trusts it again once.
+    return TRUSTED if rec.get("definition") == config_flags(command)[1] else MOVED
 
 
 def trusted(command: str | None = None) -> bool:
@@ -157,13 +163,22 @@ def policy_on(cwd: str | None) -> bool:
         return False
 
 
-def launch_flags(cwd: str | None) -> list[str]:
+def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
     """The flags a Codex agent in ``cwd`` launches with: brindle's hook when the
-    repo's policy is on and the person trusted the hook; else none."""
+    repo's policy is on and the person trusted the hook; else none. A reviewer
+    gets it with the policy off too (nobody watches its prompts; the hook only
+    allows what its allowed_tools cover, #241), but only a hook trusted
+    already: with the policy off brindle never trusts a NEW one itself, and a
+    REMOVED trust stays removed."""
     try:
         if not policy_on(cwd):
-            return []
-        command = hook_command()
+            if not review:
+                return []
+            command = hook_command()
+            if status(command) not in (TRUSTED, MOVED):
+                return []
+        else:
+            command = hook_command()
         return config_flags(command) if ensure(command=command) == TRUSTED else []
     except Exception:  # noqa: BLE001 - never stop a launch over this
         return []
@@ -187,6 +202,31 @@ def launch_warning(provider: str, cwd: str | None) -> str | None:
             f"({why}), so Codex asks for approvals itself. Ask the user to run `{INSTALL}`")
 
 
+UNTRUSTED = ("brindle couldn't trust its own Codex permission hook (new, or changed by an upgrade), "
+             "so Codex agents start without it and Codex asks for approvals itself. "
+             f"Ask the user to run `{INSTALL}`.")
+
+
+def tell_untrusted(db, agent, cwd: str | None) -> bool:
+    """Tell ``agent``'s supervisor, once, that brindle couldn't trust its hook,
+    so this Codex agent started without it: nobody may watch a reviewer's pane
+    to find out otherwise. A trust the person removed stays theirs to give
+    back (launch_warning, doctor), not news."""
+    if agent.provider != "codex" or not agent.parent_id or not policy_on(cwd) \
+            or status() not in (NEW, MOVED):
+        return False
+    if db.conn.execute("SELECT 1 FROM inbox WHERE agent_id=? AND instr(body, ?) > 0",
+                       (agent.parent_id, UNTRUSTED)).fetchone():
+        return False
+    from brindle import agents
+
+    try:
+        agents.send_message(db, agent.parent_id, UNTRUSTED)
+    except agents.AgentError:
+        db.enqueue(agent.parent_id, UNTRUSTED, None)
+    return True
+
+
 # -- asking Codex itself ---------------------------------------------------------------
 
 
@@ -197,7 +237,8 @@ class _AppServer:
         self.timeout = timeout
         try:
             self.proc = subprocess.Popen([binary, "app-server", *flags], stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                         start_new_session=True)
         except OSError as e:
             raise CodexHookError(f"couldn't run {binary}: {e}") from e
         self.lines: queue.Queue = queue.Queue()
@@ -248,6 +289,14 @@ class _AppServer:
                 return result
 
     def close(self) -> None:
+        # The app-server leads its own process group (see __init__): kill the
+        # group so nothing it spawned outlives it.
+        pid = getattr(self.proc, "pid", None)
+        if pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
         try:
             self.proc.kill()
         except OSError:
@@ -300,5 +349,5 @@ def trust(binary: str, state: HookState) -> HookState:
         raise CodexHookError(f"Codex still reports the hook as {after.status}")
     with permissions.editing() as store:
         store.codex_hook = {"command": after.command, "key": after.key, "hash": after.hash,
-                            "timeout": str(TIMEOUT)}
+                            "definition": config_flags(after.command)[1]}
     return after

@@ -168,6 +168,44 @@ def verify_delivery(db, agent, text: str | None = None, baseline: str | None = N
     agents._detach([*brindle_invocation(), "_launch-health", agent.id, "--token", token, "--verify"])
 
 
+def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
+    """Recognize acceptance without requiring Codex's turn-complete notify."""
+    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+        return True
+    if provider.name != "codex":
+        return False
+    plain = provider.ANSI_SGR.sub("", screen)
+    old = set(provider.ANSI_SGR.sub("", baseline).splitlines())
+    lines = plain.splitlines()
+    # A submitted brief can be the last › on screen while Codex works.
+    # paste_blocked deliberately treats everything after it as a possible
+    # draft; delivery can instead use fresh, structured turn output.
+    prompts = [i for i, line in enumerate(lines) if provider.INPUT_LINE.match(line)]
+    prompt_text = " ".join(prompt.split())
+    matching = [i for i in prompts
+                if (heading := " ".join(provider.INPUT_LINE.match(lines[i]).group(1).split()))
+                and prompt_text.startswith(heading)]
+    if not matching:
+        return False
+    # A resume may replay old tool output with no baseline at all. Only
+    # output following this brief, before the next composer/turn, proves
+    # acceptance. Choose the last match so a repeated brief still in the
+    # composer cannot inherit evidence from an earlier submission.
+    start = matching[-1]
+    end = next((i for i in prompts if i > start), len(lines))
+    for line in lines[start + 1:end]:
+        if line in old or " ".join(line.split()) in prompt_text:
+            continue
+        # Match Codex's own row markers, not bare keyboard-help prose.
+        if re.fullmatch(r"• Working \([^\n]*[Ee]sc to interrupt\)", line):
+            return True
+        # Any fresh bullet is the model's own output after the brief: tool
+        # rows (Ran, Edited, Explored...) or analysis, with or without Working.
+        if re.match(r"^• \S", line):
+            return True
+    return False
+
+
 def verify_pending(db, agent_id: str, token: str | None) -> None:
     """Detached turn observation; retry once, fenced to this launch.
 
@@ -205,10 +243,12 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
             if fresh is None:
                 return
             screen = capture(fresh)
-            if (provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing"
+            if (_turn_running(provider, screen, baseline, text)
                     or failure(screen, baseline=baseline, task=agent.task or "",
                                submitted_prompt=text, provider=agent.provider)):
                 delivered(db, agent, baseline)
+                if provider.tool_permission(screen):
+                    _tell(db, agent, _approval_body(agent, screen))
                 return
             if time.time() >= deadline:
                 break
@@ -230,7 +270,7 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
                     if fresh is None:
                         return
                     screen = capture(fresh)
-                    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+                    if _turn_running(provider, screen, baseline, text):
                         delivered(db, agent, baseline)
                         return
                     if provider.input_ready(screen) and not provider.paste_blocked(screen, True):
@@ -238,17 +278,40 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
                 else:
                     break
             tmux.paste(fresh.tmux_window, text, lead=lead, server=agents.server_of(fresh))
-    if not db.conn.execute("UPDATE launch_health SET outcome='delivery-failed' WHERE agent_id=? AND token=? "
-                           "AND delivered_at IS NULL AND outcome IS NULL", (agent.id, token)).rowcount:
+    asking = provider.tool_permission(screen)
+    if not db.conn.execute("UPDATE launch_health SET outcome=? WHERE agent_id=? AND token=? "
+                           "AND delivered_at IS NULL AND outcome IS NULL",
+                           ("awaiting-approval" if asking else "delivery-failed", agent.id, token)).rowcount:
         return
-    db.update_agent(agent.id, status="failed")
-    body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
-            "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
-            "Check its pane and restart the worker; this is not a startup prompt.")
+    if asking:
+        # A tool approval only exists inside a running turn: never fail the worker.
+        body = _approval_body(agent, screen)
+    else:
+        db.update_agent(agent.id, status="failed")
+        body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
+                "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
+                "Check its pane and restart the worker; this is not a startup prompt.")
+    _tell(db, agent, body)
+
+
+def _tell(db, agent, body: str) -> None:
+    from brindle import agents
+
     try:
         agents.send_message(db, agent.parent_id, body)
     except agents.AgentError:
         db.enqueue(agent.parent_id, body, None)
+
+
+def _approval_body(agent, screen: str) -> str:
+    """What a working agent is asking to run, for its supervisor."""
+    from brindle import prompt_answer
+
+    plain = prompt_answer.plain(screen).splitlines()
+    at = next((i for i, line in enumerate(plain) if "Would you like to" in line), None)
+    asked = " ".join(" ".join(plain[at + 1:at + 6]).split())[:300] if at is not None else ""
+    return (f"Worker {agent.id} is working but waiting at an approval prompt"
+            + (f": {asked}" if asked else "") + ". Answer it in its pane; the brief was not lost.")
 
 
 def helper_token(agent) -> list[str]:
@@ -591,6 +654,8 @@ def retry_reviewer(db, agent, ws):
         # parent and commit, but start a new conversation and MCP connection.
         replacement = agents.spawn(db, ws, agent.profile, prompt=agent.task, parent_id=agent.parent_id,
                                    mode="review", background_setup=True, review_sha=agent.review_sha)
+        if agent.review_slot is not None:
+            db.update_agent(replacement.id, review_slot=agent.review_slot)
     except Exception as exc:
         raise agents.AgentError(
             f"Reviewer {agent.id} was stopped after its brindle MCP connection failed; "

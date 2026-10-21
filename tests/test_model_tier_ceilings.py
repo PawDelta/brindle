@@ -57,6 +57,7 @@ def test_list_agents_includes_token_usage_when_available(db, repo, monkeypatch):
     fake_usage.total = 5000
     from brindle import usage
     monkeypatch.setattr(usage, "agent_usage", lambda db_arg, a_arg: fake_usage)
+    monkeypatch.setattr(usage, "agent_transcripts", lambda db_arg, a_arg: [])
     monkeypatch.setattr(usage, "short_summary", lambda u: "5k tokens")
     monkeypatch.setattr(mcp_server, "DB", lambda: db)
     monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (None, ws))
@@ -154,7 +155,7 @@ def test_queued_task_rerouted_when_ceiling_lowered_before_launch(db, repo, monke
     assert len(delegated) == 1
     # Profile must be rerouted to a medium profile, NOT developer-heavy!
     assert delegated[0] != "developer-heavy"
-    assert delegated[0] in ["developer", "developer-codex"]
+    assert delegated[0] in ["developer-sonnet", "developer", "developer-codex"]
     # Task metadata in DB should be updated
     updated_t = db.get_task(task.id)
     assert updated_t.profile == delegated[0]

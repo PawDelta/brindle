@@ -38,7 +38,7 @@ class Model:
 
 CATALOG: tuple[Model, ...] = (
     Model("claude-haiku", "Claude Haiku", CLI, "claude", "developer-light", ("light",)),
-    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer", ("light", "medium")),
+    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer-sonnet", ("light", "medium")),
     Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("medium", "heavy")),
     Model("codex", "Codex", CLI, "codex", "developer-codex"),
     Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "developer-gemini", ("medium", "heavy")),

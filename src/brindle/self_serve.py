@@ -16,6 +16,14 @@ when the setup is applied, by ``company_login``); plus Claude Code's managed set
 (``providers.claude_org_managed``). Every command is an argv list with a
 timeout through ``company_login.run_cmd``. You must be authorized to use any
 company credentials you connect this way.
+
+A cloud route (Bedrock, Vertex) is proposed only when something says the cloud
+is meant for Claude: ``CLAUDE_CODE_USE_BEDROCK``/``CLAUDE_CODE_USE_VERTEX`` set
+(e.g. ``CLAUDE_CODE_USE_VERTEX=1 brindle doctor --fix``), never just because
+its CLI is signed in (Foundry needs ``ANTHROPIC_FOUNDRY_RESOURCE``; Claude
+Code's managed settings are used as they are). The proposal is never made in a
+brindle agent's pane, where an agent could answer it. ``brindle doctor`` shows
+a saved route and ``brindle account route --reset`` removes it.
 """
 
 from __future__ import annotations
@@ -41,6 +49,12 @@ MAX_AWS_PROFILES = 5
 DEFAULT_GCP_REGION = "us-east5"
 NUDGE = ("Setting this up for your team? Your admin can do it once for everyone with "
          "brindle Team: pawdelta.com/brindle#pricing")
+# The Claude Code switch that says a signed-in cloud is meant for Claude.
+CLOUD_SWITCH = {"bedrock": "CLAUDE_CODE_USE_BEDROCK", "vertex": "CLAUDE_CODE_USE_VERTEX"}
+ROUTE_LABELS = {"bedrock": "Amazon Bedrock", "vertex": "Vertex AI", "foundry": "Azure AI Foundry",
+                "gateway": "a gateway", "subscription": "a Claude organization's plan"}
+ENV_ROUTES = (("CLAUDE_CODE_USE_BEDROCK", "bedrock"), ("CLAUDE_CODE_USE_VERTEX", "vertex"),
+              ("CLAUDE_CODE_USE_FOUNDRY", "foundry"), ("ANTHROPIC_BASE_URL", "gateway"))
 
 
 # -- the saved setup -----------------------------------------------------------------------
@@ -83,6 +97,48 @@ def local_setup():
 
 def save_local(setup) -> None:
     config.set_user(LOCAL_KEY, to_json(setup))
+
+
+def route_status() -> tuple[str, bool] | None:
+    """(the self-serve Claude route, whether Claude panes use it now), or None
+    when none is saved. In use means the stored env panes get is the self-serve
+    one: an org's route replacing it, Claude Code's managed settings, or a
+    sign-in that failed before it was stored leave the saved setup unused."""
+    try:
+        stored = config.user_settings().get(company_login.ENV_KEY)
+    except (OSError, ValueError):
+        return None
+    env = company_login.stored_env() if isinstance(stored, dict) and stored.get("self_serve") else {}
+    if env:
+        return next((route for var, route in ENV_ROUTES if env.get(var)), "subscription"), True
+    setup = local_setup()
+    if setup is not None and setup.claude is not None:
+        return setup.claude.route, False
+    return None
+
+
+def checks() -> list:
+    """`brindle doctor`: the self-serve Claude route, while one is saved: where,
+    and whether Claude panes use it."""
+    from brindle.doctor import OK, Check
+
+    got = route_status()
+    if got is None:
+        return []
+    label = f"{ROUTE_LABELS.get(got[0], got[0])} (self-serve, saved in {config.user_config_path()})"
+    use = ("every Claude pane uses it" if got[1] else
+           "not in use (an org's setup or Claude Code's managed settings come first, or its sign-in didn't finish)")
+    return [Check(OK, "claude route", f"{label}: {use}; undo with `brindle account route --reset`")]
+
+
+def reset() -> bool:
+    """Remove the saved self-serve setup and the route it gives Claude panes
+    (``brindle account route --reset``); True when something was removed."""
+    removed = config.forget_user(LOCAL_KEY)
+    stored = config.user_settings().get(company_login.ENV_KEY)
+    if isinstance(stored, dict) and stored.get("self_serve"):
+        removed = config.forget_user(company_login.ENV_KEY) or removed
+    return removed
 
 
 # -- detection -----------------------------------------------------------------------------
@@ -175,9 +231,19 @@ def _aws_profiles(path) -> list[dict]:
     return out[:MAX_AWS_PROFILES]
 
 
+def _meant_for_claude(route: str, d: Detection) -> bool:
+    """Whether the signed-in cloud for ``route`` is meant for Claude (its Claude
+    Code switch is set); if not, ``d`` says how to ask for it."""
+    if os.environ.get(CLOUD_SWITCH[route]):
+        return True
+    d.found.append(f"  (to use it for Claude, run `{CLOUD_SWITCH[route]}=1 brindle doctor --fix`)")
+    return False
+
+
 def _aws_choices(d: Detection) -> None:
     from brindle.pro import team_policy
 
+    choices = []
     for p in _aws_profiles(company_login.aws_config_path()):
         got = _run(["aws", "sts", "get-caller-identity", "--profile", p["name"], "--output", "json"])
         state = "not signed in" if got is None or got[0] != 0 else "signed in"
@@ -185,9 +251,11 @@ def _aws_choices(d: Detection) -> None:
                        f"{p['role_name']}, {p['region']} ({state})")
         aws = team_policy.AwsSetup(sso_start_url=p["sso_start_url"], sso_region=p["sso_region"],
                                    account_id=p["account_id"], role_name=p["role_name"], region=p["region"])
-        d.choices.append(Choice(
+        choices.append(Choice(
             f"Bedrock ({aws_billed(aws.account_id)}, role {aws.role_name}, {aws.region})",
             team_policy.ClaudeSetup(route="bedrock", aws=aws), f"Bedrock: {aws_billed(aws.account_id)}"))
+    if choices and _meant_for_claude("bedrock", d):
+        d.choices.extend(choices)
 
 
 def _value(argv: list[str]) -> str:
@@ -207,6 +275,8 @@ def _gcloud_choice(d: Detection) -> None:
         return
     region = _value(["gcloud", "config", "get-value", "compute/region"]) or DEFAULT_GCP_REGION
     d.found.append(f"Google Cloud: project {project}, region {region}")
+    if not _meant_for_claude("vertex", d):
+        return
     d.choices.append(Choice(
         f"Vertex AI (Google Cloud project {project}, {region})",
         team_policy.ClaudeSetup(route="vertex", gcp=team_policy.GcpSetup(project=project, region=region)),
@@ -293,6 +363,8 @@ def offer(say: Callable[[str], None], repo_root: str | None, ask,
     outcome of an applied setup goes to ``say``."""
     from brindle.pro import team_policy
 
+    if os.environ.get("BRINDLE_AGENT_ID"):
+        return None     # a brindle agent's pane: an agent could answer for the person
     info = info or say
     d = detect()
     if d.managed:
@@ -341,4 +413,4 @@ def run(say: Callable[[str], None], repo_root: str | None = None, ask=None,
     return offer(say, repo_root, ask, info)
 
 
-__all__ = ["detect", "local_setup", "offer", "run", "save_local"]
+__all__ = ["checks", "detect", "local_setup", "offer", "reset", "route_status", "run", "save_local"]

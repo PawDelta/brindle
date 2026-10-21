@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -182,10 +183,14 @@ def test_audit_history_goal_isolation(db, ws, sup):
     assert ap.audit_history is None
     assert "Omit legacy export" not in autopilot.audit_prompt(db, ap, "headsha")
 
-    # finishing the goal clears it
+    # Completion retains history; only an unrelated replacement clears it.
     autopilot.record_accepted_decision(db, sup.id, "Accepted something in Goal 2")
-    assert db.get_autopilot(sup.id).audit_history is not None
-    autopilot.clear_finished_goal(db, sup.id)
+    history = db.get_autopilot(sup.id).audit_history
+    db.update_autopilot(sup.id, audit_sha=autopilot._commit(ws, tracked_only=True))
+    autopilot.record_audit(db, sup.id, True, "Delivered")
+    assert db.get_autopilot(sup.id).state == "done"
+    assert history in db.get_autopilot(sup.id).audit_history
+    autopilot.set_goal(db, sup.id, "Goal 3", [("Task 3", "true", "")])
     assert db.get_autopilot(sup.id).audit_history is None
 
 
@@ -237,13 +242,23 @@ def test_record_audit_decision_rejects_unauthorized_callers(db, ws, sup, monkeyp
     assert "Finding 3" in history and "Supervisor accepted exclusion" in history
 
 
-def test_session_handover_preserves_audit_history_and_accepted_decisions(db, repo, ws, monkeypatch):
+@pytest.mark.parametrize("completed", [False, True])
+def test_session_handover_preserves_audit_history_and_accepted_decisions(db, repo, ws, monkeypatch, completed):
     ws2 = Workspace("ws-ho2", str(repo), "feat/ho2", "main", "main", "worktree", str(repo), 20010, "tmux-ho2", 0)
     db.add_workspace(ws2)
     old_sup = add(db, ws, "old", mode="interactive")
     db.add_autopilot(old_sup.id)
-    autopilot.set_goal(db, old_sup.id, "Refactor core engine", [("Step 1", "true", "")])
+    autopilot.set_goal(db, old_sup.id, "Refactor core engine", [("Step 1", "true", None)])
     autopilot.record_accepted_decision(db, old_sup.id, "Accepted exclusion of deprecated driver")
+    if completed:
+        sha = autopilot._commit(ws, tracked_only=True)
+        db.record_check(db.milestones(old_sup.id)[0].id, True, "Verified", sha)
+        db.update_autopilot(old_sup.id, audit_sha=sha)
+        autopilot.record_audit(db, old_sup.id, True, "Delivered")
+        autopilot.sync_goals_file(db, old_sup.id)
+    old_ap, old_ms = db.get_autopilot(old_sup.id), db.milestones(old_sup.id)
+    old_file = autopilot.session_goals_path(db, old_sup.id)
+    contents = old_file.read_text()
     old_history = db.get_autopilot(old_sup.id).audit_history
 
     monkeypatch.setattr(agents, "pause", lambda db, id, **kwargs: None)
@@ -253,6 +268,12 @@ def test_session_handover_preserves_audit_history_and_accepted_decisions(db, rep
     new_ap = db.get_autopilot(new_sup.id)
     assert new_ap.audit_history == old_history
     assert "Accepted exclusion of deprecated driver" in autopilot.audit_prompt(db, new_ap, "commit-head")
+    if completed:
+        assert (new_ap.state, new_ap.audit_ok, new_ap.audit_sha) == ("done", 1, old_ap.audit_sha)
+        assert replace(db.milestones(new_sup.id)[0], id=old_ms[0].id, root_id=old_sup.id) == old_ms[0]
+        assert db.milestones(old_sup.id) == old_ms and old_file.read_text() == contents
+        assert autopilot.session_goals_path(db, new_sup.id).read_text() == contents
+        assert autopilot.on_stop(db, new_sup, {}) is None
 
 
 @pytest.mark.variant("incident: 0.3.4 sent every review to reviewer-gemini whenever agy was installed; the fix removed that branch")

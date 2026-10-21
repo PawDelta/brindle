@@ -31,8 +31,8 @@ def _reap_dead_test_servers() -> None:
     from brindle import procs, tmux
 
     for name in tmux.other_servers("brindle-test-"):
-        pid = name.removeprefix("brindle-test-")
-        if pid.isdigit() and not procs.alive(int(pid)):
+        m = re.fullmatch(r"brindle-test-(\d+)(?:[-.].*)?", name)
+        if m and not procs.alive(int(m.group(1))):
             tmux.reap_server(name)
 
 
@@ -85,6 +85,27 @@ def _reap_run_leftovers(known: set[str]) -> list[str]:
     return found
 
 
+# The tmux server socket of the test running now (see test_tmux_server).
+_TEST_SERVER: list[str] = []
+_TEST_COUNT = [0]
+
+
+@pytest.fixture(autouse=True)
+def test_tmux_server(monkeypatch):
+    """Each test gets its own tmux server (``brindle-test-<pid>-<n>``), not
+    one shared by every test on the worker. A detached helper an earlier test
+    started (``_launch-health``, ``_warm-checks``, ...) keeps that test's
+    BRINDLE_TMUX_SOCKET, so it can only reach that test's dead server, never
+    the one a later test is using. A shared server is the suspected route for
+    a leftover helper's tmux commands, or the previous test's teardown, to
+    take the server out from under a later test between its new-session and
+    new-window (#199); the failure was not reproduced."""
+    _TEST_COUNT[0] += 1
+    name = f"brindle-test-{os.getpid()}-{_TEST_COUNT[0]}"
+    _TEST_SERVER[:] = [name]
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", name)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def private_tmux_server():
     """Run every test's tmux sessions on a private server, so parallel test
@@ -103,7 +124,7 @@ def private_tmux_server():
     watchdog = subprocess.Popen(
         ["/bin/sh", "-c",
          'while kill -0 "$1" 2>/dev/null; do sleep 1; done; '
-         'tmux -L "$2" kill-server 2>/dev/null; rm -f "$3"',
+         'for s in "$3" "$3"-* "$3".*; do tmux -L "${s##*/}" kill-server 2>/dev/null; rm -f "$s"; done',
          "brindle-test-watchdog", str(os.getpid()), name, str(tmux.socket_dir() / name)],
         start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -128,14 +149,12 @@ def pytest_runtest_teardown(item, nextitem):
     made and forgot is stopped and removed, with a warning naming the test.
     Runs after every fixture's teardown, so a test's monkeypatching (of
     subprocess, say) is undone by then."""
-    import os
-
     from brindle import tmux
 
     yield
-    if os.environ.get("BRINDLE_TMUX_SOCKET") == f"brindle-test-{os.getpid()}":
+    while _TEST_SERVER:
         try:
-            tmux.kill_server()
+            tmux.reap_server(_TEST_SERVER.pop())
         except tmux.TmuxError:
             pass
     leaked = _reap_run_leftovers(_KNOWN_SOCKETS)
@@ -186,9 +205,21 @@ def no_real_agent_cli(tmp_path, monkeypatch):
         if os.path.basename(exe) in ("claude", "codex") or exe in overrides:
             refuse(exe, argv)
         # The headless runner is a child process that resolves the binary itself.
-        # A test that fakes one provider's binary leaves the other unused.
+        # Only the binary of the provider the launch uses matters: a test that
+        # fakes one provider's leaves the other's unused.
         if "_headless" in argv:
-            binaries = [b for b in overrides if b] or [providers.claude_binary(), providers.codex_binary()]
+            i = argv.index("_headless") + 1
+            agent = None
+            try:
+                from brindle.db import DB
+                agent = DB().get_agent(argv[i]) if i < len(argv) else None
+            except Exception:
+                pass  # no such database: assume either provider
+            by_provider = {"claude": (os.environ.get("BRINDLE_CLAUDE_BIN"), providers.claude_binary),
+                           "codex": (os.environ.get("BRINDLE_CODEX_BIN"), providers.codex_binary)}
+            used = [by_provider[agent.provider]] if agent and agent.provider in by_provider \
+                else list(by_provider.values())
+            binaries = [override for override, _ in used if override] or [find() for _, find in used]
             for binary in binaries:
                 refuse(binary, argv)
 

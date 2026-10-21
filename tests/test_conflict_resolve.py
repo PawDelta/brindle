@@ -128,7 +128,7 @@ def test_a_finished_workers_conflict_goes_to_a_light_worker_in_its_worktree(db, 
     approve(db, ws, "rev1", "ok")
     pipeline.on_review(db, db.get_agent("rev1"), ws, True, "ok")
     assert (repo / "app.py").read_text() == "mine\ntheirs\n" and db.get_workspace(ws.id) is None
-    [merged] = boss_messages(db)
+    waiting, merged = boss_messages(db)   # its merge waited on the checks first (#217)
     assert "Merged feat into main" in merged and "resolved" in merged
 
 

@@ -894,6 +894,66 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     assert len(reports) == 1 and model_access.refused(a.profile, fp=row["fingerprint"]) == lh.AUTH
 
 
+@pytest.mark.parametrize("output,stale,draft", [
+    ("• Working (4m 15s • esc to interrupt)", False, False),
+    pytest.param("• Edited src/feature.py (+1 -1)", False, False,
+                 marks=pytest.mark.variant("#236 also showed edits before the Working status")),
+    ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, False),
+    ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", True, False),
+    ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, True),
+    ("• Ran git status --short\n  └ clean", False, "history"),
+])
+def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypatch, output, stale, draft):
+    lh, a, _, _, _, reports = health
+    # #236: submitted brief and turn output above the captured Codex footer,
+    # without a second › separating the transcript from the composer.
+    screen = f"› {a.task}\n\n{output}\n\n" + CODEX_EMPTY_PANE.split("\n", 1)[1]
+    if draft == "history":
+        screen = f"› previous task\n\n{output}\n\n› {a.task}\n\n  90% context left\n"
+    elif draft:
+        screen = screen.replace(a.task, "an unrelated draft quoting tool output")
+    cleared = []
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    monkeypatch.setattr(tmux, "paste", lambda *a, **k: pytest.fail("brief submitted twice"))
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: cleared.append(a))
+    lh.verify_delivery(db, a, a.task, baseline=screen if stale else "")
+    lh.verify_pending(db, a.id, a._launch_health_token)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert (row["delivered_at"] is not None) == (not stale and not draft)
+    assert (row["outcome"] == "delivery-failed") == bool(stale or draft)
+    assert bool(reports) == bool(stale or draft)
+    assert bool(cleared) == bool(stale or draft)
+
+
+APPROVAL_PROMPT = """\
+  Would you like to run the following command?
+
+  $ uv run pytest tests/test_feature.py -q
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for this command (p)
+  3. No, and tell Codex what to do differently (esc)
+"""
+
+
+@pytest.mark.parametrize("brief_visible", [True, False])
+def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, health, monkeypatch, brief_visible):
+    lh, a, _, _, _, reports = health
+    # #240: earlier tool output and analysis above an approval prompt, no Working row.
+    head = (f"› {a.task}\n\n• Explored\n  └ Read feature.py\n\n• The change looks small; running its tests.\n\n"
+            if brief_visible else "")
+    screen = head + APPROVAL_PROMPT
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    monkeypatch.setattr(tmux, "paste", lambda *a, **k: pytest.fail("brief submitted twice"))
+    lh.verify_delivery(db, a, a.task)
+    lh.verify_pending(db, a.id, a._launch_health_token)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert db.get_agent(a.id).status != "failed"
+    assert (row["delivered_at"] is not None) == brief_visible
+    assert row["outcome"] == (None if brief_visible else "awaiting-approval")
+    assert len(reports) == 1 and "uv run pytest tests/test_feature.py" in reports[0][1]
+
+
 @pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])
 def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, started, clears):
     from brindle import prompt_answer
