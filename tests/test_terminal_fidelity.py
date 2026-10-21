@@ -37,6 +37,7 @@ def draw(*_):
     out(f"\x1b[{rows - 3};1H" + "─" * cols + "╭" + "─" * (cols - 2) + "╮")
     out(f"\x1b[{rows - 1};1H│ > {typed}\x1b[{rows - 1};{cols}H│╰" + "─" * (cols - 2) + "╯")
     out(f"\x1b[{rows - 1};{5 + len(typed)}H")
+out("\x1b[?1049h\x1b[?1003h\x1b[?1006h")    # the alternate screen and SGR any-event mouse
 out("".join(f"history {i}\r\n" for i in range(40)))
 signal.signal(signal.SIGWINCH, draw)
 draw()
@@ -75,7 +76,7 @@ class App:
     the size the daemon says it is."""
 
     def __init__(self, sock) -> None:
-        self.sock, self.frames = sock, queue.Queue()
+        self.sock, self.frames, self.raw = sock, queue.Queue(), b""
         self.screen = pyte.Screen(*APP)
         self.stream = pyte.ByteStream(self.screen)
         threading.Thread(target=self._read, daemon=True).start()
@@ -95,6 +96,7 @@ class App:
             except queue.Empty:
                 break
             if m.get("bytes") is not None:
+                self.raw += m["bytes"]
                 self.stream.feed(m["bytes"])
                 continue
             m = json.loads(m["text"])
@@ -155,6 +157,10 @@ def test_the_apps_terminal_shows_what_tmux_shows_and_keys_land_at_its_cursor(tmp
             if shared:      # the app's view is focused: its size is the window's
                 sock.send_json({"type": "focus"})
             see(app, pane, APP)
+            # The seed's reset clears the program's modes: it sets them again after it.
+            reset = app.raw.index(b"\x1bc") + 2
+            assert b"\x1b[?1049h" in app.raw[reset:] and b"\x1b[?1003h" in app.raw[reset:]
+            assert b"\x1b[?1006h" in app.raw[reset:]
             sock.send_json({"type": "key", "text": "h"})     # keys land at the cursor
             see(app, pane, APP, "h")
             if shared:

@@ -329,9 +329,12 @@ class Pane:
         return None if reply.error else tmux.parse_view(reply.text)
 
     async def seed(self, viewer: Viewer) -> tuple[bytes, tmux.View | None]:
-        """The pane as it stands: scrollback and screen, then the cursor, and
-        the View it was taken at (the size to show it at). ``viewer.pos`` is
-        set to where its stream must go on from."""
+        """The pane as it stands: the modes its program has set (the reset
+        clears them, and a capture doesn't carry them: a full-screen program
+        like Claude Code is on the alternate screen and reads the wheel as
+        mouse reports), scrollback and screen, then the cursor, and the View
+        it was taken at (the size to show it at). ``viewer.pos`` is set to
+        where its stream must go on from."""
         if self.control is not None:
             # The capture's reply comes after the %output it includes and
             # before the %output it doesn't, so the stream starts at its end.
@@ -357,7 +360,8 @@ class Pane:
             out = _as_terminal(text)
         if view:
             self.window = view.window       # a pane can be moved to another window
-            out += _cursor(view)
+            # After the reset, before the screen: the alternate screen first, for it to land on.
+            out = RESET + _modes(view) + out.removeprefix(RESET) + _cursor(view)
         return out, view
 
     def _wanted(self) -> tuple[int, int] | None:
@@ -579,6 +583,11 @@ def _redraw(previous: list[str] | None, rows: list[str], view: tmux.View | None)
 
 def _cursor(view: tmux.View) -> bytes:
     return f"\x1b[0m\x1b[{view.y + 1};{view.x + 1}H".encode()
+
+
+def _modes(view: tmux.View) -> bytes:
+    """The DEC private modes the pane's program has set, set again."""
+    return "".join(f"\x1b[?{mode}h" for mode in view.modes).encode()
 
 
 def _size(view: tmux.View | None) -> dict:
