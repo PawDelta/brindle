@@ -1515,9 +1515,8 @@ class Antigravity(Provider):
             policy = antigravity.policy_on(ctx.cwd)
             # agy has no mode that refuses instead of prompting, so under
             # dontAsk (nobody watches, e.g. a reviewer) brindle's hook decides
-            # every call, as under agy_approvals "brindle".
-            strict = ctx.profile.permission_mode == "dontAsk" or (
-                policy is not None and antigravity.strict_on(ctx.cwd))
+            # every call, as under agy_approvals "brindle" (unset, for workers).
+            strict = ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
             antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]

@@ -8,6 +8,7 @@ import pytest
 
 from conftest import sh
 from brindle import antigravity, autopilot, workspaces
+from brindle.config import set_local
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import Antigravity, LaunchContext
@@ -26,7 +27,7 @@ def test_command_passes_the_profiles_model_and_effort(db, ws, repo, monkeypatch)
     import dataclasses
     monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
     profile = dataclasses.replace(load_profile("developer"), model="gemini-3.1-pro-high", effort="high")
-    argv = Antigravity().command(LaunchContext("g1", profile, None, cwd=str(repo)))
+    argv = Antigravity().command(LaunchContext("g1", profile, None, cwd=str(repo), mode="interactive"))
     assert argv[:7] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high", "--mode", "auto"]
 
 
@@ -228,8 +229,8 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
 
-    def launch(profile):
-        argv = Antigravity().command(LaunchContext("r1", load_profile(profile), None, cwd=ws.path))
+    def launch(profile, mode="assign"):
+        argv = Antigravity().command(LaunchContext("r1", load_profile(profile), None, cwd=ws.path, mode=mode))
         hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
         return argv, hooks["PreToolUse"][0]["hooks"][0]["command"]
 
@@ -245,11 +246,19 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     strict(db, ws, "list_dir", {})   # adds r1, the reviewer
     assert answer("r1", "touch should_not_exist.txt") == "deny"
     assert answer("r1", "git diff main...HEAD") == "allow"
-    # Its worker relaunching in the same checkout keeps the reviewer's gate,
-    # and, started without the flag, still gets agy's own prompt.
+    # GitHub #233: with agy_approvals unset, a worker on any profile runs under
+    # the same gate, its profile's allowed_tools applied as for a Claude
+    # worker, and an uncovered command denied rather than left at a prompt.
+    add_agent(db, ws, agent_id="w1", mode="assign", profile="developer")
+    argv, _ = launch("developer")
+    assert antigravity.SKIP_FLAG in argv
+    assert answer("w1", "git commit -m wip") == "allow"
+    assert answer("w1", "touch should_not_exist.txt") == "deny"
+    assert antigravity.SKIP_FLAG not in launch("developer", mode="interactive")[0]  # a person answers
+    # An explicit "prompt" keeps agy's own prompt, beside the reviewer's gate.
+    set_local(ws.repo_root, "agy_approvals", "prompt")
     argv, hook = launch("developer")
     assert antigravity.SKIP_FLAG not in argv and antigravity.STRICT_EVENT in hook
-    add_agent(db, ws, agent_id="w1", mode="assign", profile="developer")
     monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: False)
     assert answer("w1", "touch should_not_exist.txt") == "ask"
 

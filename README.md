@@ -657,7 +657,7 @@ Autopilot, merge gates and cleanup:
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"off"` | `"on"`: brindle answers Claude Code workers' permission prompts from its rules (see "Permission policy" below); off, the prompts behave as they always did |
-| `agy_approvals` | `"prompt"` | `"brindle"`: with the policy on, Antigravity workers run without approval prompts and brindle's hook allows or denies every call (see "Antigravity" under "Permission policy") |
+| `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"` and interactive agy sessions `"prompt"` |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | unset | a task whose `files` overlap a running task's: `"block"` refuses it, `"warn"` starts it with a warning, `"queue"` queues it until that task merges. Unset, it is refused within a session and queued behind another session's task (both sessions' supervisors are told; the other session's work is never cancelled), and the queued task starts from that task's merge commit |
@@ -930,7 +930,8 @@ A session override of `features.hooks=false` reported false. No feature-enable
 flag is needed on these versions, and brindle leaves explicit disablement alone.
 
 **Antigravity.** agy's hook can deny but its "allow" is ignored (an agy bug),
-and it has no "no opinion" answer. So the hook denies what the policy denies,
+and it has no "no opinion" answer. So, where agy prompts (an interactive agy
+session, or any agy agent under `"agy_approvals": "prompt"`), the hook denies what the policy denies,
 answers "allow" for a file inside the workspace (which agy reads and writes
 without asking anyway) and "ask" for everything else, and brindle copies the
 rules agy can express exactly into your `~/.gemini/antigravity-cli/settings.json`
@@ -945,8 +946,10 @@ does it by hand. To undo, turn `permission_policy` off and run `sync-agy`: brind
 removes exactly its own entries. brindle doesn't learn from agy approvals (its
 hook runs for every tool call, so a tool running doesn't mean you approved it).
 
-With `"agy_approvals": "brindle"` (and the policy on), brindle's hook is the
-only gate instead: agy workers start with `--dangerously-skip-permissions`,
+For workers (any agy agent but an interactive one) when `agy_approvals` is
+unset, and for every agy agent under `"agy_approvals": "brindle"`, whether or
+not the policy is on, brindle's hook is the
+only gate instead: they start with `--dangerously-skip-permissions`,
 under which agy still honors a hook's deny, and the hook runs on every tool,
 subagents' calls included. It allows what a rule allows (a repo's checks
 included), the shell commands in the profile's `allowed_tools` (what a Claude
@@ -957,8 +960,10 @@ repo's checks), brindle's own tools and agy's tools that act only on the
 conversation, and denies everything else, telling the agent to
 ask its supervisor; you allow it with `brindle permissions allow`. Any failure
 in the hook is a deny, and a tool brindle doesn't know is denied. Nobody can
-approve a prompt in the agent's pane in this mode. The default, `"prompt"`,
-leaves agy asking as described above.
+approve a prompt in the agent's pane in this mode, so a worker never waits at
+one nobody is watching. `"prompt"` leaves agy asking as described above (and
+`assign`/`handoff` name the profile's `allowed_tools` agy's own settings don't
+already allow).
 
 ## brindle Pro and Team
 
@@ -1600,7 +1605,7 @@ When running long, unattended autopilot sessions with API keys:
   - **Recovering failed/blocked workers**: When an agent fails on an expired key or autopilot pauses with a credential error, export the fresh key (or update `brindle keys set`), then run `brindle continue`. This unpauses the session and relaunches paused/failed agents with the new credentials. The replacement credentials are automatically synced to the session credential store, dynamically refreshed by the supervisor's launcher on all subsequent worker delegations (`assign`/`handoff`).
   - **Proactive rotation in live sessions**: For Claude keys rotated outside brindle, set Claude Code's `apiKeyHelper` in `~/.claude/settings.json` or the project's `.claude/settings.json`. Claude Code re-runs the helper every 5 minutes (configurable with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`) and after a 401, so running workers pick up the new key. Don't also export `ANTHROPIC_API_KEY` or set a Claude key with `brindle keys set`, since an environment key takes precedence over the helper. Codex and Antigravity keys still need workers stopped, then `brindle keys set`, then `brindle continue`. Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
   - **Precedence**: Newly stored keys (`brindle keys set`) or session credentials updated during recovery take effect dynamically for all new panes, overriding stale launcher environments. For profile-level overrides, an explicit profile key (`env.NAME`) takes precedence over default provider credentials.
-- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts for anything `settings.json` doesn't allow, their profile's `allowed_tools` included (see Permissions), unless run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
+- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. brindle therefore runs agy workers with `--dangerously-skip-permissions` and its own hook as the gate, applying their profile's `allowed_tools` and denying the rest (see Permissions). Under an explicit `agy_approvals: "prompt"` they instead stall on approval prompts for anything `settings.json` doesn't allow, their profile's `allowed_tools` included.
 
 #### OpenCode
 
@@ -2154,18 +2159,24 @@ you already have them, and won't change one that's committed. Each agent's first
 message is a short warm-up with its instructions, because `agy` connects MCP servers
 only once a conversation has started.
 
-**Permissions.** `agy` doesn't let hooks approve shell commands, so an Antigravity
-agent asks before running anything your own `agy` settings don't already allow, and
-the sidebar shows it as needing you. A profile's `permission_mode` maps to agy's
-modes (`auto` to agy's Auto mode, `acceptEdits` to accept-edits, `plan` to plan;
-`dontAsk` runs brindle's hook as the only gate, as under `agy_approvals: "brindle"`).
-Its `allowed_tools` don't apply by themselves under the default `agy_approvals:
-"prompt"`: agy reads no hook's "allow", and its only allow list,
+**Permissions.** `agy` doesn't let hooks approve shell commands, so by default
+brindle runs Antigravity workers with `--dangerously-skip-permissions` and its
+own hook as the only gate (see "Antigravity" under "Permission policy"): a
+profile's `allowed_tools` shell entries and brindle's rules apply as they do
+for a Claude Code worker, and a call nothing allows is denied with a message
+telling the agent to find a simpler way or ask its supervisor, never left at a
+prompt nobody is watching. A profile's `permission_mode` maps to agy's modes
+(`auto` to agy's Auto mode, `acceptEdits` to accept-edits, `plan` to plan;
+`dontAsk` runs brindle's hook as the only gate even in an interactive session).
+
+An interactive agy session, or any agy agent under `"agy_approvals": "prompt"`,
+asks before running anything your own `agy` settings don't already allow, and
+the sidebar shows it as needing you. There a profile's `allowed_tools` don't
+apply by themselves: agy reads no hook's "allow", and its only allow list,
 `~/.gemini/antigravity-cli/settings.json`, is shared by every agy session, so brindle
 doesn't add one worker's rules there (another worker, or you, would get them too).
 `assign` and `handoff` name the `allowed_tools` that settings file doesn't already
-allow. Under `agy_approvals: "brindle"` (with the policy on) brindle's hook applies a
-profile's shell entries itself. To let agents run tests and commit without asking,
+allow. To let such agents run tests and commit without asking,
 add rules to that file yourself, for example:
 
 ```json

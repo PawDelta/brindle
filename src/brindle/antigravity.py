@@ -30,9 +30,10 @@ agy's hooks, mapped onto brindle's:
 - ``PreToolUse`` (only with ``permission_policy: "on"``): brindle's permission
   policy (brindle.permissions) answers deny, or what agy would do anyway (allow
   for a file inside the workspace, else ask), never nothing. Under
-  agy_approvals "brindle", or a profile with permission_mode dontAsk (agy has
-  no mode that refuses rather than prompts), agy runs with
-  --dangerously-skip-permissions and this hook allows or denies every call.
+  agy_approvals "brindle" (unset, for every agent but an interactive one; see
+  strict_on), or a profile with permission_mode dontAsk (agy has no mode that
+  refuses rather than prompts), agy runs with --dangerously-skip-permissions
+  and this hook allows or denies every call, whatever permission_policy says.
 agy has no hook for "waiting for approval": that is read from the screen.
 Hooks can't approve anything in agy (a hook's "allow" is ignored), so with the
 policy on brindle mirrors the allow rules agy's syntax can express into the
@@ -478,13 +479,13 @@ def _launched_with_skip_flag(max_depth: int = 4) -> bool | None:
 
 def _prompting_agent(db, agent_id: str) -> bool:
     """A known agent brindle launched without the skip flag: neither its repo
-    (agy_approvals "brindle") nor its profile (dontAsk) asks for the strict
-    hook. An unknown one isn't: that fails closed."""
+    (agy_approvals, see strict_on) nor its profile (dontAsk) asks for the
+    strict hook. An unknown one isn't: that fails closed."""
     from brindle.profiles import load_profile
 
     agent = db.get_agent(agent_id)
     ws = db.get_workspace(agent.workspace_id) if agent else None
-    if ws is None or strict_on(ws.repo_root):
+    if ws is None or strict_on(ws.repo_root, agent.mode):
         return False
     try:
         return load_profile(agent.profile, ws.repo_root).permission_mode != "dontAsk"
@@ -720,16 +721,21 @@ def policy_on(workspace: str) -> list[str] | None:
     return list(cfg.checks or []) if cfg.permission_policy == "on" else None
 
 
-def strict_on(workspace: str) -> bool:
-    """agy_approvals "brindle" with the permission policy on: agy runs with
-    --dangerously-skip-permissions and brindle's hook decides every call."""
+def strict_on(workspace: str, mode: str | None = None) -> bool:
+    """Whether an agy agent of ``mode`` in ``workspace`` runs with
+    --dangerously-skip-permissions and brindle's hook decides every call:
+    under agy_approvals "brindle", and, with it unset, for every agent but an
+    interactive one (nobody watches a worker's prompts; a person answers an
+    interactive agent's). "prompt" leaves agy asking."""
     from brindle.config import load_repo_config
 
     try:
         cfg = load_repo_config(workspace)
     except Exception:  # noqa: BLE001
         return False
-    return cfg.permission_policy == "on" and cfg.agy_approvals == "brindle"
+    if cfg.agy_approvals in ("brindle", "prompt"):
+        return cfg.agy_approvals == "brindle"
+    return mode != "interactive"
 
 
 def sync_for_launch(workspace: str, checks: list[str] | None) -> None:
@@ -776,8 +782,8 @@ def unapplied_rules(profile) -> list[str]:
 
 def launch_warning(agent, ws) -> str | None:
     """Which of its profile's allowed_tools an agy worker in workspace ``ws``
-    still asks about (see unapplied_rules), or None. Under agy_approvals
-    "brindle" or dontAsk, brindle's hook decides every call instead."""
+    still asks about (see unapplied_rules), or None. When brindle's hook
+    decides every call (strict_on, or dontAsk), it applies them instead."""
     from brindle.profiles import load_profile
 
     if agent.provider != "antigravity":
@@ -786,12 +792,12 @@ def launch_warning(agent, ws) -> str | None:
         profile = load_profile(agent.profile, ws.repo_root)
     except KeyError:
         return None
-    if profile.permission_mode == "dontAsk" or strict_on(ws.path):
+    if profile.permission_mode == "dontAsk" or strict_on(ws.path, agent.mode):
         return None
     missing = unapplied_rules(profile)
     if not missing:
         return None
     return (f"this Antigravity worker asks before using these allowed_tools of profile {profile.name}, "
             f"since agy applies only its own settings.json, which every agy session shares: "
-            f"{', '.join(missing)}. Add them to {settings_path()} yourself, or set agy_approvals to "
-            "\"brindle\" with permission_policy on to have brindle's hook apply the Bash ones")
+            f"{', '.join(missing)}. Add them to {settings_path()} yourself, or remove agy_approvals "
+            "\"prompt\" to have brindle's hook apply the Bash ones")
