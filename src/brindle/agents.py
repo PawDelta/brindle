@@ -2383,6 +2383,9 @@ def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
     is piped, else to the supervisor, then close the reviewer."""
     from brindle import pipeline
 
+    # Before a merge removes the workspace, and with it this reviewer's
+    # record: the link to its root, whose sidebar close_removed may rescue.
+    root_id = root_of(db, reviewer_id)
     try:
         caller, ws = db.get_agent(reviewer_id), db.get_workspace(ws_id)
         review = next((r for r in reversed(db.workspace_reviews(ws_id))
@@ -2404,7 +2407,7 @@ def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
         # A merge removes the workspace but leaves the session this reviewer
         # runs in; once the reviewer is gone nobody else would end it.
         if ws and db.get_workspace(ws_id) is None:
-            _closing_session(reviewer_id).write_text(ws.tmux_session)
+            _closing_session(reviewer_id).write_text(f"{ws.tmux_session}\n{root_id}")
         close_later(reviewer_id)
 
 
@@ -2418,15 +2421,18 @@ def _closing_session(agent_id: str):
 
 def close_removed(db: DB, agent_id: str) -> None:
     """Kill an agent and, when its workspace was removed with the session left
-    running (noted by ``finish_review``), that session too: only brindle's own,
-    unattached session of a workspace that no longer exists."""
+    running (noted by ``finish_review``, with the root it belonged to), that
+    session too: only brindle's own, unattached session of a workspace that no
+    longer exists."""
     note = _closing_session(agent_id)
     try:
-        session = note.read_text().strip()
+        session, _, root_id = note.read_text().strip().partition("\n")
         note.unlink()
     except OSError:
-        session = ""
-    root_id = root_of(db, agent_id)   # before kill drops the record that links it
+        session = root_id = ""
+    # The workspace's removal took the agent's record, and with it the link to
+    # its root, unless the note kept it.
+    root_id = root_id.strip() or root_of(db, agent_id)
     try:
         kill(db, agent_id)
     except AgentError:

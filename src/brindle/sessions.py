@@ -188,6 +188,15 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                   "SELECT ?, alias, repo_root, added_at FROM session_repos WHERE root_id=?",
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
+        # So does an outside job it waits on (wait_on), or the notice of one
+        # that just ended: the old session's autopilot is off, so nobody would
+        # be told. In this transaction, so the wait is finished once, by one side.
+        if c.execute("UPDATE autopilot SET external_wait=(SELECT external_wait FROM autopilot "
+                     "WHERE root_id=?) WHERE root_id=? AND external_wait IS NULL",
+                     (old_root_id, new.id)).rowcount:
+            c.execute("UPDATE autopilot SET external_wait=NULL WHERE root_id=?", (old_root_id,))
+        c.execute("UPDATE inbox SET agent_id=? WHERE agent_id=? AND delivered_at IS NULL "
+                  "AND instr(body, ?) > 0", (new.id, old_root_id, pilot.WAIT_ENDED_HEAD))
     _repoint_orphaned_tasks(db, new.id)
     bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
