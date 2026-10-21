@@ -900,7 +900,20 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             model_checked: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
-    whatever the mode: a worker, a reviewer, a subagent or the chat itself."""
+    whatever the mode: a worker, a reviewer, a subagent or the chat itself.
+    The CLI's config home is resolved once for the whole launch
+    (provider_homes.resolved): its identity check, preflight and pane all
+    get that one, even if a sign-in inside brindle completes meanwhile."""
+    from brindle import provider_homes
+
+    with provider_homes.resolved(agent.provider):
+        _launch_resolved(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
+                         background_setup=background_setup, model_checked=model_checked)
+
+
+def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
+                     resume: str | None, watch_pane: bool, background_setup: bool = False,
+                     model_checked: bool = False) -> None:
     try:
         upgrade.check_launch()
     except upgrade.StaleInstall as e:

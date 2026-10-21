@@ -23,6 +23,8 @@ copy, brindle's changes stay in brindle's copy."""
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -122,7 +124,7 @@ def effective_home(provider: str) -> Path | None:
     own once it is in use, else the person's own (None for Antigravity)."""
     if home(provider) is None:
         return None
-    return home(provider) if isolated(provider) else source(provider)
+    return home(provider) if launch_env(provider) else source(provider)
 
 
 def _prepared(provider: str, where: Path) -> dict[str, str]:
@@ -133,12 +135,32 @@ def _prepared(provider: str, where: Path) -> dict[str, str]:
     return {VARIABLE[provider]: str(where)}
 
 
+# The homes one launch resolved (resolved()): every launch_env call during it gets the same.
+_pinned: contextvars.ContextVar[dict[str, dict[str, str]]] = contextvars.ContextVar("provider_homes", default={})
+
+
 def launch_env(provider: str) -> dict[str, str]:
     """What points ``provider``'s CLI at brindle's config home once it is in
     use (after the one-time copy of the person's files); empty while the CLI
-    still runs with the person's own home, and for Antigravity."""
+    still runs with the person's own home, and for Antigravity. Inside
+    resolved(), the value that launch resolved."""
+    pinned = _pinned.get()
+    if provider in pinned:
+        return dict(pinned[provider])
     where = home(provider)
     return _prepared(provider, where) if where is not None and isolated(provider) else {}
+
+
+@contextlib.contextmanager
+def resolved(provider: str):
+    """Resolve ``provider``'s config home once (the person's own as the
+    fallback included) and give that same value to every launch_env call
+    inside, so one launch never mixes two homes."""
+    token = _pinned.set({**_pinned.get(), provider: launch_env(provider)})
+    try:
+        yield
+    finally:
+        _pinned.reset(token)
 
 
 def login_env(provider: str) -> dict[str, str]:
