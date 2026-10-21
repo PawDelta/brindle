@@ -1209,6 +1209,31 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     assert not list(path.parent.glob("*.tmp"))
 
 
+def test_kb_sources_add_sync_and_remove_a_folder(db, repo, world, tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("# Alpha\n\nThe first note.\n")
+    q = f"?repo={repo}"
+
+    assert _send("POST", "/v1/kb/sources" + q, {"path": str(tmp_path / "nope")})[0] == 400
+    assert _send("POST", "/v1/kb/sources", {"path": str(docs)})[0] == 400      # no repo
+    code, added = _send("POST", "/v1/kb/sources" + q, {"path": str(docs), "private": True})
+    assert code == 202
+    (source,) = _send("GET", "/v1/kb/sources" + q)[1]
+    assert source["docs"] == 1 and source["visibility"] == "personal"
+
+    (docs / "b.md").write_text("# Beta\n\nThe second note.\n")
+    code, synced = _send("POST", f"/v1/kb/sources/{source['id'][:8]}/sync" + q)
+    assert code == 202
+    assert _send("GET", "/v1/kb/sources" + q)[1][0]["docs"] == 2
+    done = {e["payload"]["job"]: e["payload"]["result"] for e in bus.tail(db, kinds=("job.done",))}
+    assert done[synced["job"]]["indexed"] == 1 and added["job"] in done
+
+    assert _send("DELETE", "/v1/kb/sources/nope" + q)[0] == 404
+    assert _send("DELETE", f"/v1/kb/sources/{source['id']}" + q)[0] == 200
+    assert _send("GET", "/v1/kb/sources" + q)[1] == []
+
+
 def test_set_user_overlapping_writes_keep_both_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("BRINDLE_HOME", str(tmp_path))
     monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
