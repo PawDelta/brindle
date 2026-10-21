@@ -12,8 +12,11 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+
+from brindle.db import DB
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 
@@ -284,9 +287,9 @@ def _fix_claude(confirm, done: list[str]) -> list[str]:
     return ["ANTHROPIC_API_KEY: approved for Claude Code"]
 
 
-def checks(repo_root: str | None) -> list[Check]:
+def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
+    """Run diagnostics, borrowing ``db`` or closing each connection we open."""
     from brindle import config, detect, procs, tmux, updates
-    from brindle.db import DB
 
     out: list[Check] = []
     v = sys.version_info
@@ -343,7 +346,9 @@ def checks(repo_root: str | None) -> list[Check]:
         probe = home / ".doctor-probe"
         probe.write_text("ok")
         probe.unlink()
-        DB().conn.execute("SELECT 1")
+        probe_db = db if db is not None else DB()
+        with closing(probe_db.conn) if db is None else nullcontext():
+            probe_db.conn.execute("SELECT 1")
         out.append(Check(OK, "brindle home", f"{home} (writable, database opens)"))
     except Exception as e:  # noqa: BLE001
         out.append(Check(FAIL, "brindle home", f"{home}: {e}"))
@@ -363,13 +368,14 @@ def checks(repo_root: str | None) -> list[Check]:
             out.append(Check(WARN, "tmux focus-events", str(e)))
 
     try:
-        db = DB()
-        table = procs.table()
-        stray = []
-        for aid in procs.all_agent_ids(table):
-            a = db.get_agent(aid)
-            if a is None or a.status in ("paused", "done") or a.dismissed_at is not None:
-                stray.append(aid)
+        process_db = db if db is not None else DB()
+        with closing(process_db.conn) if db is None else nullcontext():
+            table = procs.table()
+            stray = []
+            for aid in procs.all_agent_ids(table):
+                a = process_db.get_agent(aid)
+                if a is None or a.status in ("paused", "done") or a.dismissed_at is not None:
+                    stray.append(aid)
         if stray:
             out.append(Check(WARN, "leftover processes",
                              f"{len(stray)} agent(s) have processes running but aren't active: "

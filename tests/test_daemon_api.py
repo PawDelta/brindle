@@ -183,7 +183,7 @@ def seeded(db, repo, monkeypatch):
     knowledge.record_decision(db, key, "storage", "use sqlite", "simple")
     kb_mod.add_source(db, key, "folder", str(repo))
     monkeypatch.setattr(identity_lock, "locked_by", lambda a: "other@example.com" if a == "w2" else None)
-    monkeypatch.setattr(doctor, "checks", lambda r: [doctor.Check("ok", "python", "3.12")])
+    monkeypatch.setattr(doctor, "checks", lambda r, db=None: [doctor.Check("ok", "python", "3.12")])
     monkeypatch.setattr(cost, "require_entitled", lambda: None)
     panes = tmux.PaneSnapshot(tmux.current_server())
     panes.update({"@1": True, "@2": True, "@3": True})
@@ -221,7 +221,7 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
-@pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events"])
+@pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events", "doctor", "doctor-owned"])
 def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, kind):
     opened, closed = [], []
     connect = sqlite3.connect
@@ -248,6 +248,26 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
         assert peer._agent_panes() == {}
     elif kind == "terminal":
         assert terminal._find("missing")["code"] == "not_found"
+    elif kind.startswith("doctor"):
+        from brindle import company_identity, legacy, signin_pause, updates
+
+        # Keep the actual database probes; fake unrelated CLI/network diagnostics.
+        monkeypatch.setattr(doctor, "_tool", lambda *a, **k: doctor.Check("ok", a[0], ""))
+        for name in ("signin_checks", "credential_checks", "daemon_checks", "native_checks",
+                     "override_checks", "quota_checks", "airgap_checks", "pro_checks", "managed_checks"):
+            monkeypatch.setattr(doctor, name, lambda *a, **k: [])
+        monkeypatch.setattr(company_identity, "checks", lambda: [])
+        monkeypatch.setattr(signin_pause, "checks", lambda: [])
+        monkeypatch.setattr(updates, "notice", lambda **k: None)
+        monkeypatch.setattr(legacy, "findings", lambda repo: [])
+        monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+        monkeypatch.setattr(procs, "table", lambda: {})
+        if kind == "doctor":
+            for _ in range(10):
+                assert _get("/v1/doctor", AUTH)[0] == 200
+            assert len(opened) == 10    # each route's DB serves both database probes
+        else:
+            assert doctor.checks(None)
     else:
         incoming = [{"type": "websocket.connect"}, {"type": "websocket.disconnect", "code": 1000}]
 

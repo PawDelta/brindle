@@ -327,7 +327,7 @@ def get_routing(db: DB, request: Request) -> Any:
 
 @_json
 def get_doctor(db: DB, request: Request) -> Any:
-    return [dataclasses.asdict(c) for c in doctor.checks(_repo(request))]
+    return [dataclasses.asdict(c) for c in doctor.checks(_repo(request), db=db)]
 
 
 @_json
