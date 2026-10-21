@@ -221,6 +221,36 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
+def test_usage_lists_every_provider_and_flags_the_near_ones_worst_first(brindle_home, monkeypatch):
+    import time
+
+    from brindle import quota
+
+    now = time.time()
+    store = {
+        # the fullest window resets tomorrow; the emptier one resets in ten minutes
+        "claude": quota.Quota("claude", [quota.Window(40.0, now + 86400, 10080),
+                                         quota.Window(20.0, now + 600, 300)], None, now - 5, "status line"),
+        "codex": quota.Quota("codex", [quota.Window(85.0, now + 86400, 10080)], None, now - 9, "rollout"),
+        "antigravity": quota.Quota("antigravity", [], now + 600, now - 1, "limit error"),
+    }
+    monkeypatch.setattr(quota, "get", store.get)
+    code, body = _get("/v1/usage", AUTH)
+    assert code == 200
+    by = {p["provider"]: p for p in body["providers"]}
+    assert list(by) == list(quota.PROVIDERS)
+    assert by["claude"]["known"] and not by["claude"]["limited"]
+    assert by["claude"]["windows"][0] == {"used": 40.0, "resets_at": now + 86400, "minutes": 10080,
+                                          "name": "weekly", "short": "wk"}
+    assert by["claude"]["updated_at"] == now - 5
+    assert by["antigravity"]["limited"] and by["antigravity"]["limited_until"] == now + 600
+    assert by["native"] == {"provider": "native", "known": False, "limited": False, "windows": [],
+                            "limited_until": None, "updated_at": None}
+    assert [(n["provider"], n["reason"]) for n in body["near"]] == [
+        ("antigravity", "limited"), ("codex", "high"), ("claude", "resets_soon")]
+    assert body["near"][2]["resets_at"] == now + 600
+
+
 @pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events", "doctor", "doctor-owned",
                                   "preflight", "spend-events", "slow-check"])
 def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, kind):
