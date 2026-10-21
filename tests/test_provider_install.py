@@ -196,33 +196,30 @@ def test_the_persons_home_runs_until_a_sign_in_inside_brindle_then_brindles_does
     assert "brindle-org" in company_identity.claude_identity("org", None).line
 
 
-def test_one_launch_keeps_the_home_it_resolved_when_a_sign_in_completes_meanwhile(machine, db, repo, tmp_path,
-                                                                                monkeypatch):
+def test_an_agent_keeps_the_home_decided_at_spawn_when_a_sign_in_completes_after(machine, db, repo, tmp_path,
+                                                                                 monkeypatch):
     brindle_home = tmp_path / "brindle-claude"
     monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(brindle_home))
     ws = workspaces.adopt_root(db, str(repo))
-    agent = Agent("w1", ws.id, "developer", "claude", None, "assign", "idle", "", None, time.time())
-    db.add_agent(agent)
-    seen = {}
+    seen = []
 
-    def sign_in_completes(*a, **k):         # after the launch resolved its home, before its identity check
+    def sign_in_completes(*a, **k):         # spawn has started: the home is decided already
         brindle_home.mkdir(parents=True, exist_ok=True)
         (brindle_home / provider_homes.SIGNED_IN).write_text("now")
-        return None
 
-    def identity_check(provider):
-        seen["identity"] = provider_homes.launch_env(provider)
+    def identity_check(provider, home=None):
+        seen.append(("identity", home))
         return None, None, None
 
     def preflight(*a, **k):
-        seen["preflight"] = provider_homes.launch_env("claude")
+        seen.append(("preflight", provider_homes.launch_env("claude")))
         return []
 
     class Opened(Exception):
         pass
 
     def open_window(db, agent, ws, *a, **k):
-        seen["pane"] = agents.agent_env(ws, agent.id, agent).get("CLAUDE_CONFIG_DIR")
+        seen.append(("pane", agents.agent_env(ws, agent.id, agent).get("CLAUDE_CONFIG_DIR")))
         raise Opened
 
     monkeypatch.setattr(agents, "model_problem", sign_in_completes)
@@ -230,9 +227,16 @@ def test_one_launch_keeps_the_home_it_resolved_when_a_sign_in_completes_meanwhil
     monkeypatch.setattr(agents, "launch_blockers", preflight)
     monkeypatch.setattr(agents, "_open_window", open_window)
     with pytest.raises(Opened):
-        agents._launch(db, agent, ws, prompt=None, resume=None, watch_pane=False)
-    assert seen == {"identity": {}, "preflight": {}, "pane": None}     # the person's home, all through
-    assert provider_homes.launch_env("claude") == {"CLAUDE_CONFIG_DIR": str(brindle_home)}   # the next launch
+        agents.spawn(db, ws, "developer", provider_name="claude")
+    assert seen == [("identity", {}), ("preflight", {}), ("pane", None)]     # the person's home, end to end
+    # Its stored decision outlives the sign-in: a resume of an agent spawned before it keeps it.
+    seen.clear()
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "paused", "", None, time.time(),
+                       config_home=""))
+    with pytest.raises(Opened):
+        agents._launch(db, db.get_agent("w1"), ws, prompt=None, resume=None, watch_pane=False)
+    assert seen == [("identity", {}), ("preflight", {}), ("pane", None)]
+    assert provider_homes.decide("claude") == str(brindle_home)        # a new agent gets brindle's
 
 
 def test_a_turned_off_provider_never_launches(machine, db, repo, monkeypatch):

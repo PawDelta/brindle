@@ -248,11 +248,13 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
                 else:
                     recovery_keys[k] = sess_val
 
-        # brindle's own config home for the CLI (provider_homes): the lowest
-        # layer, so a profile's env lines still win.
+        # The CLI's config home stored on the agent at spawn (provider_homes):
+        # the lowest layer, so a profile's env lines still win. An agent with
+        # none stored yet (older rows) gets what a launch would decide.
         from brindle import provider_homes
 
-        homes = provider_homes.launch_env(agent.provider)
+        homes = (provider_homes.env_for(agent.provider, agent.config_home) if agent.config_home is not None
+                 else provider_homes.launch_env(agent.provider))
         if enforced is None:
             env = {**homes, **company, **recovery_keys, **profile_env, **managed_env, **env}
         else:
@@ -395,13 +397,22 @@ def spawn(
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
+    from brindle import preflight, provider_homes
+
+    off = preflight.turned_off(provider.name)     # before anything (deciding its home) runs the CLI
+    if off:
+        raise PreflightBlocked([off])
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
         done_when=done_when, review_sha=review_sha,
+        # Its CLI's config home, decided once here: every later check, its
+        # pane and a resume use this one, whatever a sign-in changes meanwhile.
+        config_home=provider_homes.decide(provider.name),
     )
-    why = model_problem(profile_name, ws, agent=agent)
+    with provider_homes.using(agent.provider, agent.config_home):
+        why = model_problem(profile_name, ws, agent=agent)
     if why:
         raise AgentError(why)
     db.add_agent(agent)
@@ -901,12 +912,26 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
     whatever the mode: a worker, a reviewer, a subagent or the chat itself.
-    The CLI's config home is resolved once for the whole launch
-    (provider_homes.resolved): its identity check, preflight and pane all
-    get that one, even if a sign-in inside brindle completes meanwhile."""
-    from brindle import provider_homes
+    The CLI's config home is the one stored on the agent at spawn
+    (provider_homes.decide): its identity check, preflight, pane and every
+    resume use it, even after a sign-in inside brindle. An agent recorded by
+    an older brindle has none yet: it is decided and stored here, once."""
+    try:
+        upgrade.check_launch()
+    except upgrade.StaleInstall as e:
+        raise AgentError(str(e)) from e
+    from brindle import preflight, provider_homes
 
-    with provider_homes.resolved(agent.provider):
+    # A provider the person turned off in brindle never starts, and nothing
+    # below (deciding its home, model check, identity probe) runs its CLI either.
+    off = preflight.turned_off(agent.provider)
+    if off:
+        raise PreflightBlocked([off])
+    if agent.config_home is None:
+        agent.config_home = provider_homes.decide(agent.provider)
+        if agent.config_home is not None:
+            db.update_agent(agent.id, config_home=agent.config_home)
+    with provider_homes.using(agent.provider, agent.config_home):
         _launch_resolved(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
                          background_setup=background_setup, model_checked=model_checked)
 
@@ -914,17 +939,6 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                      resume: str | None, watch_pane: bool, background_setup: bool = False,
                      model_checked: bool = False) -> None:
-    try:
-        upgrade.check_launch()
-    except upgrade.StaleInstall as e:
-        raise AgentError(str(e)) from e
-    from brindle import preflight
-
-    # A provider the person turned off in brindle never starts, and nothing
-    # below (model check, identity probe) runs its CLI either.
-    off = preflight.turned_off(agent.provider)
-    if off:
-        raise PreflightBlocked([off])
     m = managed(ws.repo_root)   # read once for this launch
     profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)
@@ -941,7 +955,10 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         return
     # An org that enforces its company sign-in (Enterprise) refuses a
     # different identity; one that can't be told never blocks.
-    why, outcome, route = company_identity.launch_check(provider.name)
+    from brindle import provider_homes
+
+    why, outcome, route = company_identity.launch_check(
+        provider.name, home=provider_homes.env_for(agent.provider, agent.config_home))
     if outcome:
         route_health.record(ws.repo_root, agent=provider.name, route=route, model=profile.model,
                             outcome=outcome)

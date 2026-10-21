@@ -135,32 +135,46 @@ def _prepared(provider: str, where: Path) -> dict[str, str]:
     return {VARIABLE[provider]: str(where)}
 
 
-# The homes one launch resolved (resolved()): every launch_env call during it gets the same.
-_pinned: contextvars.ContextVar[dict[str, dict[str, str]]] = contextvars.ContextVar("provider_homes", default={})
+# An agent's own home while brindle works on it (using()): its stored decision.
+_agent_home: contextvars.ContextVar[dict[str, dict[str, str]]] = contextvars.ContextVar("provider_homes", default={})
 
 
 def launch_env(provider: str) -> dict[str, str]:
     """What points ``provider``'s CLI at brindle's config home once it is in
     use (after the one-time copy of the person's files); empty while the CLI
     still runs with the person's own home, and for Antigravity. Inside
-    resolved(), the value that launch resolved."""
-    pinned = _pinned.get()
-    if provider in pinned:
-        return dict(pinned[provider])
+    using(), the agent's stored home instead: nothing is resolved again."""
+    stored = _agent_home.get()
+    if provider in stored:
+        return dict(stored[provider])
     where = home(provider)
     return _prepared(provider, where) if where is not None and isolated(provider) else {}
 
 
+def decide(provider: str) -> str | None:
+    """The config home a new agent on ``provider`` runs with, decided once
+    (at spawn) and stored on it: brindle's home's path, or "" for the
+    person's own; None for a CLI with no config home of brindle's (Antigravity)."""
+    if home(provider) is None:
+        return None
+    return launch_env(provider).get(VARIABLE[provider], "")
+
+
+def env_for(provider: str, stored: str | None) -> dict[str, str]:
+    """The environment an agent's stored decision (decide()) gives its CLI."""
+    return {VARIABLE[provider]: stored} if stored and provider in VARIABLE else {}
+
+
 @contextlib.contextmanager
-def resolved(provider: str):
-    """Resolve ``provider``'s config home once (the person's own as the
-    fallback included) and give that same value to every launch_env call
-    inside, so one launch never mixes two homes."""
-    token = _pinned.set({**_pinned.get(), provider: launch_env(provider)})
+def using(provider: str, stored: str | None):
+    """Work on an agent whose home was decided as ``stored``: every home
+    lookup inside (preflight, consents, trust, sign-in and identity checks)
+    answers with it rather than resolving the home again."""
+    token = _agent_home.set({**_agent_home.get(), provider: env_for(provider, stored)})
     try:
         yield
     finally:
-        _pinned.reset(token)
+        _agent_home.reset(token)
 
 
 def login_env(provider: str) -> dict[str, str]:
