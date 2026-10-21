@@ -29,7 +29,10 @@ agy's hooks, mapped onto brindle's:
 - ``PostToolUse``: a tool ran, so a permission prompt was answered.
 - ``PreToolUse`` (only with ``permission_policy: "on"``): brindle's permission
   policy (brindle.permissions) answers deny, or what agy would do anyway (allow
-  for a file inside the workspace, else ask), never nothing.
+  for a file inside the workspace, else ask), never nothing. Under
+  agy_approvals "brindle", or a profile with permission_mode dontAsk (agy has
+  no mode that refuses rather than prompts), agy runs with
+  --dangerously-skip-permissions and this hook allows or denies every call.
 agy has no hook for "waiting for approval": that is read from the screen.
 Hooks can't approve anything in agy (a hook's "allow" is ignored), so with the
 policy on brindle mirrors the allow rules agy's syntax can express into the
@@ -197,7 +200,10 @@ def install(workspace: str, permission_policy: bool = False, strict: bool = Fals
     handler = lambda ev: [{"type": "command", "command": _hook_command(EVENTS[ev]), "timeout": 60}]  # noqa: E731
     hooks = {"PreInvocation": handler("PreInvocation"), "Stop": handler("Stop"),
              "PostToolUse": [{"matcher": "*", "hooks": handler("PostToolUse")}]}
-    if strict:
+    if strict or _has_strict_hook(workspace):
+        # Kept once there: an agent beside this one (a dontAsk reviewer in its
+        # worker's checkout) may run with the skip flag, gated only by it. It
+        # answers an agy started without the flag as before (pre_tool_main).
         # agy runs every call this hook doesn't deny, so it sees every tool.
         hooks["PreToolUse"] = [{"matcher": "*", "hooks": [
             {"type": "command", "command": _hook_command(STRICT_EVENT), "timeout": 60}]}]
@@ -211,6 +217,16 @@ def install(workspace: str, permission_policy: bool = False, strict: bool = Fals
         rule.write_text(RULE, encoding="utf-8")
         if created:
             _exclude(workspace, AGENTS_DIR / "rules" / "brindle.md")
+
+
+def _has_strict_hook(workspace: str) -> bool:
+    path = Path(workspace) / AGENTS_DIR / "hooks.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    mine = data.get("brindle") if isinstance(data, dict) else None
+    return isinstance(mine, dict) and STRICT_EVENT in json.dumps(mine.get("PreToolUse"))
 
 
 def can_resume(conversation_id: str) -> bool:
@@ -460,6 +476,22 @@ def _launched_with_skip_flag(max_depth: int = 4) -> bool | None:
     return None
 
 
+def _prompting_agent(db, agent_id: str) -> bool:
+    """A known agent brindle launched without the skip flag: neither its repo
+    (agy_approvals "brindle") nor its profile (dontAsk) asks for the strict
+    hook. An unknown one isn't: that fails closed."""
+    from brindle.profiles import load_profile
+
+    agent = db.get_agent(agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if ws is None or strict_on(ws.repo_root):
+        return False
+    try:
+        return load_profile(agent.profile, ws.repo_root).permission_mode != "dontAsk"
+    except KeyError:
+        return False
+
+
 def pre_tool_main(stdin_text: str, db_factory=None, strict: bool = False) -> str:
     """``brindle _hook agy-pre-tool``: always a JSON answer (deny, ask, or allow
     for a file in the workspace); any failure (no agent, bad input, a broken
@@ -481,7 +513,11 @@ def pre_tool_main(stdin_text: str, db_factory=None, strict: bool = False) -> str
             return PRE_TOOL_FALLBACK if _launched_with_skip_flag() is False else STRICT_FALLBACK
         if db_factory is None:
             from brindle.db import DB as db_factory
-        out = pre_tool_decision(db_factory(), agent_id, payload, strict=strict)
+        db = db_factory()
+        if strict and _prompting_agent(db, agent_id) and _launched_with_skip_flag() is False:
+            # An agent that prompts as usual, beside one the strict hook gates.
+            strict, fallback = False, PRE_TOOL_FALLBACK
+        out = pre_tool_decision(db, agent_id, payload, strict=strict)
         allowed = ("deny", "allow") if strict else ("deny", "ask", "allow")
         if isinstance(out, dict) and out.get("decision") in allowed:
             return json.dumps(out)
