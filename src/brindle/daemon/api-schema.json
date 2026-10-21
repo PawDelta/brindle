@@ -2834,6 +2834,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/user-settings"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/user-settings"
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/{id:path}/diff"
     },
     {
