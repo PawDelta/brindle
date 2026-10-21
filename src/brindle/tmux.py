@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -976,22 +977,33 @@ def decode_output(data: bytes) -> bytes:
 _OCTAL = re.compile(rb"\\([0-7]{3})")
 
 
-def attached_terminals(target: str, server: object = _THIS_SERVER) -> int | None:
-    """How many terminals show ``target``'s session (0: nobody is looking at
-    it), not counting control-mode clients such as the daemon's own, which
-    ``#{session_attached}`` would. None when the pane is gone. ``server`` as
-    for capture."""
-    proc = _tmux("list-clients", "-t", target, "-F", "#{client_flags}", check=False,
+CLIENT_FORMAT = "#{client_flags} #{client_activity} #{window_id}"
+
+
+def attached_terminals(target: str, server: object = _THIS_SERVER) -> list[tuple[int, str]] | None:
+    """The terminals showing ``target``'s session (empty: nobody is looking
+    at it), as parse_terminals gives them, not counting control-mode clients
+    such as the daemon's own, which ``#{session_attached}`` would. None when
+    the pane is gone. ``server`` as for capture."""
+    proc = _tmux("list-clients", "-t", target, "-F", CLIENT_FORMAT, check=False,
                  server=server)
     if proc.returncode != 0:
         return None
-    return count_terminals(proc.stdout.splitlines())
+    return parse_terminals(proc.stdout.splitlines())
 
 
-def count_terminals(flags: Iterable[str]) -> int:
-    """The non-control clients among ``flags``, one client's
-    ``#{client_flags}`` per item."""
-    return sum(1 for f in flags if f and "control-mode" not in f.split(","))
+def parse_terminals(lines: Iterable[str]) -> list[tuple[int, str]]:
+    """The non-control clients among ``lines``, one client's CLIENT_FORMAT
+    per item, as (when it last had input, in epoch seconds; the window it
+    shows)."""
+    out = []
+    for line in lines:
+        flags, _, rest = line.partition(" ")
+        if not flags or "control-mode" in flags.split(","):
+            continue
+        activity, _, window = rest.partition(" ")
+        out.append((int(activity) if activity.isdigit() else 0, window.strip()))
+    return out
 
 
 def set_window_size_manual(target: str, server: object = _THIS_SERVER) -> None:
@@ -1011,24 +1023,35 @@ def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
     _tmux("set-option", "-w", "-u", "-t", target, "window-size", check=False, server=server)
 
 
-CURSOR_FORMAT = "#{cursor_x} #{cursor_y}"
+VIEW_FORMAT = "#{cursor_x} #{cursor_y} #{pane_width} #{pane_height} #{window_id}"
 
 
-def pane_view(target: str, server: object = _THIS_SERVER) -> tuple[int, int] | None:
-    """``target``'s cursor column and row; None when the pane is gone.
-    ``server`` as for capture."""
-    proc = _tmux("display-message", "-p", "-t", target, CURSOR_FORMAT, check=False,
+@dataclass(frozen=True)
+class View:
+    """Where a pane's cursor is (column, row), how big the pane is, and the
+    window it is in."""
+
+    x: int
+    y: int
+    cols: int
+    rows: int
+    window: str
+
+
+def pane_view(target: str, server: object = _THIS_SERVER) -> View | None:
+    """``target``'s View; None when the pane is gone. ``server`` as for capture."""
+    proc = _tmux("display-message", "-p", "-t", target, VIEW_FORMAT, check=False,
                  server=server)
-    return parse_cursor(proc.stdout) if proc.returncode == 0 else None
+    return parse_view(proc.stdout) if proc.returncode == 0 else None
 
 
-def parse_cursor(line: str) -> tuple[int, int] | None:
-    """A CURSOR_FORMAT line as (column, row), or None when it isn't one."""
+def parse_view(line: str) -> View | None:
+    """A VIEW_FORMAT line as a View, or None when it isn't one."""
     try:
-        x, y = (int(v) for v in line.split())
+        x, y, cols, rows, window = line.split()
+        return View(int(x), int(y), int(cols), int(rows), window)
     except ValueError:
         return None
-    return x, y
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:

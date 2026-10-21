@@ -52,6 +52,7 @@ audit_export = "brindle.pro.audit_export:make"
 
 [dependency-groups]
 dev = [
+    "pyte>=0.8.2",
     "pytest>=8",
     "pytest-cov>=7.0",
     "pytest-xdist>=3.8.0",

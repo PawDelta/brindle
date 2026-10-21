@@ -21,11 +21,13 @@ across processes.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from brindle import git
 
 TTL = 10.0  # safety net: recompute at least this often even if nothing else invalidated the cache
+WARM_WORKERS = 8
 
 _base_ref_cache: dict[tuple[str, str], tuple[tuple, str]] = {}
 _status_cache: dict[str, tuple[tuple, float, git.Status]] = {}
@@ -186,3 +188,21 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
         return st
     _status_cache[key] = (fp, now, st)
     return st
+
+
+def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
+    """Bring the cached status of each (path, base) up to date at once, in
+    parallel: a cold first look (the app opening) runs one `git status` per
+    worktree, which done one after another took most of the time."""
+    pairs = [(p, b) for p, b in pairs if b]
+    if len(pairs) < 2:
+        return
+
+    def one(pair: tuple[str, str | None]) -> None:
+        try:
+            cached_status(pair[0], pair[1], now=now)
+        except git.GitError:
+            pass
+
+    with ThreadPoolExecutor(max_workers=min(WARM_WORKERS, len(pairs))) as pool:
+        list(pool.map(one, pairs))

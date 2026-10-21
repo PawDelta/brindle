@@ -15,6 +15,8 @@ from brindle.daemon.terminal import WS_NOT_FOUND
 from brindle.db import Agent
 
 TOKEN = "t" * 43
+VIEW = "3 1 80 24 @1"       # %1's cursor, size and window
+FUTURE = 4102444800         # a terminal's input that is always later than the app's
 
 
 class FakeTmux:
@@ -43,7 +45,7 @@ class FakeTmux:
             return subprocess.CompletedProcess(args, 1, "", "")
         out = ""
         if args[0] == "display-message":
-            out = {"#{session_name}": "sess", tmux.CURSOR_FORMAT: "3 1"}.get(args[-1], "0")
+            out = {"#{session_name}": "sess", tmux.VIEW_FORMAT: VIEW}.get(args[-1], "0")
         elif args[0] == "capture-pane":
             out = self.screen.decode() + "\n"
         elif args[0] == "list-clients":
@@ -51,8 +53,9 @@ class FakeTmux:
         return subprocess.CompletedProcess(args, 0, out, "")
 
     def flags(self) -> list[str]:
-        return ["attached,focused,control-mode,UTF-8"] * bool(self.procs) + \
-            ["attached,UTF-8"] * self.attached
+        # An attached terminal shows %1's window and had input last.
+        return ["attached,focused,control-mode,UTF-8 0 @1"] * bool(self.procs) + \
+            [f"attached,UTF-8 {FUTURE} @1"] * self.attached
 
     async def spawn(self, argv: list[str]) -> "FakeControl":
         proc = FakeControl(self, argv)
@@ -79,7 +82,7 @@ class FakeTmux:
                 self.print_during_capture = b""
             proc.reply(self.screen.split(b"\n"))
         elif words[0] == "display-message":
-            proc.reply([b"3 1"])
+            proc.reply([VIEW.encode()])
         elif words[0] == "list-clients":
             proc.reply([f.encode() for f in self.flags()])
         else:
@@ -163,7 +166,7 @@ def connect(client, agent):
 def test_viewers_share_one_control_client_whose_seeds_are_ordered_with_its_stream(fake):
     with TestClient(build_app(TOKEN)) as client:
         a = connect(client, "w1")
-        assert a.receive_json() == {"type": "terminal", "agent": "w1", "shared": False}
+        assert a.receive_json() == {"type": "terminal", "agent": "w1", "shared": False, "cols": 80, "rows": 24}
         assert a.receive_bytes() == b"\x1bchello\r\nworld\x1b[0m\x1b[2;4H"
         fake.print(b"\x1b[31mli", b"ve\\")       # handed over together: one frame
         assert a.receive_bytes() == b"\x1b[31mlive\\"
@@ -204,7 +207,7 @@ def test_control_frames_reach_the_pane(fake, attached):
         else:       # the first size at once, the last after the throttle, then viewers reseeded
             fake.wait_for(lambda: ("resize-window", "-t", "%1", "-x", "120", "-y", "40") in fake.calls)
             fake.wait_for(lambda: sum(l.startswith("capture-pane") for l in fake.lines) >= 2)
-            assert sock.receive_json() == {"type": "resync"}
+            assert sock.receive_json() == {"type": "resync", "cols": 80, "rows": 24}
             assert sock.receive_bytes().startswith(b"\x1bc")
         sent = [l for l in fake.lines if l.split()[0] in ("send-keys", "set-buffer", "paste-buffer")]
         name = sent[2].split()[2]
@@ -238,13 +241,14 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
 
     async def go():
         pane, clock, sized = terminal.Pane("%1", None, None), Clock(), []
+        pane.window = "@1"
         pane._loop = clock
 
         gated, state, ops = {}, {"attached": 0}, []
 
         async def run(fn, target, *args):
             if fn is tmux.attached_terminals:
-                return state["attached"]
+                return [(FUTURE, "@1")] * state["attached"]
             if fn is tmux.set_window_size_manual:
                 ops.append("manual")
                 if "manual" in gated:

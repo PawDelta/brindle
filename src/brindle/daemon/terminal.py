@@ -5,9 +5,14 @@ daemon's action terminals (a sign-in, ``brindle keys set``, an upgrade; see
 After the guard has taken the token (the socket's first frame), the client gets
 a JSON hello, then the pane as binary frames: a seed (the last SEED_LINES of
 scrollback and the screen, with colours, and the cursor put back), then every
-byte the pane prints. The daemon watches a tmux session through one
-control-mode client (:class:`Control`, ``tmux -C attach``): tmux writes what
-every pane of the session prints and the replies to the daemon's own commands
+byte the pane prints. The hello carries the pane's size (``cols``, ``rows``),
+and so does the ``resync`` that comes before every later seed: the client
+must show the pane at exactly that size (letterboxed or scrolled when it
+doesn't fit), never reflowed to its own, or the program's cursor addressing
+lands on the wrong cells. Whenever the pane's size changes (a resize, a
+terminal that shares it resizing) viewers are seeded again, at the new size.
+The daemon watches a tmux session through one control-mode client
+(:class:`Control`, ``tmux -C attach``): tmux writes what every pane of the session prints and the replies to the daemon's own commands
 into one ordered stream, so a viewer's seed, captured through that same
 client, ends exactly where its stream starts (nothing is shown twice, nothing
 is lost), and keys go down the client's stdin instead of through a tmux
@@ -23,8 +28,12 @@ key names) or ``{"type": "key", "text": "..."}`` (typed as is), ``{"type":
 "paste", "text": "..."}`` (one bracketed paste, not submitted) and ``{"type":
 "resize", "cols": c, "rows": r}``, applied at once, then at most one per RESIZE_SECONDS (the last size always
 lands), and viewers are seeded again once it settles.
-While a terminal client is attached to the pane's session, tmux's own sizing
-rule applies: resizes are skipped and viewers are told ``shared``.
+While a terminal client is attached to the pane's session, viewers are told
+``shared``, and the window is sized the way tmux sizes it for two clients
+under ``window-size latest``: by whichever had input last. The app's viewer
+takes it with its size, a key or a paste; a terminal showing the window
+takes it back by typing there (seen within TAKE_SECONDS), and then tmux's
+own rule applies until the viewer's next input.
 
 An agent with no pane to stream (exited, or never had one) gets ``no_pane`` and
 what is left: the dead pane's last screen, else the last thing its transcript
@@ -40,6 +49,7 @@ import logging
 import re
 import secrets
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +67,7 @@ COALESCE_BYTES = 64 << 10
 CONTROL_LIMIT = 1 << 24        # one %output line can carry a whole pty read, escaped
 RESIZE_SECONDS = 0.25
 SHARED_SECONDS = 2.0
+TAKE_SECONDS = 0.5              # how often a shared window is checked for a terminal's input
 POLL_SECONDS = 0.1
 MAX_SIZE = 1000                 # columns or rows a resize may ask for
 WS_NOT_FOUND = 4404
@@ -184,6 +195,13 @@ class Control:
                     pane = self.panes.get(pane_id.decode("ascii", "replace"))
                     if pane is not None:
                         pane.printed(tmux.decode_output(data))
+                elif line.startswith(b"%layout-change "):
+                    # The window was resized (or split): its panes' viewers
+                    # see the old size until they are seeded at the new one.
+                    window = line.split(b" ", 2)[1].decode("ascii", "replace")
+                    for pane in self.panes.values():
+                        if pane.window == window:
+                            pane.relayout()
                 elif line.startswith(b"%begin "):
                     block, guard = [], line.split(b" ", 1)[1]
                 elif line.startswith(b"%exit"):
@@ -252,7 +270,10 @@ class Pane:
         self._unseeded = False          # a resize was applied and viewers not seeded since
         self._tasks: list[asyncio.Task] = []
         self._screen: list[str] | None = None
-        self._cursor: tuple[int, int] | None = None
+        self._view: tmux.View | None = None
+        self.window: str | None = None  # the id of the window the pane is in
+        self._input_at = 0.0            # when the app's viewer last typed, pasted or resized
+        self._yielded = False           # a terminal had input since: its size rules
         self._closed = False
         self._loop = asyncio.get_running_loop()
 
@@ -264,8 +285,11 @@ class Pane:
     async def open(self) -> None:
         try:
             if self.control is None:
-                self._screen, self._cursor = await self._capture_screen()
+                self._screen, self._view = await self._capture_screen()
                 self._tasks.append(asyncio.ensure_future(self._poll_screen()))
+            else:
+                self._view = await self._pane_view()
+            self.window = self._view.window if self._view else None
             await self._check_shared()
         except BaseException:
             await self.close()
@@ -284,37 +308,60 @@ class Pane:
         for v in self.viewers:
             v.wake.set()
 
+    def relayout(self) -> None:
+        """The pane's size changed: seed its viewers again, at the new size."""
+        for v in self.viewers:
+            v.reseed = True
+        self._wake()
+
     def add(self) -> Viewer:
         v = Viewer(self.ring.end, self.shared)
         self.viewers.add(v)
         return v
 
-    async def seed(self, viewer: Viewer) -> bytes:
-        """The pane as it stands: scrollback and screen, then the cursor.
-        ``viewer.pos`` is set to where its stream must go on from."""
+    async def _pane_view(self) -> tmux.View | None:
+        if self.control is None:
+            return await self.run(tmux.pane_view, self.target)
+        reply = await self.control.send(f"display-message -p -t {self.target} '{tmux.VIEW_FORMAT}'")
+        return None if reply.error else tmux.parse_view(reply.text)
+
+    async def seed(self, viewer: Viewer) -> tuple[bytes, tmux.View | None]:
+        """The pane as it stands: scrollback and screen, then the cursor, and
+        the View it was taken at (the size to show it at). ``viewer.pos`` is
+        set to where its stream must go on from."""
         if self.control is not None:
             # The capture's reply comes after the %output it includes and
             # before the %output it doesn't, so the stream starts at its end.
             capture = self.control.send(
                 f"capture-pane -p -e -J -S -{SEED_LINES} -t {self.target}")
-            cursor = self.control.send(f"display-message -p -t {self.target} '{tmux.CURSOR_FORMAT}'")
-            rows, at = await capture, await cursor
+            view = await self._pane_view()
+            rows = await capture
             if rows.error:
                 raise tmux.TmuxError(f"tmux capture-pane: {rows.text.strip()}")
             viewer.pos = rows.ends.get(self.target, self.ring.end)
             out = RESET + b"\r\n".join(rows.lines)
-            view = tmux.parse_cursor(at.text) if not at.error else None
         else:
             text = await self.run(tmux.capture, self.target, SEED_LINES, True)
             view = await self.run(tmux.pane_view, self.target)
             viewer.pos = self.ring.end
             out = _as_terminal(text)
         if view:
+            self.window = view.window       # a pane can be moved to another window
             out += _cursor(view)
-        return out
+        return out, view
+
+    def active(self) -> None:
+        """The app's viewer typed or pasted: like a tmux client's input, that
+        makes its size the window's again (see _check_shared)."""
+        self._input_at = time.time()
+        if self._yielded:
+            self._yielded = False
+            if self._size:
+                self.resize(*self._size)
 
     async def send_keys(self, keys: list[str] | None = None, text: str | None = None) -> None:
         """Type ``text`` as is, or press ``keys`` (tmux key names)."""
+        self.active()
         if self.control is None:
             args = ["-l", "--", text] if text else ["--", *(keys or [])]
             await self.run(tmux.send_keys, self.target, *args)
@@ -325,6 +372,7 @@ class Pane:
         await self._command(f"send-keys -t {self.target} {args}")
 
     async def paste(self, text: str) -> None:
+        self.active()
         if self.control is None:
             await self.run(tmux.paste, self.target, text, False)
             return
@@ -342,8 +390,10 @@ class Pane:
     def resize(self, cols: int, rows: int) -> None:
         """Size the window to ``cols`` x ``rows``: at once when none was
         applied in the last RESIZE_SECONDS, else at the end of that time, with
-        the last size asked for (a dragged window sends dozens)."""
+        the last size asked for (a dragged window sends dozens). Like a
+        key, it makes the viewer's size the window's (see active)."""
         self._size = (cols, rows)
+        self._input_at, self._yielded = time.time(), False
         self._dirty = True
         if self._resize or self._runner:    # one is waiting or running: it takes the latest size
             return
@@ -395,7 +445,7 @@ class Pane:
         try:
             await self._check_shared()      # a terminal may have attached since the last poll
             async with self._sizing:        # the state is read again once it is ours
-                if self.shared or size == self._applied:
+                if self._yielded or size == self._applied:
                     return
                 if not self._manual:
                     self._manual = True     # set first: a cancelled close still hands it back
@@ -410,56 +460,65 @@ class Pane:
         except tmux.TmuxError:
             log.debug("brindle: can't resize %s", self.target, exc_info=True)
 
-    async def _attached(self) -> int | None:
+    async def _attached(self) -> list[tuple[int, str]] | None:
         """Terminals showing the pane's session (the daemon's own control
-        client doesn't count); None when the pane is gone."""
+        client doesn't count), as tmux.parse_terminals gives them; None when
+        the pane is gone."""
         if self.control is None:
             return await self.run(tmux.attached_terminals, self.target)
-        reply = await self.control.send(f"list-clients -t {self.target} -F '#{{client_flags}}'")
+        reply = await self.control.send(f"list-clients -t {self.target} -F '{tmux.CLIENT_FORMAT}'")
         if reply.error:
             return None
-        return tmux.count_terminals(line.decode("ascii", "replace") for line in reply.lines)
+        return tmux.parse_terminals(line.decode("ascii", "replace") for line in reply.lines)
 
     async def _check_shared(self) -> None:
-        attached = await self._attached()
-        if attached is None:
+        terminals = await self._attached()
+        if terminals is None:
             raise tmux.TmuxError(f"can't find pane: {self.target}")
-        shared = attached > 0
+        shared = bool(terminals)
+        # A terminal showing this window had input after the viewer last did:
+        # it is tmux's latest client, so tmux's rule sizes the window now.
+        took = any(window == self.window and at > self._input_at for at, window in terminals)
         async with self._sizing:        # after any resize or acquisition in flight
+            if took and not self._yielded:
+                self._yielded = True
+                if self._manual:
+                    self._manual = False
+                    self._applied = None
+                    await self.run(tmux.unset_window_size, self.target)
             if shared == self.shared:
                 return
             self.shared = shared
-            if shared and self._manual:     # the terminal's size rules again
-                self._manual = False
-                self._applied = None
-                await self.run(tmux.unset_window_size, self.target)
         self._wake()
 
     async def _poll_shared(self) -> None:
         while True:
-            await asyncio.sleep(SHARED_SECONDS)
+            await asyncio.sleep(TAKE_SECONDS if self.shared and not self._yielded else SHARED_SECONDS)
             try:
                 await self._check_shared()
             except tmux.TmuxError:
                 log.debug("brindle: can't read %s", self.target, exc_info=True)
 
-    async def _capture_screen(self) -> tuple[list[str], tuple[int, int] | None]:
+    async def _capture_screen(self) -> tuple[list[str], tmux.View | None]:
         text = await self.run(tmux.capture, self.target, 0, True, join=False)
         return text.removesuffix("\n").split("\n"), await self.run(tmux.pane_view, self.target)
 
     async def _poll_screen(self) -> None:
         """The no-stream fallback: redraw the rows that changed since the last
-        look (a cursor that moved on its own, Enter onto a blank line, counts)."""
+        look (a cursor that moved on its own, Enter onto a blank line, counts),
+        or seed the viewers again when the pane's size changed."""
         while True:
             await asyncio.sleep(POLL_SECONDS)
             try:
-                rows, cursor = await self._capture_screen()
+                rows, view = await self._capture_screen()
             except tmux.TmuxError:
                 self.stream_ended()
                 return
-            if rows != self._screen or cursor != self._cursor:
-                self.printed(_redraw(self._screen, rows, cursor))
-                self._screen, self._cursor = rows, cursor
+            if view and self._view and (view.cols, view.rows) != (self._view.cols, self._view.rows):
+                self.relayout()
+            elif rows != self._screen or view != self._view:
+                self.printed(_redraw(self._screen, rows, view))
+            self._screen, self._view = rows, view
 
     async def close(self) -> None:
         self._closed = True
@@ -474,17 +533,22 @@ class Pane:
                 log.debug("brindle: can't unsize %s", self.target, exc_info=True)
 
 
-def _redraw(previous: list[str] | None, rows: list[str], cursor: tuple[int, int] | None) -> bytes:
+def _redraw(previous: list[str] | None, rows: list[str], view: tmux.View | None) -> bytes:
     """Rows that differ from ``previous``, each erased first so a full-width
     row never leaves the terminal in its pending-wrap state."""
     parts = [f"\x1b[{i + 1};1H\x1b[0m\x1b[2K{row}" for i, row in enumerate(rows)
              if previous is None or i >= len(previous) or previous[i] != row]
     out = ("\x1b[?25l" + "".join(parts)).encode()
-    return out + (_cursor(cursor) if cursor else b"") + b"\x1b[?25h"
+    return out + (_cursor(view) if view else b"") + b"\x1b[?25h"
 
 
-def _cursor(view: tuple[int, int]) -> bytes:
-    return f"\x1b[0m\x1b[{view[1] + 1};{view[0] + 1}H".encode()
+def _cursor(view: tmux.View) -> bytes:
+    return f"\x1b[0m\x1b[{view.y + 1};{view.x + 1}H".encode()
+
+
+def _size(view: tmux.View | None) -> dict:
+    """The pane size a hello or resync carries."""
+    return {"cols": view.cols, "rows": view.rows} if view else {}
 
 
 class Hub:
@@ -690,8 +754,9 @@ async def _stream(ws: WebSocket, hub: Hub, hello: dict) -> None:
         return
     reader = asyncio.ensure_future(_control(ws, pane))
     try:
-        await ws.send_json({**hello, "shared": viewer.shared})
-        await ws.send_bytes(await pane.seed(viewer))
+        seed, view = await pane.seed(viewer)
+        await ws.send_json({**hello, "shared": viewer.shared, **_size(view)})
+        await ws.send_bytes(seed)
         while not pane.ended:
             waker = asyncio.ensure_future(viewer.wake.wait())
             await asyncio.wait({reader, waker}, return_when=asyncio.FIRST_COMPLETED)
@@ -733,8 +798,9 @@ async def _flush(ws: WebSocket, pane: Pane, viewer: Viewer) -> None:
     data = None if viewer.reseed else pane.ring.since(viewer.pos)
     viewer.reseed = False
     if data is None:
-        await ws.send_json({"type": "resync"})
-        await ws.send_bytes(await pane.seed(viewer))
+        seed, view = await pane.seed(viewer)
+        await ws.send_json({"type": "resync", **_size(view)})
+        await ws.send_bytes(seed)
     elif data:
         viewer.pos += len(data)
         await ws.send_bytes(data)
