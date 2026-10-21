@@ -361,6 +361,17 @@ def provider_preflight(db: DB, request: Request) -> Any:
 
 
 @_json
+def providers_installed(db: DB, request: Request) -> Any:
+    """Per provider CLI: whether brindle installed it (``state`` "brindle",
+    version, its config home), runs the person's own copy ("mine", path and
+    version) or finds none ("missing"), and ``update``: the latest version
+    known and whether it is newer. ``?check=1`` asks each maker's source now."""
+    from brindle import providers_install
+
+    return providers_install.statuses(check=request.query_params.get("check") in ("1", "true"))
+
+
+@_json
 def account(db: DB, request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
@@ -472,6 +483,8 @@ ROUTES = [
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/routing", get_routing),
     Route("/v1/doctor", get_doctor),
+    # Before the action routes' DELETE /v1/providers/{provider}.
+    Route("/v1/providers/installed", providers_installed),
     Route("/v1/providers/{provider}/preflight", provider_preflight),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),

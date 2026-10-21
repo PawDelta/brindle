@@ -1195,8 +1195,11 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     methods = picker.LOGIN_METHODS.get(provider, {})
     if method is not None and method not in methods:
         raise ServiceError("invalid", f"{provider} sign-in methods: {', '.join(methods) or 'none'}")
+    from brindle import providers_install
+
     browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
-    env = {"BROWSER": browser["BROWSER"]} if browser else {}
+    # brindle's own copy signs in to its own config home, where its agents look.
+    env = {**providers_install.launch_env(provider), **({"BROWSER": browser["BROWSER"]} if browser else {})}
     return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env)
 
 
@@ -1224,6 +1227,94 @@ def provider_consent(db: DB, params: dict, body: Body) -> Any:
     except preflight.StaleConsent as e:
         raise ServiceError("conflict", str(e), 409) from None
     return {"provider": params["provider"], "id": item, "recorded": True}
+
+
+# One-click provider setup (brindle.providers_install): the maker's own build,
+# downloaded, verified and unpacked into brindle's folder; nothing on PATH.
+
+
+def _install_provider(params: dict) -> str:
+    from brindle import providers_install
+
+    provider = params["provider"]
+    if provider not in providers_install.PROVIDERS:
+        raise ServiceError("invalid", f"provider must be one of {', '.join(providers_install.PROVIDERS)}")
+    return provider
+
+
+def _install_job(kind: str, provider: str, run: Callable[..., Any]) -> Job:
+    """``run(progress)`` as job ``kind``, one per provider: while one runs, a
+    second press (install or update) gets that job back. ``job.progress``
+    carries ``stage`` (check_version, download, verify, unpack) and, while
+    downloading, ``done`` and ``total`` bytes."""
+    from brindle import providers_install
+
+    job = Job(secrets.token_hex(8), kind)
+    held = providers_install.claim(provider, job)
+    if held is not job:
+        return held
+
+    def work(db: DB, job: Job) -> Any:
+        def progress(stage: str, **fields: Any) -> None:
+            bus.publish(db, "job.progress", job=job.id, provider=provider, stage=stage, **fields)
+
+        try:
+            return run(progress)
+        except providers_install.InstallError as e:
+            raise ServiceError("install_failed", str(e), 422) from None
+        finally:
+            providers_install.release(provider)
+
+    return start_job(kind, work, job=job, provider=provider)
+
+
+def _not_installing(provider: str) -> None:
+    from brindle import providers_install
+
+    if providers_install.running(provider) is not None:
+        raise ServiceError("conflict", f"{provider} is being installed or updated: try again when it ends", 409)
+
+
+def install_provider(db: DB, params: dict, body: Body) -> Any:
+    """Download, verify and unpack the provider's CLI (``version``, else the
+    latest) into brindle's folder and run that copy from now on (202 job)."""
+    from brindle import providers_install
+
+    provider, version = _install_provider(params), _get(body, "version")
+    return _install_job("provider.install", provider,
+                        lambda progress: providers_install.install(provider, version, progress))
+
+
+def update_provider(db: DB, params: dict, body: Body) -> Any:
+    """Update brindle's own copy to the latest version, if newer (202 job)."""
+    from brindle import providers_install
+
+    provider = _install_provider(params)
+    if providers_install.brindle_copy(provider) is None and providers_install.running(provider) is None:
+        raise ServiceError("conflict", f"brindle hasn't installed {provider}: install it first", 409)
+    return _install_job("provider.update", provider, lambda progress: providers_install.update(provider, progress))
+
+
+def use_my_provider(db: DB, params: dict, body: Body) -> Any:
+    """Run the person's own copy of the CLI (``path``, else the one found on
+    PATH) instead of brindle's."""
+    from brindle import providers_install
+
+    provider = _install_provider(params)
+    _not_installing(provider)
+    try:
+        return providers_install.use_mine(provider, _get(body, "path"))
+    except providers_install.InstallError as e:
+        raise ServiceError("not_found", str(e), 404) from None
+
+
+def remove_provider(db: DB, params: dict, body: Body) -> Any:
+    """Delete brindle's copy of the CLI (its config home and sign-in stay)."""
+    from brindle import providers_install
+
+    provider = _install_provider(params)
+    _not_installing(provider)
+    return providers_install.remove(provider)
 
 
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
@@ -1411,6 +1502,10 @@ ROUTES = [
     _post("/providers/{provider}/login", provider_login),
     _post("/providers/{provider}/trust", provider_trust),
     _post("/providers/{provider}/consent", provider_consent),
+    _post("/providers/{provider}/install", install_provider),
+    _post("/providers/{provider}/update", update_provider),
+    _post("/providers/{provider}/use-mine", use_my_provider),
+    Route("/v1/providers/{provider}", _endpoint(remove_provider), methods=["DELETE"]),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
     _post("/terminals/{id}/input", terminal_input),

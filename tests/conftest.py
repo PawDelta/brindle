@@ -292,6 +292,8 @@ def brindle_home(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     # ... nor agy's real settings.
     monkeypatch.setenv("BRINDLE_AGY_SETTINGS", str(tmp_path / "agy-home" / "settings.json"))
+    # ... nor the provider CLIs brindle installed for the person (providers_install).
+    monkeypatch.setenv("BRINDLE_PROVIDERS_DIR", str(tmp_path / "providers"))
     # The shell provider runs $SHELL. The person's own shell reads their dotfiles,
     # so a slow or stuck one (a stale pyenv rehash lock waits 60s) would fail
     # tests that give the shell a few seconds.

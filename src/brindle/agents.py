@@ -248,14 +248,19 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
                 else:
                     recovery_keys[k] = sess_val
 
+        # brindle's own copy of the CLI (providers_install): its config home and
+        # its updater off, the lowest layer so a profile's env lines still win.
+        from brindle import providers_install
+
+        installed = providers_install.launch_env(agent.provider)
         if enforced is None:
-            env = {**company, **recovery_keys, **profile_env, **managed_env, **env}
+            env = {**installed, **company, **recovery_keys, **profile_env, **managed_env, **env}
         else:
             # An enforced company identity (Enterprise): the pane runs on the route
             # launch_problem checked, whatever a profile's env lines say. The route
             # env is the top layer (managed_env is the same route's, from managed_models).
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
-            env = {**recovery_keys, **profile_env, **managed_env, **enforced, **env}
+            env = {**installed, **recovery_keys, **profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -3632,7 +3637,7 @@ def transcript_file(agent: Agent) -> str | None:
     if agent.provider == "claude":
         import glob
 
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = providers.claude_config_dir()
         found = glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(ref)}.jsonl"))
         return found[0] if found else None
     if agent.provider == "codex":

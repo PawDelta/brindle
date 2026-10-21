@@ -201,14 +201,35 @@ def _permission_hook_timeout(cwd: str | None) -> int:
 
 
 def claude_binary() -> str:
-    """BRINDLE_CLAUDE_BIN, else `claude` on PATH."""
-    return os.environ.get("BRINDLE_CLAUDE_BIN") or "claude"
+    """BRINDLE_CLAUDE_BIN, else the copy brindle installed or the person
+    pinned (providers_install), else `claude` on PATH."""
+    from brindle import providers_install
+
+    return os.environ.get("BRINDLE_CLAUDE_BIN") or providers_install.binary("claude") or "claude"
+
+
+def _install_home(provider: str) -> str | None:
+    from brindle import providers_install
+
+    return providers_install.config_home(provider)
+
+
+def claude_config_dir() -> str:
+    """Where the Claude Code brindle runs keeps its settings and sessions:
+    brindle's own copy's config home, else ``$CLAUDE_CONFIG_DIR``, else ~/.claude."""
+    return _install_home("claude") or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+
+
+def codex_home() -> str:
+    """The Codex brindle runs's ``CODEX_HOME``: brindle's own copy's, else the environment's, else ~/.codex."""
+    return _install_home("codex") or os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex")
 
 
 def claude_global_config() -> str:
     """Claude Code's global state file, where it records trusted folders:
-    ``$CLAUDE_CONFIG_DIR/.claude.json``, else ``~/.claude.json``."""
-    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    ``<config dir>/.claude.json`` when the config dir is moved (brindle's own
+    copy, or ``$CLAUDE_CONFIG_DIR``), else ``~/.claude.json``."""
+    config = _install_home("claude") or os.environ.get("CLAUDE_CONFIG_DIR")
     return os.path.join(config, ".claude.json") if config else os.path.expanduser("~/.claude.json")
 
 
@@ -529,7 +550,7 @@ class ClaudeCode(Provider):
         # (also what /hooks writes) turns off from any settings file Claude
         # Code loads, as does a managed allowManagedHooksOnly. --setting-sources
         # limits which of the person's own files it loads; managed ones always count.
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = claude_config_dir()
         files = [(p, ("disableAllHooks", "allowManagedHooksOnly")) for p in managed_settings_paths()]
         sources = {"user": [os.path.join(config, "settings.json")]}
         if cwd:
@@ -563,7 +584,7 @@ class ClaudeCode(Provider):
         was never saved exits at once with "No conversation found"."""
         import glob
 
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = claude_config_dir()
         return bool(glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(session_id)}.jsonl")))
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
@@ -952,8 +973,11 @@ def which_cli(name: str) -> str | None:
 
 
 def codex_binary() -> str:
-    """BRINDLE_CODEX_BIN, else `codex` on PATH, else the ChatGPT app's copy."""
-    explicit = os.environ.get("BRINDLE_CODEX_BIN")
+    """BRINDLE_CODEX_BIN, else the copy brindle installed or the person pinned
+    (providers_install), else `codex` on PATH, else the ChatGPT app's copy."""
+    from brindle import providers_install
+
+    explicit = os.environ.get("BRINDLE_CODEX_BIN") or providers_install.binary("codex")
     if explicit:
         return explicit
     return which_cli("codex") or (CODEX_BUNDLED if os.path.exists(CODEX_BUNDLED) else "codex")
@@ -1117,7 +1141,7 @@ def codex_auth_path() -> str:
     override = os.environ.get("BRINDLE_CODEX_AUTH")
     if override:
         return os.path.expanduser(override)
-    return os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "auth.json")
+    return os.path.join(codex_home(), "auth.json")
 
 
 def codex_chatgpt_login() -> bool:
@@ -1135,7 +1159,7 @@ def codex_chatgpt_login() -> bool:
 
 
 def codex_config_path() -> str:
-    return os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "config.toml")
+    return os.path.join(codex_home(), "config.toml")
 
 
 def codex_trust(repo_root: str) -> str | None:
@@ -1337,11 +1361,14 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     CLI opens on its login screen, and the prompt brindle types in lands there.
     ``env`` is a profile's ``env.NAME: value`` lines: the agent runs with them
     over brindle's own environment, so a key set there counts, and the probe
-    sees them too."""
-    full_env = {**os.environ, **env} if env else os.environ
+    sees them too, over brindle's own copy's config home (providers_install)."""
+    from brindle import providers_install
+
+    installed = providers_install.launch_env(provider)
+    full_env = {**os.environ, **installed, **(env or {})} if env or installed else os.environ
     if any(full_env.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
-    key = _signed_in_key(provider, env)
+    key = _signed_in_key(provider, {**installed, **(env or {})} or None)   # each copy's login its own
     seen = _SIGNED_IN.get(key)
     inv = _last_invalidated(provider)
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
@@ -1749,12 +1776,15 @@ class OpenCode(Provider):
         return opencode.can_resume(session_id)
 
     def command(self, ctx: LaunchContext) -> list[str]:
-        from brindle import opencode
+        from brindle import opencode, providers_install
 
         # OpenCode takes brindle's MCP server, plugin, instructions and
         # permissions from the environment (see brindle.opencode), and
         # merges them over the person's own config.
-        argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(opencode.config(ctx))]
+        config = opencode.config(ctx)
+        if providers_install.brindle_copy("opencode"):      # brindle's own copy updates only through brindle
+            config["autoupdate"] = False
+        argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(config)]
         from brindle.codex_hook import policy_on
 
         if policy_on(ctx.cwd):   # the plugin asks brindle before each tool call
@@ -1871,7 +1901,7 @@ def get_provider(name: str) -> Provider:
 def _own_status_line(project_dir: str | None) -> str | None:
     """The status line command the person configured for Claude Code, if any:
     project settings first, then user settings (as Claude Code orders them)."""
-    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    config = claude_config_dir()
     candidates = []
     if project_dir:
         candidates += [os.path.join(project_dir, ".claude", "settings.local.json"),

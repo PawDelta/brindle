@@ -150,8 +150,11 @@ export const Brindle = async ({ client }) => {
 
 
 def binary() -> str:
-    """BRINDLE_OPENCODE_BIN, else `opencode` on PATH, else where OpenCode's installer puts it."""
-    explicit = os.environ.get("BRINDLE_OPENCODE_BIN")
+    """BRINDLE_OPENCODE_BIN, else the copy brindle installed or the person pinned
+    (providers_install), else `opencode` on PATH, else where OpenCode's installer puts it."""
+    from brindle import providers_install
+
+    explicit = os.environ.get("BRINDLE_OPENCODE_BIN") or providers_install.binary("opencode")
     if explicit:
         return explicit
     from brindle.providers import which_cli
