@@ -400,8 +400,31 @@ def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processe
         polling.cancel()
         assert b"old" in seed and b"new" in pane.ring.since(viewer.pos)
 
+    # A shared pane's first key waits for its latch to be up, then goes in
+    # one tmux command with the latch's press: no terminal's key between.
+    async def latched():
+        pane, gate, calls = terminal.Pane("%1", None, None, "sess"), asyncio.Event(), []
+        pane.shared = True
+
+        async def opening():                    # the latch starting up, held
+            await gate.wait()
+            pane._latch = terminal.Latch("sess", None)
+            pane._latch.name = "/dev/ttys9"
+
+        async def run(fn, *args, **kwargs):
+            calls.append((fn, args, kwargs))
+        pane._open_latch, pane.run = opening, run
+        typing = asyncio.ensure_future(pane.send_keys(text="h"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        gate.set()
+        await typing
+        assert [c for c in calls if c[0] is tmux.send_keys] == [
+            (tmux.send_keys, ("%1", "-l", "--", "h"), {"latch": "/dev/ttys9"})]
+
     monkeypatch.setattr(terminal, "POLL_SECONDS", 0)
     asyncio.run(interleaved())
+    asyncio.run(latched())
 
 
 def test_control_quote_is_one_argument_tmux_reads_back_as_the_text():

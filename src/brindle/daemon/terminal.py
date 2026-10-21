@@ -430,26 +430,35 @@ class Pane:
         return out, view
 
     def _input(self) -> None:
-        """The app's viewer had input: while the pane is shared, its Latch
-        presses its key, so tmux orders this input against a terminal's, and
-        no terminal takes the window until tmux has noted it (or
-        LATCH_SECONDS have passed). Terminals on the window are read afresh."""
+        """The app's viewer had input: the terminals on the window are read
+        afresh (see _check_shared)."""
         self._inputs += 1
         self._present = None
-        if not self.shared or self.session is None:
-            return
-        if self._latch is not None:
-            self._press()
-        elif self._latching is None:
-            self._pending = self._loop.time() + LATCH_SECONDS
-            self._latching = asyncio.ensure_future(self._open_latch())
 
-    def _press(self) -> None:
-        """Press the latch: on the control channel, ahead of the input's own
-        keys; then don't let a terminal take the window until tmux noted it."""
-        name = self._latch.name
-        sent = [self.control.send(line) for line in tmux.latch_press(name)] if self.control is not None \
-            else [asyncio.ensure_future(self.run(tmux.press_latch, name))]
+    async def _latch_ready(self) -> str | None:
+        """While the pane is shared, its Latch's name, once it is up (the
+        first input waits for it); else None."""
+        if not self.shared or self.session is None:
+            return None
+        if self._latch is None:
+            if self._latching is None:
+                self._latching = asyncio.ensure_future(self._open_latch())
+            await asyncio.shield(self._latching)
+        return self._latch.name if self._latch is not None else None
+
+    def _mark(self, latch: str | None, alone: bool = True) -> None:
+        """Press the latch for an input of the viewer's, so tmux orders the
+        two: on the control channel, written in the same breath as the
+        input's own command, which the caller sends next; without one, run
+        here only when ``alone`` (a resize), else the caller's tmux command
+        carries it (tmux.send_keys's ``latch``). No terminal takes the
+        window until tmux has noted it (or LATCH_SECONDS have passed)."""
+        if latch is None:
+            return
+        if self.control is not None:
+            sent = [self.control.send(line) for line in tmux.latch_press(latch)]
+        else:
+            sent = [asyncio.ensure_future(self.run(tmux.press_latch, latch))] if alone else []
         for done in sent:
             done.add_done_callback(self._pressed)
         self._pending = self._loop.time() + LATCH_SECONDS
@@ -479,12 +488,11 @@ class Pane:
             await latch.close()
             if not isinstance(e, (tmux.TmuxError, OSError)):
                 raise
-            # Without one, tmux's whole-second times can't order the inputs:
-            # a terminal takes the window once LATCH_SECONDS have passed.
+            # Without one the inputs can't be ordered: only a terminal
+            # attaching takes the window (see _check_shared).
             log.debug("brindle: no latch on %s", self.session, exc_info=True)
             return
-        self._latch = latch
-        self._press()
+        self._latch = latch     # pressed by the inputs that waited for it, not here
 
     async def _settle(self) -> None:
         """Look again soon, until tmux has noted the latch's key."""
@@ -503,10 +511,12 @@ class Pane:
 
     async def send_keys(self, keys: list[str] | None = None, text: str | None = None) -> None:
         """Type ``text`` as is, or press ``keys`` (tmux key names)."""
+        latch = await self._latch_ready()
+        self._mark(latch, alone=False)      # and nothing awaited from here to the keys
         self.active()
         if self.control is None:
             args = ["-l", "--", text] if text else ["--", *(keys or [])]
-            await self.run(tmux.send_keys, self.target, *args)
+            await self._marked(tmux.send_keys, latch, self.target, *args)
             return
         # "--": nothing the client sends is read as a send-keys flag (-t would retarget it)
         args = f"-l -- {tmux.control_quote(text)}" if text \
@@ -514,14 +524,41 @@ class Pane:
         await self._command(f"send-keys -t {self.target} {args}")
 
     async def paste(self, text: str) -> None:
-        self.active()
+        latch = await self._latch_ready()
         if self.control is None:
-            await self.run(tmux.paste, self.target, text, False)
+            self._mark(latch, alone=False)
+            self.active()
+            await self._marked(tmux.paste, latch, self.target, text, False)
             return
         buf = f"brindle-{uuid.uuid4().hex[:8]}"
+        # Written together, in order: the buffer, the mark, the paste.
         # "--": a paste starting with "-" is data, not a set-buffer option
-        await self._command(f"set-buffer -b {buf} -- {tmux.control_quote(text)}")
-        await self._command(f"paste-buffer -p -d -b {buf} -t {self.target}")
+        lines = [f"set-buffer -b {buf} -- {tmux.control_quote(text)}",
+                 f"paste-buffer -p -d -b {buf} -t {self.target}"]
+        loaded = self.control.send(lines[0])
+        self._mark(latch, alone=False)
+        self.active()
+        pasted = self.control.send(lines[1])
+        for line, reply in zip(lines, await asyncio.gather(loaded, pasted)):
+            if reply.error:
+                raise tmux.TmuxError(f"tmux {line.split(' ', 1)[0]}: {reply.text.strip()}")
+
+    async def _marked(self, fn, latch: str | None, *args) -> None:
+        """``fn`` (tmux.send_keys or tmux.paste) with the latch pressed in
+        the same tmux command; again without it when that failed (a latch
+        gone stops the command list before the input)."""
+        try:
+            await self.run(fn, *args, latch=latch)
+        except tmux.TmuxError:
+            if latch is None:
+                raise
+            log.debug("brindle: the latch on %s didn't take", self.session, exc_info=True)
+            await self.run(fn, *args)
+
+    async def request_resize(self, cols: int, rows: int) -> None:
+        """A resize frame: the viewer's input too (see resize)."""
+        self._mark(await self._latch_ready())
+        self.resize(cols, rows)
 
     async def _command(self, line: str) -> Reply:
         reply = await self.control.send(line)
@@ -640,9 +677,11 @@ class Pane:
             # A terminal showing this window became its latest client after
             # the viewer's last input (tmux noted it after the latch's key),
             # or attached since: tmux's rule sizes the window, until the
-            # viewer's next input.
+            # viewer's next input. With no latch, what tmux noted can't be
+            # ordered against the viewer's input, so only attaching counts.
             attached = here - (here if self._present is None else self._present)
-            took = self._pending is None and (latest in here or bool(attached))
+            ordered = self._latch is not None and latest in here
+            took = self._pending is None and (ordered or bool(attached))
             if took and not self._yielded:
                 self._yielded = True
                 if self._manual:
@@ -1004,4 +1043,4 @@ async def _apply(pane: Pane, frame: object) -> None:
     elif kind == "resize":
         cols, rows = frame.get("cols"), frame.get("rows")
         if isinstance(cols, int) and isinstance(rows, int):
-            pane.resize(max(1, min(cols, MAX_SIZE)), max(1, min(rows, MAX_SIZE)))
+            await pane.request_resize(max(1, min(cols, MAX_SIZE)), max(1, min(rows, MAX_SIZE)))

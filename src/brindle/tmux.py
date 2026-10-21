@@ -908,26 +908,28 @@ def capture(target: str, lines: int = 200, escapes: bool = False,
 
 
 def paste(target: str, text: str, submit: bool = True, lead: str | None = None,
-          server: object = _THIS_SERVER) -> None:
+          server: object = _THIS_SERVER, latch: str | None = None) -> None:
     """Paste ``text`` as one bracketed paste (so newlines don't submit early),
     then press Enter. ``lead``, a single line, is typed before it instead of
     pasted: agent CLIs treat pasted text as untrusted content, and typed
     text as the person's own words, so the lead is what vouches for it.
-    ``server`` as for capture."""
+    ``server`` as for capture; ``latch`` as for send_keys."""
     if lead:
         _tmux("send-keys", "-t", target, "-l", lead.replace("\n", " ") + " ", server=server)
     buf = f"brindle-{uuid.uuid4().hex[:8]}"
     _tmux("load-buffer", "-b", buf, "-", input=text, server=server)
-    _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target, server=server)
+    _tmux(*_pressing(latch), "paste-buffer", "-p", "-d", "-b", buf, "-t", target, server=server)
     if submit:
         # TUIs debounce paste events; Enter too soon gets folded into the paste.
         time.sleep(0.3)
         _tmux("send-keys", "-t", target, "Enter", server=server)
 
 
-def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
-    """``server`` as for capture."""
-    _tmux("send-keys", "-t", target, *keys, server=server)
+def send_keys(target: str, *keys: str, server: object = _THIS_SERVER,
+              latch: str | None = None) -> None:
+    """``server`` as for capture. ``latch``: a latch_argv client to press
+    first, in the same tmux command, so no other client's key comes between."""
+    _tmux(*_pressing(latch), "send-keys", "-t", target, *keys, server=server)
 
 
 def control_argv(session: str, server: object = _THIS_SERVER) -> list[str]:
@@ -1011,10 +1013,17 @@ def track_latest(target: str, server: object = _THIS_SERVER) -> None:
           f"set-option -wF {LATEST_OPTION} '#{{client_name}}'", server=server)
 
 
+def _pressing(client: str | None) -> list[str]:
+    """latch_press as the first commands of a tmux process's command list."""
+    if not client:
+        return []
+    return ["switch-client", "-c", client, "-T", _LATCH_TABLE, ";",
+            "send-keys", "-K", "-c", client, "User0", ";"]
+
+
 def press_latch(client: str, server: object = _THIS_SERVER) -> None:
     """latch_press, run as a tmux process. ``server`` as for capture."""
-    _tmux("switch-client", "-c", client, "-T", _LATCH_TABLE, ";",
-          "send-keys", "-K", "-c", client, "User0", server=server)
+    _tmux(*_pressing(client)[:-1], server=server)
 
 
 def window_latest(target: str, server: object = _THIS_SERVER) -> str:
