@@ -399,24 +399,20 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert codex_hook.status() == codex_hook.TRUSTED
 
 
-@pytest.mark.parametrize("upgrade", [
-    "timeout",
-    pytest.param("command", marks=pytest.mark.variant("#239 as reported: a reinstall moves the command")),
-])
-def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatch, upgrade):
-    """#239: Codex's trust covers the hook's whole definition, so a trust
-    recorded by an older build (command, key and hash only) is renewed before
-    a reviewer starts, not left to Codex's 'Hooks need review'."""
+def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatch):
+    """#239: the trust on record was for the same command with another timeout
+    (a build with the day-long hold), and the upgraded build's hook has the
+    old 30s one. Codex's hash covers the whole definition, so the hook it saw
+    was new, while brindle, comparing commands only, called it trusted and
+    passed it into 'Hooks need review'. (A changed command was already
+    re-trusted.) It's renewed before a reviewer starts now."""
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
     turn_on(ws)
     monkeypatch.setattr(codex_hook, "TIMEOUT", 86430)
-    codex_hook.trust("codex", codex_hook.inspect("codex"))  # the older build's trust
+    codex_hook.trust("codex", codex_hook.inspect("codex"))  # the other build's trust
     with permissions.editing() as store:  # in the record format from before the definition was kept
         store.codex_hook = {k: store.codex_hook[k] for k in ("command", "key", "hash")}
-    if upgrade == "timeout":
-        monkeypatch.setattr(codex_hook, "TIMEOUT", 30)
-    else:
-        move_brindle(monkeypatch)
+    monkeypatch.setattr(codex_hook, "TIMEOUT", 30)
     flag = codex_hook.config_flags()[1]
     assert flag in launch_argv(ws, mode="review")
     assert codex_hook.inspect("codex").status == "trusted"  # what Codex launches with
