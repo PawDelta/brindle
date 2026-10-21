@@ -977,10 +977,10 @@ def decode_output(data: bytes) -> bytes:
 _OCTAL = re.compile(rb"\\([0-7]{3})")
 
 
-CLIENT_FORMAT = "#{client_flags} #{client_activity} #{window_id}"
+CLIENT_FORMAT = "#{client_flags} #{client_activity} #{window_id} #{client_name}"
 
 
-def attached_terminals(target: str, server: object = _THIS_SERVER) -> list[tuple[int, str]] | None:
+def attached_terminals(target: str, server: object = _THIS_SERVER) -> list[tuple[str, int, str]] | None:
     """The terminals showing ``target``'s session (empty: nobody is looking
     at it), as parse_terminals gives them, not counting control-mode clients
     such as the daemon's own, which ``#{session_attached}`` would. None when
@@ -992,17 +992,15 @@ def attached_terminals(target: str, server: object = _THIS_SERVER) -> list[tuple
     return parse_terminals(proc.stdout.splitlines())
 
 
-def parse_terminals(lines: Iterable[str]) -> list[tuple[int, str]]:
+def parse_terminals(lines: Iterable[str]) -> list[tuple[str, int, str]]:
     """The non-control clients among ``lines``, one client's CLIENT_FORMAT
-    per item, as (when it last had input, in epoch seconds; the window it
-    shows)."""
+    per item, as (its name; when it last had input, in whole epoch seconds;
+    the window it shows)."""
     out = []
     for line in lines:
-        flags, _, rest = line.partition(" ")
-        if not flags or "control-mode" in flags.split(","):
-            continue
-        activity, _, window = rest.partition(" ")
-        out.append((int(activity) if activity.isdigit() else 0, window.strip()))
+        flags, activity, window, name = (line.strip().split(" ", 3) + ["", "", ""])[:4]
+        if flags and "control-mode" not in flags.split(","):
+            out.append((name, int(activity) if activity.isdigit() else 0, window))
     return out
 
 

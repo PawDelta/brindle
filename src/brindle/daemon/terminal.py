@@ -49,7 +49,6 @@ import logging
 import re
 import secrets
 import threading
-import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -272,7 +271,9 @@ class Pane:
         self._screen: list[str] | None = None
         self._view: tmux.View | None = None
         self.window: str | None = None  # the id of the window the pane is in
-        self._input_at = 0.0            # when the app's viewer last typed, pasted or resized
+        self._inputs = 0                # how often the app's viewer typed, pasted or resized
+        self._seen: dict[str, int] | None = None   # each terminal's last input as of the viewer's
+        self._rebase: asyncio.Task | None = None   # reading those after the viewer's input
         self._yielded = False           # a terminal had input since: its size rules
         self._closed = False
         self._loop = asyncio.get_running_loop()
@@ -350,10 +351,18 @@ class Pane:
             out += _cursor(view)
         return out, view
 
+    def _input(self) -> None:
+        """The app's viewer had input: where the terminals' last input stands
+        now is read afresh (see _check_shared)."""
+        self._inputs += 1
+        self._seen = None
+        if self.shared and (self._rebase is None or self._rebase.done()):
+            self._rebase = asyncio.ensure_future(self._check_shared_quietly())
+
     def active(self) -> None:
         """The app's viewer typed or pasted: like a tmux client's input, that
         makes its size the window's again (see _check_shared)."""
-        self._input_at = time.time()
+        self._input()
         if self._yielded:
             self._yielded = False
             if self._size:
@@ -393,7 +402,8 @@ class Pane:
         the last size asked for (a dragged window sends dozens). Like a
         key, it makes the viewer's size the window's (see active)."""
         self._size = (cols, rows)
-        self._input_at, self._yielded = time.time(), False
+        self._yielded = False
+        self._input()
         self._dirty = True
         if self._resize or self._runner:    # one is waiting or running: it takes the latest size
             return
@@ -460,7 +470,7 @@ class Pane:
         except tmux.TmuxError:
             log.debug("brindle: can't resize %s", self.target, exc_info=True)
 
-    async def _attached(self) -> list[tuple[int, str]] | None:
+    async def _attached(self) -> list[tuple[str, int, str]] | None:
         """Terminals showing the pane's session (the daemon's own control
         client doesn't count), as tmux.parse_terminals gives them; None when
         the pane is gone."""
@@ -472,14 +482,24 @@ class Pane:
         return tmux.parse_terminals(line.decode("ascii", "replace") for line in reply.lines)
 
     async def _check_shared(self) -> None:
+        inputs = self._inputs
         terminals = await self._attached()
         if terminals is None:
             raise tmux.TmuxError(f"can't find pane: {self.target}")
         shared = bool(terminals)
-        # A terminal showing this window had input after the viewer last did:
-        # it is tmux's latest client, so tmux's rule sizes the window now.
-        took = any(window == self.window and at > self._input_at for at, window in terminals)
+        here = {name: at for name, at, window in terminals if window == self.window}
         async with self._sizing:        # after any resize or acquisition in flight
+            took = False
+            if self._seen is None:
+                if inputs == self._inputs:  # read after the viewer's last input
+                    self._seen = here
+            else:
+                # A terminal showing this window had input since the viewer
+                # last did (its last-input time moved, or it attached since):
+                # it is tmux's latest client, so tmux's rule sizes the window.
+                # tmux keeps those times to the second, so a move is the only
+                # sign of input in the second the viewer's input was in.
+                took = any(self._seen.get(name) != at for name, at in here.items())
             if took and not self._yielded:
                 self._yielded = True
                 if self._manual:
@@ -491,13 +511,16 @@ class Pane:
             self.shared = shared
         self._wake()
 
+    async def _check_shared_quietly(self) -> None:
+        try:
+            await self._check_shared()
+        except tmux.TmuxError:
+            log.debug("brindle: can't read %s", self.target, exc_info=True)
+
     async def _poll_shared(self) -> None:
         while True:
             await asyncio.sleep(TAKE_SECONDS if self.shared and not self._yielded else SHARED_SECONDS)
-            try:
-                await self._check_shared()
-            except tmux.TmuxError:
-                log.debug("brindle: can't read %s", self.target, exc_info=True)
+            await self._check_shared_quietly()
 
     async def _capture_screen(self) -> tuple[list[str], tmux.View | None]:
         text = await self.run(tmux.capture, self.target, 0, True, join=False)
@@ -522,7 +545,7 @@ class Pane:
 
     async def close(self) -> None:
         self._closed = True
-        for task in (*self._tasks, self._runner, self._resize):
+        for task in (*self._tasks, self._runner, self._resize, self._rebase):
             if task:
                 task.cancel()
         async with self._sizing:

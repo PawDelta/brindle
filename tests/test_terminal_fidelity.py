@@ -1,8 +1,6 @@
-"""The app's terminal shows exactly what tmux shows: a real pane running a
-small TUI, streamed through the daemon's terminal route and rendered by a
-headless terminal (pyte) as the app's xterm.js renders it, matches tmux's
-screen and cursor, and keys land at that cursor, whether the app sizes the
-pane or a terminal of another size shares it."""
+"""A real pane's TUI, streamed through the terminal route into a headless
+terminal (pyte) as into the app's xterm.js, shows what tmux shows, cursor
+included, and takes keys there, whether or not a terminal shares the pane."""
 
 import fcntl
 import json
@@ -27,9 +25,8 @@ from brindle.daemon.app import build_app
 TOKEN = "t" * 43
 APP = (80, 24)      # the app's xterm, as its fit addon sizes it
 
-# Like Claude Code's TUI: a long line that wraps, a rule as wide as the
-# terminal, a box with the cursor put in it by cursor addressing, keys
-# echoed there; all redrawn on SIGWINCH.
+# Like Claude Code's: a line that wraps, a full-width rule, a box with the
+# cursor addressed into it and keys echoed there; redrawn on SIGWINCH.
 TUI = r'''
 import os, signal, tty
 tty.setraw(0)
@@ -43,10 +40,8 @@ def draw(*_):
 out("".join(f"history {i}\r\n" for i in range(40)))
 signal.signal(signal.SIGWINCH, draw)
 draw()
-while True:
-    key = os.read(0, 64).decode()
-    typed += key
-    out(key)
+while key := os.read(0, 64).decode():
+    typed += key; out(key)
 '''
 
 
@@ -76,9 +71,8 @@ class Client:
 
 
 class App:
-    """The app's Terminal.tsx: an xterm of the app's size that sends that
-    size once the hello comes and shows the pane at the size the daemon
-    says it is."""
+    """Terminal.tsx: sends the app's size on the hello, shows the pane at
+    the size the daemon says it is."""
 
     def __init__(self, sock) -> None:
         self.sock, self.frames = sock, queue.Queue()
@@ -119,8 +113,7 @@ def tmux_view(pane: str) -> tuple:
     return [r.rstrip() for r in rows], (x, y), (w, h)
 
 
-def wait(pred) -> None:
-    """Until ``pred`` holds; each look asks tmux, which paces the loop."""
+def wait(pred) -> None:     # each look asks tmux, which paces the loop
     deadline = time.monotonic() + 10
     while not pred():
         assert time.monotonic() < deadline
@@ -156,16 +149,19 @@ def test_the_apps_terminal_shows_what_tmux_shows_and_keys_land_at_its_cursor(tmp
         wait(lambda: tmux._tmux("select-window", "-t", pane, check=False).returncode == 0
              and tmux_view(pane)[2] == (shared[0], shared[1] - 1))
     with TestClient(build_app(TOKEN)) as http:
+        if shared:
+            # tmux keeps input times to the second: start a new one, so the
+            # terminal's attaching is in the last one and the app's input
+            # and the terminal's key below share this one.
+            threading.Event().wait(1.02 - time.time() % 1)
         sock = http.websocket_connect(f"/v1/terminal/{tid}").__enter__()
         sock.send_text(TOKEN)
         try:
             app = App(sock)
             see(app, pane, APP)     # the app's size, from its resize, shared or not
             if shared:
-                # The terminal types: like tmux's latest client, it takes the
-                # window, and the app shows it at the terminal's size. tmux
-                # keeps input times to the second, so that is a second later.
-                threading.Event().wait(1.05 - time.time() % 1)
+                # The terminal types in the same second: like tmux's latest
+                # client it takes the window; the app shows it at its size.
                 os.write(client.master, b"t")
                 see(app, pane, (shared[0], shared[1] - 1), "t")
                 client.size(100, 35)

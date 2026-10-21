@@ -48,7 +48,7 @@ def fake_tmux(monkeypatch):
     monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a: None)
     monkeypatch.setattr(agents.tmux, "capture", lambda *a, **k: IDLE_SCREEN)
     monkeypatch.setattr(agents.tmux, "paste", lambda target, text, **k: pasted.append((target, text)))
-    monkeypatch.setattr(agents, "is_alive", lambda agent: True)
+    monkeypatch.setattr(agents, "is_alive", lambda agent, panes=None: True)
     return pasted
 
 

@@ -368,7 +368,7 @@ def health(db, root, monkeypatch):
     monkeypatch.setattr(agents, "_detach", started.append)
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(lh, "capture", lambda a: "working")
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append((to, body)))
     lh.prepare(db, a, "effective-account")

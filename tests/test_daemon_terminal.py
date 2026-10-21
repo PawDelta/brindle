@@ -16,7 +16,6 @@ from brindle.db import Agent
 
 TOKEN = "t" * 43
 VIEW = "3 1 80 24 @1"       # %1's cursor, size and window
-FUTURE = 4102444800         # a terminal's input that is always later than the app's
 
 
 class FakeTmux:
@@ -53,9 +52,8 @@ class FakeTmux:
         return subprocess.CompletedProcess(args, 0, out, "")
 
     def flags(self) -> list[str]:
-        # An attached terminal shows %1's window and had input last.
-        return ["attached,focused,control-mode,UTF-8 0 @1"] * bool(self.procs) + \
-            [f"attached,UTF-8 {FUTURE} @1"] * self.attached
+        return ["attached,focused,control-mode,UTF-8 0 @1 client-1"] * bool(self.procs) + \
+            ["attached,UTF-8 0 @1 /dev/ttys1"] * self.attached
 
     async def spawn(self, argv: list[str]) -> "FakeControl":
         proc = FakeControl(self, argv)
@@ -202,13 +200,12 @@ def test_control_frames_reach_the_pane(fake, attached):
         sock.send_json({"type": "paste", "text": "-a\nb"})   # "-a": data, not a set-buffer option
         for cols in (80, 100, 120):
             sock.send_json({"type": "resize", "cols": cols, "rows": 40})
-        if attached:    # a terminal is attached: its size rules, nothing is resized
-            fake.wait_for(lambda: sum(l.startswith("list-clients") for l in fake.lines) >= 2)
-        else:       # the first size at once, the last after the throttle, then viewers reseeded
-            fake.wait_for(lambda: ("resize-window", "-t", "%1", "-x", "120", "-y", "40") in fake.calls)
-            fake.wait_for(lambda: sum(l.startswith("capture-pane") for l in fake.lines) >= 2)
-            assert sock.receive_json() == {"type": "resync", "cols": 80, "rows": 24}
-            assert sock.receive_bytes().startswith(b"\x1bc")
+        # The first size at once, the last after the throttle, then viewers
+        # reseeded; an attached terminal with no input since doesn't stop it.
+        fake.wait_for(lambda: ("resize-window", "-t", "%1", "-x", "120", "-y", "40") in fake.calls)
+        fake.wait_for(lambda: sum(l.startswith("capture-pane") for l in fake.lines) >= 2)
+        assert sock.receive_json() == {"type": "resync", "cols": 80, "rows": 24}
+        assert sock.receive_bytes().startswith(b"\x1bc")
         sent = [l for l in fake.lines if l.split()[0] in ("send-keys", "set-buffer", "paste-buffer")]
         name = sent[2].split()[2]
         assert sent == [
@@ -217,10 +214,10 @@ def test_control_frames_reach_the_pane(fake, attached):
             f'set-buffer -b {name} -- "-a\\012b"',
             f"paste-buffer -p -d -b {name} -t %1",
         ]
-        assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == (
-            [] if attached else [("set-option", "-w", "-t", "%1", "window-size", "manual"),
-                                 ("resize-window", "-t", "%1", "-x", "80", "-y", "40"),
-                                 ("resize-window", "-t", "%1", "-x", "120", "-y", "40")])
+        assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == [
+            ("set-option", "-w", "-t", "%1", "window-size", "manual"),
+            ("resize-window", "-t", "%1", "-x", "80", "-y", "40"),
+            ("resize-window", "-t", "%1", "-x", "120", "-y", "40")]
         sock.__exit__(None, None, None)
 
 
@@ -248,7 +245,7 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
 
         async def run(fn, target, *args):
             if fn is tmux.attached_terminals:
-                return [(FUTURE, "@1")] * state["attached"]
+                return [("/dev/ttys1", 0, "@1")] * state["attached"]
             if fn is tmux.set_window_size_manual:
                 ops.append("manual")
                 if "manual" in gated:

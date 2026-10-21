@@ -98,16 +98,6 @@ def test_list_panes_empty_when_tmux_not_installed(monkeypatch):
     assert tmux.list_panes() == {}
 
 
-def test_a_cold_snapshot_reads_its_worktrees_statuses_at_once(db, repo, monkeypatch):
-    wss = make_workspaces(db, repo, ["one", "two", "three"])
-    status_cache.clear()
-    # Each worktree's status waits for the others': read one after another, they never meet.
-    together = threading.Barrier(len(wss), timeout=5)
-    compute = status_cache._compute_status
-    monkeypatch.setattr(status_cache, "_compute_status", lambda *a: (together.wait(), compute(*a))[1])
-    assert [w["ahead"] for w in view.snapshot(db, str(repo), panes={})] == [0, 0, 0]
-
-
 # -- benchmark: subprocess counts for 3 workspaces x 2 agents ----------------
 
 
@@ -127,6 +117,10 @@ def test_snapshot_subprocess_counts_cold_and_warm(db, repo, monkeypatch, capsys)
 
         git_calls = count_calls(monkeypatch, git, "run")
         tmux_calls = count_calls(monkeypatch, tmux, "_tmux")
+        # Cold, each worktree's status waits for the others': read one after another, they'd never meet.
+        status_cache.clear()
+        together, compute = threading.Barrier(len(wss), timeout=5), status_cache._compute_status
+        monkeypatch.setattr(status_cache, "_compute_status", lambda *a: (together.wait(), compute(*a))[1])
         view.snapshot(db, str(repo))
         cold_git, cold_tmux = len(git_calls), len(tmux_calls)
 
