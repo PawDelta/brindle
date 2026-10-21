@@ -1816,9 +1816,15 @@ def flush(db: DB, agent_id: str) -> bool:
     assert agent is not None
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
-    baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
-    tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-               server=server_of(agent))
+    try:
+        baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
+        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+                   server=server_of(agent))
+    except BaseException:
+        # pop_pending claimed this row before the external send. Release the
+        # same row and our idle claim so the next flush can retry it once.
+        db.retry_pending(msg.id, agent_id, agent.status_since)
+        raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
     return True

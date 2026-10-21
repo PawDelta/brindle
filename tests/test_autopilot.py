@@ -167,17 +167,25 @@ def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
     monkeypatch.setattr(procs, "alive", lambda pid: True)
     db.update_agent(agent.id, status="idle")
     monkeypatch.setattr(wake, "enabled", lambda a: False)
+    monkeypatch.setattr(inbox, "usable", lambda a: False)
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
     monkeypatch.setattr(launch_health, "before_delivery", lambda *a: "")
-    monkeypatch.setattr(launch_health, "delivered", lambda *a: None)
-    delivered, broken = [], [True]
+    monkeypatch.setattr(launch_health, "verify_delivery", lambda *a: None)
+    delivered, claimed, broken = [], [], [True]
 
-    def usable(a):
+    def paste(target, body, **kw):
+        assert db.pending_count(agent.id) == 0  # fail after dequeue, not before dispatch
+        rows = db.conn.execute("SELECT id FROM inbox WHERE agent_id=?", (agent.id,)).fetchall()
+        assert len(rows) == 1
+        claimed.append(rows[0][0])
+        assert agents.flush(db, agent.id) is False  # another sender cannot take this claim
         if broken[0]:
+            if broken[0] == "paused":
+                db.set_status(agent.id, "paused")
             raise tmux.TmuxError("delivery unavailable")
-        return True
+        delivered.append(body)
 
-    monkeypatch.setattr(inbox, "usable", usable)
-    monkeypatch.setattr(inbox, "send", lambda a, body, **kw: delivered.append(body) or True)
+    monkeypatch.setattr(tmux, "paste", paste)
     # The deadline ends a wait even if its process remains alive.
     autopilot.wait_on(db, agent.id, pid=1234, until=time.time() - 1, note="training deadline")
     autopilot.need_user(db, agent.id, "Choose dataset", ask=True)
@@ -194,12 +202,19 @@ def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
     # A failure after enqueue must keep the one notice durable for retry.
     assert autopilot.usage_sweep(db) == []
     assert db.pending_count(agent.id) == 1
+    assert db.get_agent(agent.id).status == "idle"
     assert db.get_autopilot(agent.id).external_wait is None
     assert autopilot.on_stop(db, db.get_agent(agent.id), {}) is None
+    broken[0] = "paused"
+    assert autopilot.usage_sweep(db) == []
+    assert db.get_agent(agent.id).status == "paused"  # don't undo a concurrent pause
+    assert db.pending_count(agent.id) == 1
+    db.set_status(agent.id, "idle")
     broken[0] = False
     assert autopilot.usage_sweep(db) == []
     assert autopilot.usage_sweep(db) == []
     assert db.pending_count(agent.id) == 0
+    assert len(claimed) == 3 and len(set(claimed)) == 1
     assert len(delivered) == 1 and "training deadline" in delivered[0]
 
 

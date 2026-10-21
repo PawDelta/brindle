@@ -1252,6 +1252,19 @@ class DB:
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
             return _load(Message, row)
 
+    def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
+        """Release the caller's failed delivery claim without creating a second message.
+
+        Restore idle only if this delivery still owns the processing status;
+        a newer hook or pause must keep its status. Both releases are atomic.
+        """
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                      (message_id, agent_id))
+            c.execute("UPDATE agents SET status='idle', status_since=? "
+                      "WHERE id=? AND status='processing' AND status_since=?",
+                      (time.time(), agent_id, idle_since))
+
     def drop_pending(self, agent_id: str, sender_id: str) -> int:
         with self.tx() as c:
             cur = c.execute(
