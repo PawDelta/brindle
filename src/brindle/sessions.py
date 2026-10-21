@@ -52,7 +52,9 @@ def paused(db: DB, repo_root: str) -> list[Session]:
                 if panes is None:
                     panes = tmux.list_panes()
                     owners = agents.pane_owners(db, panes)
-                if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners):
+                # On another server, its own server's panes say whose its pane is.
+                mine = owners if agents.same_server(a, panes) else None
+                if agents.is_alive(a, panes) and agents.owns_pane(db, a, mine):
                     continue
             if a.mode == "interactive" and a.status in ("paused", "failed"):
                 members = agents.tree(db, a.id)

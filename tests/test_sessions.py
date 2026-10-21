@@ -132,11 +132,13 @@ def test_dropping_a_session_still_closes_its_own_leftover_window(db, root):
     assert not tmux.window_alive(pane)
 
 
-def test_failed_but_running_session_survives_retention(db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("elsewhere", [False, True])
+def test_failed_but_running_session_survives_retention(db, tmp_path, monkeypatch, elsewhere):
     """A chat marked "failed" (its brief's delivery unconfirmed, an auth
     error on a turn) keeps running. Retention once took it for a paused
     session past KEEP: it closed the live chat's window, removed its worktree
-    and deleted its records."""
+    and deleted its records. ``elsewhere``: the chat runs on another tmux
+    server, whose pane id this server has given to some other agent."""
     from brindle import pool
     from brindle.db import Workspace
 
@@ -146,13 +148,18 @@ def test_failed_but_running_session_survives_retention(db, tmp_path, monkeypatch
                                    f"brindle-{name}", time.time()))
     root = db.get_workspace("proj/root")
     add(db, db.get_workspace("proj/session-2"), "live", status="failed", since=1000)
-    db.update_agent("live", tmux_window="%9")
+    server = "elsewhere" if elsewhere else tmux.current_server()
+    db.update_agent("live", tmux_window="%9", tmux_server=server)
     for i in range(3):
         add(db, root, f"s{i}", since=2000 + i)
-    panes = tmux.PaneSnapshot(tmux.current_server())
-    panes["%9"] = True
-    panes.tags["%9"] = {agents.AGENT_TAG: "live"}
-    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    snaps = {}
+    for srv, owner in [(tmux.current_server(), "other" if elsewhere else "live"), (server, "live")]:
+        snaps[srv] = tmux.PaneSnapshot(srv)
+        snaps[srv]["%9"] = True
+        snaps[srv].tags["%9"] = {agents.AGENT_TAG: owner}
+    here = tmux.current_server()
+    monkeypatch.setattr(tmux, "list_panes", lambda server=here: snaps[server])
+    monkeypatch.setattr(tmux, "window_alive", lambda target, server=here: snaps[server].get(target, False))
     killed, removed = [], []
     monkeypatch.setattr(tmux, "kill_window", killed.append)
     monkeypatch.setattr(workspaces, "remove", lambda db_, ws, **kw: removed.append(ws.id))
