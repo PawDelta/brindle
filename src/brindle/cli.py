@@ -3080,10 +3080,7 @@ def quit_cmd(root_id: str) -> None:
 @app.command("_close", hidden=True)
 def close_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
     time.sleep(delay)
-    try:
-        agents.kill(_helper_db(), agent_id)
-    except agents.AgentError:
-        pass
+    agents.close_removed(_helper_db(), agent_id)
 
 
 @app.command("_finish-review", hidden=True)
