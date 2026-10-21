@@ -209,6 +209,96 @@ def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     assert autopilot.on_stop(db, agent, {}) is None
 
 
+def _crash(*a, **k):
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("had_passed, result, state, label", [
+    (False, (True, "$ c"), "passed", None),
+    (False, (False, "$ c\n(exit 1)"), "not_done", "not done yet"),
+    (True, (False, "$ c\n(exit 1)"), "regressed", "regressed"),
+    (False, (False, "$ c\n(exit 127)"), "failed", "couldn't run: command not found"),
+    (False, (False, "$ c\n(exit 126)"), "failed", "couldn't run: command not runnable"),
+    (False, (False, "$ c\n(timed out after 5s)"), "failed", "couldn't run: timed out after 5s"),
+    (False, (False, "$ c\n(exit -11)"), "failed", "couldn't run: crashed: killed by signal 11"),
+    pytest.param(False, (False, "$ c\n(exit 133)"), "failed", "couldn't run: crashed: killed by signal 5",
+                 marks=pytest.mark.variant("SIGTRAP: any 128+n shell signal exit is a crash")),
+    (False, _crash, "failed", "couldn't run: crashed: boom"),
+])
+def test_check_records_a_state_in_plain_words(db, root, monkeypatch, had_passed, result, state, label):
+    from brindle.service.dto import MilestoneDTO
+
+    agent, ws = root
+    with_goal(db, checks=("c", None))   # the unchecked second milestone keeps the goal open
+    if had_passed:
+        db.record_check(db.milestones("boss")[0].id, True, "ok", None)
+    monkeypatch.setattr(gates, "run_checked", result if callable(result) else (lambda *a, **k: result))
+    out = autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+    m = db.milestones("boss")[0]
+    assert m.state == state and autopilot.state_text(m) == label
+    assert MilestoneDTO.from_row(m).label == label
+    if label:
+        assert label in autopilot.progress(db, "boss") and label in out
+
+
+def test_regressed_survives_a_dirty_pass_and_a_couldnt_run(db, root, repo, monkeypatch):
+    agent, ws = root
+    with_goal(db, checks=("c", None))
+    (repo / "dirty.txt").write_text("")   # a dirty checkout records no passed_sha
+    results = iter([(True, "$ c"), (False, "$ c\n(exit 1)"), (False, "$ c\n(exit 127)"), (False, "$ c\n(exit 1)")])
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **k: next(results))
+    seen = []
+    for _ in range(4):
+        autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+        seen.append(db.milestones("boss")[0].state)
+    assert seen == ["passed", "regressed", "failed", "regressed"]
+
+
+def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, monkeypatch):
+    from brindle import git, repos
+
+    agent, ws = root
+    autopilot.set_goal(db, "boss", "g", [("a", "c1", None, None, "other"), ("b", "c2", None)])
+
+    def gone(*a, **k):
+        raise git.GitError("not a git repository")
+
+    monkeypatch.setattr(repos, "resolve_attached", gone)
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **k: (False, "$ c2\n(exit 1)"))
+    autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+    assert [(m.state, m.state_why) for m in db.milestones("boss")] == [
+        ("failed", "checkout missing"), ("not_done", None)]
+    # Checking only milestone 2 rechecks a passed milestone whose checkout is gone.
+    db.record_check(db.milestones("boss")[0].id, True, "ok", None)
+    autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
+    assert db.milestones("boss")[0].state == "failed"
+
+
+def test_shell_reported_crash_signal_is_couldnt_run(monkeypatch):
+    import signal
+
+    from brindle.db import check_state
+
+    fake = SimpleNamespace(stdout="", stderr="Floating point exception (core dumped)",
+                           returncode=128 + signal.SIGFPE)
+    monkeypatch.setattr(autopilot.subprocess, "run", lambda *a, **k: fake)
+    ok, out = autopilot.run_check("c", ".", {}, 5)
+    assert check_state(ok, out, False) == ("failed", f"crashed: killed by signal {signal.SIGFPE}")
+
+
+def test_old_milestone_rows_get_a_state(db, root):
+    db.set_milestones("boss", [("a", "c", None), ("b", "c", None), ("c", "c", None), ("d", "c", None)])
+    ids = [m.id for m in db.milestones("boss")]
+    with db.tx() as c:
+        c.execute("UPDATE milestones SET status='passed', state=NULL WHERE id=?", (ids[0],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc' WHERE id=?", (ids[1],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, output='(exit 127)' WHERE id=?", (ids[2],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc', "
+                  "output=\"repo 'other' isn't attached to this session\" WHERE id=?", (ids[3],))
+    db._migrate()
+    assert [m.state for m in db.milestones("boss")] == ["passed", "regressed", "failed", "failed"]
+
+
 def commit_all(repo, msg="work"):
     sh(f"git add -A && git commit -qm {msg}", repo)
 
@@ -556,7 +646,7 @@ def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
     ("waiting", "waiting"),
     ("pending_task", "waiting"),
     ("usage_paused", "waiting"),
-    (None, "failed"),
+    (None, "not_done"),
 ])
 def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
     from brindle import view

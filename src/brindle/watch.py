@@ -144,7 +144,8 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
     return [fit(t, width) for t in wrapped]
 
 
-MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "pending": ("○", "dim"),
+MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "regressed": ("✗", "bad"),
+                  "not_done": ("○", "dim"), "pending": ("○", "dim"),
                   "working": ("◐", "busy"), "waiting": ("◌", "alert")}
 
 
@@ -162,6 +163,8 @@ def render_autopilot(pilot: dict, width: int) -> list[Line]:
         wrapped = _wrap(m["title"], width - 4, "")
         lines.append(Line(f"  {mark} {wrapped[0]}", style))
         lines += [Line(f"    {t}", style) for t in wrapped[1:]]
+        if m.get("label") and m["status"] not in ("working", "waiting"):
+            lines += [Line(f"    {t}", style) for t in _wrap(m["label"], width - 4, "")]
     done = sum(m["status"] == "passed" for m in pilot["milestones"])
     total = len(pilot["milestones"])
     state = {"done": ("goal reached", "ok"), "blocked": ("needs you", "alert"),

@@ -429,6 +429,18 @@
               "title": "Id",
               "type": "integer"
             },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
             "output": {
               "anyOf": [
                 {
@@ -468,6 +480,30 @@
               ],
               "default": null,
               "title": "Repo"
+            },
+            "state": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "State"
+            },
+            "state_why": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "State Why"
             },
             "status": {
               "title": "Status",
@@ -937,6 +973,18 @@
           "title": "Id",
           "type": "integer"
         },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
         "output": {
           "anyOf": [
             {
@@ -976,6 +1024,30 @@
           ],
           "default": null,
           "title": "Repo"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State"
+        },
+        "state_why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State Why"
         },
         "status": {
           "title": "Status",

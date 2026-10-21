@@ -141,10 +141,15 @@ class MilestoneDTO(_DTO):
     repo: str | None = None
     checked_at: float | None = None
     output: str | None = None
+    state: str | None = None       # passed | not_done | regressed | failed (couldn't run); None: never checked
+    state_why: str | None = None
+    label: str | None = None       # plain words for state: "not done yet", "regressed", "couldn't run: <why>"
 
     @classmethod
     def from_row(cls, m: Milestone) -> MilestoneDTO:
-        return cls.model_validate(vars(m))
+        from brindle.autopilot import state_text
+
+        return cls.model_validate({**vars(m), "label": state_text(m)})
 
 
 class GoalDTO(_DTO):
