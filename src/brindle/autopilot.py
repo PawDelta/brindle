@@ -12,6 +12,7 @@ is running, its Stop hook tells it to keep going. It stops pushing when:
 - the supervisor calls ``need_user`` (blocked on a decision only the user can
   make), until the user next types something or, for its own question,
   until the supervisor says it's answered,
+- the supervisor calls ``wait_on`` for an outside job, until it ends,
 - it has nudged MAX_NUDGES times in a row with no progress (stalled), or
 - Claude usage is near its limit.
 
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -57,6 +59,7 @@ GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's ow
 MAX_NUDGES = 3
 NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
 NUDGE_HEAD = "[brindle autopilot] The goal isn't reached yet, and no workers are running."
+WAIT_ENDED_HEAD = "[brindle autopilot] The job you were waiting on has ended"
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
 OUTPUT_TAIL_LINES = 30
 
@@ -118,6 +121,12 @@ to be asked each step.
   depend on it: call `need_user` with the question, ask it, keep working the
   rest, and report the blocked item with it. Stop only when nothing else is
   left; once the user answers, call `need_user(answered=true)`.
+- If the next step waits on an outside job, call `wait_on(pid=..., note=...)`
+  or `wait_on(until=..., note=...)` (Unix timestamp in seconds); `path=...`
+  can watch for a completion file. Autopilot holds reminders and stall counting,
+  then wakes you once when the process exits, the time arrives, or the file
+  appears. If several are given, the first to finish ends the wait. An existing
+  wait is kept if you call again. Keep working on independent steps meanwhile.
 - When a milestone passes, tell the user in one line.
 - If a message says autopilot is off, stop driving: wait for the user's
   instructions.
@@ -1054,6 +1063,52 @@ def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
                         question=note if ask else None)
 
 
+def wait_on(db: DB, root_id: str, pid: int | None = None, until: float | None = None,
+            note: str = "", path: str | None = None) -> None:
+    """Declare a session wait; any supplied completion condition ends it."""
+    if pid is None and until is None and not path:
+        raise AutopilotError("Give a pid, an until Unix timestamp, or a completion file path.")
+    if pid is not None and not 0 < pid <= 2**31 - 1:
+        raise AutopilotError("pid must be a positive process id.")
+    if until is not None and (not math.isfinite(until) or until < 0):
+        raise AutopilotError("until must be a finite Unix timestamp in seconds.")
+    db.set_external_wait(root_id, json.dumps({"pid": pid, "until": until,
+                                            "path": path or None, "note": note.strip()[:500]}))
+
+
+def wait_summary(ap: Autopilot) -> str | None:
+    if not ap.external_wait:
+        return None
+    wait = json.loads(ap.external_wait)
+    parts = []
+    if wait["pid"] is not None:
+        parts.append(f"pid {wait['pid']}")
+    if wait["until"] is not None:
+        parts.append(f"until {wait['until']:g}")
+    if wait["path"]:
+        parts.append(f"file {wait['path']}")
+    return f"waiting on {wait['note'] or 'outside job'} ({', '.join(parts)})"
+
+
+def wait_ended(db: DB, ap: Autopilot, now: float | None = None) -> str | None:
+    """Queue one durable completion notice from either a Stop hook or sweep."""
+    from brindle import agents, identity_lock, procs
+
+    if not ap.external_wait:
+        return None
+    now = time.time() if now is None else now
+    wait = json.loads(ap.external_wait)
+    ended = ((wait["until"] is not None and now >= wait["until"])
+             or (wait["path"] is not None and Path(wait["path"]).exists())
+             or (wait["pid"] is not None and not procs.alive(wait["pid"])))
+    if not ended:
+        return None
+    identity_lock.ensure(agents.get(db, ap.root_id))
+    note = f": {wait['note']}" if wait["note"] else ""
+    message = f"{WAIT_ENDED_HEAD}{note}. Continue with the next step."
+    return message if db.finish_external_wait(ap.root_id, ap.external_wait, now, message) else None
+
+
 def held(ap: Autopilot) -> bool:
     """Autopilot waits on the supervisor's open question, and nothing has
     blocked it since (that would have replaced the note)."""
@@ -1523,7 +1578,7 @@ def work_state(db: DB, root_id: str) -> str | None:
     ap = db.get_autopilot(root_id)
     if ap is not None and checking(ap):
         return "checking"
-    if (ap is not None and ap.state == "usage_paused") or login_pause.paused(db, root_id):
+    if (ap is not None and (ap.state == "usage_paused" or ap.external_wait)) or login_pause.paused(db, root_id):
         return "waiting"
     live = active_workers(db, root_id)
     if any(a.status != "waiting" for a in live):
@@ -1549,6 +1604,8 @@ def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
                 "user's request (ask what we're building only if there is no request).")
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
+    if waiting := wait_summary(ap):
+        lines.append(waiting)
     ms = db.milestones(root_id)
     w = work_state(db, root_id) if in_flight and any(m.status == "failed" for m in ms) else None
     for m in ms:
@@ -1793,7 +1850,10 @@ def usage_resume(db: DB, root_id: str, now: float | None = None) -> str | None:
 
 def usage_sweep(db: DB, now: float | None = None) -> list[str]:
     """One pass over every autopilot session: stop workers at the limit,
-    resume them after the reset. Called from the cull sweep."""
+    resume them after the reset, and wake completed outside waits.
+    Called from the cull sweep."""
+    from brindle import agents, identity_lock, login_pause, tmux
+
     done = []
     for root in db.list_agents():
         if root.mode != "interactive" or root.status in ("paused", "done"):
@@ -1806,6 +1866,20 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
             cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
             if over_limit(db, root.id, cfg):
                 done.append(f"usage limit reached: {root.id} is {db.get_autopilot(root.id).state}")
+            elif ((ap.external_wait or db.outstanding(root.id, WAIT_ENDED_HEAD))
+                  and not login_pause.paused(db, root.id) and not proposing(ap)):
+                try:
+                    message = wait_ended(db, ap, now)
+                    if db.outstanding(root.id, WAIT_ENDED_HEAD):
+                        identity_lock.ensure(root)
+                        if agents.is_alive(root):
+                            agents.flush(db, root.id)
+                    if message:
+                        done.append(message)
+                except (agents.AgentError, tmux.TmuxError):
+                    # Keep the wait, or its already queued notice, for retry.
+                    # Other sessions and the cull sweep's login recovery must run.
+                    log.debug("outside wait delivery deferred for %s", root.id, exc_info=True)
         elif ap.state == "usage_paused":
             line = usage_resume(db, root.id, now)
             if line:
@@ -1855,6 +1929,12 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
 
     if over_limit(db, agent.id, cfg):
         return None  # workers included: they'd keep burning usage
+    if ap.external_wait:
+        try:
+            wait_ended(db, ap)
+        except agents.AgentError:
+            log.debug("outside wait completion deferred for %s", agent.id, exc_info=True)
+        return None  # the durable inbox notice wakes it, including after a failed delivery
     if checking(ap):
         return None  # the check's result arrives as a message and wakes it up
     working, stalled = split_workers(db, agent.id, screen=True)
@@ -1863,7 +1943,7 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
-    if db.outstanding(agent.id, NUDGE_HEAD):
+    if db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD):
         return None  # (#209) the last reminder is still queued or unread: never pile up another
     now = time.time()
     if (ap.nudged_at == ap.progress and ap.nudged_time is not None
@@ -1914,7 +1994,8 @@ def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
         f"unverified milestone and assign workers (at most {cfg.max_agents or 'any number'} "
         "at once), get finished branches reviewed and merged, and call check_milestone. "
         "If you need a decision only the user can make, call need_user with the question, "
-        "then ask it."
+        "then ask it. If the next step waits on an outside job, call wait_on with its pid, "
+        "an until Unix timestamp, or a completion file path, and a note."
     )
 
 

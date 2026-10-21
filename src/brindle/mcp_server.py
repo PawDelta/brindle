@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -1433,6 +1434,29 @@ def record_milestone_changes(db: DB, root_id: str, ws: Workspace, before: dict,
         task=f"check_milestone({position if position is not None else 'all'})",
         result=text,
     )
+
+
+@mcp.tool()
+def wait_on(pid: int | None = None, until: float | None = None, note: str = "",
+            path: str | None = None) -> str:
+    """Autopilot: the next step waits on an outside job. Give at least one of
+    pid (a local process), until (Unix timestamp in seconds), or path (a file
+    to appear, relative to the session checkout). With several conditions,
+    the first to finish ends the wait. Holds nudges and stall counting, then
+    sends one completion nudge including note. A repeated call keeps the
+    existing wait. Keep doing independent work meanwhile."""
+    db = DB()
+    found = _session(db)
+    if isinstance(found, str):
+        return found
+    root_id, ws = found
+    if path:
+        path = str((Path(ws.path) / Path(path).expanduser()).resolve())
+    try:
+        autopilot.wait_on(db, root_id, pid, until, note, path)
+    except autopilot.AutopilotError as e:
+        return str(e)
+    return autopilot.wait_summary(db.get_autopilot(root_id)) or "No outside wait."
 
 
 @mcp.tool()
