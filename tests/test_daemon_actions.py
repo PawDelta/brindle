@@ -1193,8 +1193,10 @@ def test_upgrade_runs_in_the_background_and_reports_on_the_bus(db, world, monkey
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["done", "failed"])
-def test_setup_codex_hook_trusts_it_in_the_background(db, world, monkeypatch, fails):
+def test_setup_codex_hook_trusts_it_in_the_background(db, world, monkeypatch, tmp_path, fails):
     from brindle import codex_hook
+
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     trusted, again = [], []
     state = SimpleNamespace(command="hook")

@@ -71,7 +71,8 @@ def _notice(db, root, worker, mp):
     ("setup", _hook_trust_removed, [(None, None)]),
     ("org_notice", _notice, [(None, "admin")]),
 ])
-def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, kind, setup, expected):
+def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, setup, expected):
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(org_status, "_org_id", lambda: "org1")
     ws = workspaces.create(db, str(repo), "feat/inbox").workspace
     now = time.time()
