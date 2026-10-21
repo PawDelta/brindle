@@ -260,6 +260,12 @@ def pause_session(db: DB, params: dict, body: Body) -> Any:
     return {"paused": [a.id for a in agents.pause(db, root.id)]}
 
 
+def close_session(db: DB, params: dict, body: Body) -> Any:
+    root, _ = _root(db, params["root"])
+    closed = svc.close_session(db, root.id)
+    return {"closed": [a.id for a, _ in closed], "stopped": [a.id for a, was in closed if was]}
+
+
 def handover_session(db: DB, params: dict, body: Body) -> Any:
     root, ws = _root(db, params["root"])
     dest = workspaces.checkout_for_target(db, ws.path, _get(body, "to", required=True))
@@ -1365,6 +1371,7 @@ ROUTES = [
     _post("/sessions", start_session),
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
+    _post("/sessions/{root}/close", close_session),
     _post("/sessions/{root}/handover", handover_session),
     _post("/sessions/{root}/transfer", transfer_session),
     # GET on the file path reads (routes_read); agent callers are refused by the guard.

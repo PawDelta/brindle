@@ -455,6 +455,14 @@ def close(db: DB, agent_id: str) -> tuple[Agent, bool]:
     return agents.close(db, agent_id, panes), was_running
 
 
+def close_session(db: DB, root_id: str) -> list[tuple[Agent, bool]]:
+    """Close a session's supervisor and every agent under it, as ``close`` does
+    one (branches and worktrees stay). Each comes back with whether it had to
+    be stopped; agents already closed are skipped, so closing twice is a no-op."""
+    root = agents.get(db, root_id)
+    return [close(db, a.id) for a in agents.tree(db, root.id) if a.dismissed_at is None]
+
+
 def close_exited(db: DB, repo_root: str | None = None) -> list[Agent]:
     """Close every agent (in ``repo_root``, else every repo) that has stopped or finished."""
     panes = tmux.list_panes()
