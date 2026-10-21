@@ -588,17 +588,16 @@ def sync_goals_file(db: DB, root_id: str) -> None:
 
 
 def clear_finished_goal(db: DB, root_id: str) -> None:
-    """The goal is reached: remove the session's goal file and clear its
-    goal. Never raises: a file we can't write must not fail the verdict."""
+    """The goal is reached: remove the session's goal file but KEEP the goal
+    and its milestones (state ``done`` marks it reached) so the app can keep
+    showing them; only the next set_goal replaces them. Never raises: a file
+    we can't write must not fail the verdict."""
     try:
         ap = db.get_autopilot(root_id)
         if not ap or not ap.goal:
             return
         remove_goals_file(db, root_id)
-        db.set_milestones(root_id, [])
-        db.update_autopilot(root_id, goal=None, detail=None, goals_file=None, goal_sha=None,
-                            audit_sha=None, audit_ok=None, auditor_id=None, note=None,
-                            audit_history=None)
+        db.update_autopilot(root_id, goals_file=None, auditor_id=None, note=None, audit_history=None)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't clear the finished goal")
 
@@ -1672,7 +1671,9 @@ def progress(db: DB, root_id: str) -> str:
         label = state_text(m)
         stale = f", last check: {label}" if label and shown != m.state else (f", {label}" if label else "")
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
-    if ap.state in ("blocked", "stalled") and ap.note:
+    if ap.state == "done":
+        lines.append("Goal reached: every milestone passes. Nothing left to do; tell the user.")
+    elif ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
     elif ap.state == "auditing":
         lines.append("Completion audit running: the goal isn't reached until it approves.")

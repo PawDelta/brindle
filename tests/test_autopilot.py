@@ -209,6 +209,34 @@ def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     assert autopilot.on_stop(db, agent, {}) is None
 
 
+def test_a_reached_goal_is_kept_with_its_milestones_and_autopilot_idles(db, tmp_path, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import Workspace
+    from brindle.service.dto import GoalDTO
+
+    ws = Workspace("p/root", str(tmp_path), "root", "root", "main", None, str(tmp_path), None, "t", time.time())
+    db.add_workspace(ws)
+    agent = add_agent(db, ws, "boss")
+    db.add_autopilot("boss")
+    monkeypatch.setattr(autopilot, "_commit", lambda *a, **k: None)
+    monkeypatch.setattr(session_review, "session", lambda db_, root_id: (agent, ws))
+    monkeypatch.setattr(session_review, "reasons", lambda *a: ["no PR target"])
+    monkeypatch.setattr(session_review, "has_pr_target", lambda ws_: False)
+    with_goal(db)
+    before = [m.id for m in db.milestones("boss")]
+    for m in db.milestones("boss"):
+        db.record_check(m.id, True, "", "sha", passed_sha="sha")
+    db.update_autopilot("boss", state="done")
+    autopilot.clear_finished_goal(db, "boss")
+    ap = db.get_autopilot("boss")
+    dto = GoalDTO.from_autopilot(ap, db.milestones("boss"), None, session_review.goal_phase(db, "boss"))
+    assert dto.goal == "Settings page" and (dto.goal_phase, dto.state) == ("done", "done")
+    assert [(m.id, m.status) for m in dto.milestones] == [(i, "passed") for i in before]
+    assert autopilot.on_stop(db, agent, {}) is None and db.get_autopilot("boss").state == "done"
+    with_goal(db)   # a new set_goal replaces it
+    assert db.get_autopilot("boss").state == "running"
+
+
 def _crash(*a, **k):
     raise RuntimeError("boom")
 
@@ -338,9 +366,9 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
                                          "autopilot.audit_started", "autopilot.audit"))] == [
         ("autopilot.goal", None), ("autopilot.checked", True), ("autopilot.checked", True),
         ("autopilot.audit_started", None), ("autopilot.audit", True)]
-    # The finished goal goes: its file and the session's goal and milestones.
+    # The finished goal's file goes; the goal and milestones stay for the app.
     assert not goals.exists()
-    assert db.get_autopilot("boss").goal is None and db.milestones("boss") == []
+    assert db.get_autopilot("boss").goal == "Settings page" and len(db.milestones("boss")) == 2
     assert autopilot.on_stop(db, agent, {}) is None
 
 
