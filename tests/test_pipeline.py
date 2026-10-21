@@ -13,13 +13,13 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, cull, gates, pipeline, procs, providers, workspaces
+from brindle import agents, autopilot, bus, cull, gates, pipeline, procs, providers, workspaces
 from brindle.config import RepoConfig
 from test_merge_order import add
 from test_pipeline_idempotent import drain
 
 
-def test_reviewer_without_verdict_gets_fallback(db, repo, monkeypatch):
+def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, repo, monkeypatch):
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
     ws = workspaces.create(db, str(repo), "feat").workspace
@@ -46,6 +46,8 @@ def test_reviewer_without_verdict_gets_fallback(db, repo, monkeypatch):
     assert started == ["reviewer"]
     assert db.get_agent("w1").pipeline is None
     assert any("review of `feat` never came back" in b for b in drain(db))
+    assert [(e["agent_id"], e["root_id"], e["payload"]["actor"])
+            for e in bus.tail(db, kinds=("pipeline.escalated",))] == [("w1", "boss", "brindle")]
 
 
 def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp_path, monkeypatch):

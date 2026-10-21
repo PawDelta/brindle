@@ -44,7 +44,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 EVENT = "codex-permission-request"
-TIMEOUT = 30
+# Seconds Codex gives the hook: room for the default permission_hold_seconds
+# (a day) plus agents.HOOK_SLACK. Codex caps only SessionEnd hooks' timeouts
+# (codex-rs/hooks/src/engine/discovery.rs); others take any value. Fixed, not
+# per repo: the trusted hash covers it, so a change is a new hook to Codex
+# (status() reads it as MOVED, and ensure() trusts it again). A longer hold
+# is cut to fit (agents).
+TIMEOUT = 86400 + 30
 SOURCE = "sessionFlags"
 
 
@@ -53,7 +59,9 @@ class CodexHookError(RuntimeError):
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    from brindle import providers
+
+    return Path(providers.codex_home())
 
 
 def _stable_invocation() -> list[str]:

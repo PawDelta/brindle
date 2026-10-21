@@ -6,9 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 from mcp import Client
+from mcp.server.mcpserver.exceptions import ToolError
 
 import brindle
-from brindle import mcp_server, profiles, upgrade, watch
+from brindle import agents, mcp_server, profiles, upgrade, watch
 
 
 def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_started_with(monkeypatch, tmp_path):
@@ -107,3 +108,25 @@ def test_a_brindle_package_in_the_cwd_is_not_what_brindle_runs_again(monkeypatch
     run = subprocess.run([*brindle_invocation(), "--version"], cwd=tmp_path, capture_output=True, text=True)
     assert "decoy" not in run.stderr
     assert run.returncode == 0
+
+
+def test_a_stale_install_is_told_to_clients_and_stops_the_daemon_before_a_launch(monkeypatch):
+    fake = SimpleNamespace(changed=lambda: True)
+    stops = []
+    monkeypatch.setattr(upgrade, "install", fake)
+    monkeypatch.setattr(upgrade, "on_stale_launch", lambda: stops.append(1))
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, SimpleNamespace(repo_root=None)))
+
+    with pytest.raises(agents.AgentError):
+        agents._launch(None, None, None, prompt=None, resume=None, watch_pane=False)
+    assert stops == [1]
+    compared = []
+    monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: compared.append(1) or True))
+    monkeypatch.setattr(upgrade, "on_stale_launch", None)
+    with pytest.raises(AttributeError):     # past the check, into launch setup (ws is None)
+        agents._launch(None, None, None, prompt=None, resume=None, watch_pane=False)
+    assert compared == [1]
+    ok = asyncio.run(mcp_server.mcp.call_tool("list_repos", {}))
+    assert mcp_server.STALE_NOTICE in [c.text for c in ok.content]
+    with pytest.raises(ToolError, match="run /mcp to reconnect"):
+        asyncio.run(mcp_server.mcp.call_tool("no_such_tool", {}))

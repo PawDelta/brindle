@@ -337,7 +337,9 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
 
 
 def codex_home() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    from brindle import providers
+
+    return Path(providers.codex_home())
 
 
 def newest_rollout(home: Path | None = None) -> Path | None:

@@ -51,7 +51,8 @@ def verify(name: str, value: str) -> str | None:
     try:
         status, body = _get(url, headers)
     except (OSError, ValueError) as e:
-        return f"couldn't reach the provider to check the key: {e}"
+        # Never the exception's text: http.client quotes a header it refuses, the key included.
+        return f"couldn't reach the provider to check the key ({type(e).__name__})"
     if status == 401:
         return "the provider rejected this key (401 unauthorized); check that you copied all of it"
     if status != 200:

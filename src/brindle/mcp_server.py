@@ -4,7 +4,6 @@ from ``BRINDLE_AGENT_ID`` (set in the agent's environment at spawn)."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import time
@@ -12,6 +11,7 @@ from pathlib import Path
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
 from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
@@ -19,10 +19,13 @@ from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.profiles import list_profiles
+from brindle.view import last_activity
 
 MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
-LAST_ACTIVITY_TAIL_BYTES = 65_536
+
+STALE_NOTICE = "brindle was updated since this session started; run /mcp to reconnect"
+
 
 def _calling_agent() -> Agent | None:
     agent_id = os.environ.get("BRINDLE_AGENT_ID")
@@ -35,10 +38,18 @@ class _Server(MCPServer):
     coordinator's allowlist is enforced here, never left to its prompt."""
 
     async def call_tool(self, name, arguments, context=None):
-        refused = coordinator.refusal(_calling_agent(), name)
-        if refused:
-            raise ToolError(refused)
-        return await super().call_tool(name, arguments, context)
+        try:
+            refused = coordinator.refusal(_calling_agent(), name)
+            if refused:
+                raise ToolError(refused)
+            result = await super().call_tool(name, arguments, context)
+        except ToolError as e:
+            if upgrade.install.changed():
+                raise ToolError(f"{e}\n{STALE_NOTICE}") from e
+            raise
+        if upgrade.install.changed() and hasattr(result, "content"):
+            result.content.append(TextContent(type="text", text=STALE_NOTICE))
+        return result
 
     async def list_tools(self):
         agent = _calling_agent()
@@ -155,60 +166,6 @@ def _summary(db: DB, ws: Workspace) -> str:
         f"workspace {ws.id} on branch {ws.branch}: {st.ahead} commit(s) ahead of {base}, "
         f"{st.behind} behind{dirty}\n{stat}"
     )
-
-
-def _ago(seconds: float) -> str:
-    s = max(int(seconds), 0)
-    if s < 90:
-        return f"{s}s ago"
-    if s < 90 * 60:
-        return f"{s // 60}m ago"
-    return f"{s // 3600}h ago"
-
-
-def _last_tool(transcript: str) -> str | None:
-    """Name of the last tool call in the tail of a session transcript (Claude
-    Code's or a native worker's JSONL). Reads only the last few KB."""
-    try:
-        with open(transcript, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(f.tell() - LAST_ACTIVITY_TAIL_BYTES, 0))
-            tail = f.read().decode("utf-8", errors="ignore")
-    except OSError:
-        return None
-    for line in reversed(tail.splitlines()):
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(entry, dict):
-            continue
-        blocks = (entry.get("message") or {}).get("content") if isinstance(entry.get("message"), dict) else None
-        for b in reversed(blocks if isinstance(blocks, list) else []):
-            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name"):
-                return str(b["name"])
-        calls = entry.get("tool_calls")
-        if isinstance(calls, list) and calls and isinstance(calls[-1], dict) and calls[-1].get("name"):
-            return str(calls[-1]["name"])
-    return None
-
-
-def _last_activity(a: Agent) -> str:
-    """`` last: WebFetch 40s ago`` from the agent's transcript (its mtime is
-    the last activity), or empty when it has none."""
-    from brindle import identity_lock
-
-    who = identity_lock.locked_by(a.id) if getattr(a, "id", None) else None
-    if who:
-        return f" locked: {who}"
-    if not a.transcript_path:
-        return ""
-    try:
-        age = time.time() - os.stat(a.transcript_path).st_mtime
-    except OSError:
-        return ""
-    tool = _last_tool(a.transcript_path)
-    return f" last: {tool + ' ' if tool else ''}{_ago(age)}"
 
 
 DEFAULT_WAIT_SECONDS = 240
@@ -450,7 +407,7 @@ async def handoff(
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
-                done_when=done_when, plan_first=plan_first, files=files,
+                done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
@@ -583,7 +540,7 @@ async def assign(
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
-                done_when=done_when, plan_first=plan_first, files=files,
+                done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
@@ -753,7 +710,7 @@ def list_agents(repo: str | None = None) -> str:
                     pass
                 lines.append(
                     f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
-                    f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}{_stall_indicator(db, a)}"
+                    f"ws={ws.id} branch={ws.branch}{usage_str}{last_activity(a)}{_stall_indicator(db, a)}"
                     + (f" review={state}" if piped is not None and a.id == piped.id else "")
                 )
         return "\n".join(lines) or "No agents."
@@ -1253,19 +1210,8 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     if isinstance(found, str):
         return found
     root_id, _ = found
-    items = []
-    for m in milestones:
-        title = str(m.get("title", "")).strip()
-        if not title:
-            return "Every milestone needs a title."
-        repo_alias, check = repos.split_check(str(m.get("check") or ""))
-        repo_alias = str(m.get("repo") or "").strip() or repo_alias
-        if repo_alias and repos.resolve_attached(db, root_id, repo_alias) is None:
-            return (f"Milestone {title!r} names repo {repo_alias!r}, which isn't attached to this "
-                    "session (list_repos shows what is).")
-        items.append((title, check, (str(m.get("detail") or "").strip() or None),
-                      (str(m.get("profile") or "").strip() or None), repo_alias))
     try:
+        items = autopilot.milestone_items(db, root_id, milestones)
         autopilot.set_goal(db, root_id, goal, items, detail)
     except autopilot.AutopilotError as e:
         return str(e)
@@ -1486,18 +1432,17 @@ def transfer_to_repo(target_path: str, branch: str | None = None) -> str:
     (and any uncommitted changes) are replayed onto a new branch there, as a
     brindle workspace to review and merge. Only works from a scratch session
     (brindle started outside a git repo)."""
-    from brindle import scratch
+    from brindle.service import sessions as svc
+    from brindle.service.errors import ServiceError
 
     db = DB()
     caller, ws = _caller(db)
-    if not scratch.is_scratch(ws.path):
-        return "This isn't a scratch session; the work is already in a real repository."
     try:
         # This chat stays up to deliver the reply; the next session started in
         # the target repo pauses it (scratch.pause_transferred_to).
-        t = scratch.transfer(db, ws, target_path, branch, keep_running=caller.id if caller else None)
-    except (scratch.ScratchError, git.GitError, workspaces.WorkspaceError) as e:
-        return f"Transfer failed: {e}"
+        t = svc.transfer_to_repo(db, ws, target_path, branch, keep_running=caller.id if caller else None)
+    except ServiceError as e:
+        return e.message if e.code == "invalid" else f"Transfer failed: {e.message}"
     return (f"Moved {t.commits} commit(s) onto branch {t.workspace.branch} in {t.workspace.repo_root} "
             f"(workspace {t.workspace.id}, at {t.workspace.path}). The user can open it with "
             f"`brindle` in that repo, then review with `brindle diff {t.workspace.name}`.")

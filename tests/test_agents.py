@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from conftest import sh
 
-from brindle import agents, tmux, workspaces
+from brindle import agents, bus, tmux, workspaces
 from brindle.db import Agent
 from brindle.providers import ClaudeCode, LaunchContext
 from brindle.profiles import load_profile
@@ -257,6 +257,9 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     # Finishing later forwards the result to the supervisor's inbox...
     agents.report_result(db, "w1", "done later")
     assert db.pending_count("boss") == 1
+    assert [(e["kind"], e["agent_id"], e["payload"].get("sender_id"))
+            for e in bus.tail(db, kinds=("agent.result", "message.queued"))] == [
+        ("agent.result", "w1", None), ("message.queued", "boss", "w1")]
     # ...and if the supervisor collects it directly, the duplicate is dropped.
     out = mcp_server._await_worker(db, "w1", wait_seconds=0)
     assert "done later" in out
@@ -367,6 +370,19 @@ def test_add_dir_is_never_the_last_flag():
     argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
     last = max(i for i, a in enumerate(argv) if a == "--add-dir")
     assert argv[last + 2].startswith("--"), argv[last:]
+
+
+@pytest.mark.parametrize("configured, expected", [(None, "default"), ("auto", "auto")])
+def test_claude_permission_mode_defaults_to_the_user_config(configured, expected):
+    from dataclasses import replace
+
+    from brindle import config
+
+    if configured:
+        config.set_user("claude_permission_mode", configured)
+    profile = replace(load_profile("developer"), permission_mode=None)
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    assert argv[argv.index("--permission-mode") + 1] == expected
 
 
 def test_repo_read_dirs_become_read_only_allow_rules(ws):

@@ -751,15 +751,54 @@ def with_footer(body: str, repo_root: str) -> str:
     return f"{body.rstrip()}\n\n{PR_FOOTER}" if body.strip() else PR_FOOTER
 
 
-def pull_request(ws: Workspace, title: str | None = None, draft: bool = False) -> str:
+def pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
+                 body: str | None = None) -> str:
     """Push, then open a PR with ``gh`` when available, else return the
     compare URL for the browser."""
+    return open_pull_request(ws, title, draft, body) or compare_url(ws)
+
+
+def existing_pull_request(ws: Workspace) -> str | None:
+    """The URL of the PR ``gh`` finds open for ``ws``'s branch, or None."""
+    if not shutil.which("gh"):
+        return None
+    existing = subprocess.run(["gh", "pr", "view", ws.branch, "--json", "url", "-q", ".url"],
+                              cwd=ws.path, capture_output=True, text=True)
+    return existing.stdout.strip() if existing.returncode == 0 and existing.stdout.strip() else None
+
+
+def pull_request_merged(url: str, cwd: str) -> bool:
+    """Whether ``gh`` reports the PR at ``url`` merged (False when it can't tell)."""
+    if not shutil.which("gh"):
+        return False
+    try:
+        out = subprocess.run(["gh", "pr", "view", url, "--json", "state", "-q", ".state"],
+                             cwd=cwd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and out.stdout.strip() == "MERGED"
+
+
+def compare_url(ws: Workspace) -> str:
+    """The browser page for opening ``ws``'s PR by hand."""
+    web = git.remote_web_url(ws.repo_root)
+    if not web:
+        raise WorkspaceError("pushed, but couldn't work out a web URL for origin")
+    return f"{web}/compare/{require_base(ws)}...{ws.branch}?expand=1"
+
+
+def open_pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
+                      body: str | None = None) -> str | None:
+    """Push, then open a PR with ``gh``: its URL (or the one already open for
+    the branch), or None when ``gh`` isn't there or can't open one."""
     base = require_base(ws)
     git.push(ws.path, ws.branch)
     if shutil.which("gh"):
         args = ["gh", "pr", "create", "--base", base, "--head", ws.branch]
-        if title:
-            body = ""
+        if title or body is not None:
+            body = body or ""
+            if not title:
+                args.append("--fill")
         else:
             # --fill picks the title; the body is what --fill would write
             # (the commit subjects) with the footer, since --body overrides it.
@@ -773,16 +812,8 @@ def pull_request(ws: Workspace, title: str | None = None, draft: bool = False) -
         proc = subprocess.run(args, cwd=ws.path, capture_output=True, text=True)
         if proc.returncode == 0:
             return proc.stdout.strip()
-        existing = subprocess.run(
-            ["gh", "pr", "view", ws.branch, "--json", "url", "-q", ".url"],
-            cwd=ws.path, capture_output=True, text=True,
-        )
-        if existing.returncode == 0 and existing.stdout.strip():
-            return existing.stdout.strip()
-    web = git.remote_web_url(ws.repo_root)
-    if not web:
-        raise WorkspaceError("pushed, but couldn't work out a web URL for origin")
-    return f"{web}/compare/{base}...{ws.branch}?expand=1"
+        return existing_pull_request(ws)
+    return None
 
 
 def keeps_merged_branches(repo_root: str) -> bool:

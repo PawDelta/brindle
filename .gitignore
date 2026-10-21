@@ -9,7 +9,8 @@ graphify-out/
 .brindle/*.log
 .brindle/agents/
 # private, kept local for now
-docs/
+docs/*
+!docs/agents-and-routing.md
 .brindle/config.local.json
 .brindle/bench.json
 .DS_Store

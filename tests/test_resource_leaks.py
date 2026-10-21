@@ -69,18 +69,28 @@ def test_closing_the_reviewer_of_a_removed_workspace_ends_its_session(db, repo):
 
 def test_sidebar_survives_closing_the_reviewer_of_a_removed_workspace(db, monkeypatch):
     """The sidebar had followed the person into the merged workspace's session;
-    ending that session must not take the sidebar with it."""
-    db.add_workspace(Workspace("rootws", "/repo", "rootws", "worktree", "rootws", "main", "/rootws",
-                               None, "root_s", time.time()))
+    ending that session must not take the sidebar with it, though the merge
+    that removed the workspace took the reviewer's record (its root link) too."""
+    from brindle import pipeline
+
+    for ws_id, session in (("rootws", "root_s"), ("workerws", "worker_s")):
+        db.add_workspace(Workspace(ws_id, "/repo", ws_id, "worktree", ws_id, "main", f"/{ws_id}",
+                                   None, session, time.time()))
     db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
                        "%root", None, time.time()))
-    db.add_agent(Agent("r1", "rootws", "reviewer", "claude", "root1", "review", "done",
+    db.add_agent(Agent("r1", "workerws", "reviewer", "claude", "root1", "review", "done",
                        "%review", None, time.time()))
     db.set_sidebar_pane("root1", "%sidebar")
-    agents._closing_session("r1").write_text("worker_s")
+    db.add_review("workerws", "sha", "r1", True, "ok")
+    monkeypatch.setattr(pipeline, "on_review",   # the approval merges: the workspace is removed
+                        lambda db, caller, ws, approved, summary: db.delete_workspace(ws.id) or True)
+    monkeypatch.setattr(agents, "report_result", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "close_later", lambda agent_id: None)
+    agents.finish_review(db, "r1", "workerws")
+    assert db.get_agent("r1") is None
     where = {"%sidebar": "worker_s"}
     events = []
-    monkeypatch.setattr(agents, "kill", lambda db, agent_id: db.delete_agent(agent_id))
+    monkeypatch.setattr(agents, "kill", lambda db, agent_id: None)
     monkeypatch.setattr(agents.tmux, "pane_session", where.get)
     monkeypatch.setattr(agents.tmux, "session_attached", lambda session: session == "root_s")
     monkeypatch.setattr(agents, "bring_sidebar",

@@ -69,6 +69,8 @@ uv tool install --editable ~/Projects/brindle   # or from a local checkout
 
 brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
 
+There's also a free brindle desktop app for macOS, Linux, and Windows (via WSL). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
+
 `brindle --version` prints the installed version; the tmux status bar of every brindle
 session shows it too (`brindle 0.4.3`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
@@ -636,6 +638,7 @@ Autopilot, merge gates and cleanup:
 | Key | Default | |
 |---|---|---|
 | `autopilot` | `true` | start the supervisor with autopilot on |
+| `claude_permission_mode` | `"default"` | the `--permission-mode` for Claude Code sessions whose profile sets no `permission_mode`; the default holds permission requests for the brindle app, set `"auto"` to opt into auto mode. Only read from `~/.brindle/config.json` |
 | `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
 | `checks` | `[]` | commands that must pass in a worker's branch before it merges |
 | `review` | only under autopilot | require a reviewer's approval before merging |
@@ -698,6 +701,9 @@ When a workspace is created (including from the pool), brindle starts one contai
 `brindle services [ls|up|down] [workspace]` lists, starts or stops them by hand. Without brindle Pro, brindle prints a one-line notice and starts nothing; if Docker isn't installed it warns and carries on. `brindle doctor` reports Docker when services are configured.
 
 ### Routing by weight
+
+For a walkthrough of agents, routing, rules and org limits, see
+[Agents and routing](docs/agents-and-routing.md).
 
 The supervisor sizes a task and passes `weight` (`"light"`, `"medium"`,
 `"heavy"` or `"advanced"`, with `"reasoning"` and `"complex"` accepted as aliases) to

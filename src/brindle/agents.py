@@ -22,14 +22,14 @@ import time
 import uuid
 from types import SimpleNamespace
 
-from brindle import cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, workspaces
+from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
-from brindle.providers import LaunchContext, get_provider, signed_out, unusable
+from brindle.providers import LaunchContext, get_provider, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
     SIDEBAR_DISMISSED,
@@ -229,6 +229,7 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         managed_env = {} if org else managed_models.agent_env(m, agent.provider)
         enforced = None if agent.provider != "claude" or org else company_identity.enforced_route_env()
         session_creds = {}
+        db_inst = None
         try:
             from brindle.db import DB
             db_inst = DB()
@@ -243,6 +244,9 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             session_creds = db_inst.get_session_credentials_with_timestamps(curr_id or root_id)
         except Exception:
             pass
+        finally:
+            if db_inst is not None:
+                db_inst.conn.close()
 
         from brindle import keystore, secrets
         guarded = _guarded_profile(agent, ws)
@@ -270,14 +274,21 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
                 else:
                     recovery_keys[k] = sess_val
 
+        # The CLI's config home stored on the agent at spawn (provider_homes):
+        # the lowest layer, so a profile's env lines still win. An agent with
+        # none stored yet (older rows) gets what a launch would decide.
+        from brindle import provider_homes
+
+        homes = (provider_homes.env_for(agent.provider, agent.config_home) if agent.config_home is not None
+                 else provider_homes.launch_env(agent.provider))
         if enforced is None:
-            env = {**company, **recovery_keys, **profile_env, **managed_env, **env}
+            env = {**homes, **company, **recovery_keys, **profile_env, **managed_env, **env}
         else:
             # An enforced company identity (Enterprise): the pane runs on the route
             # launch_problem checked, whatever a profile's env lines say. The route
             # env is the top layer (managed_env is the same route's, from managed_models).
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
-            env = {**recovery_keys, **profile_env, **managed_env, **enforced, **env}
+            env = {**homes, **recovery_keys, **profile_env, **managed_env, **enforced, **env}
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -359,8 +370,11 @@ def spawn(
     review_sha: str | None = None,
     claim_goals: bool = True,
     files: list[str] | None = None,
+    weight: str | None = None,
 ) -> Agent:
-    """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
+    """Start an agent in ``ws``. ``weight`` is the weight its task was routed
+    as, kept on the agent so the owner's per-kind effort and instructions apply
+    from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
     accepted decisions covering ``files``. With ``autopilot``, the
     agent is a session root that drives toward a goal (see brindle.autopilot);
@@ -401,7 +415,8 @@ def spawn(
         # write scope join here (the scope is still checked on the diff).
         rules = "\n\n".join(p for p in (rules_prompt(load_rule_packs(profile, ws.repo_root)),
                                         guardrails.scope_prompt(guardrails.effective(profile))) if p)
-        full = f"{profile.prompt.strip()}\n\n{rules}".strip() if rules else profile.prompt
+        tuned = _with_overrides(profile, _weight_kind(weight), ws.repo_root)
+        full = f"{tuned.prompt.strip()}\n\n{rules}".strip() if rules else tuned.prompt
         prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
         from brindle import codemap
@@ -414,16 +429,28 @@ def spawn(
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
+    from brindle import preflight, provider_homes
+
+    off = preflight.turned_off(provider.name)     # before anything (deciding its home) runs the CLI
+    if off:
+        raise PreflightBlocked([off])
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
         done_when=done_when, review_sha=review_sha,
+        # Its CLI's config home, decided once here: every later check, its
+        # pane and a resume use this one, whatever a sign-in changes meanwhile.
+        config_home=provider_homes.decide(provider.name),
+        weight=_weight_kind(weight) if mode in ("handoff", "assign") else None,
     )
-    why = model_problem(profile_name, ws, agent=agent)
+    with provider_homes.using(agent.provider, agent.config_home):
+        why = model_problem(profile_name, ws, agent=agent)
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    if agent.weight:
+        db.update_agent(agent_id, weight=agent.weight)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
         db.update_agent(agent_id, plan_first=1)
         agent.plan_first = 1
@@ -474,6 +501,74 @@ def _guarded_profile(agent: Agent, ws: Workspace | None):
         return None
 
 
+def supervisor_choice(repo_root: str):
+    """The profile a new supervisor chat takes its provider, model and effort
+    from: the first of the owner's ``supervisor_profile`` and
+    ``supervisor_fallbacks`` that exists, the org's policy allows and can run
+    here; None when none is set or none can (the supervisor profile's own then)."""
+    from brindle.config import load_repo_config
+    from brindle.profiles import ProfileError
+    from brindle.service.routing import RoutingPolicy
+
+    cfg = load_repo_config(repo_root)
+    policy = RoutingPolicy.load(repo_root)
+    for name in [cfg.supervisor_profile, *cfg.supervisor_fallbacks]:
+        try:
+            p = load_profile(name, repo_root) if name else None
+        except (KeyError, ProfileError):
+            continue
+        if p is not None and policy.refusal(p) is None and unusable(p.provider, p.env) is None:
+            return p
+    return None
+
+
+def _with_supervisor_choice(profile, provider: str, repo_root: str):
+    """``profile`` (the supervisor's) running on the owner's choice's provider,
+    model and effort, when this chat was launched on that choice's provider
+    (a provider asked for by name keeps the profile's own)."""
+    from dataclasses import replace
+
+    choice = supervisor_choice(repo_root)
+    if choice is None or choice.provider != provider:
+        return profile
+    return replace(profile, provider=choice.provider, model=choice.model, effort=choice.effort)
+
+
+def _with_kind_overrides(db: DB, profile, agent: Agent, repo_root: str):
+    """``profile`` with the effort and instructions the owner set for the kind
+    of work ``agent`` does (its task's weight, a review, or the supervisor chat)."""
+    from brindle import learning
+
+    if agent.mode == "review":
+        kind = "reviewer"
+    elif agent.profile == SUPERVISOR and agent.mode == "interactive":
+        kind = "supervisor"
+    else:
+        kind = _weight_kind(agent.weight or learning._task_files(db, agent, repo_root)[1])
+    return _with_overrides(profile, kind, repo_root)
+
+
+def _weight_kind(weight: str | None) -> str | None:
+    """The routing kind of a task weight (an alias resolved), None when it isn't one."""
+    from brindle.config import WEIGHTS, normalize_weight
+
+    kind = normalize_weight(weight)
+    return kind if kind in WEIGHTS else None
+
+
+def _with_overrides(profile, kind: str | None, repo_root: str):
+    from dataclasses import replace
+
+    from brindle.config import load_repo_config
+
+    tuned = load_repo_config(repo_root).routing_overrides.get(kind, {}) if kind else {}
+    if effort := tuned.get("effort"):
+        profile = replace(profile, effort=effort)
+    if text := tuned.get("instructions"):
+        profile = replace(profile, prompt=f"{profile.prompt.strip()}\n\n{text.strip()}".strip())
+    return profile
+
+
 def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     """``agent``'s profile as launched: autopilot sessions add their guide, a
     supervisor gets the rules for acting on findings, the person's standing
@@ -489,6 +584,9 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     from brindle.profiles import load_rule_packs, rules_prompt
 
     profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
+    if agent.profile == SUPERVISOR and agent.mode == "interactive":
+        profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
+    profile = _with_kind_overrides(db, profile, agent, ws.repo_root)
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.
@@ -634,6 +732,8 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         m = managed(ws.repo_root)
     if profile is None:
         profile = guardrails.effective(load_profile(profile_name, ws.repo_root))
+        if profile_name == SUPERVISOR and agent is not None and agent.mode == "interactive":
+            profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
         why = managed_models.refusal(m, profile) if m is not None else None
         if why:
             route_health.record(ws.repo_root, agent=profile.provider,
@@ -809,12 +909,144 @@ def add_dirs_warning(agent: Agent, ws: Workspace) -> str | None:
     return _add_dirs_warning(load_profile(agent.profile, ws.repo_root), agent.provider)
 
 
+class PreflightBlocked(AgentError):
+    """A launch its CLI would stop on before the first turn: ``items`` are
+    brindle.preflight items, each naming what resolves it."""
+
+    def __init__(self, items: list) -> None:
+        self.items = items
+        super().__init__("; ".join(i.detail for i in items))
+
+
+def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tuple[dict[str, str], bool, tuple]:
+    """Who ``agent``'s CLI signs in as on this launch: the environment it gets
+    (its profile's env lines, the managed provider's variables, the
+    credentials brindle hands it, and the keys its auth or the org denies,
+    blanked so the launcher's own copy doesn't count), whether the org's own
+    key signs it in (no login to check), and the denied names. ``agent`` need
+    not be recorded yet: a launch about to happen is checked the same way."""
+    from brindle.pro import managed_models
+
+    if m is _UNREAD:
+        m = managed(ws.repo_root)
+    profile = profile or _guarded_profile(agent, ws)
+    if profile is None:
+        raise AgentError(f"no profile {agent.profile!r}")
+    launch_env = {**profile.env, **managed_models.agent_env(m, agent.provider)}
+    deny = pane_auth.deny_names(agent.provider, profile.auth, m,
+                                agent.provider == "claude" and bool(providers.claude_org_managed()))
+    org_key = managed_models.has_org_key(m, agent.provider)
+    prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
+    eff_env = _window_environment(agent, ws, m)[0]
+    probe_env = {**launch_env, **{k: eff_env[k] for k in prov_creds if k in eff_env}}
+    return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
+
+
+def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, identity=None,
+                    keys_only: bool = False) -> list:
+    """What would stop ``agent``'s CLI before its first turn if it launched
+    now in ``ws`` (brindle.preflight), judged with the identity it runs as.
+    ``keys_only``: when nobody is starting anything yet (a read), the CLI's
+    sign-in check sees only the credential names of that identity, never
+    the rest of a repo profile's env lines (NODE_OPTIONS, PATH, a config
+    dir), which only a launch the person starts may run with."""
+    from brindle import preflight
+
+    if agent.provider not in preflight.PROVIDERS:
+        return []
+    profile = profile or _guarded_profile(agent, ws)
+    if profile is None:
+        return []
+    if agent.provider == "native":
+        return preflight.check("native", ws.repo_root, profile=profile)
+    env, org_key, _ = identity or launch_identity(agent, ws, profile, m)
+    if keys_only:
+        # brindle's own list of the CLI's credentials: never names a repo declares.
+        env = {k: v for k, v in env.items() if k in providers._ENV_AUTH.get(agent.provider, ())}
+    launch = {"repo": ws.repo_root, "profile": agent.profile}
+    session = credentials_session(agent)
+    if session:
+        launch["session"] = session
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch)
+
+
+def credentials_session(agent: Agent) -> str | None:
+    """The root session whose stored credentials ``agent``'s launch gets (see
+    agent_env), when it has any: a consent asked for that launch names it, so
+    recording it resolves the same key."""
+    from brindle.db import DB
+
+    db = DB()
+    try:
+        current = agent.parent_id or agent.id
+        while current:
+            a = db.get_agent(current)
+            if a is None or not a.parent_id:
+                break
+            current = a.parent_id
+        return current if current and db.get_session_credentials(current) else None
+    finally:
+        db.conn.close()
+
+
+def consent_identity(db: DB, repo: str, profile: str, provider: str, session: str | None) -> dict[str, str]:
+    """The environment a consent's launch signs in with, rebuilt from what
+    its action names: ``repo``, ``profile``, and ``session`` (a recorded root
+    session whose stored credentials it gets; ``repo`` is its own repo or one
+    attached to it, as a worker's launch there would be)."""
+    from brindle import repos
+
+    parent = None
+    if session is None:
+        ws = workspaces.adopt_root(db, repo)
+    else:
+        root = db.get_agent(session)
+        own = repos.own_root(db, session) if root and not root.parent_id else None
+        try:
+            target = repos.resolve(db, session, own, repo) if own else None
+        except repos.RepoError:
+            target = None
+        if target is None:
+            raise AgentError(f"no session {session!r} in {repo}")
+        ws, parent = repos.target_workspace(db, target), root.id
+    who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
+                None, 0.0)
+    return launch_identity(who, ws)[0]
+
+
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False,
             model_checked: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
-    whatever the mode: a worker, a reviewer, a subagent or the chat itself."""
+    whatever the mode: a worker, a reviewer, a subagent or the chat itself.
+    The CLI's config home is the one stored on the agent at spawn
+    (provider_homes.decide): its identity check, preflight, pane and every
+    resume use it, even after a sign-in inside brindle. An agent recorded by
+    an older brindle has none yet: it is decided and stored here, once."""
+    try:
+        upgrade.check_launch()
+    except upgrade.StaleInstall as e:
+        raise AgentError(str(e)) from e
+    from brindle import preflight, provider_homes
+
+    # A provider the person turned off in brindle never starts, and nothing
+    # below (deciding its home, model check, identity probe) runs its CLI either.
+    off = preflight.turned_off(agent.provider)
+    if off:
+        raise PreflightBlocked([off])
+    if agent.config_home is None:
+        agent.config_home = provider_homes.decide(agent.provider)
+        if agent.config_home is not None:
+            db.update_agent(agent.id, config_home=agent.config_home)
+    with provider_homes.using(agent.provider, agent.config_home):
+        _launch_resolved(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
+                         background_setup=background_setup, model_checked=model_checked)
+
+
+def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
+                     resume: str | None, watch_pane: bool, background_setup: bool = False,
+                     model_checked: bool = False) -> None:
     m = managed(ws.repo_root)   # read once for this launch
     profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)
@@ -831,7 +1063,10 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         return
     # An org that enforces its company sign-in (Enterprise) refuses a
     # different identity; one that can't be told never blocks.
-    why, outcome, route = company_identity.launch_check(provider.name)
+    from brindle import provider_homes
+
+    why, outcome, route = company_identity.launch_check(
+        provider.name, home=provider_homes.env_for(agent.provider, agent.config_home))
     if outcome:
         route_health.record(ws.repo_root, agent=provider.name, route=route, model=profile.model,
                             outcome=outcome)
@@ -840,26 +1075,20 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     from brindle import signin_pause
 
     signin_pause.record_launch(agent)   # who it runs as, so a resume never crosses accounts
-    # What the agent will run with: the managed provider's variables, and
-    # no personal keys (blank, so the launcher's own copy doesn't count).
-    from brindle.pro import managed_models
-
-    launch_env = {**profile.env, **managed_models.agent_env(m, provider.name)}
-    deny = pane_auth.deny_names(provider.name, profile.auth, m,
-                                provider.name == "claude" and bool(providers.claude_org_managed()))
-    org_key = managed_models.has_org_key(m, provider.name)
+    env, org_key, deny = launch_identity(agent, ws, profile, m)
     why = pane_auth.key_problem(profile, provider.name, deny, org_key)
     if why:
         raise AgentError(why)
-    # The org's own key signs the agent in: there is no login to check.
-    prov_creds = set() if org_key else secrets.agent_credentials(provider.name, profile.name, ws.repo_root)
-    eff_env = _window_environment(agent, ws, m)[0]
-    probe_keys = {k: eff_env[k] for k in prov_creds if k in eff_env}
-    probe_env = {**launch_env, **probe_keys}
-    why = None if org_key else signed_out(
-        provider.name, {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}})
-    if why:
-        raise AgentError(why)
+    # What its CLI would stop on before the first turn (brindle.preflight),
+    # with the identity it runs as. A person starting their own chat from a
+    # terminal answers its first-run screens there; nobody watches a worker's.
+    blocking = launch_blockers(agent, ws, profile, m, identity=(env, org_key, deny))
+    # Installing a CLI or tmux shows when the window opens, as before.
+    blocking = [b for b in blocking if b.kind != "setup"]
+    if agent.parent_id is None and agent.mode == "interactive":
+        blocking = [b for b in blocking if b.kind not in ("consent", "trust")]
+    if blocking:
+        raise PreflightBlocked(blocking)
     # Here rather than in spawn, so a resume checks too: a directory can be
     # deleted between the first launch and a `brindle continue`. This reaches a
     # person running brindle in a terminal; a launch from the MCP server has no
@@ -890,6 +1119,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle.providers import trust_folder
 
         trust_folder(ws.path)  # no trust dialog for nobody to answer
+    if provider.name == "codex":
+        try:   # Codex keys trust by the main repository: one answer covers every worktree
+            providers.trust_codex_project(ws.repo_root)
+        except (OSError, ValueError):
+            pass   # after_launch still answers the screen; preflight reports a config it can't read
     if provider.name == "antigravity" and m is not None and m.setup is not None and m.setup.antigravity is not None:
         try:
             providers.set_agy_gemini()
@@ -1209,6 +1443,7 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
     if stop_local_models:
         _stop_local_models(db)
     knowledge.note(db, root_id, knowledge.PAUSE)
+    bus.publish_agent(db, "session.paused", root_id, agents=[a.id for a in paused])
     return paused
 
 
@@ -1326,7 +1561,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         auth_indicators = ("auth", "credential", "sign in", "signed out", "login", "api key", "key", "token", "unauthorized", "forbidden")
         if any(ind in note for ind in auth_indicators):
             db.update_autopilot(root_id, state="running", note=None)
-
+    if resumed:
+        bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
     return resumed
 
 
@@ -1609,7 +1845,7 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
     provider = get_provider(agent.provider)
     if condensed:
         # The full text is kept, already read, for read_messages(message_id=...).
-        kept = db.enqueue_held(agent.id, body, sender_id)
+        kept = db.enqueue_held(agent.id, body, sender_id, publish=False)
         db.mark_delivered(kept)
         text = one_line(db, kept, body, sender_id)
     else:
@@ -1680,6 +1916,8 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     if (agent.headless or not provider.uses_hooks
             or agent.status not in ("starting", "idle", "processing", "waiting")):
         return None  # a headless pane shows output, not a TUI to read
+    if agent.status == "waiting" and db.hook_permission_request(agent.id) is not None:
+        return None  # its hook holds a request for the app's answer: the pane still looks busy
     _sync_hooks_off(db, agent, provider.hooks_disabled(*_settings_scope(db, agent)))
     if agent.status == "idle" and samples < 2 and not agent.hooks_off:
         return None
@@ -1944,6 +2182,9 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         ws = db.get_workspace(agent.workspace_id)
     first = agent.result is None
     db.set_result(agent.id, result)
+    if ws:
+        bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
+                          repo_root=ws.repo_root, mode=agent.mode, first=first)
     # Usage and history are extras: never let them stop the result arriving.
     try:
         u = usage_mod.agent_usage(db, agent)
@@ -2111,6 +2352,7 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         close_later(caller_id)
         return gone
     db.add_review(ws.id, sha, caller.id, approved, summary)
+    bus.publish_agent(db, "review.submitted", caller.id, approved=approved, sha=sha)
     if approved:
         db.bump_progress(autopilot.root_of(db, caller.id))
     pipeline.note_review(db, ws, approved, reviewer=caller)
@@ -2141,6 +2383,9 @@ def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
     is piped, else to the supervisor, then close the reviewer."""
     from brindle import pipeline
 
+    # Before a merge removes the workspace, and with it this reviewer's
+    # record: the link to its root, whose sidebar close_removed may rescue.
+    root_id = root_of(db, reviewer_id)
     try:
         caller, ws = db.get_agent(reviewer_id), db.get_workspace(ws_id)
         review = next((r for r in reversed(db.workspace_reviews(ws_id))
@@ -2162,7 +2407,7 @@ def finish_review(db: DB, reviewer_id: str, ws_id: str) -> None:
         # A merge removes the workspace but leaves the session this reviewer
         # runs in; once the reviewer is gone nobody else would end it.
         if ws and db.get_workspace(ws_id) is None:
-            _closing_session(reviewer_id).write_text(ws.tmux_session)
+            _closing_session(reviewer_id).write_text(f"{ws.tmux_session}\n{root_id}")
         close_later(reviewer_id)
 
 
@@ -2176,15 +2421,18 @@ def _closing_session(agent_id: str):
 
 def close_removed(db: DB, agent_id: str) -> None:
     """Kill an agent and, when its workspace was removed with the session left
-    running (noted by ``finish_review``), that session too: only brindle's own,
-    unattached session of a workspace that no longer exists."""
+    running (noted by ``finish_review``, with the root it belonged to), that
+    session too: only brindle's own, unattached session of a workspace that no
+    longer exists."""
     note = _closing_session(agent_id)
     try:
-        session = note.read_text().strip()
+        session, _, root_id = note.read_text().strip().partition("\n")
         note.unlink()
     except OSError:
-        session = ""
-    root_id = root_of(db, agent_id)   # before kill drops the record that links it
+        session = root_id = ""
+    # The workspace's removal took the agent's record, and with it the link to
+    # its root, unless the note kept it.
+    root_id = root_id.strip() or root_of(db, agent_id)
     try:
         kill(db, agent_id)
     except AgentError:
@@ -2312,8 +2560,10 @@ def delegate(
     plan_first: bool | None = None,
     start: str | None = None,
     files: list[str] | None = None,
+    weight: str | None = None,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``plan_first`` (None: the repo's ``plan_first`` config)
+    """Start a worker. ``weight`` is the weight its task was routed as.
+    ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
     decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
     branch starts from the caller's current branch, so it sees the caller's
@@ -2366,6 +2616,7 @@ def delegate(
     agent = spawn(
         db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
         done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
+        weight=weight,
     )
     from brindle import events
 
@@ -2408,7 +2659,7 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
         return cfg.review_profile
     if cfg.reviewer and cfg.reviewer != "reviewer":
         return cfg.reviewer
-    if db is None or not repo_root:
+    if db is None or not repo_root or cfg.routing_locked.get("reviewer"):
         return cfg.reviewer
     from brindle import learning
 
@@ -2466,43 +2717,49 @@ def _review_worktree_present(ws: Workspace) -> None:
 
 
 def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
-    """The reviewer profile to use, checked to be one that can run: raises
-    ``AgentError`` if it (explicit or picked) doesn't exist, or uses the codex
-    provider but codex isn't on PATH -- rather than spawning a reviewer doomed
-    to fail in a dead pane."""
-    worker = workspace_worker(db, ws)
-    profile = profile or default_review_profile(cfg, worker, db, ws.repo_root,
-                                                worker.task if worker else None)
+    """The reviewer profile to use, checked to be one that can run, rather than
+    spawning a reviewer doomed to fail in a dead pane. ``profile`` asked for by
+    name is the only candidate; otherwise the owner's pick, then each of
+    ``cfg.reviewer_fallbacks`` in order: the first that exists, can run on its
+    provider here and that policy allows. Raises ``AgentError`` for the first
+    candidate's problem when none can."""
+    if profile is not None:
+        candidates = [profile]
+    else:
+        worker = workspace_worker(db, ws)
+        pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
+        candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
+    first: AgentError | None = None
+    for name in candidates:
+        try:
+            _reviewer_can_run(name, ws, cfg)
+            return name
+        except AgentError as e:
+            first = first or e
+    raise first
+
+
+def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
+    """Raises ``AgentError`` if reviewer profile ``name`` doesn't exist, its
+    provider can't run an agent here (with the profile's own environment) or
+    policy refuses it."""
     try:
-        chosen = load_profile(profile, ws.repo_root)
+        chosen = load_profile(name, ws.repo_root)
     except KeyError as e:
         raise AgentError(str(e)) from e
     _airgap_check(chosen, ws.repo_root)   # before any of the branch is read for the brief
-    why = unusable("codex") if chosen.provider == "codex" else None
-    if why:
+    if why := unusable(chosen.provider, chosen.env):
         raise AgentError(
-            f"reviewer profile {profile!r} can't run: {why}. "
+            f"reviewer profile {name!r} can't run: {why}. "
             "Fix that, or set review_profile (or pass profile) to a different reviewer"
         )
     try:
         from brindle import policy as pol
-        d = pol.check_assign(cfg, ws.repo_root, profile, "code review", "review")
-        if not d.allowed:
-            for fallback in (cfg.reviewer, "reviewer", "reviewer-gemini", "reviewer-local"):
-                if fallback != profile:
-                    try:
-                        load_profile(fallback, ws.repo_root)
-                        fb_d = pol.check_assign(cfg, ws.repo_root, fallback, "code review", "review")
-                        if fb_d.allowed:
-                            return fallback
-                    except Exception:
-                        continue
-            raise AgentError(f"reviewer profile {profile!r} refused by policy: {d.reason}")
-    except AgentError:
-        raise
-    except Exception:
-        pass
-    return profile
+        d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
+    except Exception:  # noqa: BLE001 - an unreadable policy doesn't stop a review
+        return
+    if not d.allowed:
+        raise AgentError(f"reviewer profile {name!r} refused by policy: {d.reason}")
 
 
 def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) -> Agent | None:
@@ -2867,7 +3124,7 @@ def submit_plan(db: DB, agent_id: str, plan: str) -> str:
         return "Give the plan."
     if not agent.parent_id:
         raise AgentError("no supervisor to send the plan to")
-    db.update_agent(agent.id, plan_state="proposed")
+    db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip())
     send_message(db, agent.parent_id,
                  f"Worker {agent.id} proposes this plan and is waiting for your decision "
                  f"(approve_plan agent_id={agent.id}):\n\n{plan.strip()}", sender_id=agent.id)
@@ -2886,7 +3143,7 @@ def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
     feedback = feedback.strip()
     if approved:
-        db.update_agent(agent.id, plan_state="approved")
+        db.update_agent(agent.id, plan_state="approved", plan_text=None)
         text = "Your plan is approved: go ahead and implement it."
     else:
         db.update_agent(agent.id, plan_state="revise")
@@ -2974,7 +3231,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     prompt the person as usual (ask). Off unless the repo or user config
     sets ``permission_policy: "on"``, except for a Codex reviewer, whose hook
     allows what its profile's allowed_tools cover and leaves the rest to
-    Codex (#241). Never raises: any failure is ask."""
+    Codex (#241). A request left to the person is held for the app's answer
+    while the app is open (_hold_for_app; a Claude one is recorded with the
+    policy off too). Never raises: any failure is ask."""
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -2984,11 +3243,13 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if ws is None:
             return None
         cfg = load_repo_config(ws.repo_root)
-        # Policy off: only a Codex reviewer has the hook (codex_hook.launch_flags).
-        # Nobody watches it, so it gets what its allowed_tools cover and
-        # nothing else of brindle's: every other answer is Codex's own.
-        review_only = cfg.permission_policy != "on"
-        if review_only and not (provider == "codex" and agent.mode == "review"):
+        policy = cfg.permission_policy == "on"
+        # Policy off: of the other CLIs only a Codex reviewer has the hook
+        # (codex_hook.launch_flags). Nobody watches it, so it gets what its
+        # allowed_tools cover and nothing else of brindle's: every other
+        # answer is Codex's own.
+        review_only = not policy and provider == "codex"
+        if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         if provider == "codex":
@@ -3047,6 +3308,18 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
+            if decision.decision == "ask" and len(reqs) == 1:
+                # The same hold for the app's answer as Claude Code's (no suggested rules here).
+                from brindle import codex_hook
+
+                # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
+                hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
+                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
+                if answer:
+                    decision = permissions.Decision(
+                        "deny" if answer == "deny" else "allow",
+                        "the person denied this in the brindle app" if answer == "deny"
+                        else "the person answered in the brindle app")
             return permissions.codex_output(decision)
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
@@ -3067,30 +3340,124 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
             return None
-        rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-        decision = permissions.decide(req, checks=cfg.checks, rules=rules)
-        _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
-        tool_use_id = payload.get("tool_use_id")
-        if decision.decision == "ask" and isinstance(tool_use_id, str) and tool_use_id:
-            db.add_permission_request(agent.id, tool_use_id, json.dumps(req.to_dict()), decision.reason)
+        if policy:
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+            _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
+        else:
+            decision = permissions.Decision("ask", "")
+        if decision.decision == "ask":
+            # Claude Code's own "always allow" options, as it would apply them.
+            suggestions = payload.get("permission_suggestions")
+            suggestions = permissions.persistent_suggestions(suggestions)
+            # Recorded either way: its PostToolUse counts as the person's approval.
+            answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
+                                   hold=cfg.permission_hold_seconds)
+            if answer:
+                return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
         return None
 
 
+# Seconds a hold waits on the daemon at a time between looks at whether the
+# agent was closed or its request answered at the CLI's own prompt.
+HOLD_LOOK_SECONDS = 5.0
+# Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
+# so the hook gives the request to the prompt itself before the CLI cancels it.
+HOOK_SLACK = 30
+ANSWERS = ("allow_once", "allow_always", "deny")
+
+
+def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
+                  hold: float) -> str | None:
+    """Record a request the policy left to the person and, while the app's
+    daemon runs, hold it there for the person's answer for ``hold`` seconds
+    (_await_app_answer; the row's ``hold_until`` says till when, for the
+    app's inbox). The answer comes only from the daemon, to this hook alone
+    (brindle.daemon.holds): the row is for showing the request, never read
+    as an answer. With no daemon, nothing is held. Neither CLI's
+    PermissionRequest carries a tool_use_id: the request gets an id of its
+    own (Claude Code's PostToolUse is paired with it by tool and input, see
+    note_permission_outcome). ``keep``: record it even when nothing is held,
+    and keep it once the hold ends (for that pairing)."""
+    from brindle import permissions
+    from brindle.daemon.holds import Holder
+
+    request_id = uuid.uuid4().hex[:16]
+    recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+    # Only an answer to exactly this request and these suggestions counts.
+    holder = Holder(agent.id, request_id, permissions.request_digest(*recorded))
+    # Held before it is recorded anywhere, so nothing watching the rows can take its id first.
+    hold_until = time.time() + hold
+    held = holder.register(hold_until)
+    db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
+                              "hook" if held else None, hold_until=hold_until if held else None)
+    answer = None
+    if held:
+        try:
+            answer = _await_app_answer(db, agent, holder, req, hold)
+        finally:
+            holder.end()
+            db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
+                                         answer=answer)
+    # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
+    # take the pairing meant for the same command asked again (note_permission_outcome).
+    if not keep or answer == "deny":
+        db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
+    return answer
+
+
+def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | None:
+    """The person's answer from the app's inbox, as the daemon hands it to
+    ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
+    the person asks to answer in the terminal, once the agent is closed or
+    killed, once its CLI's own prompt took the request (its PostToolUse
+    removed the row), or if the daemon goes away: then the request goes to
+    the CLI's own prompt (or, where there is none, is refused). The agent
+    shows waiting meanwhile, as at that prompt."""
+    db.set_status(agent.id, "waiting")
+    bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
+    deadline, answer = time.monotonic() + hold, None
+    while True:
+        now = db.get_agent(agent.id)
+        recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+                                   (agent.id, holder.request_id)).fetchone()
+        left = deadline - time.monotonic()
+        if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
+                or recorded is None or left <= 0):
+            break
+        held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
+        if answer is not None or not held:
+            break
+    answer = answer if answer in ANSWERS else None     # "terminal": the person sent it to the prompt
+    if answer:
+        db.set_status(agent.id, "processing", only_if="waiting")
+    return answer
+
+
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
     """PostToolUse: if the tool's request had been left to the person, they
-    approved it. Count that toward a suggestion (never a rule by itself)."""
-    tool_use_id = payload.get("tool_use_id")
-    if not isinstance(tool_use_id, str) or not tool_use_id:
-        return
+    approved it. Count that toward a suggestion (never a rule by itself).
+    The request is the oldest recorded one for the same tool and input
+    (PermissionRequest has no tool_use_id to pair them by)."""
     try:
-        row = db.pop_permission_request(agent.id, tool_use_id)
-        if row is None:
-            return
         from brindle import permissions
 
+        ws = db.get_workspace(agent.workspace_id)
+        ran = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root) if ws else None
+        if ran is None:
+            return
+        same = (ran.tool, ran.kind, ran.command, ran.path, ran.url)
+
+        def matches(row) -> bool:
+            r = json.loads(row["request"])
+            return (r.get("tool"), r.get("kind"), r.get("command"), r.get("path"), r.get("url")) == same
+
+        row = db.pop_permission_request(agent.id, matches)
+        if row is None or not row["reason"]:
+            return   # none, or recorded for the inbox with the policy off: nothing to learn
         req = permissions.Request.from_dict(json.loads(row["request"]))
         permissions.record_approval(req)
         _record_permission(db, agent, db.get_workspace(agent.workspace_id), req.summary(),
@@ -3109,7 +3476,8 @@ def pending_permission(db: DB, agent_id: str) -> str | None:
         from brindle import permissions
 
         req = permissions.Request.from_dict(json.loads(row["request"]))
-        return f"It is asking to use {req.summary()} (brindle's permission policy: {row['reason']})."
+        policy = f" (brindle's permission policy: {row['reason']})" if row["reason"] else ""
+        return f"It is asking to use {req.summary()}{policy}."
     except Exception:  # noqa: BLE001
         return None
 
@@ -3532,7 +3900,7 @@ def transcript_file(agent: Agent) -> str | None:
     if agent.provider == "claude":
         import glob
 
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = providers.claude_config_dir()
         found = glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(ref)}.jsonl"))
         return found[0] if found else None
     if agent.provider == "codex":

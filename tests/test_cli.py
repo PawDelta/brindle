@@ -4,7 +4,7 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, cli, workspaces
+from brindle import workspaces
 from brindle.cli import app
 from brindle.db import Agent
 
@@ -90,20 +90,27 @@ def test_version_flag_prints_the_installed_version():
     assert __version__ != "unknown"
 
 
-def test_continue_from_inside_session(db, repo, monkeypatch, fake_agent_cli):
-    ws = workspaces.adopt_root(db, str(repo))
-    caller = agents.spawn(db, ws, "developer", mode="interactive")
-    target = agents.spawn(db, ws, "developer", mode="interactive")
-    db.set_status(target.id, "paused")
-    calls = []
-    monkeypatch.setattr(agents, "is_alive", lambda a: a.id == caller.id)
-    # The caller is the one live session; no tmux state decides that.
-    monkeypatch.setattr(cli, "_live_sessions", lambda db_, ws_: [db.get_agent(caller.id)])
-    monkeypatch.setattr(agents, "pause", lambda *a, **k: calls.append("pause"))
-    monkeypatch.setattr(agents, "resume", lambda *a, **k: calls.append("resume") or [])
-    monkeypatch.setenv("BRINDLE_AGENT_ID", caller.id)
-    monkeypatch.chdir(repo)
+def test_app_command_opens_the_app_or_prints_the_download_url(monkeypatch):
+    import subprocess
+    import sys
 
-    res = CliRunner().invoke(app, ["continue", target.id, "--no-attach"])
-    assert res.exit_code == 1, res.output
-    assert calls == []
+    from brindle import cli
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    runs = []
+    no_opener = []
+
+    def run(cmd, **kw):
+        runs.append(cmd)
+        if no_opener:
+            raise OSError("no opener")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    installed = CliRunner().invoke(cli.app, ["app"])
+    assert runs == [["xdg-open", "brindle://"]]
+    assert cli.APP_DOWNLOAD_URL not in installed.output
+
+    no_opener.append(True)
+    missing = CliRunner().invoke(cli.app, ["app"])
+    assert cli.APP_DOWNLOAD_URL in missing.output

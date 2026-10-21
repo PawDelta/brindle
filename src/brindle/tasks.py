@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import PurePath
 
-from brindle import agents, conflicts, git, savings
+from brindle import agents, bus, conflicts, git, savings
 from brindle.db import DB, Agent, Task, Workspace
 
 
@@ -424,6 +424,7 @@ def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
         return []
     cancelled = [t.id]
     db.update_task(t.id, state="cancelled")
+    bus.publish(db, "task.cancelled", repo_root=t.repo_root, task_id=t.id, reason=reason)
     if t.caller_id:
         try:
             agents.send_message(
@@ -479,8 +480,11 @@ def move(db: DB, task_id: str, from_state: str, to_state: str) -> bool:
     """Move a task from ``from_state`` to ``to_state`` atomically; False if
     it was no longer in ``from_state`` (started, cancelled, held already)."""
     with db.tx() as c:
-        return c.execute("UPDATE tasks SET state=? WHERE id=? AND state=?",
-                         (to_state, task_id, from_state)).rowcount == 1
+        moved = c.execute("UPDATE tasks SET state=? WHERE id=? AND state=?",
+                          (to_state, task_id, from_state)).rowcount == 1
+    if moved:
+        bus.publish(db, f"task.{to_state}", task_id=task_id)
+    return moved
 
 
 def set_dependencies(db: DB, task_id: str, depends_on: list[str], expect: list[str]) -> bool:
@@ -523,6 +527,8 @@ def enqueue(
     db.add_task(t)
     if plan_first is not None:
         db.update_task(t.id, plan_first=int(plan_first))
+    bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
+                depends_on=depends_on or [])
     return t
 
 
@@ -541,6 +547,7 @@ def record_started(
         state="started", created_at=time.time(), started_at=time.time(), weight=weight,
     )
     db.add_task(t)
+    bus.publish_agent(db, "task.started", worker.id, task_id=t.id)
     return t
 
 
@@ -579,6 +586,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         raise agents.AgentError(f"workspace {task.caller_ws_id} for queued task {task.id} is gone")
     caller = db.get_agent(task.caller_id) if task.caller_id else None
     profile = task.profile
+    launch_weight = task.weight
     cfg = load_repo_config(caller_ws.repo_root)
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
@@ -596,6 +604,7 @@ def start_queued(db: DB, task: Task) -> Agent:
                     files=_loads(task.files),
                 )
                 profile = routed_profile
+                launch_weight = effective_weight
                 db.update_task(task.id, profile=profile, weight=effective_weight)
             else:
                 choose_profile(db, task.caller_id or "", caller_ws.repo_root, requested=profile, weight=None)
@@ -605,8 +614,10 @@ def start_queued(db: DB, task: Task) -> Agent:
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
+        weight=launch_weight,
     )
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
+    bus.publish_agent(db, "task.started", worker.id, task_id=task.id)
     savings.attach_agent(db, task.id, worker.id)
     return worker
 

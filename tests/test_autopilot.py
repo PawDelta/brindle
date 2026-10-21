@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, gates, git, watch, workspaces
+from brindle import agents, autopilot, bus, gates, git, watch, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.providers import status_line
@@ -309,7 +309,7 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")
 
 
-def test_need_user_question_holds_until_answered(db, root, monkeypatch):
+def test_need_user_question_holds_until_answered_and_publishes_events(db, root, monkeypatch):
     # A question holds only the work that depends on it: an unrelated user
     # message doesn't cancel it, and autopilot doesn't nudge while it's open.
     # (#209) Anything that woke the chat without brindle's tag (a watcher's
@@ -327,6 +327,9 @@ def test_need_user_question_holds_until_answered(db, root, monkeypatch):
     autopilot.answered(db, "boss")
     ap = db.get_autopilot("boss")
     assert ap.state == "running" and ap.note is None and ap.question is None
+    assert [(e["kind"], e["root_id"], e["payload"].get("question"))
+            for e in bus.tail(db, kinds=("autopilot.need_user", "autopilot.answered"))] == [
+        ("autopilot.need_user", "boss", "Postgres or SQLite?"), ("autopilot.answered", "boss", None)]
 
 
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
@@ -347,6 +350,123 @@ def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     (repo / ".brindle").mkdir(exist_ok=True)   # the session's goal file lives in it
     (repo / ".brindle" / "config.json").write_text('{"goal_audit": false}')
     assert autopilot.on_stop(db, agent, {}) is None
+
+
+def test_a_reached_goal_is_kept_with_its_milestones_and_autopilot_idles(db, tmp_path, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import Workspace
+    from brindle.service.dto import GoalDTO
+
+    ws = Workspace("p/root", str(tmp_path), "root", "root", "main", None, str(tmp_path), None, "t", time.time())
+    db.add_workspace(ws)
+    agent = add_agent(db, ws, "boss")
+    db.add_autopilot("boss")
+    monkeypatch.setattr(autopilot, "_commit", lambda *a, **k: None)
+    monkeypatch.setattr(session_review, "session", lambda db_, root_id: (agent, ws))
+    monkeypatch.setattr(session_review, "reasons", lambda *a: ["no PR target"])
+    monkeypatch.setattr(session_review, "has_pr_target", lambda ws_: False)
+    with_goal(db)
+    before = [m.id for m in db.milestones("boss")]
+    for m in db.milestones("boss"):
+        db.record_check(m.id, True, "", "sha", passed_sha="sha")
+    db.update_autopilot("boss", state="done")
+    ap = db.get_autopilot("boss")
+    dto = GoalDTO.from_autopilot(ap, db.milestones("boss"), None, session_review.goal_phase(db, "boss"))
+    assert dto.goal == "Settings page" and (dto.goal_phase, dto.state) == ("done", "done")
+    assert [(m.id, m.status) for m in dto.milestones] == [(i, "passed") for i in before]
+    assert autopilot.on_stop(db, agent, {}) is None and db.get_autopilot("boss").state == "done"
+    with_goal(db)   # a new set_goal replaces it
+    assert db.get_autopilot("boss").state == "running"
+
+
+def _crash(*a, **k):
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("had_passed, result, state, label", [
+    (False, (True, "$ c"), "passed", None),
+    (False, (False, "$ c\n(exit 1)"), "not_done", "not done yet"),
+    (True, (False, "$ c\n(exit 1)"), "regressed", "regressed"),
+    (False, (False, "$ c\n(exit 127)"), "failed", "couldn't run: command not found"),
+    (False, (False, "$ c\n(exit 126)"), "failed", "couldn't run: command not runnable"),
+    (False, (False, "$ c\n(timed out after 5s)"), "failed", "couldn't run: timed out after 5s"),
+    (False, (False, "$ c\n(exit -11)"), "failed", "couldn't run: crashed: killed by signal 11"),
+    pytest.param(False, (False, "$ c\n(exit 133)"), "failed", "couldn't run: crashed: killed by signal 5",
+                 marks=pytest.mark.variant("SIGTRAP: any 128+n shell signal exit is a crash")),
+    (False, _crash, "failed", "couldn't run: crashed: boom"),
+])
+def test_check_records_a_state_in_plain_words(db, root, monkeypatch, had_passed, result, state, label):
+    from brindle.service.dto import MilestoneDTO
+
+    agent, ws = root
+    with_goal(db, checks=("c", None))   # the unchecked second milestone keeps the goal open
+    if had_passed:
+        db.record_check(db.milestones("boss")[0].id, True, "ok", None)
+    monkeypatch.setattr(gates, "run_checked", result if callable(result) else (lambda *a, **k: result))
+    out = autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+    m = db.milestones("boss")[0]
+    assert m.state == state and autopilot.state_text(m) == label
+    assert MilestoneDTO.from_row(m).label == label
+    if label:
+        assert label in autopilot.progress(db, "boss") and label in out
+
+
+def test_regressed_survives_a_dirty_pass_and_a_couldnt_run(db, root, repo, monkeypatch):
+    agent, ws = root
+    with_goal(db, checks=("c", None))
+    (repo / "dirty.txt").write_text("")   # a dirty checkout records no passed_sha
+    results = iter([(True, "$ c"), (False, "$ c\n(exit 1)"), (False, "$ c\n(exit 127)"), (False, "$ c\n(exit 1)")])
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **k: next(results))
+    seen = []
+    for _ in range(4):
+        autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+        seen.append(db.milestones("boss")[0].state)
+    assert seen == ["passed", "regressed", "failed", "regressed"]
+
+
+def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, monkeypatch):
+    from brindle import git, repos
+
+    agent, ws = root
+    autopilot.set_goal(db, "boss", "g", [("a", "c1", None, None, "other"), ("b", "c2", None)])
+
+    def gone(*a, **k):
+        raise git.GitError("not a git repository")
+
+    monkeypatch.setattr(repos, "resolve_attached", gone)
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **k: (False, "$ c2\n(exit 1)"))
+    autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+    assert [(m.state, m.state_why) for m in db.milestones("boss")] == [
+        ("failed", "checkout missing"), ("not_done", None)]
+    # Checking only milestone 2 rechecks a passed milestone whose checkout is gone.
+    db.record_check(db.milestones("boss")[0].id, True, "ok", None)
+    autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
+    assert db.milestones("boss")[0].state == "failed"
+
+
+def test_shell_reported_crash_signal_is_couldnt_run(monkeypatch):
+    import signal
+
+    from brindle.db import check_state
+
+    fake = SimpleNamespace(stdout="", stderr="Floating point exception (core dumped)",
+                           returncode=128 + signal.SIGFPE)
+    monkeypatch.setattr(autopilot.subprocess, "run", lambda *a, **k: fake)
+    ok, out = autopilot.run_check("c", ".", {}, 5)
+    assert check_state(ok, out, False) == ("failed", f"crashed: killed by signal {signal.SIGFPE}")
+
+
+def test_old_milestone_rows_get_a_state(db, root):
+    db.set_milestones("boss", [("a", "c", None), ("b", "c", None), ("c", "c", None), ("d", "c", None)])
+    ids = [m.id for m in db.milestones("boss")]
+    with db.tx() as c:
+        c.execute("UPDATE milestones SET status='passed', state=NULL WHERE id=?", (ids[0],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc' WHERE id=?", (ids[1],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, output='(exit 127)' WHERE id=?", (ids[2],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc', "
+                  "output=\"repo 'other' isn't attached to this session\" WHERE id=?", (ids[3],))
+    db._migrate()
+    assert [m.state for m in db.milestones("boss")] == ["passed", "regressed", "failed", "failed"]
 
 
 def commit_all(repo, msg="work"):
@@ -384,6 +504,12 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
     milestones, contents = db.milestones("boss"), goals.read_text()
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert "goal is reached" in out and db.get_autopilot("boss").state == "done"
+    assert [(e["kind"], e["payload"].get("done", e["payload"].get("approved")))
+            for e in bus.tail(db, kinds=("autopilot.goal", "autopilot.checked",
+                                         "autopilot.audit_started", "autopilot.audit"))] == [
+        ("autopilot.goal", None), ("autopilot.checked", True), ("autopilot.checked", True),
+        ("autopilot.audit_started", None), ("autopilot.audit", True)]
+    # The finished goal stays, with its file and milestones, for the app.
     assert db.get_autopilot("boss").goal == "Settings page"
     assert db.milestones("boss") == milestones and goals.read_text() == contents
     assert db.get_autopilot("boss").goal_sha == start
@@ -700,13 +826,87 @@ def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
     assert "Newer step" in watch.print_once(db, ws.repo_root, color=False)
 
 
+@pytest.mark.parametrize("passed, checking, workers, expected", [
+    (1, False, [], ["done", "in_progress"]),                              # check passed
+    (0, True, ["building"], ["in_review", "in_progress"]),                # a check is running
+    (0, False, ["reviewing"], ["in_review", "in_progress"]),              # all reported, in review
+    (0, False, ["reviewer"], ["in_review", "in_progress"]),
+    (0, False, ["reviewing", "building"], ["in_progress", "in_progress"]),  # still building
+    (0, False, [], ["in_progress", "in_progress"]),                       # nothing under way
+    (0, False, ["reviewing", "ready"], ["in_review", "in_progress"]),     # a ready branch doesn't veto
+    (0, False, ["gone"], ["in_review", "in_progress"]),                   # reported, marked done, still in checks
+])
+def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expected):
+    _, ws = root
+    with_goal(db)
+    first = db.milestones("boss")[0]
+    db.record_check(first.id, bool(passed), "" if passed else "nope")
+    monkeypatch.setattr(agents, "is_alive", lambda a: a.status != "idle")
+    if checking:
+        db.update_autopilot("boss", checking_since=time.time())
+    for i, kind in enumerate(workers):
+        add_agent(db, ws, f"w{i}", mode="review" if kind == "reviewer" else "assign", parent="boss",
+                  status="done" if kind == "gone" else "idle" if kind == "ready" else "processing")
+        if kind in ("reviewing", "ready"):
+            db.update_agent(f"w{i}", pipeline=kind)
+        if kind in ("ready", "gone"):
+            db.update_agent(f"w{i}", result="done")
+        if kind == "gone":
+            db.update_agent(f"w{i}", pipeline="reviewing")
+    phases = autopilot.milestone_phases(db, "boss")
+    assert [phases[m.id] for m in db.milestones("boss")] == expected
+
+
+@pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected, target", [
+    (0, False, False, False, False, False, "in_progress", True),
+    (0, True, False, False, False, False, "in_review", True),           # a milestone check is running
+    (2, False, True, False, False, True, "ready_for_pr", True),         # all pass, session review ready
+    (2, False, False, False, False, False, "in_progress", True),        # all pass, review not ready
+    (2, False, True, True, False, True, "pr_open", True),               # audit approved, PR still open
+    (2, False, True, True, True, True, "done", True),                   # PR merged
+    (1, False, False, True, True, False, "pr_open", True),              # merged but goal not reached
+    (2, False, True, True, True, False, "pr_open", True),               # merged, milestones pass, audit hasn't approved
+    (2, False, False, False, False, True, "in_progress", True),         # reached, manual PR, checkout dirty: not done
+    (2, False, False, False, False, True, "done", False),               # reached, nothing to open a PR for
+])
+def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, goal_done, expected, target):
+    from brindle.daemon import session_review
+
+    with_goal(db)
+    for m in db.milestones("boss")[:passed]:
+        db.record_check(m.id, True, "")
+    if checking:
+        db.update_autopilot("boss", checking_since=time.time())
+    if goal_done:
+        db.update_autopilot("boss", state="done", audit_ok=1)
+    if pr:
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at, merged_at)"
+                        " VALUES ('boss', 'feat', 'https://x/pr/1', 1, ?)", (2 if merged else None,))
+    monkeypatch.setattr(session_review, "session", lambda db, root_id: (None, SimpleNamespace(repo_root="r")))
+    monkeypatch.setattr(session_review, "reasons", lambda db, root, ws: [] if ready else ["not yet"])
+    monkeypatch.setattr(session_review, "has_pr_target", lambda ws: target)
+    assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)
+
+
+def test_a_replacement_pr_does_not_inherit_the_old_merge(db, root):
+    from brindle.daemon import routes_actions
+
+    key = ("boss", "feat")
+    routes_actions._record_pr(db, key, "https://x/pr/1", None, False)
+    db.conn.execute("UPDATE session_prs SET merged_at = 2")
+    routes_actions._record_pr(db, key, "https://x/pr/1", "abc", False)       # same PR: stays merged
+    assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] == 2
+    routes_actions._record_pr(db, key, "https://x/pr/2", None, False)        # a new one: open
+    assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
+
+
 @pytest.mark.parametrize("flight, expected", [
     ("processing", "working"),
     ("waiting", "waiting"),
     ("pending_task", "waiting"),
     ("usage_paused", "waiting"),
     ("checking", "checking"),
-    (None, "failed"),
+    (None, "not_done"),
 ])
 def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
     from brindle import view
@@ -734,7 +934,7 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
         assert any("checking" in line.text for line in watch.render_autopilot(entry, 80))
         monkeypatch.setattr(gates, "run_checked", lambda *a, **k: (False, "new failure"))
         finished = autopilot.check_milestones(db, "boss", ws)
-        assert "✗" in finished and "checking" not in finished and "new failure" in finished
+        assert "not done yet" in finished and "checking" not in finished and "new failure" in finished
         assert "checking" in autopilot.progress(db, "boss")
         db.record_check(db.milestones("boss")[0].id, True, "passed")
         db.update_autopilot("boss", checking_since=None)

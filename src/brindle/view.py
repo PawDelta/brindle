@@ -3,6 +3,7 @@ agents. Git fields are None when they can't be computed."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -34,6 +35,60 @@ STOPPED_ROOT_LINGER = NATIVE_SUBAGENT_LINGER
 # ``retired``) once it's this old, so one just made by hand isn't hidden
 # before anything is started in it.
 UNUSED_WORKTREE_GRACE = 600.0
+# How much of a transcript's tail last_tool reads.
+LAST_ACTIVITY_TAIL_BYTES = 65_536
+
+
+def _ago(seconds: float) -> str:
+    s = max(int(seconds), 0)
+    if s < 90:
+        return f"{s}s ago"
+    if s < 90 * 60:
+        return f"{s // 60}m ago"
+    return f"{s // 3600}h ago"
+
+
+def last_tool(transcript: str) -> str | None:
+    """Name of the last tool call in the tail of a session transcript (Claude
+    Code's or a native worker's JSONL). Reads only the last few KB."""
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(f.tell() - LAST_ACTIVITY_TAIL_BYTES, 0))
+            tail = f.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        blocks = (entry.get("message") or {}).get("content") if isinstance(entry.get("message"), dict) else None
+        for b in reversed(blocks if isinstance(blocks, list) else []):
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name"):
+                return str(b["name"])
+        calls = entry.get("tool_calls")
+        if isinstance(calls, list) and calls and isinstance(calls[-1], dict) and calls[-1].get("name"):
+            return str(calls[-1]["name"])
+    return None
+
+
+def last_activity(a: Agent) -> str:
+    """`` last: WebFetch 40s ago`` from the agent's transcript (its mtime is
+    the last activity), or empty when it has none."""
+    who = identity_lock.locked_by(a.id) if getattr(a, "id", None) else None
+    if who:
+        return f" locked: {who}"
+    if not a.transcript_path:
+        return ""
+    try:
+        age = time.time() - os.stat(a.transcript_path).st_mtime
+    except OSError:
+        return ""
+    tool = last_tool(a.transcript_path)
+    return f" last: {tool + ' ' if tool else ''}{_ago(age)}"
 
 
 def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
@@ -269,13 +324,17 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
             a = parent
         return a.id in hidden_roots
 
-    out = []
+    listed = []
     for ws, everyone in found:
         shown = [a for a in everyone if a.dismissed_at is None and not hidden(a)]
         if everyone and not shown and ws.kind != "main":
             continue
         if retired(db, ws, alive, now, everyone):
             continue
+        listed.append((ws, shown))
+    status_cache.warm([(ws.path, ws.base_branch) for ws, _ in listed if os.path.isdir(ws.path)], now=now)
+    out = []
+    for ws, shown in listed:
         entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
                                 panes=panes, agent_list=shown, alive=alive)
         review = db.last_review(ws.id)
@@ -338,7 +397,8 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
         "wait": autopilot.wait_summary(ap),
         "usage_resets_at": ap.usage_resets_at,
         "milestones": [{"position": m.position, "title": m.title,
-                        "status": w if m.status == "failed" and w else m.status,
+                        "status": w if m.status == "failed" and w else (m.state or m.status),
+                        "label": autopilot.state_text(m),
                         "check": m.check_cmd} for m in ms],
         "usage": autopilot.usage(),
         "quota": quota.notes(repo_root, native=False),

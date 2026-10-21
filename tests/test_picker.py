@@ -76,7 +76,8 @@ def test_wsl_browser_sign_in_points_the_login_at_the_windows_browser(monkeypatch
     seen = []
     assert picker.sign_in("codex", run=lambda argv, **kw: seen.append(kw.get("env")) or (0, ""),
                           confirm=lambda *a, **kw: True, echo=lambda s: None)
-    assert (seen[0] and {"BROWSER": seen[0]["BROWSER"]}) == shown
+    # The login env also carries brindle's config home (provider_homes): BROWSER is checked on its own.
+    assert ({"BROWSER": seen[0]["BROWSER"]} if "BROWSER" in (seen[0] or {}) else None) == shown
 
 
 def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), allowed=None, ci=False):

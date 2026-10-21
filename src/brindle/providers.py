@@ -193,15 +193,55 @@ DELIVERY_NOTE = (
 )
 
 
+def _permission_hook_timeout(cwd: str | None) -> int:
+    """Claude Code's timeout for brindle's PermissionRequest hook (seconds; its
+    docs give command hooks 600 by default and no maximum): the repo's
+    permission_hold_seconds, plus agents.HOOK_SLACK so the hook hands the
+    request to the prompt itself before Claude Code would cancel it."""
+    from brindle.agents import HOOK_SLACK
+    from brindle.config import RepoConfig, load_repo_config
+
+    try:
+        hold = load_repo_config(cwd).permission_hold_seconds if cwd else RepoConfig.permission_hold_seconds
+    except Exception:  # noqa: BLE001 - never stop a launch over this
+        hold = RepoConfig.permission_hold_seconds
+    return int(hold) + HOOK_SLACK
+
+
 def claude_binary() -> str:
-    """BRINDLE_CLAUDE_BIN, else `claude` on PATH."""
-    return os.environ.get("BRINDLE_CLAUDE_BIN") or "claude"
+    """BRINDLE_CLAUDE_BIN, else the install picked in the app, else `claude`
+    on PATH, else one in the maker's standard places (providers_install)."""
+    from brindle import providers_install
+
+    explicit = os.environ.get("BRINDLE_CLAUDE_BIN") or providers_install.selected("claude")
+    if explicit:
+        return explicit
+    return "claude" if which_cli("claude") else providers_install.found("claude") or "claude"
+
+
+def claude_config_dir() -> str:
+    """The config folder brindle runs Claude Code with (provider_homes):
+    brindle's own once it is in use, else ``$CLAUDE_CONFIG_DIR`` or ~/.claude."""
+    from brindle import provider_homes
+
+    return str(provider_homes.effective_home("claude"))
+
+
+def codex_home() -> str:
+    """The ``CODEX_HOME`` brindle runs Codex with (provider_homes): brindle's
+    own once it is in use, else the environment's or ~/.codex."""
+    from brindle import provider_homes
+
+    return str(provider_homes.effective_home("codex"))
 
 
 def claude_global_config() -> str:
     """Claude Code's global state file, where it records trusted folders:
-    ``$CLAUDE_CONFIG_DIR/.claude.json``, else ``~/.claude.json``."""
-    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    ``.claude.json`` in its config folder when that is moved (brindle's own,
+    or ``$CLAUDE_CONFIG_DIR``), else ``~/.claude.json``."""
+    from brindle import provider_homes
+
+    config = provider_homes.launch_env("claude").get("CLAUDE_CONFIG_DIR") or os.environ.get("CLAUDE_CONFIG_DIR")
     return os.path.join(config, ".claude.json") if config else os.path.expanduser("~/.claude.json")
 
 
@@ -309,6 +349,39 @@ def approve_api_key(api_key: str) -> str:
     return config
 
 
+def claude_onboarded() -> bool:
+    """Whether Claude Code has been through its first-run screens here (theme,
+    security notes): ``hasCompletedOnboarding`` in its global config."""
+    try:
+        return _read_json(os.path.realpath(claude_global_config())).get("hasCompletedOnboarding") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def record_claude_onboarding() -> str:
+    """Record that the person went through Claude Code's first-run screens,
+    as Claude Code records it (``hasCompletedOnboarding``), with its theme
+    left as they set it or the CI default. Only after the person confirmed
+    its security notes in the app: brindle never acknowledges them for
+    anyone. Returns the file's path; raises OSError or ValueError."""
+    config = os.path.realpath(claude_global_config())
+    os.makedirs(os.path.dirname(config), mode=0o700, exist_ok=True)
+    with _config_lock():
+        try:
+            data = _read_json(config)
+            import stat
+
+            mode = stat.S_IMODE(os.stat(config).st_mode)
+        except FileNotFoundError:
+            data, mode = {}, 0o600
+        if not isinstance(data, dict):
+            raise ValueError(f"{config} doesn't hold a JSON object")
+        data["hasCompletedOnboarding"] = True
+        data.setdefault("theme", CI_THEME)
+        _replace_json(config, data, mode)
+    return config
+
+
 # Where Claude Code reads its org-managed settings (its documented system
 # paths); BRINDLE_CLAUDE_MANAGED_SETTINGS (os.pathsep-separated) replaces them.
 MANAGED_SETTINGS_PATHS = (
@@ -349,9 +422,10 @@ def claude_org_managed() -> str | None:
     return None
 
 
-def _config_lock():
-    """The brindle lock around every write to Claude Code's global state, so
-    two brindle processes can't drop each other's change."""
+def _config_lock(name: str = "claude-trust.lock"):
+    """The brindle lock around every write to Claude Code's global state (or,
+    by ``name``, another CLI's), so two brindle processes can't drop each
+    other's change."""
     import contextlib
     import fcntl
 
@@ -361,7 +435,7 @@ def _config_lock():
     def held():
         lock_dir = brindle_home() / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        with open(lock_dir / "claude-trust.lock", "a+") as lock:
+        with open(lock_dir / name, "a+") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 yield
@@ -396,11 +470,14 @@ def _write_trust(config: str, key: str) -> bool:
 def _replace_json(config: str, data: dict, mode: int) -> None:
     """Write ``data`` over ``config`` atomically with ``mode``, through a temp
     file beside it that never has a wider mode and is always removed."""
+    _replace_text(config, json.dumps(data, indent=2), mode)
+
+
+def _replace_text(config: str, text: str, mode: int) -> None:
     import uuid
 
     tmp = f"{config}.brindle-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     try:
-        text = json.dumps(data, indent=2)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
@@ -485,7 +562,7 @@ class ClaudeCode(Provider):
         # (also what /hooks writes) turns off from any settings file Claude
         # Code loads, as does a managed allowManagedHooksOnly. --setting-sources
         # limits which of the person's own files it loads; managed ones always count.
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = claude_config_dir()
         files = [(p, ("disableAllHooks", "allowManagedHooksOnly")) for p in managed_settings_paths()]
         sources = {"user": [os.path.join(config, "settings.json")]}
         if cwd:
@@ -519,12 +596,12 @@ class ClaudeCode(Provider):
         was never saved exits at once with "No conversation found"."""
         import glob
 
-        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        config = claude_config_dir()
         return bool(glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(session_id)}.jsonl")))
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
     @staticmethod
-    def _hook(event: str, agent_id: str, waiter: bool = False) -> list[dict]:
+    def _hook(event: str, agent_id: str, waiter: bool = False, timeout: int | None = None) -> list[dict]:
         # The agent's id (and where brindle keeps its state) go in the command
         # itself, not just the pane's environment: Claude Code may run the
         # session in a process its background daemon started earlier, whose
@@ -536,7 +613,7 @@ class ClaudeCode(Provider):
             return assigns + " ".join(shlex.quote(a) for a in
                                       [*brindle_invocation(), "_hook", name, "--agent", agent_id])
 
-        hooks = [{"type": "command", "command": command(event)}]
+        hooks = [{"type": "command", "command": command(event), **({"timeout": timeout} if timeout else {})}]
         if waiter:
             # An interactive chat also gets brindle's mail through a
             # background waiter that wakes the model (brindle.wake), not
@@ -589,8 +666,11 @@ class ClaudeCode(Provider):
                 # When a tool would prompt, brindle's permission policy (off
                 # unless permission_policy is "on"; see brindle.permissions)
                 # may answer allow or deny from the structured request; no
-                # answer leaves the prompt to the person.
-                "PermissionRequest": self._hook("permission-request", ctx.agent_id),
+                # answer leaves the prompt to the person. While the app is
+                # open it holds the request for the app's answer for the
+                # repo's permission_hold_seconds: Claude Code must let it.
+                "PermissionRequest": self._hook("permission-request", ctx.agent_id,
+                                                timeout=_permission_hook_timeout(ctx.cwd)),
             },
             # Claude Code only tells status lines how much of the plan's usage
             # is spent. brindle's records that, then runs the person's own
@@ -666,8 +746,9 @@ class ClaudeCode(Provider):
         model = company_login.claude_model(p.model, ctx.cwd)
         if model:
             argv += ["--model", model]
-        if ctx.profile.permission_mode:
-            argv += ["--permission-mode", ctx.profile.permission_mode]
+        from brindle import config as user_config
+
+        argv += ["--permission-mode", ctx.profile.permission_mode or user_config.claude_permission_mode()]
         if ctx.session_id and not ctx.resume:
             argv += ["--session-id", ctx.session_id]
         if ctx.resume:
@@ -917,11 +998,14 @@ def which_cli(name: str) -> str | None:
 
 
 def codex_binary() -> str:
-    """BRINDLE_CODEX_BIN, else `codex` on PATH, else the ChatGPT app's copy."""
+    """BRINDLE_CODEX_BIN, else the install picked in the app, else `codex` on
+    PATH, else one in the maker's standard places or the ChatGPT app's copy."""
+    from brindle import providers_install
+
     explicit = os.environ.get("BRINDLE_CODEX_BIN")
     if explicit:
         return explicit
-    return which_cli("codex") or (CODEX_BUNDLED if os.path.exists(CODEX_BUNDLED) else "codex")
+    return providers_install.found("codex") or "codex"
 
 
 
@@ -988,7 +1072,10 @@ def subscription_login(provider: str = "claude") -> bool:
     provider's environment credentials left out so a key can't stand in for it."""
     if provider != "claude":
         return False
-    env = {k: v for k, v in os.environ.items() if k not in _ENV_AUTH["claude"]}
+    from brindle import provider_homes
+
+    env = {**{k: v for k, v in os.environ.items() if k not in _ENV_AUTH["claude"]},
+           **provider_homes.launch_env("claude")}
     res = _auth_probe([claude_binary(), "auth", "status"], env)
     if not res:
         return False
@@ -1082,7 +1169,7 @@ def codex_auth_path() -> str:
     override = os.environ.get("BRINDLE_CODEX_AUTH")
     if override:
         return os.path.expanduser(override)
-    return os.path.join(os.path.expanduser(os.environ.get("CODEX_HOME") or "~/.codex"), "auth.json")
+    return os.path.join(codex_home(), "auth.json")
 
 
 def codex_chatgpt_login() -> bool:
@@ -1097,6 +1184,97 @@ def codex_chatgpt_login() -> bool:
     mode = data.get("auth_mode") if isinstance(data, dict) else None
     del data
     return mode == "chatgpt"
+
+
+def codex_config_path() -> str:
+    return os.path.join(codex_home(), "config.toml")
+
+
+def codex_trust(repo_root: str) -> str | None:
+    """Codex's recorded trust for ``repo_root``: its ``trust_level`` under
+    ``[projects."<path>"]`` in config.toml (Codex keys a worktree by its main
+    repository, symlinks resolved), or None when it has none. Raises
+    ValueError when the file doesn't parse."""
+    import tomllib
+
+    try:
+        with open(codex_config_path(), "rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return None
+    projects = data.get("projects")
+    entry = projects.get(os.path.realpath(repo_root)) if isinstance(projects, dict) else None
+    return entry.get("trust_level", "") if isinstance(entry, dict) else None
+
+
+def _toml_header_is(line: str, path: tuple[str, ...]) -> bool:
+    """Whether ``line`` is a TOML table header naming ``path``, however it's
+    quoted or commented (``[projects.'/repo'] # mine``)."""
+    import tomllib
+
+    if not line.lstrip().startswith("[") or line.lstrip().startswith("[["):
+        return False
+    try:
+        data = tomllib.loads(line)
+    except ValueError:
+        return False
+    for part in path:
+        if not isinstance(data, dict) or list(data) != [part]:
+            return False
+        data = data[part]
+    return data == {}
+
+
+def trust_codex_project(repo_root: str, *, override: bool = False) -> bool:
+    """Record ``repo_root`` as trusted in Codex's config.toml, as its "Trust
+    this folder?" screen does, so a session never opens on that screen. A
+    repo Codex has no answer for gets one (the answer Codex.after_launch gives
+    anyway for a repo the person started brindle in); a different answer the
+    person gave Codex is kept unless ``override`` (they chose to trust it in
+    the app). Edits only that one value, and writes only when the result
+    parses to exactly the old config plus it. Returns whether it's trusted
+    now; leaves a missing Codex home alone."""
+    import stat
+    import tomllib
+
+    path, key = codex_config_path(), os.path.realpath(repo_root)
+    if not os.path.isdir(os.path.dirname(path)):
+        return False
+    with _config_lock("codex-trust.lock"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            text, mode = "", 0o600
+        old = tomllib.loads(text)
+        projects = old.get("projects") if isinstance(old.get("projects"), dict) else {}
+        entry = projects.get(key)
+        if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
+            return True
+        if isinstance(entry, dict) and "trust_level" in entry and not override:
+            return False
+        lines = text.splitlines()
+        at = next((i + 1 for i, line in enumerate(lines) if _toml_header_is(line, ("projects", key))), None)
+        if at is not None:
+            end = next((i for i in range(at, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+            body = [i for i in range(at, end) if re.match(r"\s*trust_level\s*=", lines[i])]
+            if body:
+                lines[body[0]] = 'trust_level = "trusted"'
+            else:
+                lines.insert(at, 'trust_level = "trusted"')
+            new = "\n".join(lines) + "\n"
+        else:
+            new = ((text if not text or text.endswith("\n") else text + "\n")
+                   + f'\n[projects.{json.dumps(key)}]\ntrust_level = "trusted"\n')
+        want = {**old, "projects": {**projects, key: {**(entry or {}), "trust_level": "trusted"}}}
+        try:
+            if tomllib.loads(new) != want:
+                return False
+        except ValueError:
+            return False
+        _replace_text(path, new, mode)
+    return True
 
 
 # Checked on Codex CLI 0.162.0 signed in with ChatGPT: the interactive TUI (what
@@ -1211,11 +1389,14 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     CLI opens on its login screen, and the prompt brindle types in lands there.
     ``env`` is a profile's ``env.NAME: value`` lines: the agent runs with them
     over brindle's own environment, so a key set there counts, and the probe
-    sees them too."""
-    full_env = {**os.environ, **env} if env else os.environ
+    sees them too, as it sees brindle's config home for the CLI (provider_homes)."""
+    from brindle import provider_homes
+
+    homes = provider_homes.launch_env(provider)
+    full_env = {**os.environ, **homes, **(env or {})}
     if any(full_env.get(k) for k in _ENV_AUTH.get(provider, ())):
         return None
-    key = _signed_in_key(provider, env)
+    key = _signed_in_key(provider, {**homes, **(env or {})} or None)   # an answer is the home's it was asked in
     seen = _SIGNED_IN.get(key)
     inv = _last_invalidated(provider)
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
@@ -1279,8 +1460,10 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
     ``env`` is a profile's own environment, as for signed_out."""
     import shutil
 
-    from brindle import antigravity, opencode
+    from brindle import antigravity, opencode, providers_install
 
+    if providers_install.turned_off(provider):
+        return f"{provider} is turned off in brindle"
     binary = {"claude": claude_binary, "codex": codex_binary,
               "antigravity": antigravity.binary, "opencode": opencode.binary}.get(provider)
     if binary:
@@ -1752,7 +1935,7 @@ def get_provider(name: str) -> Provider:
 def _own_status_line(project_dir: str | None) -> str | None:
     """The status line command the person configured for Claude Code, if any:
     project settings first, then user settings (as Claude Code orders them)."""
-    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    config = claude_config_dir()
     candidates = []
     if project_dir:
         candidates += [os.path.join(project_dir, ".claude", "settings.local.json"),

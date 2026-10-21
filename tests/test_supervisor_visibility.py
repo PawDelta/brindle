@@ -60,16 +60,16 @@ def test_last_activity_claude_transcript(tmp_path):
     t.write_text("\n".join(json.dumps(x) for x in lines) + "\n{broken")
     old = time.time() - 40
     os.utime(t, (old, old))
-    out = mcp_server._last_activity(SimpleNamespace(transcript_path=str(t)))
+    out = view.last_activity(SimpleNamespace(transcript_path=str(t)))
     assert out.startswith(" last: WebFetch 4") and out.endswith("s ago")
 
 
 def test_last_activity_native_and_missing(tmp_path):
     t = tmp_path / "n.jsonl"
     t.write_text(json.dumps({"type": "assistant", "tool_calls": [{"name": "bash"}]}) + "\n")
-    assert " last: bash " in mcp_server._last_activity(SimpleNamespace(transcript_path=str(t)))
-    assert mcp_server._last_activity(SimpleNamespace(transcript_path=None)) == ""
-    assert mcp_server._last_activity(SimpleNamespace(transcript_path=str(tmp_path / "no"))) == ""
+    assert " last: bash " in view.last_activity(SimpleNamespace(transcript_path=str(t)))
+    assert view.last_activity(SimpleNamespace(transcript_path=None)) == ""
+    assert view.last_activity(SimpleNamespace(transcript_path=str(tmp_path / "no"))) == ""
 
 
 def test_list_agents_marks_stale_progress(db, tmp_path, monkeypatch):

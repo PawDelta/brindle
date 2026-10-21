@@ -1078,21 +1078,8 @@ class ProPolicy(PolicyPlugin):
             return deny(f"{who} uses {got}; org {p.org_id} allows only "
                         f"{', '.join(p.allowed_providers) or 'no providers'}")
         if p.allowed_models is not None:
-            from brindle import pricing
-            norm_model = pricing.normalize(info.model) if info.model else None
-            norm_allowed = {pricing.normalize(m) for m in p.allowed_models}
-            route = None
-            if p.agent_setup and p.agent_setup.claude and info.provider == "claude":
-                from brindle import company_login, providers
-
-                # only a route a Claude pane gets: see company_login.claude_model
-                if not providers.claude_org_managed() and company_login.route_in_use(p.org_id, p.agent_setup):
-                    route = p.agent_setup.claude
-            # an alias the org's Claude route pins runs as that route id
-            pinned = getattr(route.models, info.model, None) \
-                if route and route.models and info.model in ("opus", "sonnet", "haiku") else None
-            if norm_model not in norm_allowed and info.model not in p.allowed_models \
-                    and not (pinned and pinned in p.allowed_models):
+            route = claude_route(p.org_id, p.agent_setup, info.provider)
+            if not model_allowed(p.allowed_models, info.model, pinned_model(route, info.model)):
                 got = f"model {info.model!r}" if info.model else "no declared model"
                 fix = (f"it is the default model of org {p.org_id}'s Claude route; an org admin must change "
                        "agent_setup" if route and info.model and info.model == route.default_model
@@ -1123,6 +1110,38 @@ class ProPolicy(PolicyPlugin):
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "antigravity": "Google Antigravity", "opencode": "OpenCode"}
 
 
+def claude_route(org_id: str | None, setup: AgentSetup | None, provider: str | None) -> ClaudeSetup | None:
+    """The org's Claude route a ``provider`` pane runs on, or None: only a
+    route a Claude pane gets (see company_login.claude_model)."""
+    if not (setup and setup.claude and provider == "claude"):
+        return None
+    from brindle import company_login, providers
+
+    if providers.claude_org_managed() or not company_login.route_in_use(org_id, setup):
+        return None
+    return setup.claude
+
+
+def pinned_model(route: ClaudeSetup | None, model: str | None) -> str | None:
+    """The route id an alias (opus, sonnet, haiku) runs as when ``route`` pins it, or None."""
+    if route is None or route.models is None or model not in ("opus", "sonnet", "haiku"):
+        return None
+    return getattr(route.models, model, None)
+
+
+def model_allowed(allowed: tuple[str, ...] | None, model: str | None, pinned: str | None = None) -> bool:
+    """Whether ``allowed`` (an org's allowed_models; None: any) lets a worker
+    run ``model``: the model itself, matched as pricing normalizes it, or the
+    route id its alias is ``pinned`` to, matched exactly."""
+    if allowed is None:
+        return True
+    from brindle import pricing
+
+    if model and (model in allowed or pricing.normalize(model) in {pricing.normalize(m) for m in allowed}):
+        return True
+    return bool(pinned) and pinned in allowed
+
+
 @dataclass(frozen=True)
 class Access:
     """The CLIs, models and profiles this person may use here: the org's
@@ -1139,6 +1158,19 @@ class Access:
     deny_personal_keys: bool = False
     unrouted: dict = field(default_factory=dict)        # CLI -> why the managed routing refuses it
     error: str | None = None
+    agent_setup: AgentSetup | None = None               # its Claude route may pin an alias to an allowed id
+
+    def pinned(self, provider: str | None, model: str | None) -> str | None:
+        """The route id the org's Claude route pins ``model`` (an alias) to, or None."""
+        return pinned_model(claude_route(self.org_id, self.agent_setup, provider), model)
+
+    def route_model(self, provider: str | None, model: str | None) -> str | None:
+        """The model a ``provider`` worker on ``model`` runs as: its pinned route id, else ``model``."""
+        return self.pinned(provider, model) or model
+
+    def allows_run(self, provider: str | None, model: str | None) -> bool:
+        """Whether ``model`` may be used by ``provider``: check_assign's test (:func:`model_allowed`)."""
+        return not self.error and model_allowed(self.allowed_models, model, self.pinned(provider, model))
 
     def refusal(self, provider: str) -> str | None:
         """Why this person may not run ``provider``'s CLI, or None."""
@@ -1154,20 +1186,13 @@ class Access:
 
     def allows_model(self, model: str | None) -> bool:
         """Whether ``model`` may be used, by check_assign's matching."""
-        if self.error:
-            return False
-        if self.allowed_models is None:
-            return True
-        from brindle import pricing
-
-        return bool(model) and (model in self.allowed_models or pricing.normalize(model)
-                                in {pricing.normalize(m) for m in self.allowed_models})
+        return not self.error and model_allowed(self.allowed_models, model)
 
     def allows_profile(self, profile: str, provider: str | None, model: str | None) -> bool:
         """Whether a worker on ``profile`` (which runs ``provider``'s ``model``,
         as ``policy._profile_fields`` resolves them) may start: check_assign's
         provider, model and profile tests."""
-        return (bool(provider) and self.allows(provider) and self.allows_model(model)
+        return (bool(provider) and self.allows(provider) and self.allows_run(provider, model)
                 and (self.allowed_profiles is None or profile in self.allowed_profiles))
 
     def clis(self) -> list[str]:
@@ -1203,7 +1228,7 @@ def access(repo_root: str | None) -> Access:
     deny_keys = m.deny_personal_keys if m is not None else p.deny_personal_keys
     return Access(org_id=p.org_id, allowed_providers=p.allowed_providers,
                   allowed_models=p.allowed_models, allowed_profiles=p.allowed_profiles,
-                  deny_personal_keys=deny_keys, unrouted=unrouted)
+                  deny_personal_keys=deny_keys, unrouted=unrouted, agent_setup=p.agent_setup)
 
 
 def make(repo_root: str) -> ProPolicy:
