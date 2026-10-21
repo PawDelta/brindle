@@ -213,6 +213,51 @@ def _last_activity(a: Agent) -> str:
 DEFAULT_WAIT_SECONDS = 240
 
 
+# A hint for supervisors, not a status transition: a long tool can also be quiet.
+STALL_AFTER_SECONDS = 180
+
+
+def _stall_indicator(db: DB, a: Agent) -> str:
+    """Flag busy agents with no recorded activity for three minutes.
+
+    Use the same provider-aware transcripts as token accounting, including
+    subagents. Their mtimes move for tools as well as token output. Only fall
+    back to pane activity when no transcript is available: spinner redraws
+    must not hide a stalled turn. No signal means no claim about progress.
+    """
+    from brindle import identity_lock, tmux, usage
+
+    if (a.status not in ("processing", "starting", "unknown")
+            or a.result is not None or a.dismissed_at is not None):
+        return ""
+    if identity_lock.locked_by(a.id):
+        return ""
+    last = None
+    try:
+        paths = usage.agent_transcripts(db, a)
+    except OSError:
+        paths = []  # discovery can race with a session being removed
+    for path in paths:
+        try:
+            modified = path.stat().st_mtime
+        except OSError:
+            continue  # a transcript may disappear during cleanup
+        last = max(last or modified, modified)
+    if last is None and a.tmux_window and not a.headless:
+        try:
+            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        except tmux.TmuxError:
+            pass  # an unavailable server is not evidence of a stalled worker
+    if last is None:
+        return ""
+    # A resumed turn gets its own grace period even before its first output.
+    last = max(last, a.status_since or a.created_at)
+    quiet = time.time() - last
+    if quiet < STALL_AFTER_SECONDS:
+        return ""
+    return f" no progress for {int(quiet // 60)} min"
+
+
 def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
     """Wait a bounded time for a handoff worker. Tool calls must stay short:
     MCP clients time out long calls, and a timed-out call would strand the
@@ -705,7 +750,7 @@ def list_agents(repo: str | None = None) -> str:
                     pass
                 lines.append(
                     f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
-                    f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}"
+                    f"ws={ws.id} branch={ws.branch}{usage_str}{_last_activity(a)}{_stall_indicator(db, a)}"
                     + (f" review={state}" if piped is not None and a.id == piped.id else "")
                 )
         return "\n".join(lines) or "No agents."
@@ -1060,8 +1105,9 @@ def submit_review(approved: bool, summary: str) -> str:
 @mcp.tool()
 def remove_workspace(workspace: str, delete_branch: bool | None = None, force: bool = False,
                      repo: str | None = None) -> str:
-    """Remove a workspace's worktree and stop its agents (repo: look it up
-    in that attached repo; a workspace id works without it). By default the
+    """Remove a workspace's worktree and stop its agents. workspace accepts
+    an agent id, workspace id, workspace name or branch name (repo: look it
+    up in that attached repo; ids work without it). By default the
     branch is deleted once it is fully merged into its base (the repo's
     delete_merged_branches) and kept otherwise; delete_branch=false always
     keeps it, delete_branch=true deletes it (only if merged, unless force).
@@ -1071,9 +1117,13 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
     db = DB()
     caller, _ = _caller(db)
     try:
-        ws = _ws(db, workspace, repo)
+        agent = db.get_agent(workspace)
+        ws = _ws(db, agent.workspace_id if agent else workspace, repo)
     except repos.RepoError as e:
         return str(e)
+    except workspaces.WorkspaceError as e:
+        return (f"Not removed: {e}. workspace accepts an agent id, workspace id, "
+                "workspace name or branch name.")
     if not force:
         # Refuse before any notification or task cancellation goes out.
         for other in db.workspaces_sharing(ws.repo_root, path=ws.path, exclude_id=ws.id):
