@@ -132,6 +132,36 @@ def test_dropping_a_session_still_closes_its_own_leftover_window(db, root):
     assert not tmux.window_alive(pane)
 
 
+def test_failed_but_running_session_survives_retention(db, tmp_path, monkeypatch):
+    """A chat marked "failed" (its brief's delivery unconfirmed, an auth
+    error on a turn) keeps running. Retention once took it for a paused
+    session past KEEP: it closed the live chat's window, removed its worktree
+    and deleted its records."""
+    from brindle import pool
+    from brindle.db import Workspace
+
+    repo = str(tmp_path / "proj")
+    for wid, name, kind in [("proj/root", "root", "main"), ("proj/session-2", "session-2", "worktree")]:
+        db.add_workspace(Workspace(wid, repo, name, kind, name, "main", f"{repo}/{name}", None,
+                                   f"brindle-{name}", time.time()))
+    root = db.get_workspace("proj/root")
+    add(db, db.get_workspace("proj/session-2"), "live", status="failed", since=1000)
+    db.update_agent("live", tmux_window="%9")
+    for i in range(3):
+        add(db, root, f"s{i}", since=2000 + i)
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes["%9"] = True
+    panes.tags["%9"] = {agents.AGENT_TAG: "live"}
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    killed, removed = [], []
+    monkeypatch.setattr(tmux, "kill_window", killed.append)
+    monkeypatch.setattr(workspaces, "remove", lambda db_, ws, **kw: removed.append(ws.id))
+    monkeypatch.setattr(pool, "fill_in_background", lambda repo_root: None)
+
+    assert sessions.enforce(db, repo, now=2100) == 0
+    assert db.get_agent("live") is not None and killed == [] and removed == []
+
+
 def test_continue_picker_resumes_chosen(db, root, monkeypatch):
     from brindle import cli, picker
 

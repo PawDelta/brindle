@@ -40,10 +40,20 @@ class Session:
 
 
 def paused(db: DB, repo_root: str) -> list[Session]:
-    """Paused sessions whose chat ran in ``repo_root``, newest first."""
+    """Paused sessions whose chat ran in ``repo_root``, newest first. A
+    "failed" chat whose pane is still running isn't one: that status also
+    marks a live chat (a brief whose delivery wasn't confirmed, an auth error
+    on one turn), and dropping it (see enforce) would close it mid-session."""
     out = []
+    panes = owners = None
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
+            if a.mode == "interactive" and a.status == "failed":
+                if panes is None:
+                    panes = tmux.list_panes()
+                    owners = agents.pane_owners(db, panes)
+                if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners):
+                    continue
             if a.mode == "interactive" and a.status in ("paused", "failed"):
                 members = agents.tree(db, a.id)
                 branches = []
