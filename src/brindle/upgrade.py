@@ -78,6 +78,23 @@ class InstallWatch:
         return self._changed
 
 
+install = InstallWatch()    # this process's code is the install as of its start
+on_stale_launch = None      # the daemon sets this to start its clean shutdown
+
+
+class StaleInstall(Exception):
+    pass
+
+
+def check_launch() -> None:
+    """Called before an agent launches. A process that can restart itself (the
+    daemon) starts doing so and refuses the launch; one that can't (the MCP
+    server) carries on and tells its client instead."""
+    if on_stale_launch is not None and install.changed():
+        on_stale_launch()
+        raise StaleInstall("brindle was updated; it is restarting on the new version, try again in a moment")
+
+
 def reexec() -> None:
     """Replace this process with a fresh run of the same brindle command, from
     the install as it is now. Never returns."""

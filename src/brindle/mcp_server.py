@@ -23,7 +23,6 @@ MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
 
 STALE_NOTICE = "brindle was updated since this session started; run /mcp to reconnect"
-_install = upgrade.InstallWatch()    # this server's code is the install as of its start
 
 
 def _calling_agent() -> Agent | None:
@@ -37,11 +36,16 @@ class _Server(MCPServer):
     coordinator's allowlist is enforced here, never left to its prompt."""
 
     async def call_tool(self, name, arguments, context=None):
-        refused = coordinator.refusal(_calling_agent(), name)
-        if refused:
-            raise ToolError(refused)
-        result = await super().call_tool(name, arguments, context)
-        if _install.changed() and hasattr(result, "content"):
+        try:
+            refused = coordinator.refusal(_calling_agent(), name)
+            if refused:
+                raise ToolError(refused)
+            result = await super().call_tool(name, arguments, context)
+        except ToolError as e:
+            if upgrade.install.changed():
+                raise ToolError(f"{e}\n{STALE_NOTICE}") from e
+            raise
+        if upgrade.install.changed() and hasattr(result, "content"):
             result.content.append(TextContent(type="text", text=STALE_NOTICE))
         return result
 
