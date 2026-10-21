@@ -14,15 +14,18 @@ their agents and commands folders (Codex: prompts). Nothing else: no
 settings.json, config.toml or MCP config, nothing with hooks, commands or
 env, no credential or token file, no Keychain entry. brindle's homes start
 from each CLI's defaults plus brindle's own flags, and the person signs in
-through the CLI's own login inside brindle. A source path with a link in it
-anywhere (the folder itself, a folder under it, the file) is never copied,
-and only regular files are read, without following links. After that one
+through the CLI's own login inside brindle. The person's config folder is
+resolved once (a dotfile manager may link ~/.claude itself); below it, a path
+with a link anywhere (a folder, the file) is never copied, nor is a file or
+folder named like a credential, and only regular files are read, without
+following links. The Markdown is copied as it is, unscanned. After that one
 copy, brindle's changes stay in brindle's copy."""
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 import sys
 import threading
@@ -122,14 +125,21 @@ def _copy(src: Path, dest: Path, rel: str) -> None:
         target.write_bytes(raw)
 
 
+# A file or folder named like a credential is never copied, whatever it holds.
+SECRET_NAME = re.compile(r"(?i)(token|key|secret|passw|auth|credential|bearer|cookie|^\.env)")
+
+
 def _markdown(src: Path, folder: str) -> list[str]:
-    """The ``*.md`` files under ``src/folder``, relative to ``src``; links aren't entered."""
+    """The ``*.md`` files under ``src/folder``, relative to ``src``; links and
+    credential-named files and folders are left out."""
     if not _no_links(src, folder) or not (src / folder).is_dir():
         return []
     out = []
     for dirpath, dirnames, filenames in os.walk(src / folder, followlinks=False):
-        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
-        out += [os.path.relpath(os.path.join(dirpath, n), src) for n in filenames if n.endswith(".md")]
+        dirnames[:] = [d for d in dirnames
+                       if not os.path.islink(os.path.join(dirpath, d)) and not SECRET_NAME.search(d)]
+        out += [os.path.relpath(os.path.join(dirpath, n), src) for n in filenames
+                if n.endswith(".md") and not SECRET_NAME.search(n)]
     return sorted(out)
 
 
@@ -139,7 +149,8 @@ def ensure(provider: str) -> bool:
     where = home(provider)
     if where is None:
         return False
-    src = source(provider)
+    # Resolved once: a dotfile manager may link ~/.claude itself. Below it, no link is followed.
+    src = Path(os.path.realpath(source(provider)))
     with _lock:
         if (where / MARKER).exists():
             return False

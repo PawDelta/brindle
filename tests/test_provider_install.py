@@ -140,12 +140,14 @@ def test_a_second_install_press_gets_the_running_job(machine, db, monkeypatch, t
 
 def test_only_instructions_and_markdown_are_copied_once_and_never_through_a_link(machine, tmp_path, monkeypatch):
     home, _ = machine
-    src, brindle_home = home / ".claude", tmp_path / "brindle-claude"
+    src, brindle_home = tmp_path / "dotfiles" / "claude", tmp_path / "brindle-claude"
     monkeypatch.delenv("CLAUDE_CONFIG_DIR")
     monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(brindle_home))
     (src / "commands").mkdir(parents=True)
+    (home / ".claude").symlink_to(src, target_is_directory=True)           # a dotfile manager's link: fine
     (src / "CLAUDE.md").write_text("house rules")
     (src / "commands" / "review.md").write_text("review the diff")
+    (src / "commands" / "api-token.md").write_text("fixture-named-like-a-credential")
     (src / "settings.json").write_text('{"env": {"ANTHROPIC_API_KEY": "fixture-key"}}')
     (src / ".credentials.json").write_text('{"token": "fixture-file"}')
     (src / "commands" / "notes.md").symlink_to(src / ".credentials.json")    # a linked file
