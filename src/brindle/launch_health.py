@@ -199,7 +199,9 @@ def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
         # Match Codex's own row markers, not bare keyboard-help prose.
         if re.fullmatch(r"• Working \([^\n]*[Ee]sc to interrupt\)", line):
             return True
-        if re.match(r"^• (?:Ran|Edited) \S", line):
+        # Any fresh bullet is the model's own output after the brief: tool
+        # rows (Ran, Edited, Explored...) or analysis, with or without Working.
+        if re.match(r"^• \S", line):
             return True
     return False
 
@@ -274,13 +276,25 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
                 else:
                     break
             tmux.paste(fresh.tmux_window, text, lead=lead, server=agents.server_of(fresh))
-    if not db.conn.execute("UPDATE launch_health SET outcome='delivery-failed' WHERE agent_id=? AND token=? "
-                           "AND delivered_at IS NULL AND outcome IS NULL", (agent.id, token)).rowcount:
+    asking = provider.tool_permission(screen)
+    if not db.conn.execute("UPDATE launch_health SET outcome=? WHERE agent_id=? AND token=? "
+                           "AND delivered_at IS NULL AND outcome IS NULL",
+                           ("awaiting-approval" if asking else "delivery-failed", agent.id, token)).rowcount:
         return
-    db.update_agent(agent.id, status="failed")
-    body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
-            "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
-            "Check its pane and restart the worker; this is not a startup prompt.")
+    if asking:
+        # A tool approval only exists inside a running turn: never fail the worker.
+        from brindle import prompt_answer
+        plain = prompt_answer.plain(screen).splitlines()
+        at = next((i for i, line in enumerate(plain) if prompt_answer.TOOL_PERMISSION.search(line)
+                   or "Would you like to" in line), None)
+        asked = " ".join(" ".join(plain[at + 1:at + 6]).split())[:300] if at is not None else ""
+        body = (f"Worker {agent.id} is working but waiting at an approval prompt"
+                + (f": {asked}" if asked else "") + ". Answer it in its pane; the brief was not lost.")
+    else:
+        db.update_agent(agent.id, status="failed")
+        body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
+                "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
+                "Check its pane and restart the worker; this is not a startup prompt.")
     try:
         agents.send_message(db, agent.parent_id, body)
     except agents.AgentError:

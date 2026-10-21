@@ -925,6 +925,36 @@ def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypa
     assert bool(cleared) == bool(stale or draft)
 
 
+APPROVAL_PROMPT = """\
+  Would you like to run the following command?
+
+  $ uv run pytest tests/test_feature.py -q
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for this command (p)
+  3. No, and tell Codex what to do differently (esc)
+"""
+
+
+@pytest.mark.parametrize("brief_visible", [True, False])
+def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, health, monkeypatch, brief_visible):
+    lh, a, _, _, _, reports = health
+    # #240: earlier tool output and analysis above an approval prompt, no Working row.
+    head = (f"› {a.task}\n\n• Explored\n  └ Read feature.py\n\n• The change looks small; running its tests.\n\n"
+            if brief_visible else "")
+    screen = head + APPROVAL_PROMPT
+    monkeypatch.setattr(lh, "capture", lambda a: screen)
+    monkeypatch.setattr(tmux, "paste", lambda *a, **k: pytest.fail("brief submitted twice"))
+    lh.verify_delivery(db, a, a.task)
+    lh.verify_pending(db, a.id, a._launch_health_token)
+    row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
+    assert db.get_agent(a.id).status != "failed"
+    assert (row["delivered_at"] is not None) == brief_visible
+    assert row["outcome"] == (None if brief_visible else "awaiting-approval")
+    assert bool(reports) != brief_visible
+    assert brief_visible or "uv run pytest tests/test_feature.py" in reports[0][1]
+
+
 @pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])
 def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, started, clears):
     from brindle import prompt_answer
