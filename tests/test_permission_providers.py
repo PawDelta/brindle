@@ -2,6 +2,7 @@
 payloads as brindle Requests, their answers, the one-time Codex hook trust, and
 the copy of brindle's rules kept in agy's own settings."""
 
+import hashlib
 import json
 import os
 import time
@@ -334,12 +335,14 @@ class FakeAppServer:
     def call(self, method, params):
         FakeAppServer.calls.append((method, params))
         config = codex_hook.codex_home() / "config.toml"
-        trusted = config.exists() and "sha256:abc" in config.read_text()
+        # Like Codex's, the hash covers the hook's whole definition (command, timeout).
+        current = "sha256:" + hashlib.sha256(self.flags[1].encode()).hexdigest()
+        trusted = config.exists() and current in config.read_text()
         if method == "hooks/list":
             command = json.loads(self.flags[1].split("command=", 1)[1].split(",timeout=")[0])
             return {"data": [{"cwd": "/", "errors": [], "warnings": [], "hooks": [{
                 "key": "/<session-flags>/config.toml:permission_request:0:0", "source": "sessionFlags",
-                "command": command, "currentHash": "sha256:abc",
+                "command": command, "currentHash": current,
                 "trustStatus": "trusted" if trusted else "untrusted"}]}]}
         if method == "config/batchWrite":
             [edit] = params["edits"]
@@ -369,17 +372,19 @@ def test_install_codex_hook_dry_run_then_yes(monkeypatch):
     assert res.exit_code == 0, res.output
     assert "trusted" in res.output
     rec = permissions.load_store().codex_hook
+    flag = codex_hook.config_flags()[1]
     assert rec == {"command": codex_hook.hook_command(),
-                   "key": "/<session-flags>/config.toml:permission_request:0:0", "hash": "sha256:abc"}
+                   "key": "/<session-flags>/config.toml:permission_request:0:0",
+                   "hash": "sha256:" + hashlib.sha256(flag.encode()).hexdigest(), "definition": flag}
     assert codex_hook.trusted()
     assert "already trusted" in r.invoke(app, ["permissions", "install-codex-hook"]).output
 
 
-def launch_argv(ws):
+def launch_argv(ws, mode=None):
     from brindle.profiles import load_profile
     from brindle.providers import Codex, LaunchContext
 
-    return Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path))
+    return Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path, mode=mode))
 
 
 def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monkeypatch):
@@ -392,6 +397,34 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert a[a.index(flag) - 1] == "-c"
     assert "--agent" not in flag  # one command for every agent: one trust
     assert codex_hook.status() == codex_hook.TRUSTED
+
+
+def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatch):
+    """#239: Codex's trust covers the hook's whole definition, so a trust
+    recorded for another build's hook (same command, another timeout) is
+    renewed before a reviewer starts, not left to Codex's 'Hooks need review'."""
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    monkeypatch.setattr(codex_hook, "TIMEOUT", 86430)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))  # the other build's trust
+    monkeypatch.setattr(codex_hook, "TIMEOUT", 30)
+    flag = codex_hook.config_flags()[1]
+    assert flag in launch_argv(ws, mode="review")
+    assert codex_hook.inspect("codex").status == "trusted"  # what Codex launches with
+    (codex_hook.codex_home() / "config.toml").write_text("")  # the person takes the trust out
+    FakeAppServer.calls = []
+    assert flag not in launch_argv(ws, mode="review")
+    assert FakeAppServer.calls == [] and codex_hook.status() == codex_hook.REMOVED
+
+
+def test_supervisor_is_told_once_when_brindle_cant_trust_its_hook(db, ws):
+    turn_on(ws)  # no Codex answers here, so the hook stays untrusted
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+    reviewer = worker(db, ws, id_="r1")
+    assert codex_hook.launch_flags(ws.path) == []
+    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+    assert not codex_hook.tell_untrusted(db, reviewer, ws.path)
+    assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id='boss'").fetchone()[0] == 1
 
 
 def test_unreadable_codex_trust_never_gets_reinstalled(ws, monkeypatch):

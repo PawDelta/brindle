@@ -15,7 +15,8 @@ and only brindle's own Codex agents get it. The key is then always
 same for every agent (the hook finds its agent from ``BRINDLE_AGENT_ID``, which
 Codex passes through), so one trust covers every worktree brindle ever creates.
 A changed command (brindle installed somewhere else, a different BRINDLE_HOME)
-is a new hook to Codex.
+or timeout (another build of brindle) is a new hook to Codex, so brindle
+records the whole definition it trusted, not just the command.
 
 brindle trusts its own hook the first time a Codex agent needs it (``ensure``),
 and again after it moves, so there's no setup step; it says so once at
@@ -77,21 +78,28 @@ def hook_command() -> str:
     return assigns + " ".join(shlex.quote(a) for a in [*_stable_invocation(), "_hook", EVENT])
 
 
-def config_flags(command: str | None = None) -> list[str]:
+def config_flags(command: str | None = None, timeout: int | str | None = None) -> list[str]:
     """``-c`` arguments that give a Codex session brindle's hook."""
     command = command or hook_command()
-    hooks = f'[{{hooks=[{{type="command",command={json.dumps(command)},timeout={TIMEOUT}}}]}}]'
+    hooks = f'[{{hooks=[{{type="command",command={json.dumps(command)},timeout={timeout or TIMEOUT}}}]}}]'
     return ["-c", f"hooks.PermissionRequest={hooks}"]
+
+
+def _recorded_definition(rec: dict) -> str:
+    """The hook definition a recorded trust was for. Records from before
+    ``definition`` was kept name only the command (and maybe the timeout)."""
+    return rec.get("definition") or config_flags(rec["command"], rec.get("timeout") or 30)[1]
 
 
 TRUSTED, MOVED, NEW, REMOVED = "trusted", "moved", "new", "removed"
 
 
 def status(command: str | None = None) -> str:
-    """Where brindle's hook stands with Codex: TRUSTED (this exact command, and
-    Codex's config still says so), MOVED (trusted, but brindle's command has
-    changed since: a reinstall, another BRINDLE_HOME), NEW (never trusted) or
-    REMOVED (trusted once, then the trust was taken out of Codex's config)."""
+    """Where brindle's hook stands with Codex: TRUSTED (this exact hook, and
+    Codex's config still says so), MOVED (trusted, but brindle's hook has
+    changed since: a reinstall, another BRINDLE_HOME, another timeout), NEW
+    (never trusted) or REMOVED (trusted once, then the trust was taken out of
+    Codex's config)."""
     import tomllib
 
     from brindle import permissions
@@ -111,7 +119,9 @@ def status(command: str | None = None) -> str:
     entry = state.get(rec["key"]) if isinstance(state, dict) else None
     if not (isinstance(entry, dict) and entry.get("trusted_hash") == rec["hash"]):
         return REMOVED
-    return TRUSTED if rec["command"] == command else MOVED
+    # Codex's hash covers the whole definition, not just the command: a trust
+    # recorded for another timeout (another build of brindle) is for another hook.
+    return TRUSTED if _recorded_definition(rec) == config_flags(command)[1] else MOVED
 
 
 def trusted(command: str | None = None) -> bool:
@@ -176,6 +186,31 @@ def launch_warning(provider: str, cwd: str | None) -> str | None:
            else "Codex didn't accept it (is Codex too old for hooks?)")
     return ("permission_policy is on, but this Codex worker runs without brindle's permission hook "
             f"({why}), so Codex asks for approvals itself. Ask the user to run `{INSTALL}`")
+
+
+UNTRUSTED = ("brindle couldn't trust its own Codex permission hook (new, or changed by an upgrade), "
+             "so Codex agents start without it and Codex asks for approvals itself. "
+             f"Ask the user to run `{INSTALL}`.")
+
+
+def tell_untrusted(db, agent, cwd: str | None) -> bool:
+    """Tell ``agent``'s supervisor, once, that brindle couldn't trust its hook,
+    so this Codex agent started without it: nobody may watch a reviewer's pane
+    to find out otherwise. A trust the person removed stays theirs to give
+    back (launch_warning, doctor), not news."""
+    if agent.provider != "codex" or not agent.parent_id or not policy_on(cwd) \
+            or status() not in (NEW, MOVED):
+        return False
+    if db.conn.execute("SELECT 1 FROM inbox WHERE agent_id=? AND instr(body, ?) > 0",
+                       (agent.parent_id, UNTRUSTED)).fetchone():
+        return False
+    from brindle import agents
+
+    try:
+        agents.send_message(db, agent.parent_id, UNTRUSTED)
+    except agents.AgentError:
+        db.enqueue(agent.parent_id, UNTRUSTED, None)
+    return True
 
 
 # -- asking Codex itself ---------------------------------------------------------------
@@ -290,5 +325,6 @@ def trust(binary: str, state: HookState) -> HookState:
     if after.status != "trusted":
         raise CodexHookError(f"Codex still reports the hook as {after.status}")
     with permissions.editing() as store:
-        store.codex_hook = {"command": after.command, "key": after.key, "hash": after.hash}
+        store.codex_hook = {"command": after.command, "key": after.key, "hash": after.hash,
+                            "definition": config_flags(after.command)[1]}
     return after

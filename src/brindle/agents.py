@@ -901,6 +901,13 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode, plan_first=bool(agent.plan_first),
                                           mcp_recovery=mcp_recovery))
+    if provider.name == "codex":
+        from brindle import codex_hook
+
+        try:
+            codex_hook.tell_untrusted(db, agent, ws.path)  # launched without the hook it couldn't trust
+        except Exception:  # noqa: BLE001 - never stop a launch over this
+            pass
     if prompt or db.pending_count(agent.id):
         _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
                               submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
