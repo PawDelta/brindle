@@ -862,6 +862,8 @@ def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | No
         m = effective_profile_model(p, repo_root).lower()
         if any(h in m for h in ("fable", "opus", "o3", "deepseek-r1", "astra")):
             return "heavy"
+        if "sonnet" in m:
+            return "medium"
         if getattr(p, "effort", None) in ("high", "xhigh", "max"):
             return "heavy"
         if "-heavy" in name:
@@ -899,8 +901,9 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                    weight: str | None = None, why: list[str] | None = None,
                    decision: dict | None = None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
-    ``requested`` if given, else the first unverified milestone's profile in
-    the caller's session, else the repo's routing for ``weight`` (available
+    ``requested`` if given, else (when no ``weight`` is given) the first
+    unverified milestone's profile in the caller's session, else the repo's
+    routing for ``weight`` (available
     candidates only, the hosted learner choosing among them), else the hosted
     learner's pick among ``learning_candidates``, else the repo's
     ``default_agent``. Raises AutopilotError if it doesn't exist. An
@@ -925,7 +928,10 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     routed: dict = {}
     if not name:
         pending = next((m for m in db.milestones(root_of(db, caller_id)) if m.status != "passed"), None)
-        if pending and pending.profile:
+        if pending and pending.profile and weight:
+            if why is not None:
+                why.append(f"weight {weight} overrides milestone profile {pending.profile.strip()}")
+        elif pending and pending.profile:
             m_profile = pending.profile.strip()
             if ceiling and weight_order[profile_weight(m_profile, cfg, repo_root)] > weight_order[ceiling]:
                 candidates = cfg.routing.get(ceiling, [cfg.default_agent])
