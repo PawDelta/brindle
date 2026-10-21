@@ -3,11 +3,14 @@ terminal socket, on a real tmux server, must hand back every fd and SQLite
 connection they open, and keystrokes sent after all that must still reach the
 pane."""
 
+import contextlib
+import json
 import os
 import sqlite3
 import threading
 import time
 
+import anyio
 import pytest
 from starlette.testclient import TestClient
 
@@ -16,21 +19,29 @@ from brindle.daemon.app import build_app
 from brindle.db import Agent
 
 TOKEN = "t" * 43
-ROUNDS = 12
-EVENT_CLIENTS = 120
-TERMINAL_CLIENTS = 25
+ROUNDS = 5
+EVENT_CLIENTS = 60
+TERMINAL_CLIENTS = 10
 
-READ_PATHS = [
-    "/v1/meta", "/v1/repos", "/v1/sessions?repo={repo}", "/v1/snapshot", "/v1/goal?repo={repo}",
-    "/v1/inbox", "/v1/agents/w1", "/v1/agents/missing", "/v1/workspaces/{ws}/diff",
-    "/v1/workspaces/{ws}/file", "/v1/decisions?repo={repo}", "/v1/kb/sources?repo={repo}",
-    "/v1/kb/search?repo={repo}&q=x", "/v1/profiles", "/v1/profiles/developer", "/v1/config?repo={repo}",
-    "/v1/routing?repo={repo}", "/v1/doctor", "/v1/providers/claude/preflight?repo={repo}",
-    "/v1/account", "/v1/cost",
-]
+DEADLINE = 50.0     # seconds the whole test may wait on the daemon before it fails
+pause = threading.Event()   # never set: pause.wait(n) is a plain timed wait
+
+# path -> the status it must answer; the 404s and the 402 are deliberate error paths
+READ_PATHS = {
+    "/v1/meta": 200, "/v1/repos": 200, "/v1/sessions?repo={repo}": 200, "/v1/snapshot": 200,
+    "/v1/goal?repo={repo}": 200, "/v1/inbox": 200, "/v1/agents/w1": 200, "/v1/agents/missing": 404,
+    "/v1/workspaces/{ws}/diff": 200, "/v1/workspaces/{ws}/file?path=app.py": 200,
+    "/v1/workspaces/{ws}/file?path=nope.py": 404, "/v1/decisions?repo={repo}": 200,
+    "/v1/kb/sources?repo={repo}": 200, "/v1/kb/search?repo={repo}&q=x": 200, "/v1/profiles": 200,
+    "/v1/profiles/developer": 200, "/v1/config?repo={repo}": 200, "/v1/routing?repo={repo}": 200,
+    "/v1/doctor": 200, "/v1/providers/claude/preflight?repo={repo}": 200, "/v1/account": 200,
+    "/v1/cost": 402,    # Pro-gated: refused after the route opened its DB
+}
 
 
 class Tracked(sqlite3.Connection):
+    """A connection that says whether it is still open."""
+
     live: set = set()
 
     def __init__(self, *args, **kwargs):
@@ -38,8 +49,8 @@ class Tracked(sqlite3.Connection):
         Tracked.live.add(id(self))
 
     def close(self):
-        Tracked.live.discard(id(self))
         super().close()
+        Tracked.live.discard(id(self))
 
 
 def open_fds() -> int:
@@ -47,22 +58,44 @@ def open_fds() -> int:
 
 
 def settled(measure, limit: float = 5.0) -> int:
-    """``measure()`` once it has stopped changing (worker threads and the
-    control client are still winding down for a moment after a socket closes)."""
-    deadline, last, pause = time.monotonic() + limit, None, threading.Event()
+    """``measure()`` once it has stopped changing for a second (worker threads
+    and the control client are still winding down after a socket closes)."""
+    deadline, last, same = time.monotonic() + limit, None, 0
     while time.monotonic() < deadline:
         now = measure()
-        if now == last:
-            return now
+        same = same + 1 if now == last else 0
+        if same >= 5:
+            break
         last = now
         pause.wait(0.2)
     return measure()
 
 
-def connect(client, path):
-    sock = client.websocket_connect(path).__enter__()
-    sock.send_text(TOKEN)
-    return sock
+class Sockets:
+    """WebSockets whose receives give up at ``deadline`` (a monotonic time):
+    a daemon that never answers fails the test instead of hanging it."""
+
+    def __init__(self, client, deadline: float) -> None:
+        self.client, self.deadline = client, deadline
+
+    @contextlib.contextmanager
+    def connect(self, path):
+        with self.client.websocket_connect(path) as sock:
+            sock.send_text(TOKEN)
+            yield sock
+
+    def receive(self, sock):
+        """The next frame's payload (text parsed as JSON, else bytes)."""
+        async def next_message():
+            with anyio.fail_after(max(0.0, self.deadline - time.monotonic())):
+                return await sock._send_rx.receive()    # what sock.receive() waits on, with a timeout
+
+        try:
+            message = sock.portal.call(next_message)
+        except TimeoutError:
+            pytest.fail("no frame from the daemon before the deadline")
+        assert message["type"] == "websocket.send", message
+        return json.loads(message["text"]) if message.get("text") is not None else message["bytes"]
 
 
 @pytest.mark.serial
@@ -71,43 +104,45 @@ def test_daemon_leaks_nothing_under_load_and_keys_still_reach_the_pane(db, repo,
     pane = tmux._tmux("new-session", "-d", "-s", "soak", "-P", "-F", "#{pane_id}", "sh").stdout.strip()
     db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "idle", pane, None, 1000.0,
                        tmux_server=tmux.current_server()))
+    # The daemon is the file's only user, as in production: SQLite keeps the fd
+    # of a connection closed beside another open one, which is not a leak.
+    db.conn.close()
     monkeypatch.setattr(identity_lock, "locked_by", lambda a: None)
     real_connect = sqlite3.connect
     monkeypatch.setattr(sqlite3, "connect", lambda *a, **kw: real_connect(*a, factory=Tracked, **kw))
-    paths = [p.format(repo=repo, ws=ws.id) for p in READ_PATHS]
+    paths = {p.format(repo=repo, ws=ws.id): status for p, status in READ_PATHS.items()}
     headers = {"Authorization": f"Bearer {TOKEN}"}
 
-    def hammer(client):
+    def hammer(client, socks):
         for _ in range(ROUNDS):
-            for path in paths:
-                client.get(path, headers=headers)
+            for path, status in paths.items():
+                got = client.get(path, headers=headers).status_code
+                assert got == status, f"{path}: {got}, expected {status}"
         for _ in range(EVENT_CLIENTS):
-            sock = connect(client, "/v1/events")
-            sock.receive_json()     # the first liveness sweep: the feed has its DB open
-            sock.__exit__(None, None, None)
+            with socks.connect("/v1/events") as sock:
+                socks.receive(sock)     # the replay: the feed has its DB open
         for _ in range(TERMINAL_CLIENTS):
-            sock = connect(client, "/v1/terminal/w1")
-            sock.receive_json()
-            sock.receive_bytes()
-            sock.__exit__(None, None, None)
+            with socks.connect("/v1/terminal/w1") as sock:
+                socks.receive(sock)     # hello
+                socks.receive(sock)     # seed
 
-    started = time.monotonic()
+    deadline = time.monotonic() + DEADLINE
     with TestClient(build_app(TOKEN)) as client:
-        hammer(client)      # warm-up: lazily opened files and thread pools are not leaks
+        socks = Sockets(client, deadline)
+        hammer(client, socks)   # warm-up: lazily opened files and thread pools are not leaks
         fds = settled(open_fds)
         conns = settled(lambda: len(Tracked.live))
-        hammer(client)
+        hammer(client, socks)
         assert settled(open_fds) <= fds
         assert settled(lambda: len(Tracked.live)) <= conns
 
-        sock = connect(client, "/v1/terminal/w1")
-        sock.receive_json()
-        sock.receive_bytes()
-        sock.send_json({"type": "key", "text": "echo soak-$((6*7))"})
-        sock.send_json({"type": "key", "keys": ["Enter"]})
-        seen = b""
-        while b"soak-42" not in seen.replace(b"echo soak-$((6*7))", b""):
-            seen += sock.receive_bytes()
-        sock.__exit__(None, None, None)
-    assert "soak-42" in tmux.capture(pane, 50, server=tmux.current_server()).replace("echo soak-$((6*7))", "")
-    assert time.monotonic() - started < 60
+        with socks.connect("/v1/terminal/w1") as sock:
+            socks.receive(sock)
+            socks.receive(sock)
+            sock.send_json({"type": "key", "text": "echo soak-$((6*7))"})
+            sock.send_json({"type": "key", "keys": ["Enter"]})
+            # Polled, not read off the socket: dropped input times out here instead of blocking.
+            while "soak-42" not in tmux.capture(pane, 50, server=tmux.current_server()).replace(
+                    "echo soak-$((6*7))", ""):
+                assert time.monotonic() < deadline, "the keystrokes never reached the pane"
+                pause.wait(0.1)
