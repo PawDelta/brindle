@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS agents (
     hooks_off TEXT,                -- why its CLI runs none of brindle's hooks, shown on its sidebar row (agents.screen_status)
     reviewing_since REAL,          -- when its last report put its branch in review (pipeline.on_report)
     review_restarted REAL,         -- the wait in review whose dead check run was started again (pipeline.restart_review)
-    merge_failed TEXT              -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    merge_failed TEXT,             -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    review_slot TEXT               -- the review claim slot a reviewer was started in (gates.standing_reviews)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -579,6 +580,7 @@ class Agent:
     reviewing_since: float | None = None   # when its last report put its branch in review (pipeline.on_report)
     review_restarted: float | None = None  # the wait in review whose review was started again (pipeline.restart_review)
     merge_failed: str | None = None        # why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
 
 
 @dataclass
@@ -828,7 +830,7 @@ class DB:
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
-                          ("merge_failed", "TEXT")):
+                          ("merge_failed", "TEXT"), ("review_slot", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
