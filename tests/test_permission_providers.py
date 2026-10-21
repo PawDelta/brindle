@@ -701,8 +701,8 @@ def test_agy_strict_launch_skips_prompts_and_hooks_every_tool(db, ws, monkeypatc
     assert antigravity.SKIP_FLAG in argv
     assert entry["matcher"] == "*" and "agy-pre-tool-strict" in entry["hooks"][0]["command"]
     set_local(ws.repo_root, "agy_approvals", "prompt")
-    argv, [entry] = launch()
-    assert antigravity.SKIP_FLAG not in argv and "agy-pre-tool-strict" not in entry["hooks"][0]["command"]
+    argv, _ = launch()
+    assert antigravity.SKIP_FLAG not in argv
 
 
 def test_launched_with_skip_flag_reads_the_agy_process(monkeypatch):

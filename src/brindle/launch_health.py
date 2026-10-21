@@ -591,6 +591,8 @@ def retry_reviewer(db, agent, ws):
         # parent and commit, but start a new conversation and MCP connection.
         replacement = agents.spawn(db, ws, agent.profile, prompt=agent.task, parent_id=agent.parent_id,
                                    mode="review", background_setup=True, review_sha=agent.review_sha)
+        if agent.review_slot is not None:
+            db.update_agent(replacement.id, review_slot=agent.review_slot)
     except Exception as exc:
         raise agents.AgentError(
             f"Reviewer {agent.id} was stopped after its brindle MCP connection failed; "

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, config, escapes, gates, history, workspaces
+from brindle import agents, autopilot, config, escapes, gates, history, pipeline, workspaces
 
 REAL_REQUEST_REVIEW = agents.request_review
 from brindle.config import RepoConfig
@@ -108,6 +108,7 @@ def piped(db, repo, monkeypatch):
     def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None, **kw):
         agent_id = f"rev{len(started)}"
         add(db_, ws_, agent_id, "review", profile or "reviewer", parent=caller.id)
+        db_.update_agent(agent_id, review_slot=profile if kw.get("second") else "")   # as _request_review
         started.append(profile)
         return db_.get_agent(agent_id)
 
@@ -165,6 +166,53 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped):
     agents.submit_review(db, "rev0", True, "lgtm")   # a late approval can't outvote it
     assert not merged(repo) and db.get_agent("w1").pipeline == "fixing"
     assert db.latest_review(ws.id, gates.head(ws)) is not None
+
+
+def test_issue216_a_rejection_stands_until_its_own_review_slot_is_reviewed_again(db, repo, piped, monkeypatch):
+    """Which verdict replaces which goes by the review claim's slot, not the
+    reviewer's profile: here the primary review is requested again on the
+    second review's profile."""
+    setup, _started = piped
+    ws = setup(second={"heavy": "reviewer-codex"})
+    db.update_agent("w1", result="added new.py", pipeline="reviewing")
+    monkeypatch.setattr(agents, "request_review", REAL_REQUEST_REVIEW)
+    spawned = []
+
+    def fake_spawn(db_, ws_, profile, **kw):
+        spawned.append(f"s{len(spawned)}")
+        add(db_, ws_, spawned[-1], "review", profile, parent=kw.get("parent_id"), review_sha=kw.get("review_sha"))
+        return db_.get_agent(spawned[-1])
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg: profile or "reviewer")
+    monkeypatch.setattr(agents, "_review_kill_switch", lambda ws_: None)
+    boss, cfg = db.get_agent("boss"), config.load_repo_config(repo)
+    primary = agents.request_review(db, boss, ws, "reviewer", cfg=cfg)
+    agents.submit_review(db, primary.id, False, "missing a test")
+    second = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg, second=True)
+    agents.submit_review(db, second.id, True, "lgtm")   # started later, but another slot's review
+    assert not merged(repo)
+    again = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg)   # the primary, again
+    assert spawned == ["s0", "s1", "s2"] and again.id == "s2"
+    agents.submit_review(db, again.id, True, "test added")
+    assert merged(repo)
+
+
+@pytest.mark.parametrize("slot", ["", "reviewer-codex"])
+def test_two_approvals_in_one_review_slot_are_one_review(db, repo, piped, slot):
+    """A stalled reviewer's fallback ran (here on the other review's profile),
+    and the stalled one's verdict came in late: two approvals, both in the
+    primary slot, or both in the second review's."""
+    setup, _started = piped
+    ws = setup(second={"heavy": "reviewer-codex"})
+    db.update_agent("w1", result="added new.py", pipeline="reviewing")
+    for rid, profile in (("rev0", "reviewer"), ("rev1", "reviewer-codex")):
+        add(db, ws, rid, "review", profile, parent="boss")
+        db.update_agent(rid, review_slot=slot)
+    for rid in ("rev1", "rev0"):
+        db.add_review(ws.id, gates.head(ws), rid, True, "lgtm")
+    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
+    assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
 
 
 def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):
