@@ -120,6 +120,12 @@ def test_a_stale_install_is_told_to_clients_and_stops_the_daemon_before_a_launch
     with pytest.raises(agents.AgentError):
         agents._launch(None, None, None, prompt=None, resume=None, watch_pane=False)
     assert stops == [1]
+    compared = []
+    monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: compared.append(1) or True))
+    monkeypatch.setattr(upgrade, "on_stale_launch", None)
+    with pytest.raises(AttributeError):     # past the check, into launch setup (ws is None)
+        agents._launch(None, None, None, prompt=None, resume=None, watch_pane=False)
+    assert compared == [1]
     ok = asyncio.run(mcp_server.mcp.call_tool("list_repos", {}))
     assert mcp_server.STALE_NOTICE in [c.text for c in ok.content]
     with pytest.raises(ToolError, match="run /mcp to reconnect"):

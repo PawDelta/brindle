@@ -90,7 +90,7 @@ def check_launch() -> None:
     """Called before an agent launches. A process that can restart itself (the
     daemon) starts doing so and refuses the launch; one that can't (the MCP
     server) carries on and tells its client instead."""
-    if on_stale_launch is not None and install.changed():
+    if install.changed() and on_stale_launch is not None:
         on_stale_launch()
         raise StaleInstall("brindle was updated; it is restarting on the new version, try again in a moment")
 
