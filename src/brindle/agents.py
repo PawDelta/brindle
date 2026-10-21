@@ -65,6 +65,15 @@ When you have finished:
    supervisor should check.
 """
 
+REPORT_ONLY_FOOTER = """
+
+---
+You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
+{guidance}
+You don't edit or commit anything: when you have finished, call the
+`report_result` tool from the `brindle` MCP server with your findings.
+"""
+
 REVIEW_FOOTER = """
 
 ---
@@ -143,9 +152,26 @@ PERMISSION_GUIDANCE = (
 )
 
 
-def worker_guidance(ws: Workspace) -> str:
+def is_review_profile(profile_name: str, repo_root: str) -> bool:
+    """Whether ``profile_name`` is a reviewer (or extends one): it reads a
+    branch and reports, so it has nothing to commit, test or merge."""
+    name: str | None = profile_name
+    seen: set[str] = set()
+    while name and name not in seen:
+        if name.startswith("reviewer"):
+            return True
+        seen.add(name)
+        try:
+            name = load_profile(name, repo_root).extends   # one step up the chain
+        except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
+            return False
+    return False
+
+
+def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
     """How a worker should find code (the code map, if any), test it, and
-    stay within its pre-approved commands."""
+    stay within its pre-approved commands. A report-only worker gets no
+    testing instructions."""
     from brindle import codemap
     from brindle.config import load_repo_config
 
@@ -153,7 +179,7 @@ def worker_guidance(ws: Workspace) -> str:
         checks = load_repo_config(ws.repo_root).checks
     except ValueError:
         checks = []
-    parts = (codemap.guidance(ws), test_guidance(checks),
+    parts = (codemap.guidance(ws), "" if report_only else test_guidance(checks),
              PERMISSION_GUIDANCE.format(root=ws.repo_root))
     return "\n".join(p for p in parts if p)
 
@@ -289,7 +315,7 @@ plan is approved; if it comes back with feedback, revise it and call
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
                            provider, headless: bool, plan_first: bool = False,
-                           decisions: str = "", chunks: str = "") -> str:
+                           decisions: str = "", chunks: str = "", report_only: bool = False) -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
@@ -304,8 +330,9 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
         prompt += PLAN_FIRST_NOTE
-    prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch,
-                                   guidance=worker_guidance(ws))
+    footer = REPORT_ONLY_FOOTER if report_only else WORKER_FOOTER
+    prompt += footer.format(agent_id=agent_id, branch=ws.branch,
+                            guidance=worker_guidance(ws, report_only))
     if (done_when and provider.name == "claude" and not headless
             and not provider.hooks_disabled(ws.path)):
         # /goal is an interactive command that Claude Code refuses when hooks
@@ -380,6 +407,7 @@ def spawn(
         from brindle import codemap
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
                                         plan_first=plan_first,
+                                        report_only=is_review_profile(profile.name, ws.repo_root),
                                         decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
                                         chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
                                                                       codemap.graph_path(ws)))
@@ -1272,6 +1300,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
             prompt = decorate_worker_prompt(
                 a.task, a.id, ws, a.done_when, provider, bool(a.headless),
                 plan_first=bool(a.plan_first) and a.plan_state != "approved",
+                report_only=is_review_profile(a.profile, ws.repo_root),
                 decisions=knowledge.replay_decisions(db, a.id),
                 chunks=knowledge.replay_chunks(db, a.id)) + RESUME_NOTE
         else:
@@ -2727,6 +2756,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                          mode="review", background_setup=True, review_sha=sha)
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
+    # Kept on the reviewer too: the claim names only its latest holder, and
+    # which verdict replaces which goes by slot (gates.standing_reviews).
+    if reviewer is not None:
+        db.update_agent(reviewer.id, review_slot=slot)
     return reviewer
 
 
