@@ -951,8 +951,7 @@ def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, hea
     assert db.get_agent(a.id).status != "failed"
     assert (row["delivered_at"] is not None) == brief_visible
     assert row["outcome"] == (None if brief_visible else "awaiting-approval")
-    assert bool(reports) != brief_visible
-    assert brief_visible or "uv run pytest tests/test_feature.py" in reports[0][1]
+    assert len(reports) == 1 and "uv run pytest tests/test_feature.py" in reports[0][1]
 
 
 @pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])

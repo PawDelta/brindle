@@ -247,6 +247,8 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
                     or failure(screen, baseline=baseline, task=agent.task or "",
                                submitted_prompt=text, provider=agent.provider)):
                 delivered(db, agent, baseline)
+                if provider.tool_permission(screen):
+                    _tell(db, agent, _approval_body(agent, screen))
                 return
             if time.time() >= deadline:
                 break
@@ -283,22 +285,33 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
         return
     if asking:
         # A tool approval only exists inside a running turn: never fail the worker.
-        from brindle import prompt_answer
-        plain = prompt_answer.plain(screen).splitlines()
-        at = next((i for i, line in enumerate(plain) if prompt_answer.TOOL_PERMISSION.search(line)
-                   or "Would you like to" in line), None)
-        asked = " ".join(" ".join(plain[at + 1:at + 6]).split())[:300] if at is not None else ""
-        body = (f"Worker {agent.id} is working but waiting at an approval prompt"
-                + (f": {asked}" if asked else "") + ". Answer it in its pane; the brief was not lost.")
+        body = _approval_body(agent, screen)
     else:
         db.update_agent(agent.id, status="failed")
         body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
                 "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
                 "Check its pane and restart the worker; this is not a startup prompt.")
+    _tell(db, agent, body)
+
+
+def _tell(db, agent, body: str) -> None:
+    from brindle import agents
+
     try:
         agents.send_message(db, agent.parent_id, body)
     except agents.AgentError:
         db.enqueue(agent.parent_id, body, None)
+
+
+def _approval_body(agent, screen: str) -> str:
+    """What a working agent is asking to run, for its supervisor."""
+    from brindle import prompt_answer
+
+    plain = prompt_answer.plain(screen).splitlines()
+    at = next((i for i, line in enumerate(plain) if "Would you like to" in line), None)
+    asked = " ".join(" ".join(plain[at + 1:at + 6]).split())[:300] if at is not None else ""
+    return (f"Worker {agent.id} is working but waiting at an approval prompt"
+            + (f": {asked}" if asked else "") + ". Answer it in its pane; the brief was not lost.")
 
 
 def helper_token(agent) -> list[str]:
