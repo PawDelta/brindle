@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, config, escapes, gates, history, pipeline, workspaces
+from brindle import agents, autopilot, config, escapes, gates, history, workspaces
 
 REAL_REQUEST_REVIEW = agents.request_review
 from brindle.config import RepoConfig
@@ -147,31 +147,33 @@ def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):
     assert merged(repo) and db.get_workspace(ws.id) is None
 
 
-def test_the_second_reviewer_approving_first_still_waits_for_the_other(db, repo, piped):
+@pytest.mark.parametrize("slot", [
+    None,
+    pytest.param("", marks=pytest.mark.variant("#216 fallback race: two profiles approve only the primary slot")),
+    pytest.param("reviewer-codex", marks=pytest.mark.variant("#216 fallback race: two profiles approve only the second slot")),
+])
+def test_the_second_reviewer_approving_first_still_waits_for_the_other(db, repo, piped, slot):
     setup, started = piped
     setup(second={"heavy": "reviewer-codex"})
     agents.report_result(db, "w1", "added new.py")
+    if slot is not None:
+        # #216: a fallback and a late original verdict can both approve the
+        # same slot, even when their reviewer profiles differ.
+        for rid in ("rev0", "rev1"):
+            db.update_agent(rid, review_slot=slot)
     agents.submit_review(db, "rev1", True, "codex approves")
-    assert not merged(repo)
+    assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
     agents.submit_review(db, "rev0", True, "reviewer approves")
-    assert merged(repo)
+    if slot is None:
+        assert merged(repo)
+    else:
+        assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
 
 
-def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped):
-    setup, started = piped
-    ws = setup(second={"heavy": "reviewer-codex"})
-    agents.report_result(db, "w1", "added new.py")
-    agents.submit_review(db, "rev1", False, "missing a test")
-    assert db.get_agent("w1").pipeline == "fixing"
-    agents.submit_review(db, "rev0", True, "lgtm")   # a late approval can't outvote it
-    assert not merged(repo) and db.get_agent("w1").pipeline == "fixing"
-    assert db.latest_review(ws.id, gates.head(ws)) is not None
-
-
-def test_issue216_a_rejection_stands_until_its_own_review_slot_is_reviewed_again(db, repo, piped, monkeypatch):
-    """Which verdict replaces which goes by the review claim's slot, not the
-    reviewer's profile: here the primary review is requested again on the
-    second review's profile."""
+@pytest.mark.parametrize("rejected_second", [False, True])
+def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, monkeypatch, rejected_second):
+    """#216: only a new verdict in the rejected slot can replace its rejection,
+    even when the replacement reviewer uses the other slot's profile."""
     setup, _started = piped
     ws = setup(second={"heavy": "reviewer-codex"})
     db.update_agent("w1", result="added new.py", pipeline="reviewing")
@@ -187,32 +189,19 @@ def test_issue216_a_rejection_stands_until_its_own_review_slot_is_reviewed_again
     monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg: profile or "reviewer")
     monkeypatch.setattr(agents, "_review_kill_switch", lambda ws_: None)
     boss, cfg = db.get_agent("boss"), config.load_repo_config(repo)
-    primary = agents.request_review(db, boss, ws, "reviewer", cfg=cfg)
-    agents.submit_review(db, primary.id, False, "missing a test")
-    second = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg, second=True)
-    agents.submit_review(db, second.id, True, "lgtm")   # started later, but another slot's review
-    assert not merged(repo)
-    again = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg)   # the primary, again
+    rejected_profile = "reviewer-codex" if rejected_second else "reviewer"
+    other_profile = "reviewer" if rejected_second else "reviewer-codex"
+    rejected = agents.request_review(db, boss, ws, rejected_profile, cfg=cfg, second=rejected_second)
+    agents.submit_review(db, rejected.id, False, "missing a test")
+    assert db.get_agent("w1").pipeline == "fixing"
+    other = agents.request_review(db, boss, ws, other_profile, cfg=cfg, second=not rejected_second)
+    agents.submit_review(db, other.id, True, "lgtm")   # a late approval can't outvote it
+    assert not merged(repo) and db.get_agent("w1").pipeline == "fixing"
+    assert db.latest_review(ws.id, gates.head(ws)) is not None
+    again = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg, second=rejected_second)
     assert spawned == ["s0", "s1", "s2"] and again.id == "s2"
     agents.submit_review(db, again.id, True, "test added")
     assert merged(repo)
-
-
-@pytest.mark.parametrize("slot", ["", "reviewer-codex"])
-def test_two_approvals_in_one_review_slot_are_one_review(db, repo, piped, slot):
-    """A stalled reviewer's fallback ran (here on the other review's profile),
-    and the stalled one's verdict came in late: two approvals, both in the
-    primary slot, or both in the second review's."""
-    setup, _started = piped
-    ws = setup(second={"heavy": "reviewer-codex"})
-    db.update_agent("w1", result="added new.py", pipeline="reviewing")
-    for rid, profile in (("rev0", "reviewer"), ("rev1", "reviewer-codex")):
-        add(db, ws, rid, "review", profile, parent="boss")
-        db.update_agent(rid, review_slot=slot)
-    for rid in ("rev1", "rev0"):
-        db.add_review(ws.id, gates.head(ws), rid, True, "lgtm")
-    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
-    assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
 
 
 def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):

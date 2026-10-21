@@ -88,6 +88,7 @@ def test_at_most_limit_runs_hold_a_slot_at_once(brindle_home, monkeypatch, limit
     assert meter.peak == limit
 
 
+@pytest.mark.variant("#186 starvation race: unlike slot-limit/shared-queue tests, a reported review must precede later arrivals")
 def test_a_reported_branch_is_checked_in_turn_however_many_runs_arrive_after(db, session, repo,
                                                                             monkeypatch):
     # #186: with one slot, the review a report started waited 30 min on a
