@@ -11,7 +11,6 @@ import pytest
 from conftest import full_text, sh
 from brindle import gates, pipeline, workspaces
 from brindle.db import DB
-from test_merge_order import add
 from test_pipeline_idempotent import approved, drain, keep_worktree  # noqa: F401 - fixture
 
 
@@ -60,10 +59,10 @@ def test_a_merge_waits_for_another_merge_into_the_same_base(db, repo, monkeypatc
     assert {"one.py", "two.py"} <= set(sh("git ls-tree --name-only HEAD", repo).split())
 
 
-@pytest.mark.parametrize("case", ["rejected while the checks ran", "rejected, then another approved",
-                                  "rejected, then superseded", "rejected, then an independent review"])
+@pytest.mark.parametrize("case", ["rejected while the checks ran", "rejected, then another approved"])
 def test_issue216_each_reviewers_standing_verdict_decides_the_merge(db, approved, monkeypatch, repo, case):
-    """rev0 and rev1 approved; then rev1 asks for changes on the same commit."""
+    """rev0 and rev1 approved; then rev1 asks for changes on the same commit.
+    (Which later review replaces a rejection: test_escapes, through real dispatch.)"""
     ws, _runs = approved
     sha = gates.head(ws)
     if case == "rejected while the checks ran":
@@ -73,16 +72,9 @@ def test_issue216_each_reviewers_standing_verdict_decides_the_merge(db, approved
             db.add_review(ws.id, sha, "rev1", False, "scope sign-off missing"), real(*a, **k))[1])
     else:
         db.add_review(ws.id, sha, "rev1", False, "scope sign-off missing")
-        # Started after the rejection: the same review requested again, or a second review.
-        profile = {"rejected, then superseded": "reviewer",
-                   "rejected, then an independent review": "reviewer-codex"}.get(case)
-        if profile:
-            add(db, ws, "rev2", "review", profile, parent="boss", status="processing")
-        db.add_review(ws.id, sha, "rev2" if profile else "rev0", True, "lgtm")
+        db.add_review(ws.id, sha, "rev0", True, "lgtm")
     out = pipeline.merge(db, None, ws)
-    merged = "new.py" in sh("git ls-tree --name-only HEAD", repo)
-    assert merged == (case == "rejected, then superseded"), out
-    assert out.startswith("Merged") == merged
+    assert out.startswith("Not merged") and "new.py" not in sh("git ls-tree --name-only HEAD", repo), out
 
 
 @pytest.mark.parametrize("state", ["done", "still running", "pipeline off"])

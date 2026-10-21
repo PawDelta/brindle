@@ -405,16 +405,18 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
 def standing_reviews(db: DB, ws_id: str, sha: str) -> list:
     """The verdicts on ``sha`` that stand (#216): each reviewer's latest one,
     an approval carried over from the commit before a sync included, less any
-    a later reviewer superseded: one of the same review slot (its profile;
-    a second review has a profile of its own) started after that verdict was
-    recorded, the review requested again, that has given its own since."""
+    a later reviewer superseded: one started in the same review claim slot
+    (``agents._request_review``: the commit's review, or the required second
+    review), whatever its profile, after that verdict was recorded, that has
+    given its own since. A reviewer with no recorded slot supersedes nothing."""
     reviews = db.reviews_at(ws_id, sha)
     reviewers = {r.reviewer_id: a for r in reviews
                  if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
 
     def supersedes(s, r) -> bool:
         new, old = reviewers.get(s.reviewer_id), reviewers.get(r.reviewer_id)
-        return (new is not None and old is not None and new.profile == old.profile
+        return (new is not None and old is not None and new.review_slot is not None
+                and new.review_slot == old.review_slot
                 and new.created_at > r.created_at and s.created_at > r.created_at)
 
     return [r for r in reviews if not any(supersedes(s, r) for s in reviews)]

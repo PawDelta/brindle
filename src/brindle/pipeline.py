@@ -282,11 +282,11 @@ def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace)
     profile = second_profile(db, cfg, worker, ws)
     if profile is None:
         return False
-    reviews = db.reviews_at(ws.id, gates.head(ws))
+    reviews = gates.standing_reviews(db, ws.id, gates.head(ws))   # as the merge gate counts them
     if not reviews or not all(r.approved for r in reviews) or len(reviews) < 2:
         return True   # one is missing, or one asked for changes (the worker is fixing it)
     reviewers = [db.get_agent(r.reviewer_id) for r in reviews]
-    return not any(a is not None and a.profile == profile for a in reviewers)
+    return not any(a is not None and (a.review_slot == profile or a.profile == profile) for a in reviewers)
 
 
 def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:

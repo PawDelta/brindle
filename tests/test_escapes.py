@@ -167,6 +167,36 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped):
     assert db.latest_review(ws.id, gates.head(ws)) is not None
 
 
+def test_issue216_a_rejection_stands_until_its_own_review_slot_is_reviewed_again(db, repo, piped, monkeypatch):
+    """Which verdict replaces which goes by the review claim's slot, not the
+    reviewer's profile: here the primary review is requested again on the
+    second review's profile."""
+    setup, _started = piped
+    ws = setup(second={"heavy": "reviewer-codex"})
+    db.update_agent("w1", result="added new.py", pipeline="reviewing")
+    monkeypatch.setattr(agents, "request_review", REAL_REQUEST_REVIEW)
+    spawned = []
+
+    def fake_spawn(db_, ws_, profile, **kw):
+        spawned.append(f"s{len(spawned)}")
+        add(db_, ws_, spawned[-1], "review", profile, parent=kw.get("parent_id"), review_sha=kw.get("review_sha"))
+        return db_.get_agent(spawned[-1])
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg: profile or "reviewer")
+    monkeypatch.setattr(agents, "_review_kill_switch", lambda ws_: None)
+    boss, cfg = db.get_agent("boss"), config.load_repo_config(repo)
+    primary = agents.request_review(db, boss, ws, "reviewer", cfg=cfg)
+    agents.submit_review(db, primary.id, False, "missing a test")
+    second = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg, second=True)
+    agents.submit_review(db, second.id, True, "lgtm")   # started later, but another slot's review
+    assert not merged(repo)
+    again = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg)   # the primary, again
+    assert spawned == ["s0", "s1", "s2"] and again.id == "s2"
+    agents.submit_review(db, again.id, True, "test added")
+    assert merged(repo)
+
+
 def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):
     setup, _ = piped
     ws = setup()
