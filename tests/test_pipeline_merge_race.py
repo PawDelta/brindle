@@ -61,7 +61,7 @@ def test_a_merge_waits_for_another_merge_into_the_same_base(db, repo, monkeypatc
 
 
 @pytest.mark.parametrize("case", ["rejected while the checks ran", "rejected, then another approved",
-                                  "rejected, then superseded"])
+                                  "rejected, then superseded", "rejected, then an independent review"])
 def test_issue216_each_reviewers_standing_verdict_decides_the_merge(db, approved, monkeypatch, repo, case):
     """rev0 and rev1 approved; then rev1 asks for changes on the same commit."""
     ws, _runs = approved
@@ -73,31 +73,35 @@ def test_issue216_each_reviewers_standing_verdict_decides_the_merge(db, approved
             db.add_review(ws.id, sha, "rev1", False, "scope sign-off missing"), real(*a, **k))[1])
     else:
         db.add_review(ws.id, sha, "rev1", False, "scope sign-off missing")
-        if case == "rejected, then superseded":   # a review requested again after it
-            add(db, ws, "rev2", "review", "reviewer", parent="boss", status="processing")
-        db.add_review(ws.id, sha, "rev2" if "superseded" in case else "rev0", True, "lgtm")
+        # Started after the rejection: the same review requested again, or a second review.
+        profile = {"rejected, then superseded": "reviewer",
+                   "rejected, then an independent review": "reviewer-codex"}.get(case)
+        if profile:
+            add(db, ws, "rev2", "review", profile, parent="boss", status="processing")
+        db.add_review(ws.id, sha, "rev2" if profile else "rev0", True, "lgtm")
     out = pipeline.merge(db, None, ws)
     merged = "new.py" in sh("git ls-tree --name-only HEAD", repo)
     assert merged == (case == "rejected, then superseded"), out
     assert out.startswith("Merged") == merged
 
 
-@pytest.mark.parametrize("still_running", [False, True])
-def test_issue217_approval_of_a_never_reported_branch_merges_or_says_so(db, approved, monkeypatch, repo,
-                                                                          still_running):
+@pytest.mark.parametrize("state", ["done", "still running", "pipeline off"])
+def test_issue217_approval_of_a_never_reported_branch_merges_or_says_so(db, approved, monkeypatch, repo, state):
     """The worker had no brindle connection, so the supervisor requested the review."""
     ws, _runs = approved
     keep_worktree(monkeypatch)
     db.update_agent("w1", result=None, pipeline=None)
-    if not still_running:
+    if state != "still running":
         db.set_status("w1", "done")
+    if state == "pipeline off":
+        (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True, "pipeline": False}))
     assert pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm") is True
     bodies = drain(db)
-    assert ("new.py" in sh("git ls-tree --name-only HEAD", repo)) is not still_running
-    if still_running:
-        assert any(f'This needs you: merge it with merge_workspace("{ws.id}")' in b for b in bodies)
-    else:
+    assert ("new.py" in sh("git ls-tree --name-only HEAD", repo)) is (state == "done")
+    if state == "done":
         assert any("Merged feat" in b for b in bodies)
+    else:
+        assert any(f'This needs you: merge it with merge_workspace("{ws.id}")' in b for b in bodies)
 
 
 @pytest.mark.parametrize("fails", [1, 2])
@@ -105,7 +109,6 @@ def test_an_approved_branch_whose_checks_fail_is_retried_once(db, approved, monk
     ws, _runs = approved
     (repo / ".brindle" / "config.json").write_text(json.dumps(
         {"review": True, "auto_merge_default_branch": True, "checks": ["true"]}))
-    db.set_check_duration(ws.repo_root, "true", 600.0)   # a suite that takes minutes
     monkeypatch.setattr(workspaces, "remove", lambda *a, **k: (_ for _ in ()).throw(
         workspaces.WorkspaceError("kept")))
     runs = []

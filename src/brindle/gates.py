@@ -405,14 +405,19 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
 def standing_reviews(db: DB, ws_id: str, sha: str) -> list:
     """The verdicts on ``sha`` that stand (#216): each reviewer's latest one,
     an approval carried over from the commit before a sync included, less any
-    a later reviewer superseded: one started after that verdict was recorded
-    (a review requested again, having seen it) that has given its own since."""
+    a later reviewer superseded: one of the same review slot (its profile;
+    a second review has a profile of its own) started after that verdict was
+    recorded, the review requested again, that has given its own since."""
     reviews = db.reviews_at(ws_id, sha)
-    started = {r.reviewer_id: a.created_at for r in reviews
-               if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
-    return [r for r in reviews if not any(
-        s.created_at > r.created_at and started.get(s.reviewer_id, 0.0) > r.created_at
-        for s in reviews)]
+    reviewers = {r.reviewer_id: a for r in reviews
+                 if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
+
+    def supersedes(s, r) -> bool:
+        new, old = reviewers.get(s.reviewer_id), reviewers.get(r.reviewer_id)
+        return (new is not None and old is not None and new.profile == old.profile
+                and new.created_at > r.created_at and s.created_at > r.created_at)
+
+    return [r for r in reviews if not any(supersedes(s, r) for s in reviews)]
 
 
 def verdict(db: DB, ws_id: str, sha: str):

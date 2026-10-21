@@ -768,7 +768,7 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         # #217: a worker that never reported (no brindle connection, say)
         # whose branch the supervisor had reviewed itself. Its approval is
         # the pipeline's to merge like any other, once the worker is done.
-        if not (approved and worker.result is None and enabled(cfg, worker, ws)):
+        if not (approved and worker.result is None and ws.kind == "worktree" and parent_id):
             return False, False
         try:
             standing = gates.verdict(db, ws.id, gates.head(ws))
@@ -776,6 +776,15 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             standing = None
         if standing is None or not standing.approved:
             return False, False   # the verdicts on record don't approve it: the supervisor's call
+        if not enabled(cfg, worker, ws):
+            # Not the pipeline's to merge (a handoff, or "pipeline" off): say so.
+            _tell(db, parent_id,
+                  agents.condense(
+                      f"[brindle] `{ws.branch}` approved; {worker.id} never reported, and brindle "
+                      f"doesn't merge it on its own here. This needs you: merge it with "
+                      f"merge_workspace(\"{ws.id}\").",
+                      f"Review ({reviewer.id}): approved.\n{summary}"), reviewer.id)
+            return True, False
         if busy_worker(db, ws, None):
             _tell(db, parent_id,
                   f"[brindle pipeline] `{ws.branch}` approved, but {worker.id} never reported and "
@@ -921,9 +930,6 @@ def _finish(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None) -> str
         return _finish_locked(db, current, ws, reviewer)
 
 
-MERGE_WAIT_NOTICE = 60.0   # seconds of merge checks worth telling the supervisor about
-
-
 def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None) -> str:
     parent_id = worker.parent_id
     parent = db.get_agent(parent_id) if parent_id else None
@@ -942,14 +948,16 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
     told: list[str] = []
 
     def waiting_on_checks(sha: str) -> None:
-        # #217: an approved branch whose merge waits on a long suite mustn't look stuck.
+        # #217: an approved branch whose merge waits on its checks mustn't look stuck.
+        if told:
+            return
+        told.append(sha)
         wait = agents.expected_check_wait(db, ws, cfg)
-        if not told and wait is not None and wait >= MERGE_WAIT_NOTICE:
-            told.append(sha)
-            _tell(db, parent_id,
-                  f"[brindle pipeline] `{ws.branch}` was approved; its merge is waiting on the "
-                  f"repo's checks (usually {wait / 60:.0f} min), running now at {sha[:8]}. Nothing "
-                  "to do: brindle merges it when they pass, and tells you either way.", worker.id)
+        usually = f" (usually {wait / 60:.0f} min, plus any wait for a check slot)" if wait else ""
+        _tell(db, parent_id,
+              f"[brindle pipeline] `{ws.branch}` was approved; its merge is waiting on the repo's "
+              f"checks{usually}, for {sha[:8]}. Nothing to do: brindle merges it when they pass, "
+              "and tells you either way.", worker.id)
 
     text = _try_merge(db, parent, ws, conflicting, waiting_on_checks)
     if text.startswith("Not merged. "):
