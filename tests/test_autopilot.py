@@ -649,7 +649,7 @@ def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
     (0, False, ["reviewing", "building"], ["in_progress", "in_progress"]),  # still building
     (0, False, [], ["in_progress", "in_progress"]),                       # nothing under way
     (0, False, ["reviewing", "ready"], ["in_review", "in_progress"]),     # a ready branch doesn't veto
-    (0, False, ["reviewing", "gone"], ["in_review", "in_progress"]),      # reported, process exited
+    (0, False, ["gone"], ["in_review", "in_progress"]),                   # reported, marked done, still in checks
 ])
 def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expected):
     _, ws = root
@@ -661,7 +661,7 @@ def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expec
         db.update_autopilot("boss", checking_since=time.time())
     for i, kind in enumerate(workers):
         add_agent(db, ws, f"w{i}", mode="review" if kind == "reviewer" else "assign", parent="boss",
-                  status="idle" if kind in ("ready", "gone") else "processing")
+                  status="done" if kind == "gone" else "idle" if kind == "ready" else "processing")
         if kind in ("reviewing", "ready"):
             db.update_agent(f"w{i}", pipeline=kind)
         if kind in ("ready", "gone"):
