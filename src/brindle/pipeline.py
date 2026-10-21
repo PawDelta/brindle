@@ -309,6 +309,19 @@ def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace)
     return not any(a is not None and a.profile == profile for a in reviewers)
 
 
+def _report_only(worker: Agent, ws: Workspace) -> bool:
+    """A review profile's worker, or one whose branch finished with no commits
+    and no tracked edits: there is nothing for the pipeline to review or merge."""
+    if agents.is_review_profile(worker.profile, ws.repo_root):
+        return True
+    try:
+        if git.ahead_behind(ws.path, workspaces.require_base(ws))[1]:
+            return False
+    except Exception:  # noqa: BLE001 - can't tell: let the pipeline decide as before
+        return False
+    return not git.dirty_files(ws.path, tracked_only=True)
+
+
 def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     """Start the review of a reported branch. Returns whether the pipeline
     took the report (so the caller doesn't forward it to the supervisor)."""
@@ -321,13 +334,17 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if parent is None:
         return False
-    if git.dirty_files(ws.path, tracked_only=True):   # untracked scratch files don't travel with the branch
+    if _report_only(worker, ws):
+        return False   # nothing to review or merge: the report goes straight to the supervisor
+    dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
+    if dirty:
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)
+        shown = ", ".join(dirty[:5]) + (f" and {len(dirty) - 5} more" if len(dirty) > 5 else "")
         _tell(db, parent.id,
               agents.condense(
                   f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
-                  "changes, so it can't be reviewed or merged. "
+                  f"changes ({shown}), so it can't be reviewed or merged. "
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
     # Before the check run starts: it reads this report's claim (see review_claim).

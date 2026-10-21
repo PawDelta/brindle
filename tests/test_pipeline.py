@@ -249,6 +249,8 @@ def _reported(db, repo, reviewing_since=None):
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done")
+    (Path(ws.path) / "work.py").write_text("x = 1\n")   # a branch with no commits isn't reviewed
+    sh("git add work.py && git commit -qm work", Path(ws.path))
     if reviewing_since is not None:
         db.update_agent("w1", pipeline="reviewing", reviewing_since=reviewing_since)
     return ws
