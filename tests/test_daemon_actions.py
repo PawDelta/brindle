@@ -1190,3 +1190,29 @@ def test_upgrade_runs_in_the_background_and_reports_on_the_bus(db, world, monkey
     else:
         error = events[-1]["payload"]["error"]
         assert error["code"] == "upgrade_failed" and error["tail"] == [f"uv line {i}" for i in range(10, 30)]
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["done", "failed"])
+def test_setup_codex_hook_trusts_it_in_the_background(db, world, monkeypatch, tmp_path, fails):
+    from brindle import codex_hook
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    trusted, again = [], []
+    state = SimpleNamespace(command="hook")
+    monkeypatch.setattr(codex_hook, "inspect", lambda binary, command=None: state)
+
+    def trust(binary, st):
+        trusted.append(st)
+        again.append(_send("POST", "/v1/setup/codex-hook"))      # pressed again while it runs
+        if fails:
+            raise codex_hook.CodexHookError("Codex didn't answer")
+
+    monkeypatch.setattr(codex_hook, "trust", trust)
+    code, reply = _send("POST", "/v1/setup/codex-hook")
+    assert code == 202 and trusted == [state] and again == [(202, reply)]
+    events = bus.tail(db, kinds=("job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["job"]) for e in events] == [
+        ("job.failed" if fails else "job.done", reply["job"])]
+    if fails:
+        assert events[0]["payload"]["error"]["code"] == "codex_hook_failed"

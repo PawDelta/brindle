@@ -1232,6 +1232,39 @@ def upgrade_engine(db: DB, params: dict, body: Body) -> Any:
     return start_job("engine.upgrade", work, job=job)
 
 
+_trusting: Job | None = None
+_trust_lock = threading.Lock()
+
+
+def setup_codex_hook(db: DB, params: dict, body: Body) -> Any:
+    """What ``brindle permissions install-codex-hook --yes`` does, in the
+    background (the inbox's ``codex_hook_trust`` fix): Codex trusts brindle's
+    permission hook again. ``job.done`` or ``job.failed`` ends it. A press
+    while one runs gets that job back."""
+    global _trusting
+    with _trust_lock:
+        if _trusting is not None:
+            return _trusting
+        _trusting = job = Job(secrets.token_hex(8), "setup.codex_hook")
+
+    def work(db: DB, job: Job) -> Any:
+        global _trusting
+        from brindle import codex_hook
+        from brindle.providers import codex_binary
+
+        try:
+            binary = codex_binary()
+            codex_hook.trust(binary, codex_hook.inspect(binary))
+        except codex_hook.CodexHookError as e:
+            raise ServiceError("codex_hook_failed", f"couldn't trust brindle's Codex hook: {e}", 422) from e
+        finally:
+            with _trust_lock:
+                _trusting = None
+        return {"trusted": True}
+
+    return start_job("setup.codex_hook", work, job=job)
+
+
 def _post(path: str, fn: Action) -> Route:
     return Route(f"/v1{path}", _endpoint(fn), methods=["POST"])
 
@@ -1279,4 +1312,5 @@ ROUTES = [
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
     _post("/terminals/{id}/input", terminal_input),
     _post("/engine/upgrade", upgrade_engine),
+    _post("/setup/codex-hook", setup_codex_hook),
 ]
