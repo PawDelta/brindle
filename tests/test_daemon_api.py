@@ -419,14 +419,14 @@ def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db,
     # list-panes rows: pane, its agent tag, its action-terminal tag (%4 a sidebar, %5 not brindle's)
     panes = {here: ["%1\tw1\t", "%4\t\t", "%5\t\t", "%9\t\tt-1"], "other": ["%1\tw2\t"]}
     manual = {(here, "%1"), ("other", "%1"), (here, "%4"), (here, "%5"), (here, "%9")}
-    refused: set = set()        # (server, command) tmux fails
+    refused: dict = {}          # (server, command) tmux fails -> what it says
     ran = []
 
     def fake_tmux(*args, server=None, check=True, **kw):
         ran.append((server, *args))
         out, code, err = "", 0, ""
         if (server, args[0]) in refused:
-            code, err = 1, "lost server"
+            code, err = 1, refused[server, args[0]]
         elif args[0] == "list-panes":
             out, code, err = ("\n".join(panes[server]), 0, "") if server in panes \
                 else ("", 1, "no server running on /tmp/tmux-1/gone")
@@ -440,11 +440,14 @@ def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db,
 
     monkeypatch.setattr(tmux, "_tmux", fake_tmux)
     brindles = {(here, "%1"), ("other", "%1"), (here, "%9")}
-    # A server that can't be asked, then a refused unset: nothing is taken as done.
-    for refused in ({("other", "list-panes")}, {(here, "set-option")}):
+    # A server that can't be asked (lost, or a socket it may not open), then a
+    # refused unset: nothing is taken as done.
+    for refused in ({("other", "list-panes"): "lost server"},
+                    {("other", "list-panes"): "error connecting to /tmp/tmux-501/other (Permission denied)"},
+                    {(here, "set-option"): "refused"}):
         terminal.reset_window_sizes()
         assert {(here, "%1"), (here, "%9")} <= manual
-    refused = set()
+    refused = {}
     assert terminal.reset_window_sizes() >= 2
     assert manual == {(here, "%4"), (here, "%5")} and not brindles & manual
     assert not any("-g" in r for r in ran)      # never a global option

@@ -929,6 +929,12 @@ def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
     _tmux("send-keys", "-t", target, *keys, server=server)
 
 
+# What tmux says when no server listens on the socket (it is missing, or
+# stale): older tmux names the errno. Any other "error connecting to" (a
+# socket it may not open) says nothing about the server's windows.
+_NO_SERVER = re.compile(r"no server running|error connecting to .*\((No such file or directory|Connection refused)\)")
+
+
 def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[str]:
     """Every pane on ``server`` (as for capture) that sets one of the pane
     options ``keys``; empty when no server runs there. Raises TmuxError when
@@ -937,7 +943,7 @@ def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[
     fmt = "\t".join(["#{pane_id}", *(f"#{{{k}}}" for k in keys)])
     proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
     if proc.returncode != 0:
-        if "no server running" in proc.stderr or "error connecting to" in proc.stderr:
+        if _NO_SERVER.search(proc.stderr):
             return []
         raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
     rows = (line.split("\t") for line in proc.stdout.splitlines())
