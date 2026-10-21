@@ -620,10 +620,13 @@ def _find(agent_id: str) -> dict:
 
     if ACTION_ID.fullmatch(agent_id):
         return _find_action(agent_id)
+    db = DB()
     try:
-        a = agents.get(DB(), agent_id)
+        a = agents.get(db, agent_id)
     except agents.AgentError as e:
         return {"type": "error", "code": "not_found", "message": str(e)}
+    finally:
+        db.conn.close()
     who = identity_lock.locked_by(a.id)
     if who:
         return {"type": "no_pane", "agent": a.id, "reason": "locked", "locked_by": who}

@@ -1,21 +1,25 @@
 import asyncio
 import json
 import os
+import resource
 import shutil
 import socket
+import sqlite3
 import stat
 import tempfile
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Request, TextMessage
 
 from brindle import cost, doctor, identity_lock, keystore, knowledge, procs, tmux, workspaces
 from brindle import kb as kb_mod
-from brindle.daemon import lifecycle, peer
+from brindle.daemon import events, lifecycle, peer, terminal
 from brindle.daemon.app import build_app
 from brindle.daemon.auth import WS_UNAUTHORIZED, Guard
 from brindle.db import Agent
@@ -215,6 +219,79 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     code, body = _get(path.format(ws=seeded["ws"]), AUTH, f"repo={seeded['repo']}")
     assert code in (200, 404)
     assert check(body, seeded)
+
+
+@pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events"])
+def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, kind):
+    opened, closed = [], []
+    connect = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def close(self):
+            super().close()
+            closed.append(self)
+
+    def tracked_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs, factory=Connection)
+        opened.append(conn)   # retain connections so GC cannot hide a leak
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot(tmux.current_server()))
+    if kind == "read":
+        for _ in range(30):
+            assert _get("/v1/repos", AUTH) == (200, [])
+            assert _get("/v1/agents/missing", AUTH)[0] == 404
+    elif kind == "idle":
+        assert lifecycle._agents_running() is False
+    elif kind == "peer":
+        assert peer._agent_panes() == {}
+    elif kind == "terminal":
+        assert terminal._find("missing")["code"] == "not_found"
+    else:
+        incoming = [{"type": "websocket.connect"}, {"type": "websocket.disconnect", "code": 1000}]
+
+        async def receive():
+            return incoming.pop(0)
+
+        async def send(message):
+            if message["type"] == "websocket.send":
+                raise WebSocketDisconnect()   # failure sending the initial replay
+
+        ws = WebSocket({"type": "websocket", "path": "/v1/events", "headers": [],
+                        "query_string": b"since=999", "app": SimpleNamespace(state=SimpleNamespace())}, receive, send)
+        asyncio.run(events.events(ws))
+    assert opened and set(opened) == set(closed)
+
+
+@pytest.mark.parametrize("soft,hard,refused", [
+    (256, 4096, False), (256, resource.RLIM_INFINITY, False),
+    (256, 4096, True), (100000, 100000, False),
+])
+def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, refused):
+    limit = [soft, hard]
+
+    def setlimit(which, value):
+        if refused:
+            raise OSError("not permitted")
+        limit[:] = value
+
+    class Started(Exception):
+        pass
+
+    def prepare(*args, **kwargs):
+        if refused or soft == hard:
+            assert limit[0] == soft
+        else:
+            assert soft < limit[0] <= (hard if hard != resource.RLIM_INFINITY else 65536)
+        assert limit[1] == hard
+        raise Started()
+
+    monkeypatch.setattr(resource, "getrlimit", lambda which: tuple(limit))
+    monkeypatch.setattr(resource, "setrlimit", setlimit)
+    monkeypatch.setattr(lifecycle, "prepare", prepare)
+    with pytest.raises(Started):
+        lifecycle.serve()
 
 
 @pytest.mark.parametrize("caller,refused_as,holds_for", [

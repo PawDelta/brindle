@@ -158,10 +158,20 @@ async def events(ws: WebSocket) -> None:
     loop = asyncio.get_running_loop()
     # SQLite connections stay on their thread: one worker owns this client's.
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brindle-events")
+    db: DB | None = None
+    disconnected: asyncio.Future | None = None
+
+    def open_feed() -> Feed:
+        nonlocal db
+        db = DB()
+        return Feed(db, since, ws.query_params.get("repo"), getattr(ws.app.state, "poller", None))
+
+    def close_db() -> None:
+        if db is not None:
+            db.conn.close()
+
     try:
-        feed = await loop.run_in_executor(
-            pool, lambda: Feed(DB(), since, ws.query_params.get("repo"),
-                               getattr(ws.app.state, "poller", None)))
+        feed = await loop.run_in_executor(pool, open_feed)
         disconnected = asyncio.ensure_future(_wait_for_disconnect(ws))
         for message in await loop.run_in_executor(pool, feed.start):
             await ws.send_json(message)
@@ -173,7 +183,15 @@ async def events(ws: WebSocket) -> None:
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        pool.shutdown(wait=False)
+        if disconnected is not None:
+            disconnected.cancel()
+        try:
+            # Queue cleanup on the owner thread even if cancellation arrived
+            # while open_feed/tick was still running. Never close SQLite on
+            # the event loop's thread or leave it to garbage collection.
+            await asyncio.shield(loop.run_in_executor(pool, close_db))
+        finally:
+            pool.shutdown(wait=False)
 
 
 async def _wait_for_disconnect(ws: WebSocket) -> None:

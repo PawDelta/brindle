@@ -13,7 +13,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import os
+import resource
 import signal
 import socket
 import subprocess
@@ -28,6 +30,21 @@ HOST = "127.0.0.1"
 IDLE_SECONDS = 600.0
 WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
+
+log = logging.getLogger(__name__)
+
+
+def _raise_file_limit() -> None:
+    """Finder/launchd can give the daemon a soft limit of just 256 fds."""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # An unlimited hard limit needn't mean an unlimited daemon; some
+        # kernels also reject RLIM_INFINITY as the soft limit.
+        target = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
+        if soft != resource.RLIM_INFINITY and soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (OSError, ValueError):
+        log.warning("brindle: couldn't raise the daemon's file descriptor limit", exc_info=True)
 
 
 class DaemonError(Exception):
@@ -183,8 +200,12 @@ def _agents_running() -> bool:
 
     try:
         panes = tmux.list_panes()
-        return any(agents.is_alive(a, panes) for a in DB().list_agents()
-                   if a.status not in ("done", "paused"))
+        db = DB()
+        try:
+            return any(agents.is_alive(a, panes) for a in db.list_agents()
+                       if a.status not in ("done", "paused"))
+        finally:
+            db.conn.close()
     except Exception:
         return True     # can't tell: stay up rather than strand an app
 
@@ -231,6 +252,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle.daemon.app import build_app
     from brindle.daemon.auth import new_token
 
+    _raise_file_limit()
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
     from brindle.daemon.events import start_poller

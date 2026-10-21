@@ -1,5 +1,5 @@
-"""The daemon's read-only routes. Each opens its own ``DB`` (a request runs on a
-worker thread) and answers with ``service.dto`` shapes; engine errors become
+"""The daemon's read-only routes. The wrapper opens and closes each request's
+``DB`` on its worker thread. Routes answer with ``service.dto`` shapes; engine errors become
 ``ServiceError`` JSON. Secrets leave only as key names and their last 4 characters."""
 
 from __future__ import annotations
@@ -57,13 +57,18 @@ log = logging.getLogger(__name__)
 COST_DAYS = 30
 
 
-def _json(fn: Callable[[Request], Any]) -> Callable[[Request], JSONResponse]:
+def _json(fn: Callable[[DB, Request], Any]) -> Callable[[Request], JSONResponse]:
     """A sync handler (Starlette runs it on a thread) whose return value is the
-    JSON body and whose exceptions become the service's error JSON."""
+    JSON body and whose exceptions become the service's error JSON. Owns the
+    request's DB, including on error responses."""
     @wraps(fn)
     def handler(request: Request) -> JSONResponse:
         try:
-            return JSONResponse(fn(request))
+            db = DB()
+            try:
+                return JSONResponse(fn(db, request))
+            finally:
+                db.conn.close()
         except Exception as e:  # noqa: BLE001 - every engine error maps to a ServiceError
             err = from_exception(e)
             if err.code == "internal":
@@ -88,15 +93,14 @@ def _last4(value: str) -> str:
 
 
 @_json
-def repos(request: Request) -> Any:
-    db = DB()
+def repos(db: DB, request: Request) -> Any:
     roots = sorted({ws.repo_root for ws in db.find_workspaces(None)})
     return [{"repo_root": r, "name": r.rstrip("/").rsplit("/", 1)[-1]} for r in roots]
 
 
 @_json
-def list_sessions(request: Request) -> Any:
-    db, repo = DB(), _need_repo(request)
+def list_sessions(db: DB, request: Request) -> Any:
+    repo = _need_repo(request)
     live = [SessionDTO.from_agent(s.root, s.goal).to_json() for s in sessions.live(db, repo)]
     paused = [SessionDTO.from_agent(s.root, sessions.goal_line(db, s.root)).to_json()
               for s in sessions.paused(db, repo)]
@@ -104,13 +108,12 @@ def list_sessions(request: Request) -> Any:
 
 
 @_json
-def snapshot(request: Request) -> Any:
-    return [WorkspaceDTO.model_validate(ws).to_json() for ws in view.snapshot(DB(), _repo(request))]
+def snapshot(db: DB, request: Request) -> Any:
+    return [WorkspaceDTO.model_validate(ws).to_json() for ws in view.snapshot(db, _repo(request))]
 
 
 @_json
-def goal(request: Request) -> Any:
-    db = DB()
+def goal(db: DB, request: Request) -> Any:
     entry = view.autopilot_entry(db, _need_repo(request), panes=tmux.list_panes(),
                                  root_id=request.query_params.get("root"))
     ap = entry and db.get_autopilot(entry["root_id"])
@@ -120,13 +123,12 @@ def goal(request: Request) -> Any:
 
 
 @_json
-def inbox_(request: Request) -> Any:
-    return [i.to_json() for i in inbox.items(DB(), _repo(request))]
+def inbox_(db: DB, request: Request) -> Any:
+    return [i.to_json() for i in inbox.items(db, _repo(request))]
 
 
 @_json
-def agent(request: Request) -> Any:
-    db = DB()
+def agent(db: DB, request: Request) -> Any:
     try:
         a = agents.get(db, request.path_params["id"])
     except agents.AgentError as e:
@@ -135,8 +137,7 @@ def agent(request: Request) -> Any:
 
 
 @_json
-def diff(request: Request) -> Any:
-    db = DB()
+def diff(db: DB, request: Request) -> Any:
     ws = db.get_workspace(request.path_params["id"])
     if ws is None:
         raise ServiceError("not_found", "no such workspace", 404)
@@ -146,10 +147,10 @@ def diff(request: Request) -> Any:
 
 
 @_json
-def workspace_file(request: Request) -> Any:
+def workspace_file(db: DB, request: Request) -> Any:
     """``?path=``: a file the review sheet can edit inline, read with the
     same checks as ``PUT .../file``. ``base`` is the blob sha that PUT takes."""
-    ws = DB().get_workspace(request.path_params["id"])
+    ws = db.get_workspace(request.path_params["id"])
     if ws is None:
         raise ServiceError("not_found", "no such workspace", 404)
     rel = request.query_params.get("path")
@@ -161,40 +162,37 @@ def workspace_file(request: Request) -> Any:
 
 
 @_json
-def session_readiness(request: Request) -> Any:
+def session_readiness(db: DB, request: Request) -> Any:
     """Whether brindle judges the session ready for a PR; ``reasons``: what
     is missing, in plain words (none when it is ready); ``auto_pr``: whether
     brindle opens its PR on its own once it is."""
-    db = DB()
     root, ws = session_review.session(db, request.path_params["root"])
     why = session_review.reasons(db, root, ws)
     return {"root_id": root.id, "ready": not why, "reasons": why, "auto_pr": session_review.auto_pr(ws.repo_root)}
 
 
 @_json
-def session_diff(request: Request) -> Any:
+def session_diff(db: DB, request: Request) -> Any:
     """The session branch against its PR base, each file and hunk with its
     authors (worker ids, "supervisor", "you") and the authors for filtering.
     409 with ``reasons`` unless the session is ready."""
-    db = DB()
     root, ws = session_review.session(db, request.path_params["root"])
     session_review.require_ready(db, root, ws)
     return session_review.diff(db, root, ws)
 
 
 @_json
-def session_pr_draft(request: Request) -> Any:
-    db = DB()
+def session_pr_draft(db: DB, request: Request) -> Any:
     root, ws = session_review.session(db, request.path_params["root"])
     session_review.require_ready(db, root, ws)
     return session_review.draft(db, root, ws)
 
 
 @_json
-def session_file(request: Request) -> Any:
+def session_file(db: DB, request: Request) -> Any:
     """``?path=``: any file in the session's checkout, read with the same
     checks as ``PUT .../file``. ``base`` is the blob sha PUT and DELETE take."""
-    root, ws = session_review.session(DB(), request.path_params["root"])
+    root, ws = session_review.session(db, request.path_params["root"])
     rel = request.query_params.get("path")
     if not rel:
         raise ServiceError("invalid", "path is required", 400)
@@ -204,34 +202,34 @@ def session_file(request: Request) -> Any:
 
 
 @_json
-def decisions(request: Request) -> Any:
+def decisions(db: DB, request: Request) -> Any:
     return [DecisionDTO.from_row(d).to_json()
-            for d in knowledge.decisions(DB(), knowledge.repo_key(_need_repo(request)))]
+            for d in knowledge.decisions(db, knowledge.repo_key(_need_repo(request)))]
 
 
 @_json
-def kb_sources(request: Request) -> Any:
+def kb_sources(db: DB, request: Request) -> Any:
     keep = ("id", "kind", "scope", "mode", "visibility", "credential_name", "retention_days",
             "added_at", "docs", "quarantined")
     return [{k: s[k] for k in keep if k in s}
-            for s in kb.sources(DB(), knowledge.repo_key(_need_repo(request)))]
+            for s in kb.sources(db, knowledge.repo_key(_need_repo(request)))]
 
 
 @_json
-def kb_search(request: Request) -> Any:
+def kb_search(db: DB, request: Request) -> Any:
     """The best chunks for ``q`` among the repo's indexed, non-quarantined
     documents (kb.search): heading path, text, source link and date. No
     query, no hits."""
-    return kb.search(DB(), knowledge.repo_key(_need_repo(request)), request.query_params.get("q", ""))
+    return kb.search(db, knowledge.repo_key(_need_repo(request)), request.query_params.get("q", ""))
 
 
 @_json
-def list_profiles(request: Request) -> Any:
+def list_profiles(db: DB, request: Request) -> Any:
     return [ProfileDTO.from_profile(p).to_json() for p in profiles.list_profiles(_repo(request))]
 
 
 @_json
-def get_profile(request: Request) -> Any:
+def get_profile(db: DB, request: Request) -> Any:
     """One profile as ``brindle profile show`` resolves it (its fields, where
     it is read from, the extends chain, its rule packs and the full prompt;
     never env, whose values can be secrets) with ``brindle profile lint``'s
@@ -271,7 +269,7 @@ def get_profile(request: Request) -> Any:
 
 
 @_json
-def get_config(request: Request) -> Any:
+def get_config(db: DB, request: Request) -> Any:
     repo = _repo(request)
     settings = {"user": config.user_settings()}
     if repo:
@@ -286,7 +284,7 @@ def get_config(request: Request) -> Any:
 
 
 @_json
-def get_routing(request: Request) -> Any:
+def get_routing(db: DB, request: Request) -> Any:
     """Each tier's profiles (and the model and agent each runs), the reviewer
     and the excluded providers, with the scope each comes from, every profile
     with what routing knows of it, and the org policy all of it answers to."""
@@ -328,12 +326,12 @@ def get_routing(request: Request) -> Any:
 
 
 @_json
-def get_doctor(request: Request) -> Any:
+def get_doctor(db: DB, request: Request) -> Any:
     return [dataclasses.asdict(c) for c in doctor.checks(_repo(request))]
 
 
 @_json
-def provider_preflight(request: Request) -> Any:
+def provider_preflight(db: DB, request: Request) -> Any:
     """What would stop a session on this provider in ``repo`` before its first
     turn: the items POST /v1/sessions answers 409 with, for the identity its
     chat would run as (see brindle.preflight). Native, which runs no chat,
@@ -347,13 +345,13 @@ def provider_preflight(request: Request) -> Any:
     else:
         if provider not in preflight.PROVIDERS:
             raise ServiceError("invalid", f"provider must be one of {', '.join(preflight.PROVIDERS)}")
-        blocked = session_blockers(DB(), repo, provider, read_only=True)
+        blocked = session_blockers(db, repo, provider, read_only=True)
         items = blocked.items if blocked else []
     return [PreflightItemDTO(**i.to_json()).to_json() for i in items]
 
 
 @_json
-def account(request: Request) -> Any:
+def account(db: DB, request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
 
@@ -386,10 +384,10 @@ def account(request: Request) -> Any:
 
 
 @_json
-def get_cost(request: Request) -> Any:
+def get_cost(db: DB, request: Request) -> Any:
     cost.require_entitled()
     days = int(request.query_params.get("days") or COST_DAYS)
-    s = cost.summary(DB(), _repo(request), now=time.time(), days=days)
+    s = cost.summary(db, _repo(request), now=time.time(), days=days)
 
     def bucket(b: cost.Bucket) -> dict:
         return {"dollars": b.dollars, "tokens": b.tokens, "unknown": b.unknown, "free": b.free}

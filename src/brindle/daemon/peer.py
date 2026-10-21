@@ -65,12 +65,15 @@ def _agent_panes() -> dict[str, list[int]]:
     from brindle.db import DB
 
     db = DB()
-    panes = tmux.list_panes()
-    owners = agents.pane_owners(db, panes)
-    return {a.id: tmux.window_pids(a.tmux_window) for a in db.list_agents()
-            if a.status not in ("done", "paused") and a.tmux_window
-            and agents.same_server(a, panes) and panes.get(a.tmux_window)
-            and agents.owns_pane(db, a, owners)}
+    try:
+        panes = tmux.list_panes()
+        owners = agents.pane_owners(db, panes)
+        return {a.id: tmux.window_pids(a.tmux_window) for a in db.list_agents()
+                if a.status not in ("done", "paused") and a.tmux_window
+                and agents.same_server(a, panes) and panes.get(a.tmux_window)
+                and agents.owns_pane(db, a, owners)}
+    finally:
+        db.conn.close()
 
 
 def agent_caller(pid: int) -> str | None:
