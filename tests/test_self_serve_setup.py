@@ -1,5 +1,6 @@
 """Self-serve company setup: detect, propose (default no), save, apply, label."""
 
+import io
 import json
 
 import pytest
@@ -69,7 +70,8 @@ class Fake:
 @pytest.fixture(autouse=True)
 def env(monkeypatch, tmp_path):
     company_identity.reset()
-    monkeypatch.delenv("ANTHROPIC_FOUNDRY_RESOURCE", raising=False)
+    for name in ("ANTHROPIC_FOUNDRY_RESOURCE", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(providers, "claude_org_managed", lambda: None)
     cfg = tmp_path / "aws-config"
     monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
@@ -116,8 +118,19 @@ def test_managed_claude_code_settings_are_used(monkeypatch):
     assert ask.seen == [] and fake.calls == [] and self_serve.local_setup() is None
 
 
+@pytest.mark.parametrize("route,switch", [("vertex", "CLAUDE_CODE_USE_VERTEX"),
+                                          ("bedrock", "CLAUDE_CODE_USE_BEDROCK")])
+def test_a_signed_in_cloud_cli_alone_offers_no_route(route, switch, env, monkeypatch):
+    env.write_text(AWS_CONFIG)
+    Fake(monkeypatch, {("gcloud", "config", "get-value", "project"): (0, "p\n"), ("aws", "sts"): AWS_OK})
+    assert self_serve.detect().choices == []
+    monkeypatch.setenv(switch, "1")
+    assert [c.claude.route for c in self_serve.detect().choices] == [route]
+
+
 def test_missing_clis_are_skipped(monkeypatch, env):
     fake = Fake(monkeypatch, missing=("claude", "aws", "gcloud", "az", "codex"))
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     env.write_text(AWS_CONFIG)
     d = self_serve.detect()
     assert fake.calls == [] and [c.claude.route for c in d.choices] == ["bedrock"]   # ~/.aws/config alone
@@ -145,6 +158,7 @@ def test_nothing_beyond_the_status_commands_is_run_or_read(env, monkeypatch, tmp
 
 def aws_world(env, monkeypatch):
     env.write_text(AWS_CONFIG)
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
     return Fake(monkeypatch, {("aws", "sts", "get-caller-identity", "--profile", "dev"): AWS_OK,
                               ("aws", "sts", "get-caller-identity", "--profile", "brindle-personal"): AWS_OK})
 
@@ -158,6 +172,15 @@ def test_eof_and_no_tty_mean_no(env, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
     monkeypatch.setattr("builtins.input", lambda p: (_ for _ in ()).throw(EOFError()))
     assert self_serve.tty_ask("?") == ""
+
+
+def test_an_agent_pane_is_never_offered_a_setup(env, monkeypatch):
+    fake = aws_world(env, monkeypatch)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "abc123")
+    ask = answers("y")
+    assert self_serve.run(lambda m: None, ask=ask) is None
+    assert ask.seen == [] and fake.calls == []
 
 
 def test_several_choices_pick_by_number(env, monkeypatch):
@@ -274,6 +297,20 @@ def test_removing_the_local_setup_drops_its_env(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
     assert self_serve.run(lambda m: None) is None
     assert company_login.stored_env() == {}
+
+
+def test_doctor_shows_a_saved_route_until_account_route_reset(monkeypatch):
+    from brindle.pro.account import ProAccount
+
+    self_serve.save_local(AgentSetup(claude=ClaudeSetup(route="vertex", gcp=team_policy.GcpSetup("p", "us-east5"))))
+    company_login.store_env(self_serve.SELF_ORG, {"CLAUDE_CODE_USE_VERTEX": "1"}, self_serve=True)
+    [c] = self_serve.checks()
+    assert str(config.user_config_path()) in c.detail
+    config.forget_user("agent_setup")       # the env alone still routes panes: still shown
+    assert len(self_serve.checks()) == 1
+    assert ProAccount(out=io.StringIO()).run(["route", "--reset"]) == 0
+    assert self_serve.checks() == [] and company_login.stored_env() == {}
+    assert "company_claude_env" not in config.user_settings()
 
 
 # -- doctor labels ---------------------------------------------------------------------------

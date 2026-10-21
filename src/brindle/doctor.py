@@ -303,9 +303,10 @@ def checks(repo_root: str | None) -> list[Check]:
                      install=CLI_INSTALL["opencode"][1]))
     out.extend(signin_checks(repo_root))
     out.extend(credential_checks())
-    from brindle import company_identity
+    from brindle import company_identity, self_serve
 
     out.extend(company_identity.checks())
+    out.extend(self_serve.checks())
 
     from brindle import signin_pause
 
