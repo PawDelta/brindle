@@ -221,9 +221,38 @@ def test_control_frames_reach_the_pane(fake, attached):
             ("set-option", "-w", "-t", "%1", "window-size", "manual"),
             *[("resize-window", "-t", "%1", "-x", "80", "-y", "40")] * (not attached),
             ("resize-window", "-t", "%1", "-x", "120", "-y", "40")]
-        if attached:    # blurred: the terminal's size rules again
-            sock.send_json({"type": "blur"})
-            fake.wait_for(lambda: ("set-option", "-w", "-u", "-t", "%1", "window-size") in fake.calls)
+        if attached:
+            two_viewers(fake, client, sock)     # and closes sock
+        else:
+            sock.__exit__(None, None, None)
+
+
+def two_viewers(fake, client, sock):
+    """``sock``'s viewer blurs: the terminal's size rules again. Then two
+    viewers: the most recently focused one's size applies; the other's waits
+    for its focus, and when it leaves the first's is back. The sockets close
+    whatever happens, so a failure can't hang the TestClient."""
+    def sized():
+        return [c[4:7:2] for c in fake.calls if c[0] == "resize-window"]
+    other = None
+    try:
+        sock.send_json({"type": "blur"})
+        fake.wait_for(lambda: ("set-option", "-w", "-u", "-t", "%1", "window-size") in fake.calls)
+        sock.send_json({"type": "focus"})
+        fake.wait_for(lambda: sized().count(("120", "40")) == 2)
+        other = connect(client, "w1")
+        other.receive_json()
+        for cols in (90, 91):                   # not focused: kept, not applied
+            other.send_json({"type": "resize", "cols": cols, "rows": 30})
+        other.send_json({"type": "focus"})
+        fake.wait_for(lambda: ("91", "30") in sized())
+        other.__exit__(None, None, None)
+        other = None
+        fake.wait_for(lambda: sized().count(("120", "40")) == 3)
+        assert ("90", "30") not in sized()
+    finally:
+        if other is not None:
+            other.__exit__(None, None, None)
         sock.__exit__(None, None, None)
 
 

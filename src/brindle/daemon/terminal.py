@@ -31,9 +31,12 @@ lands), and viewers are seeded again once it settles.
 While a terminal client is attached to the pane's session, viewers are told
 ``shared``, and the size follows the app's focus: ``{"type": "focus"}``
 (the viewer is focused or on screen) sizes the window to that viewer's last
-resize, as if nobody else were looking, and ``{"type": "blur"}`` (or the
-viewer leaving) of the last focused viewer hands it back to tmux's own rule,
-the terminals' size. Unshared, every resize applies.
+resize, as if nobody else were looking, until another viewer is focused;
+another viewer's resize meanwhile is kept for when it is. ``{"type":
+"blur"}`` (or the viewer leaving) gives the size to the viewer focused
+before it, or, from the last focused viewer, back to tmux's own rule: the
+terminals' size. With no viewer focused, an unshared pane takes every
+resize.
 
 An agent with no pane to stream (exited, or never had one) gets ``no_pane`` and
 what is left: the dead pane's last screen, else the last thing its transcript
@@ -102,6 +105,7 @@ class Viewer:
     def __init__(self, pos: int, shared: bool) -> None:
         self.pos, self.shared = pos, shared
         self.reseed = False             # the pane was resized: seed again
+        self.size: tuple[int, int] | None = None    # the size it last asked for
         self.wake = asyncio.Event()
 
 
@@ -270,7 +274,8 @@ class Pane:
         self._screen: list[str] | None = None
         self._view: tmux.View | None = None
         self.window: str | None = None  # the id of the window the pane is in
-        self.focused: set[Viewer] = set()   # viewers the app has focused or on screen
+        self.focused: list[Viewer] = []     # viewers focused or on screen, the latest last
+        self._last: tuple[int, int] | None = None   # the last size any viewer asked for
         self._polling = asyncio.Lock()  # a poll's capture and redraw, or a seed's capture
         self._closed = False
         self._loop = asyncio.get_running_loop()
@@ -355,18 +360,30 @@ class Pane:
             out += _cursor(view)
         return out, view
 
+    def _wanted(self) -> tuple[int, int] | None:
+        """The size the window should have: the most recently focused
+        viewer's, else (no viewer focused) the last any viewer asked for."""
+        owner = self.focused[-1] if self.focused else None
+        return (owner.size if owner else None) or self._last
+
     def focus(self, viewer: Viewer) -> None:
         """``viewer`` is focused or on screen: its size is the window's, even
-        while a terminal shares the pane."""
-        self.focused.add(viewer)
-        if self._size:
-            self.resize(*self._size)
+        while a terminal shares the pane, until another viewer is focused."""
+        if viewer in self.focused:
+            self.focused.remove(viewer)
+        self.focused.append(viewer)
+        if size := self._wanted():
+            self.resize(*size)
 
     async def blur(self, viewer: Viewer) -> None:
-        """``viewer`` isn't focused any more (or left): once no viewer is,
-        tmux's own rule sizes a shared window again."""
-        self.focused.discard(viewer)
+        """``viewer`` isn't focused any more (or left): the viewer focused
+        before it has the window's size again; once none is, tmux's own rule
+        sizes a shared window."""
+        if viewer in self.focused:
+            self.focused.remove(viewer)
         if self.focused:
+            if size := self._wanted():
+                self.resize(*size)
             return
         async with self._sizing:
             if self.shared:
@@ -415,6 +432,14 @@ class Pane:
         if self._resize or self._runner:    # one is waiting or running: it takes the latest size
             return
         self._schedule()
+
+    def request(self, viewer: Viewer, cols: int, rows: int) -> None:
+        """``viewer`` asks for ``cols`` x ``rows``: noted as its size, and
+        applied unless another viewer is the focused one (see _wanted)."""
+        viewer.size = self._last = (cols, rows)
+        if self.focused and viewer is not self.focused[-1]:
+            return
+        self.resize(cols, rows)
 
     def _schedule(self) -> None:
         wait = self._next - self._loop.time()
@@ -854,4 +879,8 @@ async def _apply(pane: Pane, frame: object, viewer: Viewer | None = None) -> Non
     elif kind == "resize":
         cols, rows = frame.get("cols"), frame.get("rows")
         if isinstance(cols, int) and isinstance(rows, int):
-            pane.resize(max(1, min(cols, MAX_SIZE)), max(1, min(rows, MAX_SIZE)))
+            size = max(1, min(cols, MAX_SIZE)), max(1, min(rows, MAX_SIZE))
+            if viewer is None:
+                pane.resize(*size)
+            else:
+                pane.request(viewer, *size)
