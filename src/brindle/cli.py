@@ -1761,52 +1761,18 @@ def profile_new(
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _lint_one(name: str, repo: str | None) -> tuple[list[str], list[str]]:
-    """(errors, warnings) for one profile."""
-    from brindle import providers
-    from brindle.profiles import (ProfileError, load_profile, load_rule_pack, missing_add_dirs)
-    from brindle.rule_checks import compile_patterns
-
-    errors: list[str] = []
-    warnings: list[str] = []
-    try:
-        p = load_profile(name, repo)
-    except (KeyError, ProfileError) as e:
-        return [str(e)], []
-    try:
-        providers.get_provider(p.provider)
-    except KeyError as e:
-        errors.append(str(e))
-    for pack_name in p.rules:
-        try:
-            pack = load_rule_pack(pack_name, repo)
-        except (KeyError, ProfileError) as e:
-            errors.append(str(e))
-            continue
-        _, bad = compile_patterns(pack)
-        errors.extend(f"rule pack {pack_name}: deny_patterns entry doesn't compile: {b}" for b in bad)
-        if not pack.prompt and not pack.mechanical:
-            warnings.append(f"rule pack {pack_name} is empty")
-    errors.extend(f"permission_denies: invalid entry {e}" for e in p.permission_denies_errors)
-    if not p.prompt.strip():
-        warnings.append("the prompt is empty")
-    for d in missing_add_dirs(p):
-        warnings.append(f"add_dirs entry doesn't exist: {d}")
-    return errors, warnings
-
-
 @profile_app.command("lint")
 def profile_lint(
     name: Optional[str] = typer.Argument(None, help="One profile; default: every profile visible here."),
 ) -> None:
     """Check profiles: extends chains, rule packs, patterns, providers and permission denies."""
-    from brindle.profiles import profile_names
+    from brindle.profiles import lint_profile, profile_names
 
     repo = _here_repo()
     names = [name] if name else profile_names(repo)
     failed = 0
     for n in names:
-        errors, warnings = _lint_one(n, repo)
+        errors, warnings = lint_profile(n, repo)
         if errors:
             failed += 1
             typer.secho(f"✗ {n}", fg="red")

@@ -270,6 +270,117 @@ def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body,
             autopilot.choose_profile(db, "sup", str(repo), weight="light")
 
 
+def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_reports_it(db, repo, world, monkeypatch):
+    from brindle import learning, plugins, quota
+    from brindle.daemon import routes_read
+    from brindle.pro import learning as pro_learning
+
+    class Prefers(learning.LearningPlugin):
+        def record(self, task, outcome):
+            pass
+
+        def suggest(self, task, candidates, default=None):
+            return "developer-codex"
+
+    plugins.reset()
+    monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: Prefers())
+    monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
+    monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
+    config.set_repo(str(repo), "learning", "cloud")
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "repo", "kinds": {
+        "medium": {"model": "developer", "fallbacks": ["developer-codex"]},      # a choice locks it
+        "heavy": {"model": "developer-heavy", "fallbacks": ["developer-codex"], "locked": False}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    assert (cfg.routing["medium"], cfg.routing_locked) == (["developer", "developer-codex"],
+                                                         {"medium": True, "heavy": False})
+    # Editing one row in another scope leaves the lock a lower scope set on a different row alone.
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local",
+                                               "kinds": {"light": {"model": "developer-light"}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    assert cfg.routing_locked == {"medium": True, "heavy": False, "light": True}
+
+    assert autopilot._route_by_weight(db, cfg, str(repo), "medium", None, None)[:2] == ("developer", False)
+    assert autopilot._route_by_weight(db, cfg, str(repo), "heavy", None, None)[:2] == ("developer-codex", True)
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert (kinds["medium"].locked, kinds["medium"].learned) == (True, None)
+    assert (kinds["heavy"].model, kinds["heavy"].learned) == ("developer-heavy", "developer-codex")
+
+    # A candidate routing excludes can't be what learning runs; an explicit review_profile isn't a learned one.
+    config.set_repo(str(repo), "exclude_providers", ["codex"])
+    config.set_repo(str(repo), "review_profile", "reviewer-codex")
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "repo",
+                                               "kinds": {"reviewer": {"model": "reviewer"}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert kinds["heavy"].learned is None
+    assert (cfg.review_profile, kinds["reviewer"].model, kinds["reviewer"].locked) == ("reviewer", "reviewer", True)
+
+
+def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo, world, monkeypatch):
+    from brindle import providers
+    from brindle.daemon import routes_read
+    from brindle.profiles import load_profile
+    from brindle.service import sessions as svc
+
+    before = config._read_json(config.scope_paths(str(repo))["local"])
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
+        "supervisor": {"model": "nope"}}})
+    assert code == 400 and config._read_json(config.scope_paths(str(repo))["local"]) == before   # nothing written
+
+    agent_dir = repo / ".brindle" / "agents"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "chat-alt.md").write_text(
+        "---\nname: chat-alt\nextends: developer\nprovider: codex\nmodel: gpt-test\neffort: high\n---\nHi.\n")
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
+        "supervisor": {"model": "chat-alt", "fallbacks": ["developer-gemini", "supervisor"]},
+        "reviewer": {"model": "reviewer-opencode", "fallbacks": ["reviewer-codex", "reviewer-gemini"]}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert (kinds["supervisor"].model, kinds["supervisor"].fallbacks, kinds["supervisor"].locked) == (
+        "chat-alt", ["developer-gemini", "supervisor"], True)
+    assert kinds["reviewer"].fallbacks == ["reviewer-codex", "reviewer-gemini"]
+    # Written to the scope asked for only.
+    assert "supervisor_profile" not in config._read_json(config.scope_paths(str(repo))["repo"])
+
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, agent, ws, **kw: launched.append(agent))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(svc, "preflight", lambda *a, **kw: [])
+    monkeypatch.setattr(svc, "cull_detached", lambda root: None)
+    monkeypatch.setattr("brindle.policy.check_assign",
+                        lambda cfg, root, name, *a: SimpleNamespace(allowed=name != "reviewer-codex", reason="no"))
+
+    def unusable(dead):
+        monkeypatch.setattr(providers, "unusable", lambda p, env=None: "down" if p in dead else None)
+        monkeypatch.setattr(agents, "unusable", providers.unusable)
+
+    # A new chat launches as the supervisor on the first choice that can run, with its model and effort.
+    unusable([])
+    svc.start(db, str(repo), autopilot=False)
+    chat = launched[-1]
+    got = agents._profile_for(db, chat, world)
+    assert (chat.profile, chat.provider, got.provider, got.model, got.effort) == (
+        "supervisor", "codex", "codex", "gpt-test", "high")
+    unusable(["codex"])                       # then the next in order: its own provider's defaults
+    svc.start(db, str(repo), autopilot=False)
+    assert (launched[-1].provider, agents._profile_for(db, launched[-1], world).model) == (
+        "antigravity", load_profile("developer-gemini", str(repo)).model)
+    svc.start(db, str(repo), provider="claude", autopilot=False)       # asked for by name: kept
+    assert agents._profile_for(db, launched[-1], world).model == load_profile("supervisor", str(repo)).model
+
+    # A review walks the pick and then the fallbacks: an unavailable provider and a policy denial are skipped.
+    unusable([])
+    assert agents._review_profile(db, world, None, cfg) == "reviewer-opencode"
+    unusable(["opencode"])
+    assert agents._review_profile(db, world, None, cfg) == "reviewer-gemini"
+    with pytest.raises(agents.AgentError, match="can't run"):       # asked for by name: no substitute
+        agents._review_profile(db, world, "reviewer-opencode", cfg)
+
+
 PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),
                     enforce=True)
 

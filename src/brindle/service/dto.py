@@ -204,13 +204,16 @@ class ProfileDTO(_DTO):
     headless: bool = False
     local: bool = False
     fallback: list[str] = []
+    lint_errors: list[str] = []     # the profile's automatic check (`brindle profile lint`)
+    lint_warnings: list[str] = []
 
     @classmethod
-    def from_profile(cls, p: Profile) -> ProfileDTO:
+    def from_profile(cls, p: Profile, lint_errors: list[str] = (), lint_warnings: list[str] = ()) -> ProfileDTO:
         # env is left out: its values can be secrets.
         return cls(name=p.name, description=p.description, provider=p.provider, model=p.model,
                    permission_mode=p.permission_mode, effort=p.effort, headless=p.headless,
-                   local=p.local, fallback=list(p.fallback))
+                   local=p.local, fallback=list(p.fallback),
+                   lint_errors=list(lint_errors), lint_warnings=list(lint_warnings))
 
 
 class RoutingSettingDTO(_DTO):
@@ -243,6 +246,19 @@ class RoutingProfileDTO(_DTO):
     cost_tier: str           # "low", "medium" or "high"
     allowed: bool = True     # whether the org's policy lets a worker run on it
     refusal: str | None = None
+    lint_errors: list[str] = []     # the profile's automatic check (`brindle profile lint`)
+    lint_warnings: list[str] = []
+
+
+class RoutingKindDTO(_DTO):
+    """One kind of work (light, medium, heavy, advanced, reviewer, supervisor):
+    the owner's pick and its ordered fallbacks, whether it is locked against
+    hosted learning, and the different profile learning is running for it now
+    (``learned``; None when it keeps the owner's pick)."""
+    model: str | None = None
+    fallbacks: list[str] = []
+    locked: bool = False
+    learned: str | None = None
 
 
 class RoutingLockDTO(_DTO):
@@ -275,6 +291,7 @@ class RoutingDTO(_DTO):
     exclude_providers: RoutingSettingDTO
     profiles: list[RoutingProfileDTO]
     policy: RoutingPolicyDTO = RoutingPolicyDTO()
+    kinds: dict[str, RoutingKindDTO] = {}
 
 
 class AccountOrgDTO(_DTO):

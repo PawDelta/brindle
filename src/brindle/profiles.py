@@ -397,6 +397,39 @@ def missing_add_dirs(profile: Profile) -> list[str]:
     return [d for d in profile.add_dirs or [] if not Path(d).is_dir()]
 
 
+def lint_profile(name: str, repo: str | None) -> tuple[list[str], list[str]]:
+    """(errors, warnings) for one profile."""
+    from brindle import providers
+    from brindle.rule_checks import compile_patterns
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        p = load_profile(name, repo)
+    except (KeyError, ProfileError) as e:
+        return [str(e)], []
+    try:
+        providers.get_provider(p.provider)
+    except KeyError as e:
+        errors.append(str(e))
+    for pack_name in p.rules:
+        try:
+            pack = load_rule_pack(pack_name, repo)
+        except (KeyError, ProfileError) as e:
+            errors.append(str(e))
+            continue
+        _, bad = compile_patterns(pack)
+        errors.extend(f"rule pack {pack_name}: deny_patterns entry doesn't compile: {b}" for b in bad)
+        if not pack.prompt and not pack.mechanical:
+            warnings.append(f"rule pack {pack_name} is empty")
+    errors.extend(f"permission_denies: invalid entry {e}" for e in p.permission_denies_errors)
+    if not p.prompt.strip():
+        warnings.append("the prompt is empty")
+    for d in missing_add_dirs(p):
+        warnings.append(f"add_dirs entry doesn't exist: {d}")
+    return errors, warnings
+
+
 def _org_item(kind: str, name: str):
     """The org library's profile or rule pack ``name`` (brindle Team, feature
     ``org_profiles``; see ``brindle.pro.org_profiles``), or None: no

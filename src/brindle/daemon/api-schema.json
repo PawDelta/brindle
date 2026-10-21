@@ -1517,6 +1517,22 @@
           "title": "Headless",
           "type": "boolean"
         },
+        "lint_errors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Errors",
+          "type": "array"
+        },
+        "lint_warnings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Warnings",
+          "type": "array"
+        },
         "local": {
           "default": false,
           "title": "Local",
@@ -1565,6 +1581,50 @@
     },
     "RoutingDTO": {
       "$defs": {
+        "RoutingKindDTO": {
+          "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
+          "properties": {
+            "fallbacks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Fallbacks",
+              "type": "array"
+            },
+            "learned": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Learned"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            }
+          },
+          "title": "RoutingKindDTO",
+          "type": "object"
+        },
         "RoutingLockDTO": {
           "properties": {
             "kind": {
@@ -1716,6 +1776,22 @@
             "installed": {
               "title": "Installed",
               "type": "boolean"
+            },
+            "lint_errors": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Lint Errors",
+              "type": "array"
+            },
+            "lint_warnings": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Lint Warnings",
+              "type": "array"
             },
             "model": {
               "anyOf": [
@@ -1887,6 +1963,14 @@
         "exclude_providers": {
           "$ref": "#/$defs/RoutingSettingDTO"
         },
+        "kinds": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutingKindDTO"
+          },
+          "default": {},
+          "title": "Kinds",
+          "type": "object"
+        },
         "policy": {
           "$ref": "#/$defs/RoutingPolicyDTO",
           "default": {
@@ -1927,6 +2011,50 @@
         "profiles"
       ],
       "title": "RoutingDTO",
+      "type": "object"
+    },
+    "RoutingKindDTO": {
+      "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
+      "properties": {
+        "fallbacks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Fallbacks",
+          "type": "array"
+        },
+        "learned": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Learned"
+        },
+        "locked": {
+          "default": false,
+          "title": "Locked",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        }
+      },
+      "title": "RoutingKindDTO",
       "type": "object"
     },
     "RoutingLockDTO": {
@@ -2105,6 +2233,22 @@
         "installed": {
           "title": "Installed",
           "type": "boolean"
+        },
+        "lint_errors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Errors",
+          "type": "array"
+        },
+        "lint_warnings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Warnings",
+          "type": "array"
         },
         "model": {
           "anyOf": [

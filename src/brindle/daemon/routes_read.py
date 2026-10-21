@@ -44,6 +44,7 @@ from brindle.service.dto import (
     PreflightItemDTO,
     ProfileDTO,
     RoutingDTO,
+    RoutingKindDTO,
     RoutingProfileDTO,
     RoutingSettingDTO,
     RoutingTierDTO,
@@ -230,7 +231,12 @@ def kb_search(db: DB, request: Request) -> Any:
 
 @_json
 def list_profiles(db: DB, request: Request) -> Any:
-    return [ProfileDTO.from_profile(p).to_json() for p in profiles.list_profiles(_repo(request))]
+    repo = _repo(request)
+    out = []
+    for p in profiles.list_profiles(repo):
+        errors, warnings = profiles.lint_profile(p.name, repo)
+        out.append(ProfileDTO.from_profile(p, lint_errors=errors, lint_warnings=warnings).to_json())
+    return out
 
 
 @_json
@@ -239,10 +245,8 @@ def get_profile(db: DB, request: Request) -> Any:
     it is read from, the extends chain, its rule packs and the full prompt;
     never env, whose values can be secrets) with ``brindle profile lint``'s
     findings for it: ``{**ProfileDTO, source, extends, rules, prompt, lint}``."""
-    from brindle.cli import _lint_one   # the lint `brindle profile lint` runs; one definition
-
     repo, name = _repo(request), request.path_params["name"]
-    errors, warnings = _lint_one(name, repo)
+    errors, warnings = profiles.lint_profile(name, repo)   # the lint `brindle profile lint` runs
     try:
         p = profiles.load_profile(name, repo)
     except (KeyError, profiles.ProfileError) as e:
@@ -267,7 +271,7 @@ def get_profile(db: DB, request: Request) -> Any:
         except (KeyError, profiles.ProfileError):
             break
     prompt = f"{p.prompt.strip()}\n\n{profiles.rules_prompt(packs)}".strip() if packs else p.prompt.strip()
-    return {**ProfileDTO.from_profile(p).to_json(),
+    return {**ProfileDTO.from_profile(p, errors, warnings).to_json(),
             "source": profiles.profile_source(name, repo), "extends": chain,
             "rules": [{"name": k.name, "description": k.description, "source": k.source} for k in packs],
             "prompt": prompt, "lint": {"errors": errors, "warnings": warnings}}
@@ -321,7 +325,9 @@ def get_routing(db: DB, request: Request) -> Any:
     for p in every:
         # A provider with no CLI of its own (native) is always there.
         here = p.provider not in doctor.CLI_INSTALL or p.provider in installed
+        errors, warnings = profiles.lint_profile(p.name, repo)
         rows.append(RoutingProfileDTO(
+            lint_errors=errors, lint_warnings=warnings,
             name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
             model=autopilot.effective_profile_model(p, repo) or None,
             installed=here, signed_in=here and providers.signed_out(p.provider, p.env) is None,
@@ -332,7 +338,49 @@ def get_routing(db: DB, request: Request) -> Any:
         reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=config.setting_source(repo, "reviewer")),
         exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers,
                                             source=config.setting_source(repo, "exclude_providers")),
-        profiles=rows, policy=policy.to_dto(every)).to_json()
+        profiles=rows, policy=policy.to_dto(every), kinds=_routing_kinds(db, cfg, repo)).to_json()
+
+
+def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, RoutingKindDTO]:
+    """Per kind of work: the owner's pick, its ordered fallbacks, whether it
+    is locked, and the different profile hosted learning runs for it now.
+    A locked kind is never overridden, so it never reports one."""
+    from brindle import agents, autopilot
+
+    def learned(kind: str, run) -> str | None:
+        if cfg.routing_locked.get(kind):
+            return None
+        try:
+            return run()
+        except Exception:  # noqa: BLE001 - a read never fails on the learner
+            log.exception("brindle: couldn't ask the learner about %s", kind)
+            return None
+
+    kinds = {}
+    def weight_pick(t: str) -> str | None:
+        # The dispatch's own resolution, so an excluded or unavailable candidate is never reported.
+        name, learned_pick, _ = autopilot._route_by_weight(db, cfg, repo, t, None, None)
+        return name if learned_pick else None
+
+    for t in config.WEIGHTS:
+        names = cfg.routing[t]
+        kinds[t] = RoutingKindDTO(model=names[0] if names else None, fallbacks=names[1:],
+                                  locked=bool(cfg.routing_locked.get(t)),
+                                  learned=learned(t, lambda t=t: weight_pick(t)))
+
+    def reviewer_pick() -> str | None:
+        if cfg.review_profile:      # the owner's explicit choice, not a learned one
+            return None
+        pick = agents.default_review_profile(cfg, None, db, repo)
+        return pick if pick != cfg.reviewer else None
+
+    kinds["reviewer"] = RoutingKindDTO(model=cfg.review_profile or cfg.reviewer,
+                                       fallbacks=cfg.reviewer_fallbacks,
+                                       locked=bool(cfg.routing_locked.get("reviewer")),
+                                       learned=learned("reviewer", reviewer_pick))
+    kinds["supervisor"] = RoutingKindDTO(model=cfg.supervisor_profile, fallbacks=cfg.supervisor_fallbacks,
+                                         locked=bool(cfg.routing_locked.get("supervisor")))
+    return kinds
 
 
 @_json

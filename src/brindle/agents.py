@@ -466,6 +466,39 @@ def _guarded_profile(agent: Agent, ws: Workspace | None):
         return None
 
 
+def supervisor_choice(repo_root: str):
+    """The profile a new supervisor chat takes its provider, model and effort
+    from: the first of the owner's ``supervisor_profile`` and
+    ``supervisor_fallbacks`` that exists, the org's policy allows and can run
+    here; None when none is set or none can (the supervisor profile's own then)."""
+    from brindle.config import load_repo_config
+    from brindle.profiles import ProfileError
+    from brindle.service.routing import RoutingPolicy
+
+    cfg = load_repo_config(repo_root)
+    policy = RoutingPolicy.load(repo_root)
+    for name in [cfg.supervisor_profile, *cfg.supervisor_fallbacks]:
+        try:
+            p = load_profile(name, repo_root) if name else None
+        except (KeyError, ProfileError):
+            continue
+        if p is not None and policy.refusal(p) is None and unusable(p.provider, p.env) is None:
+            return p
+    return None
+
+
+def _with_supervisor_choice(profile, provider: str, repo_root: str):
+    """``profile`` (the supervisor's) running on the owner's choice's provider,
+    model and effort, when this chat was launched on that choice's provider
+    (a provider asked for by name keeps the profile's own)."""
+    from dataclasses import replace
+
+    choice = supervisor_choice(repo_root)
+    if choice is None or choice.provider != provider:
+        return profile
+    return replace(profile, provider=choice.provider, model=choice.model, effort=choice.effort)
+
+
 def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     """``agent``'s profile as launched: autopilot sessions add their guide, a
     supervisor gets the rules for acting on findings, the person's standing
@@ -481,6 +514,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     from brindle.profiles import load_rule_packs, rules_prompt
 
     profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
+    if agent.profile == SUPERVISOR and agent.mode == "interactive":
+        profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.
@@ -626,6 +661,8 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         m = managed(ws.repo_root)
     if profile is None:
         profile = guardrails.effective(load_profile(profile_name, ws.repo_root))
+        if profile_name == SUPERVISOR and agent is not None and agent.mode == "interactive":
+            profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
         why = managed_models.refusal(m, profile) if m is not None else None
         if why:
             route_health.record(ws.repo_root, agent=profile.provider,
@@ -2471,7 +2508,7 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
         return cfg.review_profile
     if cfg.reviewer and cfg.reviewer != "reviewer":
         return cfg.reviewer
-    if db is None or not repo_root:
+    if db is None or not repo_root or cfg.routing_locked.get("reviewer"):
         return cfg.reviewer
     from brindle import learning
 
@@ -2529,43 +2566,49 @@ def _review_worktree_present(ws: Workspace) -> None:
 
 
 def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
-    """The reviewer profile to use, checked to be one that can run: raises
-    ``AgentError`` if it (explicit or picked) doesn't exist, or uses the codex
-    provider but codex isn't on PATH -- rather than spawning a reviewer doomed
-    to fail in a dead pane."""
-    worker = workspace_worker(db, ws)
-    profile = profile or default_review_profile(cfg, worker, db, ws.repo_root,
-                                                worker.task if worker else None)
+    """The reviewer profile to use, checked to be one that can run, rather than
+    spawning a reviewer doomed to fail in a dead pane. ``profile`` asked for by
+    name is the only candidate; otherwise the owner's pick, then each of
+    ``cfg.reviewer_fallbacks`` in order: the first that exists, can run on its
+    provider here and that policy allows. Raises ``AgentError`` for the first
+    candidate's problem when none can."""
+    if profile is not None:
+        candidates = [profile]
+    else:
+        worker = workspace_worker(db, ws)
+        pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
+        candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
+    first: AgentError | None = None
+    for name in candidates:
+        try:
+            _reviewer_can_run(name, ws, cfg)
+            return name
+        except AgentError as e:
+            first = first or e
+    raise first
+
+
+def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
+    """Raises ``AgentError`` if reviewer profile ``name`` doesn't exist, its
+    provider can't run an agent here (with the profile's own environment) or
+    policy refuses it."""
     try:
-        chosen = load_profile(profile, ws.repo_root)
+        chosen = load_profile(name, ws.repo_root)
     except KeyError as e:
         raise AgentError(str(e)) from e
     _airgap_check(chosen, ws.repo_root)   # before any of the branch is read for the brief
-    why = unusable("codex") if chosen.provider == "codex" else None
-    if why:
+    if why := unusable(chosen.provider, chosen.env):
         raise AgentError(
-            f"reviewer profile {profile!r} can't run: {why}. "
+            f"reviewer profile {name!r} can't run: {why}. "
             "Fix that, or set review_profile (or pass profile) to a different reviewer"
         )
     try:
         from brindle import policy as pol
-        d = pol.check_assign(cfg, ws.repo_root, profile, "code review", "review")
-        if not d.allowed:
-            for fallback in (cfg.reviewer, "reviewer", "reviewer-gemini", "reviewer-local"):
-                if fallback != profile:
-                    try:
-                        load_profile(fallback, ws.repo_root)
-                        fb_d = pol.check_assign(cfg, ws.repo_root, fallback, "code review", "review")
-                        if fb_d.allowed:
-                            return fallback
-                    except Exception:
-                        continue
-            raise AgentError(f"reviewer profile {profile!r} refused by policy: {d.reason}")
-    except AgentError:
-        raise
-    except Exception:
-        pass
-    return profile
+        d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
+    except Exception:  # noqa: BLE001 - an unreadable policy doesn't stop a review
+        return
+    if not d.allowed:
+        raise AgentError(f"reviewer profile {name!r} refused by policy: {d.reason}")
 
 
 def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) -> Agent | None:
