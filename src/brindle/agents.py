@@ -2184,12 +2184,17 @@ def close_removed(db: DB, agent_id: str) -> None:
         note.unlink()
     except OSError:
         session = ""
+    root_id = root_of(db, agent_id)   # before kill drops the record that links it
     try:
         kill(db, agent_id)
     except AgentError:
         pass
     if session and db.workspace_by_tmux_session(session) is None \
             and not tmux.session_attached(session):
+        # A sidebar left in this session would go down with it.
+        sidebar = db.get_sidebar_pane(root_id)
+        if sidebar and sidebar != SIDEBAR_DISMISSED and tmux.pane_session(sidebar) == session:
+            sidebar_come_home(db, root_id, sidebar)
         tmux.kill_session(session)
 
 
