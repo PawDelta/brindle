@@ -691,7 +691,8 @@ def set_goal(db: DB, root_id: str, goal: str,
         prev = old.get((m.title, m.check_cmd))
         if prev and prev.status != "pending":
             db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
-                            passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why)
+                            passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
+                            ever_passed=prev.ever_passed)
     db.bump_progress(root_id)
     bus.publish_agent(db, "autopilot.goal", root_id, goal=goal.strip(), milestones=len(milestones))
     write_goals_file(db, root_id)
@@ -1284,7 +1285,12 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         for m in batch:
             if not m.check_cmd:
                 continue
-            at = site(m.repo)
+            try:
+                at = site(m.repo)
+            except Exception as e:   # e.g. the attached repo's checkout is gone
+                db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n(checkout unavailable: {e})", None,
+                                state="failed", state_why="checkout missing")
+                continue
             if isinstance(at, str):
                 db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n{at}", None,
                                 state="failed", state_why="repo isn't attached")
@@ -1299,7 +1305,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
                 db.record_check(m.id, False, f"$ {m.check_cmd}\n(crashed: {e})", sha,
                                 state="failed", state_why=f"crashed: {e}")
                 continue
-            state, why = check_state(ok, out, m.status == "passed" or bool(m.passed_sha))
+            state, why = check_state(ok, out, m.status == "passed" or bool(m.passed_sha or m.ever_passed))
             # Not if it already passed at this very commit: a flaky check
             # flipping back isn't progress.
             newly_passed |= ok and m.status != "passed" and (sha is None or m.passed_sha != sha)

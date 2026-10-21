@@ -220,6 +220,7 @@ def _crash(*a, **k):
     (False, (False, "$ c\n(exit 127)"), "failed", "couldn't run: command not found"),
     (False, (False, "$ c\n(exit 126)"), "failed", "couldn't run: command not runnable"),
     (False, (False, "$ c\n(timed out after 5s)"), "failed", "couldn't run: timed out after 5s"),
+    (False, (False, "$ c\n(exit -11)"), "failed", "couldn't run: crashed: killed by signal 11"),
     (False, _crash, "failed", "couldn't run: crashed: boom"),
 ])
 def test_check_records_a_state_in_plain_words(db, root, monkeypatch, had_passed, result, state, label):
@@ -238,15 +239,46 @@ def test_check_records_a_state_in_plain_words(db, root, monkeypatch, had_passed,
         assert label in autopilot.progress(db, "boss") and label in out
 
 
+def test_regressed_survives_a_dirty_pass_and_a_couldnt_run(db, root, repo, monkeypatch):
+    agent, ws = root
+    with_goal(db, checks=("c", None))
+    (repo / "dirty.txt").write_text("")   # a dirty checkout records no passed_sha
+    results = iter([(True, "$ c"), (False, "$ c\n(exit 1)"), (False, "$ c\n(exit 127)"), (False, "$ c\n(exit 1)")])
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **k: next(results))
+    seen = []
+    for _ in range(4):
+        autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+        seen.append(db.milestones("boss")[0].state)
+    assert seen == ["passed", "regressed", "failed", "regressed"]
+
+
+def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, monkeypatch):
+    from brindle import git, repos
+
+    agent, ws = root
+    autopilot.set_goal(db, "boss", "g", [("a", "c1", None, None, "other"), ("b", "c2", None)])
+
+    def gone(*a, **k):
+        raise git.GitError("not a git repository")
+
+    monkeypatch.setattr(repos, "resolve_attached", gone)
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **k: (False, "$ c2\n(exit 1)"))
+    autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
+    assert [(m.state, m.state_why) for m in db.milestones("boss")] == [
+        ("failed", "checkout missing"), ("not_done", None)]
+
+
 def test_old_milestone_rows_get_a_state(db, root):
-    db.set_milestones("boss", [("a", "c", None), ("b", "c", None), ("c", "c", None)])
+    db.set_milestones("boss", [("a", "c", None), ("b", "c", None), ("c", "c", None), ("d", "c", None)])
     ids = [m.id for m in db.milestones("boss")]
     with db.tx() as c:
         c.execute("UPDATE milestones SET status='passed', state=NULL WHERE id=?", (ids[0],))
         c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc' WHERE id=?", (ids[1],))
         c.execute("UPDATE milestones SET status='failed', state=NULL, output='(exit 127)' WHERE id=?", (ids[2],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc', "
+                  "output=\"repo 'other' isn't attached to this session\" WHERE id=?", (ids[3],))
     db._migrate()
-    assert [m.state for m in db.milestones("boss")] == ["passed", "regressed", "failed"]
+    assert [m.state for m in db.milestones("boss")] == ["passed", "regressed", "failed", "failed"]
 
 
 def commit_all(repo, msg="work"):

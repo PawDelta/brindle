@@ -125,7 +125,8 @@ CREATE TABLE IF NOT EXISTS milestones (
     profile TEXT,                  -- default worker profile for assign
     repo TEXT,                     -- alias of the attached repo the check runs in (brindle.repos); NULL: the session's own
     state TEXT,                    -- last check: passed | not_done | regressed | failed (couldn't run); NULL: never checked
-    state_why TEXT                 -- for failed: why the check couldn't run
+    state_why TEXT,                -- for failed: why the check couldn't run
+    ever_passed INTEGER            -- 1 once any check passed (kept through later failures)
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
@@ -684,9 +685,11 @@ class Milestone:
     repo: str | None = None
     state: str | None = None
     state_why: str | None = None
+    ever_passed: int | None = None   # 1 once any check passed, whatever sha it ran at
 
 
-_NOT_RUNNABLE = re.compile(r"\(exit (126|127)\)\s*$")
+_EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
+_SIGNALS = {134: 6, 137: 9, 139: 11}   # exit codes a shell reports for SIGABRT, SIGKILL, SIGSEGV
 
 
 def check_state(passed: bool, output: str, had_passed: bool) -> tuple[str, str | None]:
@@ -695,8 +698,14 @@ def check_state(passed: bool, output: str, had_passed: bool) -> tuple[str, str |
     milestone had passed before; only exit 126/127 or a timeout couldn't run."""
     if passed:
         return "passed", None
-    if m := _NOT_RUNNABLE.search(output or ""):
-        return "failed", "command not found" if m.group(1) == "127" else "command not runnable"
+    if "isn't attached to this session" in (output or ""):
+        return "failed", "repo isn't attached"
+    if m := _EXIT.search(output or ""):
+        code = int(m.group(1))
+        if code in (126, 127):
+            return "failed", "command not found" if code == 127 else "command not runnable"
+        if code < 0 or code in _SIGNALS:
+            return "failed", f"crashed: killed by signal {-code if code < 0 else _SIGNALS[code]}"
     if t := re.search(r"\(timed out after (\d+)s\)\s*$", output or ""):
         return "failed", f"timed out after {t.group(1)}s"
     return ("regressed" if had_passed else "not_done"), None
@@ -920,10 +929,15 @@ class DB:
         for col in ("state", "state_why"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
+        if "ever_passed" not in cols:
+            self.conn.execute("ALTER TABLE milestones ADD COLUMN ever_passed INTEGER")
+        self.conn.execute("UPDATE milestones SET ever_passed=1 WHERE ever_passed IS NULL "
+                          "AND (status='passed' OR passed_sha IS NOT NULL)")
         # Rows checked before states were stored: work them out from what was recorded.
         for r in self.conn.execute("SELECT id, status, output, passed_sha FROM milestones "
                                    "WHERE state IS NULL AND status IN ('passed', 'failed')").fetchall():
-            state, why = check_state(r["status"] == "passed", r["output"] or "", bool(r["passed_sha"]))
+            state, why = check_state(r["status"] == "passed", r["output"] or "",
+                                     r["status"] == "passed" or bool(r["passed_sha"]))
             self.conn.execute("UPDATE milestones SET state=?, state_why=? WHERE id=?", (state, why, r["id"]))
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(login_state)")}
         for col in ("interrupted", "account"):
@@ -1572,7 +1586,8 @@ class DB:
 
     def record_check(self, milestone_id: int, passed: bool, output: str,
                      sha: str | None = None, *, passed_sha: str | None = None,
-                     state: str | None = None, state_why: str | None = None) -> None:
+                     state: str | None = None, state_why: str | None = None,
+                     ever_passed: int | None = None) -> None:
         """``passed_sha`` defaults to ``sha`` on a pass and is kept on a fail.
         ``state`` (see ``check_state``) defaults to the one the output implies;
         ``status`` stays passed/failed for everything that only asks whether
@@ -1582,9 +1597,11 @@ class DB:
         with self.tx() as c:
             c.execute(
                 "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, "
-                "passed_sha=COALESCE(?, passed_sha), state=?, state_why=? WHERE id=?",
+                "passed_sha=COALESCE(?, passed_sha), state=?, state_why=?, "
+                "ever_passed=COALESCE(?, ever_passed) WHERE id=?",
                 ("passed" if passed else "failed", time.time(), output, sha,
-                 passed_sha or (sha if passed else None), state, state_why, milestone_id),
+                 passed_sha or (sha if passed else None), state, state_why,
+                 1 if passed else ever_passed, milestone_id),
             )
 
     # -- reviews -------------------------------------------------------------
