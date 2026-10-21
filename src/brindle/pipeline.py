@@ -285,8 +285,19 @@ def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace)
     reviews = gates.standing_reviews(db, ws.id, gates.head(ws))   # as the merge gate counts them
     if not reviews or not all(r.approved for r in reviews) or len(reviews) < 2:
         return True   # one is missing, or one asked for changes (the worker is fixing it)
-    reviewers = [db.get_agent(r.reviewer_id) for r in reviews]
-    return not any(a is not None and (a.review_slot == profile or a.profile == profile) for a in reviewers)
+    reviewers = [a for r in reviews if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None]
+    return not any(_review_slot(db, a) == profile for a in reviewers)
+
+
+def _review_slot(db: DB, reviewer: Agent) -> str | None:
+    """The review claim slot ``reviewer`` was started in. A primary review
+    requested on the second review's profile is still the primary: the slot
+    decides, and the profile only for a reviewer started before slots were
+    recorded."""
+    if reviewer.review_slot is not None:
+        return reviewer.review_slot
+    slot = db.review_slot(reviewer.id)
+    return slot if slot is not None else reviewer.profile
 
 
 def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:

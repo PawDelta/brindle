@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, config, escapes, gates, history, workspaces
+from brindle import agents, autopilot, config, escapes, gates, history, pipeline, workspaces
 
 REAL_REQUEST_REVIEW = agents.request_review
 from brindle.config import RepoConfig
@@ -195,6 +195,22 @@ def test_issue216_a_rejection_stands_until_its_own_review_slot_is_reviewed_again
     assert spawned == ["s0", "s1", "s2"] and again.id == "s2"
     agents.submit_review(db, again.id, True, "test added")
     assert merged(repo)
+
+
+def test_a_primary_review_on_the_second_reviews_profile_is_not_the_second_review(db, repo, piped):
+    """A stalled primary reviewer's fallback ran on the second review's
+    profile, and the stalled one's verdict came in late: two approvals, both
+    in the primary slot."""
+    setup, _started = piped
+    ws = setup(second={"heavy": "reviewer-codex"})
+    db.update_agent("w1", result="added new.py", pipeline="reviewing")
+    for rid, profile in (("rev0", "reviewer"), ("rev1", "reviewer-codex")):
+        add(db, ws, rid, "review", profile, parent="boss")
+        db.update_agent(rid, review_slot="")
+    for rid in ("rev1", "rev0"):
+        db.add_review(ws.id, gates.head(ws), rid, True, "lgtm")
+    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
+    assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
 
 
 def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):
