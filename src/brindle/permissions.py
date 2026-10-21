@@ -913,15 +913,17 @@ def profile_bash_allows(profile) -> list[Rule]:
     ``--allowedTools`` never reaches: ``Bash(git status)`` is that exact
     command, ``Bash(uv run:*)`` it alone or followed by arguments. Like
     every bash allow, a compound or quoted command never matches."""
-    out = []
-    for entry in getattr(profile, "allowed_tools", None) or []:
-        m = PROFILE_BASH.fullmatch(entry.strip())
-        if not m:
-            continue
-        command = m.group(1).strip()
-        out.append(Rule("bash", command, "exact", "allow", "profile"))
-        if m.group(2):
-            out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
+    return [rule for entry in getattr(profile, "allowed_tools", None) or [] for rule in _profile_bash(entry)]
+
+
+def _profile_bash(entry: str) -> list[Rule]:
+    m = PROFILE_BASH.fullmatch(entry.strip())
+    if not m:
+        return []
+    command = m.group(1).strip()
+    out = [Rule("bash", command, "exact", "allow", "profile")]
+    if m.group(2):
+        out.append(Rule("bash", command + " ", "prefix", "allow", "profile"))
     return out
 
 
@@ -1274,3 +1276,10 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
         else:
             add(rule.decision, _agy_entry(rule))
     return out
+
+
+def profile_agy_entries(spec: str) -> list[str]:
+    """One ``allowed_tools`` entry in agy's settings syntax, no wider than
+    ``profile_bash_allows`` (a prefix takes only simple characters after
+    it), or [] when agy can't say it."""
+    return [e for e in (_agy_entry(rule) for rule in _profile_bash(spec)) if e]

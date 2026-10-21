@@ -1600,7 +1600,7 @@ When running long, unattended autopilot sessions with API keys:
   - **Recovering failed/blocked workers**: When an agent fails on an expired key or autopilot pauses with a credential error, export the fresh key (or update `brindle keys set`), then run `brindle continue`. This unpauses the session and relaunches paused/failed agents with the new credentials. The replacement credentials are automatically synced to the session credential store, dynamically refreshed by the supervisor's launcher on all subsequent worker delegations (`assign`/`handoff`).
   - **Proactive rotation in live sessions**: For Claude keys rotated outside brindle, set Claude Code's `apiKeyHelper` in `~/.claude/settings.json` or the project's `.claude/settings.json`. Claude Code re-runs the helper every 5 minutes (configurable with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`) and after a 401, so running workers pick up the new key. Don't also export `ANTHROPIC_API_KEY` or set a Claude key with `brindle keys set`, since an environment key takes precedence over the helper. Codex and Antigravity keys still need workers stopped, then `brindle keys set`, then `brindle continue`. Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
   - **Precedence**: Newly stored keys (`brindle keys set`) or session credentials updated during recovery take effect dynamically for all new panes, overriding stale launcher environments. For profile-level overrides, an explicit profile key (`env.NAME`) takes precedence over default provider credentials.
-- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts unless permissions are pre-populated in `settings.json` (see Permissions) or run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
+- **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. With `GEMINI_API_KEY`, unattended agy workers will still stall on approval prompts for anything `settings.json` doesn't allow, their profile's `allowed_tools` included (see Permissions), unless run with `agy_approvals: "brindle"` under `permission_policy: "on"` (`--dangerously-skip-permissions`).
 
 #### OpenCode
 
@@ -2156,8 +2156,17 @@ only once a conversation has started.
 
 **Permissions.** `agy` doesn't let hooks approve shell commands, so an Antigravity
 agent asks before running anything your own `agy` settings don't already allow, and
-the sidebar shows it as needing you. To let agents run tests and commit without asking,
-add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
+the sidebar shows it as needing you. A profile's `permission_mode` maps to agy's
+modes (`auto` to agy's Auto mode, `acceptEdits` to accept-edits, `plan` to plan;
+`dontAsk` runs brindle's hook as the only gate, as under `agy_approvals: "brindle"`).
+Its `allowed_tools` don't apply by themselves under the default `agy_approvals:
+"prompt"`: agy reads no hook's "allow", and its only allow list,
+`~/.gemini/antigravity-cli/settings.json`, is shared by every agy session, so brindle
+doesn't add one worker's rules there (another worker, or you, would get them too).
+`assign` and `handoff` name the `allowed_tools` that settings file doesn't already
+allow. Under `agy_approvals: "brindle"` (with the policy on) brindle's hook applies a
+profile's shell entries itself. To let agents run tests and commit without asking,
+add rules to that file yourself, for example:
 
 ```json
 { "permissions": { "allow": ["command(uv run pytest)", "command(git status)",

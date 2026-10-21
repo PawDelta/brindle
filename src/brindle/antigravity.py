@@ -750,3 +750,48 @@ def sync_for_launch(workspace: str, checks: list[str] | None) -> None:
         sync_permissions(root, on=checks is not None, checks=checks)
     except Exception as e:  # noqa: BLE001
         print(f"brindle: couldn't update agy's permission settings: {e}", file=sys.stderr)
+
+
+def unapplied_rules(profile) -> list[str]:
+    """The profile's ``allowed_tools`` an agy worker on agy's own prompts
+    still asks about: those agy's settings don't already allow exactly. agy
+    reads no hook's allow and has only settings every agy session shares,
+    so brindle never adds a profile's rules there: one worker's grants would
+    be every other's."""
+    from brindle import permissions
+
+    try:
+        data = json.loads(settings_path().read_text(encoding="utf-8"))
+        allow = data["permissions"]["allow"]
+    except (OSError, ValueError, KeyError, TypeError):
+        allow = []
+    allowed = set(allow) if isinstance(allow, list) else set()
+    out = []
+    for spec in profile.allowed_tools or []:
+        entries = permissions.profile_agy_entries(spec)
+        if not entries or not allowed.issuperset(entries):
+            out.append(spec)
+    return out
+
+
+def launch_warning(agent, ws) -> str | None:
+    """Which of its profile's allowed_tools an agy worker in workspace ``ws``
+    still asks about (see unapplied_rules), or None. Under agy_approvals
+    "brindle" or dontAsk, brindle's hook decides every call instead."""
+    from brindle.profiles import load_profile
+
+    if agent.provider != "antigravity":
+        return None
+    try:
+        profile = load_profile(agent.profile, ws.repo_root)
+    except KeyError:
+        return None
+    if profile.permission_mode == "dontAsk" or strict_on(ws.path):
+        return None
+    missing = unapplied_rules(profile)
+    if not missing:
+        return None
+    return (f"this Antigravity worker asks before using these allowed_tools of profile {profile.name}, "
+            f"since agy applies only its own settings.json, which every agy session shares: "
+            f"{', '.join(missing)}. Add them to {settings_path()} yourself, or set agy_approvals to "
+            "\"brindle\" with permission_policy on to have brindle's hook apply the Bash ones")

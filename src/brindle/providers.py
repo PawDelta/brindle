@@ -1530,9 +1530,12 @@ class Antigravity(Provider):
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
             argv += ["--effort", ctx.profile.effort]
-        if ctx.profile.permission_mode in ("acceptEdits", "accept-edits", "auto"):
-            # agy has no classifier mode; accepting edits is the closest.
+        if ctx.profile.permission_mode in ("acceptEdits", "accept-edits"):
             argv += ["--mode", "accept-edits"]
+        elif ctx.profile.permission_mode == "auto":
+            # agy's Auto mode, like Claude Code's: edits and commands a
+            # separate review judges safe run, the rest still asks.
+            argv += ["--mode", "auto"]
         elif ctx.profile.permission_mode == "plan":
             argv += ["--mode", "plan"]
         if ctx.resume:

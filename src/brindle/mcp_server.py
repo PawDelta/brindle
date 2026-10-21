@@ -13,7 +13,7 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from brindle import agents, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
@@ -462,11 +462,12 @@ async def handoff(
             return _remind_goal(db, caller, agents.subagent_brief(worker, wws))
         missing = agents.add_dirs_warning(worker, wws)
         unhooked = codex_hook.launch_warning(worker.provider, wws.path)
+        unapplied = antigravity.launch_warning(worker, wws)
         result = _await_worker(db, worker.id, wait_seconds)
         for w in why:
             result += f"\n\nProfile: {w}"
         brief = brief_learning.warning(db, ws.repo_root, task, done_when, files, weight)
-        for w in (warning, missing, unhooked, brief):
+        for w in (warning, missing, unhooked, unapplied, brief):
             if w:
                 result += f"\n\nWarning: {w}"
         return _remind_goal(db, caller, result)
@@ -601,6 +602,7 @@ async def assign(
             text += f"\nprofile chosen by learning: {profile}"
         for w in (warning, agents.add_dirs_warning(worker, wws),
                   codex_hook.launch_warning(worker.provider, wws.path),
+                  antigravity.launch_warning(worker, wws),
                   brief_learning.warning(db, wws.repo_root, task, done_when, files, weight)):
             if w:
                 text += f"\nWarning: {w}"

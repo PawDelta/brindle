@@ -824,6 +824,34 @@ def test_agy_launch_syncs_only_with_the_policy(agy_settings, ws, monkeypatch):
     assert not agy_settings.exists()
 
 
+def test_agy_profile_rules_stay_out_of_shared_settings_and_are_named(agy_settings, db, ws, monkeypatch):
+    # GitHub #233: under agy_approvals "prompt" agy applies only its own
+    # settings, which every agy session shares, so a profile's allowed_tools
+    # can't be given to one worker alone. They're named instead, and a second
+    # profile never inherits the first's.
+    from brindle.config import user_profiles_dir
+    from brindle.profiles import load_profile
+    from brindle.providers import Antigravity, LaunchContext
+
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["report_result"])
+    user_profiles_dir().mkdir(parents=True, exist_ok=True)
+    for name, tools in (("gem-a", "Bash(git commit:*)"), ("gem-b", "Bash(pwd), Bash(ls), WebFetch")):
+        (user_profiles_dir() / f"{name}.md").write_text(
+            f"---\nname: {name}\nprovider: antigravity\nallowed_tools: {tools}\n---\nhi\n")
+    agy_settings.parent.mkdir(parents=True)
+    agy_settings.write_text(json.dumps({"permissions": {"allow": ["command(regex:^pwd$)"]}}))
+    for id_, name in (("a1", "gem-a"), ("b1", "gem-b")):
+        worker(db, ws, provider="antigravity", id_=id_)
+        db.update_agent(id_, profile=name)
+        Antigravity().command(LaunchContext(id_, load_profile(name, ws.repo_root), "hi", cwd=ws.path))
+    assert json.loads(agy_settings.read_text())["permissions"]["allow"] == ["command(regex:^pwd$)"]
+    assert antigravity.unapplied_rules(load_profile("gem-b", ws.repo_root)) == ["Bash(ls)", "WebFetch"]
+    assert "Bash(git commit:*)" in antigravity.launch_warning(db.get_agent("a1"), ws)
+    set_local(ws.repo_root, "agy_approvals", "brindle")
+    turn_on(ws)
+    assert antigravity.launch_warning(db.get_agent("a1"), ws) is None  # brindle's hook applies them
+
+
 def test_agy_mirror_never_widens_an_allow():
     rules = [Rule("bash", "echo $(id)", "exact", "allow"),     # brindle never allows it
              Rule("bash", "npm *", "glob", "allow"),           # agy can't say it as narrowly
