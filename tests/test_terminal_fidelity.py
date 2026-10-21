@@ -136,7 +136,6 @@ def see(app: App, pane: str, size: tuple[int, int], typed: str = "") -> None:
 @pytest.mark.parametrize("shared,control", [(None, True), ((120, 30), True), ((120, 30), False)])
 def test_the_apps_terminal_shows_what_tmux_shows_and_keys_land_at_its_cursor(tmp_path, monkeypatch,
                                                                              shared, control):
-    monkeypatch.setattr(terminal, "TAKE_SECONDS", 0.1, raising=False)
     if not control:     # no tmux control mode: the pane is polled
         async def refused(argv):
             raise OSError("no control mode")
@@ -153,27 +152,22 @@ def test_the_apps_terminal_shows_what_tmux_shows_and_keys_land_at_its_cursor(tmp
         sock.send_text(TOKEN)
         try:
             app = App(sock)
-            see(app, pane, APP)     # the app's size, from its resize, shared or not
-            typed = ""
+            if shared:      # the app's view is focused: its size is the window's
+                sock.send_json({"type": "focus"})
+            see(app, pane, APP)
+            sock.send_json({"type": "key", "text": "h"})     # keys land at the cursor
+            see(app, pane, APP, "h")
             if shared:
-                # Like tmux's latest client, whoever typed last has the window
-                # and the app shows it at that size: the terminal, the app,
-                # the terminal again, all within a second (which tmux's
-                # whole-second input times can't order), from its start.
-                threading.Event().wait(1.02 - time.time() % 1)
-                theirs = (shared[0], shared[1] - 1)
-                for key, size in (("t", theirs), ("h", APP), ("u", theirs)):
-                    if size == APP:
-                        sock.send_json({"type": "key", "text": key})
-                    else:
-                        os.write(client.master, key.encode())
-                    typed += key
-                    see(app, pane, size, typed)
+                # Blurred, the window is the terminal's again, and the app shows
+                # it at that size, as the terminal resizes too.
+                sock.send_json({"type": "blur"})
+                see(app, pane, (shared[0], shared[1] - 1), "h")
                 client.size(100, 35)
-                see(app, pane, (100, 34), typed)
-            # Keys typed in the app land at the cursor (and take the window back).
-            sock.send_json({"type": "key", "text": "hi"})
-            see(app, pane, APP, typed + "hi")
+                see(app, pane, (100, 34), "h")
+                sock.send_json({"type": "focus"})
+                see(app, pane, APP, "h")
+            sock.send_json({"type": "key", "text": "i"})
+            see(app, pane, APP, "hi")
         finally:
             sock.__exit__(None, None, None)
         # The daemon lets its control client go before the loop does.

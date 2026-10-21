@@ -51,12 +51,9 @@ class FakeTmux:
             out = "".join(f"{f}\n" for f in self.flags())
         return subprocess.CompletedProcess(args, 0, out, "")
 
-    async def no_latch(self, argv, tty):
-        raise OSError("no latch here")
-
     def flags(self) -> list[str]:
-        return ["attached,focused,control-mode,UTF-8 @1 client-1"] * bool(self.procs) + \
-            ["attached,UTF-8 @1 /dev/ttys1"] * self.attached
+        return ["attached,focused,control-mode,UTF-8"] * bool(self.procs) + \
+            ["attached,UTF-8"] * self.attached
 
     async def spawn(self, argv: list[str]) -> "FakeControl":
         proc = FakeControl(self, argv)
@@ -155,7 +152,6 @@ def fake(db, repo, tmp_path, monkeypatch):
     fake = FakeTmux()
     monkeypatch.setattr(tmux, "_tmux", fake)
     monkeypatch.setattr(terminal, "spawn", fake.spawn)
-    monkeypatch.setattr(terminal, "spawn_latch", fake.no_latch)
     return fake
 
 
@@ -204,8 +200,11 @@ def test_control_frames_reach_the_pane(fake, attached):
         sock.send_json({"type": "paste", "text": "-a\nb"})   # "-a": data, not a set-buffer option
         for cols in (80, 100, 120):
             sock.send_json({"type": "resize", "cols": cols, "rows": 40})
-        # The first size at once, the last after the throttle, then viewers
-        # reseeded; an attached terminal with no input since doesn't stop it.
+        if attached:    # a terminal shares it: its size rules until the app's view is focused
+            fake.wait_for(lambda: sum(l.startswith("list-clients") for l in fake.lines) >= 2)
+            assert not [c for c in fake.calls if c[0] == "resize-window"]
+            sock.send_json({"type": "focus"})
+        # The first size at once, the last after the throttle, then viewers reseeded.
         fake.wait_for(lambda: ("resize-window", "-t", "%1", "-x", "120", "-y", "40") in fake.calls)
         fake.wait_for(lambda: sum(l.startswith("capture-pane") for l in fake.lines) >= 2)
         assert sock.receive_json() == {"type": "resync", "cols": 80, "rows": 24}
@@ -220,8 +219,11 @@ def test_control_frames_reach_the_pane(fake, attached):
         ]
         assert [c for c in fake.calls if c[0] in ("set-option", "resize-window")] == [
             ("set-option", "-w", "-t", "%1", "window-size", "manual"),
-            ("resize-window", "-t", "%1", "-x", "80", "-y", "40"),
+            *[("resize-window", "-t", "%1", "-x", "80", "-y", "40")] * (not attached),
             ("resize-window", "-t", "%1", "-x", "120", "-y", "40")]
+        if attached:    # blurred: the terminal's size rules again
+            sock.send_json({"type": "blur"})
+            fake.wait_for(lambda: ("set-option", "-w", "-u", "-t", "%1", "window-size") in fake.calls)
         sock.__exit__(None, None, None)
 
 
@@ -249,7 +251,7 @@ def test_resize_is_throttled_on_the_leading_edge_and_the_last_size_lands():
 
         async def run(fn, target, *args):
             if fn is tmux.attached_terminals:
-                return [("/dev/ttys1", "@1")] * state["attached"]
+                return state["attached"]
             if fn is tmux.set_window_size_manual:
                 ops.append("manual")
                 if "manual" in gated:
@@ -400,31 +402,8 @@ def test_without_control_mode_the_pane_is_polled_and_typed_into_by_tmux_processe
         polling.cancel()
         assert b"old" in seed and b"new" in pane.ring.since(viewer.pos)
 
-    # A shared pane's first key waits for its latch to be up, then goes in
-    # one tmux command with the latch's press: no terminal's key between.
-    async def latched():
-        pane, gate, calls = terminal.Pane("%1", None, None, "sess"), asyncio.Event(), []
-        pane.shared = True
-
-        async def opening():                    # the latch starting up, held
-            await gate.wait()
-            pane._latch = terminal.Latch("sess", None)
-            pane._latch.name = "/dev/ttys9"
-
-        async def run(fn, *args, **kwargs):
-            calls.append((fn, args, kwargs))
-        pane._open_latch, pane.run = opening, run
-        typing = asyncio.ensure_future(pane.send_keys(text="h"))
-        for _ in range(20):
-            await asyncio.sleep(0)
-        gate.set()
-        await typing
-        assert [c for c in calls if c[0] is tmux.send_keys] == [
-            (tmux.send_keys, ("%1", "-l", "--", "h"), {"latch": "/dev/ttys9"})]
-
     monkeypatch.setattr(terminal, "POLL_SECONDS", 0)
     asyncio.run(interleaved())
-    asyncio.run(latched())
 
 
 def test_control_quote_is_one_argument_tmux_reads_back_as_the_text():

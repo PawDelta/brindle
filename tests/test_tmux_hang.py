@@ -260,5 +260,5 @@ def test_tmux_bin_override_and_pane_streaming_controls(tmp_path, monkeypatch):
                       "#{window_width}x#{window_height}").stdout.strip()
     assert info == "132x43"
     assert tmux._tmux("show-options", "-w", "-v", "-t", target, "window-size").stdout.strip() == "manual"
-    assert tmux.attached_terminals(target) == []
+    assert tmux.attached_terminals(target) == 0
     assert f"resize-window -t {target} -x 132 -y 43" in log.read_text()

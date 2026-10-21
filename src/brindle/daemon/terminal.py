@@ -29,13 +29,11 @@ key names) or ``{"type": "key", "text": "..."}`` (typed as is), ``{"type":
 "resize", "cols": c, "rows": r}``, applied at once, then at most one per RESIZE_SECONDS (the last size always
 lands), and viewers are seeded again once it settles.
 While a terminal client is attached to the pane's session, viewers are told
-``shared``, and the window is sized the way tmux sizes it for two clients
-under ``window-size latest``: by whichever had input last. The app's viewer
-takes it with its size, a key or a paste; a terminal showing the window
-takes it back by typing there (seen within TAKE_SECONDS), and then tmux's
-own rule applies until the viewer's next input. tmux itself orders the two
-inputs: the viewer's go through a hidden client of the session's
-(:class:`Latch`).
+``shared``, and the size follows the app's focus: ``{"type": "focus"}``
+(the viewer is focused or on screen) sizes the window to that viewer's last
+resize, as if nobody else were looking, and ``{"type": "blur"}`` (or the
+viewer leaving) of the last focused viewer hands it back to tmux's own rule,
+the terminals' size. Unshared, every resize applies.
 
 An agent with no pane to stream (exited, or never had one) gets ``no_pane`` and
 what is left: the dead pane's last screen, else the last thing its transcript
@@ -46,14 +44,10 @@ from __future__ import annotations
 
 import asyncio
 import collections
-import fcntl
 import json
 import logging
-import os
 import re
 import secrets
-import struct
-import termios
 import threading
 import uuid
 from dataclasses import dataclass
@@ -72,9 +66,6 @@ COALESCE_BYTES = 64 << 10
 CONTROL_LIMIT = 1 << 24        # one %output line can carry a whole pty read, escaped
 RESIZE_SECONDS = 0.25
 SHARED_SECONDS = 2.0
-TAKE_SECONDS = 0.5              # how often a shared window is checked for a terminal's input
-LATCH_SECONDS = 0.5             # how long to wait for tmux to note a Latch's key
-LATCHES: set[str] = set()       # the daemon's Latch clients, which are nobody's terminal
 POLL_SECONDS = 0.1
 MAX_SIZE = 1000                 # columns or rows a resize may ask for
 WS_NOT_FOUND = 4404
@@ -254,73 +245,14 @@ class Control:
             await proc.wait()
 
 
-async def spawn_latch(argv: list[str], tty: int) -> asyncio.subprocess.Process:
-    """A Latch's tmux client, on ``tty`` (tests put a fake here)."""
-    return await asyncio.create_subprocess_exec(
-        *argv, stdin=tty, stdout=tty, stderr=tty, start_new_session=True,
-        env={**tmux.control_env(), "TERM": "xterm-256color"})
-
-
-class Latch:
-    """The app's viewer as a client of a shared pane's session, so tmux
-    itself orders its input against a terminal's: a hidden client
-    (tmux.latch_argv) on a pty of the daemon's, pressed (tmux.latch_press)
-    for each of the viewer's inputs and so the window's latest client until
-    a terminal's next key makes that terminal latest. tmux notes each change
-    (tmux.track_latest), even two in one second, which a terminal's
-    whole-second #{client_activity} can't tell apart. The pty's output is
-    read and dropped; the client goes with the pty (or with close)."""
-
-    def __init__(self, session: str, server: str | None) -> None:
-        self.session, self.server = session, server
-        self.name: str | None = None    # its client name: the pty's path
-        self._master: int | None = None
-        self._proc: asyncio.subprocess.Process | None = None
-        self._loop = asyncio.get_running_loop()
-
-    async def open(self) -> None:
-        master, tty = os.openpty()
-        try:
-            fcntl.ioctl(tty, termios.TIOCSWINSZ, struct.pack("HHHH", 5, 20, 0, 0))
-            self.name = os.ttyname(tty)
-            self._proc = await spawn_latch(tmux.latch_argv(self.session, self.server), tty)
-        except BaseException:
-            os.close(master)
-            raise
-        finally:
-            os.close(tty)
-        self._master = master
-        LATCHES.add(self.name)
-        self._loop.add_reader(master, self._drain)
-
-    def _drain(self) -> None:
-        try:
-            if os.read(self._master, 1 << 16):
-                return
-        except OSError:
-            pass
-        self._loop.remove_reader(self._master)
-
-    async def close(self) -> None:
-        LATCHES.discard(self.name)
-        if self._master is not None:
-            self._loop.remove_reader(self._master)
-            os.close(self._master)
-            self._master = None
-        if self._proc is not None and self._proc.returncode is None:
-            self._proc.kill()
-            await self._proc.wait()
-
-
 class Pane:
     """One pane the daemon streams: what it prints, who is watching, its size.
     With a :class:`Control`, its output comes through that; without one
     (``control`` is None) it is polled with capture-pane and viewers get the
     rows that changed."""
 
-    def __init__(self, target: str, server: str | None, control: Control | None,
-                 session: str | None = None) -> None:
-        self.target, self.server, self.control, self.session = target, server, control, session
+    def __init__(self, target: str, server: str | None, control: Control | None) -> None:
+        self.target, self.server, self.control = target, server, control
         self.ring = Ring(RING_BYTES)
         self.viewers: set[Viewer] = set()
         self.shared = False
@@ -338,14 +270,8 @@ class Pane:
         self._screen: list[str] | None = None
         self._view: tmux.View | None = None
         self.window: str | None = None  # the id of the window the pane is in
+        self.focused: set[Viewer] = set()   # viewers the app has focused or on screen
         self._polling = asyncio.Lock()  # a poll's capture and redraw, or a seed's capture
-        self._inputs = 0                # how often the app's viewer typed, pasted or resized
-        self._present: set[str] | None = None  # terminals on the window at the viewer's input
-        self._pending: float | None = None     # until when tmux may still note the latch's key
-        self._latch: Latch | None = None
-        self._latching: asyncio.Task | None = None
-        self._settling: asyncio.Task | None = None
-        self._yielded = False           # a terminal had input since: its size rules
         self._closed = False
         self._loop = asyncio.get_running_loop()
 
@@ -429,94 +355,35 @@ class Pane:
             out += _cursor(view)
         return out, view
 
-    def _input(self) -> None:
-        """The app's viewer had input: the terminals on the window are read
-        afresh (see _check_shared)."""
-        self._inputs += 1
-        self._present = None
+    def focus(self, viewer: Viewer) -> None:
+        """``viewer`` is focused or on screen: its size is the window's, even
+        while a terminal shares the pane."""
+        self.focused.add(viewer)
+        if self._size:
+            self.resize(*self._size)
 
-    async def _latch_ready(self) -> str | None:
-        """While the pane is shared, its Latch's name, once it is up (the
-        first input waits for it); else None."""
-        if not self.shared or self.session is None:
-            return None
-        if self._latch is None:
-            if self._latching is None:
-                self._latching = asyncio.ensure_future(self._open_latch())
-            await asyncio.shield(self._latching)
-        return self._latch.name if self._latch is not None else None
-
-    def _mark(self, latch: str | None, alone: bool = True) -> None:
-        """Press the latch for an input of the viewer's, so tmux orders the
-        two: on the control channel, written in the same breath as the
-        input's own command, which the caller sends next; without one, run
-        here only when ``alone`` (a resize), else the caller's tmux command
-        carries it (tmux.send_keys's ``latch``). No terminal takes the
-        window until tmux has noted it (or LATCH_SECONDS have passed)."""
-        if latch is None:
+    async def blur(self, viewer: Viewer) -> None:
+        """``viewer`` isn't focused any more (or left): once no viewer is,
+        tmux's own rule sizes a shared window again."""
+        self.focused.discard(viewer)
+        if self.focused:
             return
-        if self.control is not None:
-            sent = [self.control.send(line) for line in tmux.latch_press(latch)]
-        else:
-            sent = [asyncio.ensure_future(self.run(tmux.press_latch, latch))] if alone else []
-        for done in sent:
-            done.add_done_callback(self._pressed)
-        self._pending = self._loop.time() + LATCH_SECONDS
-        if self._settling is None or self._settling.done():
-            self._settling = asyncio.ensure_future(self._settle())
+        async with self._sizing:
+            if self.shared:
+                await self._unsize()
 
-    def _pressed(self, done: asyncio.Future) -> None:
-        failed = None if done.cancelled() else done.exception()
-        if failed is None and not done.cancelled() and getattr(done.result(), "error", False):
-            failed = done.result().text
-        if failed:
-            log.debug("brindle: can't press the latch on %s: %s", self.session, failed)
-
-    async def _open_latch(self) -> None:
-        latch = Latch(self.session, self.server)
-        try:
-            await self.run(tmux.track_latest, self.target)
-            await latch.open()
-            deadline = self._loop.time() + LATCH_SECONDS
-            while not any(name == latch.name for name, _ in await self._attached() or []):
-                if self._loop.time() > deadline:
-                    raise tmux.TmuxError(f"the latch on {self.session} didn't attach")
-                await asyncio.sleep(0.01)
-            if self._closed:
-                raise asyncio.CancelledError
-        except BaseException as e:
-            await latch.close()
-            if not isinstance(e, (tmux.TmuxError, OSError)):
-                raise
-            # Without one the inputs can't be ordered: only a terminal
-            # attaching takes the window (see _check_shared).
-            log.debug("brindle: no latch on %s", self.session, exc_info=True)
-            return
-        self._latch = latch     # pressed by the inputs that waited for it, not here
-
-    async def _settle(self) -> None:
-        """Look again soon, until tmux has noted the latch's key."""
-        while self._pending is not None and not self._closed:
-            await asyncio.sleep(0.02)
-            await self._check_shared_quietly()
-
-    def active(self) -> None:
-        """The app's viewer typed or pasted: like a tmux client's input, that
-        makes its size the window's again (see _check_shared)."""
-        self._input()
-        if self._yielded:
-            self._yielded = False
-            if self._size:
-                self.resize(*self._size)
+    async def _unsize(self) -> None:
+        """Hand the window's size back to tmux (the caller holds _sizing)."""
+        if self._manual:
+            self._manual = False
+            self._applied = None
+            await self.run(tmux.unset_window_size, self.target)
 
     async def send_keys(self, keys: list[str] | None = None, text: str | None = None) -> None:
         """Type ``text`` as is, or press ``keys`` (tmux key names)."""
-        latch = await self._latch_ready()
-        self._mark(latch, alone=False)      # and nothing awaited from here to the keys
-        self.active()
         if self.control is None:
             args = ["-l", "--", text] if text else ["--", *(keys or [])]
-            await self._marked(tmux.send_keys, latch, self.target, *args)
+            await self.run(tmux.send_keys, self.target, *args)
             return
         # "--": nothing the client sends is read as a send-keys flag (-t would retarget it)
         args = f"-l -- {tmux.control_quote(text)}" if text \
@@ -524,41 +391,13 @@ class Pane:
         await self._command(f"send-keys -t {self.target} {args}")
 
     async def paste(self, text: str) -> None:
-        latch = await self._latch_ready()
         if self.control is None:
-            self._mark(latch, alone=False)
-            self.active()
-            await self._marked(tmux.paste, latch, self.target, text, False)
+            await self.run(tmux.paste, self.target, text, False)
             return
         buf = f"brindle-{uuid.uuid4().hex[:8]}"
-        # Written together, in order: the buffer, the mark, the paste.
         # "--": a paste starting with "-" is data, not a set-buffer option
-        lines = [f"set-buffer -b {buf} -- {tmux.control_quote(text)}",
-                 f"paste-buffer -p -d -b {buf} -t {self.target}"]
-        loaded = self.control.send(lines[0])
-        self._mark(latch, alone=False)
-        self.active()
-        pasted = self.control.send(lines[1])
-        for line, reply in zip(lines, await asyncio.gather(loaded, pasted)):
-            if reply.error:
-                raise tmux.TmuxError(f"tmux {line.split(' ', 1)[0]}: {reply.text.strip()}")
-
-    async def _marked(self, fn, latch: str | None, *args) -> None:
-        """``fn`` (tmux.send_keys or tmux.paste) with the latch pressed in
-        the same tmux command; again without it when that failed (a latch
-        gone stops the command list before the input)."""
-        try:
-            await self.run(fn, *args, latch=latch)
-        except tmux.TmuxError:
-            if latch is None:
-                raise
-            log.debug("brindle: the latch on %s didn't take", self.session, exc_info=True)
-            await self.run(fn, *args)
-
-    async def request_resize(self, cols: int, rows: int) -> None:
-        """A resize frame: the viewer's input too (see resize)."""
-        self._mark(await self._latch_ready())
-        self.resize(cols, rows)
+        await self._command(f"set-buffer -b {buf} -- {tmux.control_quote(text)}")
+        await self._command(f"paste-buffer -p -d -b {buf} -t {self.target}")
 
     async def _command(self, line: str) -> Reply:
         reply = await self.control.send(line)
@@ -569,11 +408,9 @@ class Pane:
     def resize(self, cols: int, rows: int) -> None:
         """Size the window to ``cols`` x ``rows``: at once when none was
         applied in the last RESIZE_SECONDS, else at the end of that time, with
-        the last size asked for (a dragged window sends dozens). Like a
-        key, it makes the viewer's size the window's (see active)."""
+        the last size asked for (a dragged window sends dozens). A shared
+        window takes it only while a viewer is focused (see focus)."""
         self._size = (cols, rows)
-        self._yielded = False
-        self._input()
         self._dirty = True
         if self._resize or self._runner:    # one is waiting or running: it takes the latest size
             return
@@ -625,7 +462,7 @@ class Pane:
         try:
             await self._check_shared()      # a terminal may have attached since the last poll
             async with self._sizing:        # the state is read again once it is ours
-                if self._yielded or size == self._applied:
+                if (self.shared and not self.focused) or size == self._applied:
                     return
                 if not self._manual:
                     self._manual = True     # set first: a cancelled close still hands it back
@@ -640,69 +477,36 @@ class Pane:
         except tmux.TmuxError:
             log.debug("brindle: can't resize %s", self.target, exc_info=True)
 
-    async def _attached(self) -> list[tuple[str, str]] | None:
-        """Clients showing the pane's session other than the daemon's control
-        client, as tmux.parse_terminals gives them (Latches included); None
-        when the pane is gone."""
+    async def _attached(self) -> int | None:
+        """Terminals showing the pane's session (the daemon's own control
+        client doesn't count); None when the pane is gone."""
         if self.control is None:
             return await self.run(tmux.attached_terminals, self.target)
-        reply = await self.control.send(f"list-clients -t {self.target} -F '{tmux.CLIENT_FORMAT}'")
+        reply = await self.control.send(f"list-clients -t {self.target} -F '#{{client_flags}}'")
         if reply.error:
             return None
-        return tmux.parse_terminals(line.decode("ascii", "replace") for line in reply.lines)
-
-    async def _window_latest(self) -> str:
-        if self.control is None:
-            return await self.run(tmux.window_latest, self.target)
-        reply = await self.control.send(
-            f"display-message -p -t {self.target} '#{{{tmux.LATEST_OPTION}}}'")
-        return "" if reply.error else reply.text.strip()
+        return tmux.count_terminals(line.decode("ascii", "replace") for line in reply.lines)
 
     async def _check_shared(self) -> None:
-        inputs = self._inputs
-        clients = await self._attached()
-        if clients is None:
+        attached = await self._attached()
+        if attached is None:
             raise tmux.TmuxError(f"can't find pane: {self.target}")
-        latest = await self._window_latest()
-        terminals = [(name, window) for name, window in clients if name not in LATCHES]
-        shared = bool(terminals)
-        here = {name for name, window in terminals if window == self.window}
+        shared = attached > 0
         async with self._sizing:        # after any resize or acquisition in flight
-            if self._present is None and inputs == self._inputs:   # read after the viewer's input
-                self._present = here
-            if self._pending is not None and (
-                    (self._latch is not None and latest == self._latch.name)
-                    or self._loop.time() > self._pending):
-                self._pending = None
-            # A terminal showing this window became its latest client after
-            # the viewer's last input (tmux noted it after the latch's key),
-            # or attached since: tmux's rule sizes the window, until the
-            # viewer's next input. With no latch, what tmux noted can't be
-            # ordered against the viewer's input, so only attaching counts.
-            attached = here - (here if self._present is None else self._present)
-            ordered = self._latch is not None and latest in here
-            took = self._pending is None and (ordered or bool(attached))
-            if took and not self._yielded:
-                self._yielded = True
-                if self._manual:
-                    self._manual = False
-                    self._applied = None
-                    await self.run(tmux.unset_window_size, self.target)
             if shared == self.shared:
                 return
             self.shared = shared
+            if shared and not self.focused:     # the terminal's size rules again
+                await self._unsize()
         self._wake()
-
-    async def _check_shared_quietly(self) -> None:
-        try:
-            await self._check_shared()
-        except tmux.TmuxError:
-            log.debug("brindle: can't read %s", self.target, exc_info=True)
 
     async def _poll_shared(self) -> None:
         while True:
-            await asyncio.sleep(TAKE_SECONDS if self.shared and not self._yielded else SHARED_SECONDS)
-            await self._check_shared_quietly()
+            await asyncio.sleep(SHARED_SECONDS)
+            try:
+                await self._check_shared()
+            except tmux.TmuxError:
+                log.debug("brindle: can't read %s", self.target, exc_info=True)
 
     async def _capture_screen(self) -> tuple[list[str], tmux.View | None]:
         text = await self.run(tmux.capture, self.target, 0, True, join=False)
@@ -728,11 +532,9 @@ class Pane:
 
     async def close(self) -> None:
         self._closed = True
-        for task in (*self._tasks, self._runner, self._resize, self._latching, self._settling):
+        for task in (*self._tasks, self._runner, self._resize):
             if task:
                 task.cancel()
-        if self._latch is not None:
-            await self._latch.close()
         async with self._sizing:
             try:
                 if self._manual:
@@ -797,7 +599,7 @@ class Hub:
                 control = None
             else:
                 self.controls[(server, session)] = control
-        pane = Pane(target, server, control, session)
+        pane = Pane(target, server, control)
         if control is not None:
             control.panes[target] = pane
         try:
@@ -810,6 +612,11 @@ class Hub:
     async def leave(self, pane: Pane, viewer: Viewer) -> None:
         async with self._lock:
             pane.viewers.discard(viewer)
+            if viewer in pane.focused:      # a focused viewer leaving is a blur
+                try:
+                    await pane.blur(viewer)
+                except tmux.TmuxError:
+                    log.debug("brindle: can't unsize %s", pane.target, exc_info=True)
             key = (pane.server, pane.target)
             if not pane.viewers and self.panes.get(key) is pane:
                 del self.panes[key]
@@ -960,7 +767,7 @@ async def _stream(ws: WebSocket, hub: Hub, hello: dict) -> None:
         await ws.send_json({"type": "error", "code": "unavailable", "message": str(e)})
         await ws.close(1011)
         return
-    reader = asyncio.ensure_future(_control(ws, pane))
+    reader = asyncio.ensure_future(_control(ws, pane, viewer))
     try:
         seed, view = await pane.seed(viewer)
         await ws.send_json({**hello, "shared": viewer.shared, **_size(view)})
@@ -1014,7 +821,7 @@ async def _flush(ws: WebSocket, pane: Pane, viewer: Viewer) -> None:
         await ws.send_bytes(data)
 
 
-async def _control(ws: WebSocket, pane: Pane) -> None:
+async def _control(ws: WebSocket, pane: Pane, viewer: Viewer) -> None:
     """The client's control frames, applied in order, until it goes."""
     while True:
         message = await ws.receive()
@@ -1022,18 +829,22 @@ async def _control(ws: WebSocket, pane: Pane) -> None:
             return
         try:
             frame = json.loads(message.get("text") or "")
-            await _apply(pane, frame)
+            await _apply(pane, frame, viewer)
         except ValueError:
             continue
         except tmux.TmuxError:
             log.debug("brindle: control frame for %s failed", pane.target, exc_info=True)
 
 
-async def _apply(pane: Pane, frame: object) -> None:
+async def _apply(pane: Pane, frame: object, viewer: Viewer | None = None) -> None:
     if not isinstance(frame, dict):
         return
     kind = frame.get("type")
-    if kind == "key" and isinstance(frame.get("text"), str) and frame["text"]:
+    if kind == "focus" and viewer is not None:
+        pane.focus(viewer)
+    elif kind == "blur" and viewer is not None:
+        await pane.blur(viewer)
+    elif kind == "key" and isinstance(frame.get("text"), str) and frame["text"]:
         await pane.send_keys(text=frame["text"])
     elif kind == "key" and isinstance(frame.get("keys"), list) and frame["keys"] \
             and all(isinstance(k, str) for k in frame["keys"]):
@@ -1043,4 +854,4 @@ async def _apply(pane: Pane, frame: object) -> None:
     elif kind == "resize":
         cols, rows = frame.get("cols"), frame.get("rows")
         if isinstance(cols, int) and isinstance(rows, int):
-            await pane.request_resize(max(1, min(cols, MAX_SIZE)), max(1, min(rows, MAX_SIZE)))
+            pane.resize(max(1, min(cols, MAX_SIZE)), max(1, min(rows, MAX_SIZE)))

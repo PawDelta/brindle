@@ -908,28 +908,26 @@ def capture(target: str, lines: int = 200, escapes: bool = False,
 
 
 def paste(target: str, text: str, submit: bool = True, lead: str | None = None,
-          server: object = _THIS_SERVER, latch: str | None = None) -> None:
+          server: object = _THIS_SERVER) -> None:
     """Paste ``text`` as one bracketed paste (so newlines don't submit early),
     then press Enter. ``lead``, a single line, is typed before it instead of
     pasted: agent CLIs treat pasted text as untrusted content, and typed
     text as the person's own words, so the lead is what vouches for it.
-    ``server`` as for capture; ``latch`` as for send_keys."""
+    ``server`` as for capture."""
     if lead:
         _tmux("send-keys", "-t", target, "-l", lead.replace("\n", " ") + " ", server=server)
     buf = f"brindle-{uuid.uuid4().hex[:8]}"
     _tmux("load-buffer", "-b", buf, "-", input=text, server=server)
-    _tmux(*_pressing(latch), "paste-buffer", "-p", "-d", "-b", buf, "-t", target, server=server)
+    _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target, server=server)
     if submit:
         # TUIs debounce paste events; Enter too soon gets folded into the paste.
         time.sleep(0.3)
         _tmux("send-keys", "-t", target, "Enter", server=server)
 
 
-def send_keys(target: str, *keys: str, server: object = _THIS_SERVER,
-              latch: str | None = None) -> None:
-    """``server`` as for capture. ``latch``: a latch_argv client to press
-    first, in the same tmux command, so no other client's key comes between."""
-    _tmux(*_pressing(latch), "send-keys", "-t", target, *keys, server=server)
+def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
+    """``server`` as for capture."""
+    _tmux("send-keys", "-t", target, *keys, server=server)
 
 
 def control_argv(session: str, server: object = _THIS_SERVER) -> list[str]:
@@ -979,80 +977,22 @@ def decode_output(data: bytes) -> bytes:
 _OCTAL = re.compile(rb"\\([0-7]{3})")
 
 
-CLIENT_FORMAT = "#{client_flags} #{window_id} #{client_name}"
-LATEST_OPTION = "@brindle_latest"
-_LATEST_HOOK = "client-active[7406]"     # an index of its own: the person's hooks stay
-_LATCH_TABLE = "brindle-latch"           # a key table of its own, whose one key does nothing
-
-
-def latch_argv(session: str, server: object = _THIS_SERVER) -> list[str]:
-    """A client of ``session`` that is no one's terminal: ignore-size (it
-    sizes no window), typed into only by latch_press, which makes it a
-    window's latest client as anyone's key does. Not read-only: tmux would
-    refuse send-keys run from outside a client while it is the most recent
-    one. ``server`` as for capture."""
-    base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
-    return [*base, "attach-session", "-f", "ignore-size", "-t", f"={session}"]
-
-
-def latch_press(client: str) -> list[str]:
-    """The command lines (control_quote'd; tmux answers each) that press a
-    key on ``client`` that reaches no pane: it is looked up in a table where
-    it does nothing."""
-    c = control_quote(client)
-    return [f"switch-client -c {c} -T {_LATCH_TABLE}", f"send-keys -K -c {c} User0"]
-
-
-def track_latest(target: str, server: object = _THIS_SERVER) -> None:
-    """Have tmux note in each window of ``target``'s session (window option
-    LATEST_OPTION) the name of the client that last became its latest one,
-    in tmux's own order of the clients' input; and give latch_press its key.
-    ``server`` as for capture."""
-    _tmux("bind-key", "-T", _LATCH_TABLE, "User0", "switch-client", "-T", "root", server=server)
-    _tmux("set-hook", "-t", target, _LATEST_HOOK,
-          f"set-option -wF {LATEST_OPTION} '#{{client_name}}'", server=server)
-
-
-def _pressing(client: str | None) -> list[str]:
-    """latch_press as the first commands of a tmux process's command list."""
-    if not client:
-        return []
-    return ["switch-client", "-c", client, "-T", _LATCH_TABLE, ";",
-            "send-keys", "-K", "-c", client, "User0", ";"]
-
-
-def press_latch(client: str, server: object = _THIS_SERVER) -> None:
-    """latch_press, run as a tmux process. ``server`` as for capture."""
-    _tmux(*_pressing(client)[:-1], server=server)
-
-
-def window_latest(target: str, server: object = _THIS_SERVER) -> str:
-    """The client track_latest last noted for ``target``'s window ("": none)."""
-    return _tmux("display-message", "-p", "-t", target, f"#{{{LATEST_OPTION}}}", check=False,
-                 server=server).stdout.strip()
-
-
-def attached_terminals(target: str, server: object = _THIS_SERVER) -> list[tuple[str, str]] | None:
-    """The terminals showing ``target``'s session (empty: nobody is looking
-    at it), as parse_terminals gives them, not counting control-mode clients
-    such as the daemon's own, which ``#{session_attached}`` would. None when
-    the pane is gone. ``server`` as for capture."""
-    proc = _tmux("list-clients", "-t", target, "-F", CLIENT_FORMAT, check=False,
+def attached_terminals(target: str, server: object = _THIS_SERVER) -> int | None:
+    """How many terminals show ``target``'s session (0: nobody is looking at
+    it), not counting control-mode clients such as the daemon's own, which
+    ``#{session_attached}`` would. None when the pane is gone. ``server`` as
+    for capture."""
+    proc = _tmux("list-clients", "-t", target, "-F", "#{client_flags}", check=False,
                  server=server)
     if proc.returncode != 0:
         return None
-    return parse_terminals(proc.stdout.splitlines())
+    return count_terminals(proc.stdout.splitlines())
 
 
-def parse_terminals(lines: Iterable[str]) -> list[tuple[str, str]]:
-    """The non-control clients among ``lines``, one client's CLIENT_FORMAT
-    per item, as (its name, the window it shows)."""
-    out = []
-    for line in lines:
-        flags, window, name = (line.strip().split(" ", 2) + ["", ""])[:3]
-        if flags and "control-mode" not in flags.split(","):
-            out.append((name, window))
-    return out
+def count_terminals(flags: Iterable[str]) -> int:
+    """The non-control clients among ``flags``, one client's
+    ``#{client_flags}`` per item."""
+    return sum(1 for f in flags if f and "control-mode" not in f.split(","))
 
 
 def set_window_size_manual(target: str, server: object = _THIS_SERVER) -> None:
@@ -1129,11 +1069,8 @@ def own_client() -> str | None:
     pane = os.environ.get("TMUX_PANE")
     if not pane:
         return None
-    proc = _tmux("list-clients", "-t", pane, "-F", "#{client_name} #{client_flags}", check=False)
-    # Not the daemon's hidden client (see latch_argv), which sizes nothing.
-    clients = [line.split()[0] for line in proc.stdout.splitlines()
-               if line.split() and "ignore-size" not in line.split()[-1].split(",")] \
-        if proc.returncode == 0 else []
+    proc = _tmux("list-clients", "-t", pane, "-F", "#{client_name}", check=False)
+    clients = proc.stdout.split() if proc.returncode == 0 else []
     return clients[0] if clients else None
 
 
