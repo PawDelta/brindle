@@ -2487,6 +2487,22 @@ def _review_worktree_present(ws: Workspace) -> None:
 
 
 def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
+    """``_review_profile_one`` for the profile asked for, else for the owner's
+    pick and, when that can't run, each of ``cfg.reviewer_fallbacks`` in order."""
+    try:
+        return _review_profile_one(db, ws, profile, cfg)
+    except AgentError as first:
+        if profile is not None:     # asked for by name: no substitute
+            raise
+        for fallback in cfg.reviewer_fallbacks:
+            try:
+                return _review_profile_one(db, ws, fallback, cfg)
+            except AgentError:
+                continue
+        raise first
+
+
+def _review_profile_one(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
     """The reviewer profile to use, checked to be one that can run: raises
     ``AgentError`` if it (explicit or picked) doesn't exist, or uses the codex
     provider but codex isn't on PATH -- rather than spawning a reviewer doomed

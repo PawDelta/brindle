@@ -213,6 +213,9 @@ class RepoConfig:
     # Kind of work -> whether hosted learning may never override it. Per kind, so a scope can
     # unlock one a lower scope locked and a write to one kind leaves the others as they are.
     routing_locked: dict[str, bool] = field(default_factory=dict)
+    reviewer_fallbacks: list[str] = field(default_factory=list)   # reviewer profiles to try, in order, when the reviewer can't run
+    supervisor_profile: str | None = None      # the profile whose provider the supervisor runs on (None: the supervisor profile's own)
+    supervisor_fallbacks: list[str] = field(default_factory=list)  # tried in order when that provider can't run it
     # Model prices in $/MTok that add to or override brindle's built-in ones (see brindle.pricing):
     # {"model": {"input", "output", "cache_write"?, "cache_read"?}}, merged per model: user, then repo, then config.local.json.
     pricing: dict[str, dict] = field(default_factory=dict)
@@ -325,7 +328,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "agy_approvals",
-                "learned_rules_repeats", "learned_rules_profile", "exclude_providers"):
+                "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
+                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])

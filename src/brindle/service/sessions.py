@@ -257,6 +257,30 @@ def pause(db: DB, ws: Workspace, stop_procs: bool = True) -> list[Note]:
     return notes
 
 
+def supervisor_provider(repo_root: str, provider: str | None = None) -> str | None:
+    """The provider a new supervisor chat runs on: ``provider`` if given, else
+    the owner's ``supervisor_profile`` (then ``supervisor_fallbacks``, in
+    order), the first that exists, the org's policy allows and can run here;
+    None when none is set or none can (the supervisor profile's own then)."""
+    from brindle.config import load_repo_config
+    from brindle.profiles import ProfileError, load_profile
+    from brindle.providers import unusable
+    from brindle.service.routing import RoutingPolicy
+
+    if provider:
+        return provider
+    cfg = load_repo_config(repo_root)
+    policy = RoutingPolicy.load(repo_root)
+    for name in [cfg.supervisor_profile, *cfg.supervisor_fallbacks]:
+        try:
+            p = load_profile(name, repo_root) if name else None
+        except (KeyError, ProfileError):
+            continue
+        if p is not None and policy.refusal(p) is None and unusable(p.provider, p.env) is None:
+            return p.provider
+    return None
+
+
 def launch(db: DB, ws: Workspace, *, provider: str | None = None, prompt: str | None = None,
            watch: bool = True, autopilot: bool | None = None) -> Started:
     """Start the supervisor chat in ``ws`` (autopilot: the repo's default when None)."""
@@ -286,6 +310,7 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
             return got
         ws, more = tidy_branch(db, got.workspace)
         notes = got.notes + more
+    provider = supervisor_provider(ws.repo_root, provider)
     problems = preflight(agents.SUPERVISOR, provider, ws.repo_root)
     if problems:
         raise ServiceError("unavailable", "; ".join(problems), 503)

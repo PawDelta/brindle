@@ -216,7 +216,8 @@ def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool
                                                     "HEAD", None, top, None, "", 0.0)
     else:
         ws = workspaces.adopt_root(db, repo)
-    provider = provider or load_profile(agents.SUPERVISOR, ws.repo_root).provider
+    provider = (svc.supervisor_provider(ws.repo_root, provider)
+                or load_profile(agents.SUPERVISOR, ws.repo_root).provider)
     chat = Agent("", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
     return _blocked([(chat, ws)], keys_only=read_only)
 
@@ -1066,7 +1067,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     excluded = _get(body, "exclude_providers", list)
     kinds = _get(body, "kinds", dict) or {}
     lock_changes: dict[str, bool] = {}
-    supervisor = None
+    extra: dict[str, Any] = {}      # supervisor and reviewer settings the kinds ask for
     current = config.load_repo_config(repo).routing
     for kind, spec in kinds.items():
         if kind not in config.ROUTING_KINDS or not isinstance(spec, dict):
@@ -1080,24 +1081,27 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
             lock_changes[kind] = True   # the owner just chose it: learning must not undo that
         if model is not None and not (isinstance(model, str) and model):
             raise ServiceError("invalid", f"{kind}: model must be a name")
-        if fallbacks is not None and (kind not in config.WEIGHTS or not isinstance(fallbacks, list)
-                                      or not all(isinstance(n, str) for n in fallbacks)):
-            raise ServiceError("invalid", f"{kind}: fallbacks must be a list of profile names, for a weight only")
+        if fallbacks is not None and (not isinstance(fallbacks, list) or not all(isinstance(n, str) for n in fallbacks)):
+            raise ServiceError("invalid", f"{kind}: fallbacks must be a list of profile names")
         if kind in config.WEIGHTS and (model is not None or fallbacks is not None):
             old = current[kind]
             names = [model if model is not None else old[0] if old else None,
                      *(fallbacks if fallbacks is not None else old[1:])]
             tiers = {**(tiers or {}), kind: [n for n in dict.fromkeys(names) if n]}
-        elif kind == "reviewer" and model is not None:
-            reviewer = model
-        elif kind == "supervisor" and model is not None:
-            # The supervisor pick is a CLI (provider) id, as the picker stores it.
-            if model not in providers.PROVIDERS:
-                raise ServiceError("invalid", f"supervisor must be one of {', '.join(providers.PROVIDERS)}, not {model!r}")
-            supervisor = model
+        elif kind == "reviewer":
+            reviewer = model if model is not None else reviewer
+            if fallbacks is not None:
+                extra["reviewer_fallbacks"] = list(dict.fromkeys(fallbacks))
+        elif kind == "supervisor":
+            if model is not None:
+                extra["supervisor_profile"] = model
+            if fallbacks is not None:
+                extra["supervisor_fallbacks"] = list(dict.fromkeys(fallbacks))
     by_name = {p.name: p for p in profiles.list_profiles(repo)}
     known = set(by_name)
     named = [reviewer] if reviewer is not None else []
+    for value in extra.values():     # supervisor and reviewer choices and fallbacks are profiles too
+        named.extend(value if isinstance(value, list) else [value])
     for tier, names in (tiers or {}).items():
         if config.normalize_weight(tier) not in config.WEIGHTS:
             raise ServiceError("invalid", f"tier must be one of {', '.join(config.WEIGHTS)}, not {tier!r}")
@@ -1138,9 +1142,9 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         mine = config.locked_kinds(config._read_json(config.scope_paths(repo)[scope]).get("routing_locked"))
         path = write("routing_locked", {**mine, **lock_changes})
         updated.append("routing_locked")
-    if supervisor is not None:
-        path = config.set_user(config.SUPERVISOR_KEY, supervisor)
-        updated.append("supervisor")
+    for key, value in extra.items():
+        path = write(key, value)
+        updated.append(key)
     if reviewer is not None and kinds.get("reviewer", {}).get("model") and config.load_repo_config(repo).review_profile:
         write("review_profile", reviewer)   # it would win over `reviewer`, so the new choice must replace it
     if not updated:

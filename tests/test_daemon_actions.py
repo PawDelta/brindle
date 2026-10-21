@@ -300,9 +300,6 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
     assert code == 200, reply
     cfg = config.load_repo_config(str(repo))
     assert cfg.routing_locked == {"medium": True, "heavy": False, "light": True}
-    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local",
-                                               "kinds": {"supervisor": {"model": "developer-heavy"}}})
-    assert code == 400 and config.supervisor_pick() is None     # a profile isn't a supervisor CLI
 
     assert autopilot._route_by_weight(db, cfg, str(repo), "medium", None, None)[:2] == ("developer", False)
     assert autopilot._route_by_weight(db, cfg, str(repo), "heavy", None, None)[:2] == ("developer-codex", True)
@@ -320,6 +317,37 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
     kinds = routes_read._routing_kinds(db, cfg, str(repo))
     assert kinds["heavy"].learned is None
     assert (cfg.review_profile, kinds["reviewer"].model, kinds["reviewer"].locked) == ("reviewer", "reviewer", True)
+
+
+def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo, world, monkeypatch):
+    from brindle import providers
+    from brindle.daemon import routes_read
+    from brindle.service import sessions as svc
+
+    before = config._read_json(config.scope_paths(str(repo))["local"])
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
+        "supervisor": {"model": "nope"}}})
+    assert code == 400 and config._read_json(config.scope_paths(str(repo))["local"]) == before   # nothing written
+
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
+        "supervisor": {"model": "developer-codex", "fallbacks": ["developer-gemini", "supervisor"]},
+        "reviewer": {"model": "reviewer-codex", "fallbacks": ["reviewer-gemini", "reviewer"]}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert (kinds["supervisor"].model, kinds["supervisor"].fallbacks, kinds["supervisor"].locked) == (
+        "developer-codex", ["developer-gemini", "supervisor"], True)
+    assert kinds["reviewer"].fallbacks == ["reviewer-gemini", "reviewer"]
+    # Written to the scope asked for only.
+    assert "supervisor_profile" not in config._read_json(config.scope_paths(str(repo))["repo"])
+
+    # A new chat runs on the first of them that can run; a review uses the order too.
+    for dead, provider, reviewer in ([], "codex", "reviewer-codex"), (["codex"], "antigravity", "reviewer-gemini"):
+        monkeypatch.setattr(providers, "unusable", lambda p, env=None, dead=dead: "down" if p in dead else None)
+        monkeypatch.setattr(agents, "unusable", providers.unusable)
+        assert svc.supervisor_provider(str(repo)) == provider
+        assert agents._review_profile(db, world, None, cfg) == reviewer
+    assert svc.supervisor_provider(str(repo), "claude") == "claude"      # asked for by name: kept
 
 
 PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),

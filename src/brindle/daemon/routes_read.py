@@ -375,9 +375,10 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, Routi
         return pick if pick != cfg.reviewer else None
 
     kinds["reviewer"] = RoutingKindDTO(model=cfg.review_profile or cfg.reviewer,
+                                       fallbacks=cfg.reviewer_fallbacks,
                                        locked=bool(cfg.routing_locked.get("reviewer")),
                                        learned=learned("reviewer", reviewer_pick))
-    kinds["supervisor"] = RoutingKindDTO(model=config.supervisor_pick(),
+    kinds["supervisor"] = RoutingKindDTO(model=cfg.supervisor_profile, fallbacks=cfg.supervisor_fallbacks,
                                          locked=bool(cfg.routing_locked.get("supervisor")))
     return kinds
 
