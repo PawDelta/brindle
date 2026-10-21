@@ -108,6 +108,7 @@ def piped(db, repo, monkeypatch):
     def fake_review(db_, caller, ws_, profile=None, focus=None, cfg=None, **kw):
         agent_id = f"rev{len(started)}"
         add(db_, ws_, agent_id, "review", profile or "reviewer", parent=caller.id)
+        db_.update_agent(agent_id, review_slot=profile if kw.get("second") else "")   # as _request_review
         started.append(profile)
         return db_.get_agent(agent_id)
 
@@ -197,16 +198,17 @@ def test_issue216_a_rejection_stands_until_its_own_review_slot_is_reviewed_again
     assert merged(repo)
 
 
-def test_a_primary_review_on_the_second_reviews_profile_is_not_the_second_review(db, repo, piped):
-    """A stalled primary reviewer's fallback ran on the second review's
-    profile, and the stalled one's verdict came in late: two approvals, both
-    in the primary slot."""
+@pytest.mark.parametrize("slot", ["", "reviewer-codex"])
+def test_two_approvals_in_one_review_slot_are_one_review(db, repo, piped, slot):
+    """A stalled reviewer's fallback ran (here on the other review's profile),
+    and the stalled one's verdict came in late: two approvals, both in the
+    primary slot, or both in the second review's."""
     setup, _started = piped
     ws = setup(second={"heavy": "reviewer-codex"})
     db.update_agent("w1", result="added new.py", pipeline="reviewing")
     for rid, profile in (("rev0", "reviewer"), ("rev1", "reviewer-codex")):
         add(db, ws, rid, "review", profile, parent="boss")
-        db.update_agent(rid, review_slot="")
+        db.update_agent(rid, review_slot=slot)
     for rid in ("rev1", "rev0"):
         db.add_review(ws.id, gates.head(ws), rid, True, "lgtm")
     pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
