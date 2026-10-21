@@ -1212,8 +1212,17 @@ def create_profile(db: DB, params: dict, body: Body) -> Any:
                    f"{', '.join(access.allowed_models or ()) or '(none)'}, not {model or 'no declared model'}")
         if why:
             raise ServiceError("forbidden", why, 403)
+    if model is not None and (not isinstance(model, str) or not model.isprintable()):
+        raise ServiceError("invalid", "model must be one line of plain text")
     text = profiles.profile_text(name, description, instructions or "Describe the role here.",
                                  provider=provider, model=model, effort=effort, rules=rules)
+    try:    # what will load is what was validated, whatever the values held
+        written = profiles._parse(text, name)
+    except profiles.ProfileError as e:
+        raise ServiceError("invalid", str(e)) from e
+    if (written.name, written.provider, written.model, written.effort, written.rules) != (
+            name, provider, model, effort, rules):
+        raise ServiceError("invalid", "a value can't be written to the agent file as given")
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(target, "x", encoding="utf-8") as f:    # a second create of the name loses, not overwrites

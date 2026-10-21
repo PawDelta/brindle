@@ -586,6 +586,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         raise agents.AgentError(f"workspace {task.caller_ws_id} for queued task {task.id} is gone")
     caller = db.get_agent(task.caller_id) if task.caller_id else None
     profile = task.profile
+    launch_weight = task.weight
     cfg = load_repo_config(caller_ws.repo_root)
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
@@ -603,6 +604,7 @@ def start_queued(db: DB, task: Task) -> Agent:
                     files=_loads(task.files),
                 )
                 profile = routed_profile
+                launch_weight = effective_weight
                 db.update_task(task.id, profile=profile, weight=effective_weight)
             else:
                 choose_profile(db, task.caller_id or "", caller_ws.repo_root, requested=profile, weight=None)
@@ -612,6 +614,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
+        weight=launch_weight,
     )
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     bus.publish_agent(db, "task.started", worker.id, task_id=task.id)

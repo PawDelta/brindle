@@ -343,8 +343,11 @@ def spawn(
     review_sha: str | None = None,
     claim_goals: bool = True,
     files: list[str] | None = None,
+    weight: str | None = None,
 ) -> Agent:
-    """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
+    """Start an agent in ``ws``. ``weight`` is the weight its task was routed
+    as, kept on the agent so the owner's per-kind effort and instructions apply
+    from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
     accepted decisions covering ``files``. With ``autopilot``, the
     agent is a session root that drives toward a goal (see brindle.autopilot);
@@ -385,7 +388,8 @@ def spawn(
         # write scope join here (the scope is still checked on the diff).
         rules = "\n\n".join(p for p in (rules_prompt(load_rule_packs(profile, ws.repo_root)),
                                         guardrails.scope_prompt(guardrails.effective(profile))) if p)
-        full = f"{profile.prompt.strip()}\n\n{rules}".strip() if rules else profile.prompt
+        tuned = _with_overrides(profile, _weight_kind(weight), ws.repo_root)
+        full = f"{tuned.prompt.strip()}\n\n{rules}".strip() if rules else tuned.prompt
         prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
         from brindle import codemap
@@ -410,12 +414,15 @@ def spawn(
         # Its CLI's config home, decided once here: every later check, its
         # pane and a resume use this one, whatever a sign-in changes meanwhile.
         config_home=provider_homes.decide(provider.name),
+        weight=_weight_kind(weight) if mode in ("handoff", "assign") else None,
     )
     with provider_homes.using(agent.provider, agent.config_home):
         why = model_problem(profile_name, ws, agent=agent)
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    if agent.weight:
+        db.update_agent(agent_id, weight=agent.weight)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
         db.update_agent(agent_id, plan_first=1)
         agent.plan_first = 1
@@ -502,21 +509,31 @@ def _with_supervisor_choice(profile, provider: str, repo_root: str):
 def _with_kind_overrides(db: DB, profile, agent: Agent, repo_root: str):
     """``profile`` with the effort and instructions the owner set for the kind
     of work ``agent`` does (its task's weight, a review, or the supervisor chat)."""
-    from dataclasses import replace
-
     from brindle import learning
-    from brindle.config import WEIGHTS, load_repo_config, normalize_weight
 
     if agent.mode == "review":
         kind = "reviewer"
     elif agent.profile == SUPERVISOR and agent.mode == "interactive":
         kind = "supervisor"
     else:
-        weight = learning._task_files(db, agent, repo_root)[1]
-        kind = normalize_weight(weight) if weight else None
-        if kind not in WEIGHTS:
-            return profile
-    tuned = load_repo_config(repo_root).routing_overrides.get(kind, {})
+        kind = _weight_kind(agent.weight or learning._task_files(db, agent, repo_root)[1])
+    return _with_overrides(profile, kind, repo_root)
+
+
+def _weight_kind(weight: str | None) -> str | None:
+    """The routing kind of a task weight (an alias resolved), None when it isn't one."""
+    from brindle.config import WEIGHTS, normalize_weight
+
+    kind = normalize_weight(weight)
+    return kind if kind in WEIGHTS else None
+
+
+def _with_overrides(profile, kind: str | None, repo_root: str):
+    from dataclasses import replace
+
+    from brindle.config import load_repo_config
+
+    tuned = load_repo_config(repo_root).routing_overrides.get(kind, {}) if kind else {}
     if effort := tuned.get("effort"):
         profile = replace(profile, effort=effort)
     if text := tuned.get("instructions"):
@@ -2438,8 +2455,10 @@ def delegate(
     plan_first: bool | None = None,
     start: str | None = None,
     files: list[str] | None = None,
+    weight: str | None = None,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``plan_first`` (None: the repo's ``plan_first`` config)
+    """Start a worker. ``weight`` is the weight its task was routed as.
+    ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
     decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
     branch starts from the caller's current branch, so it sees the caller's
@@ -2492,6 +2511,7 @@ def delegate(
     agent = spawn(
         db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
         done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
+        weight=weight,
     )
     from brindle import events
 

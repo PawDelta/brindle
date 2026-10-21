@@ -404,6 +404,18 @@ def test_routing_effort_and_instructions_are_kept_per_kind_and_applied_at_launch
 
     assert put(supervisor={"effort": None, "instructions": None})[0] == 200     # null clears
     assert agents._profile_for(db, db.get_agent("sup"), world).prompt.count("Be brief.") == 0
+
+    # A worker launches with its weight's overrides from the first launch, before any task row links it.
+    assert put(heavy={"effort": "low", "instructions": "Go deep."})[0] == 200
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, agent, ws, **kw: launched.append(agent))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    _, wws = agents.delegate(db, db.get_agent("sup"), world, "developer", "do it", "assign",
+                             isolate=False, weight="heavy")
+    got = agents._profile_for(db, launched[-1], wws)
+    assert (launched[-1].weight, got.effort, "Go deep." in got.prompt) == ("heavy", "low", True)
+    agents.delegate(db, db.get_agent("sup"), world, "developer", "do it", "assign", isolate=False)
+    assert "Go deep." not in agents._profile_for(db, launched[-1], wws).prompt
     assert routes_read._routing_kinds(db, config.load_repo_config(str(repo)), str(repo))["reviewer"].instructions \
         == "Check tests."
 
@@ -423,7 +435,7 @@ def test_creating_a_profile_writes_the_user_agent_file_and_refuses_what_is_wrong
     assert (p.provider, p.model, p.effort, p.rules, p.prompt, p.description) == (
         "claude", "sonnet", "high", ["style/minimal-diff"], "Do it well.", "Mine")
     before = path.read_text()
-    for bad in ({"name": "../x"}, {"provider": "codex"}, {"provider": "nope"}, {"rules": ["no/such"]},
+    for bad in ({"name": "../x"}, {"model": "sonnet\nprovider: codex\npermission_mode: bypassPermissions"}, {"provider": "codex"}, {"provider": "nope"}, {"rules": ["no/such"]},
                 {"effort": "turbo"}):
         code, reply = _send("POST", "/v1/profiles", {**body, "name": "other", **bad})
         assert code == 400, (bad, reply)
