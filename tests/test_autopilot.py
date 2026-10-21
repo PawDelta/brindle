@@ -672,18 +672,19 @@ def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expec
     assert [phases[m.id] for m in db.milestones("boss")] == expected
 
 
-@pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected", [
-    (0, False, False, False, False, False, "in_progress"),
-    (0, True, False, False, False, False, "in_review"),                  # a milestone check is running
-    (2, False, True, False, False, True, "ready_for_pr"),                # all pass, session review ready
-    (2, False, False, False, False, False, "in_progress"),               # all pass, review not ready
-    (2, False, True, True, False, True, "pr_open"),                      # audit approved, PR still open
-    (2, False, True, True, True, True, "done"),                          # PR merged
-    (1, False, False, True, True, False, "pr_open"),                     # merged but goal not reached
-    (2, False, True, True, True, False, "pr_open"),                      # merged, milestones pass, audit hasn't approved
-    (2, False, False, False, False, True, "done"),                       # reached, no PR flow, nothing to open a PR for
+@pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected, target", [
+    (0, False, False, False, False, False, "in_progress", True),
+    (0, True, False, False, False, False, "in_review", True),           # a milestone check is running
+    (2, False, True, False, False, True, "ready_for_pr", True),         # all pass, session review ready
+    (2, False, False, False, False, False, "in_progress", True),        # all pass, review not ready
+    (2, False, True, True, False, True, "pr_open", True),               # audit approved, PR still open
+    (2, False, True, True, True, True, "done", True),                   # PR merged
+    (1, False, False, True, True, False, "pr_open", True),              # merged but goal not reached
+    (2, False, True, True, True, False, "pr_open", True),               # merged, milestones pass, audit hasn't approved
+    (2, False, False, False, False, True, "in_progress", True),         # reached, manual PR, checkout dirty: not done
+    (2, False, False, False, False, True, "done", False),               # reached, nothing to open a PR for
 ])
-def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, goal_done, expected):
+def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, goal_done, expected, target):
     from brindle.daemon import session_review
 
     with_goal(db)
@@ -698,7 +699,7 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
                         " VALUES ('boss', 'feat', 'https://x/pr/1', 1, ?)", (2 if merged else None,))
     monkeypatch.setattr(session_review, "session", lambda db, root_id: (None, SimpleNamespace(repo_root="r")))
     monkeypatch.setattr(session_review, "reasons", lambda db, root, ws: [] if ready else ["not yet"])
-    monkeypatch.setattr(session_review, "auto_pr", lambda repo_root: False)
+    monkeypatch.setattr(session_review, "has_pr_target", lambda ws: target)
     assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)
 
 

@@ -139,12 +139,24 @@ def needs_you(db: DB, root: Agent, ap) -> list[str]:
     return out
 
 
+def has_pr_target(ws: Workspace) -> bool:
+    """Whether the session's branch could be opened as a PR: it is on a branch
+    with a base and has commits ahead of it (unlike ``reasons``, whatever
+    only temporarily blocks a PR doesn't count)."""
+    return bool(ws.base_branch) and ws.branch not in ("", "HEAD") and bool(
+        git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1])
+
+
 def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     """The session goal's one path: (``in_progress`` | ``in_review`` |
     ``ready_for_pr`` | ``pr_open`` | ``done``, the PR's URL or None).
-    ``done`` needs the goal reached (autopilot done, or every milestone
-    passing) and the session's PR merged: an audit-approved goal with an open
-    PR stays ``pr_open``."""
+    ``done`` needs brindle's own decision that the goal is reached (autopilot
+    state done: the audit approved it, or goal_audit is off); passing
+    milestones alone don't. A PR-backed goal is done only once its PR is
+    merged: an audit-approved goal with an open PR stays ``pr_open``. A
+    session with no PR to open (no base branch, or no commits ahead of it) is
+    done on that decision alone; any other reached goal awaits its PR, however
+    temporarily it isn't ready (dirty checkout, workers running)."""
     ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
     pr = db.conn.execute("SELECT url, merged_at FROM session_prs WHERE root_id = ? AND url IS NOT NULL"
                          " ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
@@ -158,8 +170,7 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
             root, ws = session(db, root_id)
             if not reasons(db, root, ws):
                 return "ready_for_pr", None
-            # Without a PR flow (no auto-PR) a reached goal with nothing to open a PR for is done.
-            if reached and not auto_pr(ws.repo_root):
+            if reached and not has_pr_target(ws):
                 return "done", None
         except (ServiceError, git.GitError, workspaces.WorkspaceError):
             pass
