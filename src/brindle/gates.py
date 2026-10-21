@@ -19,8 +19,10 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 
 import shutil
@@ -133,6 +135,25 @@ def _concurrency(ws: Workspace) -> int:
         return host_check_concurrency()
 
 
+_place = threading.local()
+
+
+@contextmanager
+def queue_place(since: float):
+    """Check runs this thread starts inside this wait in the check queue as
+    if they had arrived at ``since``: each command of one run keeps the run's
+    place, and a review keeps the place of the report it is for (#186). An
+    enclosing place is kept."""
+    outer = getattr(_place, "since", None)
+    if outer is None:
+        _place.since = since
+    try:
+        yield
+    finally:
+        if outer is None:
+            _place.since = None
+
+
 @contextmanager
 def _check_slot(limit: int, cancel=None):
     """Hold one of ``limit`` machine-wide slots for a check run, waiting for
@@ -140,19 +161,29 @@ def _check_slot(limit: int, cancel=None):
     and every run then takes hours. The slots are lock files under the brindle
     home, so every brindle process (the merge gate, ``_review-after-checks``,
     ``_warm-checks``, milestone checks) shares them, and a process that dies
-    gives its slot back. ``limit`` 0 or less means no cap."""
+    gives its slot back. Waiters go first come, first served (see
+    ``queue_place``): a free slot is left to an earlier waiter that can use
+    it, so a run can't be passed over by later arrivals for as long as they
+    keep coming (#186: a review waited 30 min on a 3-second check). ``limit``
+    0 or less means no cap."""
     if limit <= 0:
         yield
         return
     from brindle.config import brindle_home
 
     lock_dir = brindle_home() / "locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    queue = lock_dir / "check-queue"
+    queue.mkdir(parents=True, exist_ok=True)
     files = [open(lock_dir / f"check-slot-{i}.lock", "w") for i in range(limit)]
+    since = getattr(_place, "since", None) or time.time()
+    ticket = _enqueue(queue, since, limit)
     try:
         held = False
         while not held:
-            for f in files:
+            ahead = _waiting_ahead(queue, ticket.name)
+            for i, f in enumerate(files):
+                if any(i < other for other in ahead):
+                    continue   # an earlier waiter can take this one
                 try:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
@@ -163,10 +194,62 @@ def _check_slot(limit: int, cancel=None):
                 if cancel is not None and cancel():
                     raise Abandoned("slot")
                 time.sleep(SLOT_POLL)
+        _dequeue(ticket)
         yield
     finally:
+        _dequeue(ticket)
         for f in files:
             f.close()   # closing releases the slot
+
+
+class _Ticket:
+    """A waiter's place in the check queue: a file named for its arrival and
+    slot limit, locked for as long as it waits (an unlocked one is a dead
+    waiter's)."""
+
+    def __init__(self, path, f) -> None:
+        self.path, self.name, self.file = path, path.name, f
+
+
+def _enqueue(queue, since: float, limit: int) -> _Ticket:
+    name = f"{int(since * 1_000_000):020d}-{limit}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    staged = queue / ("." + name)
+    f = open(staged, "w")
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    os.replace(staged, queue / name)   # in the queue only once locked, so never taken for dead
+    return _Ticket(queue / name, f)
+
+
+def _dequeue(ticket: _Ticket) -> None:
+    if ticket.file.closed:
+        return
+    try:
+        os.unlink(ticket.path)
+    except FileNotFoundError:
+        pass
+    ticket.file.close()
+
+
+def _waiting_ahead(queue, mine: str) -> list[int]:
+    """The slot limits of the live waiters queued before ``mine``; a dead
+    waiter's ticket is cleared on the way."""
+    ahead = []
+    for name in sorted(os.listdir(queue)):
+        if name >= mine:
+            break
+        if name.startswith("."):
+            continue
+        try:
+            with open(queue / name) as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    ahead.append(int(name.split("-")[1]))
+                    continue
+                os.unlink(queue / name)   # its waiter died without taking it out
+        except (FileNotFoundError, ValueError, IndexError):
+            continue
+    return ahead
 
 
 def _marker_file(kind: str, ws_id: str):
@@ -344,22 +427,23 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     env = workspaces.workspace_env(ws)
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
-    for cmd in cfg.checks:
-        if cancel is None:
-            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
-        else:
-            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel=cancel)
-        if ok:
-            lines.append(f"PASS `{cmd}`")
-            continue
-        if budget <= 0:
-            lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
-            continue
-        # Keep the tail, not the head: run_check's own exit-code marker is the
-        # last line, and that's the part a reviewer needs most.
-        shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
-        budget -= len(shown)
-        lines.append(f"FAIL `{cmd}`\n{shown}")
+    with queue_place(time.time()):   # one place in the check queue for all its commands
+        for cmd in cfg.checks:
+            if cancel is None:
+                ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+            else:
+                ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel=cancel)
+            if ok:
+                lines.append(f"PASS `{cmd}`")
+                continue
+            if budget <= 0:
+                lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
+                continue
+            # Keep the tail, not the head: run_check's own exit-code marker is the
+            # last line, and that's the part a reviewer needs most.
+            shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
+            budget -= len(shown)
+            lines.append(f"FAIL `{cmd}`\n{shown}")
     return "\n".join(lines)
 
 
@@ -390,11 +474,12 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
         r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
     env = workspaces.workspace_env(ws)
-    for cmd in cfg.checks:
-        ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
-        if not ok:
-            return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
-        r.passed.append(f"`{cmd}` passed")
+    with queue_place(time.time()):
+        for cmd in cfg.checks:
+            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+            if not ok:
+                return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
+            r.passed.append(f"`{cmd}` passed")
     # A verdict recorded while the checks ran (a second reviewer's, #216)
     # counts as much as one recorded before them.
     if review_required and (problem := _review_problem(db, ws, sha)):
