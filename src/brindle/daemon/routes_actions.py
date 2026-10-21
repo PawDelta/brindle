@@ -1363,6 +1363,49 @@ def setup_codex_hook(db: DB, params: dict, body: Body) -> Any:
     return start_job("setup.codex_hook", work, job=job)
 
 
+# -- projects: the app's picker ----------------------------------------------------
+
+
+def clone_repo(db: DB, params: dict, body: Body) -> Any:
+    """``git clone <url>`` into ``parent_dir/<repo name>`` as the person's own
+    git would (their credentials and SSH keys; brindle handles none). Git's
+    progress lines go out as ``job.progress`` ``text``; ``job.done`` carries
+    ``{"path": ...}``, and a failure carries git's message (code ``auth_failed``
+    when it was refused for credentials). An existing destination is refused (409)."""
+    from brindle import clone
+
+    url = _get(body, "url", required=True)
+    dest = clone.destination(url, _get(body, "parent_dir", required=True))
+
+    def work(db: DB, job: Job) -> Any:
+        def progress(text: str) -> None:
+            bus.publish(db, "job.progress", job=job.id, text=text)
+
+        return {"path": clone.clone(url, dest, progress)}
+
+    return start_job("repo.clone", work)
+
+
+def open_repo(db: DB, params: dict, body: Body) -> Any:
+    """Register the folder ``path`` as session start does (workspaces.adopt_root).
+    A folder that isn't a git repo is refused (409 ``not_a_repo``) unless the
+    body says ``init``: then ``git init`` makes it one first."""
+    from pathlib import Path
+
+    path = Path(_get(body, "path", required=True)).expanduser()
+    if not path.is_dir():
+        raise ServiceError("invalid", f"not a folder: {path}")
+    initialized = False
+    if git.run(["rev-parse", "--show-toplevel"], path, check=False).returncode != 0:
+        if not _get(body, "init", bool, False):
+            raise ServiceError("not_a_repo", f"{path} isn't a git repository", 409)
+        git.run(["init", "-q"], path)
+        initialized = True
+    ws = workspaces.adopt_root(db, str(path))
+    return {"workspace_id": ws.id, "repo_root": ws.repo_root, "path": ws.path, "branch": ws.branch,
+            "initialized": initialized}
+
+
 def _post(path: str, fn: Action) -> Route:
     return Route(f"/v1{path}", _endpoint(fn), methods=["POST"])
 
@@ -1414,6 +1457,8 @@ ROUTES = [
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
     _post("/terminals/{id}/input", terminal_input),
+    _post("/repos/clone", clone_repo),
+    _post("/repos/open", open_repo),
     _post("/engine/upgrade", upgrade_engine),
     _post("/setup/codex-hook", setup_codex_hook),
 ]

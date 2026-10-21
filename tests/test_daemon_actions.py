@@ -1316,3 +1316,51 @@ def test_setup_codex_hook_trusts_it_in_the_background(db, world, monkeypatch, tm
         ("job.failed" if fails else "job.done", reply["job"])]
     if fails:
         assert events[0]["payload"]["error"]["code"] == "codex_hook_failed"
+
+
+@pytest.fixture
+def cloning(world, repo, monkeypatch):
+    from brindle import clone
+
+    monkeypatch.setattr(clone, "ALLOW_FILE_URLS", True)       # tests only: production refuses file://
+    return f"file://{repo.parent / 'origin.git'}"
+
+
+def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
+    assert code == 202, reply
+    done = bus.tail(db, kinds=("job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["result"]) for e in done] == [
+        ("job.done", {"path": str(parent / "origin")})]
+    assert (parent / "origin" / "app.py").is_file()
+    assert any(e["payload"]["job"] == reply["job"] for e in bus.tail(db, kinds=("job.progress",)))
+    again, err = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
+    assert (again, err["error"]["code"]) == (409, "exists")
+
+
+@pytest.mark.parametrize("url", ["-u/bin/sh", "/tmp/some/repo", "file:///tmp/x.git", "http://example.com/a.git",
+                                 "https://-oProxyCommand=x/a.git", "https://example.com/a b.git"])
+def test_a_clone_refuses_what_is_not_a_remote_url(world, tmp_path, url):
+    code, reply = _send("POST", "/v1/repos/clone", {"url": url, "parent_dir": str(tmp_path)})
+    assert (code, reply["error"]["code"]) == (400, "invalid"), reply
+
+
+def test_a_clone_that_git_refuses_fails_the_job_with_its_message(db, cloning, tmp_path):
+    code, _ = _send("POST", "/v1/repos/clone", {"url": "file:///nonexistent/gone.git", "parent_dir": str(tmp_path)})
+    assert code == 202
+    failed = bus.tail(db, kinds=("job.failed",))
+    assert failed and failed[0]["payload"]["error"]["code"] == "clone_failed"
+    assert "gone.git" in failed[0]["payload"]["error"]["message"]
+
+
+def test_opening_a_folder_registers_a_repo_and_offers_git_init_for_a_plain_one(db, world, repo, tmp_path):
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(repo)})
+    assert (code, reply["repo_root"], reply["initialized"]) == (200, str(repo), False)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(plain)})
+    assert (code, reply["error"]["code"]) == (409, "not_a_repo")
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(plain), "init": True})
+    assert (code, reply["initialized"], db.workspace_by_path(str(plain)) is not None) == (200, True, True)
