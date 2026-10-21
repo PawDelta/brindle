@@ -140,6 +140,31 @@ def test_codex_checks_and_profile_commands(db, ws, command, expected):
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
+@pytest.mark.parametrize("command,expected", [
+    ("gh issue view 239 --repo PawDelta/brindle", "allow"),
+    ("gh pr diff 5 --repo PawDelta/brindle", "allow"),
+    ("gh pr merge 5 --repo PawDelta/brindle", "deny"),  # dontAsk: writes stay refused
+    ("gh api -X POST repos/PawDelta/brindle/issues", "deny"),
+])
+def test_codex_reviewer_reads_github_but_cannot_write(db, ws, command, expected):
+    turn_on(ws)
+    a = Agent("r1", ws.id, "reviewer-codex", "codex", "boss", "review", "processing", "%r1", None, time.time())
+    db.add_agent(a)
+    out = agents.hook_main(db, a.id, "codex-permission-request",
+                          json.dumps(codex_payload("Bash", {"command": command}, ws.path)))
+    assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == expected
+
+
+def test_codex_reviewer_launch_allows_sandbox_network(ws):
+    from brindle.agents import load_profile
+    from brindle.providers import Codex, LaunchContext
+
+    flag = "sandbox_workspace_write.network_access=true"
+    review = Codex().command(LaunchContext("c1", load_profile("reviewer-codex"), None, cwd=ws.path, mode="review"))
+    assign = Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path, mode="assign"))
+    assert flag in review and flag not in assign
+
+
 @pytest.mark.parametrize("command,expected", [("git push", "deny")])
 def test_codex_session_bookkeeping_failure_preserves_decision(db, ws, monkeypatch, command, expected):
     a = worker(db, ws)

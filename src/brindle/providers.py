@@ -1410,6 +1410,10 @@ class Codex(Provider):
             # Supported by Codex 0.162.1. Workers cannot act on an update
             # notice; omit this extra startup UI from automated launches.
             argv += ["-c", "check_for_update_on_startup=false"]
+        if ctx.mode == "review":
+            # The reviewer's read-only `gh issue view` / `gh pr view` need the
+            # network, which Codex's sandbox blocks; allowed_tools gates what runs.
+            argv += ["-c", "sandbox_workspace_write.network_access=true"]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:
