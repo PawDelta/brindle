@@ -1174,9 +1174,9 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
 
 
 # -- terminals: the real command in a terminal the app shows -------------------------
-# Each answers {"terminal": id, "started": bool} for WS /v1/terminal/{id}; while
-# the same action is still running, a second press gets its terminal (started
-# False). The person signs in or types the secret there; the daemon never
+# Each answers an ActionTerminalDTO: the pane and tmux server the app's own tmux
+# client attaches to, and the id for POST /terminals/{id}/input. While the same
+# action is still running, a second press gets its terminal (started False). The person signs in or types the secret there; the daemon never
 # automates a sign-in. The app may instead send a key the person typed to
 # PUT /v1/keys/{name} (write-only), or a code they pasted to a terminal's input.
 

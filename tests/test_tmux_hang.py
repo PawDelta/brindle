@@ -242,7 +242,7 @@ def test_attach_fails_fast_on_a_hung_server(db, repo, hung_tmux):
     assert time.time() - t0 < 5
 
 
-def test_tmux_bin_override_and_pane_streaming_controls(tmp_path, monkeypatch):
+def test_tmux_bin_override_and_window_size_reset(tmp_path, monkeypatch):
     real = shutil.which("tmux")
     wrapper = tmp_path / "custom-tmux"
     log = tmp_path / "custom.log"
@@ -254,11 +254,9 @@ def test_tmux_bin_override_and_pane_streaming_controls(tmp_path, monkeypatch):
     monkeypatch.setenv("BRINDLE_TMUX_BIN", str(wrapper))
     tmux.ensure_session("brindle_pipe", str(tmp_path), {})
     target = "=brindle_pipe:"
-    tmux.set_window_size_manual(target)
-    tmux.resize_window(target, 132, 43)
-    info = tmux._tmux("display-message", "-p", "-t", target,
-                      "#{window_width}x#{window_height}").stdout.strip()
-    assert info == "132x43"
-    assert tmux._tmux("show-options", "-w", "-v", "-t", target, "window-size").stdout.strip() == "manual"
-    assert tmux.attached_terminals(target) == 0
-    assert f"resize-window -t {target} -x 132 -y 43" in log.read_text()
+    assert tmux.window_size_option(target) is None      # the global value is inherited, not set here
+    tmux._tmux("set-option", "-w", "-t", target, "window-size", "manual")
+    assert tmux.window_size_option(target) == "manual"
+    tmux.unset_window_size(target)
+    assert tmux.window_size_option(target) is None
+    assert f"set-option -w -u -t {target} window-size" in log.read_text()

@@ -342,7 +342,6 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 ], ids=["login", "key", "bad-key"])
 def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeypatch, path, status, command):
     from brindle import providers, tmux
-    from brindle.daemon import terminal
 
     windows = {}            # terminal id -> [window name, argv, alive]
     second: list = []       # a second press, made while the first is creating its window
@@ -370,9 +369,11 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
         return
     thread = second.pop(0)
     thread.join(5)
-    assert second == [(200, {"terminal": reply["terminal"], "started": False})]
-    assert reply["started"] and len(windows) == 1 and command in windows[reply["terminal"]][1]
-    assert terminal._find(reply["terminal"])["target"] == "%1"
+    # Where the app's own tmux client attaches: the pane, on the daemon's server.
+    attach = {"target": "%1", "server": tmux.current_server()}
+    assert second == [(200, {"terminal": reply["terminal"], "started": False, **attach})]
+    assert reply == {"terminal": reply["terminal"], "started": True, **attach}
+    assert len(windows) == 1 and command in windows[reply["terminal"]][1]
     windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
     code, again = _send("POST", path)
     assert (code, again["started"], len(windows)) == (200, True, 2)
@@ -385,7 +386,7 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     monkeypatch.setattr(providers, "claude_binary", lambda: "claude")
     monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
     monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
-                        windows.setdefault(tag[1], argv))
+                        windows.setdefault(tag[1], argv) and f"%{len(windows)}")
     monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
         (f"%{i + 1}", "login claude", True, tid) for i, tid in enumerate(windows)])
     monkeypatch.setattr(tmux, "send_keys", lambda target, *keys, **kw: typed.append((target, *keys)))

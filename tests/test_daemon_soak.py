@@ -1,7 +1,5 @@
-"""The daemon under repeated use: the read routes, the events feed and the
-terminal socket, on a real tmux server, must hand back every fd and SQLite
-connection they open, and keystrokes sent after all that must still reach the
-pane."""
+"""The daemon under repeated use: the read routes and the events feed, on a
+real tmux server, must hand back every fd and SQLite connection they open."""
 
 import contextlib
 import faulthandler
@@ -23,7 +21,6 @@ from brindle.db import Agent
 TOKEN = "t" * 43
 ROUNDS = 5
 EVENT_CLIENTS = 60
-TERMINAL_CLIENTS = 10
 
 DEADLINE = 50.0     # seconds the whole test may wait on the daemon before it fails
 pause = threading.Event()   # never set: pause.wait(n) is a plain timed wait
@@ -81,7 +78,7 @@ def open_fds() -> int:
 
 def settled(measure, limit: float = 5.0) -> int:
     """``measure()`` once it has stopped changing for a second (worker threads
-    and the control client are still winding down after a socket closes)."""
+    are still winding down after a socket closes)."""
     deadline, last, same = time.monotonic() + limit, None, 0
     while time.monotonic() < deadline:
         now = measure()
@@ -121,7 +118,7 @@ class Sockets:
 
 
 @pytest.mark.serial
-def test_daemon_leaks_nothing_under_load_and_keys_still_reach_the_pane(db, repo, monkeypatch):
+def test_daemon_leaks_nothing_under_load(db, repo, monkeypatch):
     ws = workspaces.create(db, str(repo), "feat/soak").workspace
     pane = tmux._tmux("new-session", "-d", "-s", "soak", "-P", "-F", "#{pane_id}", "sh").stdout.strip()
     db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "idle", pane, None, 1000.0,
@@ -143,10 +140,6 @@ def test_daemon_leaks_nothing_under_load_and_keys_still_reach_the_pane(db, repo,
         for _ in range(EVENT_CLIENTS):
             with socks.connect("/v1/events") as sock:
                 socks.receive(sock)     # the replay: the feed has its DB open
-        for _ in range(TERMINAL_CLIENTS):
-            with socks.connect("/v1/terminal/w1") as sock:
-                socks.receive(sock)     # hello
-                socks.receive(sock)     # seed
 
     deadline = time.monotonic() + DEADLINE
     with wall_clock(DEADLINE), TestClient(build_app(TOKEN)) as client:
@@ -157,14 +150,3 @@ def test_daemon_leaks_nothing_under_load_and_keys_still_reach_the_pane(db, repo,
         hammer(client, socks)
         assert settled(open_fds) <= fds
         assert settled(lambda: len(Tracked.live)) <= conns
-
-        with socks.connect("/v1/terminal/w1") as sock:
-            socks.receive(sock)
-            socks.receive(sock)
-            sock.send_json({"type": "key", "text": "echo soak-$((6*7))"})
-            sock.send_json({"type": "key", "keys": ["Enter"]})
-            # Polled, not read off the socket: dropped input times out here instead of blocking.
-            while "soak-42" not in tmux.capture(pane, 50, server=tmux.current_server()).replace(
-                    "echo soak-$((6*7))", ""):
-                assert time.monotonic() < deadline, "the keystrokes never reached the pane"
-                pause.wait(0.1)

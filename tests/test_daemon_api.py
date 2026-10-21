@@ -22,7 +22,7 @@ from brindle import kb as kb_mod
 from brindle.daemon import events, lifecycle, peer, terminal
 from brindle.daemon.app import build_app
 from brindle.daemon.auth import WS_UNAUTHORIZED, Guard
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
 from brindle.pro import license
 
 TOKEN = "t" * 43
@@ -268,7 +268,7 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
         return conn
 
     monkeypatch.setattr(sqlite3, "connect", tracked_connect)
-    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot(tmux.current_server()))
+    monkeypatch.setattr(tmux, "list_panes", lambda *a: tmux.PaneSnapshot(tmux.current_server()))
     if kind == "read":
         for _ in range(30):
             assert _get("/v1/repos", AUTH) == (200, [])
@@ -278,7 +278,8 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
     elif kind == "peer":
         assert peer._agent_panes() == {}
     elif kind == "terminal":
-        assert terminal._find("missing")["code"] == "not_found"
+        monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [])
+        assert terminal.reset_window_sizes() == 0
     elif kind == "preflight":
         from brindle import git, preflight
 
@@ -404,6 +405,41 @@ def test_peer_pid_names_the_unix_socket_caller():
     a, b = socket.socketpair(socket.AF_UNIX)
     with a, b:
         assert peer.peer_pid(a) == os.getpid()
+
+
+def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db, monkeypatch):
+    # The old streaming daemon left window-size manual on windows it sized.
+    db.add_workspace(Workspace("ws", "/r", "root", "main", "main", None, "/r", None, "brindle-root", 1.0))
+    db.add_agent(Agent("w1", "ws", "developer", "claude", None, "assign", "idle", "%1", None, 1.0))
+    db.add_agent(Agent("w2", "ws", "developer", "claude", None, "assign", "idle", "%1", None, 1.0,
+                       tmux_server="other"))
+    here = tmux.current_server()
+    tags = {here: {"%1": {tmux.AGENT_TAG: "w1"}, "%4": {tmux.SIDEBAR_TAG: "root"}},
+            "other": {"%1": {tmux.AGENT_TAG: "w2"}}}
+    manual = {(here, "%1"), ("other", "%1"), (here, "%4"), (here, "%5"), (here, "%9")}   # %5: not brindle's
+    ran = []
+
+    def list_panes(server=None):
+        snap = tmux.PaneSnapshot(server)
+        snap.tags = tags.get(server, {})
+        return snap
+
+    def fake_tmux(*args, server=None, check=True, **kw):
+        ran.append((server, *args))
+        set_here = args[0] == "show-options" and (server, args[4]) in manual
+        return SimpleNamespace(returncode=0, stdout="manual\n" if set_here else "", stderr="")
+
+    monkeypatch.setattr(tmux, "list_panes", list_panes)
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [("%9", "login claude", False, "t-1")])
+    monkeypatch.setattr(tmux, "_tmux", fake_tmux)
+    assert terminal.reset_window_sizes() == 3
+    unset = sorted(r for r in ran if r[1] == "set-option")
+    assert unset == sorted([(here, "set-option", "-w", "-u", "-t", "%1", "window-size"),
+                            ("other", "set-option", "-w", "-u", "-t", "%1", "window-size"),
+                            (here, "set-option", "-w", "-u", "-t", "%9", "window-size")])
+    assert not any("-g" in r for r in ran)      # never a global option
+    ran.clear()
+    assert terminal.reset_window_sizes() == 0 and ran == []     # one-time
 
 
 def test_committed_api_schema_matches_the_routes_and_dtos():
