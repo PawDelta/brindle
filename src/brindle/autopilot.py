@@ -1294,7 +1294,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         positions = ", ".join(str(m.position) for m in regressed)
         verb = "was passing but now fails" if len(regressed) == 1 else "were passing but now fail"
         lines.append(f"REGRESSED: milestone {positions} {verb}.")
-    lines.append(progress(db, root_id))
+    lines.append(progress(db, root_id, in_flight=False))
     for m in shown:
         if m.output and m.status == "failed":
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
@@ -1542,7 +1542,12 @@ def work_state(db: DB, root_id: str) -> str | None:
     return None
 
 
-def progress(db: DB, root_id: str) -> str:
+def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
+    """Render live progress, or recorded results for a completed check report.
+
+    A completed report must not inherit the background flag: the helper keeps
+    it set until delivery finishes, so concurrent readers still see checking.
+    """
     ap = db.get_autopilot(root_id)
     if ap is None:
         return "Autopilot is not set up for this session."
@@ -1553,7 +1558,7 @@ def progress(db: DB, root_id: str) -> str:
     done, total = counts(db, root_id)
     lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
     ms = db.milestones(root_id)
-    w = work_state(db, root_id) if any(m.status == "failed" for m in ms) else None
+    w = work_state(db, root_id) if in_flight and any(m.status == "failed" for m in ms) else None
     for m in ms:
         where = f"@{m.repo}: " if m.repo else ""
         how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"

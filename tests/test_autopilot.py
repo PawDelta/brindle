@@ -584,6 +584,10 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
         text = autopilot.progress(db, "boss")
         assert "◌" in text and "checking" in text and "failed" not in text
         assert any("checking" in line.text for line in watch.render_autopilot(entry, 80))
+        monkeypatch.setattr(gates, "run_checked", lambda *a, **k: (False, "new failure"))
+        finished = autopilot.check_milestones(db, "boss", ws)
+        assert "✗" in finished and "checking" not in finished and "new failure" in finished
+        assert "checking" in autopilot.progress(db, "boss")
         db.record_check(db.milestones("boss")[0].id, True, "passed")
         db.update_autopilot("boss", checking_since=None)
         assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["milestones"][0]["status"] == "passed"
