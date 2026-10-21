@@ -1,36 +1,23 @@
-"""`brindle account upgrade --enterprise [--trial] --seats N --org ORG`."""
+"""`brindle account upgrade --enterprise`: Enterprise is set up by contact, never a checkout."""
 import pytest
 
 from test_pro_team import ORG, run, team  # noqa: F401 - fixtures
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
 
-URL = "https://checkout.stripe.test/c/ent"
+CONTACT = ("Enterprise is set up with PawDelta, not bought here. Email support@pawdelta.com "
+           "with your team size and where agents will run; we'll turn it on for your org.")
 
 
-@pytest.fixture
-def checkout(team):
-    seen = []
-    team.routes["POST /billing/checkout"] = lambda f, h: (seen.append(dict(f)), (200, {"url": URL}))[1]
-    team.seen = seen
-    return team
-
-
-def test_enterprise_posts_the_plan_and_trial_false(checkout):
-    code, out, _ = run(checkout, "upgrade", "--enterprise", "--seats", "25", "--org", ORG)
-    assert code == 0 and out.strip() == URL
-    assert checkout.seen == [{"plan": "enterprise", "seats": 25, "org_id": ORG, "trial": False}]
-
-
-def test_trial_over_ten_seats_is_refused_locally(checkout):
-    code, _, err = run(checkout, "upgrade", "--enterprise", "--trial", "--seats", "11", "--org", ORG)
-    assert code == 1 and "limited to 10 seats" in err and "11" in err
-    assert "POST /billing/checkout" not in checkout.paths()
-
-
-def test_enterprise_needs_seats_and_an_org(checkout):
-    code, _, err = run(checkout, "upgrade", "--enterprise", "--seats", "3")
-    assert code == 1 and "no team org selected" in err
-    assert run(checkout, "upgrade", "--enterprise", "--org", ORG)[0] == 2
-    assert run(checkout, "upgrade", "--enterprise", "--seats", "0", "--org", ORG)[0] == 2
-    assert run(checkout, "upgrade", "--enterprise", "--seats", "x", "--org", ORG)[0] == 2
-    assert "POST /billing/checkout" not in checkout.paths()
+@pytest.mark.parametrize("args", [
+    ("upgrade", "--enterprise", "--seats", "25", "--org", ORG),
+    ("upgrade", "--enterprise", "--trial", "--seats", "11", "--org", ORG),
+    ("upgrade", "--enterprise", "--seats", "3"),
+    ("upgrade", "--enterprise", "--org", ORG),
+    ("upgrade", "--enterprise", "--trial"),
+    ("upgrade", "--enterprise"),
+])
+def test_enterprise_prints_the_contact_message_and_exits_zero(team, args):
+    team.routes["POST /billing/checkout"] = lambda f, h: (200, {"url": "https://checkout.stripe.test/c/x"})
+    code, out, err = run(team, *args)
+    assert code == 0 and out.strip() == CONTACT and err == ""
+    assert "POST /billing/checkout" not in team.paths()

@@ -1001,7 +1001,7 @@ brindle account login      # opens your browser to sign in (--device: enter a co
 brindle account status     # your plan, features, hosted learning on or off, when the entitlement expires
 brindle account savings    # what hosted learning's picks gained in this repo, this month and last: estimates, from this machine's records only
 brindle account upgrade    # opens the checkout for brindle Pro (and prints its URL)
-brindle account upgrade --enterprise [--trial] --seats N --org ORG   # brindle Enterprise for a team org; --trial: free trial, at most 10 seats
+brindle account upgrade --enterprise      # brindle Enterprise is set up by contact (prints support@pawdelta.com); not a checkout
 brindle account portal     # opens the billing portal (invoices, payment method, cancellation); --org ORG for a team org
 brindle account seats N    # set a Team or Enterprise org's seat count (billing admin); --org ORG; Stripe prorates the change
 brindle account org list   # the orgs you belong to; `org use <id>` switches, `org policy` shows the current one
