@@ -1405,20 +1405,11 @@ class Codex(Provider):
         # brindle.codex_hook). Otherwise Codex prompts as usual.
         from brindle import codex_hook
 
-        hook_flags = codex_hook.launch_flags(ctx.cwd)
-        argv += hook_flags
+        argv += codex_hook.launch_flags(ctx.cwd)
         if ctx.mode in ("handoff", "handoff_detached", "assign", "review"):
             # Supported by Codex 0.162.1. Workers cannot act on an update
             # notice; omit this extra startup UI from automated launches.
             argv += ["-c", "check_for_update_on_startup=false"]
-        if ctx.mode == "review" and hook_flags:
-            # The reviewer's read-only `gh issue view` / `gh pr view` need the
-            # network, which Codex's sandbox blocks. Only open it while brindle's
-            # hook is active, and make Codex ask (so the hook decides) for every
-            # command outside its own read-only safe list, so a `gh` write can't
-            # run unasked in the now-networked sandbox.
-            argv += ["-c", "sandbox_workspace_write.network_access=true",
-                     "-c", 'approval_policy="untrusted"']
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:

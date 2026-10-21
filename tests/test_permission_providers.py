@@ -157,22 +157,6 @@ def test_codex_reviewer_reads_github_but_cannot_write(db, ws, command, expected)
     assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == expected
 
 
-def test_codex_reviewer_launch_allows_sandbox_network_only_with_the_hook(ws, monkeypatch):
-    from brindle.agents import load_profile
-    from brindle.providers import Codex, LaunchContext
-
-    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
-    flags = ["sandbox_workspace_write.network_access=true", 'approval_policy="untrusted"']
-
-    def argv(profile, mode):
-        return Codex().command(LaunchContext("c1", load_profile(profile), None, cwd=ws.path, mode=mode))
-
-    assert not set(flags) & set(argv("reviewer-codex", "review"))  # policy off: no hook gating the commands
-    turn_on(ws)
-    assert set(flags) <= set(argv("reviewer-codex", "review"))  # network, and Codex asks the hook for the rest
-    assert not set(flags) & set(argv("developer", "assign"))
-
-
 @pytest.mark.parametrize("command,expected", [("git push", "deny")])
 def test_codex_session_bookkeeping_failure_preserves_decision(db, ws, monkeypatch, command, expected):
     a = worker(db, ws)
