@@ -43,6 +43,10 @@ TERMINAL = "it is at the CLI's own prompt now: answer it in the agent's terminal
 WORDING_LINES = 12       # of a prompt, shown to the person
 STEP_SECONDS = 0.2       # between looks at the hook
 CONFIRM_SECONDS = 5.0    # for the hook to take the answer
+# A failed agent that no sign-in fixes (Agent.failed_why); any other (an auth
+# failure, or a row from before the cause was kept) is its credentials.
+NOT_CREDENTIALS = {"model": "failed: its model isn't available on this route",
+                   "delivery": "failed: its brief wasn't delivered; check its pane and restart it"}
 
 
 def awaiting_review(agent: dict, ws: dict) -> str | None:
@@ -64,7 +68,7 @@ def needs_you(agent: dict, ws: dict) -> str | None:
     if agent["status"] == "waiting":
         return "needs you"
     if agent["status"] == "failed":
-        return "credentials need attention"
+        return NOT_CREDENTIALS.get(agent.get("failed_why"), "credentials need attention")
     if ws.get("asking") == agent["id"]:
         return "has a question"
     return None if ws.get("autopilot") else awaiting_review(agent, ws)
@@ -88,7 +92,7 @@ def _kind(agent: dict, ws: dict, reason: str) -> str:
     if agent["status"] == "waiting":
         return "waiting"
     if agent["status"] == "failed":
-        return "credentials"
+        return "failed" if agent.get("failed_why") in NOT_CREDENTIALS else "credentials"
     if ws.get("asking") == agent["id"]:
         return "question"
     return "merge_failed" if reason.startswith("merge failed") else "review"

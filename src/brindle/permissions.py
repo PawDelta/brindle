@@ -1108,8 +1108,9 @@ class Store:
     # repo root -> its `checks`, for each repo whose agy workers run with the
     # policy on: what the mirror covers.
     agy_repos: dict[str, list] = field(default_factory=dict)
-    # The Codex hook the person trusted (brindle.codex_hook): command, key, hash.
-    codex_hook: dict[str, str] = field(default_factory=dict)
+    # The Codex hook the person trusted (brindle.codex_hook), per Codex config
+    # home (its resolved path): command, key, hash, definition.
+    codex_hook: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_json(self) -> str:
         data: dict = {"version": 1, "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
@@ -1147,8 +1148,14 @@ def load_store() -> Store:
     managed = {k: strings(v) for k, v in managed.items() if k in ("allow", "deny")} if isinstance(managed, dict) else {}
     repos = data.get("agy_repos")
     repos = {k: strings(v) for k, v in repos.items()} if isinstance(repos, dict) else {}
-    codex = data.get("codex_hook")
-    codex = {k: v for k, v in codex.items() if isinstance(v, str)} if isinstance(codex, dict) else {}
+    codex = data.get("codex_hook") if isinstance(data.get("codex_hook"), dict) else {}
+    if isinstance(codex.get("command"), str):
+        # One record from before trust was kept per home: it was the person's own Codex home's.
+        from brindle import provider_homes
+
+        codex = {os.path.realpath(provider_homes.source("codex")): codex}
+    codex = {home: {k: v for k, v in rec.items() if isinstance(v, str)}
+             for home, rec in codex.items() if isinstance(rec, dict)}
     return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex)
 
 

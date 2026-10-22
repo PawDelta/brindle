@@ -136,7 +136,7 @@ def test_stop_failure_payloads_with_enums_and_last_assistant_message(db, repo):
     # 1. oauth_org_not_allowed error
     agents.handle_hook(db, worker.id, "stop-failure", {"error": "oauth_org_not_allowed", "error_details": "Organization not authorized"})
     w = db.get_agent(worker.id)
-    assert w.status == "failed"
+    assert w.status == "failed" and w.failed_why == "auth"
     ap = db.get_autopilot(sup.id)
     assert ap.state == "blocked"
     assert "Organization not authorized" in (ap.note or "")

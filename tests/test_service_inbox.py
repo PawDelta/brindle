@@ -60,6 +60,8 @@ def _notice(db, root, worker, mp):
 @pytest.mark.parametrize("kind, setup, expected", [
     ("waiting", _worker(status="waiting"), [("w1", None)]),
     ("credentials", _worker(status="failed"), [("w1", None)]),
+    # Live: a Codex worker whose brief wasn't delivered read "Codex needs a sign-in", signed in or not.
+    ("failed", _worker(provider="codex", status="failed", failed_why="delivery"), [("w1", None)]),
     ("question", _two_asking, [("r1", None), ("r2", None)]),
     ("review", _worker(result="done"), [("w1", None)]),
     ("merge_failed", _worker(result="done", merge_failed="conflict in app.py"), [("w1", None)]),
@@ -85,6 +87,7 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
     # Each agent's item links into its session; a sign-in carries the login the app can start.
     assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")
+    assert all(i.action is None and "credentials" not in i.reason for i in got if kind == "failed")
     assert all((i.fix, i.action.path) == ("codex_hook_trust", "/v1/setup/codex-hook") for i in got if kind == "setup")
 
 
