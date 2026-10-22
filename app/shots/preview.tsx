@@ -195,7 +195,7 @@ void sync.idle().then(() =>
     if (OPENS[scene]) press(OPENS[scene]);
     // What the press opened is on screen by now; what THEN asks the daemon for (a search) too, after its debounce.
     setTimeout(() => {
-      THEN[scene]?.();
+      if (Object.hasOwn(THEN, scene)) THEN[scene]();
       setTimeout(() => {
         document.documentElement.dataset.ready = "1";
       }, 600);

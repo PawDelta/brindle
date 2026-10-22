@@ -25,7 +25,7 @@ function inlineIntoIndex(): Plugin {
         if (file.endsWith(".js")) {
           // A classic script runs where it stands: at the foot, once #root exists.
           html = html.replace(/<script[^>]*src="\.\/assets\/[^"]+"[^>]*><\/script>\n?/, "");
-          html = html.replace(/<\/body>/, () => `<script>${text.replace(/<\/script/g, "<\\/script")}</script>\n</body>`);
+          html = html.replace(/<\/body>/, () => `<script>${text.replace(/<\/(script)/gi, "<\\/$1")}</script>\n</body>`);
         } else if (file.endsWith(".css")) {
           html = html.replace(/<link rel="stylesheet"[^>]*href="\.\/assets\/[^"]+"[^>]*>/, () => `<style>${text}</style>`);
         }

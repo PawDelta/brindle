@@ -65,7 +65,7 @@ test.afterAll(() => {
 
 /* The panel's shell, row by row (the DOM renderer's, which draws some spaces as no-break ones). */
 const shellRows = async (page: Page) =>
-  (await page.locator('[data-testid="terminal-panel"] [data-testid="terminal"] .xterm-rows > div').allTextContents()).map((r) => r.replace(/ /g, " "));
+  (await page.locator('[data-testid="terminal-panel"] [data-testid="terminal"] .xterm-rows > div').allTextContents()).map((r) => r.replace(/\u00a0/g, " "));
 
 test("terminal panel: the status line's toggle docks a live shell under the session", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
