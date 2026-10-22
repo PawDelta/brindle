@@ -16,6 +16,8 @@ Sidebar call site (watch.py, where it logs a caught draw error or a restart):
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -109,8 +111,7 @@ def record(source: str, level: str, message: str, detail=None) -> bool:
             entry["detail"] = {"truncated": True, "bytes": len(line)}
             line = _encode(entry)
         path = log_path()
-        with _lock:
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with _locked():
             if path.exists() and path.stat().st_size + len(line) > MAX_BYTES:
                 os.replace(path, rotated_path())
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -122,6 +123,20 @@ def record(source: str, level: str, message: str, detail=None) -> bool:
     except Exception:  # noqa: BLE001 - debug logging must never break what it logs
         log.debug("brindle: couldn't write a debug log entry", exc_info=True)
         return False
+
+
+@contextlib.contextmanager
+def _locked():
+    """Held around a rotation or a write, and while the uploader opens the
+    files, in every process (the sidebar writes from its own)."""
+    _dir().mkdir(parents=True, exist_ok=True, mode=0o700)
+    with _lock:
+        fd = os.open(_dir() / ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)     # closing releases the lock
 
 
 def _encode(entry: dict) -> bytes:
@@ -229,13 +244,21 @@ def _cursor_path() -> Path:
     return _dir() / "uploaded.json"
 
 
-def _file_id(path: Path) -> list[int] | None:
-    """The file's (device, inode): rotation renames debug.log, so it keeps them."""
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    return [st.st_dev, st.st_ino]
+def _open_logs() -> list:
+    """debug.log.1 and debug.log, oldest first, as (open file, [device, inode]),
+    opened together under the lock so no rotation falls between them. Each is
+    identified by its open descriptor, so a rotation after this can't change
+    which file an offset belongs to (rotation renames, so the inode moves with it)."""
+    files = []
+    with _locked():
+        for path in (rotated_path(), log_path()):
+            try:
+                f = path.open("rb")
+            except OSError:
+                continue
+            st = os.fstat(f.fileno())
+            files.append((f, [st.st_dev, st.st_ino]))
+    return files
 
 
 def _pending() -> tuple[list[dict], dict | None]:
@@ -246,19 +269,18 @@ def _pending() -> tuple[list[dict], dict | None]:
         cursor = json.loads(_cursor_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cursor = None
-    files = [(p, _file_id(p)) for p in (rotated_path(), log_path())]
-    files = [(p, fid) for p, fid in files if fid is not None]
-    start = 0
+    opened = _open_logs()
+    files, start = opened, 0
     if isinstance(cursor, dict):
         # Past the file the cursor is in (a file it doesn't name is all new).
-        for i, (_, fid) in enumerate(files):
+        for i, (_, fid) in enumerate(opened):
             if fid == cursor.get("file"):
-                files, start = files[i:], int(cursor.get("offset") or 0)
+                files, start = opened[i:], int(cursor.get("offset") or 0)
                 break
     entries, last = [], None
-    for i, (path, fid) in enumerate(files):
-        offset = start if i == 0 else 0
-        with path.open("rb") as f:
+    try:
+        for i, (f, fid) in enumerate(files):
+            offset = start if i == 0 else 0
             f.seek(offset)
             for raw in f:
                 if not raw.endswith(b"\n") or len(entries) >= MAX_BATCH:
@@ -270,35 +292,51 @@ def _pending() -> tuple[list[dict], dict | None]:
                     continue
                 if isinstance(entry, dict):
                     entries.append(entry)
-        last = {"file": fid, "offset": offset}
-        if len(entries) >= MAX_BATCH:
-            break
+            last = {"file": fid, "offset": offset}
+            if len(entries) >= MAX_BATCH:
+                break
+    finally:
+        for f, _ in opened:
+            f.close()
     return entries, last
 
 
 def upload_once() -> int:
-    """Post what's pending, checking just before that the signed-in account is
-    still staff; the number of entries the server took."""
+    """Post what's pending as an account checked to be staff; the number of
+    entries the server took.
+
+    The staff check and the post use one snapshot of the credentials (one
+    access token, one backend), never the store again: an account switch or a
+    token refresh in between can't send the batch as an account that wasn't
+    checked. ``staff`` first refreshes the token in the store if it's due."""
     from brindle.pro import auth
 
     if not enabled():
         return 0
-    try:
-        client, store = _account()
-    except Exception:  # noqa: BLE001 - no credential store: nothing to upload with
-        return 0
-    who = _identity(client, store)
     is_staff = staff(refresh=True)
     if is_staff is False:
         config.set_user(SETTING, False)
-    if is_staff is not True or _identity(client, store) != who:
-        return 0
-    entries, cursor = _pending()
-    if not entries:
+    if is_staff is not True:
         return 0
     try:
-        status, _ = auth.authed(client, store, "POST", "/debug/logs",
-                                auth.JSONBody({"client": _client_info(), "entries": entries}))
+        client, store = _account()
+        snap = store.load() or {}
+        if snap.get("base_url") and auth.base_url(snap["base_url"]) != client.base:
+            return 0
+        token = snap.get("access_token")
+        if not token:
+            return 0
+        status, me = client.call("GET", "/me", token=token)
+        if status != 200 or me.get("staff") is not True:
+            if status == 200:
+                config.set_user(SETTING, False)
+            return 0
+        entries, cursor = _pending()
+        if not entries:
+            return 0
+        status, _ = client.call("POST", "/debug/logs",
+                                auth.JSONBody({"client": _client_info(), "entries": entries}),
+                                token=token)
     except Exception:  # noqa: BLE001 - offline or air-gapped: try at the next interval
         log.debug("brindle: debug log upload failed", exc_info=True)
         return 0

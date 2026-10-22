@@ -16,7 +16,7 @@ class _Server:
     """A fake backend and credential store; ``me`` and ``creds`` can change mid-test."""
 
     def __init__(self, me: dict):
-        self.me, self.posted = me, []
+        self.me, self.posted, self.tokens = me, [], []
         self.creds = {"refresh_token": "r-a", "access_token": "a", "access_expires_at": time.time() + 3600}
 
     def load(self):
@@ -26,6 +26,7 @@ class _Server:
         if url.endswith("/me"):
             return 200, self.me
         self.posted.append((url, dict(form)))
+        self.tokens.append(headers.get("Authorization"))
         return 202, {}
 
 
@@ -80,6 +81,22 @@ def test_debuglog_account_switch_to_non_staff_stops_uploads(server):
     assert not debuglog.enabled()
 
 
+def test_debuglog_switch_during_an_upload_posts_as_the_checked_account(server, monkeypatch):
+    s = server({"sub": "u1", "staff": True})
+    config.set_user(debuglog.SETTING, True)
+    debuglog.record("app", "info", "private")
+    real = debuglog._pending
+
+    def switch_then_pending():
+        got = real()
+        s.me, s.creds["access_token"] = {"sub": "u2"}, "b"      # non-staff B signs in meanwhile
+        return got
+
+    monkeypatch.setattr(debuglog, "_pending", switch_then_pending)
+    assert debuglog.upload_once() == 1
+    assert s.tokens == ["Bearer a"]       # A, whose staff status was checked, never B
+
+
 def test_debuglog_rotation_keeps_pending_entries(server, monkeypatch):
     s = server({"sub": "u1", "staff": True})
     config.set_user(debuglog.SETTING, True)
@@ -95,6 +112,26 @@ def test_debuglog_rotation_keeps_pending_entries(server, monkeypatch):
     assert debuglog.upload_once() == 2
     assert [e["message"] for e in s.posted[-1][1]["entries"]] == ["b", "c"]
     assert debuglog.upload_once() == 0
+
+
+def test_debuglog_rotation_while_the_uploader_has_the_files_open(server, monkeypatch):
+    s = server({"sub": "u1", "staff": True})
+    config.set_user(debuglog.SETTING, True)
+    debuglog.record("app", "info", "a")
+    monkeypatch.setattr(debuglog, "MAX_BYTES", debuglog.log_path().stat().st_size * 5 // 2)
+    debuglog.record("app", "info", "b")
+    real = debuglog._open_logs
+
+    def open_then_rotate():
+        got = real()
+        monkeypatch.setattr(debuglog, "_open_logs", real)
+        debuglog.record("app", "info", "c")       # rotates [a, b] away
+        return got
+
+    monkeypatch.setattr(debuglog, "_open_logs", open_then_rotate)
+    assert debuglog.upload_once() == 2
+    assert debuglog.upload_once() == 1
+    assert [[e["message"] for e in body["entries"]] for _, body in s.posted] == [["a", "b"], ["c"]]
 
 
 def test_debuglog_oversized_detail_is_replaced_by_a_marker():
