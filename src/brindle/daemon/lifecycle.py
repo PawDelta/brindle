@@ -268,6 +268,9 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle.daemon.events import start_poller
 
     poller = start_poller()
+    from brindle import debuglog
+
+    debuglog.Uploader().start()
     activity = Activity(build_app(token, port=info["port"], poller=poller))
     server = make_server(activity)
     upgrade.on_stale_launch = lambda: setattr(server, "should_exit", True)
