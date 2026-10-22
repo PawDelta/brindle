@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import textwrap
 import time
+import traceback
 from dataclasses import dataclass, field
 
 import brindle
@@ -858,6 +859,9 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
 
         bar = org_status.Bar(tmux.pane_session(os.environ["TMUX_PANE"]))
     while True:
+      # One pass: a failure in it is logged and the next pass carries on. Only
+      # a deliberate quit (or the pane closing) ends the sidebar.
+      try:
         if install.changed():
             return RESTART
         if poller is not None and own_root and time.time() - delivered_at >= 5.0:
@@ -946,33 +950,22 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
             state.follow = False
         offset = state.offset
         content_top = top + (1 if show_above else 0)
-        stdscr.erase()
-        _draw_logo(stdscr, w, styles, braid[1]) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
-        page = lines[offset:offset + visible]
-        for y, (i, ln) in enumerate(enumerate(page, start=offset), start=content_top):
-            attr = styles.get(ln.style, curses.A_NORMAL)
-            if i == selected:
-                # A green bar and a subtle highlight, not inverted colours.
-                stdscr.addnstr(y, 0, "▌", 1, styles["bar"])
-                stdscr.addnstr(y, 1, ln.text.ljust(w - 2), w - 2,
-                               styles["select"] | (attr & curses.A_BOLD))
-                continue
-            stdscr.addnstr(y, 1, ln.text, w - 2, attr)
-        if show_above:
-            text = "↑ more"
-            stdscr.addnstr(top, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
-        if show_below:
-            text = "↓ more"
-            stdscr.addnstr(content_top + visible, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
-        for y, ln in enumerate(bottom, start=h - len(bottom)):
-            stdscr.addnstr(y, 1, ln.text, w - 2, styles.get(ln.style, curses.A_NORMAL))
-        stdscr.refresh()
-        # The image goes over the cells _draw_logo left blank, once: again only
-        # when something may have written over them (a resize, a clear, a peek).
-        image = (h, w, braid[0]) if h >= 18 and _braid_fits(w, braid[1]) else None
-        if image is not None and image != shown:
-            sidebar_logo.show(1, braid[0])
-        shown = image
+        if stdscr.getmaxyx() != (h, w):
+            continue  # resized while this frame was laid out: lay it out again
+        try:
+            _paint(stdscr, h, w, styles, braid[1], lines[offset:offset + visible], offset,
+                   selected, top, content_top, visible, show_above, show_below, bottom)
+        except curses.error:
+            # The pane changed size under the frame (curses refuses a cell past
+            # its edge): skip it, the next tick repaints at the new size.
+            shown = None
+        else:
+            # The image goes over the cells _draw_logo left blank, once: again only
+            # when something may have written over them (a resize, a clear, a peek).
+            image = (h, w, braid[0]) if h >= 18 and _braid_fits(w, braid[1]) else None
+            if image is not None and image != shown:
+                sidebar_logo.show(1, braid[0])
+            shown = image
 
         key = stdscr.getch()
         if key == curses.KEY_RESIZE:
@@ -1040,6 +1033,46 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 except agents.AgentError as e:
                     notice = str(e)
                 stale = True
+      except Exception:  # noqa: BLE001 - one bad pass never ends the sidebar
+        _log_error("sidebar pass failed")
+        stale, shown = True, None
+        # Wait out the refresh (a pass that fails every time mustn't spin), still
+        # honouring a quit typed meanwhile.
+        if stdscr.getch() in quit_keys(sidebar):
+            if not own_root:
+                return
+            now = time.time()
+            go, armed, notice = quit_request(armed, now)
+            notice_until = now + CLOSE_CONFIRM_SECONDS
+            if go:
+                agents.quit_later(own_root)
+                return
+
+
+def _paint(stdscr, h: int, w: int, styles: dict[str, int], braid: int, page: list, offset: int,
+           selected: int | None, top: int, content_top: int, visible: int,
+           show_above: bool, show_below: bool, bottom: list) -> None:
+    """One frame of the dashboard, laid out by _loop for an ``h`` x ``w`` pane."""
+    stdscr.erase()
+    _draw_logo(stdscr, w, styles, braid) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
+    for y, (i, ln) in enumerate(enumerate(page, start=offset), start=content_top):
+        attr = styles.get(ln.style, curses.A_NORMAL)
+        if i == selected:
+            # A green bar and a subtle highlight, not inverted colours.
+            stdscr.addnstr(y, 0, "▌", 1, styles["bar"])
+            stdscr.addnstr(y, 1, ln.text.ljust(w - 2), w - 2,
+                           styles["select"] | (attr & curses.A_BOLD))
+            continue
+        stdscr.addnstr(y, 1, ln.text, w - 2, attr)
+    if show_above:
+        text = "↑ more"
+        stdscr.addnstr(top, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
+    if show_below:
+        text = "↓ more"
+        stdscr.addnstr(content_top + visible, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
+    for y, ln in enumerate(bottom, start=h - len(bottom)):
+        stdscr.addnstr(y, 1, ln.text, w - 2, styles.get(ln.style, curses.A_NORMAL))
+    stdscr.refresh()
 
 
 def run(repo_root: str | None, sidebar: bool = False) -> None:
@@ -1050,10 +1083,31 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # shortcut: the text logo everywhere; the braid image (sidebar_logo.probe())
     # broke the sidebar in iTerm2 after a session switch. Bring it back once fixed.
     logo = None
-    if curses.wrapper(_loop, repo_root, sidebar, logo) == RESTART:
+    try:
+        result = curses.wrapper(_loop, repo_root, sidebar, logo)
+    except Exception:
+        # Down despite _loop's guard (curses setup, say): the pane's respawn
+        # loop (sidebar_follow.RESPAWN_SCRIPT) starts it again on the nonzero exit.
+        if sidebar:
+            _log_error("sidebar crashed")
+        raise
+    if result == RESTART:
         # Run again from the upgraded install, in this same pane (curses.wrapper
         # has put the terminal back); returning would count as quitting the sidebar.
         upgrade.reexec()
+
+
+def _log_error(what: str) -> None:
+    """Append ``what`` and the exception being handled, with its traceback, to
+    ``sidebar.log``: the curses screen has nowhere to show it."""
+    from brindle.config import brindle_home
+
+    try:
+        brindle_home().mkdir(parents=True, exist_ok=True)
+        with open(brindle_home() / "sidebar.log", "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {what}\n{traceback.format_exc()}\n")
+    except OSError:
+        pass
 
 
 def _log_to_file() -> None:

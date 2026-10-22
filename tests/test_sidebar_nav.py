@@ -281,3 +281,80 @@ def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(db, monkeypatch)
     # The wheel-down scrolls the top section (Costs) off the pane.
     assert "▾ Costs" in screen.frames[0]
     assert "▾ Costs" not in screen.frames[1]
+
+
+def _quiet_loop(monkeypatch, snapshot):
+    """watch._loop with no tmux, poller or costs behind it."""
+    monkeypatch.setattr(curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(curses, "mousemask", lambda mask: (mask, 0))
+    monkeypatch.setattr(watch, "_styles", lambda *a: collections.defaultdict(int))
+    monkeypatch.setattr(watch, "_start_status", lambda: None)
+    monkeypatch.setattr(watch, "_cull_in_background", lambda: None)
+    monkeypatch.setattr(watch.tmux, "list_panes", lambda: [])
+    monkeypatch.setattr(watch.view, "snapshot", snapshot)
+    monkeypatch.setattr(watch.view, "autopilot_entry", lambda *a, **k: None)
+    monkeypatch.setattr(watch.watch_costs, "local", lambda *a, **k: watch.watch_costs.Local())
+    monkeypatch.setattr(watch.watch_costs, "Feed", lambda root: types.SimpleNamespace(get=lambda: None))
+    monkeypatch.setattr(watch.sidebar_logo, "viewer", lambda: "")
+
+
+def test_sidebar_survives_a_resize_that_leaves_a_frame_off_screen(db, monkeypatch):
+    # The desktop app resizes the shared window: a frame drawn past the pane's
+    # edge got addnwstr() ERR from curses, which ended the sidebar.
+    _quiet_loop(monkeypatch, lambda *a, **k: [ws([agent("a1")])])
+
+    class Screen:
+        """Raises like curses past its size; each key resizes it to the next size."""
+        def __init__(self):
+            self.sizes, self.keys = [(24, 30), (24, 1), (24, 30)], [curses.KEY_RESIZE] * 2 + [ord("q")]
+            self.frames = [[]]
+        def getmaxyx(self):
+            return self.sizes[0]
+        def getch(self):
+            if self.keys[0] == curses.KEY_RESIZE:
+                self.sizes.pop(0)
+            self.frames.append([])
+            return self.keys.pop(0)
+        def addnstr(self, y, x, text, *rest):
+            h, w = self.sizes[0]
+            if not (0 <= y < h and 0 <= x < w):
+                raise curses.error("addnwstr() returned ERR")
+            self.frames[-1].append(text)
+        def timeout(self, ms): pass
+        def erase(self): pass
+        def refresh(self): pass
+        def clear(self): pass
+
+    screen = Screen()
+    watch._loop(screen, None)
+    # The narrow frame is skipped, and the next tick repaints at the new size.
+    assert "brindle" in screen.frames[2]
+
+
+def test_sidebar_survives_an_unexpected_error_and_logs_it(db, brindle_home, monkeypatch):
+    snapshots = iter([KeyError("boom"), [ws([agent("a1")])]])
+
+    def snapshot(*a, **k):
+        if isinstance(got := next(snapshots), Exception):
+            raise got
+        return got
+    _quiet_loop(monkeypatch, snapshot)
+
+    class Screen:
+        def __init__(self):
+            self.keys, self.text = [-1, ord("q")], []
+        def getmaxyx(self):
+            return 24, 30
+        def getch(self):
+            return self.keys.pop(0)
+        def addnstr(self, y, x, text, *rest):
+            self.text.append(text)
+        def timeout(self, ms): pass
+        def erase(self): pass
+        def refresh(self): pass
+        def clear(self): pass
+
+    screen = Screen()
+    watch._loop(screen, None)
+    assert any("feat" in t for t in screen.text)  # the next pass drew the dashboard
+    assert "KeyError: 'boom'" in (brindle_home / "sidebar.log").read_text()

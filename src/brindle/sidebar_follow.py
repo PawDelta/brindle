@@ -20,6 +20,29 @@ SIDEBAR_TAG = tmux.SIDEBAR_TAG
 # sidebar_follow then leaves it gone instead of recreating it.
 SIDEBAR_DISMISSED = "dismissed"
 
+# Runs the sidebar ("$@") again in its pane whenever it exits nonzero: a crash,
+# or an upgrade re-exec into an engine that wasn't fully installed yet (then
+# the installed `brindle` on PATH). Waits 0, 1, 2, 4... up to 30s between
+# tries, from 0 again after a run that lasted 30s. A zero exit is a deliberate
+# quit, and closing the pane ends the loop with it.
+RESPAWN_SCRIPT = """d=0
+while :; do
+  t=$(date +%s)
+  if [ -x "$1" ]; then "$@"; else brindle watch --sidebar; fi
+  s=$?
+  [ "$s" -eq 0 ] && exit 0
+  [ $(($(date +%s) - t)) -ge 30 ] && d=0
+  printf '%s sidebar exited with status %s; restarting in %ss\\n' \\
+    "$(date '+%Y-%m-%d %H:%M:%S')" "$s" "$d" >> "${BRINDLE_HOME:-$HOME/.brindle}/sidebar.log"
+  sleep "$d"
+  d=$((d ? d * 2 : 1)); [ "$d" -gt 30 ] && d=30
+done"""
+
+
+def respawning(command: list[str]) -> list[str]:
+    """``command`` (the sidebar's argv) wrapped in RESPAWN_SCRIPT."""
+    return ["/bin/sh", "-c", RESPAWN_SCRIPT, "brindle-sidebar", *command]
+
 
 def root_of(db: DB, agent_id: str) -> str:
     seen: set[str] = set()
@@ -106,7 +129,8 @@ def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> st
     from brindle.providers import brindle_invocation
     from brindle.workspaces import workspace_env
 
-    pane = tmux.split_left(target_pane, ws.path, [*brindle_invocation(), "watch", "--sidebar"],
+    pane = tmux.split_left(target_pane, ws.path,
+                           respawning([*brindle_invocation(), "watch", "--sidebar"]),
                            workspace_env(ws), columns=SIDEBAR_COLUMNS,
                            position=_sidebar_position(ws))
     tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)

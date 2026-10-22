@@ -163,3 +163,18 @@ def test_sidebar_survives_only_while_the_brindle_session_is_attached(db, monkeyp
     sidebar_follow.sidebar_follow(db, "worker_s")
 
     assert moved == [("%sidebar", "%worker")]
+
+
+def test_sidebar_restarts_in_its_pane_after_a_nonzero_exit(tmp_path):
+    # A crash, or a re-exec into a half-installed engine whose Python exits:
+    # the pane's command runs the sidebar again, until it quits with 0.
+    runs = tmp_path / "runs"
+    sidebar = tmp_path / "sidebar"
+    sidebar.write_text(f'#!/bin/sh\necho "$@" >> {runs}\n[ $(wc -l < {runs}) -ge 2 ]\n')
+    sidebar.chmod(0o755)
+    env = {**os.environ, "BRINDLE_HOME": str(tmp_path)}
+
+    subprocess.run(sidebar_follow.respawning([str(sidebar), "watch", "--sidebar"]), env=env, check=True)
+
+    assert runs.read_text().splitlines() == ["watch --sidebar"] * 2
+    assert "sidebar exited with status 1" in (tmp_path / "sidebar.log").read_text()
