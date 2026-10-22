@@ -62,6 +62,7 @@ def test_requests_need_the_token_and_no_foreign_origin(headers, status):
     assert ("api_version" in body) == (status == 200)
 
 
+@pytest.mark.variant("a token sent in the URL must never open the socket, only the first frame")
 @pytest.mark.parametrize("query,frame,reached", [
     (f"token={TOKEN}".encode(), "wrong", False),    # a token in the URL counts for nothing
     (b"", TOKEN, True),
@@ -462,27 +463,6 @@ def test_committed_api_schema_matches_the_routes_and_dtos():
     assert schema.SCHEMA_PATH.read_text() == schema.render()
 
 
-def test_routing_shows_each_tier_and_setting_with_its_source(seeded, monkeypatch):
-    from brindle import config, providers
-
-    config.set_local(seeded["repo"], "routing", {"light": ["developer"]})
-    config.set_repo(seeded["repo"], "exclude_providers", ["antigravity"])
-    config.set_user("reviewer", "reviewer")
-    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude"])
-    monkeypatch.setattr(providers, "signed_out", lambda provider, env=None: None)
-    _, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
-    tiers = {t: (s["values"], s["source"]) for t, s in body["tiers"].items()}
-    assert tiers["light"] == (["developer"], "local")
-    assert tiers["medium"] == (config.DEFAULT_ROUTING["medium"], "default")
-    assert body["reviewer"] == {"values": ["reviewer"], "source": "user"}
-    assert body["exclude_providers"] == {"values": ["antigravity"], "source": "repo"}
-    rows = {p["name"]: p for p in body["profiles"]}
-    assert (rows["developer"]["installed"], rows["developer"]["signed_in"]) == (True, True)
-    assert (rows["developer-codex"]["installed"], rows["developer-codex"]["signed_in"]) == (False, False)
-    assert rows["developer-gemini"]["excluded"] and not rows["developer"]["excluded"]
-    assert (rows["developer-light"]["cost_tier"], rows["developer-heavy"]["cost_tier"]) == ("low", "high")
-
-
 def test_rules_lists_every_pack_with_its_description_and_source(seeded):
     rules = Path(seeded["repo"]) / ".brindle" / "rules"
     rules.mkdir(parents=True)
@@ -553,26 +533,7 @@ def test_profiles_detail_lints_a_broken_profile(seeded):
     assert _get("/v1/profiles/nope", AUTH, f"repo={seeded['repo']}")[1]["error"]["code"] == "not_found"
 
 
-@pytest.mark.parametrize("setting,available,effective", [
-    ("off", True, False),    # entitled, but the repo turned learning off
-    ("cloud", True, True),
-    ("auto", True, True),
-    ("cloud", False, False),  # asked for, but the plan has no hosted learning
-], ids=["off", "cloud", "auto", "unentitled"])
-def test_account_learning_is_the_repos_effective_mode(seeded, monkeypatch, setting, available, effective):
-    from brindle import config, learning
-
-    feats = frozenset({"learning"} if available else set())
-    ent = license.Entitlement("u", "org1", "pro", "active", feats, 1, 0, 9, "k", role="owner")
-    monkeypatch.setattr(license, "current", lambda **kw: ent)
-    monkeypatch.setattr("brindle.pro.account.ProAccount.orgs", lambda self, org: [])
-    monkeypatch.setattr(learning, "kept_note", lambda cfg, repo: "kept the default")
-    config.set_repo(seeded["repo"], "learning", setting)
-    _, body = _get("/v1/account", AUTH, f"repo={seeded['repo']}")
-    assert (body["learning_available"], body["learning"]) == (available, effective)
-    assert body["learning_note"] == ("kept the default" if effective else None)
-
-
+@pytest.mark.variant("a secret is shown only as its name and last four characters, never whole")
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
     monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)

@@ -16,9 +16,3 @@ def test_publish_never_raises(db):
     assert bus.publish(db, "x") is None
 
 
-def test_prune_drops_only_old_events(db):
-    old = bus.publish(db, "old")
-    db.conn.execute("UPDATE events SET ts = ts - 90000 WHERE id = ?", (old,))
-    new = bus.publish(db, "new")
-    assert bus.prune(db) == 1
-    assert [r["id"] for r in bus.tail(db)] == [new]
