@@ -44,7 +44,9 @@ def timeout() -> float:
 
 
 def _hung(base: list[str], args: tuple[str, ...]) -> TmuxTimeout:
-    server = f"the tmux server -L {base[2]}" if len(base) > 2 else "the default tmux server"
+    # the server name follows -L (the flags -u and -L may come in either order)
+    server = (f"the tmux server -L {base[base.index('-L') + 1]}" if "-L" in base
+              else "the default tmux server")
     return TmuxTimeout(
         f"tmux {args[0] if args else ''} got no answer within {timeout():g}s: {server} is not "
         "responding, so every tmux command on it hangs. If it stays stuck, `tmux kill-server` "
@@ -67,8 +69,10 @@ def _bin() -> str:
 
 
 def _argv(server: str | None) -> list[str]:
-    bin_ = _bin()
-    return [bin_, "-L", server] if server else [bin_]
+    # -u: UTF-8 output even when the caller's locale is unset (the desktop
+    # app's bundled engine starts from launchd with no LANG/LC_*, and tmux
+    # would otherwise print every non-ASCII byte as "_").
+    return [_bin(), "-u", "-L", server] if server else [_bin(), "-u"]
 
 
 def _base() -> list[str]:
