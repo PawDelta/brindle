@@ -81,6 +81,15 @@ def _stable_invocation() -> list[str]:
 
     argv = brindle_invocation()
     exe = argv[0]
+    # Codex keeps one trusted hash for the hook's slot, so the processes brindle
+    # runs as (the installed ``brindle`` shim on PATH, the app's ``python -m
+    # brindle``) must name the same install the same way, or each one's trust
+    # replaces the other's and the next launch of either stops at "Hooks need review".
+    script = os.path.join(os.path.dirname(exe), "brindle")
+    if len(argv) == 1:
+        return [os.path.realpath(exe)]
+    if argv[1:] == ["-P", "-m", "brindle"] and os.access(script, os.X_OK):
+        return [os.path.realpath(script)]
     plain = os.path.join(os.path.dirname(exe), "python")
     try:
         if plain != exe and os.path.realpath(plain) == os.path.realpath(exe):
@@ -150,18 +159,40 @@ def ensure(binary: str | None = None, command: str | None = None) -> str:
     the permission policy without a setup step. A trust the person removed
     from Codex's config stays removed (``brindle permissions install-codex-hook
     --yes`` gives it back). Never raises."""
-    command = command or hook_command()
-    now = status(command)
-    if now not in (NEW, MOVED):
-        return now
     from brindle.providers import codex_binary
 
-    binary = binary or codex_binary()
-    try:
-        trust(binary, inspect(binary, command))
-    except Exception:  # noqa: BLE001 - Codex missing, too old, or not answering
+    command = command or hook_command()
+    now = status(command)
+    if now not in (NEW, MOVED, TRUSTED):
         return now
+    binary = binary or codex_binary()
+    was_trusted = now == TRUSTED
+    try:
+        state = inspect(binary, command)
+        if was_trusted and state.status == "trusted":
+            return TRUSTED
+        # brindle's record is only what it last saw. The Codex that runs now
+        # (an upgrade, or a wrapper's own executable) may hash or key the
+        # hook differently, which is "Hooks need review" at its startup: ask it.
+        trust(binary, state)
+    except Exception:  # noqa: BLE001 - Codex missing, too old, or not answering
+        if not was_trusted:
+            return now
+        # Can't verify a trust brindle has on record: don't pass the hook on it,
+        # and don't keep calling it trusted (the warning, the supervisor's
+        # notice and the inbox read the record); the next launch asks again.
+        _forget_definition()
+        return MOVED
     return TRUSTED
+
+
+def _forget_definition() -> None:
+    from brindle import permissions
+
+    with permissions.editing() as store:
+        rec = store.codex_hook.get(_home_key(codex_home()))
+        if rec:
+            rec.pop("definition", None)
 
 
 def policy_on(cwd: str | None) -> bool:
@@ -357,6 +388,11 @@ def trust(binary: str, state: HookState) -> HookState:
             "value": {state.key: {"trusted_hash": state.hash}}}]})
     finally:
         server.close()
+    # Written but not yet verified: on record without its definition, which
+    # status() reads as MOVED (verify again, and tell), never as a removal.
+    home = _home_key(codex_home())
+    with permissions.editing() as store:
+        store.codex_hook[home] = {"command": state.command, "key": state.key, "hash": state.hash}
     after = inspect(binary, state.command)
     if after.status != "trusted":
         raise CodexHookError(f"Codex still reports the hook as {after.status}")

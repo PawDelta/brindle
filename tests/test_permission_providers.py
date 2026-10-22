@@ -456,6 +456,103 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     assert FakeAppServer.calls == [] and codex_hook.status() == codex_hook.REMOVED
 
 
+def test_reviewer_launch_retrusts_the_hook_after_codex_itself_changed(ws, monkeypatch):
+    """A Codex upgrade (or a wrapper's own executable changing) hashes the very
+    same hook differently: brindle's record still matches its config.toml, but
+    Codex shows 'Hooks need review'. Asked of the running Codex before launch."""
+    class UpgradedCodex(FakeAppServer):
+        def __init__(self, binary, flags):
+            super().__init__(binary, [flags[0], flags[1] + "#build2"])
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    flag = codex_hook.config_flags()[1]
+    assert flag in launch_argv(ws, mode="review")
+    monkeypatch.setattr(codex_hook, "_AppServer", UpgradedCodex)
+    assert codex_hook.status() == codex_hook.TRUSTED  # brindle's record can't tell
+    assert codex_hook.inspect("codex").status == "untrusted"  # what Codex would stop at
+    set_local(ws.repo_root, "permission_policy", "off")
+    assert flag in launch_argv(ws, mode="review")
+    assert codex_hook.inspect("codex").status == "trusted"
+
+
+def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):
+    """Codex says the hook is untrusted and refuses the re-trust: the reviewer
+    starts without the hook, so the record must stop saying TRUSTED (the
+    warning and the supervisor's notice read it)."""
+    class RefusingCodex(FakeAppServer):
+        def __init__(self, binary, flags):
+            super().__init__(binary, [flags[0], flags[1] + "#build2"])
+
+        def call(self, method, params):
+            if method == "config/batchWrite":
+                raise codex_hook.CodexHookError("read-only config")
+            return super().call(method, params)
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    monkeypatch.setattr(codex_hook, "_AppServer", RefusingCodex)
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+    reviewer = worker(db, ws, id_="r1")
+    assert codex_hook.launch_flags(ws.path, review=True) == []
+    assert codex_hook.status() == codex_hook.MOVED
+    assert codex_hook.launch_warning("codex", ws.path)
+    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+
+
+def test_trust_written_but_not_verified_is_pending_not_removed(db, ws, monkeypatch):
+    """The write to Codex's config lands, then asking Codex fails: the config
+    holds a hash the record doesn't, which read as the person removing the trust
+    (never retried, supervisor not told). It's pending now, and the next launch recovers."""
+    class SilentAfterWrite(FakeAppServer):
+        wrote = False
+
+        def call(self, method, params):
+            if SilentAfterWrite.wrote and method == "hooks/list":
+                raise codex_hook.CodexHookError("codex app-server didn't answer")
+            out = super().call(method, params)
+            SilentAfterWrite.wrote |= method == "config/batchWrite"
+            return out
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    move_brindle(monkeypatch)  # a new hook: re-trusting writes a new hash
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+    reviewer = worker(db, ws, id_="r1")
+    monkeypatch.setattr(codex_hook, "_AppServer", SilentAfterWrite)
+    assert codex_hook.launch_flags(ws.path) == []
+    assert codex_hook.status() == codex_hook.MOVED
+    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)  # Codex answers again
+    assert codex_hook.config_flags(codex_hook.hook_command())[1] in codex_hook.launch_flags(ws.path)
+    assert codex_hook.status() == codex_hook.TRUSTED
+    (codex_hook.codex_home() / "config.toml").write_text("")  # a real removal is still one
+    assert codex_hook.status() == codex_hook.REMOVED
+
+
+def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
+    """Live: the app ran `<tool venv>/bin/python -P -m brindle`, a shell the
+    `brindle` shim; Codex has one trusted hash for the hook, so each process's
+    trust replaced the other's and the next launch stopped at 'Hooks need review'."""
+    venv = tmp_path / "tool" / "bin"
+    venv.mkdir(parents=True)
+    script = venv / "brindle"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    shim = tmp_path / "local-bin"
+    shim.mkdir()
+    (shim / "brindle").symlink_to(script)
+    py = venv / "python"
+    py.write_text("")
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(py), "-P", "-m", "brindle"])
+    from_app = codex_hook.hook_command()
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(shim / "brindle")])
+    assert codex_hook.hook_command() == from_app
+    assert str(script.resolve()) in from_app
+
+
 def test_codex_hook_trust_is_per_codex_home(ws, monkeypatch, tmp_path):
     """Live: brindle's own Codex home (provider_homes) came into use while the
     one trust on record (an older brindle's, a single record) was ~/.codex's.
