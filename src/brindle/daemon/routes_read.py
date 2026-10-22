@@ -313,6 +313,14 @@ def get_user_settings(db: DB, request: Request) -> Any:
 
 
 @_json
+def get_debug(db: DB, request: Request) -> Any:
+    """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on)."""
+    from brindle import debuglog
+
+    return debuglog.checked()
+
+
+@_json
 def get_routing(db: DB, request: Request) -> Any:
     """Each tier's profiles (and the model and agent each runs), the reviewer
     and the excluded providers, with the scope each comes from, every profile
@@ -550,6 +558,7 @@ ROUTES = [
     Route("/v1/config", get_config),
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/routing", get_routing),
+    Route("/v1/debug", get_debug),
     Route("/v1/doctor", get_doctor),
     # Before the action routes' DELETE /v1/providers/{provider}.
     Route("/v1/providers/installed", providers_installed),

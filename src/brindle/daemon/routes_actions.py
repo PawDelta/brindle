@@ -1047,6 +1047,28 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
     return {"claude_permission_mode": config.claude_permission_mode()}
 
 
+def put_debug(db: DB, params: dict, body: Body) -> Any:
+    """``enabled``: turn debug logs on (403 unless the account is brindle staff) or off."""
+    from brindle import debuglog
+
+    on = _get(body, "enabled", bool, required=True)
+    try:
+        return debuglog.set_enabled(on)
+    except PermissionError as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+
+
+def post_debug_log(db: DB, params: dict, body: Body) -> Any:
+    """One of the app's own events into the debug log (written only while it is on);
+    ``app_version`` (optional) is the app's version for the uploads."""
+    from brindle import debuglog
+
+    debuglog.note_app_version(_get(body, "app_version"))
+    recorded = debuglog.record(_get(body, "source", required=True), _get(body, "level", default="info"),
+                               _get(body, "message", required=True), body.get("detail"))
+    return {"recorded": recorded}
+
+
 def put_routing(db: DB, params: dict, body: Body) -> Any:
     """``tiers`` (tier -> profiles to try, in order), ``reviewer`` and
     ``exclude_providers`` into ~/.brindle/config.json (scope "user"), the
@@ -1673,6 +1695,8 @@ ROUTES = [
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),
     Route("/v1/routing", _endpoint(put_routing), methods=["PUT"]),
+    Route("/v1/debug", _endpoint(put_debug), methods=["PUT"]),
+    _post("/debug/log", post_debug_log),
     _post("/profiles", create_profile),
     _post("/permissions", change_permissions),
     _post("/account/login", account_login),
