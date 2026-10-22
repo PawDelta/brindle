@@ -23,9 +23,9 @@ function inlineIntoIndex(): Plugin {
       for (const file of readdirSync(assets)) {
         const text = readFileSync(join(assets, file), "utf8");
         if (file.endsWith(".js")) {
-          // A classic script runs where it stands: at the foot, once #root exists.
-          html = html.replace(/<script[^>]*src="\.\/assets\/[^"]+"[^>]*><\/script>\n?/, "");
-          html = html.replace(/<\/body>/, () => `<script src="data:text/javascript;base64,${Buffer.from(text).toString("base64")}"></script>\n</body>`);
+          // The bundle as a data: URL in place of its tag (base64 can't close the element); defer runs it once #root exists.
+          const inline = `<script defer src="data:text/javascript;base64,${Buffer.from(text).toString("base64")}"></script>`;
+          html = html.replace(/<script[^>]*src="\.\/assets\/[^"]+"[^>]*><\/script>/, () => inline);
         } else if (file.endsWith(".css")) {
           html = html.replace(/<link rel="stylesheet"[^>]*href="\.\/assets\/[^"]+"[^>]*>/, () => `<style>${text}</style>`);
         }
