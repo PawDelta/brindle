@@ -1,0 +1,5 @@
+Q1: queued_tasks=0 (total=27)
+Q2: unverified_milestones=[Milestone 2 (Pilot: 3 questions in both modes, graded): check=`uv run python experiments/codemode/pilot/ground_truth.py && test -f experiments/codemode/pilot/answers.json && test -f experiments/codemode/pilot/GRADES.md`]
+Q3: active_agents=3 (paused=4, active_ids=1bb5847a:idle, a3763fac:processing, 75368c5e:processing)
+
+[output_length=421 chars, elapsed=0.5724s]
