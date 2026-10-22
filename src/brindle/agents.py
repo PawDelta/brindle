@@ -2591,9 +2591,16 @@ def delegate(
     if why:
         raise AgentError(why)
     if isolate and branch:   # naming a branch must not reuse another identity's worktree
+        mine = pilot.root_of(db, caller.id) if caller else None
         for other in db.find_workspaces(caller_ws.repo_root):
             if other.branch == branch:
                 identity_lock.ensure_workspace(db, other)
+                # Nor another session's: several sessions can share a checkout.
+                owner = workspace_worker(db, other)
+                theirs = pilot.root_of(db, owner.id) if owner and owner.parent_id else None
+                if theirs and theirs != mine:
+                    raise AgentError(f"branch {branch!r} belongs to session {theirs}'s worker "
+                                     f"{owner.id}; pick another branch name")
     if isolate:
         caller_ws = workspaces.refresh_branch(db, caller_ws)
         # merge_into applies to the supervisor's workers; a worker's own

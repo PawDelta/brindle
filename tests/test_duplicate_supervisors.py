@@ -1,6 +1,6 @@
-"""Only one supervisor stays live per project: a scratch session's chat is
-paused once its work moves into a repo, and an agent whose pane id a newer
-agent took over doesn't count as live."""
+"""No duplicate supervisors: a scratch session's chat is paused once its
+work moves into a repo, and an agent whose pane id a newer agent took over
+doesn't count as live."""
 
 import time
 
@@ -47,14 +47,13 @@ def test_mcp_transfer_keeps_the_caller_until_the_repo_session_starts(db, repo, m
     assert live == []                                    # the reply can still be delivered
     # Then a supervisor starting in the repo pauses it.
     ws = workspaces.adopt_root(db, str(repo))
-    cli._pause_running(db, ws)
+    cli._pause_transferred(db, ws)
     assert live == ["scratchsup"]
 
 
-def test_starting_in_the_repo_pauses_the_scratch_chat_of_a_cli_transfer(db, repo, moved, live):
+def test_concurrent_sessions_starting_in_repo_pauses_only_the_scratch_chat(db, repo, moved, live):
     scratch.transfer(db, moved, str(repo), keep_running="scratchsup")   # as the MCP tool does
     ws = workspaces.adopt_root(db, str(repo))
-    repo_sup = _sup(db, "reposup", ws, "%2")
-    cli._pause_running(db, ws)
-    assert sorted(live) == ["reposup", "scratchsup"]     # the old one is gone before the new one spawns
-    assert repo_sup.id in live
+    _sup(db, "reposup", ws, "%2")
+    cli._pause_transferred(db, ws)
+    assert live == ["scratchsup"]                        # the repo's own session keeps running

@@ -96,7 +96,7 @@ def started(repo, monkeypatch):
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     for name in ("_attach", "_cull_detached", "_local_models_detached", "_settings_sync_detached",
-                 "_pause_running", "_preflight", "_trust_codex_hook"):
+                 "_pause_transferred", "_preflight", "_trust_codex_hook"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
     monkeypatch.chdir(repo)
     return calls
@@ -130,6 +130,20 @@ def test_start_on_main_fast_forwards_to_origin_and_never_drops_local_work(
               branch=None, worktree=None)
     assert git.out(["rev-parse", "HEAD"], repo) == (local if local_commit else pushed)
     assert (repo / "notes.txt").read_text() == "my notes"
+
+
+def test_concurrent_sessions_a_third_start_leaves_both_live(db, repo, started, monkeypatch):
+    ws = workspaces.adopt_root(db, str(repo))
+    for aid in ("sup1", "sup2"):
+        db.add_agent(Agent(aid, ws.id, "supervisor", "claude", None, "interactive", "idle",
+                           f"%{aid}", None, 0.0))
+    paused = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("sup1", "sup2"))
+    monkeypatch.setattr(agents, "pause", lambda db_, aid, **kw: paused.append(aid))
+    # No terminal to ask in: the new one starts here, alongside both.
+    cli.start(prompt=None, provider=None, attach=False, watch=False, autopilot=None,
+              branch=None, worktree=None)
+    assert [branch for branch, _, _ in started] == ["main"] and paused == []
 
 
 def test_bare_brindle_always_starts_a_supervisor(db, repo, started, monkeypatch):

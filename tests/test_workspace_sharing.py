@@ -52,6 +52,27 @@ def test_assign_with_branch_of_live_worker_is_refused(db, repo, live, monkeypatc
         agents.delegate(db, None, root, "developer", "task", "assign", branch="feat/x")
 
 
+def test_concurrent_sessions_keep_their_worker_branches_apart(db, repo, live, monkeypatch):
+    root = workspaces.adopt_root(db, str(repo))
+    for sup in ("supA", "supB"):
+        db.add_agent(Agent(sup, root.id, "supervisor", "claude", None, "interactive", "idle",
+                           f"%{sup}", None, time.time()))
+
+    def spawn(db_, ws_, profile, parent_id=None, **kw):
+        db_.add_agent(Agent(f"w-{parent_id}", ws_.id, profile, "claude", parent_id, "assign",
+                            "done", "@2", None, time.time()))
+        return db_.get_agent(f"w-{parent_id}")
+
+    monkeypatch.setattr(agents, "spawn", spawn)
+    _, a_ws = agents.delegate(db, db.get_agent("supA"), root, "developer", "task", "assign",
+                              branch="feat/shared")
+    # supA's worker is finished, but its worktree still holds supA's unmerged work.
+    with pytest.raises(agents.AgentError, match="supA"):
+        agents.delegate(db, db.get_agent("supB"), root, "developer", "task", "assign",
+                        branch="feat/shared")
+    assert [w.id for w in db.list_agents(a_ws.id)] == ["w-supA"]
+
+
 # -- removal ----------------------------------------------------------------------
 
 

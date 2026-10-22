@@ -239,7 +239,7 @@ def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monke
     code, reply = _send("POST", "/v1/sessions", {"repo": world.repo_root})
     assert code == 409 and spawned == []
     conflict = reply["conflict"]
-    assert [c["key"] for c in conflict["choices"]] == ["o", "n", "p"]
+    assert [c["key"] for c in conflict["choices"]] == ["o", "a", "n", "p"]
     assert [s["id"] for s in conflict["sessions"]] == ["sup"]
 
 

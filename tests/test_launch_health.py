@@ -231,7 +231,7 @@ def slow_background(monkeypatch):
 def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, slow_background):
     monkeypatch.chdir(repo)
     ws = workspaces.adopt_root(db, str(repo))
-    # A session still running here, which start must pause first.
+    # A session still running here, which keeps running alongside the new one.
     old = agents.spawn(db, ws, "supervisor", provider_name="shell")
     calls: list[list[str]] = []
     real = subprocess.run
@@ -249,7 +249,7 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     finally:
         tmux.kill_session(ws.tmux_session)
     assert elapsed < BUDGET
-    assert db.get_agent(old.id).status == "paused"
+    assert db.get_agent(old.id).status != "paused"
     # Retention and culling went to the detached helper instead.
     assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
     # Each subprocess start waits on costs wall time: about 30 now, 83 before.

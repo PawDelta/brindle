@@ -322,11 +322,11 @@ def start(
 ) -> None:
     """Start a fresh supervisor chat here, with the dashboard alongside. A launch only ever starts a supervisor; it starts the other agents itself.
 
-    If a session is still running here, you choose: open it, start the new
-    one in its own worktree (both run at once), or pause it and start fresh.
-    Without a terminal to ask in, it's paused, and `brindle continue` brings
-    it back. With --branch or --worktree it runs in that worktree instead,
-    which gets the repo's .brindle config."""
+    If a session is still running here, you choose: open it, start another
+    here alongside it, start the new one in its own worktree (both run at
+    once either way), or pause it and start fresh. Without a terminal to ask
+    in, the new one starts here alongside it. With --branch or --worktree it
+    runs in that worktree instead, which gets the repo's .brindle config."""
     from brindle import picker
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS, get_provider
     from brindle.service import sessions as svc
@@ -366,10 +366,10 @@ def start(
     provider = _resolve_supervisor(ws.repo_root, provider, yes=yes, demo=demo)
     _preflight(agents.SUPERVISOR, provider, ws.repo_root)
     _trust_codex_hook(ws.repo_root)
-    # Nothing slow before the chat starts: the paused session's leftover
+    # Nothing slow before the chat starts: a paused session's leftover
     # processes, old paused sessions' worktrees and the pool refill are all
     # handled by the detached cull.
-    _pause_running(db, ws, stop_procs=False)
+    _pause_transferred(db, ws)
     _check_updates(ws.repo_root)
     started = _run(svc.launch, db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
     a = started.agent
@@ -554,11 +554,12 @@ def _say_autopilot(db: DB, root_id: str) -> None:
 
 
 def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[str] = None):
-    """Pick among the repo's live sessions (any worktree): open one, start a
-    new session in its own worktree, or pause one and start fresh. Returns
-    ``(choice, session)`` with choice "o", "n" or "p", or None when cancelled.
-    ``wanted`` is the CLI asked for with -s: Enter on a session that runs on
-    another one starts fresh instead, since opening it wouldn't give that.
+    """Pick among the repo's live sessions (any worktree): open one, start
+    another here alongside, start a new session in its own worktree, or pause
+    one and start fresh. Returns ``(choice, session)`` with choice "o", "a",
+    "n" or "p", or None when cancelled. ``wanted`` is the CLI asked for with
+    -s: Enter on a session that runs on another one starts a fresh one
+    alongside instead, since opening it wouldn't give that.
     ``here`` is the current checkout's workspace id: its session starts highlighted."""
     from brindle import picker
     from brindle.service import sessions as svc
@@ -572,7 +573,7 @@ def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[
         return None
     k, i = got
     if k == "enter":
-        k = "p" if differs[i] else "o"
+        k = "a" if differs[i] else "o"
     return k, live[i]
 
 
@@ -595,11 +596,12 @@ def _ask_about_paused(db: DB, available: list):
     return None if got is None else available[got[1]]
 
 
-def _pause_running(db: DB, ws: Workspace, stop_procs: bool = True) -> None:
-    """At most one live session per checkout: pause any that's still running."""
+def _pause_transferred(db: DB, ws: Workspace) -> None:
+    """Pause scratch session chats whose work moved into this repo; live
+    sessions here keep running alongside the new one."""
     from brindle.service import sessions as svc
 
-    _say(_run(svc.pause, db, ws, stop_procs=stop_procs))
+    _say(_run(svc.pause_transferred, db, ws))
 
 
 @app.command("continue")
@@ -886,16 +888,14 @@ def _tell_supervisors_about_delegation(db: DB) -> None:
     from brindle.service import sessions as svc
 
     for ws in db.find_workspaces():
-        running = svc.running_here(db, ws)
-        if not running:
-            continue
-        try:
-            rule = pilot.delegation_rule(load_repo_config(ws.repo_root))
-            agents.send_message(db, running.id, "[brindle] The person changed how readily you delegate. "
-                                "From now on this replaces your earlier delegation rule:\n\n" + rule)
-            typer.echo(f"  told the running supervisor ({running.id})")
-        except (agents.AgentError, ValueError):
-            pass
+        for running in svc.live_here(db, ws):
+            try:
+                rule = pilot.delegation_rule(load_repo_config(ws.repo_root))
+                agents.send_message(db, running.id, "[brindle] The person changed how readily you delegate. "
+                                    "From now on this replaces your earlier delegation rule:\n\n" + rule)
+                typer.echo(f"  told the running supervisor ({running.id})")
+            except (agents.AgentError, ValueError):
+                pass
 
 
 @app.command("autopilot")
