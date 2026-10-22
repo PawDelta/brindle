@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 ACTION_SESSION = "brindle-app"  # the daemon's own tmux session: the app's action terminals
 ACTION_TAG = "@brindle_terminal"
 ACTION_ID = re.compile(r"t-[0-9a-f]{16}")
+SHELL_KIND = "shell"        # the window name of the app's plain shells
 WINDOW_SIZE_RESET = "window-size-reset"     # under brindle's home: reset_window_sizes has run
 _opening = threading.Lock()
 
@@ -58,9 +59,9 @@ def _action(terminal_id: str, started: bool, pane: str) -> dict:
 
 def _running_action(terminal_id: str) -> str | None:
     """The pane of the action terminal ``terminal_id``, while it runs."""
-    for pane, _, alive, tag in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG):
+    for pane, name, alive, tag in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG):
         if tag == terminal_id:
-            return pane if alive else None
+            return pane if alive and name != SHELL_KIND else None   # a shell is typed into in the app, never over the API
     return None
 
 

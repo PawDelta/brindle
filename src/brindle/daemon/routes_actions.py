@@ -1433,7 +1433,7 @@ def shell_terminal(db: DB, params: dict, body: Body) -> Any:
     allowed = {os.path.realpath(p) for w in db.find_workspaces() for p in (w.path, w.repo_root)}
     if cwd not in allowed:
         raise ServiceError("invalid", f"{cwd} isn't an attached repo or one of its worktrees")
-    return terminal.open_action("shell", [os.environ.get("SHELL") or "/bin/sh", "-l"], cwd=cwd, reuse=False)
+    return terminal.open_action(terminal.SHELL_KIND, [os.environ.get("SHELL") or "/bin/sh", "-l"], cwd=cwd, reuse=False)
 
 
 def close_terminal(db: DB, params: dict, body: Body) -> Any:

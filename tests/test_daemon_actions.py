@@ -606,6 +606,8 @@ def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, monkeypatch
     assert (code, code2, first["started"], second["started"]) == (200, 200, True, True)
     assert first["terminal"] != second["terminal"] and first["target"] == "%1"
     assert [(c, a) for c, a, _ in opened] == [(os.path.realpath(repo), ["/bin/zsh", "-l"])] * 2
+    # Typed into in the app's own tmux client, never through the API.
+    assert _send("POST", f"/v1/terminals/{first['terminal']}/input", {"text": "ls"})[0] == 404
     assert _send("DELETE", f"/v1/terminals/{first['terminal']}")[0] == 200 and killed == ["@1"]
     assert _send("DELETE", "/v1/terminals/t-0000000000000000")[0] == 404
 
