@@ -8,7 +8,6 @@ import pytest
 from brindle import agents, doctor, workspaces
 from brindle.db import Agent
 from brindle.service import sessions as svc
-from brindle.service.errors import ServiceError
 
 
 def add(db, ws, aid, status="idle", since=None):
@@ -34,12 +33,13 @@ def running(db, repo, monkeypatch):
 
 @pytest.mark.parametrize("choice, branch, paused", [
     ("o", None, []),
+    pytest.param("a", "main", [], id="concurrent_sessions_alongside"),
     ("n", "brindle/session-2", []),
     ("p", "main", ["sup1"]),
 ])
 def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, running, choice,
                                                                       branch, paused):
-    asked = svc.start(db, str(repo))
+    asked = svc.place(db, workspaces.adopt_root(db, str(repo)))
     assert isinstance(asked, svc.Conflict)
     conflict = asked.to_json()["conflict"]
     assert [s["id"] for s in conflict["sessions"]] == ["sup1"] and conflict["default"] == 0
@@ -51,18 +51,33 @@ def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, 
     assert running == paused
 
 
-def test_continue_refuses_to_pause_the_session_running_it(db, repo, monkeypatch):
+def test_concurrent_sessions_continue_from_inside_another_session(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     caller = add(db, ws, "caller")
+    add(db, ws, "other")
     add(db, ws, "target", status="paused")
-    resumed = []
-    # The caller is the one live session; no tmux state decides that.
-    monkeypatch.setattr(svc, "live_here", lambda db_, ws_: [caller])
-    monkeypatch.setattr(agents, "resume", lambda *a, **k: resumed.append(a) or [])
+    resumed, paused = [], []
+    monkeypatch.setattr(agents, "is_alive",
+                        lambda a, panes=None: a.id in ("caller", "other") or bool(resumed))
+    monkeypatch.setattr(agents, "pane_owners", lambda db_, panes=None: {})
+    monkeypatch.setattr(agents, "pause", lambda db_, aid, **kw: paused.append(aid))
+    monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(rid) or [db.get_agent(rid)])
     monkeypatch.setenv("BRINDLE_AGENT_ID", caller.id)
-    with pytest.raises(ServiceError) as e:
-        svc.continue_(db, ws, "target")
-    assert e.value.http_status == 409 and resumed == []
+    got = svc.continue_(db, ws, "target")
+    assert got.state == "resumed" and resumed == ["target"] and paused == []
+    # Both now run here; a command from the caller's pane means the caller's session.
+    assert svc.session_root(db, str(repo)) == "caller"
+
+
+def test_concurrent_sessions_continue_recovers_the_named_older_live_session(db, repo, monkeypatch):
+    ws = workspaces.adopt_root(db, str(repo))
+    add(db, ws, "older", status="failed")
+    add(db, ws, "newer")
+    resumed = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("older", "newer"))
+    monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(rid) or [])
+    got = svc.continue_(db, ws, "older")
+    assert got.state == "recovered" and got.root.id == "older" and resumed == ["older"]
 
 
 def test_continue_lists_the_paused_sessions_then_resumes_the_one_picked(db, repo, monkeypatch):
