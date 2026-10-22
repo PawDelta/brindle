@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS agents (
     review_restarted REAL,         -- the wait in review whose dead check run was started again (pipeline.restart_review)
     merge_failed TEXT,             -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
     config_home TEXT,              -- the CLI config home it runs with, decided once at spawn (provider_homes): '' the person's own
-    review_slot TEXT               -- the review claim slot a reviewer was started in (gates.standing_reviews)
+    review_slot TEXT,              -- the review claim slot a reviewer was started in (gates.standing_reviews)
+    failed_why TEXT                -- why its status is 'failed': auth | model | delivery (service.inbox)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -633,6 +634,7 @@ class Agent:
     config_home: str | None = None         # its CLI's config home, decided once at spawn (provider_homes); '' the person's own
     weight: str | None = None              # the weight its task was routed as, known from launch (agents.spawn)
     review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
+    failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
 
 
 @dataclass
@@ -910,9 +912,14 @@ class DB:
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
                           ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT"),
-                          ("weight", "TEXT"), ("review_slot", "TEXT")):
+                          ("weight", "TEXT"), ("review_slot", "TEXT"), ("failed_why", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        if "failed_why" not in cols:
+            # Agents failed before the cause was kept: a brief launch_health
+            # couldn't deliver is known; the rest stay unknown (service.inbox).
+            self.conn.execute("UPDATE agents SET failed_why='delivery' WHERE status='failed' AND id IN "
+                              "(SELECT agent_id FROM launch_health WHERE outcome='delivery-failed')")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
         if "plan_first" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN plan_first INTEGER")

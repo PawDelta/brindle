@@ -402,6 +402,7 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     denied = model_access.refused(a.profile, fp="effective-account")
     assert denied.key == cause
     assert (db.get_agent(a.id).status == "failed") == (cause == "launch_model")
+    assert db.get_agent(a.id).failed_why == ("model" if cause == "launch_model" else None)
     ws = db.get_workspace(a.workspace_id)
     assert route_health.pending() == ({(ws.repo_root, provider, "bedrock", "claude-opus-5-5", refused): 1}
                                       if refused else {})
@@ -1009,6 +1010,7 @@ def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, st
     assert (row["outcome"] == "delivery-failed") == (not started)
     assert len(reports) == (0 if started else 1)
     assert db.get_agent(a.id).status == ("processing" if started else "failed")
+    assert db.get_agent(a.id).failed_why == (None if started else "delivery")   # no sign-in fixes it
     if started:
         assert lh.inspect(db, a.id) == "pending" and reports == []
 

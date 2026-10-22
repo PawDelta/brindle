@@ -3770,6 +3770,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         is_model = not is_rate_limit and not is_auth and bool(
             re.search(launch_health.SELECTED_MODEL, err_fields))
         if is_auth or is_model:
+            db.update_agent(agent_id, failed_why="auth" if is_auth else "model")
             db.set_status(agent_id, "failed")
             db.clear_permission_requests(agent_id)
             _note_reviewer_end(db, agent)

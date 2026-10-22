@@ -43,6 +43,13 @@ TERMINAL = "it is at the CLI's own prompt now: answer it in the agent's terminal
 WORDING_LINES = 12       # of a prompt, shown to the person
 STEP_SECONDS = 0.2       # between looks at the hook
 CONFIRM_SECONDS = 5.0    # for the hook to take the answer
+# Why a failed agent waits on the person (Agent.failed_why). Only an auth
+# failure asks for a sign-in; a cause brindle didn't keep (an agent failed
+# before it did) isn't taken for one.
+FAILED = {"auth": "credentials need attention",
+          "model": "failed: its model isn't available on this route",
+          "delivery": "failed: its brief wasn't delivered; check its pane and restart it"}
+FAILED_UNKNOWN = "failed: check its pane and restart it"
 
 
 def awaiting_review(agent: dict, ws: dict) -> str | None:
@@ -64,7 +71,7 @@ def needs_you(agent: dict, ws: dict) -> str | None:
     if agent["status"] == "waiting":
         return "needs you"
     if agent["status"] == "failed":
-        return "credentials need attention"
+        return FAILED.get(agent.get("failed_why"), FAILED_UNKNOWN)
     if ws.get("asking") == agent["id"]:
         return "has a question"
     return None if ws.get("autopilot") else awaiting_review(agent, ws)
@@ -88,7 +95,7 @@ def _kind(agent: dict, ws: dict, reason: str) -> str:
     if agent["status"] == "waiting":
         return "waiting"
     if agent["status"] == "failed":
-        return "credentials"
+        return "credentials" if agent.get("failed_why") == "auth" else "failed"
     if ws.get("asking") == agent["id"]:
         return "question"
     return "merge_failed" if reason.startswith("merge failed") else "review"

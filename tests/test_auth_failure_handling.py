@@ -82,6 +82,7 @@ def test_dead_failed_agent_preserves_failed_status_in_view_and_watch(db, repo):
     ws = Workspace("ws-dead", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-dead", 0)
     db.add_workspace(ws)
     worker = agents.spawn(db, ws, "developer", mode="assign")
+    db.update_agent(worker.id, failed_why="auth")
     db.set_status(worker.id, "failed")
     worker = db.get_agent(worker.id)
 
@@ -136,7 +137,7 @@ def test_stop_failure_payloads_with_enums_and_last_assistant_message(db, repo):
     # 1. oauth_org_not_allowed error
     agents.handle_hook(db, worker.id, "stop-failure", {"error": "oauth_org_not_allowed", "error_details": "Organization not authorized"})
     w = db.get_agent(worker.id)
-    assert w.status == "failed"
+    assert w.status == "failed" and w.failed_why == "auth"
     ap = db.get_autopilot(sup.id)
     assert ap.state == "blocked"
     assert "Organization not authorized" in (ap.note or "")

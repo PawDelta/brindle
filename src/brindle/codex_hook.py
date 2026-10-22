@@ -25,7 +25,11 @@ and again after it moves, so there's no setup step; it says so once at
 Trusting (``ensure``, or ``brindle permissions install-codex-hook --yes``)
 asks Codex itself (its app-server's ``hooks/list``) for the key and hash, writes the trust through
 Codex's own config writer (``config/batchWrite``) and records what it trusted
-in ``~/.brindle/permissions.json``. Without it brindle doesn't pass the hook at
+in ``~/.brindle/permissions.json``. All of that is per Codex config home (the
+one brindle runs Codex with, ``codex_home``; brindle's own once it is in use,
+see provider_homes): the app-server runs with that ``CODEX_HOME``, and the
+record is kept under the home's resolved path, so a home brindle never trusted
+its hook in is NEW there, whatever another home says. Without it brindle doesn't pass the hook at
 all: an untrusted hook is skipped by ``codex exec`` and makes the interactive
 CLI ask for a review at startup.
 """
@@ -62,6 +66,11 @@ def codex_home() -> Path:
     from brindle import providers
 
     return Path(providers.codex_home())
+
+
+def _home_key(home: Path) -> str:
+    """The key a Codex home's trust record is kept under (permissions.Store.codex_hook)."""
+    return os.path.realpath(home)
 
 
 def _stable_invocation() -> list[str]:
@@ -102,17 +111,18 @@ def status(command: str | None = None) -> str:
     Codex's config still says so), MOVED (trusted, but brindle's hook has
     changed since: a reinstall, another BRINDLE_HOME, another timeout), NEW
     (never trusted) or REMOVED (trusted once, then the trust was taken out of
-    Codex's config)."""
+    Codex's config). All of it in the Codex home brindle runs Codex with now."""
     import tomllib
 
     from brindle import permissions
 
     command = command or hook_command()
-    rec = permissions.load_store().codex_hook
+    home = codex_home()
+    rec = permissions.load_store().codex_hook.get(_home_key(home), {})
     if not rec.get("command") or not rec.get("key") or not rec.get("hash"):
         return NEW
     try:
-        with open(codex_home() / "config.toml", "rb") as f:
+        with open(home / "config.toml", "rb") as f:
             cfg = tomllib.load(f)
     except OSError:
         cfg = {}
@@ -231,14 +241,17 @@ def tell_untrusted(db, agent, cwd: str | None) -> bool:
 
 
 class _AppServer:
-    """A short-lived ``codex app-server`` over stdio (JSON-RPC, one per line)."""
+    """A short-lived ``codex app-server`` over stdio (JSON-RPC, one per line),
+    on the Codex home brindle runs Codex with (``codex_home``): the trust it
+    lists and writes is that home's."""
 
     def __init__(self, binary: str, flags: list[str], timeout: float = 30.0):
         self.timeout = timeout
         try:
             self.proc = subprocess.Popen([binary, "app-server", *flags], stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                         start_new_session=True)
+                                         start_new_session=True,
+                                         env={**os.environ, "CODEX_HOME": str(codex_home())})
         except OSError as e:
             raise CodexHookError(f"couldn't run {binary}: {e}") from e
         self.lines: queue.Queue = queue.Queue()
@@ -348,6 +361,7 @@ def trust(binary: str, state: HookState) -> HookState:
     if after.status != "trusted":
         raise CodexHookError(f"Codex still reports the hook as {after.status}")
     with permissions.editing() as store:
-        store.codex_hook = {"command": after.command, "key": after.key, "hash": after.hash,
-                            "definition": config_flags(after.command)[1]}
+        store.codex_hook[_home_key(after.config.parent)] = {
+            "command": after.command, "key": after.key, "hash": after.hash,
+            "definition": config_flags(after.command)[1]}
     return after

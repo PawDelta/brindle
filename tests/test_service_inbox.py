@@ -59,7 +59,9 @@ def _notice(db, root, worker, mp):
 
 @pytest.mark.parametrize("kind, setup, expected", [
     ("waiting", _worker(status="waiting"), [("w1", None)]),
-    ("credentials", _worker(status="failed"), [("w1", None)]),
+    ("credentials", _worker(status="failed", failed_why="auth"), [("w1", None)]),
+    # Live: a Codex worker whose brief wasn't delivered read "Codex needs a sign-in", signed in or not.
+    ("failed", _worker(provider="codex", status="failed", failed_why="delivery"), [("w1", None)]),
     ("question", _two_asking, [("r1", None), ("r2", None)]),
     ("review", _worker(result="done"), [("w1", None)]),
     ("merge_failed", _worker(result="done", merge_failed="conflict in app.py"), [("w1", None)]),
@@ -85,7 +87,29 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
     # Each agent's item links into its session; a sign-in carries the login the app can start.
     assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")
+    assert all(i.action is None for i in got if kind == "failed")
     assert all((i.fix, i.action.path) == ("codex_hook_trust", "/v1/setup/codex-hook") for i in got if kind == "setup")
+
+
+def test_inbox_asks_no_sign_in_of_agents_failed_before_the_cause_was_kept(db, repo):
+    """Reviewer round 1: the owner's worker failed (brief undelivered) before
+    brindle kept why, so after the upgrade its cause is unknown: it must not
+    keep asking for a sign-in, and the delivery failure is read back from
+    launch_health."""
+    from brindle.db import DB
+
+    ws = workspaces.create(db, str(repo), "feat/inbox").workspace
+    now = time.time()
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, now))
+    for aid in ("w1", "w2"):
+        db.add_agent(Agent(aid, ws.id, "developer", "codex", "r1", "assign", "failed", "@2", None, now))
+    db.conn.execute("INSERT INTO launch_health (agent_id, pane, fingerprint, outcome) "
+                    "VALUES ('w1', '@2', 'fp', 'delivery-failed')")
+    db.conn.execute("ALTER TABLE agents DROP COLUMN failed_why")   # the database before the upgrade
+    db = DB()
+    assert [db.get_agent(a).failed_why for a in ("w1", "w2")] == ["delivery", None]
+    got = [i for i in inbox.items(db, str(repo), panes={"@1": True}) if i.agent_id in ("w1", "w2")]
+    assert sorted((i.agent_id, i.kind, i.action) for i in got) == [("w1", "failed", None), ("w2", "failed", None)]
 
 
 
