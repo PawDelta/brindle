@@ -9,6 +9,7 @@ from brindle.daemon.auth import WS_UNAUTHORIZED
 TOKEN = "t" * 43
 
 
+@pytest.mark.variant("a wrong first-frame token must close the socket with WS_UNAUTHORIZED")
 def test_missing_token_is_rejected(db):
     with TestClient(build_app(TOKEN)) as client, \
             client.websocket_connect("/v1/events") as ws:

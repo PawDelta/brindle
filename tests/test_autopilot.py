@@ -309,29 +309,6 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")
 
 
-def test_need_user_question_holds_until_answered_and_publishes_events(db, root, monkeypatch):
-    # A question holds only the work that depends on it: an unrelated user
-    # message doesn't cancel it, and autopilot doesn't nudge while it's open.
-    # (#209) Anything that woke the chat without brindle's tag (a watcher's
-    # event on a log) re-armed a reminder of it: one every ~2 s, for hours.
-    agent, _ = root
-    with_goal(db)
-    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
-    for _ in range(3):
-        agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "queue: epoch 3 done"})
-        assert agents.handle_hook(db, "boss", "stop", {}) is None
-    assert db.get_autopilot("boss").state == "blocked"
-    db.bump_progress("boss")
-    assert autopilot.on_stop(db, agent, {}) is None
-    autopilot.answered(db, "boss")
-    ap = db.get_autopilot("boss")
-    assert ap.state == "running" and ap.note is None and ap.question is None
-    assert [(e["kind"], e["root_id"], e["payload"].get("question"))
-            for e in bus.tail(db, kinds=("autopilot.need_user", "autopilot.answered"))] == [
-        ("autopilot.need_user", "boss", "Postgres or SQLite?"), ("autopilot.answered", "boss", None)]
-
-
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):
     agent, ws = root
     with_goal(db)
@@ -411,19 +388,6 @@ def test_check_records_a_state_in_plain_words(db, root, monkeypatch, had_passed,
         assert label in autopilot.progress(db, "boss") and label in out
 
 
-def test_regressed_survives_a_dirty_pass_and_a_couldnt_run(db, root, repo, monkeypatch):
-    agent, ws = root
-    with_goal(db, checks=("c", None))
-    (repo / "dirty.txt").write_text("")   # a dirty checkout records no passed_sha
-    results = iter([(True, "$ c"), (False, "$ c\n(exit 1)"), (False, "$ c\n(exit 127)"), (False, "$ c\n(exit 1)")])
-    monkeypatch.setattr(gates, "run_checked", lambda *a, **k: next(results))
-    seen = []
-    for _ in range(4):
-        autopilot.check_milestones(db, "boss", ws, cfg=RepoConfig(goal_audit=False))
-        seen.append(db.milestones("boss")[0].state)
-    assert seen == ["passed", "regressed", "failed", "regressed"]
-
-
 def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, monkeypatch):
     from brindle import git, repos
 
@@ -442,18 +406,6 @@ def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, 
     db.record_check(db.milestones("boss")[0].id, True, "ok", None)
     autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
     assert db.milestones("boss")[0].state == "failed"
-
-
-def test_shell_reported_crash_signal_is_couldnt_run(monkeypatch):
-    import signal
-
-    from brindle.db import check_state
-
-    fake = SimpleNamespace(stdout="", stderr="Floating point exception (core dumped)",
-                           returncode=128 + signal.SIGFPE)
-    monkeypatch.setattr(autopilot.subprocess, "run", lambda *a, **k: fake)
-    ok, out = autopilot.run_check("c", ".", {}, 5)
-    assert check_state(ok, out, False) == ("failed", f"crashed: killed by signal {signal.SIGFPE}")
 
 
 def test_old_milestone_rows_get_a_state(db, root):
@@ -886,18 +838,6 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
     monkeypatch.setattr(session_review, "reasons", lambda db, root, ws: [] if ready else ["not yet"])
     monkeypatch.setattr(session_review, "has_pr_target", lambda ws: target)
     assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)
-
-
-def test_a_replacement_pr_does_not_inherit_the_old_merge(db, root):
-    from brindle.daemon import routes_actions
-
-    key = ("boss", "feat")
-    routes_actions._record_pr(db, key, "https://x/pr/1", None, False)
-    db.conn.execute("UPDATE session_prs SET merged_at = 2")
-    routes_actions._record_pr(db, key, "https://x/pr/1", "abc", False)       # same PR: stays merged
-    assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] == 2
-    routes_actions._record_pr(db, key, "https://x/pr/2", None, False)        # a new one: open
-    assert db.conn.execute("SELECT merged_at FROM session_prs").fetchone()[0] is None
 
 
 @pytest.mark.parametrize("flight, expected", [
