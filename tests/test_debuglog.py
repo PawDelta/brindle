@@ -12,14 +12,15 @@ from brindle import config, debuglog
 from brindle.pro import auth
 
 
-class _Store:
-    def load(self):
-        return {"refresh_token": "r", "access_token": "a", "access_expires_at": time.time() + 3600}
+class _Server:
+    """A fake backend and credential store; ``me`` and ``creds`` can change mid-test."""
 
-
-class _Transport:
     def __init__(self, me: dict):
         self.me, self.posted = me, []
+        self.creds = {"refresh_token": "r-a", "access_token": "a", "access_expires_at": time.time() + 3600}
+
+    def load(self):
+        return dict(self.creds)
 
     def request(self, method, url, form, headers):
         if url.endswith("/me"):
@@ -30,12 +31,12 @@ class _Transport:
 
 @pytest.fixture
 def server(monkeypatch):
-    def make(me: dict) -> _Transport:
-        t = _Transport(me)
+    def make(me: dict) -> _Server:
+        s = _Server(me)
         monkeypatch.setattr(debuglog, "_account",
-                            lambda: (auth.Client("https://brindle.test/v1", transport=t), _Store()))
+                            lambda: (auth.Client("https://brindle.test/v1", transport=s), s))
         monkeypatch.setattr(debuglog, "_staff", {})
-        return t
+        return s
     return make
 
 
@@ -47,20 +48,61 @@ def test_debuglog_non_staff_cannot_turn_it_on(server):
 
 
 def test_debuglog_staff_entry_is_scrubbed_and_uploaded(server):
-    t = server({"sub": "u1", "staff": True})
+    s = server({"sub": "u1", "staff": True})
     assert _send("PUT", "/v1/debug", {"enabled": True}) == (200, {"enabled": True, "staff": True})
-    secret = "sk-ant-" + "x" * 30
+    secrets = ["sk-ant-" + "x" * 30, "opaque-access-123456789", "example-password-123456789",
+               "opaque-bearer-123456789"]
 
     assert debuglog.record("sidebar", "error", f"draw failed in {Path.home()}/proj",
-                           {"env": f"key {secret}"})
+                           {"env": f"key {secrets[0]}", "access_token": secrets[1], "password": secrets[2],
+                            "headers": {"Authorization": f"Bearer {secrets[3]}"},
+                            "said": f"sent Bearer {secrets[3]}"})
     (line,) = debuglog.log_path().read_text().splitlines()
-    assert str(Path.home()) not in line and secret not in line and "~/proj" in line
+    assert str(Path.home()) not in line and "~/proj" in line
 
     assert debuglog.upload_once() == 1
-    ((url, body),) = t.posted
+    ((url, body),) = s.posted
     assert url == "https://brindle.test/v1/debug/logs"
     assert body["entries"] == [json.loads(line)] and body["client"]["install_id"]
+    assert not any(x in line or x in json.dumps(body) for x in secrets)
     assert debuglog.upload_once() == 0      # nothing new since
+
+
+def test_debuglog_account_switch_to_non_staff_stops_uploads(server):
+    s = server({"sub": "u1", "staff": True})
+    assert _send("PUT", "/v1/debug", {"enabled": True})[0] == 200
+    debuglog.record("app", "info", "before the switch")
+    s.me, s.creds["refresh_token"] = {"sub": "u2"}, "r-b"       # another, non-staff account
+
+    assert _send("GET", "/v1/debug") == (200, {"enabled": False, "staff": False})
+    config.set_user(debuglog.SETTING, True)     # even if the setting is still on
+    assert debuglog.upload_once() == 0 and s.posted == []
+    assert not debuglog.enabled()
+
+
+def test_debuglog_rotation_keeps_pending_entries(server, monkeypatch):
+    s = server({"sub": "u1", "staff": True})
+    config.set_user(debuglog.SETTING, True)
+    debuglog.record("app", "info", "a")
+    size = debuglog.log_path().stat().st_size
+    assert debuglog.upload_once() == 1
+    # b fits; c rotates [a, b] away, and the new file is as large as the old cursor.
+    monkeypatch.setattr(debuglog, "MAX_BYTES", size * 5 // 2)
+    debuglog.record("app", "info", "b")
+    debuglog.record("app", "info", "c")
+    assert debuglog.rotated_path().exists()
+
+    assert debuglog.upload_once() == 2
+    assert [e["message"] for e in s.posted[-1][1]["entries"]] == ["b", "c"]
+    assert debuglog.upload_once() == 0
+
+
+def test_debuglog_oversized_detail_is_replaced_by_a_marker():
+    config.set_user(debuglog.SETTING, True)
+
+    assert debuglog.record("app", "error", "big", ["é" * 2000] * 600)
+    assert debuglog.log_path().stat().st_size <= debuglog.MAX_ENTRY
+    assert json.loads(debuglog.log_path().read_text())["detail"]["truncated"] is True
 
 
 def test_debuglog_disabled_writes_nothing():
