@@ -178,30 +178,60 @@ def _identity(client, creds: dict) -> str:
     return hashlib.sha256(f"{client.base}\0{who}".encode()).hexdigest()
 
 
+class _Changed(Exception):
+    """The stored credentials stopped being the snapshot's (another account
+    signed in, or they were rotated elsewhere): the next call uses the new ones."""
+
+
+def _fresh(client, store, snap: dict) -> dict | None:
+    """``snap`` with an access token that isn't due, rotated from ``snap``'s own
+    refresh token on ``snap``'s backend if it is; None when signed out."""
+    from brindle.pro import auth
+
+    if not snap.get("refresh_token"):
+        return None
+    if snap.get("access_token") and \
+            float(snap.get("access_expires_at") or 0) > time.time() + auth.ACCESS_SLACK:
+        return snap
+    rotated = _rotated(client, store, snap)
+    if rotated is None:
+        raise _Changed
+    return rotated
+
+
+def _ask_staff(client, snap: dict) -> bool | None:
+    """``/me`` on the snapshot's backend with its access token: True or False,
+    None when the backend can't say (a server error, or the token was refused)."""
+    status, body = client.call("GET", "/me", token=snap["access_token"])
+    if status >= 500 or status == 401:
+        return None
+    return status == 200 and body.get("staff") is True
+
+
 def staff(refresh: bool = False) -> bool | None:
     """Whether the signed-in account is brindle staff: True, False (the server
-    said no, or no account), or None when it can't be asked (offline). Kept for
-    :data:`STAFF_TTL_S` per account."""
+    said no, or no account), or None when it can't be asked (offline). Asked
+    with one snapshot of the credentials (never reloaded), and kept for
+    :data:`STAFF_TTL_S` under that snapshot's account."""
     from brindle.pro import auth
 
     now = time.time()
     try:
-        client, creds, store = _snapshot()
+        client, snap, store = _snapshot()
     except Exception:  # noqa: BLE001 - no credential store: not staff
         return False
-    who = _identity(client, creds)
-    got = _staff.get(who)
+    got = _staff.get(_identity(client, snap))
     if not refresh and got and now - got[1] < STAFF_TTL_S:
         return got[0]
     try:
-        status, body = auth.authed(client, store, "GET", "/me")
-    except auth.TransportError:
+        snap = _fresh(client, store, snap)
+        value = False if snap is None else _ask_staff(client, snap)
+    except (auth.TransportError, _Changed):
         return None
-    except Exception:  # noqa: BLE001 - not signed in: not staff
-        status, body = 401, {}
-    value = None if status >= 500 else (status == 200 and body.get("staff") is True)
+    except Exception:  # noqa: BLE001 - the session was revoked: not staff
+        snap, value = None, False
     _staff.clear()      # only the current account's answer is kept
-    _staff[who] = (value, now)
+    _staff[_identity(client, snap or {})] = (value, now)
     return value
 
 
@@ -333,19 +363,15 @@ def upload_once() -> int:
         return 0
     try:
         client, snap, store = _snapshot()
-        if not snap.get("refresh_token"):
+        snap = _fresh(client, store, snap)
+        if snap is None:
             return 0
-        if not snap.get("access_token") or \
-                float(snap.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK:
-            snap = _rotated(client, store, snap)
-            if snap is None:
-                return 0
+        is_staff = _ask_staff(client, snap)
+        if is_staff is False:
+            config.set_user(SETTING, False)
+        if is_staff is not True:
+            return 0
         token = snap["access_token"]
-        status, me = client.call("GET", "/me", token=token)
-        if status != 200 or me.get("staff") is not True:
-            if status == 200:
-                config.set_user(SETTING, False)
-            return 0
         entries, cursor = _pending()
         if not entries:
             return 0

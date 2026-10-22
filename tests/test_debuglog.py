@@ -16,6 +16,7 @@ class _Server:
 
     def __init__(self, me: dict):
         self.me, self.posted, self.tokens = me, [], []
+        self.by_token, self.asked = {}, []      # /me answers for particular tokens; each /me asked
         self.creds = {"refresh_token": "r-a", "access_token": "a", "access_expires_at": time.time() + 3600,
                       "base_url": "https://brindle.test/v1"}
 
@@ -27,7 +28,8 @@ class _Server:
 
     def request(self, method, url, form, headers):
         if url.endswith("/me"):
-            return 200, self.me
+            self.asked.append((url, headers.get("Authorization")))
+            return 200, self.by_token.get(headers.get("Authorization"), self.me)
         if url.endswith("/token/refresh"):
             new = form["refresh_token"] + "2"
             return 200, {"access_token": new.removeprefix("r-"), "refresh_token": new, "expires_in": 900}
@@ -86,22 +88,36 @@ def test_debuglog_account_switch_to_non_staff_stops_uploads(server):
     assert not debuglog.enabled()
 
 
-def test_debuglog_switch_during_an_upload_posts_as_the_checked_account(server, monkeypatch):
+def test_debuglog_switch_mid_check_or_upload_uses_the_snapshot_account(server, monkeypatch):
     s = server({"sub": "u1", "staff": True})
-    config.set_user(debuglog.SETTING, True)
-    debuglog.record("app", "info", "private")
-    s.creds["access_expires_at"] = 0       # A's access token is due: refreshed from A's snapshot
-    real = debuglog._pending
+    s.by_token["Bearer b"] = {"sub": "u2"}      # B is not staff
+    a = dict(s.creds)
+    b = {**a, "refresh_token": "r-b", "access_token": "b", "base_url": "https://other.test/v1"}
+    real_snapshot, real_pending = debuglog._snapshot, debuglog._pending
 
-    def switch_then_pending():
-        got = real()
-        # Non-staff B signs in on another backend meanwhile.
-        s.me, s.creds = {"sub": "u2"}, {**s.creds, "access_token": "b", "base_url": "https://other.test/v1"}
+    def snapshot_then_switch():         # B signs in on another backend right after the read
+        got = real_snapshot()
+        s.creds = dict(b)
         return got
 
-    monkeypatch.setattr(debuglog, "_pending", switch_then_pending)
+    monkeypatch.setattr(debuglog, "_snapshot", snapshot_then_switch)
+    assert debuglog.staff(refresh=True) is True         # asked as A, on A's backend
+    monkeypatch.setattr(debuglog, "_snapshot", real_snapshot)
+    assert debuglog.staff() is False        # A's cached answer isn't B's
+    assert s.asked == [("https://brindle.test/v1/me", "Bearer a"), ("https://other.test/v1/me", "Bearer b")]
+
+    s.creds = {**a, "access_expires_at": 0}     # A again, its access token due
+    config.set_user(debuglog.SETTING, True)
+    debuglog.record("app", "info", "private")
+
+    def pending_then_switch():
+        got = real_pending()
+        s.creds = dict(b)
+        return got
+
+    monkeypatch.setattr(debuglog, "_pending", pending_then_switch)
     assert debuglog.upload_once() == 1
-    # Posted as A (checked, refreshed) to A's backend, never as B or to B's backend.
+    # Posted as A (checked, refreshed from A's snapshot) to A's backend, never as B or to B's backend.
     assert s.tokens == ["Bearer a2"] and s.posted[0][0] == "https://brindle.test/v1/debug/logs"
 
 
