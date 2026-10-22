@@ -36,9 +36,7 @@ def open_action(kind: str, command: list[str], cwd: str | None = None,
     ``server`` the app's tmux client attaches to. While a window for ``kind``
     is still running, a second press gets that one (``started`` False)
     rather than a second sign-in or upgrade racing it; once it has exited, a
-    new one starts. ``restart`` ends that running window (brindle's own,
-    never keys typed into it) and starts ``command`` afresh. The person types
-    into it there (a sign-in, a secret):
+    new one starts. The person types into it there (a sign-in, a secret):
     nothing they type passes through the API. The pane stays after the
     command exits, so its last words can be read."""
     with _opening:      # find-or-create as one step: two presses at once start one

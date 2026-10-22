@@ -569,16 +569,12 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
 
 def test_a_restarted_sign_in_ends_the_running_one_and_starts_afresh(world, monkeypatch):
     from brindle import providers, tmux
-
-    panes, alive = {}, {}   # pane -> terminal id; terminal id -> window alive
-
-    def new_window(session, name, cwd, argv, env, tag):
-        pane = f"%{len(panes) + 1}"
-        panes[pane], alive[tag[1]] = tag[1], True
-        return pane
-
+    panes, alive = {}, {}  # pane -> terminal id; terminal id -> alive
     monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
     monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    def new_window(s, n, c, a, e, tag):
+        panes[pane := f"%{len(panes) + 1}"], alive[tag[1]] = tag[1], True
+        return pane
     monkeypatch.setattr(tmux, "new_window", new_window)
     monkeypatch.setattr(tmux, "kill_window", lambda pane: alive.update({panes[pane]: False}))
     monkeypatch.setattr(tmux, "tagged_panes", lambda s, k: [(p, "login codex", alive[t], t) for p, t in panes.items()])
