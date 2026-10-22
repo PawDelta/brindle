@@ -28,7 +28,7 @@ _opening = threading.Lock()
 
 
 def open_action(kind: str, command: list[str], cwd: str | None = None,
-                env: dict[str, str] | None = None) -> dict:
+                env: dict[str, str] | None = None, reuse: bool = True) -> dict:
     """Run ``command`` in a new window (named ``kind``: the action and what
     it acts on, e.g. "login codex") of the daemon's own tmux session
     (ACTION_SESSION) and return its ActionTerminalDTO: the id POST
@@ -38,10 +38,11 @@ def open_action(kind: str, command: list[str], cwd: str | None = None,
     rather than a second sign-in or upgrade racing it; once it has exited, a
     new one starts. The person types into it there (a sign-in, a secret):
     nothing they type passes through the API. The pane stays after the
-    command exits, so its last words can be read."""
+    command exits, so its last words can be read. ``reuse=False`` always opens
+    a new window (a shell tab: each "+" is its own)."""
     with _opening:      # find-or-create as one step: two presses at once start one
         for pane, name, alive, terminal_id in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG):
-            if alive and name == kind:
+            if reuse and alive and name == kind:
                 return _action(terminal_id, False, pane)
         terminal_id = "t-" + secrets.token_hex(8)
         cwd = cwd or str(Path.home())
@@ -61,6 +62,19 @@ def _running_action(terminal_id: str) -> str | None:
         if tag == terminal_id:
             return pane if alive else None
     return None
+
+
+def close_action(terminal_id: str) -> bool:
+    """Close the action terminal ``terminal_id``'s window, running or exited.
+    False when there is no such terminal. Only action terminals."""
+    if not ACTION_ID.fullmatch(terminal_id):
+        return False
+    for pane, _, _, tag in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG):
+        if tag == terminal_id:
+            window = tmux.pane_window(pane)
+            tmux.kill_window(window) if window else tmux.kill_pane(pane)
+            return True
+    return False
 
 
 def send_input(terminal_id: str, text: str, submit: bool = True) -> bool:
