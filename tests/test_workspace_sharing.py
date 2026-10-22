@@ -2,13 +2,16 @@
 removing a row must never delete a live worker's worktree."""
 
 import dataclasses
+import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
-from brindle import agents, mcp_server, workspaces
+from brindle import agents, mcp_server, pipeline, workspaces
 from brindle.db import Agent
+from conftest import sh
 
 
 @pytest.fixture
@@ -52,25 +55,67 @@ def test_assign_with_branch_of_live_worker_is_refused(db, repo, live, monkeypatc
         agents.delegate(db, None, root, "developer", "task", "assign", branch="feat/x")
 
 
-def test_concurrent_sessions_keep_their_worker_branches_apart(db, repo, live, monkeypatch):
+@pytest.fixture
+def two_sessions(db, repo, monkeypatch):
+    """supA and supB run in one checkout; a worker starts as done, with id w-<its session>."""
     root = workspaces.adopt_root(db, str(repo))
     for sup in ("supA", "supB"):
         db.add_agent(Agent(sup, root.id, "supervisor", "claude", None, "interactive", "idle",
                            f"%{sup}", None, time.time()))
+    during_spawn = []
 
     def spawn(db_, ws_, profile, parent_id=None, **kw):
+        for hook in during_spawn:
+            hook()
         db_.add_agent(Agent(f"w-{parent_id}", ws_.id, profile, "claude", parent_id, "assign",
                             "done", "@2", None, time.time()))
         return db_.get_agent(f"w-{parent_id}")
 
     monkeypatch.setattr(agents, "spawn", spawn)
+    return root, during_spawn
+
+
+@pytest.mark.parametrize("prefix", [
+    "",
+    pytest.param("team/", marks=pytest.mark.variant("bypass: the prefix create adds hid the owner")),
+])
+def test_concurrent_sessions_keep_their_worker_branches_apart(db, repo, live, two_sessions, prefix):
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"branch_prefix": prefix}))
+    root, during_spawn = two_sessions
+    refused = []
+
+    def b_while_a_starts():   # supA's worktree exists, its worker's row doesn't yet
+        during_spawn.clear()
+        with pytest.raises(agents.AgentError, match="right now") as e:
+            agents.delegate(db, db.get_agent("supB"), root, "developer", "task", "assign",
+                            branch="feat/shared")
+        refused.append(e)
+
+    during_spawn.append(b_while_a_starts)
     _, a_ws = agents.delegate(db, db.get_agent("supA"), root, "developer", "task", "assign",
                               branch="feat/shared")
+    assert refused and a_ws.branch == f"{prefix}feat/shared"
     # supA's worker is finished, but its worktree still holds supA's unmerged work.
     with pytest.raises(agents.AgentError, match="supA"):
         agents.delegate(db, db.get_agent("supB"), root, "developer", "task", "assign",
                         branch="feat/shared")
     assert [w.id for w in db.list_agents(a_ws.id)] == ["w-supA"]
+
+
+@pytest.mark.variant("the task's merge requirement: two sessions' workers both land in the shared branch")
+def test_concurrent_sessions_merge_their_workers_into_the_checkout(db, repo, live, two_sessions):
+    root, _ = two_sessions
+    spaces = {}
+    for sup in ("supA", "supB"):
+        _, ws = agents.delegate(db, db.get_agent(sup), root, "developer", f"task {sup}", "assign")
+        (Path(ws.path) / f"{sup}.py").write_text("x = 1\n")
+        sh(f"git add {sup}.py && git commit -qm {sup}", Path(ws.path))
+        spaces[sup] = ws
+    assert spaces["supA"].branch != spaces["supB"].branch
+    for sup, ws in spaces.items():
+        assert pipeline.merge(db, db.get_agent(sup), ws).startswith("Merged"), sup
+    assert {"supA.py", "supB.py"} <= set(sh("git ls-tree --name-only HEAD", repo).split())
 
 
 # -- removal ----------------------------------------------------------------------

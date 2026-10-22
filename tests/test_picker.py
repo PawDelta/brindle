@@ -143,7 +143,7 @@ def test_supervisor_bare_flag_reaches_the_picker(db, repo, monkeypatch, argv, va
 
 @pytest.mark.parametrize("wanted, default", [
     (None, "o"), ("claude", "o"), (picker.PICK, "o"),
-    ("codex", "p"),                       # the running session is on another CLI
+    ("codex", "a"),                       # the running session is on another CLI: start alongside
 ])
 def test_running_session_on_another_cli_is_not_the_default(monkeypatch, wanted, default):
     monkeypatch.setattr(picker, "pick_row", lambda *a, **kw: ("enter", 0))

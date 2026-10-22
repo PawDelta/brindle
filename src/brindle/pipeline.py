@@ -114,6 +114,17 @@ def base_lock(repo_root: str, base: str | None, wait: bool = True):
 
 
 @contextmanager
+def branch_start_lock(repo_root: str, branch: str):
+    """Hold ``branch`` of ``repo_root`` while a worker is started on it, from
+    the check of who owns its worktree to the worker's row: otherwise another
+    session's delegate of the same branch sees no owner yet and moves in too.
+    Never waits and isn't re-entrant: BlockingIOError while another start holds it."""
+    key = hashlib.sha1(f"{repo_root}\0{branch}".encode()).hexdigest()[:16]
+    with _file_lock("start-" + key, wait=False):
+        yield
+
+
+@contextmanager
 def _reentrant_lock(name: str, wait: bool = True):
     held = getattr(_held, "ids", None)
     if held is None:

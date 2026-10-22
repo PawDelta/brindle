@@ -6,6 +6,7 @@ import pytest
 
 from brindle import agents, cli, git, workspaces
 from brindle.db import Agent
+from brindle.service import sessions as svc
 from conftest import sh
 
 
@@ -96,7 +97,7 @@ def started(repo, monkeypatch):
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     for name in ("_attach", "_cull_detached", "_local_models_detached", "_settings_sync_detached",
-                 "_pause_transferred", "_preflight", "_trust_codex_hook"):
+                 "_preflight", "_trust_codex_hook"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
     monkeypatch.chdir(repo)
     return calls
@@ -134,16 +135,22 @@ def test_start_on_main_fast_forwards_to_origin_and_never_drops_local_work(
 
 def test_concurrent_sessions_a_third_start_leaves_both_live(db, repo, started, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
-    for aid in ("sup1", "sup2"):
-        db.add_agent(Agent(aid, ws.id, "supervisor", "claude", None, "interactive", "idle",
-                           f"%{aid}", None, 0.0))
-    paused = []
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("sup1", "sup2"))
-    monkeypatch.setattr(agents, "pause", lambda db_, aid, **kw: paused.append(aid))
+
+    def launch(aid, ws_=ws, *a, **kw):
+        db.add_agent(Agent(aid, ws_.id, "supervisor", "claude", None, "interactive", "idle",
+                           f"%{aid}", None, float(len(db.list_agents(ws.id)))))
+        return db.get_agent(aid)
+
+    launch("sup1")
+    launch("sup2")
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, profile, **kw: launch("sup3", ws_))
+    # Alive until paused: a pause anywhere in start shows up as a session gone.
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: db.get_agent(a.id).status != "paused")
+    monkeypatch.setattr(agents, "pane_owners", lambda db_, panes=None: {})
     # No terminal to ask in: the new one starts here, alongside both.
     cli.start(prompt=None, provider=None, attach=False, watch=False, autopilot=None,
               branch=None, worktree=None)
-    assert [branch for branch, _, _ in started] == ["main"] and paused == []
+    assert [a.id for a in svc.live_here(db, ws)] == ["sup3", "sup2", "sup1"]
 
 
 def test_bare_brindle_always_starts_a_supervisor(db, repo, started, monkeypatch):
