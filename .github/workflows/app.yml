@@ -1,0 +1,88 @@
+# The desktop app (app/): Vitest, the front-end build, the shell's Rust tests
+# and a check that app/src/api/schema.ts still matches the engine's API schema,
+# on every pull request and push to main that touches the app, that schema,
+# the app's workflows or the pre-push hook's release-tag guard (tested in
+# app/scripts/publish_gate.test.ts). The Python suite (ci.yml) skips app-only
+# changes, so an app-only pull request runs only this.
+name: App
+
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "src/brindle/daemon/api-schema.json"
+      - ".github/workflows/app*.yml"
+      - ".githooks/pre-push"
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "src/brindle/daemon/api-schema.json"
+      - ".github/workflows/app*.yml"
+      - ".githooks/pre-push"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install
+        run: npm --prefix app ci
+      - name: Test
+        run: npm --prefix app test -- --run
+      - name: Build
+        run: npm --prefix app run build
+      # The engine and the app come from one commit, so their contract can't drift.
+      - name: API types match the engine's schema
+        run: |
+          npm --prefix app run gen:api
+          git diff --exit-code -- app/src/api/schema.ts \
+            || { echo "::error::app/src/api/schema.ts is stale: run npm --prefix app run gen:api and commit it"; exit 1; }
+
+  rust:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Tauri's Linux build dependencies (as app/scripts/linux-build.Dockerfile).
+      - name: Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential file pkg-config \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/src-tauri/target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-test-${{ runner.os }}-
+      # The shell embeds the front end's dist/ at compile time.
+      - name: Front end for the shell
+        run: |
+          mkdir -p app/dist
+          [ -f app/dist/index.html ] || echo '<!doctype html>' > app/dist/index.html
+      - name: Test
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml

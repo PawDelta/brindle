@@ -6,13 +6,28 @@
 # After pushing a PR branch, `scripts/ci_local.sh --report` runs the default
 # legs (host and Linux on 3.12; --full for 3.11-3.13 too) and puts a green or
 # red `local-ci` status on the commit, naming the legs it ran.
+#
+# An app-v* tag signs and publishes a desktop app release (app-release.yml),
+# and agents push with the owner's login: such a push (or deletion) is refused
+# unless BRINDLE_RELEASE_TAG_OK=1, which SKIP_LOCAL_CI doesn't bypass.
+refs="$(cat)"
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/tags/app-v*)
+      if [ "${BRINDLE_RELEASE_TAG_OK:-}" != 1 ]; then
+        echo "pre-push: ${remote_ref#refs/tags/} is an app release tag; set BRINDLE_RELEASE_TAG_OK=1 to push it" >&2
+        exit 1
+      fi ;;
+  esac
+done <<< "$refs"
 [ "${SKIP_LOCAL_CI:-}" = 1 ] && exit 0
 root="$(git rev-parse --show-toplevel)"
 zero=0000000000000000000000000000000000000000
 while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [ -n "$local_sha" ] || continue
   [ "$local_sha" = "$zero" ] && continue          # deleting a branch: nothing to test
   echo "pre-push: local CI (quick) on ${local_sha:0:12}; SKIP_LOCAL_CI=1 to skip" >&2
   "$root/scripts/ci_local.sh" --quick --rev "$local_sha" >&2 || {
     echo "pre-push: local CI failed; not pushing" >&2; exit 1; }
-done
+done <<< "$refs"
 exit 0

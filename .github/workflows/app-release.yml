@@ -1,0 +1,899 @@
+# The desktop app's release, on an app-v<version> tag (the version in
+# app/package.json). The `macos` job builds once per architecture, each on
+# a runner of that architecture (aarch64-apple-darwin on Apple Silicon,
+# x86_64-apple-darwin on Intel: the bundled engine is built for the runner's
+# own architecture only), with the Tauri CLI, signed with the Developer ID when
+# the Apple secrets are set and its updater bundle signed with the minisign key
+# when TAURI_SIGNING_PRIVATE_KEY is set. With notarization credentials, Tauri
+# notarizes the .app; the job then notarizes and staples the DMG as well, and
+# fails unless Gatekeeper (spctl) accepts both the .app and the DMG as
+# Notarized Developer ID. Once both have passed, `macos-publish` writes one
+# latest.json naming each architecture's own updater bundle and signature, and
+# publishes both DMGs, both updater bundles and latest.json to the site's
+# public downloads (served as pawdelta.com/brindle/downloads/desktop/).
+# Without the Apple secrets the builds are unsigned and only kept as workflow
+# artifacts: nothing unsigned is published. app/README.md lists the secrets
+# and variables.
+#
+# The engine the app bundles is this repo's own, at the tagged commit:
+# build_engine.sh packs src/ and the engine's project files from this
+# checkout. An app release therefore carries whatever engine main had at that
+# commit, which may be ahead of the latest PyPI release.
+#
+# Beside it the `linux` job builds the AppImage and the .deb on ubuntu-22.04
+# (x86_64) with app/scripts/smoke_bundle.sh --linux, which also checks them
+# (the .deb's control file, each binary's --version under xvfb), and publishes
+# them to the same downloads. They need no OS signing; they carry no updater
+# bundle yet (latest.json lists the Macs only).
+#
+# The `windows` job builds the Windows app (the WSL thin client: the engine
+# runs inside WSL, see app/src-tauri/src/wsl.rs) as an unsigned NSIS
+# installer, after running the WSL client's tests on Windows. Windows code
+# signing is an owner purchase, so it is only kept as a workflow artifact,
+# never published.
+#
+# Nothing here makes a GitHub Release: publish.yml (PyPI) runs on published
+# releases, and app tags stay out of it.
+#
+# Secrets: the jobs that read the Apple, Tauri or AWS secrets (macos,
+# macos-publish, linux) run in the `desktop-release` GitHub environment, which
+# holds the Apple and Tauri secrets and the TAURI_UPDATER_PUBKEY variable,
+# admits only app-v* tags and needs the owner's approval. The release role's
+# OIDC trust accepts that environment's subject.
+#
+# Release candidates: an app-v<X.Y.Z>-rc<N> tag (package.json version
+# X.Y.Z-rc<N>, e.g. 0.2.0-rc.1) publishes under brindle/downloads/desktop/rc/<version>/
+# only, with its own latest.json there, and copies that manifest to
+# brindle/downloads/desktop/rc/latest.json, the rc channel rc builds check
+# (app/src-tauri/src/updates.rs `endpoint`); it never writes or overwrites
+# brindle/downloads/desktop/latest.json or the stable brindle*.dmg / AppImage /
+# .deb names. Only a final app-v<X.Y.Z> tag updates those.
+#
+# Run by hand (workflow_dispatch) it builds and keeps the artifacts and never
+# publishes: a dispatch is not a pushed tag (publish_gate.sh), and it runs
+# outside the desktop-release environment, so it gets none of its secrets and
+# builds unsigned.
+#
+# Network and Apple: every step that downloads (rustup, npm ci, apt-get, the
+# Tauri builds, which fetch their bundlers' tools and sign and notarize with
+# Apple) goes through app/scripts/retry.sh; the DMG's notarization and
+# staple through app/scripts/notarize_dmg.sh, which retries each call to
+# Apple; the .app's staple and Gatekeeper's checks retry in place.
+# app/docs/release-failures.md has every failed run and what fixed it.
+#
+# A tag's run that fails is not re-run: rc.7's re-run never started
+# (startup_failure, no jobs), and a re-run would publish its Linux bundles
+# again. Fix the cause and push the next release candidate's tag.
+#
+# Every night (schedule), or by hand with nightly: true, the `nightly` job
+# instead builds the unsigned bundle and runs it against the real engine:
+# brindle installed from this checkout, then app/scripts/smoke_bundle.sh
+# --engine, whose app starts the daemon and must get its GET /v1/meta
+# answered. It never publishes, and no other job runs on the schedule.
+name: App release
+
+on:
+  push:
+    tags: ["app-v*"]
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      nightly:
+        description: "Run the real-engine smoke (the nightly job) instead of a release build"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SITE_DOWNLOADS: https://pawdelta.com/brindle/downloads/desktop
+  S3_PREFIX: brindle/downloads/desktop
+  # The AWS CLI's own retries (sts, s3 cp), with backoff, for the publish steps.
+  AWS_RETRY_MODE: adaptive
+  AWS_MAX_ATTEMPTS: "8"
+
+jobs:
+  # One build per Mac architecture, each on a runner of that architecture:
+  # build_engine.sh builds the bundled engine for the machine it runs on only
+  # (app/docs/bundled-engine.md, "One architecture per build"), so a
+  # universal build would carry an engine for one of them only.
+  # macos-15-intel is GitHub's x86_64 image (macos-13, the older Intel label,
+  # was retired in December 2025). Nothing is published from here: the
+  # `macos-publish` job does that once both have passed.
+  macos:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    name: macos (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            runner: macos-latest
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    # Only a pushed app-v* tag runs in the environment that holds the secrets.
+    environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+      # build_engine.sh packs brindle from this checkout, at its HEAD (the tag).
+      BRINDLE_SRC: ${{ github.workspace }}
+      BRINDLE_REF: HEAD
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./app/package.json').version")"
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "app-v$version" ]; then
+            echo "::error::tag $REF_NAME does not match app/package.json version $version (want app-v$version)"
+            exit 1
+          fi
+          # A release candidate (app-v*-rc*) publishes under rc/<version>/ only.
+          case "$version" in *-rc*) rc=true path="rc/$version" ;; *) rc=false path="$version" ;; esac
+          { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; } >> "$GITHUB_OUTPUT"
+
+      # The runner must be the architecture it builds: build_engine.sh refuses
+      # any other target.
+      - name: Runner architecture
+        run: |
+          machine="$(uname -m)"
+          [ "$machine" = arm64 ] && machine=aarch64
+          if [ "$machine" != "$ARCH" ]; then
+            echo "::error::runner is $(uname -m), this job builds $TARGET"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # GitHub's macOS, Ubuntu and Windows images ship rustup (this workflow
+      # keeps to GitHub's own actions and setup-uv, so no toolchain action).
+      # build_engine.sh builds brindle's wheel with uv.
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Rust toolchain
+        run: |
+          bash app/scripts/retry.sh rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          bash app/scripts/retry.sh rustup target add --toolchain stable "$TARGET"
+          rustc --version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/src-tauri/target
+            !app/src-tauri/target/release/bundle
+            !app/src-tauri/target/*/release/bundle
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ matrix.target }}-
+      - name: Install
+        run: bash app/scripts/retry.sh npm --prefix app ci
+
+      # Which of the optional secrets are set. Only those reach the build's
+      # environment, so a missing one means "skip that step", never "use ''".
+      # Set up after npm ci and the caches and cleared after the DMG's
+      # notarization, so only the build and that step see them.
+      - name: Signing setup
+        id: signing
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          export_env() {  # name: multi-line safe
+            local delim
+            delim="EOF_$(openssl rand -hex 8)"
+            { echo "$1<<$delim"; printf '%s\n' "${!1}"; echo "$delim"; } >> "$GITHUB_ENV"
+          }
+          signed=false notarized=false updater=false
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            signed=true
+            for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do export_env "$v"; done
+            if [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_PRIVATE_KEY" ]; then
+              notarized=true
+              key="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY.p8"
+              printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key"
+              chmod 600 "$key"
+              export APPLE_API_KEY_PATH="$key"
+              for v in APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH; do export_env "$v"; done
+            elif [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              notarized=true
+              for v in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do export_env "$v"; done
+            else
+              echo "::warning::no notarization credentials (APPLE_API_* or APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID): signed but not notarized"
+            fi
+          else
+            echo "::warning::APPLE_CERTIFICATE / APPLE_SIGNING_IDENTITY not set: building unsigned; nothing will be published"
+          fi
+          # The updater's public key is committed (tauri.conf.json's
+          # plugins.updater.pubkey). The TAURI_UPDATER_PUBKEY variable is
+          # optional; when set it must be that same key.
+          pubkey="$(jq -r '.plugins.updater.pubkey' app/src-tauri/tauri.conf.json)"
+          if [ -n "$TAURI_UPDATER_PUBKEY" ] && [ "$TAURI_UPDATER_PUBKEY" != "$pubkey" ]; then
+            echo "::error::the TAURI_UPDATER_PUBKEY variable differs from tauri.conf.json's plugins.updater.pubkey"
+            exit 1
+          fi
+          conf="$RUNNER_TEMP/release.conf.json"
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && [ -n "$pubkey" ]; then
+            updater=true
+            for v in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do export_env "$v"; done
+            echo '{"bundle": {"createUpdaterArtifacts": true}}' > "$conf"
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set: no updater bundle or latest.json"
+            echo '{"bundle": {"createUpdaterArtifacts": false}}' > "$conf"
+          fi
+          { echo "signed=$signed"; echo "notarized=$notarized"; echo "updater=$updater"; echo "conf=$conf"; } >> "$GITHUB_OUTPUT"
+
+      # build_engine.sh signs the engine in Tauri's beforeBuildCommand, before
+      # Tauri imports APPLE_CERTIFICATE itself (at bundling), so the identity
+      # must already be in a keychain codesign searches. A throwaway keychain
+      # with a random password, removed at the end of the job.
+      - name: Signing keychain
+        if: steps.signing.outputs.signed == 'true'
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/brindle-signing.keychain-db"
+          kcpw="$(openssl rand -hex 24)"
+          echo "::add-mask::$kcpw"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          p12="$RUNNER_TEMP/signing.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$p12"
+          security import "$p12" -k "$kc" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+          rm -f "$p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
+          # Search it first, then the existing user keychains.
+          read -r -a existing <<<"$(security list-keychains -d user | tr -d '"' | xargs)"
+          security list-keychains -d user -s "$kc" "${existing[@]}"
+          security find-identity -v -p codesigning "$kc" | grep -F "$APPLE_SIGNING_IDENTITY" >/dev/null \
+            || { echo "::error::$APPLE_SIGNING_IDENTITY is not in the signing keychain"; exit 1; }
+          echo "SIGNING_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+
+      # Tauri signs the app, the engine inside it (build_engine.sh) and the DMG,
+      # notarizes and staples the .app, then makes the DMG and the updater
+      # bundle from the stapled .app. The Tauri CLI runs straight from app/
+      # (npm ci above installed it); the signing setup's variables reach it
+      # through $GITHUB_ENV. Tried twice: Tauri's own codesign --timestamp and
+      # notarytool calls to Apple aren't retried, and a second build reuses
+      # the first's compiled code and engine (build_engine.sh's stamp).
+      - name: Build (${{ matrix.target }})
+        id: build
+        working-directory: app
+        env:
+          CONF: ${{ steps.signing.outputs.conf }}
+        run: bash scripts/retry.sh -n 2 -d 30 npx tauri build --target "$TARGET" --bundles app,dmg --config "$CONF"
+
+      - name: Locate bundles
+        id: bundle
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle="app/src-tauri/target/$TARGET/release/bundle"
+          shopt -s nullglob
+          dmgs=("$bundle"/dmg/brindle_"$VERSION"_*.dmg)
+          if [ "${#dmgs[@]}" != 1 ]; then
+            echo "::error::want exactly one brindle_${VERSION}_*.dmg in $bundle/dmg, found ${#dmgs[@]}"
+            ls -l "$bundle/dmg" || true
+            exit 1
+          fi
+          { echo "dir=$bundle"; echo "app=$bundle/macos/brindle.app"; echo "dmg=${dmgs[0]}"; } >> "$GITHUB_OUTPUT"
+
+      # Tauri staples the .app straight after notarization, but Apple's ticket
+      # is sometimes not downloadable yet, and Tauri carries on without one
+      # (rc.4's Intel build: "Accepted", then "does not have a ticket stapled").
+      # Retry until the ticket is there; fail if it never comes.
+      - name: Staple the app
+        if: steps.signing.outputs.notarized == 'true'
+        env:
+          APP: ${{ steps.bundle.outputs.app }}
+        run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if xcrun stapler validate "$APP" >/dev/null 2>&1; then
+              echo "ticket stapled (attempt $attempt)"
+              exit 0
+            fi
+            xcrun stapler staple "$APP" || true
+            sleep 30
+          done
+          xcrun stapler validate "$APP" || { echo "::error::no notarization ticket for the .app after 10 tries"; exit 1; }
+
+      # Tauri notarizes only the .app. The DMG around it needs its own
+      # submission and ticket, or Gatekeeper rejects the download itself
+      # ("Unnotarized Developer ID") before the app inside is ever checked.
+      # The script retries its upload, its wait and its staple apart (rc.8's
+      # Intel build lost Apple's connection while stapling, error 68).
+      - name: Notarize and staple the DMG
+        if: steps.signing.outputs.notarized == 'true'
+        env:
+          DMG: ${{ steps.bundle.outputs.dmg }}
+        run: bash app/scripts/notarize_dmg.sh "$DMG"
+
+      # No later step needs the signing material: blank it and remove the key file.
+      - name: Clear signing secrets
+        if: always()
+        run: |
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_KEY \
+                   APPLE_API_ISSUER APPLE_API_KEY_PATH APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                   TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            echo "$v=" >> "$GITHUB_ENV"
+          done
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/signing.p12"
+          if [ -n "${SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" || true
+          fi
+
+      # What a downloader's Mac will decide, checked on what is about to be
+      # published: the .app as an executable and the DMG as a download must
+      # both be accepted as Notarized Developer ID. Otherwise the job fails
+      # and nothing from either architecture is published.
+      - name: Gatekeeper
+        id: gatekeeper
+        if: steps.signing.outputs.notarized == 'true'
+        env:
+          APP: ${{ steps.bundle.outputs.app }}
+          DMG: ${{ steps.bundle.outputs.dmg }}
+        run: |
+          assess() {  # what, spctl args...
+            local what="$1" out attempt; shift
+            # spctl can ask Apple too: a failed assessment is tried again, and
+            # a real rejection fails every try.
+            for attempt in 1 2 3; do
+              out="$(spctl -a -vvv "$@" 2>&1)" && break
+              [ "$attempt" != 3 ] || { echo "$out"; echo "::error::Gatekeeper rejects the $what"; return 1; }
+              echo "spctl (try $attempt of 3): $out"
+              sleep 20
+            done
+            echo "$out"
+            if ! grep -q ': accepted$' <<<"$out" || ! grep -qx 'source=Notarized Developer ID' <<<"$out"; then
+              echo "::error::the $what is not accepted as Notarized Developer ID"
+              return 1
+            fi
+          }
+          # stapler validate asks Apple's ticket service, which can drop the
+          # connection (rc.5: "The network connection was lost", error 68).
+          # Retry a few times; a missing ticket still fails every try.
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler validate "$APP"; then break; fi
+            [ "$attempt" = 5 ] && { echo "::error::stapler validate failed 5 times for the .app"; exit 1; }
+            sleep 20
+          done
+          assess app -t exec "$APP"
+          assess DMG -t open --context context:primary-signature "$DMG"
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+
+      - name: Collect
+        id: collect
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUNDLE: ${{ steps.bundle.outputs.dir }}
+          DMG: ${{ steps.bundle.outputs.dmg }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+          NOTARIZED: ${{ steps.gatekeeper.outputs.verified == 'true' }}
+          UPDATER: ${{ steps.signing.outputs.updater }}
+        run: |
+          out="$RUNNER_TEMP/desktop/$VERSION"
+          mkdir -p "$out"
+          cp "$DMG" "$out/brindle_${VERSION}_${ARCH}.dmg"
+          if [ "$UPDATER" = true ]; then
+            cp "$BUNDLE/macos/brindle.app.tar.gz" "$out/brindle_${VERSION}_${ARCH}.app.tar.gz"
+            cp "$BUNDLE/macos/brindle.app.tar.gz.sig" "$out/brindle_${VERSION}_${ARCH}.app.tar.gz.sig"
+          fi
+          # Read by macos-publish; beside the version's directory, never published.
+          jq -n --arg version "$VERSION" --arg arch "$ARCH" \
+            --argjson signed "$SIGNED" --argjson notarized "$NOTARIZED" --argjson updater "$UPDATER" \
+            '{version: $version, arch: $arch, signed: $signed, notarized: $notarized, updater: $updater}' \
+            > "$RUNNER_TEMP/desktop/macos-$ARCH.status.json"
+          echo "dir=$RUNNER_TEMP/desktop" >> "$GITHUB_OUTPUT"
+          ls -lR "$RUNNER_TEMP/desktop"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brindle-desktop-macos-${{ matrix.arch }}-${{ steps.version.outputs.version }}
+          path: ${{ steps.collect.outputs.dir }}
+          if-no-files-found: error
+
+  # Both Mac builds' files, one latest.json naming each architecture's own
+  # updater bundle and signature, and the publish, only once both builds
+  # (and their Gatekeeper checks) have passed.
+  macos-publish:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    needs: macos
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write   # the downloads bucket's role, through GitHub's OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./app/package.json').version")"
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "app-v$version" ]; then
+            echo "::error::tag $REF_NAME does not match app/package.json version $version (want app-v$version)"
+            exit 1
+          fi
+          # A release candidate (app-v*-rc*) publishes under rc/<version>/ only.
+          case "$version" in *-rc*) rc=true path="rc/$version" ;; *) rc=false path="$version" ;; esac
+          { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: brindle-desktop-macos-*-${{ steps.version.outputs.version }}
+          path: ${{ runner.temp }}/desktop
+          merge-multiple: true
+
+      # Signed, notarized and with an updater bundle only if both builds are.
+      - name: Combine (latest.json)
+        id: collect
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RC: ${{ steps.version.outputs.rc }}
+          DEST_PATH: ${{ steps.version.outputs.path }}
+        run: |
+          dir="$RUNNER_TEMP/desktop"
+          signed=true notarized=true updater=true
+          for arch in aarch64 x86_64; do
+            status="$dir/macos-$arch.status.json"
+            [ -f "$status" ] || { echo "::error::no $arch build"; exit 1; }
+            cat "$status"
+            [ "$(jq -r .version "$status")" = "$VERSION" ] || { echo "::error::the $arch build is not $VERSION"; exit 1; }
+            [ -f "$dir/$VERSION/brindle_${VERSION}_${arch}.dmg" ] || { echo "::error::no $arch DMG"; exit 1; }
+            [ "$(jq -r .signed "$status")" = true ] || signed=false
+            [ "$(jq -r .notarized "$status")" = true ] || notarized=false
+            [ "$(jq -r .updater "$status")" = true ] || updater=false
+          done
+          rm -f "$dir"/macos-*.status.json
+          if [ "$updater" = true ]; then
+            # The updater's static manifest: each architecture gets its own bundle and signature.
+            # A release candidate's manifest goes beside its files (rc/<version>/latest.json),
+            # never to the top-level latest.json installed apps read.
+            base="$SITE_DOWNLOADS/$DEST_PATH"
+            manifest="$dir/latest.json"
+            [ "$RC" != true ] || manifest="$dir/$VERSION/latest.json"
+            jq -n --arg version "$VERSION" \
+              --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg notes "brindle desktop $VERSION" \
+              --arg arm_url "$base/brindle_${VERSION}_aarch64.app.tar.gz" \
+              --arg arm_sig "$(cat "$dir/$VERSION/brindle_${VERSION}_aarch64.app.tar.gz.sig")" \
+              --arg x64_url "$base/brindle_${VERSION}_x86_64.app.tar.gz" \
+              --arg x64_sig "$(cat "$dir/$VERSION/brindle_${VERSION}_x86_64.app.tar.gz.sig")" \
+              '{version: $version, notes: $notes, pub_date: $date, platforms: {
+                 "darwin-aarch64": {signature: $arm_sig, url: $arm_url},
+                 "darwin-x86_64": {signature: $x64_sig, url: $x64_url}}}' > "$manifest"
+            cat "$manifest"
+          else
+            echo "::warning::not both builds have an updater bundle: no latest.json"
+          fi
+          { echo "signed=$signed"; echo "notarized=$notarized"; echo "dir=$dir"; } >> "$GITHUB_OUTPUT"
+          ls -lR "$dir"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brindle-desktop-macos-${{ steps.version.outputs.version }}
+          path: ${{ steps.collect.outputs.dir }}
+          if-no-files-found: error
+
+      # Published only from a pushed tag (never a manual run, even of an
+      # existing tag), only signed and notarized (both builds, each past its
+      # Gatekeeper check), and only once the bucket's role and name are set.
+      # The two steps after this one repeat the push check in their own `if:`
+      # as well (app/scripts/publish_gate.test.ts checks both).
+      - name: Publish?
+        id: publish
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SIGNED: ${{ steps.collect.outputs.signed }}
+          NOTARIZED: ${{ steps.collect.outputs.notarized }}
+          ROLE: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: bash app/scripts/publish_gate.sh
+
+      - name: AWS credentials
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        # GitHub's OIDC token exchanged for the release role's session (no
+        # third-party credentials action). The token is never printed.
+        run: |
+          set -euo pipefail
+          token="$(curl -fsS --retry 5 --retry-all-errors -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value // empty')"
+          if [ -z "$token" ]; then
+            echo "::error::no OIDC token from GitHub (does the job have id-token: write?)"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          creds="$(AWS_REGION="$REGION" aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "desktop-release-${GITHUB_RUN_ID}" \
+            --web-identity-token "$token" \
+            --duration-seconds 3600 \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+          unset token
+          read -r key secret session <<<"$creds"
+          if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$session" ]; then
+            echo "::error::assume-role-with-web-identity returned no credentials"
+            exit 1
+          fi
+          for v in "$key" "$secret" "$session"; do echo "::add-mask::$v"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_SESSION_TOKEN=$session"
+            echo "AWS_REGION=$REGION"
+            echo "AWS_DEFAULT_REGION=$REGION"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish to pawdelta.com/brindle/downloads/desktop/
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RC: ${{ steps.version.outputs.rc }}
+          DEST_PATH: ${{ steps.version.outputs.path }}
+          DIR: ${{ steps.collect.outputs.dir }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: |
+          dest="s3://$BUCKET/$S3_PREFIX"
+          # The versioned files first (immutable), then the stable DMG names the
+          # site links to (brindle.dmg stays the Apple Silicon one), and
+          # latest.json last, so the manifest never names a bundle that isn't
+          # there yet. A release candidate stops after its own directory
+          # (rc/<version>/, its latest.json included) and the rc channel's
+          # rc/latest.json, a copy of that manifest, which rc builds read.
+          aws s3 cp --recursive "$DIR/$VERSION" "$dest/$DEST_PATH" \
+            --cache-control "public, max-age=31536000, immutable"
+          if [ "$RC" = true ]; then
+            if [ -f "$DIR/$VERSION/latest.json" ]; then
+              aws s3 cp "$DIR/$VERSION/latest.json" "$dest/rc/latest.json" \
+                --cache-control no-cache --content-type application/json
+            fi
+            echo "Published brindle desktop $VERSION (release candidate, macOS) to $SITE_DOWNLOADS/$DEST_PATH/" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          for arch in aarch64 x86_64; do
+            aws s3 cp "$DIR/$VERSION/brindle_${VERSION}_${arch}.dmg" "$dest/brindle_${arch}.dmg" \
+              --cache-control no-cache --content-type application/x-apple-diskimage
+          done
+          aws s3 cp "$DIR/$VERSION/brindle_${VERSION}_aarch64.dmg" "$dest/brindle.dmg" \
+            --cache-control no-cache --content-type application/x-apple-diskimage
+          if [ -f "$DIR/latest.json" ]; then
+            aws s3 cp "$DIR/latest.json" "$dest/latest.json" \
+              --cache-control no-cache --content-type application/json
+          fi
+          echo "Published brindle desktop $VERSION (macOS aarch64 + x86_64) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
+
+  linux:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    runs-on: ubuntu-22.04
+    environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write   # the downloads bucket's role, through GitHub's OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./app/package.json').version")"
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "app-v$version" ]; then
+            echo "::error::tag $REF_NAME does not match app/package.json version $version (want app-v$version)"
+            exit 1
+          fi
+          # A release candidate (app-v*-rc*) publishes under rc/<version>/ only.
+          case "$version" in *-rc*) rc=true path="rc/$version" ;; *) rc=false path="$version" ;; esac
+          { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; } >> "$GITHUB_OUTPUT"
+
+      # Tauri's Linux build dependencies, and Xvfb for the smoke's --version
+      # checks (the same list as app/scripts/linux-build.Dockerfile).
+      - name: Linux build dependencies
+        run: |
+          bash app/scripts/retry.sh sudo apt-get update
+          bash app/scripts/retry.sh sudo apt-get install -y --no-install-recommends \
+            build-essential file pkg-config \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+            xvfb xauth
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # GitHub's macOS, Ubuntu and Windows images ship rustup (this workflow
+      # keeps to GitHub's own actions and setup-uv, so no toolchain action).
+      - name: Rust toolchain
+        run: |
+          bash app/scripts/retry.sh rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/src-tauri/target
+            !app/src-tauri/target/release/bundle
+            !app/src-tauri/target/*/release/bundle
+          key: cargo-${{ runner.os }}-host-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-host-
+
+      # Builds the AppImage and the .deb, then checks them: nothing that fails
+      # the smoke is kept or published.
+      - name: Build and smoke (AppImage, .deb)
+        run: bash app/scripts/smoke_bundle.sh --linux
+
+      - name: Collect
+        id: collect
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle=app/src-tauri/target/release/bundle
+          out="$RUNNER_TEMP/desktop/$VERSION"
+          mkdir -p "$out"
+          cp "$bundle/appimage/brindle_${VERSION}_amd64.AppImage" "$bundle/deb/brindle_${VERSION}_amd64.deb" "$out/"
+          echo "dir=$RUNNER_TEMP/desktop" >> "$GITHUB_OUTPUT"
+          ls -lR "$RUNNER_TEMP/desktop"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brindle-desktop-linux-${{ steps.version.outputs.version }}
+          path: ${{ steps.collect.outputs.dir }}
+          if-no-files-found: error
+
+      # The macOS job's gate without the signing check: only a pushed tag,
+      # with the bucket's role and name set.
+      - name: Publish?
+        id: publish
+        env:
+          PLATFORM: linux
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          ROLE: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: bash app/scripts/publish_gate.sh
+
+      - name: AWS credentials
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        # GitHub's OIDC token exchanged for the release role's session (no
+        # third-party credentials action). The token is never printed.
+        run: |
+          set -euo pipefail
+          token="$(curl -fsS --retry 5 --retry-all-errors -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value // empty')"
+          if [ -z "$token" ]; then
+            echo "::error::no OIDC token from GitHub (does the job have id-token: write?)"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          creds="$(AWS_REGION="$REGION" aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "desktop-release-${GITHUB_RUN_ID}" \
+            --web-identity-token "$token" \
+            --duration-seconds 3600 \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+          unset token
+          read -r key secret session <<<"$creds"
+          if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$session" ]; then
+            echo "::error::assume-role-with-web-identity returned no credentials"
+            exit 1
+          fi
+          for v in "$key" "$secret" "$session"; do echo "::add-mask::$v"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_SESSION_TOKEN=$session"
+            echo "AWS_REGION=$REGION"
+            echo "AWS_DEFAULT_REGION=$REGION"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish Linux bundles to pawdelta.com/brindle/downloads/desktop/
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RC: ${{ steps.version.outputs.rc }}
+          DEST_PATH: ${{ steps.version.outputs.path }}
+          DIR: ${{ steps.collect.outputs.dir }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: |
+          dest="s3://$BUCKET/$S3_PREFIX"
+          # The versioned files first (immutable), then the stable names the
+          # site links to (not for a release candidate: rc/<version>/ only).
+          aws s3 cp --recursive "$DIR/$VERSION" "$dest/$DEST_PATH" \
+            --cache-control "public, max-age=31536000, immutable"
+          if [ "$RC" = true ]; then
+            echo "Published brindle desktop $VERSION (release candidate, Linux) to $SITE_DOWNLOADS/$DEST_PATH/" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          aws s3 cp "$DIR/$VERSION/brindle_${VERSION}_amd64.AppImage" "$dest/brindle_amd64.AppImage" \
+            --cache-control no-cache --content-type application/vnd.appimage
+          aws s3 cp "$DIR/$VERSION/brindle_${VERSION}_amd64.deb" "$dest/brindle_amd64.deb" \
+            --cache-control no-cache --content-type application/vnd.debian.binary-package
+          echo "Published brindle desktop $VERSION (Linux) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="$(node -p "require('./app/package.json').version")"
+          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "app-v$version" ]; then
+            echo "::error::tag $REF_NAME does not match app/package.json version $version (want app-v$version)"
+            exit 1
+          fi
+          # A release candidate (app-v*-rc*) publishes under rc/<version>/ only.
+          case "$version" in *-rc*) rc=true path="rc/$version" ;; *) rc=false path="$version" ;; esac
+          { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # GitHub's macOS, Ubuntu and Windows images ship rustup (this workflow
+      # keeps to GitHub's own actions and setup-uv, so no toolchain action).
+      - name: Rust toolchain
+        run: |
+          bash app/scripts/retry.sh rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/src-tauri/target
+            !app/src-tauri/target/release/bundle
+            !app/src-tauri/target/*/release/bundle
+          key: cargo-${{ runner.os }}-host-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-host-
+      - name: Install
+        run: bash app/scripts/retry.sh npm --prefix app ci
+
+      # Unsigned: no Windows signing certificate, no updater bundle (latest.json lists the Macs only).
+      # Tried twice: Tauri downloads NSIS on a first build.
+      - name: Build (NSIS installer, unsigned)
+        run: bash app/scripts/retry.sh -n 2 npm --prefix app run tauri -- build --ci --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      # The WSL client's tests, with its Windows-only code compiled in (the
+      # build above left the front end's dist/ that the shell embeds).
+      - name: WSL client tests
+        run: |
+          cargo test --manifest-path app/src-tauri/Cargo.toml --lib wsl::
+
+      - name: Collect
+        id: collect
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle=app/src-tauri/target/release/bundle
+          out="$RUNNER_TEMP/desktop/$VERSION"
+          mkdir -p "$out"
+          cp "$bundle/nsis/brindle_${VERSION}_x64-setup.exe" "$out/"
+          echo "dir=$RUNNER_TEMP/desktop" >> "$GITHUB_OUTPUT"
+          ls -lR "$RUNNER_TEMP/desktop"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brindle-desktop-windows-unsigned-${{ steps.version.outputs.version }}
+          path: ${{ steps.collect.outputs.dir }}
+          if-no-files-found: error
+
+  nightly:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # GitHub's macOS, Ubuntu and Windows images ship rustup (this workflow
+      # keeps to GitHub's own actions and setup-uv, so no toolchain action).
+      - name: Rust toolchain
+        run: |
+          bash app/scripts/retry.sh rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/src-tauri/target
+            !app/src-tauri/target/release/bundle
+            !app/src-tauri/target/*/release/bundle
+          key: cargo-${{ runner.os }}-host-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-host-
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Install tmux
+        run: bash app/scripts/retry.sh brew install tmux
+      # The engine of this same commit, so the smoke tests one commit's engine and app.
+      - name: Install the engine
+        run: |
+          bash app/scripts/retry.sh uv tool install "$GITHUB_WORKSPACE"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/brindle" --version
+          if ! "$HOME/.local/bin/brindle" daemon --help >/dev/null 2>&1; then
+            echo "::error::this commit's brindle has no daemon command"
+            exit 1
+          fi
+      - name: Install
+        run: bash app/scripts/retry.sh npm --prefix app ci
+      - name: Bundle smoke against the real engine
+        run: bash app/scripts/smoke_bundle.sh --engine
+      - name: Stop the daemon
+        if: always()
+        run: brindle daemon stop || true
+      - name: Daemon log
+        if: failure()
+        run: cat "$HOME/.brindle/app-daemon.log" || true

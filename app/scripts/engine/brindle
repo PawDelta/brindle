@@ -1,0 +1,48 @@
+#!/bin/sh
+# brindle, from the engine brindle.app carries (Contents/Resources/engine,
+# built by app/scripts/build_engine.sh): the engine's own Python, isolated
+# from the person's (-I: no PYTHON* variables, user site-packages or cwd on
+# sys.path), with the engine's bin (this brindle, its tmux) first on PATH for
+# everything it starts. Found through any symlink to this file, as the app's
+# `install_cli` puts one on PATH. -B: nothing is written into the signed
+# bundle; its bytecode was compiled when it was built.
+#
+# PATH keeps only its absolute directories (with none set, sh makes up one
+# with `.` in it), each once, and macOS's own last when it lacks them (env
+# -i, a launchd job): brindle keeps its Pro sign-in in the Keychain through
+# /usr/bin/security, and without it would fall back to a key file and read
+# as signed out; it finds processes with ps (docs/bundled-engine.md).
+self=$0
+while [ -L "$self" ]; do
+  link=$(/usr/bin/readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(/usr/bin/dirname "$self")/$link ;;
+  esac
+done
+engine=$(cd "$(/usr/bin/dirname "$self")/.." && pwd -P)
+dirs=$engine/bin
+set -f
+IFS=:
+for dir in ${PATH:-} /usr/bin /bin /usr/sbin /sbin; do
+  case $dir in
+    /*) case ":$dirs:" in
+          *":$dir:"*) ;;
+          *) dirs=$dirs:$dir ;;
+        esac ;;
+  esac
+done
+unset IFS
+set +f
+PATH=$dirs
+export PATH
+# The engine's build (BUILD, hex), on the command line of everything this
+# runs, a daemon included: how the app tells its own engine's daemon from an
+# older build's (Python keeps -X options in sys._xoptions, and ignores them).
+build=
+[ -r "$engine/BUILD" ] && read -r build < "$engine/BUILD"
+case $build in
+  "" | *[!0-9a-f]*) set -- -m brindle "$@" ;;
+  *) set -- -X "brindle-build=$build" -m brindle "$@" ;;
+esac
+exec "$engine/python/bin/python3" -I -B "$@"

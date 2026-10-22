@@ -62,9 +62,10 @@ post_status() {   # post_status STATE DESCRIPTION: the `local-ci` commit status,
   fi
 }
 
-# Docs-only changes aren't tested. The change is everything since the commit
-# branched from origin/main (or, for a commit on main, the commit itself).
-is_doc() { case "$1" in *.md|docs/*|assets/*|LICENSE|CLA.md) return 0 ;; *) return 1 ;; esac; }
+# Changes to docs or the desktop app (app/, which has its own tests) only
+# aren't tested. The change is everything since the commit branched from
+# origin/main (or, for a commit on main, the commit itself).
+is_doc() { case "$1" in *.md|docs/*|assets/*|LICENSE|CLA.md|app/*) return 0 ;; *) return 1 ;; esac; }
 if [ "$FORCE" = 0 ]; then
   base="$(git -C "$ROOT" merge-base "$SHA" origin/main 2>/dev/null || true)"
   [ -z "$base" ] || [ "$base" = "$SHA" ] && base="$(git -C "$ROOT" rev-parse --verify -q "$SHA^" || true)"

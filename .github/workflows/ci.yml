@@ -1,15 +1,15 @@
 name: CI
 
 # One Linux and one macOS job on every pull request and push to main. A push
-# that only changes docs runs nothing. A pull request always gets both test
-# checks, because they are required to merge: when it only changes docs, the
-# jobs start and skip their steps, so the checks report success under their
-# usual names. The local pre-push tests are off for now; scripts/ci_local.sh
-# still works by hand.
+# that only changes docs or the desktop app (app/, tested by app.yml) runs
+# nothing. A pull request always gets both test checks, because they are
+# required to merge: when it only changes docs or the app, the jobs start and
+# skip their steps, so the checks report success under their usual names. The
+# local pre-push tests are off for now; scripts/ci_local.sh still works by hand.
 on:
   push:
     branches: [main]
-    paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md"]
+    paths-ignore: ["**/*.md", "*.md", "docs/**", "assets/**", "LICENSE", "CLA.md", "app/**"]
   pull_request:
   workflow_dispatch:
   workflow_call:   # a release runs the same two jobs
@@ -37,7 +37,7 @@ jobs:
           code=false
           while IFS= read -r f; do
             case "$f" in
-              *.md|docs/*|assets/*|LICENSE|CLA.md) ;;
+              *.md|docs/*|assets/*|LICENSE|CLA.md|app/*) ;;
               *) code=true ;;
             esac
           done < <(git diff --name-only "$BASE_SHA"...HEAD)

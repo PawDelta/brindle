@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+src-tauri/target/
+src-tauri/gen/
+src-tauri/engine/
+src-tauri/notices/
+shots/out/
+e2e/out/

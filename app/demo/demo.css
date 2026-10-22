@@ -1,0 +1,5 @@
+/* The app's styles, with Tailwind told where the classes live: the demo
+   builds from this folder, and the app's sources are a level up. */
+@import "../src/styles.css";
+@source "../src";
+@source "../demo";
