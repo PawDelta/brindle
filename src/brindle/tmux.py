@@ -67,8 +67,10 @@ def _bin() -> str:
 
 
 def _argv(server: str | None) -> list[str]:
-    bin_ = _bin()
-    return [bin_, "-L", server] if server else [bin_]
+    # -u: UTF-8 output even when the caller's locale is unset (the desktop
+    # app's bundled engine starts from launchd with no LANG/LC_*, and tmux
+    # would otherwise print every non-ASCII byte as "_").
+    return [_bin(), "-u", "-L", server] if server else [_bin(), "-u"]
 
 
 def _base() -> list[str]:
