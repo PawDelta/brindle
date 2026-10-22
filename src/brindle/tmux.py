@@ -379,6 +379,8 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
 # Pane options counting a sidebar's crash restarts (see keep_sidebar_alive).
 SIDEBAR_RESTARTS = "@brindle_sidebar_restarts"
 SIDEBAR_RESTARTS_SINCE = "@brindle_sidebar_restarts_since"
+# Set once the hook has stopped restarting the pane: nothing will revive it.
+SIDEBAR_GAVE_UP = "@brindle_sidebar_gave_up"
 SIDEBAR_MAX_RESTARTS = 5
 SIDEBAR_RESTART_WINDOW = 60
 
@@ -403,6 +405,7 @@ n=$({show} {SIDEBAR_RESTARTS}); since=$({show} {SIDEBAR_RESTARTS_SINCE})
 if [ -z "$since" ] || [ $((now - since)) -ge {SIDEBAR_RESTART_WINDOW} ]; then n=0; since=$now; fi
 n=${{n:-0}}
 if [ "$n" -ge {SIDEBAR_MAX_RESTARTS} ]; then
+  {t} set-option -p -t {shlex.quote(pane)} {SIDEBAR_GAVE_UP} 1
   echo "{stamp}; restarted $n times in {SIDEBAR_RESTART_WINDOW}s, leaving it down" >> {log_q}
   exit 0
 fi

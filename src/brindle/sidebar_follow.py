@@ -80,8 +80,10 @@ def _valid_sidebar(pane: str | None, root_id: str) -> bool:
 def _drop_dead_sidebar(pane: str) -> bool:
     """For a launch or `brindle sidebar` (the person asking for it): close a
     sidebar pane left dead by too many crashes, so a fresh one replaces it.
-    True if it was dead."""
-    if tmux.window_alive(pane):
+    True if it was. Only once its hook has given up: a pane that is merely
+    dead has its respawn on the way, and killing it would cancel that (or
+    the process it just started) and reset its restart count."""
+    if tmux.get_pane_tag(pane, tmux.SIDEBAR_GAVE_UP) != "1":
         return False
     tmux.kill_pane(pane)
     return True
