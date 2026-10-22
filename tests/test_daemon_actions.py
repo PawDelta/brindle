@@ -570,29 +570,21 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
 def test_a_restarted_sign_in_ends_the_running_one_and_starts_afresh(world, monkeypatch):
     from brindle import providers, tmux
 
-    windows = {}            # terminal id -> [window name, argv, alive]
-    panes = {}              # pane -> terminal id
+    panes, alive = {}, {}   # pane -> terminal id; terminal id -> window alive
 
     def new_window(session, name, cwd, argv, env, tag):
         pane = f"%{len(panes) + 1}"
-        panes[pane] = tag[1]
-        windows[tag[1]] = [name, argv, True]
+        panes[pane], alive[tag[1]] = tag[1], True
         return pane
-
-    def kill_window(target):
-        windows[panes[target]][2] = False       # the window the running sign-in is in
 
     monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
     monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
     monkeypatch.setattr(tmux, "new_window", new_window)
-    monkeypatch.setattr(tmux, "kill_window", kill_window)
-    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
-        (pane, windows[tid][0], windows[tid][2], tid) for pane, tid in panes.items()])
-    code, first = _send("POST", "/v1/providers/codex/login")
-    assert (code, first["started"]) == (200, True)
+    monkeypatch.setattr(tmux, "kill_window", lambda pane: alive.update({panes[pane]: False}))
+    monkeypatch.setattr(tmux, "tagged_panes", lambda s, k: [(p, "login codex", alive[t], t) for p, t in panes.items()])
+    _, first = _send("POST", "/v1/providers/codex/login")
     code, again = _send("POST", "/v1/providers/codex/login", {"restart": True})
-    assert (code, again["started"], len(windows)) == (200, True, 2)
-    assert windows[first["terminal"]][2] is False and windows[again["terminal"]][2] is True
+    assert (code, again["started"], alive) == (200, True, {first["terminal"]: False, again["terminal"]: True})
 
 
 def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkeypatch):
