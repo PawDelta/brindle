@@ -7,13 +7,15 @@
         "answer": 0,
         "characters_of_tool_output_read": 6346,
         "wall_clock_seconds": 0.008,
-        "source_tool": "list_tasks"
+        "source_tool": "list_tasks",
+        "capture_file": "experiments/codemode/pilot/captures/traditional/list_tasks.json"
       },
       "code_mode": {
         "answer": 0,
-        "characters_of_tool_output_read": 415,
-        "wall_clock_seconds": 0.948,
-        "source_script": "experiments/codemode/pilot/code_mode_summary.py"
+        "characters_of_tool_output_read": 421,
+        "wall_clock_seconds": 0.5724,
+        "source_script": "experiments/codemode/pilot/code_mode_summary.py",
+        "capture_file": "experiments/codemode/pilot/captures/code_mode/stdout.txt"
       }
     },
     "Q2": {
@@ -25,43 +27,47 @@
         "check": "uv run python experiments/codemode/pilot/ground_truth.py && test -f experiments/codemode/pilot/answers.json && test -f experiments/codemode/pilot/GRADES.md",
         "characters_of_tool_output_read": 1907,
         "wall_clock_seconds": 0.386,
-        "source_tool": "get_progress"
+        "source_tool": "get_progress",
+        "capture_file": "experiments/codemode/pilot/captures/traditional/get_progress.json"
       },
       "code_mode": {
         "answer": "Milestone 2 (Pilot: 3 questions in both modes, graded), check: `uv run python experiments/codemode/pilot/ground_truth.py && test -f experiments/codemode/pilot/answers.json && test -f experiments/codemode/pilot/GRADES.md`",
         "milestone_number": 2,
         "milestone_title": "Pilot: 3 questions in both modes, graded",
         "check": "uv run python experiments/codemode/pilot/ground_truth.py && test -f experiments/codemode/pilot/answers.json && test -f experiments/codemode/pilot/GRADES.md",
-        "characters_of_tool_output_read": 415,
-        "wall_clock_seconds": 0.948,
-        "source_script": "experiments/codemode/pilot/code_mode_summary.py"
+        "characters_of_tool_output_read": 421,
+        "wall_clock_seconds": 0.5724,
+        "source_script": "experiments/codemode/pilot/code_mode_summary.py",
+        "capture_file": "experiments/codemode/pilot/captures/code_mode/stdout.txt"
       }
     },
     "Q3": {
       "question": "How many agents are active?",
       "traditional": {
-        "answer": 6,
-        "characters_of_tool_output_read": 1411,
+        "answer": 3,
+        "characters_of_tool_output_read": 1062,
         "wall_clock_seconds": 0.583,
-        "source_tool": "list_agents"
+        "source_tool": "list_agents",
+        "capture_file": "experiments/codemode/pilot/captures/traditional/list_agents.json"
       },
       "code_mode": {
-        "answer": 6,
-        "characters_of_tool_output_read": 415,
-        "wall_clock_seconds": 0.948,
-        "source_script": "experiments/codemode/pilot/code_mode_summary.py"
+        "answer": 3,
+        "characters_of_tool_output_read": 421,
+        "wall_clock_seconds": 0.5724,
+        "source_script": "experiments/codemode/pilot/code_mode_summary.py",
+        "capture_file": "experiments/codemode/pilot/captures/code_mode/stdout.txt"
       }
     }
   },
   "totals": {
     "traditional": {
-      "total_characters_read": 9664,
+      "total_characters_read": 9315,
       "total_wall_clock_seconds": 0.977
     },
     "code_mode": {
-      "total_characters_read": 415,
-      "total_wall_clock_seconds": 0.948,
-      "character_reduction_pct": 95.71
+      "total_characters_read": 421,
+      "total_wall_clock_seconds": 0.5724,
+      "character_reduction_pct": 95.48
     }
   }
 }
