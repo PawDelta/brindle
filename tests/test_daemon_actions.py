@@ -594,6 +594,37 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert len(typed) == 2
 
 
+def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, monkeypatch):
+    from brindle import tmux
+
+    opened, killed = [], []
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        opened.append((cwd, argv, tag[1])) or f"%{len(opened)}")
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
+        (f"%{i + 1}", "shell", True, tid) for i, (_, _, tid) in enumerate(opened)])
+    monkeypatch.setattr(tmux, "pane_window", lambda pane: "@" + pane[1:])
+    monkeypatch.setattr(tmux, "kill_window", killed.append)
+    code, first = _send("POST", "/v1/terminals/shell", {"cwd": str(repo)})
+    code2, second = _send("POST", "/v1/terminals/shell", {"cwd": str(repo)})
+    assert (code, code2, first["started"], second["started"]) == (200, 200, True, True)
+    assert first["terminal"] != second["terminal"] and first["target"] == "%1"
+    assert [(c, a) for c, a, _ in opened] == [(os.path.realpath(repo), ["/bin/zsh", "-l"])] * 2
+    # Typed into in the app's own tmux client, never through the API.
+    assert _send("POST", f"/v1/terminals/{first['terminal']}/input", {"text": "ls"})[0] == 404
+    assert _send("DELETE", f"/v1/terminals/{first['terminal']}")[0] == 200 and killed == ["@1"]
+    assert _send("DELETE", "/v1/terminals/t-0000000000000000")[0] == 404
+
+
+def test_a_shell_is_refused_outside_attached_repos(world, tmp_path, monkeypatch):
+    from brindle import tmux
+
+    monkeypatch.setattr(tmux, "new_window", lambda *a, **kw: pytest.fail("opened a shell"))
+    assert _send("POST", "/v1/terminals/shell", {"cwd": str(tmp_path)})[0] == 400
+    assert _send("POST", "/v1/terminals/shell", {})[0] == 400
+
+
 OPTIONS = ["Yes", "Yes, and don't ask again for npm test commands in /repo",
            "No, and tell Claude what to do differently (esc)"]
 SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}],

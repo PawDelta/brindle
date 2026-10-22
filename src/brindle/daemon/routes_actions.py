@@ -1428,6 +1428,23 @@ def terminal_input(db: DB, params: dict, body: Body) -> Any:
     return {"terminal": params["id"], "sent": True}
 
 
+def shell_terminal(db: DB, params: dict, body: Body) -> Any:
+    """The person's login shell (``$SHELL -l``) in ``cwd``, a new terminal each
+    call. ``cwd`` must be an attached repo's root or one of brindle's
+    worktrees of it. Not an agent: no hooks, no agent row."""
+    cwd = os.path.realpath(_get(body, "cwd", required=True))
+    allowed = {os.path.realpath(p) for w in db.find_workspaces() for p in (w.path, w.repo_root)}
+    if cwd not in allowed:
+        raise ServiceError("invalid", f"{cwd} isn't an attached repo or one of its worktrees")
+    return terminal.open_action(terminal.SHELL_KIND, [os.environ.get("SHELL") or "/bin/sh", "-l"], cwd=cwd, reuse=False)
+
+
+def close_terminal(db: DB, params: dict, body: Body) -> Any:
+    if not terminal.close_action(params["id"]):
+        raise ServiceError("not_found", f"no terminal {params['id']}", 404)
+    return {"terminal": params["id"], "closed": True}
+
+
 def put_key(db: DB, params: dict, body: Body) -> Any:
     """Store ``value`` as key ``name``, as ``brindle keys set NAME`` does.
     Write-only: the reply carries the last four characters, never the value,
@@ -1671,6 +1688,8 @@ ROUTES = [
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
     _post("/terminals/{id}/input", terminal_input),
+    _post("/terminals/shell", shell_terminal),
+    Route("/v1/terminals/{id}", _endpoint(close_terminal), methods=["DELETE"]),
     _post("/repos/clone", clone_repo),
     _post("/repos/open", open_repo),
     _post("/engine/upgrade", upgrade_engine),

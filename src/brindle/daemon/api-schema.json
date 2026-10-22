@@ -3225,6 +3225,14 @@
     },
     {
       "method": "POST",
+      "path": "/v1/terminals/shell"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/terminals/{id}"
+    },
+    {
+      "method": "POST",
       "path": "/v1/terminals/{id}/input"
     },
     {
