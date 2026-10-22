@@ -9,33 +9,34 @@ Ran [`experiments/codemode/codemode_real.py`](codemode_real.py) via `uv run pyth
 
 ## Characters Returned to the Model
 
-| Mode / Tool | Characters | Share of Traditional |
+| Mode / Tool | Initial Snapshot (chars) | Post-Review Snapshot (chars) |
 | --- | ---: | ---: |
-| Traditional: `list_tasks()` | 6,346 | 79.6% |
-| Traditional: `get_progress()` | 1,028 | 12.9% |
-| Traditional: `list_agents()` | 601 | 7.5% |
-| **Traditional Total (3 tool responses)** | **7,975** | **100.0%** |
-| **Code-Mode Summary (single script output)** | **286** | **3.6%** |
+| Traditional: `list_tasks()` | 6,346 | 6,346 |
+| Traditional: `get_progress()` | 1,028 | 1,531 |
+| Traditional: `list_agents()` | 601 | 858 |
+| **Traditional Total (3 tool responses)** | **7,975** | **8,735** |
+| **Code-Mode Summary (single script output)** | **286** | **327** |
+| **Net Reduction** | **7,689 (96.4%)** | **8,408 (96.3%)** |
 
-- **Net reduction**: **7,689 characters saved (96.4% reduction)**.
-- The largest contributor to traditional context bloat was `list_tasks()` (6,346 chars), which returned 27 historical cancelled tasks with full branch, dependency, and file lists when 0 tasks were actually queued.
-- `get_progress()` (1,028 chars) included 4 trailing quota/learning advisory notes on top of the goal and milestone status.
-- `list_agents()` (601 chars) included 3 paused supervisor sessions alongside the 2 active agents.
+- The largest contributor to traditional context bloat was `list_tasks()` (6,346 chars), which returned 27 historical cancelled tasks with full branch, dependency, and file lists when 0 tasks were actually queued (`0 pending, 0 held`).
+- `get_progress()` (1,028–1,531 chars) included trailing quota and learned-rule advisory notes on top of the goal and milestone status.
+- `list_agents()` (601–858 chars) included 3 paused supervisor sessions alongside the active agents.
 
-## Summary Agreement
+## Summary Agreement and Renderer Validation
 
 **Do the summaries agree?** **Yes (`summaries_agree: True`).**
 
-Both modes report the exact same state:
-- **Tasks**: 0 queued, 27 cancelled (27 total).
-- **Progress**: `Autopilot on. Goal: Run a code-mode experiment on brindle's real read-only tools (agy worker), and report traditional vs code-mode output sizes.` with 1 milestone (`0 of 1 milestones verified`) and 4 notes.
-- **Agents**: 2 active (`1bb5847a:idle`, `311d6ecb:processing`) and 3 paused (5 total).
+- Traditional mode and code-mode use independent extraction paths (`_traditional_reference_summary` regex extraction vs. token/line parsers `parse_tasks`, `parse_progress`, `parse_agents`) and cross-check that the authoritative milestone count line (`<done> of <total> milestones verified.`) matches the number of rendered milestone rows.
+- `validate_against_renderers()` in `codemode_real.py` also validates the parsers directly against `tasks.list_text` and `autopilot.progress` using an in-memory `DB(":memory:")` across:
+  - Empty task output (`"No pending or cancelled tasks."`), both single-repo and multi-repo (`## <label> (<root>)`) sections.
+  - Task state field parsing for `pending`, `held` (both counted in `queued`), and `cancelled`, including when branch names or `full=True` task text contain words like `pending` or `cancelled`.
+  - All milestone state markers rendered by `autopilot.progress`: `○` (`pending` / `not_done`), `✓` (`passed`), `✗` (`failed` / `regressed`), `◐` (`working`), and `◌` (`waiting` / `checking`).
 
-Code-mode output (286 chars):
+Code-mode output (327 chars):
 ```text
-tasks: 0 queued, 27 cancelled (of 27)
-progress: Autopilot on. Goal: Run a code-mode experiment on brindle's real read-only tools (agy worker), and report traditional vs code-mode output sizes. | milestones=1 notes=4
-agents: 2 active (1bb5847a:idle, 311d6ecb:processing), 3 paused (of 5)
+tasks: 0 queued (0 pending, 0 held), 27 cancelled (of 27)
+progress: Autopilot on. Goal: Run a code-mode experiment on brindle's real read-only tools (agy worker), and report traditional vs code-mode output sizes. | verified=0/1 notes=5
+agents: 3 active (1bb5847a:idle, 311d6ecb:processing, bd619bc9:processing), 3 paused (of 6)
 ```
 
 ## Failures and Observations
