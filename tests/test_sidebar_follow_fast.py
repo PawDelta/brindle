@@ -1,6 +1,7 @@
 """The tmux follow hook should avoid starting the full CLI."""
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -163,3 +164,55 @@ def test_sidebar_survives_only_while_the_brindle_session_is_attached(db, monkeyp
     sidebar_follow.sidebar_follow(db, "worker_s")
 
     assert moved == [("%sidebar", "%worker")]
+
+
+@pytest.mark.parametrize("restarts, respawned", [("", True), ("5", False)])
+def test_sidebar_restarts_its_own_pane_after_a_crash_until_the_cap(
+        tmp_path, monkeypatch, restarts, respawned):
+    # A crash, or a re-exec into a half-installed engine: tmux's pane-died
+    # hook on the sidebar's pane alone runs it again there, until it has been
+    # restarted SIDEBAR_MAX_RESTARTS times in a short while.
+    from brindle import workspaces
+
+    calls = tmp_path / "calls"
+    (tmp_path / "n").write_text(restarts)
+    (tmp_path / "since").write_text(str(int(time.time())) if restarts else "")
+    fake = tmp_path / "tmux"
+    fake.write_text(f"""#!/bin/sh
+printf '%s\\0' "$@" >> {calls}; printf '\\036' >> {calls}
+case "$*" in
+  *split-window*) echo %7;;
+  *show-options*_since) cat {tmp_path}/since;;
+  *show-options*_restarts) cat {tmp_path}/n;;
+esac
+""")
+    fake.chmod(0o755)
+    monkeypatch.setenv("BRINDLE_TMUX_BIN", str(fake))
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path))
+    monkeypatch.setattr(sidebar_follow, "_sidebar_position", lambda ws: "left")
+    monkeypatch.setattr(workspaces, "workspace_env", lambda ws: {"FOO": "x"})
+    db = SimpleNamespace(set_sidebar_pane=lambda root, pane: None)
+
+    sidebar_follow._create_sidebar(db, "root", SimpleNamespace(path=str(tmp_path)), "%1")
+
+    made = [c.split("\0")[:-1] for c in calls.read_text().split("\036")[:-1]]
+    flat = [a for c in made for a in c]
+    assert "-g" not in flat
+    died, remain = flat.index("pane-died"), flat.index("remain-on-exit")
+    assert flat[died - 3:died] == ["-p", "-t", "%7"] and flat[remain - 3:remain + 2] == [
+        "-p", "-t", "%7", "remain-on-exit", "failed"]
+    hook = flat[died + 1]
+    # What tmux runs, formats expanded, once the pane's process exits with status 1.
+    shell = shlex.split(hook)[2].replace("#{pane_dead_status}", "1").replace("##", "#")
+    subprocess.run(["/bin/sh", "-c", shell], check=True)
+
+    after = calls.read_text().split("\036")[len(made):-1]
+    respawns = [c.split("\0")[:-1] for c in after if "respawn-pane" in c]
+    log = (tmp_path / "sidebar.log").read_text()
+    assert "sidebar exited with status 1" in log
+    if respawned:
+        assert [r[r.index("respawn-pane"):] for r in respawns] == [
+            ["respawn-pane", "-t", "%7", "-c", str(tmp_path), "-e", "FOO=x"]]
+        assert "restarting it (1/5)" in log
+    else:
+        assert respawns == [] and "leaving it down" in log

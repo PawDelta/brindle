@@ -376,6 +376,58 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
     return pane
 
 
+# Pane options counting a sidebar's crash restarts (see keep_sidebar_alive).
+SIDEBAR_RESTARTS = "@brindle_sidebar_restarts"
+SIDEBAR_RESTARTS_SINCE = "@brindle_sidebar_restarts_since"
+SIDEBAR_MAX_RESTARTS = 5
+SIDEBAR_RESTART_WINDOW = 60
+
+
+def sidebar_respawn_script(pane: str, cwd: str, env: dict[str, str], log: Path) -> str:
+    """The shell script ``pane``'s pane-died hook runs, with the dead
+    process's exit status as ``$1``: it runs the sidebar's command again in
+    ``pane`` (respawn-pane keeps neither the cwd nor the ``-e`` environment,
+    so both are given again) and logs that to ``log``, unless the pane has
+    already been restarted SIDEBAR_MAX_RESTARTS times within
+    SIDEBAR_RESTART_WINDOW seconds: then it logs that it gives up and leaves
+    the dead pane showing its error. Plain sh and tmux, so it still works
+    when the engine itself is what fails to start."""
+    t = shlex.join([shutil.which(_bin()) or _bin(), *_base()[1:]])
+    env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
+    respawn = shlex.join(["respawn-pane", "-t", pane, "-c", cwd, *env_args])
+    show = f"{t} show-options -p -q -v -t {shlex.quote(pane)}"
+    log_q = shlex.quote(str(log))
+    stamp = "$(date '+%Y-%m-%d %H:%M:%S') sidebar exited with status $1"
+    return f"""now=$(date +%s)
+n=$({show} {SIDEBAR_RESTARTS}); since=$({show} {SIDEBAR_RESTARTS_SINCE})
+if [ -z "$since" ] || [ $((now - since)) -ge {SIDEBAR_RESTART_WINDOW} ]; then n=0; since=$now; fi
+n=${{n:-0}}
+if [ "$n" -ge {SIDEBAR_MAX_RESTARTS} ]; then
+  echo "{stamp}; restarted $n times in {SIDEBAR_RESTART_WINDOW}s, leaving it down" >> {log_q}
+  exit 0
+fi
+{t} set-option -p -t {shlex.quote(pane)} {SIDEBAR_RESTARTS} $((n + 1))
+{t} set-option -p -t {shlex.quote(pane)} {SIDEBAR_RESTARTS_SINCE} "$since"
+echo "{stamp}; restarting it ($((n + 1))/{SIDEBAR_MAX_RESTARTS})" >> {log_q}
+{t} {respawn}
+"""
+
+
+def keep_sidebar_alive(pane: str, cwd: str, env: dict[str, str], log: Path) -> None:
+    """Restart the sidebar in ``pane`` whenever its process exits nonzero (a
+    crash, or an upgrade re-exec into a half-installed engine), with no
+    waiting between tries: ``remain-on-exit failed`` keeps just that pane around after a
+    failed exit, and a hook on just that pane respawns it (see
+    sidebar_respawn_script). A zero exit, the person quitting, closes the
+    pane as before. Both are pane options, never global ones, so no other
+    pane is touched; they move with the pane wherever the sidebar goes."""
+    # run-shell expands formats: keep any "#" of ours literal.
+    script = sidebar_respawn_script(pane, cwd, env, log).replace("#", "##")
+    shell = shlex.join(["/bin/sh", "-c", script, "brindle-sidebar"]) + " #{pane_dead_status}"
+    _tmux_batch([["set-option", "-p", "-t", pane, "remain-on-exit", "failed"],
+                 ["set-hook", "-p", "-t", pane, "pane-died", f"run-shell -b {shlex.quote(shell)}"]])
+
+
 def window_alive(target: str, server: object = _THIS_SERVER) -> bool:
     """Whether ``target`` (a pane or window id) is alive. ``server`` names
     another tmux server to ask (a private socket name, or None for the

@@ -106,9 +106,10 @@ def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> st
     from brindle.providers import brindle_invocation
     from brindle.workspaces import workspace_env
 
+    env = workspace_env(ws)
     pane = tmux.split_left(target_pane, ws.path, [*brindle_invocation(), "watch", "--sidebar"],
-                           workspace_env(ws), columns=SIDEBAR_COLUMNS,
-                           position=_sidebar_position(ws))
+                           env, columns=SIDEBAR_COLUMNS, position=_sidebar_position(ws))
+    tmux.keep_sidebar_alive(pane, ws.path, env, brindle_home() / "sidebar.log")
     tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)
     db.set_sidebar_pane(root_id, pane)
     return pane
