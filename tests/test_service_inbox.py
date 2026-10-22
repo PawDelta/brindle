@@ -91,6 +91,26 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
     assert all((i.fix, i.action.path) == ("codex_hook_trust", "/v1/setup/codex-hook") for i in got if kind == "setup")
 
 
+def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(db, repo):
+    from brindle import agents, autopilot
+
+    ws = workspaces.create(db, str(repo), "feat/ask").workspace
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.add_autopilot("r1")
+    autopilot.need_user(db, "r1", "Commit .brindle/.gitignore?", ask=True)
+
+    def cards():
+        return [i for i in inbox.items(db, str(repo), panes={"@1": True}) if i.kind == "question"]
+
+    db.enqueue("r1", "Assigned task finished.", "w1")
+    db.pop_pending("r1")
+    agents.handle_hook(db, "r1", "prompt-submit", {"prompt": "Assigned task finished.\n"})
+    assert [i.agent_id for i in cards()] == ["r1"]
+    agents.handle_hook(db, "r1", "prompt-submit", {"prompt": "yes, commit it"})
+    assert cards() == []
+    assert db.get_autopilot("r1").question is None
+
+
 def test_inbox_asks_no_sign_in_of_agents_failed_before_the_cause_was_kept(db, repo):
     """Reviewer round 1: the owner's worker failed (brief undelivered) before
     brindle kept why, so after the upgrade its cause is unknown: it must not

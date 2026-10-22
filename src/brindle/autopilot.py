@@ -1167,13 +1167,18 @@ def answered(db: DB, root_id: str) -> None:
 
 def user_spoke(db: DB, agent: Agent) -> None:
     """The user typed into the supervisor's chat: whatever blocked autopilot
-    is theirs to have answered, so it may drive again. An open question stays
-    open (the message may be about something else) until the supervisor says
-    it's answered. Nothing here re-arms a reminder (#209): brindle can't
-    always tell the user from whatever else woke the chat."""
+    is theirs to have answered, so it may drive again. That includes the
+    supervisor's open question: the user has replied and the conversation has
+    moved on, and a supervisor that never calls ``answered`` would otherwise
+    show "has a question" indefinitely. Nothing here re-arms a reminder
+    (#209): brindle can't always tell the user from whatever else woke the
+    chat."""
     ap = db.get_autopilot(agent.id)
-    if ap and ap.state in ("blocked", "stalled") and not held(ap):
+    if ap and ap.state in ("blocked", "stalled"):
+        asked = held(ap)
         db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0)
+        if asked:
+            bus.publish_agent(db, "autopilot.answered", agent.id)
     elif ap:
         db.update_autopilot(agent.id, nudges=0)
 
