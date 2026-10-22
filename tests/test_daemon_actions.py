@@ -239,7 +239,7 @@ def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monke
     code, reply = _send("POST", "/v1/sessions", {"repo": world.repo_root})
     assert code == 409 and spawned == []
     conflict = reply["conflict"]
-    assert [c["key"] for c in conflict["choices"]] == ["o", "n", "p"]
+    assert [c["key"] for c in conflict["choices"]] == ["o", "a", "n", "p"]
     assert [s["id"] for s in conflict["sessions"]] == ["sup"]
 
 
@@ -548,6 +548,7 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
     monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
     monkeypatch.setattr(tmux, "ensure_session", ensure_session)
     monkeypatch.setattr(tmux, "new_window", new_window)
+    monkeypatch.setattr(tmux, "kill_window", lambda pane: [w.__setitem__(2, False) for w in windows.values()])
     monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
         (f"%{i + 1}", name, alive, tid) for i, (tid, (name, _, alive)) in enumerate(windows.items())])
     code, reply = _send("POST", path)
@@ -565,6 +566,10 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
     windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
     code, again = _send("POST", path)
     assert (code, again["started"], len(windows)) == (200, True, 2)
+    if command == "login":      # "Try again": ends the running sign-in and starts afresh
+        code, fresh = _send("POST", path, {"restart": True})
+        assert (code, fresh["started"], len(windows)) == (200, True, 3)
+        assert windows[again["terminal"]][2] is False
 
 
 def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkeypatch):
@@ -587,6 +592,34 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "a\nb"})[0] == 400
     assert _send("POST", "/v1/terminals/wk/input", {"text": "ab-12"})[0] == 404
     assert len(typed) == 2
+
+
+def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, tmp_path, monkeypatch):
+    from brindle import tmux
+
+    opened, killed = [], []
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        opened.append((cwd, argv, tag[1])) or f"%{len(opened)}")
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
+        (f"%{i + 1}", "shell", True, tid) for i, (_, _, tid) in enumerate(opened)])
+    monkeypatch.setattr(tmux, "pane_window", lambda pane: "@" + pane[1:])
+    monkeypatch.setattr(tmux, "kill_window", killed.append)
+    code, first = _send("POST", "/v1/terminals/shell", {"cwd": str(repo)})
+    code2, second = _send("POST", "/v1/terminals/shell", {"cwd": str(repo)})
+    assert (code, code2, first["started"], second["started"]) == (200, 200, True, True)
+    assert first["terminal"] != second["terminal"] and first["target"] == "%1"
+    assert [(c, a) for c, a, _ in opened] == [(os.path.realpath(repo), ["/bin/zsh", "-l"])] * 2
+    # Typed into in the app's own tmux client, never through the API.
+    assert _send("POST", f"/v1/terminals/{first['terminal']}/input", {"text": "ls"})[0] == 404
+    assert _send("DELETE", f"/v1/terminals/{first['terminal']}")[0] == 200 and killed == ["@1"]
+    assert _send("DELETE", "/v1/terminals/t-0000000000000000")[0] == 404
+    # Refused outside attached repos, and without a cwd.
+    count = len(opened)
+    assert _send("POST", "/v1/terminals/shell", {"cwd": str(tmp_path)})[0] == 400
+    assert _send("POST", "/v1/terminals/shell", {})[0] == 400
+    assert len(opened) == count
 
 
 OPTIONS = ["Yes", "Yes, and don't ask again for npm test commands in /repo",

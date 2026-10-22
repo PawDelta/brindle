@@ -68,8 +68,25 @@ def _agent_for_window(db: DB, ws: Workspace, window: str) -> Agent | None:
 
 
 def _valid_sidebar(pane: str | None, root_id: str) -> bool:
-    return (bool(pane) and pane != SIDEBAR_DISMISSED and tmux.window_alive(pane)
+    """``pane`` is ``root_id``'s sidebar. A dead one still is: tmux keeps a
+    crashed sidebar's pane (see tmux.start_sidebar) while its respawn is on
+    the way, or after too many crashes to show the error, and following or
+    replacing it then would start a second sidebar with a fresh restart count."""
+    return (bool(pane) and pane != SIDEBAR_DISMISSED
+            and (tmux.window_alive(pane) or tmux.pane_window(pane) is not None)
             and tmux.get_pane_tag(pane, SIDEBAR_TAG) == root_id)
+
+
+def _drop_dead_sidebar(pane: str) -> bool:
+    """For a launch or `brindle sidebar` (the person asking for it): close a
+    sidebar pane left dead by too many crashes, so a fresh one replaces it.
+    True if it was. Only once its hook has given up: a pane that is merely
+    dead has its respawn on the way, and killing it would cancel that (or
+    the process it just started) and reset its restart count."""
+    if tmux.get_pane_tag(pane, tmux.SIDEBAR_GAVE_UP) != "1":
+        return False
+    tmux.kill_pane(pane)
+    return True
 
 
 def _note_sidebar_move(why: str, pane: str, target_pane: str) -> None:
@@ -106,11 +123,14 @@ def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> st
     from brindle.providers import brindle_invocation
     from brindle.workspaces import workspace_env
 
-    pane = tmux.split_left(target_pane, ws.path, [*brindle_invocation(), "watch", "--sidebar"],
-                           workspace_env(ws), columns=SIDEBAR_COLUMNS,
-                           position=_sidebar_position(ws))
+    # The pane opens on a stand-in: the sidebar itself starts only once the
+    # pane is set to respawn it, so even a crash on startup comes back.
+    pane = tmux.split_left(target_pane, ws.path, tmux.SIDEBAR_STAND_IN, {},
+                           columns=SIDEBAR_COLUMNS, position=_sidebar_position(ws))
     tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)
     db.set_sidebar_pane(root_id, pane)
+    tmux.start_sidebar(pane, ws.path, [*brindle_invocation(), "watch", "--sidebar"],
+                       workspace_env(ws), brindle_home() / "sidebar.log")
     return pane
 
 
@@ -137,6 +157,8 @@ def bring_sidebar(db: DB, root_id: str, session: str, *, revive: bool = False) -
             return False
         sidebar = db.get_sidebar_pane(root_id)
         valid = _valid_sidebar(sidebar, root_id)
+        if valid and revive and _drop_dead_sidebar(sidebar):
+            valid = False
         if valid and tmux.pane_window(sidebar) == window:
             return True
         root_ws = db.get_workspace(root.workspace_id)

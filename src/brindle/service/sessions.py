@@ -22,7 +22,8 @@ from brindle.db import DB, Agent, Workspace
 from brindle.service.dto import SessionDTO
 from brindle.service.errors import ServiceError
 
-RUNNING_CHOICES = {"o": "open", "n": "new session in its own worktree", "p": "pause it and start fresh"}
+RUNNING_CHOICES = {"o": "open", "a": "start another here, alongside it",
+                   "n": "new session in its own worktree", "p": "pause it and start fresh"}
 PAUSED_CHOICES = {"r": "resume it"}
 NO_PAUSED = "no paused sessions here. Run `brindle` to start a fresh one."
 
@@ -132,14 +133,9 @@ def describe(s: sessions_mod.Session) -> str:
 
 
 def live_here(db: DB, ws: Workspace) -> list[Agent]:
-    """The live sessions (interactive agents) in this checkout."""
+    """The live sessions (interactive agents) in this checkout, newest first:
+    several can run in one checkout at once."""
     return [s.root for s in sessions_mod.live(db, ws.repo_root) if s.workspace.id == ws.id]
-
-
-def running_here(db: DB, ws: Workspace) -> Agent | None:
-    """The live session (its interactive agent) in this checkout, if any."""
-    live = live_here(db, ws)
-    return live[0] if live else None
 
 
 def cull_detached(repo_root: str | None = None) -> None:
@@ -174,9 +170,9 @@ def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | No
           live: list | None = None) -> Placed | Opened | Conflict:
     """Where a new session in ``ws``'s checkout runs, given the repo's live
     sessions (in any worktree). With some running and no ``choice``, a
-    Conflict: open one ("o"), start in a new worktree ("n"), or pause one and
-    start fresh here ("p"). ``live`` is the Conflict's list, to skip asking
-    tmux again."""
+    Conflict: open one ("o"), start another here alongside them ("a"), start
+    in a new worktree ("n"), or pause one and start fresh here ("p").
+    ``live`` is the Conflict's list, to skip asking tmux again."""
     live = sessions_mod.live(db, ws.repo_root) if live is None else live
     if not live:
         return Placed(ws)
@@ -187,14 +183,14 @@ def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | No
         raise ServiceError("invalid", f"no running session {session_id!r} to {RUNNING_CHOICES.get(choice, choice)}")
     if choice == "o":
         return Opened(picked.workspace, picked.root)
+    if choice == "a":
+        return Placed(ws)
     if choice == "n":
         created = session_worktree(db, ws)
         return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})")])
-    notes = []
-    if picked.workspace.id != ws.id:
-        agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
-        notes.append(Note(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back."))
-    return Placed(ws, notes)
+    # A session starts here next: keep its local models loaded.
+    agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
+    return Placed(ws, [Note(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")])
 
 
 def tidy_branch(db: DB, ws: Workspace) -> tuple[Workspace, list[Note]]:
@@ -235,26 +231,14 @@ def preflight(agent: str, provider: str | None, repo_root: str) -> list[str]:
     return doctor_mod.preflight(provider or load_profile(agent, repo_root).provider)
 
 
-def pause(db: DB, ws: Workspace, stop_procs: bool = True) -> list[Note]:
-    """At most one live session per checkout: pause any that's still running.
-    ``stop_procs=False`` when a detached cull follows (see agents.pause)."""
-    live = live_here(db, ws)
-    caller = os.environ.get("BRINDLE_AGENT_ID")
-    if caller and any(a.id == caller for a in live):
-        # Pausing kills the session's process tree, this command with it.
-        raise ServiceError("conflict", "this command would stop the session running it; "
-                           "run it from a terminal instead", 409)
-    notes = []
-    for a in live:
-        # A session starts here next: keep its local models loaded.
-        agents.pause(db, a.id, stop_procs=stop_procs, stop_local_models=False)
-        notes.append(Note(f"Paused the session that was still running here ({a.id}); "
-                          f"`brindle continue {a.id}` brings it back."))
-    # Chats left running in scratch sessions whose work moved into this repo.
-    for aid in scratch.pause_transferred_to(db, ws.repo_root):
-        notes.append(Note(f"Paused scratch session chat {aid}: its work moved into this repo; "
-                          f"`brindle continue {aid}` brings it back."))
-    return notes
+def pause_transferred(db: DB, ws: Workspace) -> list[Note]:
+    """Before a session starts or resumes in ``ws``'s repo: pause the chats
+    left running in scratch sessions whose work moved into it. Live sessions
+    in the repo keep running: several can share a checkout (their merges
+    into its branch take turns, see pipeline.base_lock)."""
+    return [Note(f"Paused scratch session chat {aid}: its work moved into this repo; "
+                 f"`brindle continue {aid}` brings it back.")
+            for aid in scratch.pause_transferred_to(db, ws.repo_root)]
 
 
 def supervisor_provider(repo_root: str, provider: str | None = None) -> str | None:
@@ -287,7 +271,7 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
     """A fresh supervisor session in ``repo_root``'s checkout, or (with
     ``branch``/``worktree``) in that worktree. With a session already running
     in the repo, a Conflict until ``choice`` and ``session_id`` say what to do
-    with it (see place)."""
+    (see place); only "p" pauses one, "a" starts this one alongside them."""
     notes: list[Note] = []
     if branch or worktree:
         ws = workspaces.checkout_for(db, repo_root, branch=branch, worktree=worktree)
@@ -301,7 +285,7 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
     problems = preflight(agents.SUPERVISOR, provider, ws.repo_root)
     if problems:
         raise ServiceError("unavailable", "; ".join(problems), 503)
-    notes += pause(db, ws, stop_procs=False)
+    notes += pause_transferred(db, ws)
     started = launch(db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
     # After the chat's window exists and is recorded: the cull's session
     # retention closes dropped sessions' windows by their stored pane ids,
@@ -347,13 +331,14 @@ def continue_(db: DB, ws: Workspace, session_id: str | None = None, *,
     """Pick up a paused session in ``ws``'s repo (``session_id``: one whose id
     starts with it; else the newest, or with ``ask`` and several paused, a
     Conflict listing them). A live session there with failed agents (or the
-    one ``session_id`` names) gets those restarted instead."""
+    one ``session_id`` names) gets those restarted instead. Other sessions
+    live in the checkout keep running either way."""
     from brindle import keystore, secrets
 
-    live = agents.find_running(db, ws, "supervisor") or next(
-        (a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and (agents.is_alive(a) or a.status == "failed")),
-        None,
-    )
+    chats = (a for a in reversed(db.list_agents(ws.id))
+             if a.mode == "interactive" and (not session_id or a.id.startswith(session_id))
+             and (agents.is_alive(a) or a.status == "failed"))
+    live = (None if session_id else agents.find_running(db, ws, "supervisor")) or next(chats, None)
     live_needs_recovery = False
     if live:
         workers = agents.tree(db, live.id)
@@ -386,7 +371,7 @@ def continue_(db: DB, ws: Workspace, session_id: str | None = None, *,
     else:
         chosen = available[0]
     others = [s for s in available if s.root.id != chosen.root.id]
-    notes = pause(db, ws)
+    notes = pause_transferred(db, ws)
     resumed = agents.resume(db, chosen.root.id, recovery_env=recovery_env)
     clear_credentials_block(db, chosen.root.id)
     return Continued("resumed", db.get_agent(chosen.root.id) or chosen.root, chosen.workspace,
@@ -397,14 +382,23 @@ def continue_(db: DB, ws: Workspace, session_id: str | None = None, *,
 
 
 def session_root(db: DB, cwd: str) -> str:
-    """This repo's current session: the one running here, else the newest
-    paused one."""
+    """This repo's current session: the one the calling agent belongs to,
+    else the newest running here, else the newest paused one."""
+    from brindle import autopilot as pilot
+
     try:
         ws = workspaces.adopt_root(db, cwd)
     except git.GitError:
         ws = scratch.for_origin(db, cwd) or workspaces.current(db)
         if ws is None:
             raise ServiceError("not_found", "no brindle session here", 404)
+    if caller := os.environ.get("BRINDLE_AGENT_ID"):
+        # Several sessions can run in one checkout: a command from a session's
+        # pane means that session, not the newest.
+        root = db.get_agent(pilot.root_of(db, caller))
+        home = db.get_workspace(root.workspace_id) if root else None
+        if home and home.repo_root == ws.repo_root:
+            return root.id
     live = agents.find_running(db, ws, "supervisor")
     if live:
         return live.id

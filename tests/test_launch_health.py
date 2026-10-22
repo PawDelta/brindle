@@ -231,7 +231,7 @@ def slow_background(monkeypatch):
 def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, slow_background):
     monkeypatch.chdir(repo)
     ws = workspaces.adopt_root(db, str(repo))
-    # A session still running here, which start must pause first.
+    # A session still running here, which keeps running alongside the new one.
     old = agents.spawn(db, ws, "supervisor", provider_name="shell")
     calls: list[list[str]] = []
     real = subprocess.run
@@ -249,7 +249,7 @@ def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, sl
     finally:
         tmux.kill_session(ws.tmux_session)
     assert elapsed < BUDGET
-    assert db.get_agent(old.id).status == "paused"
+    assert db.get_agent(old.id).status != "paused"
     # Retention and culling went to the detached helper instead.
     assert ["_cull", "--repo", ws.repo_root] in [argv[4:] for argv in detached]
     # Each subprocess start waits on costs wall time: about 30 now, 83 before.
@@ -402,6 +402,7 @@ def test_current_failures_report_safe_actions_and_effective_cooldown(db, health,
     denied = model_access.refused(a.profile, fp="effective-account")
     assert denied.key == cause
     assert (db.get_agent(a.id).status == "failed") == (cause == "launch_model")
+    assert db.get_agent(a.id).failed_why == ("model" if cause == "launch_model" else None)
     ws = db.get_workspace(a.workspace_id)
     assert route_health.pending() == ({(ws.repo_root, provider, "bedrock", "claude-opus-5-5", refused): 1}
                                       if refused else {})
@@ -1009,6 +1010,7 @@ def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, st
     assert (row["outcome"] == "delivery-failed") == (not started)
     assert len(reports) == (0 if started else 1)
     assert db.get_agent(a.id).status == ("processing" if started else "failed")
+    assert db.get_agent(a.id).failed_why == (None if started else "delivery")   # no sign-in fixes it
     if started:
         assert lh.inspect(db, a.id) == "pending" and reports == []
 

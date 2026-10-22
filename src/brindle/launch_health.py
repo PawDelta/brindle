@@ -287,6 +287,7 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
         # A tool approval only exists inside a running turn: never fail the worker.
         body = _approval_body(agent, screen)
     else:
+        db.update_agent(agent.id, failed_why="delivery")   # before the status: no sign-in to ask for
         db.update_agent(agent.id, status="failed")
         body = (f"Worker {agent.id} brief delivery failed: no turn was confirmed and automatic "
                 "re-delivery is exhausted or blocked by its pane. Its brief may be missing or left unsubmitted in the input box. "
@@ -569,6 +570,7 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     if cause and ws:
         model_access.refuse(agent.profile, cause, repo_root=ws.repo_root, fp=row["fingerprint"])
         if cause.key == MODEL.key:  # permanent for this profile; AUTH/CAPACITY may be transient
+            db.update_agent(agent.id, failed_why="model")
             db.update_agent(agent.id, status="failed")
         refused = route_health.provider_outcome(error_block)   # the status code only, never the text
         if refused:

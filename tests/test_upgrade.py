@@ -64,6 +64,7 @@ def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatc
     monkeypatch.setattr(upgrade.sys, "argv", ["brindle", "watch", "--sidebar"])
     monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: ["/venv/bin/brindle"])
     monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr("shutil.which", lambda command: None)
     attempts = []
 
     def execv(path, argv):
@@ -75,6 +76,24 @@ def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatc
 
     upgrade.reexec()
     assert len(attempts) == 3
+
+    monkeypatch.setattr(watch, "_log_to_file", lambda: None)
+    monkeypatch.setattr(watch.curses, "wrapper", lambda *a: watch.RESTART)
+    daemon = SimpleNamespace(command=None, clock=0)
+    monkeypatch.setattr(upgrade.time, "monotonic", lambda: daemon.clock)
+    monkeypatch.setattr("shutil.which", lambda command: daemon.command)
+
+    def replaced_engine(path, argv):
+        if path != "/replacement/bin/brindle":
+            assert daemon.clock == 0, "sidebar kept using the removed engine"
+            daemon.clock += 180
+            daemon.command = "/replacement/bin/brindle"
+            raise FileNotFoundError(path)
+        attempts.append(argv)
+
+    monkeypatch.setattr(upgrade.os, "execv", replaced_engine)
+    watch.run("/repo", sidebar=True)
+    assert attempts[-1] == ["/replacement/bin/brindle", "watch", "--sidebar"]
 
 
 @pytest.mark.variant("real incident: a same-version uv reinstall hardlinks the cached file, so sidebars never restarted")

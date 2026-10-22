@@ -163,3 +163,57 @@ def test_sidebar_survives_only_while_the_brindle_session_is_attached(db, monkeyp
     sidebar_follow.sidebar_follow(db, "worker_s")
 
     assert moved == [("%sidebar", "%worker")]
+
+
+@pytest.mark.parametrize("gave_up", [False, True])
+def test_sidebar_left_dead_by_crashes_follows_until_a_restart_by_hand(db, monkeypatch, gave_up):
+    """A crashed sidebar's pane stays (respawning, or capped and showing its
+    error): a window switch moves it like a live one rather than starting a
+    second sidebar with a fresh restart count. A launch or `brindle sidebar`
+    replaces it once its hook has given up, never while a respawn is pending."""
+    from brindle import agents
+
+    for ws_id, session in (("rootws", "root_s"), ("workerws", "worker_s")):
+        db.add_workspace(Workspace(ws_id, "/repo", ws_id, "worktree", ws_id, "main", f"/{ws_id}",
+                                   None, session, time.time()))
+    db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
+                       "%root", None, time.time()))
+    db.add_agent(Agent("w1", "workerws", "developer", "claude", "root1", "assign", "idle",
+                       "%worker", None, time.time()))
+    db.set_sidebar_pane("root1", "%sidebar")
+    windows = {"%root": "@r", "%worker": "@w", "%sidebar": "@r"}
+    tm = sidebar_follow.tmux
+    monkeypatch.setattr(tm, "active_window", {"root_s": "@r", "worker_s": "@w"}.get)
+    monkeypatch.setattr(tm, "pane_window", windows.get)
+    monkeypatch.setattr(tm, "pane_window_tag", lambda pane, tag: (windows.get(pane), "root1"))
+    monkeypatch.setattr(tm, "window_alive", lambda pane: pane != "%sidebar")
+    tags = {(p, tm.SIDEBAR_TAG): "root1" for p in windows} | {
+        ("%sidebar", tm.SIDEBAR_GAVE_UP): "1" if gave_up else None}
+    monkeypatch.setattr(tm, "get_pane_tag", lambda pane, tag: tags.get((pane, tag)) if pane in windows else None)
+    monkeypatch.setattr(tm, "pane_session", lambda pane: "root_s")
+    monkeypatch.setattr(tm, "session_attached", lambda session: False)
+    monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%worker")
+    monkeypatch.setattr(tm, "send_keys", lambda *a: None)
+    monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: windows.update({pane: windows[target]}))
+    monkeypatch.setattr(tm, "kill_pane", lambda pane: windows.pop(pane))
+    created = []
+
+    def create(db, root, ws, target):
+        created.append(target)
+        windows["%new"], tags[("%new", tm.SIDEBAR_TAG)] = windows[target], root
+        db.set_sidebar_pane(root, "%new")
+
+    for module in (sidebar_follow, agents):
+        monkeypatch.setattr(module, "_create_sidebar", create)
+    monkeypatch.setattr(agents, "_sidebar_position", lambda ws: "left")
+
+    sidebar_follow.sidebar_follow(db, "worker_s")
+
+    assert windows["%sidebar"] == "@w" and created == []
+
+    assert sidebar_follow.bring_sidebar(db, "root1", "worker_s", revive=True)
+    agents._ensure_sidebar(db, "root1", db.get_workspace("rootws"), "%worker")
+    if gave_up:
+        assert "%sidebar" not in windows and created == ["%worker"]
+    else:  # its respawn is on the way: left to it, in place
+        assert windows["%sidebar"] == "@w" and created == []

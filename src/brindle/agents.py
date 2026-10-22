@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import ExitStack
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
@@ -36,6 +37,7 @@ from brindle.sidebar_follow import (
     SIDEBAR_TAG,
     _agent_for_window,
     _create_sidebar,
+    _drop_dead_sidebar,
     _note_sidebar_move,
     _sidebar_lock,
     _sidebar_position,
@@ -798,7 +800,7 @@ def _ensure_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> No
     (a launch or relaunch brings it back) or has never run."""
     with _sidebar_lock(root_id, timeout=SIDEBAR_LOCK_TIMEOUT):
         existing = db.get_sidebar_pane(root_id)
-        if _valid_sidebar(existing, root_id):
+        if _valid_sidebar(existing, root_id) and not _drop_dead_sidebar(existing):
             assert existing is not None
             if tmux.pane_window(existing) != tmux.pane_window(target_pane):
                 _note_sidebar_move("launch", existing, target_pane)
@@ -2543,7 +2545,8 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
 
 def _branch_from_task(profile: str, task: str, agent_hint: str) -> str:
     words = re.findall(r"[A-Za-z0-9]+", task.lower())[:5]
-    return f"brindle/{profile}/{'-'.join(words) or 'task'}-{agent_hint}"
+    # Short enough that truncating the branch name never cuts off the hint.
+    return f"brindle/{profile}/{'-'.join(words)[:40].strip('-') or 'task'}-{agent_hint}"
 
 
 def delegate(
@@ -2589,40 +2592,69 @@ def delegate(
     why = model_problem(profile, caller_ws)
     if why:
         raise AgentError(why)
-    if isolate and branch:   # naming a branch must not reuse another identity's worktree
-        for other in db.find_workspaces(caller_ws.repo_root):
-            if other.branch == branch:
-                identity_lock.ensure_workspace(db, other)
-    if isolate:
-        caller_ws = workspaces.refresh_branch(db, caller_ws)
-        # merge_into applies to the supervisor's workers; a worker's own
-        # sub-workers still branch from (and merge back into) its branch.
-        merge_into = load_repo_config(caller_ws.repo_root).merge_into
-        base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
-        branch = branch or _branch_from_task(profile, task, new_id()[:4])
-        start = start or (base if git.branch_exists(caller_ws.repo_root, base) else "HEAD")
-        created = workspaces.create(
-            db, caller_ws.path, branch, base, fetch=False, start=start,
-            reuse_registered=True,
+    def start_worker(ws: Workspace) -> Agent:
+        # Startup dialogs are handled by the detached _after-launch helper, so
+        # handoff/assign return as soon as the window exists instead of polling
+        # the new pane for up to 30 seconds.
+        return spawn(
+            db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
+            done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
+            weight=weight,
         )
-        if created.setup and not created.setup.ok:
-            raise AgentError(f"workspace setup failed:\n{created.setup.log}")
-        ws = created.workspace
+
+    if isolate:
+        from brindle import pipeline
+
+        # The name create makes, so the checks below see the branch it reuses.
+        branch = workspaces.branch_name(caller_ws.repo_root, branch or _branch_from_task(profile, task, new_id()[:4]))
+        held = ExitStack()
+        try:
+            held.enter_context(pipeline.branch_start_lock(caller_ws.repo_root, branch))
+        except BlockingIOError:
+            raise AgentError(f"another worker is being started on branch {branch!r} right now; "
+                             "pick another branch name") from None
+        with held:   # until the worker's row says whose worktree this is
+            _check_branch_owner(db, caller, caller_ws.repo_root, branch)
+            caller_ws = workspaces.refresh_branch(db, caller_ws)
+            # merge_into applies to the supervisor's workers; a worker's own
+            # sub-workers still branch from (and merge back into) its branch.
+            merge_into = load_repo_config(caller_ws.repo_root).merge_into
+            base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
+            start = start or (base if git.branch_exists(caller_ws.repo_root, base) else "HEAD")
+            created = workspaces.create(
+                db, caller_ws.path, branch, base, fetch=False, start=start,
+                apply_prefix=False, reuse_registered=True,
+            )
+            if created.setup and not created.setup.ok:
+                raise AgentError(f"workspace setup failed:\n{created.setup.log}")
+            ws = created.workspace
+            agent = start_worker(ws)
     else:
         ws = caller_ws
-    # Startup dialogs are handled by the detached _after-launch helper, so
-    # handoff/assign return as soon as the window exists instead of polling
-    # the new pane for up to 30 seconds.
-    agent = spawn(
-        db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
-        done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-        weight=weight,
-    )
+        agent = start_worker(ws)
     from brindle import events
 
     events.emit(load_repo_config(caller_ws.repo_root),
                 "handoff" if mode.startswith("handoff") else "assign", ws, agent, actor=caller)
     return agent, ws
+
+
+def _check_branch_owner(db: DB, caller: Agent | None, repo_root: str, branch: str) -> None:
+    """Naming a branch must not reuse another identity's worktree, nor
+    another session's: several sessions can share a checkout."""
+    from brindle import autopilot as pilot
+    from brindle import identity_lock
+
+    mine = pilot.root_of(db, caller.id) if caller else None
+    for other in db.find_workspaces(repo_root):
+        if other.branch != branch:
+            continue
+        identity_lock.ensure_workspace(db, other)
+        owner = workspace_worker(db, other)
+        theirs = pilot.root_of(db, owner.id) if owner and owner.parent_id else None
+        if theirs and theirs != mine:
+            raise AgentError(f"branch {branch!r} belongs to session {theirs}'s worker "
+                             f"{owner.id}; pick another branch name")
 
 
 TASK_TRIM = 2000  # a worker's task can be long; the reviewer needs the gist, not the whole thing
@@ -3769,6 +3801,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         is_model = not is_rate_limit and not is_auth and bool(
             re.search(launch_health.SELECTED_MODEL, err_fields))
         if is_auth or is_model:
+            db.update_agent(agent_id, failed_why="auth" if is_auth else "model")
             db.set_status(agent_id, "failed")
             db.clear_permission_requests(agent_id)
             _note_reviewer_end(db, agent)

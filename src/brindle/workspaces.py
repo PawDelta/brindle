@@ -312,6 +312,13 @@ class Created:
     setup: SetupResult | None
 
 
+def branch_name(repo_root: str, branch: str, apply_prefix: bool = True) -> str:
+    """The branch ``create`` makes for ``branch``: with the repo's
+    ``branch_prefix`` (unless ``apply_prefix`` is off), sanitized."""
+    prefix = load_repo_config(repo_root).branch_prefix if apply_prefix else ""
+    return git.sanitize_branch(f"{prefix}{branch}")
+
+
 def create(
     db: DB,
     repo_path: str,
@@ -329,8 +336,7 @@ def create(
     it. Otherwise (``brindle new``) a taken branch is an error from git."""
     repo_root = git.main_repo_root(repo_path)
     cfg: RepoConfig = load_repo_config(repo_root)
-    prefix = cfg.branch_prefix if apply_prefix else ""
-    branch = git.sanitize_branch(f"{prefix}{branch}")
+    branch = branch_name(repo_root, branch, apply_prefix)
     base = base or cfg.base_branch or git.default_branch(repo_root)
     if branch == base:
         raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")

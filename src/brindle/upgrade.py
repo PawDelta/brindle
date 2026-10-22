@@ -18,13 +18,12 @@ from __future__ import annotations
 import importlib
 import os
 import pkgutil
+import shutil
 import sys
 import time
 from contextlib import asynccontextmanager
 
 import brindle
-
-REEXEC_WAIT_SECONDS = 120.0   # how long a sidebar waits for an upgrade to finish installing
 
 
 def preload() -> None:
@@ -97,20 +96,32 @@ def check_launch() -> None:
 
 def reexec() -> None:
     """Replace this process with a fresh run of the same brindle command, from
-    the install as it is now. Never returns."""
-    from brindle.providers import brindle_invocation
+    the install as it is now. Never returns.
 
-    argv = [*brindle_invocation(), *sys.argv[1:]]
+    An app replacement can remove the running engine's interpreter entirely.
+    Keep this pane alive until an engine is available, including when the
+    replacement is reachable through the installed CLI at a different path.
+    """
+    from brindle.providers import _in_worktree, brindle_invocation
+
     sys.stdout.flush()
     sys.stderr.flush()
     # An upgrade deletes the old environment before the new one is in place, so
     # the exec fails until the install is complete: wait for it, don't exit.
-    deadline = time.monotonic() + REEXEC_WAIT_SECONDS
     while True:
+        argv = [*brindle_invocation(), *sys.argv[1:]]
         try:
             os.execv(argv[0], argv)
             return      # only a fake returns
         except OSError:
-            if time.monotonic() >= deadline:
-                raise
+            # sys.executable still names the old engine after it is removed.
+            # Discover the installed launcher again on each pass; never use a
+            # worktree's venv, whose lifetime is shorter than this session's.
+            installed = shutil.which("brindle")
+            if installed and installed != argv[0] and not _in_worktree(installed):
+                try:
+                    os.execv(installed, [installed, *sys.argv[1:]])
+                    return      # only a fake returns
+                except OSError:
+                    pass
             time.sleep(0.5)

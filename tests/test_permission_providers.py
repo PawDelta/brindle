@@ -276,13 +276,14 @@ def test_codex_app_server_uses_local_protocol_and_ignores_notifications(monkeypa
     sent = [json.loads(line) for line in proc.stdin.getvalue().splitlines()]
     assert [m["method"] for m in sent] == ["initialize", "initialized", "hooks/list"]
     assert proc.killed and proc.waited
+    assert proc.env["CODEX_HOME"] == str(codex_hook.codex_home())   # the home whose trust it lists
 
 
 def _fake_codex_process(monkeypatch, stdout):
     from io import StringIO
     from types import SimpleNamespace
 
-    proc = SimpleNamespace(stdin=StringIO(), stdout=stdout, killed=False, waited=False)
+    proc = SimpleNamespace(stdin=StringIO(), stdout=stdout, killed=False, waited=False, env=None)
 
     def kill():
         proc.killed = True
@@ -291,8 +292,12 @@ def _fake_codex_process(monkeypatch, stdout):
         proc.waited = True
         return 0
 
+    def popen(*a, env=None, **kw):
+        proc.env = env
+        return proc
+
     proc.kill, proc.wait = kill, wait
-    monkeypatch.setattr(codex_hook.subprocess, "Popen", lambda *a, **kw: proc)
+    monkeypatch.setattr(codex_hook.subprocess, "Popen", popen)
     return proc
 
 
@@ -392,7 +397,8 @@ def test_install_codex_hook_dry_run_then_yes(monkeypatch):
     res = r.invoke(app, ["permissions", "install-codex-hook", "--yes"])
     assert res.exit_code == 0, res.output
     assert "trusted" in res.output
-    rec = permissions.load_store().codex_hook
+    [(home, rec)] = permissions.load_store().codex_hook.items()
+    assert home == os.path.realpath(codex_hook.codex_home())
     flag = codex_hook.config_flags()[1]
     assert rec == {"command": codex_hook.hook_command(),
                    "key": "/<session-flags>/config.toml:permission_request:0:0",
@@ -438,7 +444,8 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     monkeypatch.setattr(codex_hook, "TIMEOUT", 86430)
     codex_hook.trust("codex", codex_hook.inspect("codex"))  # the other build's trust
     with permissions.editing() as store:  # in the record format from before the definition was kept
-        store.codex_hook = {k: store.codex_hook[k] for k in ("command", "key", "hash")}
+        store.codex_hook = {home: {k: rec[k] for k in ("command", "key", "hash")}
+                            for home, rec in store.codex_hook.items()}
     monkeypatch.setattr(codex_hook, "TIMEOUT", 30)
     flag = codex_hook.config_flags()[1]
     assert flag in launch_argv(ws, mode="review")
@@ -447,6 +454,111 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     FakeAppServer.calls = []
     assert flag not in launch_argv(ws, mode="review")
     assert FakeAppServer.calls == [] and codex_hook.status() == codex_hook.REMOVED
+
+
+def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):
+    """Codex says the hook is untrusted and refuses the re-trust: the reviewer
+    starts without the hook, so the record must stop saying TRUSTED (the
+    warning and the supervisor's notice read it)."""
+    class RefusingCodex(FakeAppServer):
+        def __init__(self, binary, flags):
+            super().__init__(binary, [flags[0], flags[1] + "#build2"])
+
+        def call(self, method, params):
+            if method == "config/batchWrite":
+                raise codex_hook.CodexHookError("read-only config")
+            return super().call(method, params)
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    monkeypatch.setattr(codex_hook, "_AppServer", RefusingCodex)
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+    reviewer = worker(db, ws, id_="r1")
+    assert codex_hook.launch_flags(ws.path, review=True) == []
+    assert codex_hook.status() == codex_hook.MOVED
+    assert codex_hook.launch_warning("codex", ws.path)
+    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+
+
+def test_trust_written_but_not_verified_is_pending_not_removed(db, ws, monkeypatch):
+    """The write to Codex's config lands, then asking Codex fails: the config
+    holds a hash the record doesn't, which read as the person removing the trust
+    (never retried, supervisor not told). It's pending now, and the next launch recovers."""
+    class SilentAfterWrite(FakeAppServer):
+        wrote = False
+
+        def call(self, method, params):
+            if SilentAfterWrite.wrote and method == "hooks/list":
+                raise codex_hook.CodexHookError("codex app-server didn't answer")
+            out = super().call(method, params)
+            SilentAfterWrite.wrote |= method == "config/batchWrite"
+            return out
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    move_brindle(monkeypatch)  # a new hook: re-trusting writes a new hash
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+    reviewer = worker(db, ws, id_="r1")
+    monkeypatch.setattr(codex_hook, "_AppServer", SilentAfterWrite)
+    assert codex_hook.launch_flags(ws.path) == []
+    assert codex_hook.status() == codex_hook.MOVED
+    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)  # Codex answers again
+    assert codex_hook.config_flags(codex_hook.hook_command())[1] in codex_hook.launch_flags(ws.path)
+    assert codex_hook.status() == codex_hook.TRUSTED
+    (codex_hook.codex_home() / "config.toml").write_text("")  # a real removal is still one
+    assert codex_hook.status() == codex_hook.REMOVED
+
+
+def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
+    """Live: the app ran `<tool venv>/bin/python -P -m brindle`, a shell the
+    `brindle` shim; Codex has one trusted hash for the hook, so each process's
+    trust replaced the other's and the next launch stopped at 'Hooks need review'."""
+    venv = tmp_path / "tool" / "bin"
+    venv.mkdir(parents=True)
+    script = venv / "brindle"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    shim = tmp_path / "local-bin"
+    shim.mkdir()
+    (shim / "brindle").symlink_to(script)
+    py = venv / "python"
+    py.write_text("")
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(py), "-P", "-m", "brindle"])
+    from_app = codex_hook.hook_command()
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(shim / "brindle")])
+    assert codex_hook.hook_command() == from_app
+    assert str(script.resolve()) in from_app
+
+
+def test_codex_hook_trust_is_per_codex_home(ws, monkeypatch, tmp_path):
+    """Live: brindle's own Codex home (provider_homes) came into use while the
+    one trust on record (an older brindle's, a single record) was ~/.codex's.
+    Read against brindle's home, which has none, it was REMOVED, never trusted
+    again, and the inbox asked to fix it every time."""
+    from brindle import provider_homes
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))   # in the person's own home
+    store = permissions.store_path()
+    data = json.loads(store.read_text())
+    [own] = data["codex_hook"].values()
+    store.write_text(json.dumps({**data, "codex_hook": own}))   # the older brindle's single record
+    mine = tmp_path / "brindle-codex"
+    mine.mkdir()
+    (mine / provider_homes.SIGNED_IN).write_text("1\n")
+    monkeypatch.setenv("BRINDLE_CODEX_CONFIG_HOME", str(mine))
+    assert codex_hook.codex_home() == mine
+    assert codex_hook.status() == codex_hook.NEW
+    assert codex_hook.ensure("codex") == codex_hook.TRUSTED
+    assert codex_hook.status() == codex_hook.TRUSTED
+    assert "trusted_hash" in (mine / "config.toml").read_text()
+    assert permissions.load_store().codex_hook[os.path.realpath(os.environ["CODEX_HOME"])] == own
+    (mine / "config.toml").write_text("")   # the person takes it out of brindle's home
+    FakeAppServer.calls = []
+    assert codex_hook.ensure("codex") == codex_hook.REMOVED and FakeAppServer.calls == []
 
 
 def test_supervisor_is_told_once_when_brindle_cant_trust_its_hook(db, ws):

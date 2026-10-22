@@ -96,7 +96,7 @@ def started(repo, monkeypatch):
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     for name in ("_attach", "_cull_detached", "_local_models_detached", "_settings_sync_detached",
-                 "_pause_running", "_preflight", "_trust_codex_hook"):
+                 "_preflight", "_trust_codex_hook"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
     monkeypatch.chdir(repo)
     return calls
