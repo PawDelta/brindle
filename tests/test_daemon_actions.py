@@ -548,6 +548,7 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
     monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
     monkeypatch.setattr(tmux, "ensure_session", ensure_session)
     monkeypatch.setattr(tmux, "new_window", new_window)
+    monkeypatch.setattr(tmux, "kill_window", lambda pane: [w.__setitem__(2, False) for w in windows.values()])
     monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
         (f"%{i + 1}", name, alive, tid) for i, (tid, (name, _, alive)) in enumerate(windows.items())])
     code, reply = _send("POST", path)
@@ -565,22 +566,10 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
     windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
     code, again = _send("POST", path)
     assert (code, again["started"], len(windows)) == (200, True, 2)
-
-
-def test_a_restarted_sign_in_ends_the_running_one_and_starts_afresh(world, monkeypatch):
-    from brindle import providers, tmux
-    panes, alive = {}, {}  # pane -> terminal id; terminal id -> alive
-    monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
-    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
-    def new_window(s, n, c, a, e, tag):
-        panes[pane := f"%{len(panes) + 1}"], alive[tag[1]] = tag[1], True
-        return pane
-    monkeypatch.setattr(tmux, "new_window", new_window)
-    monkeypatch.setattr(tmux, "kill_window", lambda pane: alive.update({panes[pane]: False}))
-    monkeypatch.setattr(tmux, "tagged_panes", lambda s, k: [(p, "login codex", alive[t], t) for p, t in panes.items()])
-    _, first = _send("POST", "/v1/providers/codex/login")
-    code, again = _send("POST", "/v1/providers/codex/login", {"restart": True})
-    assert (code, again["started"], alive) == (200, True, {first["terminal"]: False, again["terminal"]: True})
+    if command == "login":      # "Try again": ends the running sign-in and starts afresh
+        code, fresh = _send("POST", path, {"restart": True})
+        assert (code, fresh["started"], len(windows)) == (200, True, 3)
+        assert windows[again["terminal"]][2] is False
 
 
 def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkeypatch):
