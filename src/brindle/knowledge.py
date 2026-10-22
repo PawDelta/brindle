@@ -20,6 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
+from brindle import bus
 from brindle.db import DB
 from brindle.pro.orgkey import GIT_TIMEOUT, normalize_remote
 
@@ -128,6 +129,14 @@ def note(db: DB, root_id: str, kind: str, payload: dict | None = None) -> None:
     ws = db.get_workspace(root.workspace_id) if root else None
     if ws is not None:
         append(db, repo_key(ws.repo_root), kind, payload or {}, session=root_id)
+
+
+def last_intent(db: DB, root_id: str) -> str | None:
+    """The summary session ``root_id`` last announced (its goal, then its
+    milestones' titles, one per line): kept after the goal itself is cleared."""
+    row = db.conn.execute("SELECT payload FROM kb_events WHERE session = ? AND kind = ?"
+                          " ORDER BY ts DESC, rowid DESC LIMIT 1", (root_id, INTENT)).fetchone()
+    return json.loads(row["payload"]).get("summary") if row else None
 
 
 def intents(db: DB, repo_key: str) -> list[dict]:
@@ -284,6 +293,8 @@ def record_decision(db: DB, repo_key: str, topic: str, body: str, rationale: str
                 "rationale": rationale, "scope": scope, "status": "accepted",
                 "link": link, "supersedes": old["id"] if old else None},
                actor=session, session=session)
+    bus.publish(db, "decision.recorded", root_id=session, repo_key=repo_key,
+                decision_id=decision_id, topic=topic, supersedes=old["id"] if old else None)
     return get_decision(db, decision_id), None
 
 
@@ -297,6 +308,8 @@ def propose_decision(db: DB, repo_key: str, topic: str, body: str, rationale: st
             "rationale": _one_line(rationale, 2000),
             "scope": [p for p in (_one_line(p, 200) for p in paths or []) if p],
             "status": "proposed"}, actor=actor)
+    bus.publish(db, "decision.proposed", agent_id=actor, repo_key=repo_key,
+                decision_id=decision_id)
     return get_decision(db, decision_id)
 
 

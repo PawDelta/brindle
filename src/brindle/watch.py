@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import brindle
 from brindle import agents, airgap, pricing, sidebar_follow, sidebar_logo, tmux, upgrade, view, watch_costs
 from brindle.db import DB
+from brindle.service.inbox import awaiting_review, needs_you, summary  # noqa: F401 - moved; callers keep using watch.*
 
 RESTART = "restart"      # what _loop returns when brindle was upgraded under it
 REFRESH_SECONDS = 2.0
@@ -104,34 +105,6 @@ def elide_middle(text: str, width: int) -> str:
     return text[:width - 1 - tail] + "…" + (text[-tail:] if tail else "")
 
 
-WORKERS = ("assign", "handoff")
-
-
-def awaiting_review(agent: dict, ws: dict) -> str | None:
-    """How a worker that reported and hasn't been approved yet reads, or None."""
-    if (agent.get("mode") in WORKERS and agent.get("reported")
-            and agent["status"] not in ("processing", "starting")):
-        state = ws.get("review_state")   # where it is in review (pipeline.review_state)
-        if state and not state.startswith("approved"):
-            return state
-        return {"approved": None, "changes": "changes requested"}.get(ws.get("review"), "to review")
-    return None
-
-
-def needs_you(agent: dict, ws: dict) -> str | None:
-    """Why a person must act on ``agent``'s row, or None: it is waiting on a
-    prompt or dialog, it is a supervisor with an open need_user question, or
-    it is a worker awaiting review in a session without autopilot (with
-    autopilot on, the supervisor reviews it)."""
-    if agent["status"] == "waiting":
-        return "needs you"
-    if agent["status"] == "failed":
-        return "credentials need attention"
-    if ws.get("asking") == agent["id"]:
-        return "has a question"
-    return None if ws.get("autopilot") else awaiting_review(agent, ws)
-
-
 def ago(seconds: float | None) -> str:
     if seconds is None or seconds < 0:
         return ""
@@ -146,20 +119,6 @@ def ago(seconds: float | None) -> str:
 
 def plural(n: int, word: str) -> str:
     return f"{n} {word}{'s' * (n != 1)}"
-
-
-def summary(snap: list[dict]) -> str:
-    agents_ = [a for ws in snap for a in ws["agents"]]
-    waiting = sum(bool(needs_you(a, ws)) for ws in snap for a in ws["agents"])
-    busy = sum(a["status"] in ("processing", "starting") for a in agents_)
-    parts = []
-    if waiting:
-        parts.append(f"{waiting} need{'s' * (waiting == 1)} you")
-    if busy:
-        parts.append(f"{busy} working")
-    if not parts:
-        parts.append("all quiet")
-    return " · ".join(parts)
 
 
 def git_summary(ws: dict) -> str:
@@ -185,7 +144,8 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
     return [fit(t, width) for t in wrapped]
 
 
-MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "pending": ("○", "dim"),
+MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "regressed": ("✗", "bad"),
+                  "not_done": ("○", "dim"), "pending": ("○", "dim"),
                   "working": ("◐", "busy"), "waiting": ("◌", "alert"), "checking": ("◌", "busy")}
 
 
@@ -204,6 +164,8 @@ def render_autopilot(pilot: dict, width: int) -> list[Line]:
         wrapped = _wrap(title, width - 4, "")
         lines.append(Line(f"  {mark} {wrapped[0]}", style))
         lines += [Line(f"    {t}", style) for t in wrapped[1:]]
+        if m.get("label") and m["status"] not in ("working", "waiting"):
+            lines += [Line(f"    {t}", style) for t in _wrap(m["label"], width - 4, "")]
     done = sum(m["status"] == "passed" for m in pilot["milestones"])
     total = len(pilot["milestones"])
     state = {"done": ("goal reached", "ok"), "blocked": ("needs you", "alert"),

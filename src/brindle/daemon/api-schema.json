@@ -1,0 +1,3275 @@
+{
+  "api_version": "1.0",
+  "models": {
+    "AccountDTO": {
+      "$defs": {
+        "AccountOrgDTO": {
+          "properties": {
+            "current": {
+              "title": "Current",
+              "type": "boolean"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "personal": {
+              "title": "Personal",
+              "type": "boolean"
+            },
+            "plan": {
+              "title": "Plan",
+              "type": "string"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "role",
+            "plan",
+            "personal",
+            "current"
+          ],
+          "title": "AccountOrgDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "orgs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AccountOrgDTO"
+          },
+          "title": "Orgs",
+          "type": "array"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan"
+        },
+        "signed_in": {
+          "title": "Signed In",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "signed_in"
+      ],
+      "title": "AccountDTO",
+      "type": "object"
+    },
+    "AccountOrgDTO": {
+      "properties": {
+        "current": {
+          "title": "Current",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "personal": {
+          "title": "Personal",
+          "type": "boolean"
+        },
+        "plan": {
+          "title": "Plan",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "plan",
+        "personal",
+        "current"
+      ],
+      "title": "AccountOrgDTO",
+      "type": "object"
+    },
+    "ActionTerminalDTO": {
+      "description": "An action terminal (a sign-in, ``brindle keys set``; see\nbrindle.daemon.terminal.open_action). The app's tmux client attaches to\nthe pane ``target`` on ``server`` (``tmux -L server``; None: the default\nserver); ``terminal`` is the id POST /terminals/{id}/input takes.\n``started`` is False when a press found one still running.",
+      "properties": {
+        "server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Server"
+        },
+        "started": {
+          "title": "Started",
+          "type": "boolean"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "terminal": {
+          "title": "Terminal",
+          "type": "string"
+        }
+      },
+      "required": [
+        "terminal",
+        "started",
+        "target"
+      ],
+      "title": "ActionTerminalDTO",
+      "type": "object"
+    },
+    "AgentDTO": {
+      "$defs": {
+        "NativeSubagentDTO": {
+          "properties": {
+            "agent_type": {
+              "title": "Agent Type",
+              "type": "string"
+            },
+            "ended_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ended At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "started_at": {
+              "title": "Started At",
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "agent_type",
+            "started_at"
+          ],
+          "title": "NativeSubagentDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "headless": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Headless"
+        },
+        "hooks_off": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hooks Off"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "locked": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Locked"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pending"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "reported": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reported"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "status_since": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Since"
+        },
+        "subagents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NativeSubagentDTO"
+          },
+          "title": "Subagents",
+          "type": "array"
+        },
+        "tmux_server": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tmux Server"
+        },
+        "tokens": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tokens"
+        },
+        "unread": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unread"
+        },
+        "window": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window"
+        }
+      },
+      "required": [
+        "id",
+        "profile",
+        "provider",
+        "status",
+        "mode"
+      ],
+      "title": "AgentDTO",
+      "type": "object"
+    },
+    "DecisionDTO": {
+      "properties": {
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "rationale": {
+          "title": "Rationale",
+          "type": "string"
+        },
+        "repo_key": {
+          "title": "Repo Key",
+          "type": "string"
+        },
+        "scope": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scope",
+          "type": "array"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "repo_key",
+        "topic",
+        "body",
+        "rationale",
+        "scope",
+        "status",
+        "created_at"
+      ],
+      "title": "DecisionDTO",
+      "type": "object"
+    },
+    "GoalDTO": {
+      "$defs": {
+        "MilestoneDTO": {
+          "properties": {
+            "check_cmd": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Check Cmd"
+            },
+            "checked_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Checked At"
+            },
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Output"
+            },
+            "phase": {
+              "default": "in_progress",
+              "title": "Phase",
+              "type": "string"
+            },
+            "position": {
+              "title": "Position",
+              "type": "integer"
+            },
+            "profile": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Profile"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "state": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "State"
+            },
+            "state_why": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "State Why"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "position",
+            "title",
+            "status"
+          ],
+          "title": "MilestoneDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "goal_phase": {
+          "default": "in_progress",
+          "title": "Goal Phase",
+          "type": "string"
+        },
+        "milestones": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MilestoneDTO"
+          },
+          "title": "Milestones",
+          "type": "array"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "pr_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pr Url"
+        },
+        "progress": {
+          "title": "Progress",
+          "type": "integer"
+        },
+        "root_id": {
+          "title": "Root Id",
+          "type": "string"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "usage_resets_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Usage Resets At"
+        }
+      },
+      "required": [
+        "root_id",
+        "enabled",
+        "state",
+        "progress"
+      ],
+      "title": "GoalDTO",
+      "type": "object"
+    },
+    "InboxActionDTO": {
+      "description": "A route the app can call to act on the item itself.",
+      "properties": {
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ],
+      "title": "InboxActionDTO",
+      "type": "object"
+    },
+    "InboxItemDTO": {
+      "$defs": {
+        "InboxActionDTO": {
+          "description": "A route the app can call to act on the item itself.",
+          "properties": {
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "path": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method",
+            "path"
+          ],
+          "title": "InboxActionDTO",
+          "type": "object"
+        },
+        "PermissionChoiceDTO": {
+          "properties": {
+            "choice": {
+              "title": "Choice",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "choice",
+            "label"
+          ],
+          "title": "PermissionChoiceDTO",
+          "type": "object"
+        },
+        "PermissionDTO": {
+          "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``).",
+          "properties": {
+            "choices": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionChoiceDTO"
+              },
+              "title": "Choices",
+              "type": "array"
+            },
+            "digest": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Digest"
+            },
+            "hold_note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Hold Note"
+            },
+            "hold_until": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Hold Until"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Kind"
+            },
+            "request_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Request Id"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Target"
+            },
+            "terminal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Terminal"
+            },
+            "terminal_prompt_visible": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Terminal Prompt Visible"
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tool"
+            },
+            "via": {
+              "title": "Via",
+              "type": "string"
+            },
+            "wording": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Wording"
+            }
+          },
+          "required": [
+            "via"
+          ],
+          "title": "PermissionDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InboxActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Id"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "fix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fix"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "notice_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notice Id"
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "root_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Root Id"
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Id"
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "title": "InboxItemDTO",
+      "type": "object"
+    },
+    "MilestoneDTO": {
+      "properties": {
+        "check_cmd": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Check Cmd"
+        },
+        "checked_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Checked At"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
+        },
+        "phase": {
+          "default": "in_progress",
+          "title": "Phase",
+          "type": "string"
+        },
+        "position": {
+          "title": "Position",
+          "type": "integer"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State"
+        },
+        "state_why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State Why"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "position",
+        "title",
+        "status"
+      ],
+      "title": "MilestoneDTO",
+      "type": "object"
+    },
+    "NativeSubagentDTO": {
+      "properties": {
+        "agent_type": {
+          "title": "Agent Type",
+          "type": "string"
+        },
+        "ended_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ended At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "started_at": {
+          "title": "Started At",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "agent_type",
+        "started_at"
+      ],
+      "title": "NativeSubagentDTO",
+      "type": "object"
+    },
+    "PermissionChoiceDTO": {
+      "properties": {
+        "choice": {
+          "title": "Choice",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        }
+      },
+      "required": [
+        "choice",
+        "label"
+      ],
+      "title": "PermissionChoiceDTO",
+      "type": "object"
+    },
+    "PermissionDTO": {
+      "$defs": {
+        "PermissionChoiceDTO": {
+          "properties": {
+            "choice": {
+              "title": "Choice",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "choice",
+            "label"
+          ],
+          "title": "PermissionChoiceDTO",
+          "type": "object"
+        }
+      },
+      "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``).",
+      "properties": {
+        "choices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionChoiceDTO"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Digest"
+        },
+        "hold_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hold Note"
+        },
+        "hold_until": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hold Until"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal"
+        },
+        "terminal_prompt_visible": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Terminal Prompt Visible"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool"
+        },
+        "via": {
+          "title": "Via",
+          "type": "string"
+        },
+        "wording": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wording"
+        }
+      },
+      "required": [
+        "via"
+      ],
+      "title": "PermissionDTO",
+      "type": "object"
+    },
+    "PreflightActionDTO": {
+      "properties": {
+        "body": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Body",
+          "type": "object"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "method",
+        "path"
+      ],
+      "title": "PreflightActionDTO",
+      "type": "object"
+    },
+    "PreflightItemDTO": {
+      "$defs": {
+        "PreflightActionDTO": {
+          "properties": {
+            "body": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Body",
+              "type": "object"
+            },
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "path": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "method",
+            "path"
+          ],
+          "title": "PreflightActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "One thing a provider's CLI would stop on before a session (brindle.preflight).",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PreflightActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "link": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Link"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "provider",
+        "title",
+        "detail"
+      ],
+      "title": "PreflightItemDTO",
+      "type": "object"
+    },
+    "ProfileDTO": {
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "fallback": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Fallback",
+          "type": "array"
+        },
+        "headless": {
+          "default": false,
+          "title": "Headless",
+          "type": "boolean"
+        },
+        "lint_errors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Errors",
+          "type": "array"
+        },
+        "lint_warnings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Warnings",
+          "type": "array"
+        },
+        "local": {
+          "default": false,
+          "title": "Local",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "permission_mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Permission Mode"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "provider"
+      ],
+      "title": "ProfileDTO",
+      "type": "object"
+    },
+    "RoutingDTO": {
+      "$defs": {
+        "RoutingKindDTO": {
+          "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
+          "properties": {
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Effort"
+            },
+            "fallbacks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Fallbacks",
+              "type": "array"
+            },
+            "instructions": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Instructions"
+            },
+            "learned": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Learned"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            }
+          },
+          "title": "RoutingKindDTO",
+          "type": "object"
+        },
+        "RoutingLockDTO": {
+          "properties": {
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "reason"
+          ],
+          "title": "RoutingLockDTO",
+          "type": "object"
+        },
+        "RoutingPolicyDTO": {
+          "description": "The org policy routing answers to. ``applies``: a Team or Enterprise\norg's policy covers this person; ``editable``: they may change routing\nat all (not when the policy applies but can't be read: ``reason``).\n``models``: each model the org allows (every model the profiles run, with\nno list) -> the local profiles that run it.",
+          "properties": {
+            "allowed_models": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Allowed Models"
+            },
+            "allowed_profiles": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Allowed Profiles"
+            },
+            "allowed_providers": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Allowed Providers"
+            },
+            "applies": {
+              "default": false,
+              "title": "Applies",
+              "type": "boolean"
+            },
+            "deny_personal_keys": {
+              "default": false,
+              "title": "Deny Personal Keys",
+              "type": "boolean"
+            },
+            "editable": {
+              "default": true,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "locked": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/RoutingLockDTO"
+              },
+              "title": "Locked",
+              "type": "array"
+            },
+            "models": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "title": "Models",
+              "type": "object"
+            },
+            "org_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Org Id"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            }
+          },
+          "title": "RoutingPolicyDTO",
+          "type": "object"
+        },
+        "RoutingProfileDTO": {
+          "properties": {
+            "allowed": {
+              "default": true,
+              "title": "Allowed",
+              "type": "boolean"
+            },
+            "cost_tier": {
+              "title": "Cost Tier",
+              "type": "string"
+            },
+            "excluded": {
+              "title": "Excluded",
+              "type": "boolean"
+            },
+            "installed": {
+              "title": "Installed",
+              "type": "boolean"
+            },
+            "lint_errors": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Lint Errors",
+              "type": "array"
+            },
+            "lint_warnings": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Lint Warnings",
+              "type": "array"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "provider": {
+              "title": "Provider",
+              "type": "string"
+            },
+            "provider_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider Name"
+            },
+            "refusal": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Refusal"
+            },
+            "signed_in": {
+              "title": "Signed In",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "provider",
+            "installed",
+            "signed_in",
+            "excluded",
+            "cost_tier"
+          ],
+          "title": "RoutingProfileDTO",
+          "type": "object"
+        },
+        "RoutingSettingDTO": {
+          "properties": {
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "values",
+            "source"
+          ],
+          "title": "RoutingSettingDTO",
+          "type": "object"
+        },
+        "RoutingTierDTO": {
+          "properties": {
+            "models": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/RoutingTierModelDTO"
+              },
+              "title": "Models",
+              "type": "array"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Values",
+              "type": "array"
+            }
+          },
+          "required": [
+            "values",
+            "source"
+          ],
+          "title": "RoutingTierDTO",
+          "type": "object"
+        },
+        "RoutingTierModelDTO": {
+          "description": "One of a tier's profiles in model terms, as the website names them:\nthe model id the org's policy is checked against and the agent's name.",
+          "properties": {
+            "allowed": {
+              "default": true,
+              "title": "Allowed",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            },
+            "provider": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider"
+            },
+            "provider_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider Name"
+            }
+          },
+          "required": [
+            "profile"
+          ],
+          "title": "RoutingTierModelDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "exclude_providers": {
+          "$ref": "#/$defs/RoutingSettingDTO"
+        },
+        "kinds": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutingKindDTO"
+          },
+          "default": {},
+          "title": "Kinds",
+          "type": "object"
+        },
+        "policy": {
+          "$ref": "#/$defs/RoutingPolicyDTO",
+          "default": {
+            "allowed_models": null,
+            "allowed_profiles": null,
+            "allowed_providers": null,
+            "applies": false,
+            "deny_personal_keys": false,
+            "editable": true,
+            "locked": [],
+            "models": {},
+            "org_id": null,
+            "reason": null
+          }
+        },
+        "profiles": {
+          "items": {
+            "$ref": "#/$defs/RoutingProfileDTO"
+          },
+          "title": "Profiles",
+          "type": "array"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/RoutingSettingDTO"
+        },
+        "tiers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutingTierDTO"
+          },
+          "title": "Tiers",
+          "type": "object"
+        }
+      },
+      "required": [
+        "tiers",
+        "reviewer",
+        "exclude_providers",
+        "profiles"
+      ],
+      "title": "RoutingDTO",
+      "type": "object"
+    },
+    "RoutingKindDTO": {
+      "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "fallbacks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Fallbacks",
+          "type": "array"
+        },
+        "instructions": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Instructions"
+        },
+        "learned": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Learned"
+        },
+        "locked": {
+          "default": false,
+          "title": "Locked",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        }
+      },
+      "title": "RoutingKindDTO",
+      "type": "object"
+    },
+    "RoutingLockDTO": {
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "reason"
+      ],
+      "title": "RoutingLockDTO",
+      "type": "object"
+    },
+    "RoutingPolicyDTO": {
+      "$defs": {
+        "RoutingLockDTO": {
+          "properties": {
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name",
+            "reason"
+          ],
+          "title": "RoutingLockDTO",
+          "type": "object"
+        }
+      },
+      "description": "The org policy routing answers to. ``applies``: a Team or Enterprise\norg's policy covers this person; ``editable``: they may change routing\nat all (not when the policy applies but can't be read: ``reason``).\n``models``: each model the org allows (every model the profiles run, with\nno list) -> the local profiles that run it.",
+      "properties": {
+        "allowed_models": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Models"
+        },
+        "allowed_profiles": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Profiles"
+        },
+        "allowed_providers": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Providers"
+        },
+        "applies": {
+          "default": false,
+          "title": "Applies",
+          "type": "boolean"
+        },
+        "deny_personal_keys": {
+          "default": false,
+          "title": "Deny Personal Keys",
+          "type": "boolean"
+        },
+        "editable": {
+          "default": true,
+          "title": "Editable",
+          "type": "boolean"
+        },
+        "locked": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RoutingLockDTO"
+          },
+          "title": "Locked",
+          "type": "array"
+        },
+        "models": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "title": "Models",
+          "type": "object"
+        },
+        "org_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Org Id"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "title": "RoutingPolicyDTO",
+      "type": "object"
+    },
+    "RoutingProfileDTO": {
+      "properties": {
+        "allowed": {
+          "default": true,
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "cost_tier": {
+          "title": "Cost Tier",
+          "type": "string"
+        },
+        "excluded": {
+          "title": "Excluded",
+          "type": "boolean"
+        },
+        "installed": {
+          "title": "Installed",
+          "type": "boolean"
+        },
+        "lint_errors": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Errors",
+          "type": "array"
+        },
+        "lint_warnings": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Lint Warnings",
+          "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        },
+        "refusal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refusal"
+        },
+        "signed_in": {
+          "title": "Signed In",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "provider",
+        "installed",
+        "signed_in",
+        "excluded",
+        "cost_tier"
+      ],
+      "title": "RoutingProfileDTO",
+      "type": "object"
+    },
+    "RoutingSettingDTO": {
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "values",
+        "source"
+      ],
+      "title": "RoutingSettingDTO",
+      "type": "object"
+    },
+    "RoutingTierDTO": {
+      "$defs": {
+        "RoutingTierModelDTO": {
+          "description": "One of a tier's profiles in model terms, as the website names them:\nthe model id the org's policy is checked against and the agent's name.",
+          "properties": {
+            "allowed": {
+              "default": true,
+              "title": "Allowed",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            },
+            "provider": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider"
+            },
+            "provider_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provider Name"
+            }
+          },
+          "required": [
+            "profile"
+          ],
+          "title": "RoutingTierModelDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "models": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RoutingTierModelDTO"
+          },
+          "title": "Models",
+          "type": "array"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Values",
+          "type": "array"
+        }
+      },
+      "required": [
+        "values",
+        "source"
+      ],
+      "title": "RoutingTierDTO",
+      "type": "object"
+    },
+    "RoutingTierModelDTO": {
+      "description": "One of a tier's profiles in model terms, as the website names them:\nthe model id the org's policy is checked against and the agent's name.",
+      "properties": {
+        "allowed": {
+          "default": true,
+          "title": "Allowed",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "provider_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider Name"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "title": "RoutingTierModelDTO",
+      "type": "object"
+    },
+    "RuleDTO": {
+      "description": "A rule pack that can be given to an agent.",
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "source"
+      ],
+      "title": "RuleDTO",
+      "type": "object"
+    },
+    "SessionDTO": {
+      "properties": {
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "goal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Goal"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "status_since": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Since"
+        },
+        "workspace_id": {
+          "title": "Workspace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "profile",
+        "status",
+        "mode",
+        "created_at"
+      ],
+      "title": "SessionDTO",
+      "type": "object"
+    },
+    "WorkspaceDTO": {
+      "$defs": {
+        "AgentDTO": {
+          "properties": {
+            "headless": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Headless"
+            },
+            "hooks_off": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Hooks Off"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "locked": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Locked"
+            },
+            "mode": {
+              "title": "Mode",
+              "type": "string"
+            },
+            "parent_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Parent Id"
+            },
+            "pending": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Pending"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            },
+            "provider": {
+              "title": "Provider",
+              "type": "string"
+            },
+            "reported": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reported"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "status_since": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Status Since"
+            },
+            "subagents": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/NativeSubagentDTO"
+              },
+              "title": "Subagents",
+              "type": "array"
+            },
+            "tmux_server": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tmux Server"
+            },
+            "tokens": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tokens"
+            },
+            "unread": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Unread"
+            },
+            "window": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Window"
+            }
+          },
+          "required": [
+            "id",
+            "profile",
+            "provider",
+            "status",
+            "mode"
+          ],
+          "title": "AgentDTO",
+          "type": "object"
+        },
+        "NativeSubagentDTO": {
+          "properties": {
+            "agent_type": {
+              "title": "Agent Type",
+              "type": "string"
+            },
+            "ended_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Ended At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "started_at": {
+              "title": "Started At",
+              "type": "number"
+            }
+          },
+          "required": [
+            "id",
+            "agent_type",
+            "started_at"
+          ],
+          "title": "NativeSubagentDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "agents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AgentDTO"
+          },
+          "title": "Agents",
+          "type": "array"
+        },
+        "ahead": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ahead"
+        },
+        "asking": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asking"
+        },
+        "autopilot": {
+          "default": false,
+          "title": "Autopilot",
+          "type": "boolean"
+        },
+        "base_branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Base Branch"
+        },
+        "behind": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Behind"
+        },
+        "branch": {
+          "title": "Branch",
+          "type": "string"
+        },
+        "dirty": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dirty"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "review": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review"
+        },
+        "review_state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review State"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "branch",
+        "path"
+      ],
+      "title": "WorkspaceDTO",
+      "type": "object"
+    }
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/v1/account"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/login"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/logout"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/account/switch-org"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/agents/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/close"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/kill"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/message"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/peek"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/rewind"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/config"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/config"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/coordinator/undo"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/cost"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/decisions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/decisions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/doctor"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/engine/upgrade"
+    },
+    {
+      "method": "WS",
+      "path": "/v1/events"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/goal"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/check"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/enabled"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/{id}/end"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/{id}/wait"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/inbox"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/inbox/{id}/{action}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kb/search"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kb/sources"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/kb/sources"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/kb/sources/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/kb/sources/{id}/sync"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/keys/{name}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/keys/{name}/set"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/meta"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/profiles"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/profiles"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/profiles/{name}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/providers/installed"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/providers/{provider}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/consent"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/install"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/login"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/providers/{provider}/preflight"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/trust"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/use-mine"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/repos"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/repos/clone"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/repos/open"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/routing"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/routing"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/rules"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/diff"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/sessions/{root:path}/file"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/file"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/sessions/{root:path}/file"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root:path}/pr"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/pr/draft"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/pr/readiness"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/close"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/continue"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/handover"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/pause"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/transfer"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/setup/codex-hook"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/snapshot"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/terminals/{id}/input"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/usage"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/user-settings"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/user-settings"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/{id:path}/diff"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/{id:path}/file"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/{id:path}/file"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id:path}/merge"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id:path}/pr"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id:path}/remove"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id:path}/review"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/{id:path}/sync"
+    }
+  ]
+}

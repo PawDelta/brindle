@@ -465,6 +465,20 @@ def commit_all(path: str | Path, message: str) -> str | None:
     return out(["rev-parse", "--short", "HEAD"], path)
 
 
+def hash_blob(cwd: str | Path, data: bytes, path: str, write: bool = False) -> str:
+    """The blob id of ``data`` as git would store it at ``path`` (that
+    path's clean filters applied; ``path`` is a name, not a pathspec). With
+    ``write`` the blob is stored too."""
+    args = ["hash-object", *(["-w"] if write else []), "--stdin", f"--path={path}"]
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, input=data, capture_output=True, timeout=TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise GitError(f"git {' '.join(args)}: {e}") from e
+    if proc.returncode != 0:
+        raise GitError(f"git {' '.join(args)}: {proc.stderr.decode(errors='replace').strip()}")
+    return proc.stdout.decode().strip()
+
+
 def paths(args: list[str], cwd: str | Path) -> list[str]:
     """The paths a ``git diff --name-only`` / ``ls-files`` style command
     lists, read NUL-separated (``-z``) so a name with a space, a quote or a

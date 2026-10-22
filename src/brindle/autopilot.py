@@ -48,8 +48,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config
-from brindle import escapes, knowledge
-from brindle.db import DB, Agent, Autopilot, Milestone, Workspace
+from brindle import bus, escapes, knowledge
+from brindle.db import DB, Agent, Autopilot, Milestone, Workspace, check_state
 from brindle.profiles import load_profile
 
 log = logging.getLogger(__name__)
@@ -500,7 +500,7 @@ def load_goals_file(root: str) -> Plan | None:
 
 # A status line is what sync_goals_file writes under each milestone. The
 # format is strict so user prose is never mistaken for one.
-STATUS_RE = re.compile(r"^status: (passed|failed|pending)( at [0-9a-f]{7,40})?( \(\d{4}-\d{2}-\d{2}\))?\s*$")
+STATUS_RE = re.compile(r"^status: (passed|failed|not_done|regressed|pending)( at [0-9a-f]{7,40})?( \(\d{4}-\d{2}-\d{2}\))?\s*$")
 
 
 def status_line(m: Milestone) -> str:
@@ -509,7 +509,7 @@ def status_line(m: Milestone) -> str:
     if m.status not in ("passed", "failed"):
         return "status: pending"
     sha = (m.passed_sha if m.status == "passed" else None) or m.checked_sha
-    out = f"status: {m.status}"
+    out = f"status: {m.state or m.status}"
     if sha and re.fullmatch(r"[0-9a-f]{7,40}", sha):
         out += f" at {sha[:7]}"
     if m.checked_at:
@@ -638,6 +638,26 @@ def set_enabled(db: DB, root_id: str, on: bool) -> None:
     db.update_autopilot(root_id, **fields)
 
 
+def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]:
+    """``set_goal``'s milestones from their JSON form, {"title", "check",
+    "detail", "profile", "repo"}; a check may name its repo as "@<alias>: <command>"."""
+    from brindle import repos
+
+    items = []
+    for m in milestones:
+        title = str(m.get("title", "")).strip()
+        if not title:
+            raise AutopilotError("Every milestone needs a title.")
+        repo_alias, check = repos.split_check(str(m.get("check") or ""))
+        repo_alias = str(m.get("repo") or "").strip() or repo_alias
+        if repo_alias and repos.resolve_attached(db, root_id, repo_alias) is None:
+            raise AutopilotError(f"Milestone {title!r} names repo {repo_alias!r}, which isn't attached "
+                                 "to this session (list_repos shows what is).")
+        items.append((title, check, (str(m.get("detail") or "").strip() or None),
+                      (str(m.get("profile") or "").strip() or None), repo_alias))
+    return items
+
+
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo]])``.
@@ -666,8 +686,10 @@ def set_goal(db: DB, root_id: str, goal: str,
         prev = old.get((m.title, m.check_cmd))
         if prev and prev.status != "pending":
             db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
-                            passed_sha=prev.passed_sha)
+                            passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
+                            ever_passed=prev.ever_passed)
     db.bump_progress(root_id)
+    bus.publish_agent(db, "autopilot.goal", root_id, goal=goal.strip(), milestones=len(milestones))
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
@@ -676,9 +698,21 @@ def set_goal(db: DB, root_id: str, goal: str,
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", "opencode": "opencode"}
 
 
+def _excluded(name: str, cfg: RepoConfig, repo_root: str) -> bool:
+    """Whether profile ``name`` runs on a provider in ``exclude_providers``
+    (a profile that doesn't exist isn't: its own check reports it)."""
+    if not cfg.exclude_providers:
+        return False
+    try:
+        return load_profile(name, repo_root).provider in cfg.exclude_providers
+    except KeyError:
+        return False
+
+
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
                  weight: str | None = None) -> str | None:
-    """Why routing skips profile ``name`` (its CLI isn't installed or
+    """Why routing skips profile ``name`` (its provider is in
+    ``exclude_providers``, its CLI isn't installed or
     signed in, its provider is out of headroom, it would break a budget
     (``gate``: a ``brindle.budget.Gate``), it doesn't exist), or None if it's usable."""
     from brindle import quota
@@ -689,6 +723,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     except KeyError:
         source = cfg.routing_sources.get(weight or "", "DEFAULT_ROUTING")
         return f"no profile {name} in {source}, skipped {name}"
+    if p.provider in cfg.exclude_providers:
+        return f"{p.provider} is excluded from routing, skipped {name}"
     over = gate.why_not(name, weight) if gate is not None and gate.active else None
     if over:
         return f"over budget, skipped {name} ({over})"
@@ -760,8 +796,11 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
                 decision["demoted_from"] = first
     if not remaining:
         return None, False, f"every {weight} candidate was out ({'; '.join(skipped) or 'none configured'})"
-    pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
-                                       weight=weight, default=remaining[0])
+    if cfg.routing_locked.get(weight):
+        pick, reason = None, None   # the owner pinned this tier: learning never overrides it
+    else:
+        pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
+                                           weight=weight, default=remaining[0])
     name = pick or remaining[0]
     if decision is not None:
         decision["baseline"] = remaining[0]
@@ -840,17 +879,19 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
         model_info = [model_name]
         if p.effort:
             model_info.append(f"{p.effort} effort")
-        pw = profile_weight(name, cfg, repo_root)
-        if pw in ("heavy", "advanced", "reasoning"):
-            cost_tier = "most expensive tier"
-        elif pw == "light":
-            cost_tier = "lowest cost tier"
-        else:
-            cost_tier = "medium cost tier"
-        cost_tag = f"; {cost_tier}"
-        return f" ({', '.join(model_info)}{cost_tag})"
+        tier = cost_tier(name, cfg, repo_root)
+        label = {"high": "most expensive tier", "low": "lowest cost tier"}.get(tier, "medium cost tier")
+        return f" ({', '.join(model_info)}; {label})"
     except Exception:
         return ""
+
+
+def cost_tier(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+    """How expensive profile ``name`` runs: "low", "medium" or "high", by its weight."""
+    pw = profile_weight(name, cfg, repo_root)
+    if pw in ("heavy", "advanced", "reasoning"):
+        return "high"
+    return "low" if pw == "light" else "medium"
 
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
@@ -983,10 +1024,13 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             if picked:
                 name = picked
             else:
-                fallback = cfg.default_agent
-                if ceiling and weight_order[profile_weight(fallback, cfg, repo_root)] > weight_order[ceiling]:
+                candidates = [cfg.default_agent]
+                if ceiling and weight_order[profile_weight(cfg.default_agent, cfg, repo_root)] > weight_order[ceiling]:
                     candidates = [n for n in cfg.routing.get(ceiling, []) if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]]
-                    fallback = candidates[0] if candidates else None
+                fallback = next((n for n in candidates if not _excluded(n, cfg, repo_root)), None)
+                if not fallback and candidates:
+                    raise AutopilotError(f"no agent profile left for a {weight} task: every candidate runs on a "
+                                         f"provider excluded from routing ({', '.join(cfg.exclude_providers)})")
                 if not fallback:
                     raise AutopilotError(f"no permissible agent profile under max_weight ceiling {ceiling!r}")
                 name = fallback
@@ -1061,6 +1105,7 @@ def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
     note = question.strip()[:500]
     db.update_autopilot(root_id, state="blocked", note=note, nudges=0,
                         question=note if ask else None)
+    bus.publish_agent(db, "autopilot.need_user", root_id, question=note, ask=ask)
 
 
 def wait_on(db: DB, root_id: str, pid: int | None = None, until: float | None = None,
@@ -1117,6 +1162,7 @@ def held(ap: Autopilot) -> bool:
 
 def answered(db: DB, root_id: str) -> None:
     db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0)
+    bus.publish_agent(db, "autopilot.answered", root_id)
 
 
 def user_spoke(db: DB, agent: Agent) -> None:
@@ -1210,10 +1256,13 @@ def _detach(args: list[str]) -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | None) -> str:
+def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | None,
+                        detach=None) -> str:
     """Start the milestone checks detached and return at once. The result is
     delivered to the session root's inbox (see cli._check_milestones). A full
-    suite can outrun an MCP call's time limit, and nothing should wait on it."""
+    suite can outrun an MCP call's time limit, and nothing should wait on it.
+    ``detach`` starts the helper's argv (the daemon passes one that also
+    reports when it exits)."""
     from brindle.providers import brindle_invocation
 
     ap = db.get_autopilot(root_id)
@@ -1226,7 +1275,7 @@ def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | Non
     args = [*brindle_invocation(), "_check-milestones", root_id, ws.id]
     if position is not None:
         args += ["--position", str(position)]
-    _detach(args)
+    (detach or _detach)(args)
     which = f"milestone {position}" if position else "every milestone"
     return (f"Checking {which} in the background (the checks run in your checkout; results "
             "already recorded for this commit are reused). The result arrives as a message; "
@@ -1288,15 +1337,27 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         for m in batch:
             if not m.check_cmd:
                 continue
-            at = site(m.repo)
+            try:
+                at = site(m.repo)
+            except Exception as e:   # e.g. the attached repo's checkout is gone
+                db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n(checkout unavailable: {e})", None,
+                                state="failed", state_why="checkout missing")
+                continue
             if isinstance(at, str):
-                db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n{at}", None)
+                db.record_check(m.id, False, f"$ @{m.repo}: {m.check_cmd}\n{at}", None,
+                                state="failed", state_why="repo isn't attached")
                 continue
             checkout, repo_cfg, sha = at
             # Cached by commit when the checkout is clean, so a check that
             # already passed at this HEAD (as a merge gate, say) isn't re-run.
-            ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout),
-                                        repo_cfg.check_timeout)
+            try:
+                ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout),
+                                            repo_cfg.check_timeout)
+            except Exception as e:
+                db.record_check(m.id, False, f"$ {m.check_cmd}\n(crashed: {e})", sha,
+                                state="failed", state_why=f"crashed: {e}")
+                continue
+            state, why = check_state(ok, out, m.status == "passed" or bool(m.passed_sha or m.ever_passed))
             # Not if it already passed at this very commit: a flaky check
             # flipping back isn't progress.
             newly_passed |= ok and m.status != "passed" and (sha is None or m.passed_sha != sha)
@@ -1305,14 +1366,17 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
                 # between got past its reviewer.
                 escapes.milestone_regressed(db, checkout.repo_root, checkout.path, m.title,
                                             m.checked_sha, sha)
-            db.record_check(m.id, ok, out, sha)
+            db.record_check(m.id, ok, out, sha, state=state, state_why=why)
 
     run(chosen)
     ms = db.milestones(root_id)
     regressed: list[Milestone] = []
     if position is not None and len(ms) > 1:
         def moved(m: Milestone) -> bool:
-            at = site(m.repo)
+            try:
+                at = site(m.repo)
+            except Exception:
+                return True   # run() records why the checkout can't be used
             sha = at[2] if not isinstance(at, str) else None
             return sha is None or m.checked_sha != sha
 
@@ -1335,6 +1399,9 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         db.update_autopilot(root_id, state="running")
     elif ap and ap.state in ("done", "auditing"):
         db.update_autopilot(root_id, state="running")
+    bus.publish_agent(db, "autopilot.checked", root_id, position=position,
+                      passed=sum(m.status == "passed" for m in ms), total=len(ms),
+                      regressed=[m.position for m in regressed], done=done)
     sync_goals_file(db, root_id)
     regressed_ids = {m.id for m in regressed}
     shown = [m for m in ms if position is None or m.position == position or done or m.id in regressed_ids]
@@ -1495,6 +1562,7 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     auditor = agents.spawn(db, ws, profile, prompt=audit_prompt(db, ap, head), parent_id=root_id,
                            mode="review", background_setup=True)
     db.update_autopilot(root_id, auditor_id=auditor.id, audit_sha=head, audit_ok=None)
+    bus.publish_agent(db, "autopilot.audit_started", root_id, auditor_id=auditor.id, sha=head)
     return auditor
 
 
@@ -1504,11 +1572,14 @@ def record_accepted_decision(db: DB, root_id: str, decision: str) -> None:
     entry = f"Accepted decision / scope exclusion:\n{decision.strip()}"
     new_history = ((ap.audit_history + "\n\n" + entry) if (ap and ap.audit_history) else entry)
     db.update_autopilot(root_id, audit_history=new_history, audit_sha=None, audit_ok=None, auditor_id=None, state="running")
+    bus.publish_agent(db, "autopilot.audit_decision", root_id)
 
 
 def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
     """The auditor's verdict. Returns the message for the supervisor."""
     ap = db.get_autopilot(root_id)
+    bus.publish_agent(db, "autopilot.audit", root_id, approved=approved,
+                      sha=ap.audit_sha if ap else None)
     sha = (ap.audit_sha or "")[:8] if ap else ""
     root = db.get_agent(root_id)
     now = _commit(db.get_workspace(root.workspace_id) if root else None, tracked_only=True)
@@ -1557,8 +1628,51 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 # -- progress -----------------------------------------------------------------
 
-MARK = {"passed": "✓", "failed": "✗", "pending": "○", "working": "◐", "waiting": "◌",
-        "checking": "◌"}
+MARK = {"passed": "✓", "failed": "✗", "not_done": "○", "regressed": "✗", "pending": "○",
+        "working": "◐", "waiting": "◌", "checking": "◌"}
+
+
+def state_text(m: Milestone) -> str | None:
+    """The plain words for a milestone's last check, or None if it passed or
+    was never checked."""
+    if m.state == "failed":
+        return f"couldn't run: {m.state_why}" if m.state_why else "couldn't run"
+    return {"not_done": "not done yet", "regressed": "regressed"}.get(m.state or "")
+
+
+def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
+    """Each milestone's user-facing phase by id: ``done`` (its check passed),
+    ``in_review`` or ``in_progress``. Only the session's current milestone
+    (the first unverified) can be in review: while a milestone check runs for
+    the session, or once every worker has reported and a branch is still in
+    review or checks. Regressed, not-done and failed milestones are in progress."""
+    ms = db.milestones(root_id)
+    current = next((m for m in ms if m.status != "passed"), None)
+    ap = db.get_autopilot(root_id)
+    in_review = False
+    if current is not None:
+        if ap is not None and checking(ap):
+            in_review = True
+        else:
+            from brindle import agents
+
+            # Session rows only: a reported worker's branch stays in review or
+            # checks after its process exits.
+            live = [a for a in agents.tree(db, root_id)[1:]
+                    if a.mode in agents.REPORTING_MODES]
+            reviewing = building = False
+            for a in live:
+                closed = a.status in ("paused", "done")
+                if a.mode == "review":
+                    reviewing |= not closed and a.result is None and not agents.review_moot(db, a)
+                elif a.pipeline == "reviewing":
+                    reviewing = True      # a closed worker's branch is still in checks
+                elif not closed and a.pipeline != "ready" and (
+                        a.result is None or a.status in BUSY or a.pipeline):
+                    building = True
+            in_review = reviewing and not building
+    return {m.id: "done" if m.state == "passed" else
+            "in_review" if in_review and m is current else "in_progress" for m in ms}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
@@ -1613,17 +1727,18 @@ def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
         how = f"check: `{where}{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
         who = f", profile: {m.profile}" if m.profile else ""
-        shown = w if m.status == "failed" and w else m.status
+        shown = w if m.status == "failed" and w else (m.state or m.status)
+        label = state_text(m)
         if shown == "checking":
             stale = ", checking…"
             when = ""
         else:
-            stale = ", last check failed" if shown != m.status else ""
+            stale = f", last check: {label}" if label and shown != m.state else (f", {label}" if label else "")
         lines.append(f"  {MARK.get(shown, '·')} {m.position}. {m.title} ({how}{who}{when}{stale})")
-    if ap.state in ("blocked", "stalled") and ap.note:
+    if ap.state == "done":
+        lines.append("Goal reached: every milestone passes. Nothing left to do; tell the user.")
+    elif ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
-    elif ap.state == "done":
-        lines.append("Completed: the goal is reached.")
     elif ap.state == "auditing":
         lines.append("Completion audit running: the goal isn't reached until it approves.")
     elif ap.audit_ok == 0 and ap.note:
@@ -1645,7 +1760,8 @@ def check_summary(db: DB, root_id: str, position: int | None, text: str) -> str:
     parts = []
     for m in chosen if position is not None else [m for m in ms if m.status == "failed"]:
         if m.status == "failed":
-            parts.append(f"Milestone {m.position} ✗ failed: {first_line(m.output or 'no output')}")
+            parts.append(f"Milestone {m.position} {MARK.get(m.state or 'failed')} "
+                         f"{state_text(m) or 'not done yet'}: {first_line(m.output or 'no output')}")
         else:
             parts.append(f"Milestone {m.position} {MARK.get(m.status, '·')} {m.status}")
     head = "; ".join(parts) or "Milestone check"

@@ -8,7 +8,7 @@ import time
 import pytest
 
 from conftest import sh
-from brindle import agents, mcp_server, tmux, view, workspaces
+from brindle import agents, bus, mcp_server, tmux, view, workspaces
 from brindle.db import Agent
 
 
@@ -126,3 +126,10 @@ def test_pause_and_resume_keep_subagent_records(db, boss, monkeypatch):
     agents.resume(db, "boss")
     assert launched == ["boss"]
     assert db.get_agent(open_one.id).status == "processing"
+    assert [(e["kind"], e["root_id"], open_one.id in e["payload"]["agents"])
+            for e in bus.tail(db, kinds=("session.paused", "session.resumed"))] == [
+        ("session.paused", "boss", True), ("session.resumed", "boss", True)]
+    assert [e["payload"]["status"] for e in bus.tail(db, kinds=("agent.status",))
+            if e["agent_id"] == open_one.id][-2:] == ["paused", "processing"]
+
+

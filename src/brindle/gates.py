@@ -330,6 +330,7 @@ def _minutes(seconds: float) -> str:
 def _report_slow(db_path: str, ws: Workspace, cmd: str, last: float, after: float, timeout: int) -> None:
     """Tell ``ws``'s supervisor a check run is far past its last duration.
     Runs on a timer thread, so with its own database connection; never raises."""
+    db = None
     try:
         db = DB(db_path)
         to_id = supervisor_id(db, ws)
@@ -342,6 +343,9 @@ def _report_slow(db_path: str, ws: Workspace, cmd: str, last: float, after: floa
              "processes, or lower \"check_concurrency\" in .brindle/config.json.")
     except Exception:  # noqa: BLE001 - a notice must never break the check run
         pass
+    finally:
+        if db is not None:
+            db.conn.close()
 
 
 def supervisor_id(db: DB, ws: Workspace) -> str | None:

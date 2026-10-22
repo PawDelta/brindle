@@ -111,13 +111,14 @@ class AntigravityError(RuntimeError):
 
 
 def binary() -> str:
-    """BRINDLE_AGY_BIN, else `agy` on PATH, else where Google's installer puts it."""
+    """BRINDLE_AGY_BIN, else the install picked in the app, else `agy` on PATH,
+    else one in the maker's standard places (providers_install)."""
     explicit = os.environ.get("BRINDLE_AGY_BIN")
     if explicit:
         return explicit
-    from brindle.providers import which_cli
+    from brindle import providers_install
 
-    return which_cli("agy") or (BUNDLED if os.path.exists(BUNDLED) else "agy")
+    return providers_install.found("antigravity") or "agy"
 
 
 def tool_names() -> list[str]:
@@ -206,9 +207,15 @@ def install(workspace: str, permission_policy: bool = False, strict: bool = Fals
         # Kept once there: an agent beside this one (a dontAsk reviewer in its
         # worker's checkout) may run with the skip flag, gated only by it. It
         # answers an agy started without the flag as before (pre_tool_main).
-        # agy runs every call this hook doesn't deny, so it sees every tool.
+        # agy runs every call this hook doesn't deny, so it sees every tool. It
+        # holds a call left to the person for the app's answer (pre_tool_decision),
+        # for the repo's permission_hold_seconds: agy must let it.
+        from brindle.agents import HOOK_SLACK
+        from brindle.config import load_repo_config
+
+        timeout = load_repo_config(workspace).permission_hold_seconds + HOOK_SLACK
         hooks["PreToolUse"] = [{"matcher": "*", "hooks": [
-            {"type": "command", "command": _hook_command(STRICT_EVENT), "timeout": 60}]}]
+            {"type": "command", "command": _hook_command(STRICT_EVENT), "timeout": timeout}]}]
     elif permission_policy:
         hooks["PreToolUse"] = [{"matcher": PRE_TOOL_MATCHER, "hooks": handler("PreToolUse")}]
     _merge_json(workspace, AGENTS_DIR / "hooks.json", "", "brindle", hooks)
@@ -451,7 +458,20 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             out = output(decision, req, spaces, protected_roots=[ws.path, ws.repo_root],
                          readable=[str(agy_home / "mcp" / "brindle"), str(agy_home / "builtin")],
                          has_supervisor=bool(agent.parent_id), escalated=escalate)
-            if escalate and req is not None and out["decision"] == "deny" and decision.decision != "deny":
+            answer = None
+            if decision.decision == "ask" and out["decision"] == "deny" and req is not None:
+                # Left to a person, and agy runs no prompt of its own here: held
+                # for the app's answer while it's open, refused as before otherwise.
+                from brindle.agents import _hold_for_app
+
+                answer = _hold_for_app(db, agent, req, decision.reason, None, keep=False,
+                                       hold=cfg.permission_hold_seconds)
+                if answer:
+                    allowed = answer in ("allow_once", "allow_always")
+                    out = {"decision": "allow" if allowed else "deny",
+                           "reason": f"brindle: the person {'allowed' if allowed else 'denied'} this in the brindle app"}
+            if (escalate and not answer and req is not None and out["decision"] == "deny"
+                    and decision.decision != "deny"):
                 _escalate(db, agent, ws, req, rules, cfg.checks)
     else:
         out = output(decision, req, spaces)
@@ -607,8 +627,21 @@ def hook_main(db, event: str, stdin_text: str) -> str:
 # -- mirroring brindle's permission rules into agy's settings ---------------------------
 
 
-def settings_path() -> Path:
+def _default_settings_path() -> Path:
     return Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+
+
+def settings_path() -> Path:
+    return _default_settings_path()
+
+
+def _mirror_isolated() -> bool:
+    """Whether BRINDLE_HOME is not the default home while agy's settings are
+    the real ~/.gemini ones: a separate brindle home (a test, a second
+    install) must not rewrite the settings of the person's own agy."""
+    from brindle.config import brindle_home
+
+    return brindle_home() != Path.home() / ".brindle" and settings_path() == _default_settings_path()
 
 
 class SettingsError(RuntimeError):
@@ -740,6 +773,9 @@ def sync_permissions(repo_root: str | None = None, on: bool | None = None,
     entry brindle added is taken out again. Returns (added, removed)."""
     from brindle import permissions
 
+    if _mirror_isolated():
+        print("brindle: BRINDLE_HOME isn't the default home; left agy's settings alone", file=sys.stderr)
+        return [], []
     with permissions.editing() as store:
         if repo_root is not None and on is not None:
             if on:

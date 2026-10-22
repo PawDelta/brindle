@@ -42,9 +42,9 @@ def turn_on(ws):
     set_local(ws.repo_root, "permission_policy", "on")
 
 
-def claude_payload(tool, tool_input, tool_use_id="toolu_1", cwd=None):
-    return {"tool_name": tool, "tool_input": tool_input, "tool_use_id": tool_use_id,
-            "cwd": cwd, "hook_event_name": "PermissionRequest"}
+def claude_payload(tool, tool_input, cwd=None):
+    """Claude Code's PermissionRequest input, which has no tool_use_id."""
+    return {"tool_name": tool, "tool_input": tool_input, "cwd": cwd, "hook_event_name": "PermissionRequest"}
 
 
 # -- the engine -------------------------------------------------------------------------------
@@ -214,12 +214,12 @@ def test_approval_after_ask_is_learned_and_end_of_turn_is_not(db, ws):
     a = worker(db, ws)
     turn_on(ws)
     for n in (1, 2):
-        agents.hook_main(db, a.id, "permission-request",
-                         json.dumps(claude_payload("Bash", {"command": "make docs"}, f"t{n}")))
-        agents.hook_main(db, a.id, "tool-done", json.dumps({"tool_name": "Bash", "tool_use_id": f"t{n}"}))
+        agents.hook_main(db, a.id, "permission-request", json.dumps(claude_payload("Bash", {"command": "make docs"})))
+        # PostToolUse: paired with the request by its tool and input.
+        agents.hook_main(db, a.id, "tool-done", json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": "make docs"}, "tool_use_id": f"t{n}"}))
     # Asked, then the turn ended without the tool running: not an approval.
-    agents.hook_main(db, a.id, "permission-request",
-                     json.dumps(claude_payload("Bash", {"command": "make clean"}, "t3")))
+    agents.hook_main(db, a.id, "permission-request", json.dumps(claude_payload("Bash", {"command": "make clean"})))
     agents.handle_hook(db, a.id, "stop", {"stop_hook_active": True})
     assert db.latest_permission_request(a.id) is None
     assert [(s.match, s.count) for s in permissions.suggestions()] == [("make docs", 2)]

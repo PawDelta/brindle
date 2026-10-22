@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle import agents, git, history, knowledge, pool, scratch, tmux, workspaces
+from brindle import agents, bus, git, history, knowledge, pool, scratch, tmux, workspaces
 from brindle.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -95,16 +95,18 @@ def live(db: DB, repo_root: str) -> list[LiveSession]:
     """Live interactive sessions in every workspace of ``repo_root`` (the
     checkout and its ``brindle/session-N`` worktrees), newest first. An agent
     whose recorded pane id a newer agent has since taken (tmux reuses ids)
-    isn't live: that pane is the newer agent's."""
-    owners = agents.pane_owners(db)
+    isn't live: that pane is the newer agent's. One tmux call answers for
+    every agent, not one per agent (the app's first load waited on those)."""
+    panes = tmux.list_panes()
+    owners = agents.pane_owners(db, panes)
     out = []
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
             if (a.mode == "interactive" and a.status not in ("paused", "done")
-                    and agents.is_alive(a) and agents.owns_pane(db, a, owners)):
+                    and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)):
                 running = [m for m in agents.tree(db, a.id)[1:]
                            if m.mode != "interactive" and m.status not in ("paused", "done", "failed")
-                           and agents.is_alive(m)]
+                           and agents.is_alive(m, panes)]
                 out.append(LiveSession(a, ws, goal_line(db, a), len(running)))
     return sorted(out, key=lambda s: s.root.created_at, reverse=True)
 
@@ -158,7 +160,8 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         for prev, m in zip(old_ms, db.milestones(new.id)):
             if prev.status != "pending":
                 db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
-                                passed_sha=prev.passed_sha)
+                                passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
+                                ever_passed=prev.ever_passed)
             if ap.state == "done":
                 # Copying a historical result is not a fresh check.
                 with db.tx() as c:
@@ -185,7 +188,17 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                   "SELECT ?, alias, repo_root, added_at FROM session_repos WHERE root_id=?",
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
+        # So does an outside job it waits on (wait_on), or the notice of one
+        # that just ended: the old session's autopilot is off, so nobody would
+        # be told. In this transaction, so the wait is finished once, by one side.
+        if c.execute("UPDATE autopilot SET external_wait=(SELECT external_wait FROM autopilot "
+                     "WHERE root_id=?) WHERE root_id=? AND external_wait IS NULL",
+                     (old_root_id, new.id)).rowcount:
+            c.execute("UPDATE autopilot SET external_wait=NULL WHERE root_id=?", (old_root_id,))
+        c.execute("UPDATE inbox SET agent_id=? WHERE agent_id=? AND delivered_at IS NULL "
+                  "AND instr(body, ?) > 0", (new.id, old_root_id, pilot.WAIT_ENDED_HEAD))
     _repoint_orphaned_tasks(db, new.id)
+    bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
         agents.pause(db, old_root_id, stop_local_models=False)
     return new

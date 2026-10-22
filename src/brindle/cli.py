@@ -13,7 +13,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from brindle import agents, git, identity_lock, tmux, view, workspaces
+from brindle import agents, git, identity_lock, tmux, workspaces
 from brindle import history as history_mod
 from brindle import keys_cmds, repo_cmds
 from brindle.usage import format_tokens
@@ -143,12 +143,22 @@ def _after_detach(ws: Workspace) -> None:
 
 def _run(fn, *args, **kwargs):
     from brindle.scratch import ScratchError
+    from brindle.service.errors import ServiceError
 
     try:
         return fn(*args, **kwargs)
     except (git.GitError, workspaces.WorkspaceError, agents.AgentError,
-            tmux.TmuxError, ScratchError, KeyError, ValueError) as e:
+            tmux.TmuxError, ScratchError, ServiceError, KeyError, ValueError) as e:
         _fail(str(e).strip("'\""))
+
+
+def _say(notes) -> None:
+    """Print a service call's notes (brindle.service.sessions.Note), in order."""
+    for n in notes:
+        if n.tone:
+            typer.secho(n.text, fg={"ok": "green", "warn": "yellow"}[n.tone])
+        else:
+            typer.echo(n.text)
 
 
 # -- workspaces --------------------------------------------------------------
@@ -317,11 +327,9 @@ def start(
     Without a terminal to ask in, it's paused, and `brindle continue` brings
     it back. With --branch or --worktree it runs in that worktree instead,
     which gets the repo's .brindle config."""
-    from brindle.config import load_repo_config
-    from brindle import scratch
-
     from brindle import picker
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS, get_provider
+    from brindle.service import sessions as svc
 
     provider = provider or provider_alias or _group_supervisor
     if provider and provider != picker.PICK:
@@ -337,46 +345,23 @@ def start(
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
     else:
         ws = _here_or_scratch(db, reuse_scratch=False)
-        from brindle import sessions
-
-        live = sessions.live(db, ws.repo_root)
-        if live and attach and not yes and sys.stdin.isatty():
-            got = _ask_about_running(live, provider, here=ws.id)
-            if got is None:
-                raise typer.Exit(0)
-            choice, picked = got
-            if choice == "o":
-                _attach(picked.workspace, picked.root.tmux_window)
+        if attach and not yes and sys.stdin.isatty():
+            got = _run(svc.place, db, ws)
+            if isinstance(got, svc.Conflict):
+                asked = _ask_about_running(got.sessions, provider, here=ws.id)
+                if asked is None:
+                    raise typer.Exit(0)
+                choice, picked = asked
+                got = _run(svc.place, db, ws, choice, picked.root.id, live=got.sessions)
+            if isinstance(got, svc.Opened):
+                _attach(got.workspace, got.root.tmux_window)
                 return
-            if choice == "n":
-                ws = _run(_session_worktree, db, ws)
-                typer.echo(f"✓ new session in its own worktree: {ws.path} ({ws.branch})")
-            elif picked.workspace.id != ws.id:
-                agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
-                typer.echo(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")
+            _say(got.notes)
+            ws = got.workspace
 
-    if not branch and not worktree and not scratch.is_scratch(ws.path):
-        curr_b = git.current_branch(ws.path)
-        default_b = git.default_branch(ws.repo_root) if curr_b else None
-        if curr_b and git.merged_into_default(ws.repo_root, curr_b):
-            typer.secho(f"! Branch '{curr_b}' is already merged into '{default_b}'.", fg="yellow")
-            try:
-                if not git.dirty_files(ws.path):
-                    git.run(["checkout", default_b], ws.path)
-                    ws = workspaces.refresh_branch(db, ws)
-                    curr_b = default_b
-                    typer.secho(f"✓ Switched to '{default_b}'.", fg="green")
-            except Exception:
-                pass
-        elif curr_b != default_b and git.upstream_gone(ws.path, curr_b):
-            # (the default branch is left out: a network probe for the common case)
-            typer.secho(f"! Branch '{curr_b}' was deleted on origin but has unmerged changes.", fg="yellow")
-        try:
-            if curr_b and curr_b == default_b:
-                if warning := git.fast_forward(ws.path, curr_b):
-                    typer.secho(f"! {warning}", fg="yellow")
-        except git.GitError:
-            pass
+    if not branch and not worktree:
+        ws, notes = svc.tidy_branch(db, ws)
+        _say(notes)
 
     provider = _resolve_supervisor(ws.repo_root, provider, yes=yes, demo=demo)
     _preflight(agents.SUPERVISOR, provider, ws.repo_root)
@@ -386,10 +371,8 @@ def start(
     # handled by the detached cull.
     _pause_running(db, ws, stop_procs=False)
     _check_updates(ws.repo_root)
-    if autopilot is None:
-        autopilot = _run(load_repo_config, ws.repo_root).autopilot
-    a = _run(agents.spawn, db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
-             watch_pane=watch, background_setup=True, autopilot=autopilot)
+    started = _run(svc.launch, db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
+    a = started.agent
     # After the chat's window exists and is recorded: the cull's session
     # retention closes dropped sessions' windows by their stored pane ids,
     # which a freshly started tmux server hands out again from %0.
@@ -397,7 +380,7 @@ def start(
     typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
     _local_models_detached(ws.repo_root)
     _settings_sync_detached()
-    if autopilot:
+    if started.autopilot:
         _say_autopilot(db, a.id)
     if attach:
         _attach(ws, a.tmux_window)
@@ -422,11 +405,9 @@ def _check_updates(repo_root: str) -> None:
 
 def _preflight(agent: str, provider: Optional[str], repo_root: str) -> None:
     """Stop before launching when the chat can't start (no tmux, no CLI)."""
-    from brindle import doctor as doctor_mod
-    from brindle.profiles import load_profile
+    from brindle.service import sessions as svc
 
-    name = provider or _run(load_profile, agent, repo_root).provider
-    problems = doctor_mod.preflight(name)
+    problems = _run(svc.preflight, agent, provider, repo_root)
     if problems:
         for p in problems:
             typer.secho(f"✗ {p}", fg="red", err=True)
@@ -555,11 +536,9 @@ def _cull_detached(repo_root: str | None = None) -> None:
     """Clean up leftover agent processes and stale workers (and, given
     ``repo_root``, apply its paused-session retention) without making the
     person wait for it (see brindle.cull, brindle.sessions.enforce)."""
-    from brindle.providers import brindle_invocation
+    from brindle.service import sessions as svc
 
-    repo = ["--repo", repo_root] if repo_root else []
-    subprocess.Popen([*brindle_invocation(), "_cull", *repo], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    svc.cull_detached(repo_root)
 
 
 def _say_autopilot(db: DB, root_id: str) -> None:
@@ -574,19 +553,6 @@ def _say_autopilot(db: DB, root_id: str) -> None:
     typer.echo("  `brindle autopilot off` hands the wheel back to you.")
 
 
-def _live_sessions(db: DB, ws: Workspace) -> list:
-    """The live sessions (interactive agents) in this checkout."""
-    from brindle import sessions
-
-    return [s.root for s in sessions.live(db, ws.repo_root) if s.workspace.id == ws.id]
-
-
-def _running_session(db: DB, ws: Workspace):
-    """The live session (its interactive agent) in this checkout, if any."""
-    live = _live_sessions(db, ws)
-    return live[0] if live else None
-
-
 def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[str] = None):
     """Pick among the repo's live sessions (any worktree): open one, start a
     new session in its own worktree, or pause one and start fresh. Returns
@@ -595,12 +561,12 @@ def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[
     another one starts fresh instead, since opening it wouldn't give that.
     ``here`` is the current checkout's workspace id: its session starts highlighted."""
     from brindle import picker
+    from brindle.service import sessions as svc
 
-    rows = [f"{s.root.id}  {s.goal or '(no goal yet)'}  {s.branch}  {_ago(s.age)}"
+    rows = [f"{s.root.id}  {s.goal or '(no goal yet)'}  {s.branch}  {svc.ago(s.age)}"
             + (f"  {s.workers} worker(s) running" if s.workers else "") for s in live]
     differs = [bool(wanted) and wanted != picker.PICK and wanted != s.root.provider for s in live]
-    got = picker.pick_row("Sessions running in this repo:", rows,
-                          {"o": "open", "n": "new session in its own worktree", "p": "pause it and start fresh"},
+    got = picker.pick_row("Sessions running in this repo:", rows, svc.RUNNING_CHOICES,
                           at=next((i for i, s in enumerate(live) if s.workspace.id == here), 0))
     if got is None:
         return None
@@ -613,6 +579,7 @@ def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[
 def _ask_about_paused(db: DB, available: list):
     """Pick the paused session to resume (newest first); None to cancel."""
     from brindle import picker
+    from brindle.service import sessions as svc
 
     rows = []
     for s in available:
@@ -622,77 +589,17 @@ def _ask_about_paused(db: DB, available: list):
         workers = s.members[1:]
         running = sum(1 for m in workers if m.status == "running")
         branches = ", ".join(s.branches[:3]) + (" …" if len(s.branches) > 3 else "")
-        rows.append(f"{s.root.id}  {goal or '(no goal yet)'}  paused {_ago(time.time() - s.paused_at)} ago  "
+        rows.append(f"{s.root.id}  {goal or '(no goal yet)'}  paused {svc.ago(time.time() - s.paused_at)} ago  "
                     f"{branches or '-'}  {running}/{len(workers)} workers")
     got = picker.pick_row("Paused sessions:", rows, {})
     return None if got is None else available[got[1]]
 
 
-def _session_worktree(db: DB, ws: Workspace) -> Workspace:
-    """A worktree for a second session in this repo: branch brindle/session-N,
-    cut from what this checkout has checked out, so the two sessions never
-    share files or a branch."""
-    n = 2
-    while git.ok(["rev-parse", "--verify", "--quiet", f"refs/heads/brindle/session-{n}"], ws.repo_root):
-        n += 1
-    created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}", base=ws.branch or None,
-                             start=git.out(["rev-parse", "HEAD"], ws.path), apply_prefix=False).workspace
-    from brindle import codemap
-    codemap.seed_session(created.path, created.repo_root)
-    return created
-
-
 def _pause_running(db: DB, ws: Workspace, stop_procs: bool = True) -> None:
-    """At most one live session per checkout: pause any that's still running.
-    ``stop_procs=False`` when a detached cull follows (see agents.pause)."""
-    from brindle import scratch
+    """At most one live session per checkout: pause any that's still running."""
+    from brindle.service import sessions as svc
 
-    live = _live_sessions(db, ws)
-    caller = os.environ.get("BRINDLE_AGENT_ID")
-    if caller and any(a.id == caller for a in live):
-        # Pausing kills the session's process tree, this command with it.
-        _fail("this command would stop the session running it; run it from a terminal instead")
-    for a in live:
-        # A session starts here next: keep its local models loaded.
-        agents.pause(db, a.id, stop_procs=stop_procs, stop_local_models=False)
-        typer.echo(f"Paused the session that was still running here ({a.id}); "
-                   f"`brindle continue {a.id}` brings it back.")
-    # Chats left running in scratch sessions whose work moved into this repo.
-    for aid in scratch.pause_transferred_to(db, ws.repo_root):
-        typer.echo(f"Paused scratch session chat {aid}: its work moved into this repo; "
-                   f"`brindle continue {aid}` brings it back.")
-
-
-def _describe(s) -> str:
-    workers = len(s.members) - 1
-    ago = _ago(time.time() - s.paused_at)
-    what = f", {workers} worker(s)" if workers else ""
-    branches = f": {', '.join(s.branches[:3])}" + (" …" if len(s.branches) > 3 else "") if s.branches else ""
-    return f"{s.root.id}  paused {ago} ago{what}{branches}"
-
-
-def _ago(seconds: float) -> str:
-    if seconds < 3600:
-        return f"{max(1, int(seconds // 60))}m"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)}h"
-    return f"{int(seconds // 86400)}d"
-
-
-def _clear_credentials_block(db: DB, root_id: str) -> bool:
-    from brindle import agents
-    ap = db.get_autopilot(root_id)
-    if not ap or ap.state != "blocked":
-        return False
-    note = (ap.note or "").lower()
-    if "credential" not in note and "sign in" not in note and "api key" not in note and "auth" not in note:
-        return False
-    tree = agents.tree(db, root_id)
-    failed = [a for a in tree if a.status == "failed"]
-    if failed:
-        return False
-    db.update_autopilot(root_id, state="running", note=None)
-    return True
+    _say(_run(svc.pause, db, ws, stop_procs=stop_procs))
 
 
 @app.command("continue")
@@ -701,103 +608,53 @@ def continue_cmd(
     attach: bool = typer.Option(True, "--attach/--no-attach"),
 ) -> None:
     """Pick up a paused session: the chat and its workers resume where they stopped."""
-    from brindle import keystore, scratch, secrets, sessions
+    from brindle.service import sessions as svc
 
     db = DB()
-    cwd = os.getcwd()
-    try:
-        git.main_repo_root(cwd)
-        ws = _run(workspaces.adopt_root, db, cwd)
-    except git.GitError:
-        ws = scratch.for_origin(db, cwd)
-        if ws is None:
-            _fail("no scratch session started from this folder to continue; run `brindle` to start one")
+    ws = _run(svc.continue_workspace, db, os.getcwd())
     _check_updates(ws.repo_root)
-    live = agents.find_running(db, ws, "supervisor") or next(
-        (a for a in reversed(db.list_agents(ws.id)) if a.mode == "interactive" and (agents.is_alive(a) or a.status == "failed")),
-        None,
-    )
-    live_needs_recovery = False
-    if live:
-        workers = agents.tree(db, live.id)
-        failed_workers = [a for a in workers if a.status == "failed"]
-        ap = db.get_autopilot(live.id)
-        is_blocked = ap and ap.state == "blocked"
-        if failed_workers or is_blocked or live.status == "failed":
-            live_needs_recovery = True
-
-    recovery_env = {k: os.environ[k] for k in keystore.known_names() if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)}
-
-    if session_id and live and live.id.startswith(session_id):
-        resumed = _run(agents.resume, db, live.id, recovery_env=recovery_env)
-        _clear_credentials_block(db, live.id)
-        typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
-        live = db.get_agent(live.id) or live
-        if attach:
-            _attach(ws, live.tmux_window)
-        return
-
-    if not session_id and live_needs_recovery:
-        resumed = _run(agents.resume, db, live.id, recovery_env=recovery_env)
-        _clear_credentials_block(db, live.id)
-        typer.secho(f"↺ recovered live session {live.id} ({len(resumed)} failed agent(s) restarted)", fg="green")
-        live = db.get_agent(live.id) or live
-        if attach:
-            _attach(ws, live.tmux_window)
-        return
-
-    available = sessions.paused(db, ws.repo_root)
-    if not available:
-        if live:
-            if attach:
-                typer.echo(f"Session {live.id} is already running; reopening it.")
-                _attach(ws, live.tmux_window)
-                return
-        _fail("no paused sessions here. Run `brindle` to start a fresh one.")
-    if session_id:
-        matches = [s for s in available if s.root.id.startswith(session_id)]
-        if len(matches) != 1:
-            _fail(f"no single paused session matches {session_id!r}. Available:\n  "
-                  + "\n  ".join(_describe(s) for s in available))
-        chosen = matches[0]
-    elif len(available) > 1 and attach and sys.stdin.isatty():
-        chosen = _ask_about_paused(db, available)
+    got = _run(svc.continue_, db, ws, session_id, ask=attach and sys.stdin.isatty())
+    if isinstance(got, svc.Conflict):
+        chosen = _ask_about_paused(db, got.sessions)
         if chosen is None:
             raise typer.Exit(0)
-    else:
-        chosen = available[0]
-    others = [s for s in available if s.root.id != chosen.root.id]
-    _pause_running(db, ws)
-    resumed = _run(agents.resume, db, chosen.root.id, recovery_env=recovery_env)
-    _clear_credentials_block(db, chosen.root.id)
-    typer.secho(f"↺ continuing {_describe(chosen)} ({len(resumed)} agent(s) restarted)", fg="green")
+        got = _run(svc.continue_, db, ws, chosen.root.id)
+    if got.state == "running":
+        if not attach:
+            _fail(svc.NO_PAUSED)
+        typer.echo(f"Session {got.root.id} is already running; reopening it.")
+        _attach(ws, got.root.tmux_window)
+        return
+    if got.state == "recovered":
+        typer.secho(f"↺ recovered live session {got.root.id} ({got.restarted} failed agent(s) restarted)", fg="green")
+        if attach:
+            _attach(ws, got.root.tmux_window)
+        return
+    _say(got.notes)
+    typer.secho(f"↺ continuing {svc.describe(got.session)} ({got.restarted} agent(s) restarted)", fg="green")
     _local_models_detached(ws.repo_root)
-    if others:
+    if got.others:
         typer.echo("Other paused sessions (brindle continue <id>):")
-        for s in others:
-            typer.echo(f"  {_describe(s)}")
+        for s in got.others:
+            typer.echo(f"  {svc.describe(s)}")
     if attach:
-        root = db.get_agent(chosen.root.id)
-        _attach(chosen.workspace, root.tmux_window)
+        _attach(got.workspace, got.root.tmux_window)
 
 
 @app.command("sessions")
 def sessions_cmd() -> None:
     """List paused sessions in this repo, with the disk their worktrees use."""
     from brindle import sessions
+    from brindle.service import sessions as svc
 
     db = DB()
     root = _run(git.main_repo_root, os.getcwd())
-    found = sessions.paused(db, root)
+    found = svc.list_(db, root)
     if not found:
         typer.echo("no paused sessions")
         return
-    for s in found:
-        # Members can share a workspace (a worker and its reviewer): count each once.
-        spaces = {m.workspace_id: db.get_workspace(m.workspace_id) for m in s.members[1:]}
-        size = sum(sessions.disk_usage(w.path) for w in spaces.values()
-                   if w and w.kind == "worktree" and os.path.isdir(w.path))
-        typer.echo(f"{_describe(s)}  ({size / 1e6:.0f} MB in worktrees)")
+    for p in found:
+        typer.echo(f"{svc.describe(p.session)}  ({p.disk / 1e6:.0f} MB in worktrees)")
     typer.echo(f"Keeps the newest {sessions.KEEP} for up to {sessions.MAX_AGE_DAYS} days. `brindle prune` cleans up now.")
 
 
@@ -910,16 +767,13 @@ def handover(
 
     The goal and milestones, workers, queued tasks and your note move to the
     new supervisor; the old one is paused."""
-    from brindle import sessions
+    from brindle.service import sessions as svc
 
     db = DB()
-    root_id = _session_root(db)
-    dest = _run(workspaces.checkout_for_target, db, os.getcwd(), to)
-    new = _run(sessions.handover, db, root_id, dest, note)
-    typer.secho(f"✓ handed {root_id} over to {new.id} in {dest.id} ({dest.branch})", fg="green")
-    _cull_detached(dest.repo_root)
+    h = _run(svc.handover, db, os.getcwd(), to, note)
+    typer.secho(f"✓ handed {h.old_id} over to {h.agent.id} in {h.workspace.id} ({h.workspace.branch})", fg="green")
     if attach:
-        _attach(dest, new.tmux_window)
+        _attach(h.workspace, h.agent.tmux_window)
 
 
 @app.callback(invoke_without_command=True)
@@ -984,25 +838,9 @@ def supervisor(
 def _session_root(db: DB) -> str:
     """This repo's current session: the one running here, else the newest
     paused one."""
-    from brindle import sessions
+    from brindle.service import sessions as svc
 
-    cwd = os.getcwd()
-    try:
-        ws = workspaces.adopt_root(db, cwd)
-    except git.GitError:
-        from brindle import scratch
-
-        ws = scratch.for_origin(db, cwd) or workspaces.current(db)
-        if ws is None:
-            _fail("no brindle session here")
-    live = agents.find_running(db, ws, "supervisor")
-    if live:
-        return live.id
-    found = sessions.paused(db, ws.repo_root)
-    if found:
-        return found[0].root.id
-    _fail("no brindle session here. Run `brindle` to start one.")
-    raise AssertionError
+    return _run(svc.session_root, db, os.getcwd())
 
 
 @app.command("delegation")
@@ -1045,9 +883,10 @@ def _tell_supervisors_about_delegation(db: DB) -> None:
     """Send each running supervisor its repo's delegation rule as it now stands."""
     from brindle import autopilot as pilot
     from brindle.config import load_repo_config
+    from brindle.service import sessions as svc
 
     for ws in db.find_workspaces():
-        running = _running_session(db, ws)
+        running = svc.running_here(db, ws)
         if not running:
             continue
         try:
@@ -1145,37 +984,48 @@ def doctor(
         raise typer.Exit(1)
 
 
+APP_DOWNLOAD_URL = "https://github.com/PawDelta/brindle-app/releases"
+
+
+@app.command("app")
+def app_cmd() -> None:
+    """Open the brindle desktop app, or print where to download it."""
+    cmd = ["open", "-a", "brindle"] if sys.platform == "darwin" else ["xdg-open", "brindle://"]
+    try:
+        opened = subprocess.run(cmd, capture_output=True).returncode == 0
+    except OSError:
+        opened = False
+    if opened:
+        typer.echo("opened the brindle app")
+    else:
+        typer.echo(f"the brindle app isn't installed. Download it from {APP_DOWNLOAD_URL}")
+
+
 @app.command("ls")
 def list_cmd(
     all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
     as_json: bool = typer.Option(False, "--json", help="Print a JSON array instead of a table."),
 ) -> None:
     """List workspaces and their agents."""
+    from brindle.service import sessions as svc
+
     db = DB()
-    repo_root = None
-    if not all_repos:
-        try:
-            repo_root = git.main_repo_root(os.getcwd())
-        except git.GitError:
-            pass
-    rows = view.session_workspaces(db, repo_root)
-    panes = tmux.list_panes()
+    rows = svc.ls(db, None if all_repos else _here_repo())
     if as_json:
-        typer.echo(json.dumps([view.workspace_entry(db, ws, panes=panes) for ws in rows], indent=2))
+        typer.echo(json.dumps([e for _, e in rows], indent=2))
         return
     if not rows:
         typer.echo("no workspaces")
         return
-    several = len({ws.repo_root for ws in rows}) > 1
+    several = len({ws.repo_root for ws, _ in rows}) > 1
     shown_repo = None
-    for ws in rows:
+    for ws, e in rows:
         if several and ws.repo_root != shown_repo:
             shown_repo = ws.repo_root
             typer.secho(f"{os.path.basename(ws.repo_root.rstrip(os.sep))}  ({ws.repo_root})", fg="cyan")
         if not os.path.isdir(ws.path):
             typer.secho(f"{ws.id}  (missing: {ws.path})", fg="red")
             continue
-        e = view.workspace_entry(db, ws, panes=panes)
         info = ""
         if e["ahead"] is not None:
             dirty = f" *{e['dirty']}" if e["dirty"] else ""
@@ -1350,12 +1200,87 @@ def cost_estimate_cmd(
     typer.echo(cost_estimate.describe(specs, reviewer or cfg.reviewer, repo_root=repo_root, db=db))
 
 
+# -- brindle daemon (the desktop app's local API; see brindle.daemon) ----------------------------
+
+daemon_app = typer.Typer(invoke_without_command=True,
+                         help="The local API the desktop app talks to: bare `brindle daemon` runs it.")
+app.add_typer(daemon_app, name="daemon")
+
+
+@daemon_app.callback()
+def daemon_cmd(
+    ctx: typer.Context,
+    unix: bool = typer.Option(True, "--socket/--no-socket", help="Listen on ~/.brindle/daemon.sock."),
+    tcp: bool = typer.Option(False, "--tcp", help="Also listen on 127.0.0.1 (a random port, in daemon.json). "
+                             "Over TCP the agent check can't run; the token is the only gate, so keep TCP for the WSL client."),
+    idle_exit: bool = typer.Option(False, "--idle-exit", help="Exit after 10 minutes with no client while no agent runs."),
+    print_connection: bool = typer.Option(
+        False, "--print-connection",
+        help="Print how to reach the running daemon as JSON (its URL, and where to read the token: "
+             "inside WSL, daemon.json's \\\\wsl$ path for a Windows app), then exit."),
+) -> None:
+    if ctx.invoked_subcommand:
+        return
+    from brindle.daemon import lifecycle
+
+    if print_connection:
+        conn = lifecycle.connection(lifecycle.running())
+        typer.echo(json.dumps(conn, indent=2))
+        raise typer.Exit(0 if conn["running"] else 1)
+    try:
+        lifecycle.serve(unix=unix, tcp=tcp, idle_exit=idle_exit)
+    except (lifecycle.DaemonError, OSError) as e:
+        typer.secho(str(e), fg="red", err=True)
+        raise typer.Exit(1)
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    """Whether the daemon runs, and where."""
+    from brindle.daemon import lifecycle
+
+    info = lifecycle.running()
+    if info is None:
+        typer.echo("not running")
+        raise typer.Exit(1)
+    where = ", ".join(x for x in (info.get("socket") and f"socket {info['socket']}",
+                                  info.get("port") and f"127.0.0.1:{info['port']}") if x)
+    typer.echo(f"running: pid {info['pid']}, brindle {info.get('version')}, {where}")
+
+
+@daemon_app.command("stop")
+def daemon_stop() -> None:
+    """Stop the running daemon."""
+    from brindle.daemon import lifecycle
+
+    info = lifecycle.stop()
+    typer.echo(f"stopped (pid {info['pid']})" if info else "not running")
+
+
+@daemon_app.command("schema")
+def daemon_schema() -> None:
+    """Write api-schema.json: the v1 routes and the DTO schemas the TypeScript client is built from."""
+    from brindle.daemon import schema
+
+    typer.echo(f"wrote {schema.write()}")
+
+
 # -- brindle permissions (the permission policy; see brindle.permissions) -------------------------
 
 permissions_app = typer.Typer(no_args_is_help=True,
                               help="The rules brindle answers workers' permission requests with "
                                    "(when permission_policy is \"on\").")
 app.add_typer(permissions_app, name="permissions")
+# The subcommands that change rules or what a provider is allowed to do.
+PERMISSION_CHANGES = {"accept", "allow", "deny", "forget", "reset", "sync-agy", "install-codex-hook"}
+
+
+@permissions_app.callback()
+def permissions_group(ctx: typer.Context) -> None:
+    # Like config.set_user: a brindle agent's CLI call must not widen its own permissions.
+    if ctx.invoked_subcommand in PERMISSION_CHANGES and os.environ.get("BRINDLE_AGENT_ID"):
+        _fail("brindle: running as an agent, so the permission rules were not changed; "
+              "the person can run this from their own terminal")
 
 
 def _here_repo() -> str | None:
@@ -1773,13 +1698,6 @@ profile_app = typer.Typer(no_args_is_help=True,
                                "(its `extends` parent and rule packs folded in).")
 app.add_typer(profile_app, name="profile")
 
-PROFILE_TEMPLATE = """---
-name: {name}
-description: {description}
-{extends}{rules}---
-{prompt}
-"""
-
 
 @profile_app.command("new")
 def profile_new(
@@ -1791,9 +1709,9 @@ def profile_new(
 ) -> None:
     """Write a new profile file to .brindle/agents/ (or ~/.brindle/agents with --user)."""
     from brindle.config import user_profiles_dir
-    from brindle.profiles import ProfileError, load_profile, load_rule_pack
+    from brindle.profiles import PROFILE_NAME, ProfileError, load_profile, load_rule_pack, profile_text
 
-    if not _PROFILE_NAME.match(name):
+    if not PROFILE_NAME.match(name):
         _fail(f"profile name {name!r}: use letters, digits, '-', '_' and '.'")
     repo = _here_repo()
     if user:
@@ -1820,54 +1738,11 @@ def profile_new(
         prompt = ("Additional instructions for this role go here; they follow the parent's prompt.")
     else:
         prompt = "You are an agent running under brindle. Describe the role here."
-    text = PROFILE_TEMPLATE.format(
-        name=name,
-        description=description or f"A {name} agent",
-        extends=f"extends: {extends}\n" if extends else "provider: claude\n",
-        rules=f"rules: {', '.join(packs)}\n" if packs else "",
-        prompt=prompt,
-    )
+    text = profile_text(name, description, prompt, extends=extends, rules=packs)
     target_dir.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
     typer.echo(f"✓ wrote {target}")
     typer.echo(f"  check it with: brindle profile show {name}")
-
-
-_PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def _lint_one(name: str, repo: str | None) -> tuple[list[str], list[str]]:
-    """(errors, warnings) for one profile."""
-    from brindle import providers
-    from brindle.profiles import (ProfileError, load_profile, load_rule_pack, missing_add_dirs)
-    from brindle.rule_checks import compile_patterns
-
-    errors: list[str] = []
-    warnings: list[str] = []
-    try:
-        p = load_profile(name, repo)
-    except (KeyError, ProfileError) as e:
-        return [str(e)], []
-    try:
-        providers.get_provider(p.provider)
-    except KeyError as e:
-        errors.append(str(e))
-    for pack_name in p.rules:
-        try:
-            pack = load_rule_pack(pack_name, repo)
-        except (KeyError, ProfileError) as e:
-            errors.append(str(e))
-            continue
-        _, bad = compile_patterns(pack)
-        errors.extend(f"rule pack {pack_name}: deny_patterns entry doesn't compile: {b}" for b in bad)
-        if not pack.prompt and not pack.mechanical:
-            warnings.append(f"rule pack {pack_name} is empty")
-    errors.extend(f"permission_denies: invalid entry {e}" for e in p.permission_denies_errors)
-    if not p.prompt.strip():
-        warnings.append("the prompt is empty")
-    for d in missing_add_dirs(p):
-        warnings.append(f"add_dirs entry doesn't exist: {d}")
-    return errors, warnings
 
 
 @profile_app.command("lint")
@@ -1875,13 +1750,13 @@ def profile_lint(
     name: Optional[str] = typer.Argument(None, help="One profile; default: every profile visible here."),
 ) -> None:
     """Check profiles: extends chains, rule packs, patterns, providers and permission denies."""
-    from brindle.profiles import profile_names
+    from brindle.profiles import lint_profile, profile_names
 
     repo = _here_repo()
     names = [name] if name else profile_names(repo)
     failed = 0
     for n in names:
-        errors, warnings = _lint_one(n, repo)
+        errors, warnings = lint_profile(n, repo)
         if errors:
             failed += 1
             typer.secho(f"✗ {n}", fg="red")
@@ -2382,27 +2257,16 @@ def close(
     """Hide agents from the dashboard for good, stopping any still running.
 
     Their worktrees, branches and records stay; `brindle ls` still lists them."""
+    from brindle.service import sessions as svc
+
     db = DB()
     if exited == bool(agent_id):
         _fail("pass an agent id, or --exited")
-    panes = tmux.list_panes()
     if agent_id:
-        target = _run(agents.get, db, agent_id)
-        was_running = agents.is_alive(target, panes) and agents.owns_pane(db, target)
-        a = _run(agents.close, db, agent_id, panes)
+        a, was_running = _run(svc.close, db, agent_id)
         typer.echo(f"✓ closed {a.id}" + (" (stopped it first)" if was_running else ""))
         return
-    repo_root = None
-    if not all_repos:
-        try:
-            repo_root = git.main_repo_root(os.getcwd())
-        except git.GitError:
-            pass
-    alive = view.live_agents(db, panes)
-    closed = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
-              if a.dismissed_at is None and (a.id not in alive or a.status == "done")]
-    for a in closed:
-        agents.close(db, a.id, panes)
+    closed = svc.close_exited(db, None if all_repos else _here_repo())
     typer.echo(f"✓ closed {len(closed)} agent(s)" if closed else "nothing to close")
 
 
@@ -2542,9 +2406,11 @@ def merge_cmd(
     squash: bool = typer.Option(False, "--squash"),
 ) -> None:
     """Merge the workspace branch into its base branch locally."""
+    from brindle.service import sessions as svc
+
     db = DB()
     ws = _ws(db, workspace)
-    target = _run(workspaces.merge_back, db, ws, squash)
+    target = _run(svc.merge, db, ws, squash)
     typer.echo(f"✓ merged {ws.branch} into {ws.base_branch} ({target})")
 
 
@@ -2584,19 +2450,13 @@ def rm(
 
     An unmerged branch is always kept; -K keeps any branch, and a repo can
     set delete_merged_branches to false."""
+    from brindle.service import sessions as svc
+
     db = DB()
     ws = _ws(db, workspace)
-    if ws.base_branch and os.path.isdir(ws.path) and not delete_branch:
-        try:
-            st = git.status(ws.path, ws.base_branch)
-        except git.GitError:
-            st = None  # e.g. the base branch is gone; the note is only a courtesy
-        if st and st.ahead and st.unpushed != 0:
-            typer.secho(
-                f"note: {ws.branch} has {st.ahead} commit(s) not in {ws.base_branch} "
-                "and not pushed; the branch is kept.", fg="yellow",
-            )
-    removed = _run(workspaces.remove, db, ws, force=force, delete_branch=delete_branch)
+    if note := svc.unpushed_note(ws, delete_branch):
+        typer.secho(note, fg="yellow")
+    removed = _run(svc.remove, db, ws, force=force, delete_branch=delete_branch)
     if removed.teardown and not removed.teardown.ok:
         typer.secho(f"teardown failed (ignored with --force):\n{removed.teardown.log}", fg="yellow")
     typer.echo(f"✓ removed {ws.id}. {removed.branch_note or 'branch deleted'}")
@@ -2698,8 +2558,10 @@ def agent_rewind(
 @app.command()
 def send(agent_id: str, message: str) -> None:
     """Send a message to an agent (queued until it's idle)."""
+    from brindle.service import sessions as svc
+
     db = DB()
-    outcome = _run(agents.send_message, db, agent_id, message, person=True)
+    outcome = _run(svc.send, db, agent_id, message)
     typer.echo(outcome)
 
 

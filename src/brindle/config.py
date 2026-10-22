@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -59,6 +61,9 @@ def user_config_path() -> Path:
 
 
 WEIGHTS = ("light", "medium", "heavy", "advanced")
+ROUTING_KINDS = (*WEIGHTS, "reviewer", "supervisor")   # the kinds of work the app routes and can lock
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+KIND_OVERRIDE_FIELDS = ("effort", "instructions")   # what the owner can set per kind, on top of its profile
 WEIGHT_ALIASES = {
     "reasoning": "advanced",
     "complex": "advanced",
@@ -131,6 +136,25 @@ class RepoConfig:
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
     permission_policy: str = "off"
+    # Seconds brindle's permission hook holds a request left to the person for
+    # the app's answer (brindle.agents._hold_for_app): a day, so in practice
+    # until the person answers it, sends it to the terminal, or the agent is
+    # closed. By provider:
+    #   Claude Code  PermissionRequest hook; timeout written as this + 30s (docs:
+    #                600s default, no maximum). Its own prompt shows meanwhile
+    #                (seen in 2.1.304); on timeout that prompt is what's left.
+    #   Codex        PermissionRequest hook (permission_policy on, hook trusted);
+    #                timeout codex_hook.TIMEOUT, a day + 30s (Codex caps only
+    #                SessionEnd hooks), so a longer hold is cut to fit. Whether
+    #                its prompt shows meanwhile: not seen yet.
+    #   Antigravity  PreToolUse hook under agy_approvals "brindle" only; timeout
+    #                written as this + 30s (agy documents no maximum; unverified).
+    #                No prompt of its own: on timeout the call is refused. Under
+    #                "prompt", agy ignores a hook's allow: answered in its pane.
+    #   OpenCode     its plugin can only deny, never allow: answered in its pane.
+    #   Native       brindle's own loop: no timeout but this; no prompt of its
+    #                own, so on timeout the call is refused.
+    permission_hold_seconds: int = 86400
     # "brindle": agy agents run with --dangerously-skip-permissions and
     # brindle's hook allows or denies every call (see brindle.antigravity).
     # "prompt": agy asks as usual. None (unset): "brindle" for agents brindle
@@ -165,6 +189,9 @@ class RepoConfig:
     local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
+    # Open a session's PR on its own once it is ready (never where the org's policy
+    # requires a human review; see brindle.daemon.session_review.auto_pr).
+    auto_pr: bool = False
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
     # ~/.brindle/config.json's, then the repo's, then config.local.json's, all kept.
@@ -186,6 +213,16 @@ class RepoConfig:
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
+    exclude_providers: list[str] = field(default_factory=list)  # providers weight routing never picks
+    # Kind of work -> whether hosted learning may never override it. Per kind, so a scope can
+    # unlock one a lower scope locked and a write to one kind leaves the others as they are.
+    routing_locked: dict[str, bool] = field(default_factory=dict)
+    # Kind of work -> {"effort", "instructions"} applied to whatever runs that kind at launch,
+    # merged per kind and field: user, then repo, then config.local.json.
+    routing_overrides: dict[str, dict[str, str]] = field(default_factory=dict)
+    reviewer_fallbacks: list[str] = field(default_factory=list)   # reviewer profiles to try, in order, when the reviewer can't run
+    supervisor_profile: str | None = None      # the profile whose provider the supervisor runs on (None: the supervisor profile's own)
+    supervisor_fallbacks: list[str] = field(default_factory=list)  # tried in order when that provider can't run it
     # Model prices in $/MTok that add to or override brindle's built-in ones (see brindle.pricing):
     # {"model": {"input", "output", "cache_write"?, "cache_read"?}}, merged per model: user, then repo, then config.local.json.
     pricing: dict[str, dict] = field(default_factory=dict)
@@ -270,6 +307,28 @@ def host_check_concurrency() -> int:
     return max(2, min(cores // 2, by_ram, CHECK_CONCURRENCY_CAP))
 
 
+def locked_kinds(found: object) -> dict[str, bool]:
+    """A ``routing_locked`` setting as {kind: locked}: a {kind: bool} map, or a
+    list of locked kinds."""
+    if isinstance(found, dict):
+        return {k: v for k, v in found.items() if k in ROUTING_KINDS and isinstance(v, bool)}
+    if isinstance(found, list):
+        return {k: True for k in found if k in ROUTING_KINDS}
+    return {}
+
+
+def kind_overrides(found: object) -> dict[str, dict[str, str]]:
+    """A ``routing_overrides`` setting as {kind: {effort?, instructions?}}, keeping only what is valid."""
+    out: dict[str, dict[str, str]] = {}
+    for kind, spec in (found.items() if isinstance(found, dict) else ()):
+        if kind in ROUTING_KINDS and isinstance(spec, dict):
+            kept = {k: v for k, v in spec.items() if k in KIND_OVERRIDE_FIELDS and isinstance(v, str) and v.strip()
+                    and (k != "effort" or v in EFFORTS)}   # a hand-edited file can't pass anything else to the CLI
+            if kept:
+                out[kind] = kept
+    return out
+
+
 def load_repo_config(repo_root: str | Path) -> RepoConfig:
     base = config_root(repo_root) / CONFIG_DIR
     shared = _read_json(base / CONFIG_FILE)
@@ -285,9 +344,11 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
                 "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
-                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy", "agy_approvals",
-                "learned_rules_repeats", "learned_rules_profile"):
+                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
+                "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
+                "permission_hold_seconds", "agy_approvals",
+                "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
+                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -321,6 +382,11 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 if norm_tier in WEIGHTS and isinstance(names, list):
                     cfg.routing[norm_tier] = [n for n in names if isinstance(n, str)]
                     cfg.routing_sources[norm_tier] = str(path)
+    for source in (user, shared, local):  # per kind, a later scope overriding an earlier one
+        cfg.routing_locked.update(locked_kinds(source.get("routing_locked")))
+    for source in (user, shared, local):
+        for kind, fields in kind_overrides(source.get("routing_overrides")).items():
+            cfg.routing_overrides.setdefault(kind, {}).update(fields)
     from brindle import worker_models
 
     worker_models.apply(cfg, user, str(repo_root))   # the models picked on the picker's workers screen
@@ -378,6 +444,17 @@ def supervisor_pick() -> str | None:
     return pick if isinstance(pick, str) and pick else None
 
 
+def claude_permission_mode() -> str:
+    """The ``--permission-mode`` for Claude sessions whose profile sets none:
+    "default" so held permission requests reach the app, unless the person
+    opted into another mode (e.g. "auto") with ``claude_permission_mode``."""
+    mode = user_settings().get("claude_permission_mode")
+    return mode if isinstance(mode, str) and mode else "default"
+
+
+_USER_WRITE = threading.Lock()
+
+
 def set_user(key: str, value: object) -> Path:
     """Set one key in ``~/.brindle/config.json`` (other keys are kept)."""
     path = user_config_path()
@@ -386,9 +463,18 @@ def set_user(key: str, value: object) -> Path:
         print("brindle: running as an agent, so ~/.brindle/config.json was not changed", file=sys.stderr)
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = _read_json(path)
-    data[key] = value
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with _USER_WRITE:   # daemon actions run in threads: one read-modify-replace at a time
+        data = _read_json(path)
+        data[key] = value
+        # A unique temp file replaced into place, so a reader never sees half a file.
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
     _sync_setting(key)
     return path
 
@@ -434,6 +520,32 @@ def set_local(repo_root: str | Path, key: str, value: object) -> Path:
     if not ignore.exists():
         ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
     return path
+
+
+def set_repo(repo_root: str | Path, key: str, value: object) -> Path:
+    """Set one key in the repo's shared ``.brindle/config.json`` (committed:
+    everyone's settings; other keys are kept)."""
+    path = scope_paths(repo_root)["repo"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _read_json(path)
+    data[key] = value
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def scope_paths(repo_root: str | Path) -> dict[str, Path]:
+    """The file of each settings scope for ``repo_root``: "user"
+    (~/.brindle/config.json), "repo" (.brindle/config.json) and "local"
+    (.brindle/config.local.json)."""
+    base = config_root(repo_root) / CONFIG_DIR
+    return {"user": user_config_path(), "repo": base / CONFIG_FILE, "local": base / LOCAL_CONFIG_FILE}
+
+
+def setting_source(repo_root: str | Path, key: str) -> str:
+    """The scope whose file sets ``key`` as load_repo_config reads it
+    ("local", then "repo", then "user"), or "default"."""
+    paths = scope_paths(repo_root)
+    return next((s for s in ("local", "repo", "user") if key in _read_json(paths[s])), "default")
 
 
 def write_template(repo_root: str | Path, values: dict | None = None) -> Path:

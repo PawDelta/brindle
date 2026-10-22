@@ -12,8 +12,11 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+
+from brindle.db import DB
 
 OK, WARN, FAIL = "ok", "warn", "fail"
 
@@ -284,9 +287,9 @@ def _fix_claude(confirm, done: list[str]) -> list[str]:
     return ["ANTHROPIC_API_KEY: approved for Claude Code"]
 
 
-def checks(repo_root: str | None) -> list[Check]:
+def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
+    """Run diagnostics, borrowing ``db`` or closing each connection we open."""
     from brindle import config, detect, procs, tmux, updates
-    from brindle.db import DB
 
     out: list[Check] = []
     v = sys.version_info
@@ -323,6 +326,7 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(Check(OK, "sidebar",
                      "`brindle sidebar` (or prefix S in tmux) brings a lost sidebar back to the session you're in"))
 
+    out.extend(daemon_checks())
     out.extend(native_checks(repo_root))
     out.extend(override_checks())
     out.extend(quota_checks(repo_root))
@@ -343,7 +347,9 @@ def checks(repo_root: str | None) -> list[Check]:
         probe = home / ".doctor-probe"
         probe.write_text("ok")
         probe.unlink()
-        DB().conn.execute("SELECT 1")
+        probe_db = db if db is not None else DB()
+        with closing(probe_db.conn) if db is None else nullcontext():
+            probe_db.conn.execute("SELECT 1")
         out.append(Check(OK, "brindle home", f"{home} (writable, database opens)"))
     except Exception as e:  # noqa: BLE001
         out.append(Check(FAIL, "brindle home", f"{home}: {e}"))
@@ -363,13 +369,14 @@ def checks(repo_root: str | None) -> list[Check]:
             out.append(Check(WARN, "tmux focus-events", str(e)))
 
     try:
-        db = DB()
-        table = procs.table()
-        stray = []
-        for aid in procs.all_agent_ids(table):
-            a = db.get_agent(aid)
-            if a is None or a.status in ("paused", "done") or a.dismissed_at is not None:
-                stray.append(aid)
+        process_db = db if db is not None else DB()
+        with closing(process_db.conn) if db is None else nullcontext():
+            table = procs.table()
+            stray = []
+            for aid in procs.all_agent_ids(table):
+                a = process_db.get_agent(aid)
+                if a is None or a.status in ("paused", "done") or a.dismissed_at is not None:
+                    stray.append(aid)
         if stray:
             out.append(Check(WARN, "leftover processes",
                              f"{len(stray)} agent(s) have processes running but aren't active: "
@@ -680,6 +687,27 @@ def quota_checks(repo_root: str | None) -> list[Check]:
         if n:
             out.append(Check(WARN if quota.headroom(p) <= 10 else OK, f"{p} quota", n))
     return out
+
+
+def daemon_checks(home: Path | None = None) -> list[Check]:
+    """Whether the daemon is running, from the pid in its ``daemon.json``, and
+    its TCP address when it also listens there (``--tcp``)."""
+    import json
+
+    from brindle import config, procs
+
+    path = (home or config.brindle_home()) / "daemon.json"
+    try:
+        info = json.loads(path.read_text())
+        pid = info.get("pid")
+    except (OSError, ValueError, AttributeError):
+        return [Check(OK, "daemon", "not running")]
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return [Check(WARN, "daemon", f"{path} has no pid; restart the daemon to rewrite it")]
+    if procs.alive(pid):
+        tcp = f", tcp 127.0.0.1:{info['port']}" if info.get("port") else ""
+        return [Check(OK, "daemon", f"running (pid {pid}{tcp})")]
+    return [Check(WARN, "daemon", f"not running: {path} is left from pid {pid}, which is gone")]
 
 
 MARK = {OK: "✓", WARN: "!", FAIL: "✗"}

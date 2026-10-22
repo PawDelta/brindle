@@ -120,6 +120,7 @@ def _cost(kind: str, worker: Agent | None, repo_root: str) -> float | None:
     org counts spend (Team ``org_budgets``); None otherwise or when it can't be priced."""
     if kind not in ("remove", "cost") or worker is None:
         return None
+    db = None
     try:
         from brindle import budget
         from brindle.db import DB
@@ -138,6 +139,9 @@ def _cost(kind: str, worker: Agent | None, repo_root: str) -> float | None:
     except Exception:
         log.debug("brindle: couldn't price %s for the event", worker.id, exc_info=True)
         return None
+    finally:
+        if db is not None:
+            db.conn.close()
 
 
 def _by_model(kind: str, worker: Agent | None, repo_root: str,
@@ -149,6 +153,7 @@ def _by_model(kind: str, worker: Agent | None, repo_root: str,
     "unknown model" when none is known), so the split sums to ``cost_usd``."""
     if kind not in ("remove", "cost") or worker is None:
         return None
+    db = None
     try:
         from brindle import cost, usage
         from brindle.db import DB
@@ -200,6 +205,9 @@ def _by_model(kind: str, worker: Agent | None, repo_root: str,
     except Exception:
         log.debug("brindle: couldn't split %s by model for the event", worker.id, exc_info=True)
         return None
+    finally:
+        if db is not None:
+            db.conn.close()
 
 
 def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None, *,
@@ -220,6 +228,7 @@ def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None,
             by_model=_by_model(kind, worker, ws.repo_root, cost_usd),
         ))
         if cost_usd and worker and kind in ("remove", "cost"):
+            db = None
             try:
                 from brindle.db import DB
                 db = DB()
@@ -230,6 +239,9 @@ def emit(cfg: RepoConfig, kind: str, ws: Workspace, worker: Agent | None = None,
                     set_rep(worker.id, round(old_reported + cost_usd, 4))
             except Exception:
                 pass
+            finally:
+                if db is not None:
+                    db.conn.close()
     except Exception:
         log.exception("brindle: the events plugin failed on a %s event", kind)
 
@@ -249,6 +261,7 @@ def emit_periodic_cost(cfg: RepoConfig, repo_root: str) -> list[str]:
     except Exception:
         return done
 
+    db = None
     try:
         db = DB()
         for a in db.list_agents():
@@ -269,6 +282,9 @@ def emit_periodic_cost(cfg: RepoConfig, repo_root: str) -> list[str]:
             done.append(f"emitted periodic cost ${delta:.2f} for agent {a.id}")
     except Exception:
         log.exception("brindle: periodic cost check failed for %s", repo_root)
+    finally:
+        if db is not None:
+            db.conn.close()
     return done
 
 

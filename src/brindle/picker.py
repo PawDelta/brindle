@@ -283,13 +283,21 @@ def _open_workers() -> None:
 SCREENS["w"] = ("workers", _open_workers)
 
 
-def _login_command(provider: str) -> list[str]:
+# Sign-in methods a provider's CLI lets you pick with a flag.
+LOGIN_METHODS: dict[str, dict[str, str]] = {
+    "claude": {"claudeai": "--claudeai", "console": "--console", "sso": "--sso"},
+    "codex": {"device": "--device-auth"},
+}
+
+
+def _login_command(provider: str, method: str | None = None) -> list[str]:
     from brindle import antigravity, opencode, providers
 
+    flag = [LOGIN_METHODS[provider][method]] if method else []
     if provider == "claude":
-        return [providers.claude_binary(), "auth", "login"]
+        return [providers.claude_binary(), "auth", "login", *flag]
     if provider == "codex":
-        return [providers.codex_binary(), "login"]
+        return [providers.codex_binary(), "login", *flag]
     if provider == "opencode":
         return [opencode.binary(), "auth", "login"]
     return [antigravity.binary()]      # agy signs in on its first screen
@@ -329,7 +337,12 @@ def sign_in(provider: str, *, run=None, confirm: Callable[..., bool] = typer.con
             echo(f"✗ installing {name} failed; run `{cmd}` yourself, then pick it again.")
             return False
     echo(f"Opening {name}'s sign-in; come back here when you're done.")
-    run(_login_command(provider), timeout=LOGIN_TIMEOUT, interactive=True, env=_wsl_browser_env())
+    from brindle import provider_homes
+
+    # The CLI signs in to brindle's config home for it, which brindle uses from then on.
+    homes, browser = provider_homes.login_env(provider), _wsl_browser_env()
+    env = {**(browser or os.environ), **homes} if homes or browser else None
+    run(_login_command(provider), timeout=LOGIN_TIMEOUT, interactive=True, env=env)
     if provider in doctor.signed_in_providers():
         echo(f"✓ {name} is signed in.")
         return True

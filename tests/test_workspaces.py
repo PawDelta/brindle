@@ -5,7 +5,7 @@ import sys
 import pytest
 
 import brindle
-from brindle import git, mcp_server, providers, workspaces
+from brindle import bus, git, mcp_server, providers, workspaces
 from brindle.config import load_repo_config
 
 from conftest import sh
@@ -68,6 +68,9 @@ def test_remove_refuses_dirty_and_keeps_branch(db, repo):
     assert git.branch_exists(str(repo), "feature")
     assert not os.path.exists(ws.path)
     assert db.get_workspace(ws.id) is None
+    assert [(e["kind"], e["workspace_id"], e["repo_root"])
+            for e in bus.tail(db, kinds=("workspace.created", "workspace.removed"))] == [
+        ("workspace.created", ws.id, ws.repo_root), ("workspace.removed", ws.id, ws.repo_root)]
 
 
 @pytest.mark.parametrize("ref", ["worker", "missing-worker"])

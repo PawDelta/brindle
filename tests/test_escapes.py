@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, config, escapes, gates, history, workspaces
+from brindle import agents, autopilot, bus, config, escapes, gates, history, workspaces
 
 REAL_REQUEST_REVIEW = agents.request_review
 from brindle.config import RepoConfig
@@ -134,6 +134,10 @@ def test_a_weight_without_a_second_reviewer_gets_one_review(db, repo, piped):
     assert started == [None]
     agents.submit_review(db, "rev0", True, "lgtm")
     assert merged(repo)
+    assert [(e["kind"], e["agent_id"]) for e in bus.tail(db, kinds=(
+        "agent.reported", "review.submitted", "pipeline.merged"))] == [
+        ("agent.reported", "w1"), ("review.submitted", "rev0"), ("pipeline.merged", "w1"),
+        ("agent.reported", "rev0")]
 
 
 def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):

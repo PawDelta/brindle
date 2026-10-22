@@ -321,6 +321,16 @@ def brindle_home(tmp_path, monkeypatch):
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    # brindle's own config homes for the CLIs (provider_homes): the same folders,
+    # so nothing is copied and nothing outside the test is written.
+    monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(tmp_path / "claude-config"))
+    monkeypatch.setenv("BRINDLE_CODEX_CONFIG_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv("BRINDLE_OPENCODE_CONFIG_HOME", str(tmp_path / "opencode-config"))
+    # Nor does a test find the machine's own CLIs in the makers' standard places
+    # (Homebrew, ~/.local/bin ...): only PATH, as the test sets it.
+    from brindle import providers_install
+
+    monkeypatch.setattr(providers_install, "STANDARD", {p: [] for p in providers_install.PROVIDERS})
     # ... nor agy's real settings.
     monkeypatch.setenv("BRINDLE_AGY_SETTINGS", str(tmp_path / "agy-home" / "settings.json"))
     # The shell provider runs $SHELL. The person's own shell reads their dotfiles,
@@ -396,10 +406,32 @@ def cli_sign_in_unknown(monkeypatch):
 
     monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: None)
     monkeypatch.setattr(providers, "_SIGNED_IN", {})
+    # Nor is a launch held for Claude Code's first-run screens (the temporary
+    # CLAUDE_CONFIG_DIR has never seen them); tests/test_daemon_actions.py checks.
+    monkeypatch.setattr(providers, "claude_onboarded", lambda: True)
     # Only what a test puts on PATH counts as installed, not an app's own copy.
     monkeypatch.setattr(providers, "CODEX_BUNDLED", "/nonexistent/codex")
     monkeypatch.setattr(antigravity, "BUNDLED", "/nonexistent/agy")
     monkeypatch.setattr(opencode, "INSTALLER", "/nonexistent/opencode")
+
+
+@pytest.fixture(scope="session")
+def _claude_stub_dir(tmp_path_factory):
+    path = tmp_path_factory.mktemp("installed-clis")
+    stub = path / "claude"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def claude_installed(_claude_stub_dir, monkeypatch):
+    """claude is installed, whether or not the machine has it (CI has no
+    provider CLIs): the baseline profiles run on it, so a reviewer or a
+    profile on claude isn't refused as unusable. A test that wants it missing
+    sets PATH itself. The stub is outside tmp_path, so no_real_agent_cli still
+    refuses to launch it."""
+    monkeypatch.setenv("PATH", f"{_claude_stub_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
 
 @pytest.fixture(autouse=True)

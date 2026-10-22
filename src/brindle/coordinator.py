@@ -25,7 +25,7 @@ import json
 import logging
 import time
 
-from brindle import agents, autopilot, gates, knowledge, repos, tasks
+from brindle import agents, autopilot, bus, gates, knowledge, repos, tasks
 from brindle.config import load_repo_config, set_local
 from brindle.db import DB, Agent, Task, Workspace
 
@@ -133,9 +133,12 @@ def _owner(db: DB, t: Task) -> str | None:
 
 
 def _record(db: DB, coord: Agent, action: str, reason: str, **payload) -> str:
-    return knowledge.append(db, knowledge.repo_key(_home(db, coord).repo_root),
-                            knowledge.COORDINATOR, {"action": action, "reason": reason, **payload},
-                            actor=coord.id)
+    event_id = knowledge.append(db, knowledge.repo_key(_home(db, coord).repo_root),
+                                knowledge.COORDINATOR,
+                                {"action": action, "reason": reason, **payload}, actor=coord.id)
+    bus.publish_agent(db, "coordinator.action", coord.id, action=action, event_id=event_id,
+                      task_id=payload.get("task"))
+    return event_id
 
 
 def _tell(db: DB, roots, text: str) -> list[str]:
@@ -294,6 +297,8 @@ def undo(db: DB, repo_key: str, ref: str) -> str:
         what = f"put task {t.id} back as it was before the coordinator's {action}"
         told = _tell(db, [_owner(db, t)], f"[brindle] A person {what} (event {ev['id'][:8]}).")
     knowledge.append(db, repo_key, knowledge.COORDINATOR, {"action": "undo", "undoes": ev["id"]})
+    bus.publish(db, "coordinator.action", action="undo", undoes=ev["id"],
+                task_id=payload.get("task"))
     return f"Undid {ev['id'][:8]}: {what}.{_told(told)}"
 
 

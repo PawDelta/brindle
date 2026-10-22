@@ -241,19 +241,22 @@ def _remember_launch(key: str) -> None:
         pass  # a cache that can't be written only means the next launch probes
 
 
-def _probe(argv: list[str], cache: bool = True) -> tuple[int, str] | None:
+def _probe(argv: list[str], cache: bool = True, home: dict[str, str] | None = None) -> tuple[int, str] | None:
     """(returncode, output) of a status command; None when its CLI isn't
-    installed or the command couldn't run or timed out."""
+    installed or the command couldn't run or timed out. ``home``: the config
+    home the CLI's agents run with (provider_homes.launch_env), so the
+    probe asks the same login; a cached answer is that home's only."""
     if not company_login.which(argv[0]):
         return None
-    key = tuple(argv)
+    key = (*argv, *sorted((home or {}).items()))
+    env = {**os.environ, **home} if home else None
     now = time.monotonic()
     hit = _cache.get(key) if cache else None
     if hit and now - hit[0] < CACHE_SECONDS:
         return hit[1]
-    code, out = company_login.run_cmd(argv, PROBE_TIMEOUT)
+    code, out = company_login.run_cmd(argv, PROBE_TIMEOUT, env=env)
     if code == 124:     # a healthy CLI can miss the timeout on a loaded machine: once more, longer
-        code, out = company_login.run_cmd(argv, PROBE_TIMEOUT * RETRY_FACTOR)
+        code, out = company_login.run_cmd(argv, PROBE_TIMEOUT * RETRY_FACTOR, env=env)
     if code in (124, 127):
         return None
     _cache[key] = (now, (code, out))
@@ -295,9 +298,10 @@ def _unknown(provider: str, tool: str, why: str = "", exe: str = "") -> Identity
 FIX = "run `brindle doctor --fix`"
 
 
-def claude_identity(org_id: str, claude, cache: bool = True) -> Identity:
+def claude_identity(org_id: str, claude, cache: bool = True, home: dict[str, str] | None = None) -> Identity:
     """Claude's identity against ``claude`` (a ``ClaudeSetup``, or None: no
-    policy, so only shown)."""
+    policy, so only shown). ``home``: the config home of the agent being
+    launched (its stored provider_homes decision), else the current one."""
     route = claude.route if claude is not None else None
     if route == "gateway":
         return Identity("claude", f"gateway {claude.gateway.base_url}",
@@ -308,14 +312,14 @@ def claude_identity(org_id: str, claude, cache: bool = True) -> Identity:
         return _gcloud(claude, cache)
     if route == "foundry":
         return _az(claude, cache)
-    return _claude_login(claude, route, cache)
+    return _claude_login(claude, route, cache, home)
 
 
-def _claude_login(claude, route, cache) -> Identity:
-    from brindle import providers
+def _claude_login(claude, route, cache, home: dict[str, str] | None = None) -> Identity:
+    from brindle import provider_homes, providers
 
     exe = providers.claude_binary()
-    got = _probe([exe, "auth", "status"], cache)
+    got = _probe([exe, "auth", "status"], cache, provider_homes.launch_env("claude") if home is None else home)
     if got is None:
         return _unknown("claude", "claude", exe=exe)
     status = _json(got[1])
@@ -449,7 +453,9 @@ def _az(claude, cache) -> Identity:
 
 def codex_identity(cache: bool = True) -> Identity:
     """Codex can't be verified beyond signed in: its status line, as information."""
-    got = _probe(["codex", "login", "status"], cache)
+    from brindle import provider_homes
+
+    got = _probe(["codex", "login", "status"], cache, provider_homes.launch_env("codex"))
     if got is None:
         return _unknown("codex", "codex")
     text = next((ln.strip() for ln in got[1].splitlines() if ln.strip()), "")
@@ -591,14 +597,14 @@ def checks() -> list:
     return out
 
 
-def launch_check(provider: str) -> tuple[str | None, str | None, str | None]:
+def launch_check(provider: str, home: dict[str, str] | None = None) -> tuple[str | None, str | None, str | None]:
     """The launch identity check for ``provider``: (why its agents must not
     start, the outcome, the policy's route). The problem is set when the org
     policy enforces its company identity (Enterprise) and this machine's
     differs. The outcome is ``identity_match``, ``identity_mismatch`` or
     ``identity_undetermined`` (what route health reports); None, with no
     route, when nothing was checked: the policy doesn't enforce, is missing
-    or can't be read."""
+    or can't be read. ``home``: the launching agent's stored config home."""
     if provider != "claude":
         return None, None, None
     try:
@@ -609,7 +615,7 @@ def launch_check(provider: str) -> tuple[str | None, str | None, str | None]:
         key = _launch_key(got[0], got[1].claude)
         if key and _launch_cache_hit(key):
             return None, "identity_match", route
-        ident = claude_identity(got[0], got[1].claude, cache=False)
+        ident = claude_identity(got[0], got[1].claude, cache=False, home=home)
         if key and ident.problem is None and ident.determined:
             _remember_launch(key)
     except Exception:  # noqa: BLE001 - an unreadable identity never blocks a launch

@@ -1,6 +1,6 @@
 [project]
 name = "brindle"
-version = "0.4.5"
+version = "0.4.4"
 description = "Run coding agents in parallel, each on its own git branch, with a supervisor that delegates, reviews, and merges"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,7 @@ dependencies = [
     "typer>=0.12",
     "mcp>=2.2,<3",
     "cryptography>=42",
+    "wsproto>=1.2",
 ]
 
 [project.urls]

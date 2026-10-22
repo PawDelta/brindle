@@ -239,3 +239,5 @@ def test_attach_fails_fast_on_a_hung_server(db, repo, hung_tmux):
     with pytest.raises((SystemExit, typer.Exit)):
         cli._attach(ws)
     assert time.time() - t0 < 5
+
+

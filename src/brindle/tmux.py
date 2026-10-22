@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -60,8 +61,14 @@ def current_server() -> str | None:
     return os.environ.get("BRINDLE_TMUX_SOCKET") or None
 
 
+def _bin() -> str:
+    """BRINDLE_TMUX_BIN, else ``tmux`` on PATH."""
+    return os.environ.get("BRINDLE_TMUX_BIN") or "tmux"
+
+
 def _argv(server: str | None) -> list[str]:
-    return ["tmux", "-L", server] if server else ["tmux"]
+    bin_ = _bin()
+    return [bin_, "-L", server] if server else [bin_]
 
 
 def _base() -> list[str]:
@@ -77,7 +84,7 @@ _THIS_SERVER: object = object()
 
 def _tmux(*args: str, input: str | None = None, check: bool = True,
           server: object = _THIS_SERVER) -> subprocess.CompletedProcess:
-    if not shutil.which("tmux"):
+    if not shutil.which(_bin()):
         raise TmuxError("tmux is not installed (macOS: `brew install tmux`)")
     base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
     try:
@@ -472,9 +479,11 @@ def pane_window_tag(pane: str, key: str) -> tuple[str | None, str | None]:
     return fields[0] or None, fields[1] or None
 
 
-def pane_session(pane: str) -> str | None:
-    """The name of the session ``pane`` is currently in, or None if it's gone."""
-    proc = _tmux("display-message", "-p", "-t", pane, "#{session_name}", check=False)
+def pane_session(pane: str, server: object = _THIS_SERVER) -> str | None:
+    """The name of the session ``pane`` is currently in, or None if it's gone.
+    ``server`` as for capture."""
+    proc = _tmux("display-message", "-p", "-t", pane, "#{session_name}", check=False,
+                 server=server)
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
@@ -544,6 +553,21 @@ def get_pane_tag(pane: str, key: str) -> str | None:
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+def tagged_panes(session: str, key: str) -> list[tuple[str, str, bool, str]]:
+    """(pane id, window name, alive, value) of each pane of ``session`` that
+    sets the pane-level user option ``key``; empty when there is no such session."""
+    fmt = f"#{{pane_id}}\t#{{window_name}}\t#{{pane_dead}}\t#{{{key}}}"
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F", fmt, check=False)
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        pane, name, dead, tag = (line.split("\t") + ["", "", ""])[:4]
+        if tag:
+            out.append((pane, name, dead.strip() == "0", tag))
+    return out
 
 
 def agent_pane_in_window(window: str, sidebar: str | None) -> str | None:
@@ -773,7 +797,7 @@ def other_servers(prefix: str = "brindle-") -> list[str]:
 
 
 def _on(server: str, *args: str) -> subprocess.CompletedProcess:
-    base = ["tmux", "-L", server]
+    base = _argv(server)
     try:
         return subprocess.run([*base, *args], capture_output=True, text=True, timeout=timeout())
     except subprocess.TimeoutExpired:
@@ -785,7 +809,7 @@ def server_homes(server: str) -> list[str | None] | None:
     session without one), or None when no server is listening there. A
     server that is listening but not answering raises TmuxTimeout: it is
     not "nothing listening", and its socket must stay."""
-    if not shutil.which("tmux"):
+    if not shutil.which(_bin()):
         return None
     proc = _on(server, "list-sessions", "-F", "#{session_name}")
     if proc.returncode != 0:
@@ -802,7 +826,7 @@ def reap_server(server: str) -> None:
     """Stop the named private ``server`` (if it's running) and remove its
     socket. Never the default server (TmuxError)."""
     server = _ours(server)
-    if shutil.which("tmux"):
+    if shutil.which(_bin()):
         _on(server, "kill-server")
     remove_socket(server)
 
@@ -870,13 +894,15 @@ def kill_session(session: str) -> None:
 
 
 def capture(target: str, lines: int = 200, escapes: bool = False,
-            server: object = _THIS_SERVER) -> str:
+            server: object = _THIS_SERVER, join: bool = True) -> str:
     """``escapes`` includes SGR colour/attribute codes (capture-pane -e):
     needed to tell styled placeholder text apart from something typed.
+    ``join`` glues wrapped lines back together (-J); False keeps one line
+    per screen row, for a caller that redraws rows in place.
     ``server``: the tmux server ``target`` is on, when it isn't the one
     brindle is using (an agent's own; see agents.server_of)."""
-    flags = ["-e"] if escapes else []
-    return _tmux("capture-pane", "-p", "-J", *flags, "-t", target, "-S", f"-{lines}",
+    flags = (["-J"] if join else []) + (["-e"] if escapes else [])
+    return _tmux("capture-pane", "-p", *flags, "-t", target, "-S", f"-{lines}",
                  server=server).stdout
 
 
@@ -901,6 +927,40 @@ def paste(target: str, text: str, submit: bool = True, lead: str | None = None,
 def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:
     """``server`` as for capture."""
     _tmux("send-keys", "-t", target, *keys, server=server)
+
+
+# What tmux says when no server listens on the socket (it is missing, or
+# stale): older tmux names the errno. Any other "error connecting to" (a
+# socket it may not open) says nothing about the server's windows.
+_NO_SERVER = re.compile(r"no server running|error connecting to .*\((No such file or directory|Connection refused)\)")
+
+
+def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[str]:
+    """Every pane on ``server`` (as for capture) that sets one of the pane
+    options ``keys``; empty when no server runs there. Raises TmuxError when
+    the server can't be asked, so an answer it never gave isn't read as "none"."""
+    keys = list(keys)
+    fmt = "\t".join(["#{pane_id}", *(f"#{{{k}}}" for k in keys)])
+    proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
+    if proc.returncode != 0:
+        if _NO_SERVER.search(proc.stderr):
+            return []
+        raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    return [pane for pane, *tags in rows if any(tags)]
+
+
+def window_size_option(target: str, server: object = _THIS_SERVER) -> str | None:
+    """The ``window-size`` set on ``target``'s window itself (not one it
+    inherits from the global options); None when it sets none. Raises
+    TmuxError when tmux can't say. ``server`` as for capture."""
+    return _tmux("show-options", "-w", "-v", "-t", target, "window-size", server=server).stdout.strip() or None
+
+
+def unset_window_size(target: str, server: object = _THIS_SERVER) -> None:
+    """Unset the ``window-size`` set on ``target``'s window: it is sized by
+    tmux's own rule again. Never the global option. ``server`` as for capture."""
+    _tmux("set-option", "-w", "-u", "-t", target, "window-size", server=server)
 
 
 def attach_command(session: str, window: str | None = None) -> list[str]:

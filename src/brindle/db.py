@@ -7,12 +7,15 @@ transaction.
 
 from __future__ import annotations
 
+import re
+import signal
 import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from typing import Iterator
 
+from brindle import bus
 from brindle.config import db_path
 
 # Claude Code's own subagents (native_subagents table, see below). A crash
@@ -72,6 +75,7 @@ CREATE TABLE IF NOT EXISTS agents (
     reviewing_since REAL,          -- when its last report put its branch in review (pipeline.on_report)
     review_restarted REAL,         -- the wait in review whose dead check run was started again (pipeline.restart_review)
     merge_failed TEXT,             -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    config_home TEXT,              -- the CLI config home it runs with, decided once at spawn (provider_homes): '' the person's own
     review_slot TEXT               -- the review claim slot a reviewer was started in (gates.standing_reviews)
 );
 CREATE TABLE IF NOT EXISTS inbox (
@@ -123,7 +127,10 @@ CREATE TABLE IF NOT EXISTS milestones (
     checked_sha TEXT,              -- the checkout's HEAD when it was last checked
     passed_sha TEXT,               -- the checkout's HEAD when it last passed
     profile TEXT,                  -- default worker profile for assign
-    repo TEXT                      -- alias of the attached repo the check runs in (brindle.repos); NULL: the session's own
+    repo TEXT,                     -- alias of the attached repo the check runs in (brindle.repos); NULL: the session's own
+    state TEXT,                    -- last check: passed | not_done | regressed | failed (couldn't run); NULL: never checked
+    state_why TEXT,                -- for failed: why the check couldn't run
+    ever_passed INTEGER            -- 1 once any check passed (kept through later failures)
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
@@ -355,16 +362,24 @@ CREATE TABLE IF NOT EXISTS pool_failures (
     failed_at REAL NOT NULL,
     PRIMARY KEY (repo_root, base_branch)
 );
--- A tool-permission request brindle's policy left to the person (see
--- brindle.permissions): the structured request, so the supervisor can be told
--- exactly what's pending, and so the tool's PostToolUse (same tool_use_id)
--- can count as the person approving it. Cleared when the turn ends.
+-- A tool-permission request left to the person (see brindle.permissions):
+-- the structured request, so the supervisor can be told exactly what's
+-- pending, and so the tool's PostToolUse (the same tool and input) can count
+-- as the person approving it. Cleared when the turn ends. While the daemon
+-- holds it for the person's answer (channel 'hook': for the inbox to show;
+-- the answer itself goes through the daemon, brindle.daemon.holds), then the
+-- CLI's own prompt has it ('prompt') or the hook took an answer ('answered').
+-- ``tool_use_id`` is the request's id: brindle's own, not the CLI's.
 CREATE TABLE IF NOT EXISTS permission_requests (
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     tool_use_id TEXT NOT NULL,
     request TEXT NOT NULL,          -- JSON of brindle.permissions.Request
-    reason TEXT NOT NULL,
+    reason TEXT NOT NULL,           -- the policy's; '' when the policy is off
     created_at REAL NOT NULL,
+    suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
+    channel TEXT,                   -- hook | prompt | answered
+    answer TEXT,                    -- what the person answered (a record only: answers go through the daemon)
+    hold_until REAL,                -- when the hook stops holding it for the app
     PRIMARY KEY (agent_id, tool_use_id)
 );
 -- One row per delegation: which profile brindle would have used without
@@ -412,6 +427,26 @@ CREATE TABLE IF NOT EXISTS review_mcp_retries (
     sha TEXT NOT NULL,
     PRIMARY KEY (workspace_id, sha)
 );
+-- The commits the session review's edit route made (the person's own edits):
+-- only the daemon writes them, so they never un-audit a session's work.
+CREATE TABLE IF NOT EXISTS review_edits (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, sha)
+);
+-- The PR of a session's branch (POST /v1/sessions/{root}/pr, or brindle's own
+-- with auto_pr): one per session and branch, so none is ever opened twice.
+-- url is NULL while it is being opened; pushed_sha: the commit last pushed to it.
+CREATE TABLE IF NOT EXISTS session_prs (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    url TEXT,
+    pushed_sha TEXT,
+    auto INTEGER NOT NULL DEFAULT 0,
+    opened_at REAL NOT NULL,
+    merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
+    PRIMARY KEY (root_id, branch)
+);
 -- The one reviewer of a workspace's commit (agents.request_review): only the
 -- dispatcher that inserts or takes over this row starts it. slot is '' for
 -- the commit's review, or the profile of a configured second review.
@@ -451,6 +486,19 @@ CREATE TABLE IF NOT EXISTS kb_events (
     ts REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS kb_events_repo ON kb_events(repo_key, ts);
+-- The local event bus (brindle.bus owns this): append-only, short-lived.
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    repo_root TEXT,
+    root_id TEXT,
+    agent_id TEXT,
+    workspace_id TEXT,
+    task_id TEXT,
+    payload TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
 CREATE TABLE IF NOT EXISTS intents (
     session_root TEXT NOT NULL,
     repo_key TEXT NOT NULL,
@@ -574,6 +622,7 @@ class Agent:
     unreported_noted: int | None = None
     plan_first: int | None = None      # must get its plan approved before editing (brindle.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
+    plan_text: str | None = None       # the plan awaiting a decision (agents.submit_plan), shown in the inbox
     tmux_server: str | None = None     # the private tmux server its window is on (see tmux.current_server)
     stop_reminded_at: float | None = None
     reopened_at: float | None = None
@@ -581,6 +630,8 @@ class Agent:
     reviewing_since: float | None = None   # when its last report put its branch in review (pipeline.on_report)
     review_restarted: float | None = None  # the wait in review whose review was started again (pipeline.restart_review)
     merge_failed: str | None = None        # why the pipeline couldn't merge its approved branch (pipeline.review_state)
+    config_home: str | None = None         # its CLI's config home, decided once at spawn (provider_homes); '' the person's own
+    weight: str | None = None              # the weight its task was routed as, known from launch (agents.spawn)
     review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
 
 
@@ -641,6 +692,32 @@ class Milestone:
     passed_sha: str | None = None
     profile: str | None = None
     repo: str | None = None
+    state: str | None = None
+    state_why: str | None = None
+    ever_passed: int | None = None   # 1 once any check passed, whatever sha it ran at
+
+
+_EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
+
+
+def check_state(passed: bool, output: str, had_passed: bool) -> tuple[str, str | None]:
+    """A milestone check's state and, for ``failed`` (the check couldn't be
+    done), why. A non-zero exit is ``not_done``, or ``regressed`` if the
+    milestone had passed before; only exit 126/127 or a timeout couldn't run."""
+    if passed:
+        return "passed", None
+    if "isn't attached to this session" in (output or ""):
+        return "failed", "repo isn't attached"
+    if m := _EXIT.search(output or ""):
+        code = int(m.group(1))
+        if code in (126, 127):
+            return "failed", "command not found" if code == 127 else "command not runnable"
+        # Negative: killed by that signal; 128+n: how a shell reports the same.
+        if code < 0 or (code > 128 and code - 128 in signal.valid_signals()):
+            return "failed", f"crashed: killed by signal {-code if code < 0 else code - 128}"
+    if t := re.search(r"\(timed out after (\d+)s\)\s*$", output or ""):
+        return "failed", f"timed out after {t.group(1)}s"
+    return ("regressed" if had_passed else "not_done"), None
 
 
 @dataclass
@@ -832,7 +909,8 @@ class DB:
                           ("tmux_server", "TEXT"), ("stop_reminded_at", "REAL"),
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
-                          ("merge_failed", "TEXT"), ("review_slot", "TEXT")):
+                          ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT"),
+                          ("weight", "TEXT"), ("review_slot", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
@@ -858,6 +936,19 @@ class DB:
         for col in ("checked_sha", "passed_sha", "profile", "repo"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
+        for col in ("state", "state_why"):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
+        if "ever_passed" not in cols:
+            self.conn.execute("ALTER TABLE milestones ADD COLUMN ever_passed INTEGER")
+        self.conn.execute("UPDATE milestones SET ever_passed=1 WHERE ever_passed IS NULL "
+                          "AND (status='passed' OR passed_sha IS NOT NULL)")
+        # Rows checked before states were stored: work them out from what was recorded.
+        for r in self.conn.execute("SELECT id, status, output, passed_sha FROM milestones "
+                                   "WHERE state IS NULL AND status IN ('passed', 'failed')").fetchall():
+            state, why = check_state(r["status"] == "passed", r["output"] or "",
+                                     r["status"] == "passed" or bool(r["passed_sha"]))
+            self.conn.execute("UPDATE milestones SET state=?, state_why=? WHERE id=?", (state, why, r["id"]))
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(login_state)")}
         for col in ("interrupted", "account"):
             if col not in cols:
@@ -891,6 +982,13 @@ class DB:
         for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
+        request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
+        for col, kind in (("suggestions", "TEXT"), ("channel", "TEXT"), ("answer", "TEXT"),
+                          ("hold_until", "REAL")):
+            if col not in request_cols:
+                self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
+        if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
+            self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
         if "token" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN token TEXT NOT NULL DEFAULT ''")
@@ -929,6 +1027,7 @@ class DB:
                 (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
                  ws.path, ws.port_base, ws.tmux_session, ws.created_at),
             )
+        bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
 
     def get_workspace(self, ws_id: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()
@@ -968,8 +1067,11 @@ class DB:
         return _load(Workspace, row) if row else None
 
     def delete_workspace(self, ws_id: str) -> None:
+        ws = self.get_workspace(ws_id)
         with self.tx() as c:
             c.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
+        if ws:
+            bus.publish_ws(self, "workspace.removed", ws, branch=ws.branch)
 
     # -- attached repos (brindle.repos) ---------------------------------------
 
@@ -1130,13 +1232,13 @@ class DB:
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
                 "headless, transcript_path, done_when, inbox_socket, inbox_token, review_sha, "
-                "tmux_server) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "tmux_server, config_home) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
                  a.status_since or a.created_at, a.task, a.session_ref, a.headless,
                  a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha,
-                 a.tmux_server),
+                 a.tmux_server, a.config_home),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:
@@ -1167,6 +1269,9 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
+        if "pipeline" in fields:   # the review / merge pipeline's step for this worker
+            bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
+                              merge_failed=bool(fields.get("merge_failed")))
 
     def claim_idle(self, agent_id: str) -> float | None:
         """Atomically flip idle -> processing. Only the caller that wins may type
@@ -1178,21 +1283,29 @@ class DB:
                 "UPDATE agents SET status='processing', status_since=? WHERE id=? AND status='idle'",
                 (claimed_at, agent_id),
             )
-            return claimed_at if cur.rowcount == 1 else None
+            claimed = cur.rowcount == 1
+        if claimed:
+            bus.publish_agent(self, "agent.status", agent_id, status="processing")
+        return claimed_at if claimed else None
 
     _STAMP = "status_since = CASE WHEN status = ? THEN status_since ELSE ? END"
 
     def set_status(self, agent_id: str, status: str, only_if: str | None = None) -> None:
         guard, args = ("", ()) if only_if is None else (" AND status=?", (only_if,))
+        # A row already in ``status`` is left as is (its status_since kept),
+        # so only a real change is published.
         with self.tx() as c:
-            c.execute(
-                f"UPDATE agents SET {self._STAMP}, status=? WHERE id=?{guard}",
-                (status, time.time(), status, agent_id, *args),
-            )
+            changed = c.execute(
+                f"UPDATE agents SET {self._STAMP}, status=? WHERE id=? AND status IS NOT ?{guard}",
+                (status, time.time(), status, agent_id, status, *args),
+            ).rowcount
+        if changed:
+            bus.publish_agent(self, "agent.status", agent_id, status=status)
 
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE agents SET result=? WHERE id=?", (result, agent_id))
+        bus.publish_agent(self, "agent.result", agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
         with self.tx() as c:
@@ -1210,7 +1323,11 @@ class DB:
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, noticed_at) VALUES (?,?,?,?,?)",
                 (agent_id, sender_id, body, now, now if notice else None),
             )
-            return int(cur.lastrowid)
+            message_id = int(cur.lastrowid)
+        if not notice:
+            bus.publish_agent(self, "message.queued", agent_id, message_id=message_id,
+                              sender_id=sender_id)
+        return message_id
 
     def mark_delivered(self, message_id: int) -> None:
         with self.tx() as c:
@@ -1218,24 +1335,49 @@ class DB:
 
     # -- permission requests left to the person (brindle.permissions) --
 
-    def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str) -> None:
+    def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str,
+                               suggestions: str | None = None, channel: str | None = None,
+                               hold_until: float | None = None) -> None:
+        """Record a request (for the inbox and the supervisor; never an answer)."""
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO permission_requests (agent_id, tool_use_id, request, "
-                      "reason, created_at) VALUES (?,?,?,?,?)",
-                      (agent_id, tool_use_id, request, reason, time.time()))
+                      "reason, created_at, suggestions, channel, hold_until) VALUES (?,?,?,?,?,?,?,?)",
+                      (agent_id, tool_use_id, request, reason, time.time(), suggestions, channel, hold_until))
 
-    def pop_permission_request(self, agent_id: str, tool_use_id: str) -> sqlite3.Row | None:
+    def permission_requests_of(self, agent_id: str) -> list[sqlite3.Row]:
+        """The agent's recorded requests, oldest first."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? ORDER BY created_at, rowid",
+                                 (agent_id,)).fetchall()
+
+    def hook_permission_request(self, agent_id: str) -> sqlite3.Row | None:
+        """The request the agent's hook holds for the app's answer, if any."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND channel='hook' "
+                                 "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
+
+    def update_permission_request(self, agent_id: str, tool_use_id: str, **fields) -> None:
+        """Set ``channel``, ``hold_until`` or ``answer`` (a record of what the
+        person answered: brindle never reads it as one) on a request."""
+        cols = [c for c in fields if c in ("channel", "hold_until", "answer")]
         with self.tx() as c:
-            row = c.execute("SELECT * FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-                            (agent_id, tool_use_id)).fetchone()
+            c.execute(f"UPDATE permission_requests SET {', '.join(f'{k}=?' for k in cols)} "
+                      "WHERE agent_id=? AND tool_use_id=?", (*(fields[k] for k in cols), agent_id, tool_use_id))
+
+    def pop_permission_request(self, agent_id: str, matches) -> sqlite3.Row | None:
+        """Remove and return the agent's oldest recorded request ``matches(row)`` holds for."""
+        with self.tx() as c:
+            rows = c.execute("SELECT * FROM permission_requests WHERE agent_id=? "
+                             "ORDER BY created_at, rowid", (agent_id,)).fetchall()
+            row = next((r for r in rows if matches(r)), None)
             if row is not None:
                 c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
-                          (agent_id, tool_use_id))
+                          (agent_id, row["tool_use_id"]))
         return row
 
     def latest_permission_request(self, agent_id: str) -> sqlite3.Row | None:
+        """The newest recorded request still waiting on an answer."""
         return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? "
-                                 "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
+                                 "AND channel IS NOT 'answered' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                                 (agent_id,)).fetchone()
 
     def clear_permission_requests(self, agent_id: str) -> None:
         with self.tx() as c:
@@ -1312,13 +1454,20 @@ class DB:
 
     # Pull mode: messages held for the agent to read with read_messages.
 
-    def enqueue_held(self, agent_id: str, body: str, sender_id: str | None) -> int:
+    def enqueue_held(self, agent_id: str, body: str, sender_id: str | None,
+                     publish: bool = True) -> int:
+        """Keep ``body`` for read_messages. ``publish=False``: it is only the
+        full text of a message delivered as another row, so no event."""
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, held) VALUES (?,?,?,?,1)",
                 (agent_id, sender_id, body, time.time()),
             )
-            return int(cur.lastrowid)
+            message_id = int(cur.lastrowid)
+        if publish:
+            bus.publish_agent(self, "message.queued", agent_id, message_id=message_id,
+                              sender_id=sender_id, held=True)
+        return message_id
 
     def get_message(self, agent_id: str, message_id: int) -> Message | None:
         row = self.conn.execute(
@@ -1489,14 +1638,23 @@ class DB:
         return [_load(Milestone, r) for r in rows]
 
     def record_check(self, milestone_id: int, passed: bool, output: str,
-                     sha: str | None = None, *, passed_sha: str | None = None) -> None:
-        """``passed_sha`` defaults to ``sha`` on a pass and is kept on a fail."""
+                     sha: str | None = None, *, passed_sha: str | None = None,
+                     state: str | None = None, state_why: str | None = None,
+                     ever_passed: int | None = None) -> None:
+        """``passed_sha`` defaults to ``sha`` on a pass and is kept on a fail.
+        ``state`` (see ``check_state``) defaults to the one the output implies;
+        ``status`` stays passed/failed for everything that only asks whether
+        the milestone is done."""
+        if state is None:
+            state, state_why = check_state(passed, output, False)
         with self.tx() as c:
             c.execute(
                 "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, "
-                "passed_sha=COALESCE(?, passed_sha) WHERE id=?",
+                "passed_sha=COALESCE(?, passed_sha), state=?, state_why=?, "
+                "ever_passed=COALESCE(?, ever_passed) WHERE id=?",
                 ("passed" if passed else "failed", time.time(), output, sha,
-                 passed_sha or (sha if passed else None), milestone_id),
+                 passed_sha or (sha if passed else None), state, state_why,
+                 1 if passed else ever_passed, milestone_id),
             )
 
     # -- reviews -------------------------------------------------------------

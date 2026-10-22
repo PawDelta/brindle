@@ -271,6 +271,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b])
     told = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
     assert len(told) == 3
+    monkeypatch.delenv("BRINDLE_AGENT_ID")  # the person runs them, from their own terminal
     for line in told[0].splitlines():
         if line.startswith("brindle permissions allow "):
             assert CliRunner().invoke(app, shlex.split(line)[1:]).exit_code == 0

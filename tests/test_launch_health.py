@@ -368,7 +368,7 @@ def health(db, root, monkeypatch):
     monkeypatch.setattr(agents, "_detach", started.append)
     monkeypatch.setattr(agents, "same_server", lambda *a: True)
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(lh, "capture", lambda a: "working")
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append((to, body)))
     lh.prepare(db, a, "effective-account")
@@ -535,7 +535,7 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     monkeypatch.setattr(lh, "capture", lambda a: shown[0])
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(body))
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
-    monkeypatch.setattr(agents, "signed_out", lambda *a, **k: None)
+    monkeypatch.setattr(providers, "signed_out", lambda *a, **k: None)
     a = agents.spawn(db, ws, "developer", provider_name=provider, prompt="real task", parent_id=boss.id,
                      mode="assign", background_setup=True)
     token = a._launch_health_token
