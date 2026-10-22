@@ -415,6 +415,25 @@ def cli_sign_in_unknown(monkeypatch):
     monkeypatch.setattr(opencode, "INSTALLER", "/nonexistent/opencode")
 
 
+@pytest.fixture(scope="session")
+def _claude_stub_dir(tmp_path_factory):
+    path = tmp_path_factory.mktemp("installed-clis")
+    stub = path / "claude"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+    return path
+
+
+@pytest.fixture(autouse=True)
+def claude_installed(_claude_stub_dir, monkeypatch):
+    """claude is installed, whether or not the machine has it (CI has no
+    provider CLIs): the baseline profiles run on it, so a reviewer or a
+    profile on claude isn't refused as unusable. A test that wants it missing
+    sets PATH itself. The stub is outside tmp_path, so no_real_agent_cli still
+    refuses to launch it."""
+    monkeypatch.setenv("PATH", f"{_claude_stub_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 @pytest.fixture(autouse=True)
 def agy_settings(tmp_path, monkeypatch):
     """agy's settings.json (which brindle's permission policy mirrors rules
