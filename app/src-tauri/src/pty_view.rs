@@ -506,8 +506,33 @@ pub fn sync_open_after(open: bool, before: &[u8], bytes: &[u8]) -> bool {
 /// tenth of a second while an agent works. Gathered, a redraw is one: all of
 /// a synchronized update (nothing of it is painted before its end anyway),
 /// and outside one, what comes within a millisecond of the last read.
-pub fn forward(reads: mpsc::Receiver<Out>, mut on_data: impl FnMut(&[u8]), on_exit: impl FnOnce(i32)) {
-    use std::time::Instant;
+pub fn forward(reads: mpsc::Receiver<Out>, on_data: impl FnMut(&[u8]), on_exit: impl FnOnce(i32)) {
+    forward_from(reads, on_data, on_exit)
+}
+
+/// Where `forward` gets the client's reads and the time: a channel and the
+/// clock, or in tests, a script of reads in time of its own.
+trait Reads {
+    fn now(&self) -> std::time::Instant;
+    /// The next read, waiting for it at most `wait` (`None`: as long as it
+    /// takes); `None` if none came, or none ever will.
+    fn next(&mut self, wait: Option<std::time::Duration>) -> Option<Out>;
+}
+
+impl Reads for mpsc::Receiver<Out> {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn next(&mut self, wait: Option<std::time::Duration>) -> Option<Out> {
+        match wait {
+            Some(wait) => self.recv_timeout(wait).ok(),
+            None => self.recv().ok(),
+        }
+    }
+}
+
+fn forward_from(mut reads: impl Reads, mut on_data: impl FnMut(&[u8]), on_exit: impl FnOnce(i32)) {
     let mut open = false;
     // The stream's last bytes, whichever message they went in: a marker split between reads, a message cut mid-marker
     // (at `SYNC_MAX` or `GATHER_BYTES`) included, is read whole however many reads it takes.
@@ -520,31 +545,31 @@ pub fn forward(reads: mpsc::Receiver<Out>, mut on_data: impl FnMut(&[u8]), on_ex
     };
     let mut exit = None;
     while exit.is_none() {
-        let mut bytes = match reads.recv() {
-            Ok(Out::Bytes(bytes)) => bytes,
-            Ok(Out::Exit(code)) => {
+        let mut bytes = match reads.next(None) {
+            Some(Out::Bytes(bytes)) => bytes,
+            Some(Out::Exit(code)) => {
                 exit = Some(code);
                 break;
             }
-            Err(_) => break,
+            None => break,
         };
         open = read(open, &bytes);
-        let first = Instant::now();
+        let first = reads.now();
         while bytes.len() < GATHER_BYTES {
             let until = first + if open { SYNC_MAX } else { GATHER_MAX };
-            let wait = if open { until.saturating_duration_since(Instant::now()) } else { QUIET.min(until.saturating_duration_since(Instant::now())) };
-            match reads.recv_timeout(wait) {
-                Ok(Out::Bytes(more)) => {
+            let wait = if open { until.saturating_duration_since(reads.now()) } else { QUIET.min(until.saturating_duration_since(reads.now())) };
+            match reads.next(Some(wait)) {
+                Some(Out::Bytes(more)) => {
                     open = read(open, &more);
                     bytes.extend_from_slice(&more);
                 }
-                Ok(Out::Exit(code)) => {
+                Some(Out::Exit(code)) => {
                     exit = Some(code);
                     break;
                 }
-                Err(_) => break,
+                None => break,
             }
-            if Instant::now() >= until {
+            if reads.now() >= until {
                 break;
             }
         }
@@ -1198,20 +1223,45 @@ mod tests {
         assert_eq!(sent, vec![b"\x1b".to_vec(), b"[?2026hrow 1 row 2\x1b[?2026l".to_vec()]);
     }
 
+    /// Reads, each at its time, in time that passes only as `forward` waits: however busy the machine, each pause is exact.
+    struct Script {
+        start: Instant,
+        now: Duration,
+        reads: std::collections::VecDeque<(Duration, Out)>,
+    }
+
+    impl Reads for Script {
+        fn now(&self) -> Instant {
+            self.start + self.now
+        }
+
+        fn next(&mut self, wait: Option<Duration>) -> Option<Out> {
+            let at = self.reads.front()?.0;
+            match wait {
+                Some(wait) if at > self.now + wait => {
+                    self.now += wait;
+                    None
+                }
+                _ => {
+                    self.now = self.now.max(at);
+                    self.reads.pop_front().map(|(_, out)| out)
+                }
+            }
+        }
+    }
+
     /// `forward` fed `reads` (bytes, each after the pause before it), and what it sent on: each `on_data`, and the exit.
     fn forwarded(reads: Vec<(u64, &'static [u8])>) -> (Vec<Vec<u8>>, i32) {
-        let (tx, rx) = mpsc::channel();
-        let feeder = std::thread::spawn(move || {
-            for (pause, bytes) in reads {
-                std::thread::sleep(Duration::from_millis(pause));
-                tx.send(Out::Bytes(bytes.to_vec())).unwrap();
-            }
-            tx.send(Out::Exit(3)).unwrap();
-        });
+        let mut at = Duration::ZERO;
+        let mut script = Script { start: Instant::now(), now: Duration::ZERO, reads: Default::default() };
+        for (pause, bytes) in reads {
+            at += Duration::from_millis(pause);
+            script.reads.push_back((at, Out::Bytes(bytes.to_vec())));
+        }
+        script.reads.push_back((at, Out::Exit(3)));
         let mut sent = Vec::new();
         let mut code = None;
-        forward(rx, |bytes| sent.push(bytes.to_vec()), |c| code = Some(c));
-        feeder.join().unwrap();
+        forward_from(script, |bytes| sent.push(bytes.to_vec()), |c| code = Some(c));
         (sent, code.expect("exited"))
     }
 
