@@ -915,6 +915,11 @@ class DB:
                           ("weight", "TEXT"), ("review_slot", "TEXT"), ("failed_why", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        if "failed_why" not in cols:
+            # Agents failed before the cause was kept: a brief launch_health
+            # couldn't deliver is known; the rest stay unknown (service.inbox).
+            self.conn.execute("UPDATE agents SET failed_why='delivery' WHERE status='failed' AND id IN "
+                              "(SELECT agent_id FROM launch_health WHERE outcome='delivery-failed')")
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
         if "plan_first" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN plan_first INTEGER")
