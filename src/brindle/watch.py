@@ -1049,10 +1049,30 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 return
 
 
+class _Clipped:
+    """A curses window that drops what falls outside an ``h`` x ``w`` pane:
+    curses refuses a write that starts off-screen, or that would fill the
+    bottom-right cell (the cursor can't move past it)."""
+
+    def __init__(self, stdscr, h: int, w: int):
+        self.stdscr, self.h, self.w = stdscr, h, w
+
+    def addnstr(self, y: int, x: int, text: str, n: int, attr: int = 0) -> None:
+        if not (0 <= y < self.h and 0 <= x < self.w):
+            return
+        n = min(n, self.w - x - (1 if y == self.h - 1 else 0))
+        if n > 0 and text:
+            self.stdscr.addnstr(y, x, text, n, attr)
+
+    def __getattr__(self, name):
+        return getattr(self.stdscr, name)
+
+
 def _paint(stdscr, h: int, w: int, styles: dict[str, int], braid: int, page: list, offset: int,
            selected: int | None, top: int, content_top: int, visible: int,
            show_above: bool, show_below: bool, bottom: list) -> None:
     """One frame of the dashboard, laid out by _loop for an ``h`` x ``w`` pane."""
+    stdscr = _Clipped(stdscr, h, w)
     stdscr.erase()
     _draw_logo(stdscr, w, styles, braid) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
     for y, (i, ln) in enumerate(enumerate(page, start=offset), start=content_top):
@@ -1086,8 +1106,8 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     try:
         result = curses.wrapper(_loop, repo_root, sidebar, logo)
     except Exception:
-        # Down despite _loop's guard (curses setup, say): the pane's respawn
-        # loop (sidebar_follow.RESPAWN_SCRIPT) starts it again on the nonzero exit.
+        # Down despite _loop's guard (curses setup, say): leave the traceback
+        # where it can be read once the pane has gone.
         if sidebar:
             _log_error("sidebar crashed")
         raise

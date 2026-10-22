@@ -304,31 +304,41 @@ def test_sidebar_survives_a_resize_that_leaves_a_frame_off_screen(db, monkeypatc
     _quiet_loop(monkeypatch, lambda *a, **k: [ws([agent("a1")])])
 
     class Screen:
-        """Raises like curses past its size; each key resizes it to the next size."""
+        """Raises like curses past its size. Each key moves it to the next size;
+        the 24x30 one shrinks to 24x1 two writes into its frame (mid-paint)."""
         def __init__(self):
-            self.sizes, self.keys = [(24, 30), (24, 1), (24, 30)], [curses.KEY_RESIZE] * 2 + [ord("q")]
-            self.frames = [[]]
+            self.sizes = [(24, 30), (24, 1), (1, 30), (24, 30), (24, 1)]
+            self.keys = [curses.KEY_RESIZE] * 3 + [-1, ord("q")]
+            self.refreshed, self.painted, self.writes = [], False, None
         def getmaxyx(self):
             return self.sizes[0]
         def getch(self):
+            self.refreshed.append(self.painted)
+            self.painted = False
             if self.keys[0] == curses.KEY_RESIZE:
                 self.sizes.pop(0)
-            self.frames.append([])
+                self.writes = 2 if len(self.sizes) == 2 else None
             return self.keys.pop(0)
-        def addnstr(self, y, x, text, *rest):
+        def addnstr(self, y, x, text, n, *rest):
+            if self.writes is not None:
+                self.writes -= 1
+                if self.writes < 0:
+                    self.sizes.pop(0)
+                    self.writes = None
             h, w = self.sizes[0]
-            if not (0 <= y < h and 0 <= x < w):
+            if not (0 <= y < h and 0 <= x < w) or n > w - x:
                 raise curses.error("addnwstr() returned ERR")
-            self.frames[-1].append(text)
         def timeout(self, ms): pass
         def erase(self): pass
-        def refresh(self): pass
+        def refresh(self):
+            self.painted = True
         def clear(self): pass
 
     screen = Screen()
     watch._loop(screen, None)
-    # The narrow frame is skipped, and the next tick repaints at the new size.
-    assert "brindle" in screen.frames[2]
+    # Every frame at a small size completes; the one resized mid-paint is
+    # skipped, and the next tick repaints at the new size.
+    assert screen.refreshed == [True, True, True, False, True]
 
 
 def test_sidebar_survives_an_unexpected_error_and_logs_it(db, brindle_home, monkeypatch):
