@@ -9,7 +9,6 @@ import pytest
 from test_daemon_actions import _send
 
 from brindle import config, debuglog
-from brindle.pro import auth
 
 
 class _Server:
@@ -17,14 +16,21 @@ class _Server:
 
     def __init__(self, me: dict):
         self.me, self.posted, self.tokens = me, [], []
-        self.creds = {"refresh_token": "r-a", "access_token": "a", "access_expires_at": time.time() + 3600}
+        self.creds = {"refresh_token": "r-a", "access_token": "a", "access_expires_at": time.time() + 3600,
+                      "base_url": "https://brindle.test/v1"}
 
     def load(self):
         return dict(self.creds)
 
+    def save(self, creds):
+        self.creds = dict(creds)
+
     def request(self, method, url, form, headers):
         if url.endswith("/me"):
             return 200, self.me
+        if url.endswith("/token/refresh"):
+            new = form["refresh_token"] + "2"
+            return 200, {"access_token": new.removeprefix("r-"), "refresh_token": new, "expires_in": 900}
         self.posted.append((url, dict(form)))
         self.tokens.append(headers.get("Authorization"))
         return 202, {}
@@ -34,8 +40,7 @@ class _Server:
 def server(monkeypatch):
     def make(me: dict) -> _Server:
         s = _Server(me)
-        monkeypatch.setattr(debuglog, "_account",
-                            lambda: (auth.Client("https://brindle.test/v1", transport=s), s))
+        monkeypatch.setattr(debuglog, "_account", lambda: (s, s))
         monkeypatch.setattr(debuglog, "_staff", {})
         return s
     return make
@@ -85,16 +90,19 @@ def test_debuglog_switch_during_an_upload_posts_as_the_checked_account(server, m
     s = server({"sub": "u1", "staff": True})
     config.set_user(debuglog.SETTING, True)
     debuglog.record("app", "info", "private")
+    s.creds["access_expires_at"] = 0       # A's access token is due: refreshed from A's snapshot
     real = debuglog._pending
 
     def switch_then_pending():
         got = real()
-        s.me, s.creds["access_token"] = {"sub": "u2"}, "b"      # non-staff B signs in meanwhile
+        # Non-staff B signs in on another backend meanwhile.
+        s.me, s.creds = {"sub": "u2"}, {**s.creds, "access_token": "b", "base_url": "https://other.test/v1"}
         return got
 
     monkeypatch.setattr(debuglog, "_pending", switch_then_pending)
     assert debuglog.upload_once() == 1
-    assert s.tokens == ["Bearer a"]       # A, whose staff status was checked, never B
+    # Posted as A (checked, refreshed) to A's backend, never as B or to B's backend.
+    assert s.tokens == ["Bearer a2"] and s.posted[0][0] == "https://brindle.test/v1/debug/logs"
 
 
 def test_debuglog_rotation_keeps_pending_entries(server, monkeypatch):

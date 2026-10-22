@@ -154,21 +154,26 @@ def note_app_version(version) -> None:
 
 
 def _account():
-    """(client, store) for the signed-in brindle Pro account."""
-    from brindle.pro import auth, credentials
+    """(store, transport) for the signed-in brindle Pro account; transport None
+    is the default one."""
+    from brindle.pro import credentials
 
-    store = credentials.default_store()
-    base = (store.load() or {}).get("base_url")
-    return auth.Client(base), store
+    return credentials.default_store(), None
 
 
-def _identity(client, store) -> str:
+def _snapshot():
+    """One read of the credentials and the client for the backend they name:
+    (client, creds, store)."""
+    from brindle.pro import auth
+
+    store, transport = _account()
+    creds = store.load() or {}
+    return auth.Client(creds.get("base_url"), transport=transport), creds, store
+
+
+def _identity(client, creds: dict) -> str:
     """Which signed-in account (and backend) the credentials are: a staff answer
     is only ever reused for the same one."""
-    try:
-        creds = store.load() or {}
-    except Exception:  # noqa: BLE001 - no credential store: no account
-        creds = {}
     who = creds.get("entitlement") or creds.get("refresh_token") or ""
     return hashlib.sha256(f"{client.base}\0{who}".encode()).hexdigest()
 
@@ -181,10 +186,10 @@ def staff(refresh: bool = False) -> bool | None:
 
     now = time.time()
     try:
-        client, store = _account()
+        client, creds, store = _snapshot()
     except Exception:  # noqa: BLE001 - no credential store: not staff
         return False
-    who = _identity(client, store)
+    who = _identity(client, creds)
     got = _staff.get(who)
     if not refresh and got and now - got[1] < STAFF_TTL_S:
         return got[0]
@@ -301,31 +306,41 @@ def _pending() -> tuple[list[dict], dict | None]:
     return entries, last
 
 
+def _rotated(client, store, snap: dict) -> dict | None:
+    """``snap`` with a fresh access token, rotated from ``snap``'s own refresh
+    token on ``snap``'s backend; None when the stored credentials aren't
+    ``snap``'s any more (another account, or rotated elsewhere): the next run uses them."""
+    from brindle.pro import auth
+
+    with auth.refresh_lock():
+        if (store.load() or {}).get("refresh_token") != snap.get("refresh_token"):
+            return None
+        return auth._rotate(client, store, snap, time.time())
+
+
 def upload_once() -> int:
     """Post what's pending as an account checked to be staff; the number of
     entries the server took.
 
     The staff check and the post use one snapshot of the credentials (one
-    access token, one backend), never the store again: an account switch or a
-    token refresh in between can't send the batch as an account that wasn't
-    checked. ``staff`` first refreshes the token in the store if it's due."""
+    access token, one backend), taken once at the start: the store is never read
+    again to pick the account or the backend, so an account switch meanwhile
+    can't send the batch as an account that wasn't checked. The next run picks
+    the new account up."""
     from brindle.pro import auth
 
     if not enabled():
         return 0
-    is_staff = staff(refresh=True)
-    if is_staff is False:
-        config.set_user(SETTING, False)
-    if is_staff is not True:
-        return 0
     try:
-        client, store = _account()
-        snap = store.load() or {}
-        if snap.get("base_url") and auth.base_url(snap["base_url"]) != client.base:
+        client, snap, store = _snapshot()
+        if not snap.get("refresh_token"):
             return 0
-        token = snap.get("access_token")
-        if not token:
-            return 0
+        if not snap.get("access_token") or \
+                float(snap.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK:
+            snap = _rotated(client, store, snap)
+            if snap is None:
+                return 0
+        token = snap["access_token"]
         status, me = client.call("GET", "/me", token=token)
         if status != 200 or me.get("staff") is not True:
             if status == 200:
