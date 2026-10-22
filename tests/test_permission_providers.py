@@ -402,8 +402,7 @@ def test_install_codex_hook_dry_run_then_yes(monkeypatch):
     flag = codex_hook.config_flags()[1]
     assert rec == {"command": codex_hook.hook_command(),
                    "key": "/<session-flags>/config.toml:permission_request:0:0",
-                   "hash": "sha256:" + hashlib.sha256(flag.encode()).hexdigest(), "definition": flag,
-                   "codex": codex_hook._fingerprint("codex")}
+                   "hash": "sha256:" + hashlib.sha256(flag.encode()).hexdigest(), "definition": flag}
     assert codex_hook.trusted()
     assert "already trusted" in r.invoke(app, ["permissions", "install-codex-hook"]).output
 
@@ -457,25 +456,24 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     assert FakeAppServer.calls == [] and codex_hook.status() == codex_hook.REMOVED
 
 
-def test_reviewer_launch_retrusts_the_hook_after_codex_itself_changed(ws, monkeypatch, tmp_path):
-    """A Codex upgrade can hash hooks differently: the trust on record (same
-    command, same definition) is for another build, so Codex shows 'Hooks need
-    review' while brindle called the hook trusted. Asked again before launch."""
+def test_reviewer_launch_retrusts_the_hook_after_codex_itself_changed(ws, monkeypatch):
+    """A Codex upgrade (or a wrapper's own executable changing) hashes the very
+    same hook differently: brindle's record still matches its config.toml, but
+    Codex shows 'Hooks need review'. Asked of the running Codex before launch."""
+    class UpgradedCodex(FakeAppServer):
+        def __init__(self, binary, flags, timeout=30.0):
+            super().__init__(binary, [flags[0], flags[1] + "#build2"], timeout)
+
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
-    codex = tmp_path / "codex"
-    codex.write_text("v1")
-    monkeypatch.setenv("BRINDLE_CODEX_BIN", str(codex))
     turn_on(ws)
     flag = codex_hook.config_flags()[1]
     assert flag in launch_argv(ws, mode="review")
-    assert codex_hook.status() == codex_hook.TRUSTED
-    codex.write_text("version two")  # Codex was updated
-    assert codex_hook.status() == codex_hook.MOVED
+    monkeypatch.setattr(codex_hook, "_AppServer", UpgradedCodex)
+    assert codex_hook.status() == codex_hook.TRUSTED  # brindle's record can't tell
+    assert codex_hook.inspect("codex").status == "untrusted"  # what Codex would stop at
     set_local(ws.repo_root, "permission_policy", "off")
-    FakeAppServer.calls = []
     assert flag in launch_argv(ws, mode="review")
-    assert "config/batchWrite" in [m for m, _ in FakeAppServer.calls]
-    assert codex_hook.status() == codex_hook.TRUSTED
+    assert codex_hook.inspect("codex").status == "trusted"
 
 
 def test_codex_hook_trust_is_per_codex_home(ws, monkeypatch, tmp_path):
@@ -554,7 +552,7 @@ def test_doctor_reports_the_codex_hook(ws, monkeypatch):
     [c] = doctor.codex_hook_checks(ws.repo_root)
     assert c.level == doctor.OK and "next Codex launch" in c.detail
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
-    codex_hook.ensure("/bin/sh")
+    codex_hook.ensure("codex")
     [c] = doctor.codex_hook_checks(ws.repo_root)
     assert c.level == doctor.OK and c.detail.startswith("trusted")
     (codex_hook.codex_home() / "config.toml").write_text("")

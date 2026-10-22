@@ -106,24 +106,7 @@ def config_flags(command: str | None = None) -> list[str]:
 TRUSTED, MOVED, NEW, REMOVED = "trusted", "moved", "new", "removed"
 
 
-def _fingerprint(binary: str | None = None) -> str:
-    """Which Codex build ``binary`` is (path, size, mtime). A trust is recorded
-    against it: a Codex upgrade can hash or key hooks differently, so what it
-    trusted before no longer counts until Codex has been asked again."""
-    import shutil
-
-    from brindle.providers import codex_binary
-
-    binary = binary or codex_binary()
-    try:
-        path = os.path.realpath(shutil.which(binary) or binary)
-        st = os.stat(path)
-    except OSError:
-        return ""
-    return f"{path}:{st.st_size}:{st.st_mtime_ns}"
-
-
-def status(command: str | None = None, binary: str | None = None) -> str:
+def status(command: str | None = None) -> str:
     """Where brindle's hook stands with Codex: TRUSTED (this exact hook, and
     Codex's config still says so), MOVED (trusted, but brindle's hook has
     changed since: a reinstall, another BRINDLE_HOME, another timeout), NEW
@@ -153,9 +136,7 @@ def status(command: str | None = None, binary: str | None = None) -> str:
     # recorded for another timeout (another build of brindle) is for another
     # hook, and so is one recorded before brindle kept the definition (it can't
     # tell what that was for), so ensure() trusts it again once.
-    if rec.get("definition") != config_flags(command)[1] or rec.get("codex") != _fingerprint(binary):
-        return MOVED
-    return TRUSTED
+    return TRUSTED if rec.get("definition") == config_flags(command)[1] else MOVED
 
 
 def trusted(command: str | None = None) -> bool:
@@ -172,14 +153,22 @@ def ensure(binary: str | None = None, command: str | None = None) -> str:
     from brindle.providers import codex_binary
 
     command = command or hook_command()
+    now = status(command)
+    if now not in (NEW, MOVED, TRUSTED):
+        return now
     binary = binary or codex_binary()
-    now = status(command, binary)
-    if now not in (NEW, MOVED):
-        return now
     try:
-        trust(binary, inspect(binary, command))
+        state = inspect(binary, command)
+        if now == TRUSTED:
+            # brindle's record is only what it last saw. The Codex that runs now
+            # (an upgrade, or a wrapper's own executable) may hash or key the
+            # hook differently, which is "Hooks need review" at its startup: ask it.
+            if state.status == "trusted":
+                return now
+            now = MOVED
+        trust(binary, state)
     except Exception:  # noqa: BLE001 - Codex missing, too old, or not answering
-        return now
+        return MOVED if now == TRUSTED else now  # can't verify a trust: don't pass the hook on it
     return TRUSTED
 
 
@@ -382,5 +371,5 @@ def trust(binary: str, state: HookState) -> HookState:
     with permissions.editing() as store:
         store.codex_hook[_home_key(after.config.parent)] = {
             "command": after.command, "key": after.key, "hash": after.hash,
-            "definition": config_flags(after.command)[1], "codex": _fingerprint(binary)}
+            "definition": config_flags(after.command)[1]}
     return after
