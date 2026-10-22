@@ -461,8 +461,8 @@ def test_reviewer_launch_retrusts_the_hook_after_codex_itself_changed(ws, monkey
     same hook differently: brindle's record still matches its config.toml, but
     Codex shows 'Hooks need review'. Asked of the running Codex before launch."""
     class UpgradedCodex(FakeAppServer):
-        def __init__(self, binary, flags, timeout=30.0):
-            super().__init__(binary, [flags[0], flags[1] + "#build2"], timeout)
+        def __init__(self, binary, flags):
+            super().__init__(binary, [flags[0], flags[1] + "#build2"])
 
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
     turn_on(ws)
@@ -474,6 +474,52 @@ def test_reviewer_launch_retrusts_the_hook_after_codex_itself_changed(ws, monkey
     set_local(ws.repo_root, "permission_policy", "off")
     assert flag in launch_argv(ws, mode="review")
     assert codex_hook.inspect("codex").status == "trusted"
+
+
+def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):
+    """Codex says the hook is untrusted and refuses the re-trust: the reviewer
+    starts without the hook, so the record must stop saying TRUSTED (the
+    warning and the supervisor's notice read it)."""
+    class RefusingCodex(FakeAppServer):
+        def __init__(self, binary, flags):
+            super().__init__(binary, [flags[0], flags[1] + "#build2"])
+
+        def call(self, method, params):
+            if method == "config/batchWrite":
+                raise codex_hook.CodexHookError("read-only config")
+            return super().call(method, params)
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    monkeypatch.setattr(codex_hook, "_AppServer", RefusingCodex)
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+    reviewer = worker(db, ws, id_="r1")
+    assert codex_hook.launch_flags(ws.path, review=True) == []
+    assert codex_hook.status() == codex_hook.MOVED
+    assert codex_hook.launch_warning("codex", ws.path)
+    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+
+
+def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
+    """Live: the app ran `<tool venv>/bin/python -P -m brindle`, a shell the
+    `brindle` shim; Codex has one trusted hash for the hook, so each process's
+    trust replaced the other's and the next launch stopped at 'Hooks need review'."""
+    venv = tmp_path / "tool" / "bin"
+    venv.mkdir(parents=True)
+    script = venv / "brindle"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o755)
+    shim = tmp_path / "local-bin"
+    shim.mkdir()
+    (shim / "brindle").symlink_to(script)
+    py = venv / "python"
+    py.write_text("")
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(py), "-P", "-m", "brindle"])
+    from_app = codex_hook.hook_command()
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(shim / "brindle")])
+    assert codex_hook.hook_command() == from_app
+    assert str(script.resolve()) in from_app
 
 
 def test_codex_hook_trust_is_per_codex_home(ws, monkeypatch, tmp_path):
