@@ -75,31 +75,35 @@ def two_sessions(db, repo, monkeypatch):
     return root, during_spawn
 
 
-@pytest.mark.parametrize("prefix", [
-    "",
-    pytest.param("team/", marks=pytest.mark.variant("bypass: the prefix create adds hid the owner")),
+@pytest.mark.parametrize("prefix, branch, task, made", [
+    ("", "feat/shared", "task", "feat/shared"),
+    # Generated names: the same hint both times, and a task long enough to truncate.
+    ("", None, "a" * 120, f"brindle/developer/{'a' * 40}-abcd"),
+    pytest.param("team/", "feat/shared", "task", "team/feat/shared",
+                 marks=pytest.mark.variant("bypass: the prefix create adds hid the owner")),
+    pytest.param("", "x" * 95 + ".lock-more", "task", "x" * 95,
+                 marks=pytest.mark.variant("bypass: a second sanitize changed the truncated name")),
 ])
-def test_concurrent_sessions_keep_their_worker_branches_apart(db, repo, live, two_sessions, prefix):
+def test_concurrent_sessions_keep_their_worker_branches_apart(db, repo, live, two_sessions, monkeypatch,
+                                                              prefix, branch, task, made):
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps({"branch_prefix": prefix}))
+    monkeypatch.setattr(agents, "new_id", lambda: "abcdef01")
     root, during_spawn = two_sessions
     refused = []
 
     def b_while_a_starts():   # supA's worktree exists, its worker's row doesn't yet
         during_spawn.clear()
         with pytest.raises(agents.AgentError, match="right now") as e:
-            agents.delegate(db, db.get_agent("supB"), root, "developer", "task", "assign",
-                            branch="feat/shared")
+            agents.delegate(db, db.get_agent("supB"), root, "developer", task, "assign", branch=branch)
         refused.append(e)
 
     during_spawn.append(b_while_a_starts)
-    _, a_ws = agents.delegate(db, db.get_agent("supA"), root, "developer", "task", "assign",
-                              branch="feat/shared")
-    assert refused and a_ws.branch == f"{prefix}feat/shared"
+    _, a_ws = agents.delegate(db, db.get_agent("supA"), root, "developer", task, "assign", branch=branch)
+    assert refused and a_ws.branch == made
     # supA's worker is finished, but its worktree still holds supA's unmerged work.
     with pytest.raises(agents.AgentError, match="supA"):
-        agents.delegate(db, db.get_agent("supB"), root, "developer", "task", "assign",
-                        branch="feat/shared")
+        agents.delegate(db, db.get_agent("supB"), root, "developer", task, "assign", branch=branch)
     assert [w.id for w in db.list_agents(a_ws.id)] == ["w-supA"]
 
 

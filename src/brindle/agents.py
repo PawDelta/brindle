@@ -2545,7 +2545,8 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
 
 def _branch_from_task(profile: str, task: str, agent_hint: str) -> str:
     words = re.findall(r"[A-Za-z0-9]+", task.lower())[:5]
-    return f"brindle/{profile}/{'-'.join(words) or 'task'}-{agent_hint}"
+    # Short enough that truncating the branch name never cuts off the hint.
+    return f"brindle/{profile}/{'-'.join(words)[:40].strip('-') or 'task'}-{agent_hint}"
 
 
 def delegate(
@@ -2604,7 +2605,6 @@ def delegate(
     if isolate:
         from brindle import pipeline
 
-        named = branch is not None
         # The name create makes, so the checks below see the branch it reuses.
         branch = workspaces.branch_name(caller_ws.repo_root, branch or _branch_from_task(profile, task, new_id()[:4]))
         held = ExitStack()
@@ -2614,8 +2614,7 @@ def delegate(
             raise AgentError(f"another worker is being started on branch {branch!r} right now; "
                              "pick another branch name") from None
         with held:   # until the worker's row says whose worktree this is
-            if named:
-                _check_branch_owner(db, caller, caller_ws.repo_root, branch)
+            _check_branch_owner(db, caller, caller_ws.repo_root, branch)
             caller_ws = workspaces.refresh_branch(db, caller_ws)
             # merge_into applies to the supervisor's workers; a worker's own
             # sub-workers still branch from (and merge back into) its branch.

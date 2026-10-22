@@ -169,15 +169,19 @@ _INVALID = re.compile(r"[^A-Za-z0-9._/-]+")
 
 
 def sanitize_branch(name: str, max_len: int = 100) -> str:
-    """Make ``name`` a valid, readable branch name."""
-    s = _INVALID.sub("-", name.strip())
-    s = re.sub(r"/{2,}", "/", s)
-    s = re.sub(r"-{2,}", "-", s)
-    s = re.sub(r"\.{2,}", ".", s)
-    s = "/".join(p.strip(".-") for p in s.split("/") if p.strip(".-"))
-    s = s.removesuffix(".lock")[:max_len].strip("/.-")
-    if not s:
-        raise ValueError(f"cannot derive a branch name from {name!r}")
+    """Make ``name`` a valid, readable branch name. Stable: a name it returns
+    comes back unchanged, so a name checked once is the name created."""
+    s, prev = name, None
+    while s != prev:   # truncating can leave a new ".lock" or "." to drop; each pass only shortens
+        prev = s
+        s = _INVALID.sub("-", s.strip())
+        s = re.sub(r"/{2,}", "/", s)
+        s = re.sub(r"-{2,}", "-", s)
+        s = re.sub(r"\.{2,}", ".", s)
+        s = "/".join(p.strip(".-") for p in s.split("/") if p.strip(".-"))
+        s = s.removesuffix(".lock")[:max_len].strip("/.-")
+        if not s:
+            raise ValueError(f"cannot derive a branch name from {name!r}")
     return s
 
 
