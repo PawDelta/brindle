@@ -1325,7 +1325,10 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
     # The CLI signs in to brindle's config home for it, which brindle uses from then on.
     env = {**provider_homes.login_env(provider), **({"BROWSER": browser["BROWSER"]} if browser else {})}
-    return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env)
+    # "Try again" in the app: end the sign-in still running and start a fresh one.
+    restart = _get(body, "restart", bool, False)
+    return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env,
+                                restart=restart)
 
 
 def provider_trust(db: DB, params: dict, body: Body) -> Any:
