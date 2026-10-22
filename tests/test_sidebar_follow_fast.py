@@ -166,24 +166,62 @@ def test_sidebar_survives_only_while_the_brindle_session_is_attached(db, monkeyp
     assert moved == [("%sidebar", "%worker")]
 
 
-@pytest.mark.parametrize("restarts, respawned", [("", True), ("5", False)])
-def test_sidebar_restarts_its_own_pane_after_a_crash_until_the_cap(
-        tmp_path, monkeypatch, restarts, respawned):
-    # A crash, or a re-exec into a half-installed engine: tmux's pane-died
-    # hook on the sidebar's pane alone runs it again there, until it has been
-    # restarted SIDEBAR_MAX_RESTARTS times in a short while.
-    from brindle import workspaces
+def test_sidebar_left_dead_by_crashes_follows_until_a_restart_by_hand(db, monkeypatch):
+    """A crashed sidebar's pane stays (respawning, or capped and showing its
+    error): a window switch moves it like a live one rather than starting a
+    second sidebar with a fresh restart count. `brindle sidebar` replaces it."""
+    for ws_id, session in (("rootws", "root_s"), ("workerws", "worker_s")):
+        db.add_workspace(Workspace(ws_id, "/repo", ws_id, "worktree", ws_id, "main", f"/{ws_id}",
+                                   None, session, time.time()))
+    db.add_agent(Agent("root1", "rootws", "supervisor", "claude", None, "interactive", "idle",
+                       "%root", None, time.time()))
+    db.add_agent(Agent("w1", "workerws", "developer", "claude", "root1", "assign", "idle",
+                       "%worker", None, time.time()))
+    db.set_sidebar_pane("root1", "%sidebar")
+    windows = {"%root": "@r", "%worker": "@w", "%sidebar": "@r"}
+    tm = sidebar_follow.tmux
+    monkeypatch.setattr(tm, "active_window", {"root_s": "@r", "worker_s": "@w"}.get)
+    monkeypatch.setattr(tm, "pane_window", windows.get)
+    monkeypatch.setattr(tm, "pane_window_tag", lambda pane, tag: (windows.get(pane), "root1"))
+    monkeypatch.setattr(tm, "window_alive", lambda pane: pane != "%sidebar")
+    monkeypatch.setattr(tm, "get_pane_tag", lambda pane, tag: "root1" if pane in windows else None)
+    monkeypatch.setattr(tm, "pane_session", lambda pane: "root_s")
+    monkeypatch.setattr(tm, "session_attached", lambda session: False)
+    monkeypatch.setattr(tm, "agent_pane_in_window", lambda window, sidebar: "%worker")
+    monkeypatch.setattr(tm, "send_keys", lambda *a: None)
+    monkeypatch.setattr(tm, "move_pane", lambda pane, target, *a: windows.update({pane: windows[target]}))
+    monkeypatch.setattr(tm, "kill_pane", lambda pane: windows.pop(pane))
+    created = []
+    monkeypatch.setattr(sidebar_follow, "_create_sidebar",
+                        lambda db, root, ws, target: created.append(target) or "%new")
 
-    calls = tmp_path / "calls"
-    (tmp_path / "n").write_text(restarts)
-    (tmp_path / "since").write_text(str(int(time.time())) if restarts else "")
+    sidebar_follow.sidebar_follow(db, "worker_s")
+
+    assert windows["%sidebar"] == "@w" and created == []
+
+    assert sidebar_follow.bring_sidebar(db, "root1", "worker_s", revive=True)
+    assert "%sidebar" not in windows and created == ["%worker"]
+
+
+def test_sidebar_restarts_its_own_pane_after_a_crash_until_the_cap(tmp_path, monkeypatch):
+    # A crash (even on startup), or a re-exec into a half-installed engine:
+    # tmux's pane-died hook on the sidebar's pane alone runs it again there,
+    # until it has been restarted SIDEBAR_MAX_RESTARTS times in a short while.
+    from brindle import tmux, workspaces
+
+    calls, opts = tmp_path / "calls", tmp_path / "opts"
+    opts.mkdir()
     fake = tmp_path / "tmux"
+    # Records each call; keeps the pane's @options as files, so the counter
+    # the hook writes is what its next run reads.
     fake.write_text(f"""#!/bin/sh
 printf '%s\\0' "$@" >> {calls}; printf '\\036' >> {calls}
+for a; do k=$v; v=$a; done
 case "$*" in
+  *pane-died*) ;;
   *split-window*) echo %7;;
-  *show-options*_since) cat {tmp_path}/since;;
-  *show-options*_restarts) cat {tmp_path}/n;;
+  *show-options*) cat {opts}/$v 2>/dev/null;;
+  *set-option*@*) printf %s "$v" > {opts}/$k;;
 esac
 """)
     fake.chmod(0o755)
@@ -193,26 +231,29 @@ esac
     monkeypatch.setattr(workspaces, "workspace_env", lambda ws: {"FOO": "x"})
     db = SimpleNamespace(set_sidebar_pane=lambda root, pane: None)
 
+    def made():
+        return [c.split("\0")[:-1] for c in calls.read_text().split("\036")[:-1]]
+
     sidebar_follow._create_sidebar(db, "root", SimpleNamespace(path=str(tmp_path)), "%1")
 
-    made = [c.split("\0")[:-1] for c in calls.read_text().split("\036")[:-1]]
-    flat = [a for c in made for a in c]
+    split = next(c for c in made() if "split-window" in c)
+    flat = [a for c in made() for a in c]
     assert "-g" not in flat
-    died, remain = flat.index("pane-died"), flat.index("remain-on-exit")
+    died, remain, launch = flat.index("pane-died"), flat.index("remain-on-exit"), flat.index("respawn-pane")
+    # The pane opens on the stand-in; the sidebar starts there only after
+    # its recovery is in place, so a crash on startup is caught too.
+    assert split[split.index("--") + 1:] == tmux.SIDEBAR_STAND_IN
+    assert remain < died < launch and flat[launch:launch + 4] == ["respawn-pane", "-k", "-t", "%7"]
     assert flat[died - 3:died] == ["-p", "-t", "%7"] and flat[remain - 3:remain + 2] == [
         "-p", "-t", "%7", "remain-on-exit", "failed"]
-    hook = flat[died + 1]
-    # What tmux runs, formats expanded, once the pane's process exits with status 1.
-    shell = shlex.split(hook)[2].replace("#{pane_dead_status}", "1").replace("##", "#")
-    subprocess.run(["/bin/sh", "-c", shell], check=True)
+    # What tmux runs, formats expanded, each time the pane's process exits with status 1.
+    shell = shlex.split(flat[died + 1])[2].replace("#{pane_dead_status}", "1").replace("##", "#")
+    before = len(made())
+    for _ in range(tmux.SIDEBAR_MAX_RESTARTS + 2):
+        subprocess.run(["/bin/sh", "-c", shell], check=True)
 
-    after = calls.read_text().split("\036")[len(made):-1]
-    respawns = [c.split("\0")[:-1] for c in after if "respawn-pane" in c]
-    log = (tmp_path / "sidebar.log").read_text()
-    assert "sidebar exited with status 1" in log
-    if respawned:
-        assert [r[r.index("respawn-pane"):] for r in respawns] == [
-            ["respawn-pane", "-t", "%7", "-c", str(tmp_path), "-e", "FOO=x"]]
-        assert "restarting it (1/5)" in log
-    else:
-        assert respawns == [] and "leaving it down" in log
+    respawns = [c[c.index("respawn-pane"):] for c in made()[before:] if "respawn-pane" in c]
+    assert respawns == [["respawn-pane", "-t", "%7", "-c", str(tmp_path), "-e", "FOO=x"]] * (
+        tmux.SIDEBAR_MAX_RESTARTS)
+    assert (opts / tmux.SIDEBAR_RESTARTS).read_text() == str(tmux.SIDEBAR_MAX_RESTARTS)
+    assert len((tmp_path / "sidebar.log").read_text().splitlines()) == tmux.SIDEBAR_MAX_RESTARTS + 2

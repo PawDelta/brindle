@@ -413,19 +413,28 @@ echo "{stamp}; restarting it ($((n + 1))/{SIDEBAR_MAX_RESTARTS})" >> {log_q}
 """
 
 
-def keep_sidebar_alive(pane: str, cwd: str, env: dict[str, str], log: Path) -> None:
-    """Restart the sidebar in ``pane`` whenever its process exits nonzero (a
-    crash, or an upgrade re-exec into a half-installed engine), with no
-    waiting between tries: ``remain-on-exit failed`` keeps just that pane around after a
-    failed exit, and a hook on just that pane respawns it (see
-    sidebar_respawn_script). A zero exit, the person quitting, closes the
-    pane as before. Both are pane options, never global ones, so no other
-    pane is touched; they move with the pane wherever the sidebar goes."""
+# What a new sidebar pane runs until start_sidebar replaces it: anything
+# that waits without exiting.
+SIDEBAR_STAND_IN = ["cat"]
+
+
+def start_sidebar(pane: str, cwd: str, command: list[str], env: dict[str, str], log: Path) -> None:
+    """Run the sidebar ``command`` in ``pane`` (opened on SIDEBAR_STAND_IN),
+    restarted whenever it exits nonzero (a crash, or an upgrade re-exec into
+    a half-installed engine), with no waiting between tries: ``remain-on-exit
+    failed`` keeps just that pane around after a failed exit, and a hook on
+    just that pane respawns it (see sidebar_respawn_script). Both are set
+    before ``command`` starts, so a crash on startup comes back too. A zero
+    exit, the person quitting, closes the pane as before. Both are pane
+    options, never global ones, so no other pane is touched; they move with
+    the pane wherever the sidebar goes."""
     # run-shell expands formats: keep any "#" of ours literal.
     script = sidebar_respawn_script(pane, cwd, env, log).replace("#", "##")
     shell = shlex.join(["/bin/sh", "-c", script, "brindle-sidebar"]) + " #{pane_dead_status}"
+    env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     _tmux_batch([["set-option", "-p", "-t", pane, "remain-on-exit", "failed"],
-                 ["set-hook", "-p", "-t", pane, "pane-died", f"run-shell -b {shlex.quote(shell)}"]])
+                 ["set-hook", "-p", "-t", pane, "pane-died", f"run-shell -b {shlex.quote(shell)}"],
+                 ["respawn-pane", "-k", "-t", pane, "-c", cwd, *env_args, "--", *command]])
 
 
 def window_alive(target: str, server: object = _THIS_SERVER) -> bool:
