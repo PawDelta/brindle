@@ -501,6 +501,37 @@ def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):
     assert codex_hook.tell_untrusted(db, reviewer, ws.path)
 
 
+def test_trust_written_but_not_verified_is_pending_not_removed(db, ws, monkeypatch):
+    """The write to Codex's config lands, then asking Codex fails: the config
+    holds a hash the record doesn't, which read as the person removing the trust
+    (never retried, supervisor not told). It's pending now, and the next launch recovers."""
+    class SilentAfterWrite(FakeAppServer):
+        wrote = False
+
+        def call(self, method, params):
+            if SilentAfterWrite.wrote and method == "hooks/list":
+                raise codex_hook.CodexHookError("codex app-server didn't answer")
+            out = super().call(method, params)
+            SilentAfterWrite.wrote |= method == "config/batchWrite"
+            return out
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    move_brindle(monkeypatch)  # a new hook: re-trusting writes a new hash
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+    reviewer = worker(db, ws, id_="r1")
+    monkeypatch.setattr(codex_hook, "_AppServer", SilentAfterWrite)
+    assert codex_hook.launch_flags(ws.path) == []
+    assert codex_hook.status() == codex_hook.MOVED
+    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)  # Codex answers again
+    assert codex_hook.config_flags(codex_hook.hook_command())[1] in codex_hook.launch_flags(ws.path)
+    assert codex_hook.status() == codex_hook.TRUSTED
+    (codex_hook.codex_home() / "config.toml").write_text("")  # a real removal is still one
+    assert codex_hook.status() == codex_hook.REMOVED
+
+
 def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
     """Live: the app ran `<tool venv>/bin/python -P -m brindle`, a shell the
     `brindle` shim; Codex has one trusted hash for the hook, so each process's

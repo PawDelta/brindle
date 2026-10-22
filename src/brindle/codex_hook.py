@@ -388,6 +388,11 @@ def trust(binary: str, state: HookState) -> HookState:
             "value": {state.key: {"trusted_hash": state.hash}}}]})
     finally:
         server.close()
+    # Written but not yet verified: on record without its definition, which
+    # status() reads as MOVED (verify again, and tell), never as a removal.
+    home = _home_key(codex_home())
+    with permissions.editing() as store:
+        store.codex_hook[home] = {"command": state.command, "key": state.key, "hash": state.hash}
     after = inspect(binary, state.command)
     if after.status != "trusted":
         raise CodexHookError(f"Codex still reports the hook as {after.status}")
