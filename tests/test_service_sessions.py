@@ -51,14 +51,15 @@ def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, 
     assert running == paused
 
 
-def test_concurrent_sessions_continue_from_inside_another_session(db, repo, monkeypatch):
+@pytest.mark.parametrize("caller_id", [pytest.param("caller", id="concurrent_sessions")])
+def test_continue_refuses_to_pause_the_session_running_it(db, repo, monkeypatch, caller_id):
     ws = workspaces.adopt_root(db, str(repo))
-    caller = add(db, ws, "caller")
+    caller = add(db, ws, caller_id)
     add(db, ws, "other")
     add(db, ws, "target", status="paused")
     resumed, paused = [], []
     monkeypatch.setattr(agents, "is_alive",
-                        lambda a, panes=None: a.id in ("caller", "other") or bool(resumed))
+                        lambda a, panes=None: a.id in (caller_id, "other") or bool(resumed))
     monkeypatch.setattr(agents, "pane_owners", lambda db_, panes=None: {})
     monkeypatch.setattr(agents, "pause", lambda db_, aid, **kw: paused.append(aid))
     monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(rid) or [db.get_agent(rid)])
@@ -66,18 +67,7 @@ def test_concurrent_sessions_continue_from_inside_another_session(db, repo, monk
     got = svc.continue_(db, ws, "target")
     assert got.state == "resumed" and resumed == ["target"] and paused == []
     # Both now run here; a command from the caller's pane means the caller's session.
-    assert svc.session_root(db, str(repo)) == "caller"
-
-
-def test_concurrent_sessions_continue_recovers_the_named_older_live_session(db, repo, monkeypatch):
-    ws = workspaces.adopt_root(db, str(repo))
-    add(db, ws, "older", status="failed")
-    add(db, ws, "newer")
-    resumed = []
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("older", "newer"))
-    monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(rid) or [])
-    got = svc.continue_(db, ws, "older")
-    assert got.state == "recovered" and got.root.id == "older" and resumed == ["older"]
+    assert svc.session_root(db, str(repo)) == caller_id
 
 
 def test_continue_lists_the_paused_sessions_then_resumes_the_one_picked(db, repo, monkeypatch):

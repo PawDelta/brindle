@@ -594,7 +594,7 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert len(typed) == 2
 
 
-def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, monkeypatch):
+def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, tmp_path, monkeypatch):
     from brindle import tmux
 
     opened, killed = [], []
@@ -615,14 +615,11 @@ def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, monkeypatch
     assert _send("POST", f"/v1/terminals/{first['terminal']}/input", {"text": "ls"})[0] == 404
     assert _send("DELETE", f"/v1/terminals/{first['terminal']}")[0] == 200 and killed == ["@1"]
     assert _send("DELETE", "/v1/terminals/t-0000000000000000")[0] == 404
-
-
-def test_a_shell_is_refused_outside_attached_repos(world, tmp_path, monkeypatch):
-    from brindle import tmux
-
-    monkeypatch.setattr(tmux, "new_window", lambda *a, **kw: pytest.fail("opened a shell"))
+    # Refused outside attached repos, and without a cwd.
+    count = len(opened)
     assert _send("POST", "/v1/terminals/shell", {"cwd": str(tmp_path)})[0] == 400
     assert _send("POST", "/v1/terminals/shell", {})[0] == 400
+    assert len(opened) == count
 
 
 OPTIONS = ["Yes", "Yes, and don't ask again for npm test commands in /repo",
