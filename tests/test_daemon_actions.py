@@ -377,6 +377,9 @@ def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo
     assert agents._review_profile(db, world, None, cfg) == "reviewer-opencode"
     unusable(["opencode"])
     assert agents._review_profile(db, world, None, cfg) == "reviewer-gemini"
+    unusable(["opencode", "antigravity"])     # none left: the pick's own problem
+    with pytest.raises(agents.AgentError, match="'reviewer-opencode' can't run: down"):
+        agents._review_profile(db, world, None, cfg)
     with pytest.raises(agents.AgentError, match="can't run"):       # asked for by name: no substitute
         agents._review_profile(db, world, "reviewer-opencode", cfg)
 
