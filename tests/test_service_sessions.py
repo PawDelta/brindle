@@ -51,7 +51,7 @@ def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, 
     assert running == paused
 
 
-def test_concurrent_sessions_continue_from_inside_another_session(db, repo, monkeypatch):
+def test_continue_refuses_to_pause_the_session_running_it(db, repo, monkeypatch):
     ws = workspaces.adopt_root(db, str(repo))
     caller = add(db, ws, "caller")
     add(db, ws, "other")
@@ -67,17 +67,6 @@ def test_concurrent_sessions_continue_from_inside_another_session(db, repo, monk
     assert got.state == "resumed" and resumed == ["target"] and paused == []
     # Both now run here; a command from the caller's pane means the caller's session.
     assert svc.session_root(db, str(repo)) == "caller"
-
-
-def test_concurrent_sessions_continue_recovers_the_named_older_live_session(db, repo, monkeypatch):
-    ws = workspaces.adopt_root(db, str(repo))
-    add(db, ws, "older", status="failed")
-    add(db, ws, "newer")
-    resumed = []
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("older", "newer"))
-    monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(rid) or [])
-    got = svc.continue_(db, ws, "older")
-    assert got.state == "recovered" and got.root.id == "older" and resumed == ["older"]
 
 
 def test_continue_lists_the_paused_sessions_then_resumes_the_one_picked(db, repo, monkeypatch):

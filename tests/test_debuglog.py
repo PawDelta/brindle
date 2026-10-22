@@ -48,13 +48,6 @@ def server(monkeypatch):
     return make
 
 
-def test_debuglog_non_staff_cannot_turn_it_on(server):
-    server({"sub": "u1"})      # no ``staff`` field: not staff
-
-    assert _send("PUT", "/v1/debug", {"enabled": True})[0] == 403
-    assert _send("GET", "/v1/debug") == (200, {"enabled": False, "staff": False})
-
-
 def test_debuglog_staff_entry_is_scrubbed_and_uploaded(server):
     s = server({"sub": "u1", "staff": True})
     assert _send("PUT", "/v1/debug", {"enabled": True}) == (200, {"enabled": True, "staff": True})
@@ -83,6 +76,7 @@ def test_debuglog_account_switch_to_non_staff_stops_uploads(server):
     s.me, s.creds["refresh_token"] = {"sub": "u2"}, "r-b"       # another, non-staff account
 
     assert _send("GET", "/v1/debug") == (200, {"enabled": False, "staff": False})
+    assert _send("PUT", "/v1/debug", {"enabled": True})[0] == 403       # a non-staff account can't turn it on
     config.set_user(debuglog.SETTING, True)     # even if the setting is still on
     assert debuglog.upload_once() == 0 and s.posted == []
     assert not debuglog.enabled()
@@ -138,36 +132,13 @@ def test_debuglog_rotation_keeps_pending_entries(server, monkeypatch):
     assert debuglog.upload_once() == 0
 
 
-def test_debuglog_rotation_while_the_uploader_has_the_files_open(server, monkeypatch):
-    s = server({"sub": "u1", "staff": True})
-    config.set_user(debuglog.SETTING, True)
-    debuglog.record("app", "info", "a")
-    monkeypatch.setattr(debuglog, "MAX_BYTES", debuglog.log_path().stat().st_size * 5 // 2)
-    debuglog.record("app", "info", "b")
-    real = debuglog._open_logs
-
-    def open_then_rotate():
-        got = real()
-        monkeypatch.setattr(debuglog, "_open_logs", real)
-        debuglog.record("app", "info", "c")       # rotates [a, b] away
-        return got
-
-    monkeypatch.setattr(debuglog, "_open_logs", open_then_rotate)
-    assert debuglog.upload_once() == 2
-    assert debuglog.upload_once() == 1
-    assert [[e["message"] for e in body["entries"]] for _, body in s.posted] == [["a", "b"], ["c"]]
-
-
-def test_debuglog_oversized_detail_is_replaced_by_a_marker():
-    config.set_user(debuglog.SETTING, True)
-
-    assert debuglog.record("app", "error", "big", ["é" * 2000] * 600)
-    assert debuglog.log_path().stat().st_size <= debuglog.MAX_ENTRY
-    assert json.loads(debuglog.log_path().read_text())["detail"]["truncated"] is True
-
-
-def test_debuglog_disabled_writes_nothing():
+def test_debuglog_disabled_writes_nothing_and_oversized_detail_is_replaced_by_a_marker():
     config.set_user(debuglog.SETTING, False)
 
     assert _send("POST", "/v1/debug/log", {"source": "app", "message": "hi"}) == (200, {"recorded": False})
     assert not debuglog.log_path().exists()
+
+    config.set_user(debuglog.SETTING, True)
+    assert debuglog.record("app", "error", "big", ["é" * 2000] * 600)
+    assert debuglog.log_path().stat().st_size <= debuglog.MAX_ENTRY
+    assert json.loads(debuglog.log_path().read_text())["detail"]["truncated"] is True

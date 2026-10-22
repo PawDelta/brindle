@@ -51,7 +51,7 @@ def test_mcp_transfer_keeps_the_caller_until_the_repo_session_starts(db, repo, m
     assert live == ["scratchsup"]
 
 
-def test_concurrent_sessions_starting_in_repo_pauses_only_the_scratch_chat(db, repo, moved, live):
+def test_starting_in_the_repo_pauses_the_scratch_chat_of_a_cli_transfer(db, repo, moved, live):
     scratch.transfer(db, moved, str(repo), keep_running="scratchsup")   # as the MCP tool does
     ws = workspaces.adopt_root(db, str(repo))
     _sup(db, "reposup", ws, "%2")

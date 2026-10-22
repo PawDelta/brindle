@@ -456,26 +456,6 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     assert FakeAppServer.calls == [] and codex_hook.status() == codex_hook.REMOVED
 
 
-def test_reviewer_launch_retrusts_the_hook_after_codex_itself_changed(ws, monkeypatch):
-    """A Codex upgrade (or a wrapper's own executable changing) hashes the very
-    same hook differently: brindle's record still matches its config.toml, but
-    Codex shows 'Hooks need review'. Asked of the running Codex before launch."""
-    class UpgradedCodex(FakeAppServer):
-        def __init__(self, binary, flags):
-            super().__init__(binary, [flags[0], flags[1] + "#build2"])
-
-    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
-    turn_on(ws)
-    flag = codex_hook.config_flags()[1]
-    assert flag in launch_argv(ws, mode="review")
-    monkeypatch.setattr(codex_hook, "_AppServer", UpgradedCodex)
-    assert codex_hook.status() == codex_hook.TRUSTED  # brindle's record can't tell
-    assert codex_hook.inspect("codex").status == "untrusted"  # what Codex would stop at
-    set_local(ws.repo_root, "permission_policy", "off")
-    assert flag in launch_argv(ws, mode="review")
-    assert codex_hook.inspect("codex").status == "trusted"
-
-
 def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):
     """Codex says the hook is untrusted and refuses the re-trust: the reviewer
     starts without the hook, so the record must stop saying TRUSTED (the

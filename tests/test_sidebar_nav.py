@@ -298,7 +298,8 @@ def _quiet_loop(monkeypatch, snapshot):
     monkeypatch.setattr(watch.sidebar_logo, "viewer", lambda: "")
 
 
-def test_sidebar_survives_a_resize_that_leaves_a_frame_off_screen(db, monkeypatch):
+def test_sidebar_survives_a_resize_that_leaves_a_frame_off_screen_and_an_unexpected_error(
+        db, brindle_home, monkeypatch):
     # The desktop app resizes the shared window: a frame drawn past the pane's
     # edge got addnwstr() ERR from curses, which ended the sidebar.
     _quiet_loop(monkeypatch, lambda *a, **k: [ws([agent("a1")])])
@@ -340,8 +341,7 @@ def test_sidebar_survives_a_resize_that_leaves_a_frame_off_screen(db, monkeypatc
     # skipped, and the next tick repaints at the new size.
     assert screen.refreshed == [True, True, True, False, True]
 
-
-def test_sidebar_survives_an_unexpected_error_and_logs_it(db, brindle_home, monkeypatch):
+    # An unexpected error in a pass is logged and the next pass draws.
     snapshots = iter([KeyError("boom"), [ws([agent("a1")])]])
 
     def snapshot(*a, **k):
