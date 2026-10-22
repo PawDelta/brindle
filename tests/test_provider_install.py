@@ -196,6 +196,7 @@ def test_the_persons_home_runs_until_a_sign_in_inside_brindle_then_brindles_does
     assert "brindle-org" in company_identity.claude_identity("org", None).line
 
 
+@pytest.mark.variant("a sign-in finishing after spawn must not move a running agent to another config home")
 def test_an_agent_keeps_the_home_decided_at_spawn_when_a_sign_in_completes_after(machine, db, repo, tmp_path,
                                                                                  monkeypatch):
     brindle_home = tmp_path / "brindle-claude"

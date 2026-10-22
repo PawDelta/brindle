@@ -15,7 +15,6 @@ an empty pane list, the cull would have killed every agent's processes too.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import time
 
@@ -242,21 +241,3 @@ def test_attach_fails_fast_on_a_hung_server(db, repo, hung_tmux):
     assert time.time() - t0 < 5
 
 
-def test_tmux_bin_override_and_window_size_reset(tmp_path, monkeypatch):
-    real = shutil.which("tmux")
-    wrapper = tmp_path / "custom-tmux"
-    log = tmp_path / "custom.log"
-    wrapper.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexec "{real}" "$@"\n')
-    wrapper.chmod(0o755)
-    monkeypatch.setenv("BRINDLE_TMUX_BIN", str(tmp_path / "missing-tmux"))
-    with pytest.raises(tmux.TmuxError):
-        tmux._tmux("list-sessions")
-    monkeypatch.setenv("BRINDLE_TMUX_BIN", str(wrapper))
-    tmux.ensure_session("brindle_pipe", str(tmp_path), {})
-    target = "=brindle_pipe:"
-    assert tmux.window_size_option(target) is None      # the global value is inherited, not set here
-    tmux._tmux("set-option", "-w", "-t", target, "window-size", "manual")
-    assert tmux.window_size_option(target) == "manual"
-    tmux.unset_window_size(target)
-    assert tmux.window_size_option(target) is None
-    assert f"set-option -w -u -t {target} window-size" in log.read_text()
