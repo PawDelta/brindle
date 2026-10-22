@@ -53,6 +53,12 @@ def test_tmux_runs_in_utf8_mode_even_without_a_locale(monkeypatch):
     assert tmux.attach_command("x")[:2] == ["tmux", "-u"]
 
 
+def test_a_hung_named_server_is_named_once(monkeypatch):
+    monkeypatch.delenv("BRINDLE_TMUX_BIN", raising=False)
+    msg = str(tmux._hung(tmux._argv("brindle-x"), ("list-panes",)))
+    assert "the tmux server -L brindle-x " in msg and "-L -L" not in msg
+
+
 def test_a_bad_variable_name_is_refused(brindle_home):
     with pytest.raises(tmux.TmuxError):
         tmux._short(["true"], {"A B; rm -rf /": "x"})
