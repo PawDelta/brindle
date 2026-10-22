@@ -28,7 +28,7 @@ _opening = threading.Lock()
 
 
 def open_action(kind: str, command: list[str], cwd: str | None = None,
-                env: dict[str, str] | None = None) -> dict:
+                env: dict[str, str] | None = None, restart: bool = False) -> dict:
     """Run ``command`` in a new window (named ``kind``: the action and what
     it acts on, e.g. "login codex") of the daemon's own tmux session
     (ACTION_SESSION) and return its ActionTerminalDTO: the id POST
@@ -42,7 +42,10 @@ def open_action(kind: str, command: list[str], cwd: str | None = None,
     with _opening:      # find-or-create as one step: two presses at once start one
         for pane, name, alive, terminal_id in tmux.tagged_panes(ACTION_SESSION, ACTION_TAG):
             if alive and name == kind:
-                return _action(terminal_id, False, pane)
+                if not restart:
+                    return _action(terminal_id, False, pane)
+                tmux.kill_window(pane)
+                break
         terminal_id = "t-" + secrets.token_hex(8)
         cwd = cwd or str(Path.home())
         tmux.ensure_session(ACTION_SESSION, cwd, {})

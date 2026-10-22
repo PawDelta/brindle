@@ -548,6 +548,7 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
     monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
     monkeypatch.setattr(tmux, "ensure_session", ensure_session)
     monkeypatch.setattr(tmux, "new_window", new_window)
+    monkeypatch.setattr(tmux, "kill_window", lambda pane: [w.__setitem__(2, False) for w in windows.values()])
     monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
         (f"%{i + 1}", name, alive, tid) for i, (tid, (name, _, alive)) in enumerate(windows.items())])
     code, reply = _send("POST", path)
@@ -565,6 +566,10 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
     windows[reply["terminal"]][2] = False       # it exited: the next press starts afresh
     code, again = _send("POST", path)
     assert (code, again["started"], len(windows)) == (200, True, 2)
+    if command == "login":      # "Try again": ends the running sign-in and starts afresh
+        code, fresh = _send("POST", path, {"restart": True})
+        assert (code, fresh["started"], len(windows)) == (200, True, 3)
+        assert windows[again["terminal"]][2] is False
 
 
 def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkeypatch):
