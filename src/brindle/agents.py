@@ -36,6 +36,7 @@ from brindle.sidebar_follow import (
     SIDEBAR_TAG,
     _agent_for_window,
     _create_sidebar,
+    _drop_dead_sidebar,
     _note_sidebar_move,
     _sidebar_lock,
     _sidebar_position,
@@ -798,7 +799,7 @@ def _ensure_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> No
     (a launch or relaunch brings it back) or has never run."""
     with _sidebar_lock(root_id, timeout=SIDEBAR_LOCK_TIMEOUT):
         existing = db.get_sidebar_pane(root_id)
-        if _valid_sidebar(existing, root_id):
+        if _valid_sidebar(existing, root_id) and not _drop_dead_sidebar(existing):
             assert existing is not None
             if tmux.pane_window(existing) != tmux.pane_window(target_pane):
                 _note_sidebar_move("launch", existing, target_pane)
