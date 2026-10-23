@@ -6,6 +6,7 @@ assign/handoff's dry_run."""
 import asyncio
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -242,8 +243,10 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
                         bool(db.merged_sha(upstream.id)) and cmd[:3] == ["merge-base", "--is-ancestor", "shared"])
     db.add_session_repo(caller.id, "engine", upstream.repo_root)
     assert tasks.unmet_dependencies(db, boss, ["shared"], caller.id) == ["shared"]
-    second = workspace("second", "engine", "second", tracked=True) if event == "requeue_pending" else None
-    deps = ["shared"] + ([agents.workspace_worker(db, second).id] if second else [])
+    second = (workspace("second", "engine", "second", tracked=upstream_kind != "workspace")
+              if event == "requeue_pending" else None)
+    deps = ["shared"] + (["second" if upstream_kind == "workspace" else agents.workspace_worker(db, second).id]
+                         if second else [])
     pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign",
                             isolate=True, branch="shared", done_when=None, files=None, depends_on=deps)
     assert tasks.sweep(db) == 0
@@ -265,6 +268,18 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
         assert launched == []
     else:
         db.set_merged(upstream.id, "merged-sha")
+        if second and upstream_kind == "workspace":
+            db.set_merged(second.id, "second-sha")
+            original_tx = db.tx
+
+            @contextmanager
+            def interleaved_tx():
+                monkeypatch.setattr(db, "tx", original_tx)
+                tasks.on_merged(db, second)
+                with original_tx() as connection:
+                    yield connection
+
+            monkeypatch.setattr(db, "tx", interleaved_tx)
         if event == "sweep":
             assert tasks.sweep(db) == 1
         else:
@@ -273,8 +288,13 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
             assert db.get_task(pending.id).state == ("held" if upstream_kind == "workspace" else "pending")
             assert launched == []
             db.delete_workspace(upstream.id)
+            if upstream_kind == "workspace":
+                db.delete_workspace(second.id)
             db.update_task(pending.id, state="pending")
-            tasks.on_merged(db, second)
+            if upstream_kind == "workspace":
+                assert tasks.sweep(db) == 1
+            else:
+                tasks.on_merged(db, second)
         assert db.get_task(pending.id).state == "started"
         tasks.on_merged(db, upstream)
         assert tasks.sweep(db) == 0

@@ -754,7 +754,13 @@ def on_merged(db: DB, ws: Workspace) -> None:
             except agents.AgentError:
                 continue  # readiness handles invalid dependencies without marking them satisfied
         if completed:
-            set_dependencies(db, t.id, [dep for dep in deps if dep not in completed], expect=deps)
+            # Merge completion into the current list under the write lock so
+            # another merge or queue edit cannot lose either update.
+            with db.tx() as c:
+                current = c.execute("SELECT state, depends_on FROM tasks WHERE id=?", (t.id,)).fetchone()
+                if current is not None and current["state"] in QUEUED:
+                    remaining = [dep for dep in _loads(current["depends_on"]) if dep not in completed]
+                    c.execute("UPDATE tasks SET depends_on=? WHERE id=?", (_dumps(remaining), t.id))
             t = db.get_task(t.id)
         if t is not None and t.state == "pending":
             _start_if_ready(db, t, dep_ref)
