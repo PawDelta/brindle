@@ -16,6 +16,7 @@ from conftest import sh
 from brindle import agents, autopilot, cli, mcp_server, repos, tasks, workspaces
 from brindle.db import Agent
 from brindle.pro import license
+from test_task_deps import dependency_rows
 
 
 def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None, **kw):
@@ -208,7 +209,8 @@ def test_assign_into_an_attached_repo_works_checks_and_merges_there(db, repo, we
     assert not (brindle_home / "main-checked").exists()     # the session's repo's didn't
 
 
-def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, web, boss, monkeypatch):
+@pytest.mark.parametrize("dep_on", ["worker_id", "branch_name"])
+def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, web, boss, monkeypatch, dep_on):
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     repos.attach(db, "boss", str(web), "web")
     out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
@@ -216,9 +218,10 @@ def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, we
     ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
     commit_file(Path(ws_a.path), "a_output.txt")
 
+    dep = worker_a if dep_on == "worker_id" else "feat-a"
     out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", repo="web",
-                                          depends_on=[worker_a]))
-    assert "Queued task" in out_b and worker_a in out_b
+                                          depends_on=[dep]))
+    assert "Queued task" in out_b and dep in out_b
     [b] = db.list_tasks(str(web), state="pending")
     assert "feat-b" in mcp_server.list_tasks()
 
@@ -229,7 +232,7 @@ def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, we
     assert ws_b.repo_root == str(web) and ws_b.branch == "feat-b"
     assert not (Path(ws_b.path) / "a_output.txt").exists()   # another repo: A's file isn't there
     msg = db.pop_pending("boss")
-    assert msg is not None and "Started" in msg.body and worker_a in msg.body
+    assert msg is not None and "Started" in msg.body and (dep in msg.body or worker_a in msg.body)
 
 
 def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web, boss, monkeypatch):
@@ -254,6 +257,54 @@ def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web
 
     assert dep.id in tasks.cancel(db, db.get_agent("boss"), p_main.id)   # its own repo's: cascades
     assert db.get_task(dep.id).state == "cancelled"
+
+
+def test_cross_repo_branch_dependency_refuses_when_ambiguous(db, dependency_rows):
+    caller, boss, workspace, _ = dependency_rows
+    for name in ("web", "api"):
+        ws = workspace(name, name, "feature", tracked=True)
+        db.add_session_repo(caller.id, name, ws.repo_root)
+    with pytest.raises(agents.AgentError):
+        tasks.unmet_dependencies(db, boss, ["feature"], caller.id)
+    worker = agents.workspace_worker(db, ws)
+    assert tasks.unmet_dependencies(db, boss, [worker.id], caller.id) == [worker.id]
+
+
+@pytest.mark.variant("A same-named branch in an unrelated identity must not block the selected upstream")
+def test_cross_repo_dependency_checks_identity_lock_only_on_selected_workspace(db, dependency_rows, monkeypatch):
+    from brindle import identity_lock
+
+    caller, boss, workspace, _ = dependency_rows
+    selected = workspace("web", "web", "feature", tracked=True)
+    db.add_session_repo(caller.id, "web", selected.repo_root)
+    alien = workspace("alien", "alien", "feature", tracked=True)
+    alien_worker = agents.workspace_worker(db, alien)
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "corp-id" if aid == alien_worker.id else None)
+    assert tasks.unmet_dependencies(db, boss, ["feature"], caller.id) == ["feature"]
+
+
+def test_two_sessions_do_not_share_attached_repos(db, dependency_rows, monkeypatch):
+    caller, boss, workspace, launched = dependency_rows
+    other = fake_spawn(db, boss, "supervisor", mode="interactive")
+    alien = workspace("alien", "other", "feature", tracked=True)
+    db.update_agent(agents.workspace_worker(db, alien).id, parent_id=other.id)
+    db.add_session_repo(other.id, "other", alien.repo_root)
+    pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign", isolate=True,
+                            branch="dep", done_when=None, files=None, depends_on=["feature"])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", other.id)
+    tasks.on_merged(db, alien)
+    assert tasks.sweep(db) == 0
+    assert db.get_task(pending.id).state == "pending" and launched == []
+
+
+@pytest.mark.variant("A local workspace without a task must still shadow a merged task in an attached repo")
+def test_local_untracked_branch_takes_precedence_over_remote_merged_task(db, dependency_rows):
+    caller, boss, workspace, _ = dependency_rows
+    remote = workspace("web", "web", "shared", tracked=True)
+    db.add_session_repo(caller.id, "web", remote.repo_root)
+    tasks.on_merged(db, remote)
+    workspace("local", branch="shared")
+    assert tasks.unmet_dependencies(db, boss, ["shared"], caller.id) == ["shared"]
 
 
 def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo, web, boss, monkeypatch):
