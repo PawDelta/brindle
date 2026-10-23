@@ -307,6 +307,8 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     clock = [time.time()]
     start = clock[0]
     monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    initial = autopilot.on_stop(db, agent, {})
+    assert initial and autopilot.NUDGE_HEAD in initial["reason"]
     autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
     assert autopilot.on_stop(db, agent, {}) is None
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")

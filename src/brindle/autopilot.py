@@ -1164,8 +1164,8 @@ def held(ap: Autopilot) -> bool:
 
 
 def answered(db: DB, root_id: str) -> None:
-    now = time.time()
-    db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0, nudged_time=now)
+    db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0,
+                        nudged_at=None, nudged_time=None)
     bus.publish_agent(db, "autopilot.answered", root_id)
 
 
@@ -1178,10 +1178,10 @@ def user_spoke(db: DB, agent: Agent) -> None:
     (#209): brindle can't always tell the user from whatever else woke the
     chat."""
     ap = db.get_autopilot(agent.id)
-    now = time.time()
     if ap and ap.state in ("blocked", "stalled"):
         asked = held(ap)
-        db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0, nudged_time=now)
+        db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0,
+                            nudged_at=None, nudged_time=None)
         if asked:
             bus.publish_agent(db, "autopilot.answered", agent.id)
     elif ap:
