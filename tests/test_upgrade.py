@@ -1,8 +1,8 @@
 import asyncio
 import shutil
+import sqlite3
 import subprocess
 import sys
-from functools import partial
 from io import StringIO
 from types import SimpleNamespace
 
@@ -29,6 +29,8 @@ def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, ex
     stopped = []
     monkeypatch.setattr(mcp_server, "start_azure_refresher",
                         lambda: SimpleNamespace(stop=lambda: stopped.append(True)))
+    notification_db = mcp_server.DB()
+    monkeypatch.setattr(mcp_server, "DB", lambda: notification_db)
 
     def disconnect():
         raise BrokenPipeError("client pipe closed")
@@ -38,12 +40,14 @@ def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, ex
         with pytest.raises(BrokenPipeError):
             mcp_server.main()
     else:
-        monkeypatch.setattr("mcp.server.mcpserver.server.stdio_server", partial(
-            stdio_server, stdin=anyio.wrap_file(StringIO()), stdout=anyio.wrap_file(StringIO())))
+        monkeypatch.setattr("mcp.server.mcpserver.server.stdio_server", lambda: stdio_server(
+            stdin=anyio.wrap_file(StringIO()), stdout=anyio.wrap_file(StringIO())))
         mcp_server.main()
     assert stopped == [True]
     assert db.pop_pending("boss") is not None
     assert db.unread_count("boss") == 0
+    with pytest.raises(sqlite3.ProgrammingError):
+        notification_db.conn.execute("SELECT 1")
 
 
 def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_started_with(monkeypatch, tmp_path):

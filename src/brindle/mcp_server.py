@@ -1479,12 +1479,15 @@ def _report_server_exit(error: Exception | None = None) -> None:
     logger.error(notice, exc_info=error is not None)
     try:
         db = DB()
-        agent_id = os.environ.get("BRINDLE_AGENT_ID")
-        agent = db.get_agent(agent_id) if agent_id else None
-        if agent is not None:
-            # send_message normally holds the body for read_messages. Push
-            # this body through the hook/runner path: MCP cannot read it now.
-            agents._send_message(db, agent, notice, None)
+        try:
+            agent_id = os.environ.get("BRINDLE_AGENT_ID")
+            agent = db.get_agent(agent_id) if agent_id else None
+            if agent is not None:
+                # send_message normally holds the body for read_messages. Push
+                # this body through the hook/runner path: MCP cannot read it now.
+                agents._send_message(db, agent, notice, None)
+        finally:
+            db.conn.close()
     except Exception:
         # Preserve the original server failure even if its recipient has
         # already stopped, or the database/delivery path is also unavailable.
