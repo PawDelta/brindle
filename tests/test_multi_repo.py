@@ -259,27 +259,32 @@ def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web
     assert db.get_task(dep.id).state == "cancelled"
 
 
-def test_cross_repo_branch_dependency_refuses_when_ambiguous(db, dependency_rows):
-    caller, boss, workspace, _ = dependency_rows
-    for name in ("web", "api"):
-        ws = workspace(name, name, "feature", tracked=True)
-        db.add_session_repo(caller.id, name, ws.repo_root)
-    with pytest.raises(agents.AgentError):
-        tasks.unmet_dependencies(db, boss, ["feature"], caller.id)
-    worker = agents.workspace_worker(db, ws)
-    assert tasks.unmet_dependencies(db, boss, [worker.id], caller.id) == [worker.id]
-
-
-@pytest.mark.variant("A same-named branch in an unrelated identity must not block the selected upstream")
-def test_cross_repo_dependency_checks_identity_lock_only_on_selected_workspace(db, dependency_rows, monkeypatch):
+@pytest.mark.parametrize("candidate", [
+    "attached",
+    pytest.param("alien", marks=pytest.mark.variant(
+        "A same-named branch in an unrelated identity must not block the selected upstream")),
+    pytest.param("local", marks=pytest.mark.variant(
+        "A local workspace without a task must still shadow a merged task in an attached repo")),
+])
+def test_cross_repo_branch_dependency_refuses_when_ambiguous(db, dependency_rows, monkeypatch, candidate):
     from brindle import identity_lock
 
     caller, boss, workspace, _ = dependency_rows
     selected = workspace("web", "web", "feature", tracked=True)
     db.add_session_repo(caller.id, "web", selected.repo_root)
-    alien = workspace("alien", "alien", "feature", tracked=True)
-    alien_worker = agents.workspace_worker(db, alien)
-    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "corp-id" if aid == alien_worker.id else None)
+    if candidate == "local":
+        tasks.on_merged(db, selected)
+        workspace("local", branch="feature")
+    else:
+        other = workspace(candidate, candidate, "feature", tracked=True)
+        worker = agents.workspace_worker(db, other)
+        if candidate == "attached":
+            db.add_session_repo(caller.id, candidate, other.repo_root)
+            with pytest.raises(agents.AgentError):
+                tasks.unmet_dependencies(db, boss, ["feature"], caller.id)
+            assert tasks.unmet_dependencies(db, boss, [worker.id], caller.id) == [worker.id]
+            return
+        monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "corp-id" if aid == worker.id else None)
     assert tasks.unmet_dependencies(db, boss, ["feature"], caller.id) == ["feature"]
 
 
@@ -295,16 +300,6 @@ def test_two_sessions_do_not_share_attached_repos(db, dependency_rows, monkeypat
     tasks.on_merged(db, alien)
     assert tasks.sweep(db) == 0
     assert db.get_task(pending.id).state == "pending" and launched == []
-
-
-@pytest.mark.variant("A local workspace without a task must still shadow a merged task in an attached repo")
-def test_local_untracked_branch_takes_precedence_over_remote_merged_task(db, dependency_rows):
-    caller, boss, workspace, _ = dependency_rows
-    remote = workspace("web", "web", "shared", tracked=True)
-    db.add_session_repo(caller.id, "web", remote.repo_root)
-    tasks.on_merged(db, remote)
-    workspace("local", branch="shared")
-    assert tasks.unmet_dependencies(db, boss, ["shared"], caller.id) == ["shared"]
 
 
 def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo, web, boss, monkeypatch):

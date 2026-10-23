@@ -23,9 +23,18 @@ def test_scrolling_keeps_the_selection_in_view():
     assert watch.nearest_visible_row([], offset=5, visible=10) == 0
 
 
-def test_old_databases_are_migrated(tmp_path):
+@pytest.mark.parametrize("newer_schema", [False, True], ids=["older", "newer"])
+def test_old_databases_are_migrated(tmp_path, newer_schema):
     path = tmp_path / "old.db"
     con = sqlite3.connect(path)
+    if newer_schema:
+        con.execute("PRAGMA user_version=2147483647")
+        with pytest.raises(RuntimeError):
+            DB(str(path))
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 2147483647
+        assert con.execute("SELECT name FROM sqlite_master").fetchall() == []
+        con.close()
+        return
     con.executescript("""
         CREATE TABLE agents (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, profile TEXT NOT NULL,
           provider TEXT NOT NULL, parent_id TEXT, mode TEXT NOT NULL, status TEXT NOT NULL,
@@ -43,17 +52,6 @@ def test_old_databases_are_migrated(tmp_path):
     assert reopened.conn.execute("PRAGMA user_version").fetchone()[0] > 0
     assert reopened.get_agent("a").status == "processing"
     reopened.conn.close()
-
-
-def test_db_refuses_newer_schema_before_changing_it(tmp_path):
-    path = tmp_path / "newer.db"
-    con = sqlite3.connect(path)
-    con.execute("PRAGMA user_version=2147483647")
-    with pytest.raises(RuntimeError):
-        DB(str(path))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 2147483647
-    assert con.execute("SELECT name FROM sqlite_master").fetchall() == []
-    con.close()
 
 
 class _Screen:
