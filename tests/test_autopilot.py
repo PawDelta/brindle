@@ -319,6 +319,9 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     assert "Postgres or SQLite?" in out["reason"]
     clock[0] += autopilot.NUDGE_BACKOFF
     assert autopilot.on_stop(db, agent, {}) is None
+    db.bump_progress("boss")
+    clock[0] += 3600.0
+    assert autopilot.on_stop(db, agent, {}) is None
     autopilot.answered(db, "boss")
     resumed = autopilot.on_stop(db, agent, {})
     assert resumed and resumed["decision"] == "block"

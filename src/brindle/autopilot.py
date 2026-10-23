@@ -1164,7 +1164,8 @@ def held(ap: Autopilot) -> bool:
 
 
 def answered(db: DB, root_id: str) -> None:
-    db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0)
+    now = time.time()
+    db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0, nudged_time=now)
     bus.publish_agent(db, "autopilot.answered", root_id)
 
 
@@ -1177,9 +1178,10 @@ def user_spoke(db: DB, agent: Agent) -> None:
     (#209): brindle can't always tell the user from whatever else woke the
     chat."""
     ap = db.get_autopilot(agent.id)
+    now = time.time()
     if ap and ap.state in ("blocked", "stalled"):
         asked = held(ap)
-        db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0)
+        db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0, nudged_time=now)
         if asked:
             bus.publish_agent(db, "autopilot.answered", agent.id)
     elif ap:
@@ -2042,10 +2044,10 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     elif held(ap):
         now = time.time()
         start = ap.nudged_time or ap.created_at
-        if (ap.nudges == 0 and start is not None
+        if (start is not None and start > 0
                 and now - start >= QUESTION_REMINDER_DELAY
                 and not db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
-            db.update_autopilot(agent.id, nudges=1, nudged_time=now)
+            db.update_autopilot(agent.id, nudged_time=-now)
             reason = (f"{QUESTION_REMINDER_HEAD}: {ap.question}. "
                       "When they have answered, call need_user(answered=true).")
             return {"decision": "block", "reason": reason}
