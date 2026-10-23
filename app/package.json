@@ -1,6 +1,6 @@
 {
   "name": "brindle-desktop",
-  "version": "0.1.0-rc.10",
+  "version": "0.1.0",
   "private": true,
   "description": "The brindle desktop app: a Tauri shell over the local brindle daemon.",
   "license": "SEE LICENSE IN ../LICENSE",
