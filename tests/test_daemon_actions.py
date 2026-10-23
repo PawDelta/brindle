@@ -53,6 +53,8 @@ def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None
 def world(db, repo, monkeypatch):
     """A session ``sup`` in the checkout and its plan-first worker ``wk`` in worktree ``w-1``;
     jobs run inline."""
+    from brindle import provider_homes
+
     root = workspaces.adopt_root(db, str(repo))
     db.add_workspace(Workspace("w-1", root.repo_root, "feat", "worktree", "feat", "main", str(repo),
                                None, "brindle-x", time.time()))
@@ -65,6 +67,7 @@ def world(db, repo, monkeypatch):
     db.add_autopilot("sup")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
     monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [])
+    monkeypatch.setattr(provider_homes, "confirm_login", lambda provider: None)
     return root
 
 

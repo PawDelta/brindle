@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
@@ -48,6 +48,27 @@ function setup(holdLogin = false) {
 }
 
 describe("ProviderSignIn, the CLI read through a pty view", () => {
+  it("confirms a browser login while agy remains at its interactive prompt", async () => {
+    const { daemon, check, shell, flow } = setup();
+    check.mockResolvedValue(false);
+    shell({ kind: "ready", tmux: "tmux 3.7c" });
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(flow().dataset.phase).toBe("waiting");
+      check.mockResolvedValue(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      expect(flow().dataset.phase).toBe("done");
+      expect(daemon.actions[0].alive).toBe(true);
+      expect(daemon.views[0].closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reads the CLI once the shell says the pty view can run, though it said so only after the login answered", async () => {
     const { daemon, check, shell, flow } = setup();
     fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));

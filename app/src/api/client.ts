@@ -10,6 +10,7 @@ import type {
   DecisionDTO,
   GoalDTO,
   InboxItemDTO,
+  PreflightItemDTO,
   ProfileDTO,
   RoutingDTO,
   SessionDTO,
@@ -119,13 +120,13 @@ export interface KeyStored {
   set: boolean;
 }
 
-/* GET /providers/{p}/preflight (engine branch desktop/provider-preflight;
-   stubbed in the fake daemon until it merges): what a provider's CLI needs
+/* GET /providers/{p}/preflight: what a provider's CLI needs
    before brindle can launch it, each a thing the app can settle natively:
    a sign-in (ProviderSignIn), a key (PUT /keys/{name}), the CLI's trust of
    the folder, or a consent it asks for once. A start or continue that
    would launch a provider with an item still open is refused with 409
-   {error: {code: "preflight"}, preflight: PreflightDTO}. */
+   {error: {code: "preflight"}, preflight: PreflightItemDTO[]}.
+   The client adapts those unresolved items to the card's PreflightDTO. */
 export type PreflightKind = "signin" | "key" | "trust" | "consent";
 
 export interface PreflightItem {
@@ -136,12 +137,24 @@ export interface PreflightItem {
   done: boolean;
   /* The key's name (kind "key"). */
   key_name?: string | null;
+  action?: PreflightItemDTO["action"];
 }
 
 export interface PreflightDTO {
   provider: string;
   ok: boolean;
   items: PreflightItem[];
+}
+
+/* The engine sends only unresolved items. The desktop's original contract
+   grouped items with done flags; keep both shapes at the API boundary. */
+function preflightResult(value: PreflightDTO | PreflightItemDTO[], provider = ""): PreflightDTO {
+  if (!Array.isArray(value)) return value;
+  return {
+    provider: provider || value[0]?.provider || "",
+    ok: value.length === 0,
+    items: value.map((item) => ({ ...item, kind: item.kind as PreflightKind, label: item.title, done: false })),
+  };
 }
 
 /* GET /workspaces/{id}/file?path= (engine branch desktop/review-edit,
@@ -864,12 +877,21 @@ export class DaemonClient {
   }
 
   /* What a provider's CLI still needs before brindle can launch it. */
-  preflight(provider: string) {
-    return this.get<PreflightDTO>(`/providers/${encodeURIComponent(provider)}/preflight`);
+  async preflight(provider: string, repo?: string | null) {
+    const result = await this.get<PreflightDTO | PreflightItemDTO[]>(`/providers/${encodeURIComponent(provider)}/preflight`, { repo });
+    return preflightResult(result, provider);
   }
 
   /* A trust or consent item settled by the person here. */
-  settlePreflight(provider: string, item: string) {
+  async settlePreflight(provider: string, item: string, action?: PreflightItemDTO["action"], repo?: string | null) {
+    if (action) {
+      await this.request(this.url(action.path.replace(/^\/v1(?=\/)/, "")), {
+        method: action.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...action.body, accept: true }),
+      });
+      return this.preflight(provider, repo);
+    }
     return this.post<PreflightDTO>(`/providers/${encodeURIComponent(provider)}/preflight/${encodeURIComponent(item)}`, { accept: true });
   }
 
@@ -1185,10 +1207,13 @@ export class DaemonClient {
     }
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO; reasons?: string[] } | undefined;
+      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[] } | undefined;
       if (got?.conflict) throw new DaemonError("conflict", got.conflict.message, response.status, got.conflict);
       const err = got?.error;
-      if (got?.preflight) throw new DaemonError("preflight", err?.message ?? `${got.preflight.provider} needs setting up first`, response.status, undefined, got.preflight);
+      if (got?.preflight) {
+        const preflight = preflightResult(got.preflight);
+        throw new DaemonError("preflight", err?.message ?? `${preflight.provider} needs setting up first`, response.status, undefined, preflight);
+      }
       throw new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
     }
     return body as T;

@@ -6,14 +6,14 @@
    a link it printed can be opened again; a question it asks (which way to
    sign in) shows as buttons, and a code it wants pasted from the browser
    as a small field, each answered through POST /v1/terminals/{id}/input,
-   which types the one line the person gave. When the CLI exits the
-   provider's state is read again (`check`): "Signed in to <provider> ✓",
+   which types the one line the person gave. The provider's state is read
+   periodically and when the CLI exits (`check`): "Signed in to <provider> ✓",
    or what went wrong, with the terminal behind "Show details" the whole
    time (PtyTerminal on its pane). The pane is read once the shell says
    the pty view can run, which may come after the sign-in started; one
    that can't run here (tmux too old or missing) fails the card with why.
-   Where the app has no pty views at all (a browser tab), nothing reads
-   the pane: the card waits for the browser and Cancel. The app never sees a password or a token: the browser and
+   Where the app has no pty views at all (a browser tab), the card still
+   checks for completed browser sign-in. The app never sees a password or a token: the browser and
    the CLI handle those. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -44,6 +44,7 @@ export interface ProviderSignInProps {
 
 /* How long "Signed in ✓" stays before the card goes. */
 const DONE_MS = 2500;
+const CHECK_MS = 3000;
 
 /* What the card is doing. */
 export type Phase =
@@ -114,20 +115,20 @@ export function useProviderSignIn({ provider, check, onDone, onActive, details: 
 
   // Each attempt's number (a start, a cancel, the hook gone): only the newest one's answers are taken.
   const attempt = useRef(0);
+  const pending = useRef<Promise<boolean> | null>(null);
   const ended = useCallback(
-    async (terminal: string) => {
+    async (terminal: string, exited = true) => {
       if (finished.current) return;
-      finished.current = true;
       const n = attempt.current;
-      setPhase({ kind: "checking", terminal });
-      let ok = false;
-      try {
-        ok = await check();
-      } catch {
-        ok = false;
-      }
+      if (exited) setPhase({ kind: "checking", terminal });
+      // An exit during a status read shares that read instead of racing it.
+      const reading = pending.current ?? (pending.current = check().catch(() => false));
+      const ok = await reading;
+      if (pending.current === reading) pending.current = null;
       // Tried again (or cancelled) while it checked: this sign-in's result is no one's now.
-      if (n !== attempt.current) return;
+      if (n !== attempt.current || finished.current || (!ok && !exited)) return;
+      finished.current = true;
+      if (ok) setAction(null);
       setPhase(ok ? { kind: "done", terminal } : { kind: "failed", terminal, message: `${name} still isn't signed in.${offerDetails ? " What it said is in the details." : " The browser's sign-in didn't finish, or it signed in to another account."}` });
       onDone?.(ok);
     },
@@ -145,6 +146,7 @@ export function useProviderSignIn({ provider, check, onDone, onActive, details: 
     setLink(null);
     setAction(null);
     finished.current = false;
+    pending.current = null;
     let started: ActionTerminal;
     try {
       started = await client.providerLogin(provider, undefined, restart);
@@ -162,6 +164,23 @@ export function useProviderSignIn({ provider, check, onDone, onActive, details: 
     },
     [],
   );
+
+  // agy stays at its chat prompt after browser sign-in. Completion is the
+  // provider's confirmed credentials, even when its terminal never exits.
+  useEffect(() => {
+    if (!action) return;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await ending.current(action.terminal, false);
+      if (live && !finished.current) timer = setTimeout(poll, CHECK_MS);
+    };
+    timer = setTimeout(poll, CHECK_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [action]);
 
   // The CLI's words, read off its screen as it changes: a link, a question, a code to paste, the end. Read
   // once the pty view can (the shell may say so only after the sign-in started), until it ends or is cancelled.
