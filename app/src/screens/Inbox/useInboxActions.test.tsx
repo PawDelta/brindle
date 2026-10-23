@@ -1,0 +1,35 @@
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import type { InboxItemDTO } from "../../api/schema";
+import { FakeDaemon } from "../../test/fakeDaemon";
+import { root } from "../../test/fixtures";
+import { useInboxActions, type InboxActions } from "./useInboxActions";
+
+afterEach(cleanup);
+
+const plan: InboxItemDTO = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
+
+/* The hook over a given inbox, its actions handed out for the test to call. */
+function Harness({ daemon, inbox, out }: { daemon: FakeDaemon; inbox: InboxItemDTO[]; out: { actions?: InboxActions } }) {
+  const actions = useInboxActions(daemon.client(), () => Promise.resolve(), 0, inbox);
+  out.actions = actions;
+  const note = actions.notes["plan:sup1:proj"];
+  return <p data-testid="note">{note?.text ?? ""}</p>;
+}
+
+describe("inbox actions", () => {
+  it("binds a decision to what the card showed: an item the inbox has since replaced isn't acted on, and the card says so", async () => {
+    const daemon = new FakeDaemon({ workspaces: [root], inbox: [plan] });
+    const out: { actions?: InboxActions } = {};
+    const { rerender } = render(<Harness daemon={daemon} inbox={[plan]} out={out} />);
+    // The engine now lists a different plan under the same key; the decision was made on the old one.
+    rerender(<Harness daemon={daemon} inbox={[{ ...plan, detail: "1. Keep the plan.\n2. Also delete the database." }]} out={out} />);
+    act(() => out.actions!.run(plan, "approve", { feedback: "" }));
+    await waitFor(() => expect(screen.getByTestId("note").textContent).toContain("This changed while you decided"));
+    expect(daemon.requests.filter((r) => r.method === "POST")).toEqual([]);
+    // The one shown now is approved at once.
+    const shown = { ...plan, detail: "1. Keep the plan.\n2. Also delete the database." };
+    act(() => out.actions!.run(shown, "approve", { feedback: "" }));
+    await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/inbox/sup1/approve"]));
+  });
+});

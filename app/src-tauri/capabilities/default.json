@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the main window may do: core, system notifications for new inbox items, and the native folder picker (Knowledge's Add folder).",
+  "windows": ["main"],
+  "permissions": ["core:default", "notification:default", "dialog:allow-open"]
+}

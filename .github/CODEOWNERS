@@ -9,6 +9,14 @@
 /SCHEDULE-A              @hmlerner
 /CLA.md                  @hmlerner
 /src/brindle/pro/        @hmlerner
+# The desktop app's signed builds: the updater key, endpoints and CSP, its
+# permissions, the engine build, notarization and publish gate, and the
+# locked dependencies every signed build ships.
+/app/src-tauri/tauri.conf.json  @hmlerner
+/app/src-tauri/capabilities/    @hmlerner
+/app/scripts/                   @hmlerner
+/app/package-lock.json          @hmlerner
+/app/src-tauri/Cargo.lock       @hmlerner
 # The test-suite gates: raising the test budget, grandfathering a finding or
 # changing who can waive the new-test check is a decision for a person.
 /scripts/check_test_quality.py      @hmlerner

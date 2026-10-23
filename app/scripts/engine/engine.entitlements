@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The hardened runtime's exceptions for the engine's python3 (build_engine.sh
+     signs it with these; docs/bundled-engine.md). libffi, under ctypes (truststore
+     reads the system's trust store through it) and cffi (cryptography), may write
+     its callbacks' trampolines into memory it then executes: on arm64 it doesn't
+     (static trampolines; checked), on x86_64 it may, which this allows. Library
+     validation stays on: every extension module is signed with the app's team. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+</dict>
+</plist>

@@ -39,3 +39,21 @@ Unless required by law, you provide your contributions as is, without warranties
 ## 8. Governing Law
 
 This agreement is governed by the laws of the State of New York, without regard to its conflict-of-laws rules.
+
+---
+
+## The desktop app (`app/`)
+
+The desktop app lives in `app/` beside the engine, and this agreement covers
+contributions to it like any other. It needs Node 22 and stable Rust:
+
+```sh
+npm --prefix app ci
+npm --prefix app test -- --run
+cargo test --manifest-path app/src-tauri/Cargo.toml
+```
+
+The app talks to the engine in this same checkout: `npm --prefix app run
+gen:api` regenerates `app/src/api/schema.ts` from
+`src/brindle/daemon/api-schema.json`, and `app/scripts/build_engine.sh` bundles
+the engine from this checkout's `HEAD`. `app/README.md` has the rest.
