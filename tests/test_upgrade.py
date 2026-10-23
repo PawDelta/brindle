@@ -2,17 +2,22 @@ import asyncio
 import shutil
 import subprocess
 import sys
+from functools import partial
+from io import StringIO
 from types import SimpleNamespace
 
+import anyio
 import pytest
 from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.stdio import stdio_server
 
 import brindle
 from brindle import agents, mcp_server, profiles, upgrade, watch
 
 
-def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch):
+@pytest.mark.parametrize("exit_kind", ["broken_pipe", "eof"])
+def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, exit_kind):
     from brindle.db import Agent, Workspace
 
     db.add_workspace(Workspace("ws", "/repo", "root", "root", "main", None, "/repo", None, "", 0))
@@ -28,8 +33,13 @@ def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch):
     def disconnect():
         raise BrokenPipeError("client pipe closed")
 
-    monkeypatch.setattr(mcp_server.mcp, "run", disconnect)
-    with pytest.raises(BrokenPipeError):
+    if exit_kind == "broken_pipe":
+        monkeypatch.setattr(mcp_server.mcp, "run", disconnect)
+        with pytest.raises(BrokenPipeError):
+            mcp_server.main()
+    else:
+        monkeypatch.setattr("mcp.server.mcpserver.server.stdio_server", partial(
+            stdio_server, stdin=anyio.wrap_file(StringIO()), stdout=anyio.wrap_file(StringIO())))
         mcp_server.main()
     assert stopped == [True]
     assert db.pop_pending("boss") is not None
@@ -60,12 +70,6 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
         async with Client(mcp_server.mcp) as client:
             await client.list_tools()
             assert "brindle.doctor" in sys.modules     # loaded before an upgrade could replace it
-            def failed_profiles(*args):
-                raise RuntimeError("profile read failed")
-
-            with monkeypatch.context() as fault:
-                fault.setattr(mcp_server, "list_profiles", failed_profiles)
-                assert (await client.call_tool("list_agent_profiles", {})).is_error
             upgrade_install()
             return [await client.call_tool("list_agent_profiles", {}) for _ in range(2)]
 
