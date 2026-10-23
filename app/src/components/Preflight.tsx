@@ -66,7 +66,7 @@ function KeyField({ item, provider, onDone }: { item: PreflightItem; provider: s
   );
 }
 
-function Settle({ item, provider, onDone, label }: { item: PreflightItem; provider: string; onDone(next: PreflightDTO): void; label: string }) {
+function Settle({ item, provider, onDone, label, repo }: { item: PreflightItem; provider: string; onDone(next: PreflightDTO): void; label: string; repo?: string | null }) {
   const client = useDaemon();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +74,7 @@ function Settle({ item, provider, onDone, label }: { item: PreflightItem; provid
     setBusy(true);
     setError(null);
     try {
-      onDone(await client.settlePreflight(provider, item.id));
+      onDone(await client.settlePreflight(provider, item.id, item.action, repo));
     } catch (e) {
       setError(message(e));
     } finally {
@@ -98,7 +98,7 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
   const { provider, items } = preflight;
   const name = providerName(provider);
   const open = items.filter((i) => !i.done);
-  const refresh = () => void client.preflight(provider).then(onRefresh).catch(() => undefined);
+  const refresh = () => void client.preflight(provider, repo).then(onRefresh).catch(() => undefined);
   return (
     <section className={`${card} flex w-full max-w-xl flex-col gap-s2 px-s3 py-s2`} aria-label={`Before ${name} can start`} data-testid="preflight">
       <div>
@@ -126,15 +126,15 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
                   <ProviderSignIn
                     provider={provider}
                     check={async () => {
-                      const next = await client.preflight(provider);
-                      return next.items.find((i) => i.id === item.id)?.done ?? false;
+                      const next = await client.preflight(provider, repo);
+                      return !next.items.some((i) => i.id === item.id && !i.done);
                     }}
                     onDone={refresh}
                   />
                 )}
                 {item.kind === "key" && <KeyField item={item} provider={provider} onDone={refresh} />}
-                {item.kind === "trust" && <Settle item={item} provider={provider} onDone={onRefresh} label="Trust this folder" />}
-                {item.kind === "consent" && <Settle item={item} provider={provider} onDone={onRefresh} label="Agree" />}
+                {item.kind === "trust" && <Settle item={item} provider={provider} onDone={onRefresh} label="Trust this folder" repo={repo} />}
+                {item.kind === "consent" && <Settle item={item} provider={provider} onDone={onRefresh} label="Agree" repo={repo} />}
               </div>
             )}
           </li>
