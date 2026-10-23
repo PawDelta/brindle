@@ -304,9 +304,25 @@ def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    autopilot.need_user(db, "boss", "Postgres or SQLite?")
+    clock = [time.time()]
+    start = clock[0]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
     assert autopilot.on_stop(db, agent, {}) is None
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")
+    clock[0] = start + 3599.0
+    assert autopilot.on_stop(db, agent, {}) is None
+    clock[0] = start + 3600.0
+    out = autopilot.on_stop(db, agent, {})
+    assert out and out["decision"] == "block"
+    assert autopilot.NUDGE_HEAD not in out["reason"]
+    assert "Postgres or SQLite?" in out["reason"]
+    clock[0] += autopilot.NUDGE_BACKOFF
+    assert autopilot.on_stop(db, agent, {}) is None
+    autopilot.answered(db, "boss")
+    resumed = autopilot.on_stop(db, agent, {})
+    assert resumed and resumed["decision"] == "block"
+    assert autopilot.NUDGE_HEAD in resumed["reason"]
 
 
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):

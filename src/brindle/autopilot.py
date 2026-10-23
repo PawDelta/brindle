@@ -58,6 +58,8 @@ GOALS_FILE = "goals.md"
 GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's own goal
 MAX_NUDGES = 3
 NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
+QUESTION_REMINDER_DELAY = 3600.0   # seconds before one reminder of an open need_user question
+QUESTION_REMINDER_HEAD = "[brindle autopilot] The question for the user is still open"
 NUDGE_HEAD = "[brindle autopilot] The goal isn't reached yet, and no workers are running."
 WAIT_ENDED_HEAD = "[brindle autopilot] The job you were waiting on has ended"
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
@@ -1103,8 +1105,9 @@ def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
     question (``ask``) holds only the work that depends on it, until the
     supervisor says it's answered."""
     note = question.strip()[:500]
+    now = time.time()
     db.update_autopilot(root_id, state="blocked", note=note, nudges=0,
-                        question=note if ask else None)
+                        question=note if ask else None, nudged_time=now)
     bus.publish_agent(db, "autopilot.need_user", root_id, question=note, ask=ask)
 
 
@@ -2036,6 +2039,17 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
                 return None
         else:
             return None
+    elif held(ap):
+        now = time.time()
+        start = ap.nudged_time or ap.created_at
+        if (ap.nudges == 0 and start is not None
+                and now - start >= QUESTION_REMINDER_DELAY
+                and not db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
+            db.update_autopilot(agent.id, nudges=1, nudged_time=now)
+            reason = (f"{QUESTION_REMINDER_HEAD}: {ap.question}. "
+                      "When they have answered, call need_user(answered=true).")
+            return {"decision": "block", "reason": reason}
+        return None
     elif ap.state != "running":
         # An open need_user question included (#209): reminding the supervisor
         # of it re-armed on anything that woke the chat, a nudge every ~2 s.
@@ -2064,7 +2078,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
-    if db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD):
+    if (db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD)
+            or db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
         return None  # (#209) the last reminder is still queued or unread: never pile up another
     now = time.time()
     if (ap.nudged_at == ap.progress and ap.nudged_time is not None
