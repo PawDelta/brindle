@@ -25,7 +25,8 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
     add(db, ws, "rev0", "review", "reviewer-gemini", parent="boss")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)  # supervisor stays busy
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     started = []

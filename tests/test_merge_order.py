@@ -17,7 +17,8 @@ from brindle.db import Agent
 def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle", result=None,
         pipeline=None, **kw):
     """An agent row with no process behind it (the orchestration tests share this)."""
-    db.add_agent(Agent(agent_id, ws.id, profile, "claude", parent, mode, status, "@0", result,
+    # tmux allocates numeric pane ids; a fake must never alias the keeper.
+    db.add_agent(Agent(agent_id, ws.id, profile, "claude", parent, mode, status, f"%fake-{agent_id}", result,
                        time.time(), **kw))
     if pipeline:   # add_agent writes the core columns only
         db.update_agent(agent_id, pipeline=pipeline)
