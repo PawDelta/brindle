@@ -385,7 +385,7 @@ async def handoff(
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
         try:
-            unmet = tasks.unmet_dependencies(db, ws, depends_on)
+            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
         except agents.AgentError as e:
             return str(e)
         effective_weight = decision.get("weight") or weight
@@ -518,7 +518,7 @@ async def assign(
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
         try:
-            unmet = tasks.unmet_dependencies(db, ws, depends_on)
+            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
         except agents.AgentError as e:
             return str(e)
         effective_weight = decision.get("weight") or weight
