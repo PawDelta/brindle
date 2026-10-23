@@ -83,13 +83,14 @@ CONFIRM_EVERY = 10.0
 _confirmed_at: dict[str, float] = {}
 
 
-def _confirm(provider: str, where: Path) -> bool:
+def _confirm(provider: str, where: Path, *, force: bool = False) -> bool:
     """Ask the CLI, with brindle's home and no key from the environment,
-    whether it is signed in there; at most every CONFIRM_EVERY seconds."""
+    whether it is signed in there. Background home lookups are spaced by
+    CONFIRM_EVERY; an explicit completion check can force a fresh answer."""
     from brindle import providers
 
     now = time.monotonic()
-    if now - _confirmed_at.get(provider, -CONFIRM_EVERY) < CONFIRM_EVERY:
+    if not force and now - _confirmed_at.get(provider, -CONFIRM_EVERY) < CONFIRM_EVERY:
         return False
     _confirmed_at[provider] = now
     env = {**{k: v for k, v in os.environ.items() if k not in providers._ENV_AUTH.get(provider, ())},
@@ -107,6 +108,19 @@ def _confirm(provider: str, where: Path) -> bool:
         (where / SIGNED_IN).write_text(f"{time.time()}\n")
         (where / LOGIN_STARTED).unlink(missing_ok=True)
     return ok
+
+
+def confirm_login(provider: str) -> bool | None:
+    """Check an unfinished login in the home it was opened in, now.
+
+    A desktop completion check must not reuse the negative result from while
+    the browser was open, or confirm a login in the person's other home.
+    None means there is no pending home switch to confirm.
+    """
+    where = home(provider)
+    if where is None or not (where / LOGIN_STARTED).exists():
+        return None
+    return _confirm(provider, where, force=True)
 
 
 def isolated(provider: str) -> bool:

@@ -282,12 +282,13 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
         monkeypatch.setattr(tmux, "tagged_pane_ids", lambda keys, server=None: [])
         assert terminal.reset_window_sizes() == 0
     elif kind == "preflight":
-        from brindle import git, preflight
+        from brindle import git, preflight, provider_homes
 
         repo = str(brindle_home.parent)
         monkeypatch.setattr(git, "toplevel", lambda path: repo)
         monkeypatch.setattr(git, "main_repo_root", lambda path: repo)
         monkeypatch.setattr(preflight, "check", lambda *a, **k: [])
+        monkeypatch.setattr(provider_homes, "confirm_login", lambda provider: None)
         for _ in range(10):
             assert _get("/v1/providers/claude/preflight", AUTH, f"repo={repo}") == (200, [])
     elif kind == "spend-events":

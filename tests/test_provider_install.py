@@ -196,6 +196,50 @@ def test_the_persons_home_runs_until_a_sign_in_inside_brindle_then_brindles_does
     assert "brindle-org" in company_identity.claude_identity("org", None).line
 
 
+@pytest.mark.parametrize("provider,completion", [("claude", "installed"), ("antigravity", "installed"),
+                                                 ("claude", "preflight")])
+def test_desktop_login_confirms_credentials_and_unblocks_launch(db, repo, tmp_path, monkeypatch, provider, completion):
+    from brindle import preflight, tmux
+    opened, signed = [], False
+    monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(tmp_path / "desktop-claude"))
+    monkeypatch.setattr(pi, "detect", lambda p: [p] if p == provider else [])
+    monkeypatch.setattr(pi, "probe_version", lambda p: "test")
+    monkeypatch.setattr(providers, "which_cli", lambda p: p)
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "tagged_panes", lambda *a: [])
+    monkeypatch.setattr(tmux, "new_window", lambda *a, **kw: opened.append(a) or "%1")
+
+    def probe(argv, env):
+        if provider == "claude":
+            ok = signed and env.get("CLAUDE_CONFIG_DIR") == str(provider_homes.home(provider))
+            return 0, json.dumps({"loggedIn": ok})
+        return (0, "models") if signed else (1, "Please sign in to view available models")
+
+    monkeypatch.setattr(providers, "_auth_probe", probe)
+    assert any(i.kind == "signin" for i in preflight.check(provider, str(repo)))
+    assert _send("POST", f"/v1/providers/{provider}/login")[0] == 200
+    # A status read while the browser is open must not strand Claude on its old home.
+    assert _row(provider)["signed_in"] is not True
+    signed = True
+    if completion == "preflight":
+        code, items = _send("GET", f"/v1/providers/{provider}/preflight")
+        assert code == 200 and not any(i["kind"] == "signin" for i in items)
+    assert _row(provider)["signed_in"] is True
+    ws = workspaces.adopt_root(db, str(repo))
+    agent = Agent("login-launch", ws.id, "developer", provider, None, "interactive", "paused", "", None,
+                  time.time())
+    db.add_agent(agent)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(company_identity, "launch_check", lambda *a, **kw: (None, None, None))
+
+    def launch(*a, **kw):
+        assert provider_homes.launch_env(provider) == opened[0][4]
+        raise StopIteration
+    monkeypatch.setattr(agents, "_open_window", launch)
+    with pytest.raises(StopIteration):
+        agents._launch(db, agent, ws, prompt=None, resume=None, watch_pane=False)
+
+
 @pytest.mark.variant("a sign-in finishing after spawn must not move a running agent to another config home")
 def test_an_agent_keeps_the_home_decided_at_spawn_when_a_sign_in_completes_after(machine, db, repo, tmp_path,
                                                                                  monkeypatch):

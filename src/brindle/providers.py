@@ -1402,6 +1402,7 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
         return None
     reason = None
+    confirmed = False
     if provider == "claude":
         res = _auth_probe([claude_binary(), "auth", "status"], full_env)
         if res:
@@ -1409,11 +1410,13 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
                 data = json.loads(res[1])
             except ValueError:
                 data = None
+            confirmed = isinstance(data, dict) and data.get("loggedIn") is True
             if isinstance(data, dict) and data.get("loggedIn") is False:
                 reason = ("Claude Code isn't signed in: run `claude auth login` "
                           "(or start `claude` and log in), then try again")
     elif provider == "codex":
         res = _auth_probe([codex_binary(), "login", "status"], full_env)
+        confirmed = bool(res) and res[0] == 0
         if res and res[0] != 0 and "not logged in" in res[1].lower():
             reason = "Codex isn't signed in: run `codex login`, then try again"
     elif provider == "antigravity":
@@ -1424,6 +1427,7 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
         from brindle import antigravity
 
         res = _auth_probe([antigravity.binary(), "models"], full_env)
+        confirmed = bool(res) and res[0] == 0
         if res and res[0] != 0:
             text = res[1].lower()
             if "gemini_api_key" in text and "not set" in text:
@@ -1439,9 +1443,10 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
         # OpenCode has no sign-in of its own to miss: its free models need
         # none, and other providers' keys and logins are its config's.
         res = (0, "")
+        confirmed = True
     else:
         return None
-    if reason is None and res is not None:
+    if confirmed:
         _SIGNED_IN[key] = time.time()
     return reason
 
