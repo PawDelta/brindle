@@ -153,7 +153,11 @@ function preflightResult(value: PreflightDTO | PreflightItemDTO[], provider = ""
   return {
     provider: provider || value[0]?.provider || "",
     ok: value.length === 0,
-    items: value.map((item) => ({ ...item, kind: item.kind as PreflightKind, label: item.title, done: false })),
+    items: value.map((item) => ({
+      ...item, kind: item.kind as PreflightKind, label: item.title, done: false,
+      key_name: item.kind === "key" && item.action?.name === "set_key"
+        ? item.action.path.match(/^\/v1\/keys\/([A-Z][A-Z0-9_]*)$/)?.[1] : undefined,
+    })),
   };
 }
 

@@ -34,7 +34,7 @@ function setup(daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj"
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
 
 describe("NewSession", () => {
-  it.each(["claude", "antigravity"])("unblocks %s sign-in using the engine's unresolved preflight items", async (provider) => {
+  it.each([["claude", false], ["antigravity", false], ["antigravity", true]] as const)("unblocks %s sign-in using the engine's unresolved preflight items (API key: %s)", async (provider, key) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], workspaces: [root], sessions: [] });
     let signed = false;
     let agreed = provider !== "claude";
@@ -45,8 +45,9 @@ describe("NewSession", () => {
         agreed = true;
         return Response.json({ recorded: true });
       }
-      const items = signed
+      const items = signed || (key && daemon.keysStored.includes("GEMINI_API_KEY"))
         ? agreed ? [] : [{ id: "claude.onboarding", provider, kind: "consent", title: "Security notes", detail: "", action: { method: "POST", path: "/v1/providers/claude/consent", body: { id: "claude.onboarding" } } }]
+        : key ? [{ id: "key.GEMINI_API_KEY", provider, kind: "key", title: "Add your Gemini API key", detail: "", action: { name: "set_key", method: "PUT", path: "/v1/keys/GEMINI_API_KEY" } }]
         : [{ id: `${provider}.signin`, provider, kind: "signin", title: "Sign in", detail: "", action: { method: "POST", path: `/v1/providers/${provider}/login` } }];
       if (path.endsWith("/preflight")) return Response.json(items);
       if (path.endsWith("/sessions") && init?.method === "POST" && items.length) return Response.json({ error: { code: "preflight", message: "Sign in" }, preflight: items }, { status: 409 });
@@ -57,14 +58,19 @@ describe("NewSession", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     const card = await screen.findByTestId("preflight");
     expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
-    vi.useFakeTimers();
-    try {
-      await act(async () => { fireEvent.click(within(card).getByRole("button", { name: /Sign in to/ })); });
-      signed = true;
-      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-      expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", !agreed);
-    } finally {
-      vi.useRealTimers();
+    if (key) {
+      fireEvent.change(within(card).getByLabelText(/ value$/), { target: { value: "fixture-key" } });
+      fireEvent.click(within(card).getByRole("button", { name: "Save" }));
+    } else {
+      vi.useFakeTimers();
+      try {
+        await act(async () => { fireEvent.click(within(card).getByRole("button", { name: /Sign in to/ })); });
+        signed = true;
+        await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+        expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", !agreed);
+      } finally {
+        vi.useRealTimers();
+      }
     }
     if (!agreed) fireEvent.click(within(card).getByRole("button", { name: "Agree" }));
     await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));

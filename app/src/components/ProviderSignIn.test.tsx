@@ -48,21 +48,30 @@ function setup(holdLogin = false) {
 }
 
 describe("ProviderSignIn, the CLI read through a pty view", () => {
-  it("confirms a browser login while agy remains at its interactive prompt", async () => {
+  it.each([false, true])("confirms a browser login with a pending status read (CLI exited: %s)", async (exited) => {
     const { daemon, check, shell, flow } = setup();
     check.mockResolvedValue(false);
     shell({ kind: "ready", tmux: "tmux 3.7c" });
     vi.useFakeTimers();
     try {
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
-      });
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" })); });
       await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-      expect(flow().dataset.phase).toBe("waiting");
       check.mockResolvedValue(true);
+      let release = () => {};
+      if (exited) check.mockImplementationOnce(() => new Promise<boolean>((resolve) => { release = () => resolve(false); }));
       await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      if (exited) {
+        await act(async () => {
+          daemon.exitAction(daemon.actions[0].id);
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        expect(flow().dataset.phase).toBe("checking");
+        expect(check).toHaveBeenCalledTimes(2);
+        await act(async () => { release(); });
+      }
       expect(flow().dataset.phase).toBe("done");
-      expect(daemon.actions[0].alive).toBe(true);
+      if (exited) expect(check).toHaveBeenCalledTimes(3);
+      expect(daemon.actions[0].alive).toBe(!exited);
       expect(daemon.views[0].closed).toBe(true);
     } finally {
       vi.useRealTimers();

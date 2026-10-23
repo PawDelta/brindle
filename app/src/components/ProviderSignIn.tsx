@@ -121,10 +121,19 @@ export function useProviderSignIn({ provider, check, onDone, onActive, details: 
       if (finished.current) return;
       const n = attempt.current;
       if (exited) setPhase({ kind: "checking", terminal });
-      // An exit during a status read shares that read instead of racing it.
-      const reading = pending.current ?? (pending.current = check().catch(() => false));
-      const ok = await reading;
+      // An exit waits for the current poll, so only one probe runs at a time.
+      const previous = pending.current;
+      const reading = previous ?? (pending.current = check().catch(() => false));
+      let ok = await reading;
       if (pending.current === reading) pending.current = null;
+      if (n !== attempt.current || finished.current) return;
+      // A negative poll may have observed credentials before the CLI saved
+      // them. Only a check started after exit can declare that login failed.
+      if (exited && previous && !ok) {
+        const fresh = pending.current ?? (pending.current = check().catch(() => false));
+        ok = await fresh;
+        if (pending.current === fresh) pending.current = null;
+      }
       // Tried again (or cancelled) while it checked: this sign-in's result is no one's now.
       if (n !== attempt.current || finished.current || (!ok && !exited)) return;
       finished.current = true;
