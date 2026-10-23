@@ -250,3 +250,31 @@ At the end, write `docs/plans/open-issues-status.md` with one row per task:
 | Task | Issue | Branch | Status (done / blocked / skipped) | Failing-before test | Full suite | Notes |
 
 Keep notes short. Name any issue where the code did not match this plan.
+
+
+## Added scope: David’s new issues (2026-10-23)
+
+The owner explicitly prioritizes **#263 as CRITICAL: login blocks launching the app**. This overrides the original phase order for these launch bugs. Existing phases remain in scope.
+
+### T19. #263: Claude / agy login does not complete — CRITICAL
+
+- Source: https://github.com/PawDelta/brindle/issues/263
+- Worker: Codex heavy, `fix/critical-provider-login`, starts immediately.
+- Trace desktop and CLI sign-in, credential-home consistency, completion detection and launch unblocking for Claude and Antigravity. Reproduce with minimal deterministic failing-before regression coverage before source fixes. Never expose credentials or automate a real sign-in.
+- Verify the actual login/completion path and successful launch readiness with fake provider results. Record exact acceptance selectors in the status report and milestone check when identified.
+
+### T20. #264: black screen when resuming a session
+
+- Source: https://github.com/PawDelta/brindle/issues/264
+- Worker: Codex heavy, `fix/resume-black-screen`, independent investigation in parallel with T19.
+- Reproduce resuming after `/exit` and verify the supervisor conversation and sidebar are restored. Trace session continuation, pane selection and sidebar attachment; coordinate overlaps before edits.
+- Require failing-before regression evidence and targeted session/sidebar checks. Preserve shared credential recovery behavior.
+
+### T21. #265: company cloud identity logins
+
+- Source: https://github.com/PawDelta/brindle/issues/265
+- Worker: Codex heavy, `feat/company-cloud-logins`, queued until T19 merges; plan first.
+- Cover Claude through Bedrock/Vertex, Gemini through Vertex, and Azure OpenAI using cloud identities; profiles carry account/project/region; doctor checks credential validity; worker identities propagate and expired credentials pause consistently.
+- Inspect existing cloud-login support first and implement only demonstrated gaps. Verify resolution, propagation, expiry and recovery with fakes, without printing credentials or modifying real cloud accounts.
+
+The final status report must include T19–T21. Issue #253 remains open: tested fatal-exit notification improvements are partial; the historical disconnect trigger is unconfirmed and the owner has no logs or reproduction details.

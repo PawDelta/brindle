@@ -28,6 +28,10 @@ NATIVE_SUBAGENT_STALE = 2 * 3600
 # Ended rows are dropped from the table entirely after this long.
 NATIVE_SUBAGENT_PRUNE_AFTER = 3600
 
+# SQLite user_version: 0 identifies databases written before version tracking.
+# Bump this when changing SCHEMA or _migrate so older engines refuse the result.
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
@@ -874,11 +878,23 @@ class DB:
         self.path = p
         self.conn = sqlite3.connect(p, timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.executescript(SCHEMA)
-        self._enforce_permissions()
-        self._migrate()
+        try:
+            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    "This database was written by a newer brindle. Update brindle."
+                )
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.executescript(SCHEMA)
+            self._enforce_permissions()
+            self._migrate()
+            # Mark the upgrade only after all required migrations succeed.
+            if version < SCHEMA_VERSION:
+                self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        except BaseException:
+            self.conn.close()
+            raise
 
     def _enforce_permissions(self) -> None:
         if self.path == ":memory:":
