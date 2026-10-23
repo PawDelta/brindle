@@ -46,9 +46,13 @@ def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
     assert "sk-profile-secret" not in doctor.render(doctor.signin_checks(str(repo)))
 
 
-def test_bedrock_bearer_bypasses_unrelated_sso_login(installed, repo):
+def test_bedrock_bearer_bypasses_unrelated_sso_login(installed, repo, monkeypatch):
     from brindle import cloud_login
 
+    # This compares bearer and SSO routes, independent of the runner's cloud identity.
+    for name in ("BRINDLE_CLOUD_ROUTE", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+                 "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_BEARER_TOKEN_BEDROCK"):
+        monkeypatch.delenv(name, raising=False)
     config = repo / "aws-config"
     config.write_text("[profile company]\nsso_session = company\n")
     env = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "company", "AWS_CONFIG_FILE": str(config),
