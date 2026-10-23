@@ -312,7 +312,7 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
 
         # Keep the actual database probes; fake unrelated CLI/network diagnostics.
         monkeypatch.setattr(doctor, "_tool", lambda *a, **k: doctor.Check("ok", a[0], ""))
-        for name in ("signin_checks", "credential_checks", "daemon_checks", "native_checks",
+        for name in ("signin_checks", "credential_checks", "cloud_checks", "daemon_checks", "native_checks",
                      "override_checks", "quota_checks", "airgap_checks", "pro_checks", "managed_checks"):
             monkeypatch.setattr(doctor, name, lambda *a, **k: [])
         monkeypatch.setattr(company_identity, "checks", lambda: [])

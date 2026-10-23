@@ -122,14 +122,18 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
             {!item.done && item.detail && <p className="pl-6 text-sm text-ink-2">{item.detail}</p>}
             {!item.done && (
               <div className="pl-6">
-                {item.kind === "signin" && (
+                {item.kind === "signin" && item.action?.name === "check" && (
+                  <Settle item={item} provider={provider} onDone={onRefresh} label="Check again" repo={repo} />
+                )}
+                {item.kind === "signin" && item.action?.name !== "check" && (
                   <ProviderSignIn
                     provider={provider}
+                    loginContext={item.action?.body}
                     check={async () => {
-                      const next = await client.preflight(provider, repo);
+                      const next = await client.preflight(provider, repo, item.action?.body);
                       return !next.items.some((i) => i.id === item.id && !i.done);
                     }}
-                    onDone={refresh}
+                    onDone={() => void client.preflight(provider, repo, item.action?.body).then(onRefresh).catch(() => undefined)}
                   />
                 )}
                 {item.kind === "key" && <KeyField item={item} provider={provider} onDone={refresh} />}

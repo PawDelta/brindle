@@ -3141,6 +3141,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/providers/{provider}/preflight"
+    },
+    {
+      "method": "POST",
       "path": "/v1/providers/{provider}/trust"
     },
     {
