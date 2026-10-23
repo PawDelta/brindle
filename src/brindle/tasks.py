@@ -710,7 +710,7 @@ def on_merged(db: DB, ws: Workspace) -> None:
         for t in db.list_tasks(ws.repo_root, state="started"):
             if t.agent_id == worker.id:
                 db.update_task(t.id, state="merged")
-    for t in db.list_tasks(state="pending"):
+    for t in queued(db):
         worker_id = worker.id if worker else None
         caller_ws = db.get_workspace(t.caller_ws_id)
         if not caller_ws:
@@ -739,7 +739,25 @@ def on_merged(db: DB, ws: Workspace) -> None:
                     break
         if not matches:
             continue
-        _start_if_ready(db, t, dep_ref)
+        # An untracked upstream has no retained Task state after workspace
+        # cleanup. Persist its satisfaction in the remaining dependencies,
+        # including while held or waiting for another upstream to merge.
+        completed = []
+        for dep in deps:
+            try:
+                _, upstream, dep_ws = _resolve_dependency(
+                    db, caller_ws, dep, session_roots, dependent_task_id=t.id)
+                if (upstream is None and dep_ws is not None and dep_ws.id == ws.id
+                        and not unmet_dependencies(db, caller_ws, [dep], caller_id=t.caller_id,
+                                                   dependent_task_id=t.id)):
+                    completed.append(dep)
+            except agents.AgentError:
+                continue  # readiness handles invalid dependencies without marking them satisfied
+        if completed:
+            set_dependencies(db, t.id, [dep for dep in deps if dep not in completed], expect=deps)
+            t = db.get_task(t.id)
+        if t is not None and t.state == "pending":
+            _start_if_ready(db, t, dep_ref)
 
 
 def _start_if_ready(db: DB, t: Task, dep_ref: str) -> bool:

@@ -242,8 +242,10 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
                         bool(db.merged_sha(upstream.id)) and cmd[:3] == ["merge-base", "--is-ancestor", "shared"])
     db.add_session_repo(caller.id, "engine", upstream.repo_root)
     assert tasks.unmet_dependencies(db, boss, ["shared"], caller.id) == ["shared"]
+    second = workspace("second", "engine", "second", tracked=True) if event == "requeue_pending" else None
+    deps = ["shared"] + ([agents.workspace_worker(db, second).id] if second else [])
     pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign",
-                            isolate=True, branch="shared", done_when=None, files=None, depends_on=["shared"])
+                            isolate=True, branch="shared", done_when=None, files=None, depends_on=deps)
     assert tasks.sweep(db) == 0
     if event.startswith("requeue_"):
         tasks.cancel(db, caller, pending.id)
@@ -254,6 +256,8 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
         if event == "requeue_pending":
             assert pending.state == "pending" and launched == []
             assert tasks.sweep(db) == 0
+            if upstream_kind == "workspace":
+                db.update_task(pending.id, state="held")
     if event in ("removed", "requeue_removed"):
         tasks.on_removed_unmerged(db, upstream)
         db.delete_workspace(upstream.id)
@@ -265,6 +269,12 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
             assert tasks.sweep(db) == 1
         else:
             tasks.on_merged(db, upstream)
+        if second:
+            assert db.get_task(pending.id).state == ("held" if upstream_kind == "workspace" else "pending")
+            assert launched == []
+            db.delete_workspace(upstream.id)
+            db.update_task(pending.id, state="pending")
+            tasks.on_merged(db, second)
         assert db.get_task(pending.id).state == "started"
         tasks.on_merged(db, upstream)
         assert tasks.sweep(db) == 0
