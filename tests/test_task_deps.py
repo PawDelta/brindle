@@ -6,13 +6,14 @@ assign/handoff's dry_run."""
 import asyncio
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from conftest import full_text, sh
 from brindle import agents, bus, mcp_server, tasks, workspaces
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
 from test_merge_order import fake_spawn
 
 
@@ -195,6 +196,173 @@ def test_queued_task_stays_queued_if_only_some_dependencies_merged(db, repo, bos
 
     [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
     assert b_task.state == "pending"
+
+
+@pytest.fixture
+def dependency_rows(db, tmp_path, monkeypatch):
+    """Task dispatch with database workspaces and a fake worker launch."""
+    def workspace(name, repo="app", branch="main", *, tracked=False):
+        root = str(tmp_path / repo)
+        ws = Workspace(name, root, name, "main", branch, "main", root, None, "", 1)
+        db.add_workspace(ws)
+        if tracked:
+            worker = fake_spawn(db, ws, "developer", parent_id=caller.id)
+            tasks.record_started(db, ws, worker, "developer", name, "assign",
+                                 isolate=True, branch=branch, done_when=None, files=None, depends_on=None)
+        return ws
+
+    boss = workspace("boss")
+    caller = fake_spawn(db, boss, "supervisor", mode="interactive")
+    launched = []
+
+    def delegate(db, caller, ws, profile, task_text, mode, **kwargs):
+        worker = fake_spawn(db, ws, profile, parent_id=caller.id, mode=mode)
+        launched.append(worker.id)
+        return worker, ws
+
+    monkeypatch.setattr(agents, "delegate", delegate)
+    monkeypatch.setattr(agents, "send_message", lambda *a, **kw: None)
+    monkeypatch.setattr(tasks.git, "ok", lambda *a, **kw: False)
+    return caller, boss, workspace, launched
+
+
+@pytest.mark.parametrize(("event", "upstream_kind"), [
+    ("merged", "task"), ("sweep", "task"), ("removed", "task"),
+    ("requeue_merged", "task"), ("requeue_pending", "task"), ("requeue_removed", "task"),
+    ("requeue_pending", "worker"), ("requeue_removed", "worker"),
+    ("requeue_pending", "workspace"), ("requeue_removed", "workspace"),
+    ("requeue_pending", "local_workspace"),
+])
+def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, monkeypatch, event, upstream_kind):
+    caller, boss, workspace, launched = dependency_rows
+    upstream = workspace("engine-worker", "app" if upstream_kind == "local_workspace" else "engine",
+                         "shared", tracked=upstream_kind == "task")
+    if upstream_kind == "worker":
+        fake_spawn(db, upstream, "developer", parent_id=caller.id)
+    monkeypatch.setattr(tasks.git, "ok", lambda cmd, path=None:
+                        bool(db.merged_sha(upstream.id)) and cmd[:3] == ["merge-base", "--is-ancestor", "shared"])
+    db.add_session_repo(caller.id, "engine", upstream.repo_root)
+    assert tasks.unmet_dependencies(db, boss, ["shared"], caller.id) == ["shared"]
+    second = (workspace("second", "engine", "second", tracked=upstream_kind != "workspace")
+              if event == "requeue_pending" else None)
+    deps = ["shared"] + (["second" if upstream_kind == "workspace" else agents.workspace_worker(db, second).id]
+                         if second else [])
+    pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign",
+                            isolate=True, branch="shared", done_when=None, files=None, depends_on=deps)
+    assert tasks.sweep(db) == 0
+    if event.startswith("requeue_"):
+        tasks.cancel(db, caller, pending.id)
+        if event == "requeue_merged":
+            tasks.on_merged(db, upstream)
+        tasks.requeue(db, caller, boss, pending.id)
+        [pending] = [t for t in db.list_tasks(boss.repo_root) if t.state != "cancelled"]
+        if event == "requeue_pending":
+            assert pending.state == "pending" and launched == []
+            assert tasks.sweep(db) == 0
+            if upstream_kind == "workspace":
+                db.update_task(pending.id, state="held")
+    if event in ("removed", "requeue_removed"):
+        tasks.on_removed_unmerged(db, upstream)
+        db.delete_workspace(upstream.id)
+        assert db.get_task(pending.id).state == "cancelled"
+        assert launched == []
+    else:
+        db.set_merged(upstream.id, "merged-sha")
+        if second and upstream_kind == "workspace":
+            db.set_merged(second.id, "second-sha")
+            original_tx = db.tx
+
+            @contextmanager
+            def interleaved_tx():
+                monkeypatch.setattr(db, "tx", original_tx)
+                tasks.on_merged(db, second)
+                with original_tx() as connection:
+                    yield connection
+
+            monkeypatch.setattr(db, "tx", interleaved_tx)
+        if event == "sweep":
+            assert tasks.sweep(db) == 1
+        else:
+            tasks.on_merged(db, upstream)
+        if second:
+            assert db.get_task(pending.id).state == ("held" if upstream_kind == "workspace" else "pending")
+            assert launched == []
+            db.delete_workspace(upstream.id)
+            if upstream_kind == "workspace":
+                db.delete_workspace(second.id)
+            db.update_task(pending.id, state="pending")
+            if upstream_kind == "workspace":
+                assert tasks.sweep(db) == 1
+            else:
+                tasks.on_merged(db, second)
+        assert db.get_task(pending.id).state == "started"
+        tasks.on_merged(db, upstream)
+        assert tasks.sweep(db) == 0
+        assert launched == [db.get_task(pending.id).agent_id]
+
+
+@pytest.mark.parametrize("finish", ["merged", "cancelled"])
+def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_rows, finish):
+    caller, boss, workspace, launched = dependency_rows
+    engine = workspace("engine", "engine")
+    db.add_session_repo(caller.id, "engine", engine.repo_root)
+    upstream, dependent = [
+        tasks.enqueue(db, caller, ws, "developer", ws.name, "assign", isolate=True,
+                      branch="shared", done_when=None, files=None, depends_on=deps)
+        for ws, deps in ((engine, []), (boss, ["shared"]))
+    ]
+    tasks.cancel(db, caller, dependent.id)
+    tasks.requeue(db, caller, boss, dependent.id)
+    [replacement] = db.list_tasks(boss.repo_root, state="pending")
+    assert launched == []
+    if finish == "cancelled":
+        tasks.cancel(db, caller, upstream.id)
+        assert db.get_task(replacement.id).state == "cancelled" and launched == []
+    else:
+        tasks.start_queued(db, upstream)
+        tasks.on_merged(db, engine)
+        assert db.get_task(replacement.id).state == "started"
+        assert len(launched) == 2
+
+
+@pytest.mark.parametrize("event", ["merged", "removed"])
+@pytest.mark.variant("An accepted exact worker ID must still dispatch after its repository is detached")
+def test_exact_worker_dependency_dispatches_after_repo_detach(db, dependency_rows, event):
+    caller, boss, workspace, launched = dependency_rows
+    upstream = workspace("engine-worker", "engine", "feature", tracked=True)
+    db.add_session_repo(caller.id, "engine", upstream.repo_root)
+    worker = agents.workspace_worker(db, upstream)
+    pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign",
+                            isolate=True, branch="app", done_when=None, files=None, depends_on=[worker.id])
+    db.remove_session_repo(caller.id, "engine")
+    assert tasks.unmet_dependencies(db, boss, [worker.id], caller.id) == [worker.id]
+    if event == "removed":
+        tasks.on_removed_unmerged(db, upstream)
+        db.delete_workspace(upstream.id)
+        assert db.get_task(pending.id).state == "cancelled" and launched == []
+    else:
+        tasks.on_merged(db, upstream)
+        assert db.get_task(pending.id).state == "started"
+        tasks.on_merged(db, upstream)
+        assert launched == [db.get_task(pending.id).agent_id]
+
+
+@pytest.mark.variant("Workspace cleanup between two upstream merges must retain the first worker's dependency identity")
+def test_queued_task_starts_when_first_dep_workspace_deleted_and_second_merges(db, dependency_rows):
+    """A retained task satisfies the first worker dependency after workspace cleanup."""
+    caller, boss, workspace, launched = dependency_rows
+    ws_a, ws_c = [workspace(n, branch=f"feat-{n}", tracked=True) for n in ("a", "c")]
+    workers = [agents.workspace_worker(db, ws).id for ws in (ws_a, ws_c)]
+    b_task = tasks.enqueue(db, caller, boss, "developer", "do B", "assign",
+                           isolate=True, branch="feat-b", done_when=None, files=None, depends_on=workers)
+    tasks.on_merged(db, ws_a)
+    db.delete_workspace(ws_a.id)
+    assert db.get_agent(workers[0]) is None
+    assert db.get_task(b_task.id).state == "pending" and launched == []
+    tasks.on_merged(db, ws_c)
+    b_task = db.get_task(b_task.id)
+    assert b_task.state == "started" and b_task.agent_id
+    assert launched == [b_task.agent_id]
 
 
 def test_a_stranded_queued_task_starts_at_the_supervisors_stop_and_only_once(db, repo, boss, monkeypatch):

@@ -400,6 +400,10 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
     elif event == "opencode-stop":
         if base and base["session_id"] != agent.session_ref:
             db.update_agent(agent_id, session_ref=base["session_id"])
+        from brindle import login_pause
+
+        if login_pause.expired_hook(db, agent, str(payload.get("error") or "")):
+            return
         antigravity.end_turn(db, agent, base, str(payload.get("error") or ""), provider="opencode")
 
 

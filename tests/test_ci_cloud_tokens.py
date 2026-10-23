@@ -122,6 +122,8 @@ def test_scrub_job_drops_the_actions_endpoint_but_gives_agents_the_cloud_env(mon
         monkeypatch.setenv(k, v)
     tokens = ci_client.start_cloud_tokens(env, say=lambda m: None)
     try:
+        for k in tokens.agent_env():
+            monkeypatch.setenv(k, os.environ.get(k, ""))
         ci_client.scrub_job(env, None, tokens)
         for e in (env, os.environ):
             assert "ACTIONS_ID_TOKEN_REQUEST_TOKEN" not in e and "ACTIONS_ID_TOKEN_REQUEST_URL" not in e

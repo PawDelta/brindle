@@ -162,7 +162,7 @@ class Profile:
     auth: str = "auto"
 
 
-AUTH_CHOICES = ("auto", "subscription", "api_key")
+AUTH_CHOICES = ("auto", "subscription", "api_key", "cloud")
 
 
 @dataclass

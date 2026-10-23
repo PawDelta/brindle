@@ -320,44 +320,111 @@ def warn_predicted_conflicts(db: DB, worker: Agent) -> str | None:
 def _dep_branch(db: DB, dep: str) -> str:
     """A dependency identifier's branch: ``dep`` may be an agent id (its
     workspace's branch) or already a branch name."""
+    if dep.startswith("workspace:"):
+        ws = db.get_workspace(dep.removeprefix("workspace:"))
+        return ws.branch if ws else dep
     agent = db.get_agent(dep)
     if agent:
         ws = db.get_workspace(agent.workspace_id)
         if ws:
             return ws.branch
+    for t in db.list_tasks():
+        if t.agent_id == dep and t.branch:
+            return t.branch
     return dep
 
 
-def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
-    """The task brindle is tracking for ``dep`` (an agent id or branch name), if
-    any -- including one that was cancelled: a cancelled dependency can never
-    become merged, so ``unmet_dependencies`` must treat it as a hard failure
-    rather than something to keep waiting on. An untracked dependency (e.g. a
-    branch never assigned through brindle) falls back to a git ancestry check
-    in ``unmet_dependencies``.
+def _session_repos(db: DB, caller_ws: Workspace, caller_id: str | None = None) -> list[str]:
+    from brindle import autopilot, repos
 
-    A dependency may live in another repo of the session (brindle.repos): an
-    agent id is found wherever its task is, but a bare branch name only
-    matches within ``repo_root``, since two repos may have a branch of the
-    same name."""
-    branch = _dep_branch(db, dep)
-    candidates = [t for t in db.list_tasks(repo_root) if t.agent_id == dep or t.branch == branch]
-    if not candidates:
-        candidates = [t for t in db.list_tasks() if t.agent_id == dep]
+    roots = [caller_ws.repo_root]
+    if not caller_id:
+        return roots
+    root_id = autopilot.root_of(db, caller_id)
+    for _, path in repos.session_roots(db, root_id):
+        if path not in roots:
+            roots.append(path)
+    return roots
+
+
+def _resolve_dependency(
+    db: DB, caller_ws: Workspace, dep: str, session_roots: list[str],
+    *, dependent_task_id: str | None = None,
+) -> tuple[str, Task | None, Workspace | None]:
+    """Resolve ``dep`` (agent id or branch name) to its target repository,
+    task, and workspace once.
+
+    Exact worker/agent IDs are resolved by exact task.agent_id matches
+    regardless of whether the live agent row still exists (e.g. after
+    workspace cleanup). Branch names use local-name precedence (checking
+    caller_ws.repo_root for either a task or workspace first), then search
+    the attached repos of the session, raising AgentError on ambiguity.
+    Internal ``task:<id>`` and ``workspace:<id>`` references preserve a requeued
+    task's upstream even before it has a worker. Exclude the depending task itself:
+    enqueueing a task with the same branch name as its upstream must not
+    create a new local dependency target."""
+    if dep.startswith("workspace:"):
+        ws = db.get_workspace(dep.removeprefix("workspace:"))
+        if ws is None:
+            raise agents.AgentError(f"dependency {dep} no longer exists")
+        return ws.repo_root, None, ws
+    if dep.startswith("task:"):
+        task = db.get_task(dep.removeprefix("task:"))
+        if task is None:
+            raise agents.AgentError(f"dependency {dep} no longer exists")
+        agent = db.get_agent(task.agent_id) if task.agent_id else None
+        return task.repo_root, task, db.get_workspace(agent.workspace_id) if agent else None
+    agent = db.get_agent(dep)
+    agent_tasks = [t for t in db.list_tasks(caller_ws.repo_root) if t.agent_id == dep]
+    if not agent_tasks:
+        agent_tasks = [t for t in db.list_tasks() if t.agent_id == dep]
+    if agent or agent_tasks:
+        ws = db.get_workspace(agent.workspace_id) if agent else None
+        task = max(agent_tasks, key=lambda t: t.created_at) if agent_tasks else None
+        target_repo = ws.repo_root if ws else (task.repo_root if task else caller_ws.repo_root)
+        return target_repo, task, ws
+
+    branch = dep
+    # Check local repo first for either task or workspace (local-name precedence)
+    local_tasks = [t for t in db.list_tasks(caller_ws.repo_root)
+                   if t.branch == branch and t.id != dependent_task_id]
+    local_workspaces = [w for w in db.find_workspaces(caller_ws.repo_root) if w.branch == branch]
+    if local_tasks or local_workspaces:
+        task = max(local_tasks, key=lambda t: t.created_at) if local_tasks else None
+        ws = local_workspaces[-1] if local_workspaces else None
+        return caller_ws.repo_root, task, ws
+
+    # Check other attached repos of the caller session
+    other_repos = [r for r in session_roots if r != caller_ws.repo_root]
+    repo_tasks = {r: [t for t in db.list_tasks(r) if t.branch == branch] for r in other_repos}
+    repo_workspaces = {r: [w for w in db.find_workspaces(r) if w.branch == branch] for r in other_repos}
+    matching_repos = [r for r in other_repos if repo_tasks[r] or repo_workspaces[r]]
+    if len(matching_repos) > 1:
+        raise agents.AgentError(f"dependency {dep!r} is ambiguous: found in multiple attached repos")
+    if len(matching_repos) == 1:
+        target_repo = matching_repos[0]
+        task = max(repo_tasks[target_repo], key=lambda t: t.created_at) if repo_tasks[target_repo] else None
+        ws = repo_workspaces[target_repo][-1] if repo_workspaces[target_repo] else None
+        return target_repo, task, ws
+
+    return caller_ws.repo_root, None, None
+
+
+def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
+    agent_tasks = [t for t in db.list_tasks(repo_root) if t.agent_id == dep]
+    if not agent_tasks:
+        agent_tasks = [t for t in db.list_tasks() if t.agent_id == dep]
+    if agent_tasks:
+        return max(agent_tasks, key=lambda t: t.created_at)
+    branch = dep
+    candidates = [t for t in db.list_tasks(repo_root) if t.branch == branch]
     return max(candidates, key=lambda t: t.created_at) if candidates else None
 
 
-def _same_repo(db: DB, repo_root: str, dep: str) -> bool:
-    """Whether ``dep`` (an agent id) belongs to ``repo_root``; a bare branch
-    name is taken to."""
-    agent = db.get_agent(dep)
-    if not agent:
-        return True
-    ws = db.get_workspace(agent.workspace_id)
-    return ws is None or ws.repo_root == repo_root
-
-
-def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | None) -> list[str]:
+def unmet_dependencies(
+    db: DB, caller_ws: Workspace, depends_on: list[str] | None, caller_id: str | None = None,
+    *, dependent_task_id: str | None = None,
+) -> list[str]:
     """``depends_on`` entries not yet merged into ``caller_ws``'s branch.
 
     Raises ``agents.AgentError`` if any dependency's task was cancelled: it
@@ -372,25 +439,27 @@ def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | Non
         return []
     from brindle import identity_lock
 
-    for dep in depends_on:   # a branch from another identity's session can't be pulled in
-        agent = db.get_agent(dep)
-        found = [db.get_workspace(agent.workspace_id)] if agent else [
-            w for w in db.find_workspaces(caller_ws.repo_root) if w.branch == dep]
-        for w in found:
-            identity_lock.ensure_workspace(db, w)   # a missing workspace (None) is never locked
+    session_roots = _session_repos(db, caller_ws, caller_id)
+
+    resolved: dict[str, tuple[str, Task | None, Workspace | None]] = {}
+    for dep in depends_on:
+        target_repo, task, ws = _resolve_dependency(
+            db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
+        resolved[dep] = (target_repo, task, ws)
+        if ws is not None:
+            identity_lock.ensure_workspace(db, ws)
+
     unmet = []
     for dep in depends_on:
-        task = _dep_task(db, caller_ws.repo_root, dep)
+        target_repo, task, ws = resolved[dep]
         if task is not None:
             if task.state == "cancelled":
                 raise agents.AgentError(f"dependency {dep} was cancelled and will never merge")
             if task.state != "merged":
                 unmet.append(dep)
-        elif not _same_repo(db, caller_ws.repo_root, dep):
-            # A worker in another repo that brindle isn't tracking as a task:
+        elif target_repo != caller_ws.repo_root:
+            # A dependency in another attached repo that brindle isn't tracking as a task:
             # its branch can't be an ancestor here; judge it by its merge record.
-            agent = db.get_agent(dep)
-            ws = db.get_workspace(agent.workspace_id) if agent else None
             if ws is None or not db.merged_sha(ws.id):
                 unmet.append(dep)
         elif not git.ok(["merge-base", "--is-ancestor", _dep_branch(db, dep), "HEAD"], caller_ws.path):
@@ -403,11 +472,12 @@ def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:
 
 
 def _refers_to(dep: str, t: Task, from_repo: str | None = None) -> bool:
-    """Whether a ``depends_on`` entry names task ``t``: its worker's agent id
-    (once it has one), from any repo, or its declared branch, only from the
-    same repo (``from_repo``: the depending task's; two repos may have a
-    branch of the same name)."""
-    if t.agent_id is not None and dep == t.agent_id:
+    """Whether a dependency names ``t`` by pinned task ID, worker ID or branch.
+
+    Task and worker IDs match from any repo. Branch names match only from
+    ``from_repo`` (the depending task's repo), since two repos can have a
+    branch with the same name."""
+    if dep == f"task:{t.id}" or (t.agent_id is not None and dep == t.agent_id):
         return True
     return dep == t.branch and (from_repo is None or from_repo == t.repo_root)
 
@@ -501,7 +571,9 @@ def set_dependencies(db: DB, task_id: str, depends_on: list[str], expect: list[s
 def known_dependency(db: DB, repo_root: str, dep: str) -> bool:
     """Whether ``dep`` names an agent or a branch brindle knows in
     ``repo_root``: a typo would leave a task waiting for good."""
-    return (db.get_agent(dep) is not None
+    return ((dep.startswith("task:") and db.get_task(dep.removeprefix("task:")) is not None)
+            or (dep.startswith("workspace:") and db.get_workspace(dep.removeprefix("workspace:")) is not None)
+            or db.get_agent(dep) is not None
             or any(w.branch == dep for w in db.find_workspaces(repo_root))
             or any(t.branch == dep for t in db.list_tasks(repo_root)))
 
@@ -563,8 +635,12 @@ def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str]) -> str | 
     merge commit that ``caller_ws``'s branch lacks, as when the holder merged
     into another session's branch; None to start from the caller's branch."""
     for dep in depends_on:
-        agent = db.get_agent(dep)
-        dep_ws = db.get_workspace(agent.workspace_id) if agent else None
+        if dep.startswith("workspace:"):
+            dep_ws = db.get_workspace(dep.removeprefix("workspace:"))
+        else:
+            task = db.get_task(dep.removeprefix("task:")) if dep.startswith("task:") else None
+            agent = db.get_agent(task.agent_id) if task and task.agent_id else db.get_agent(dep)
+            dep_ws = db.get_workspace(agent.workspace_id) if agent else None
         if dep_ws is None or dep_ws.repo_root != caller_ws.repo_root:
             continue
         sha = db.merged_sha(dep_ws.id)
@@ -627,20 +703,67 @@ def on_merged(db: DB, ws: Workspace) -> None:
     'merged' (so dependents judge it correctly, and it stops counting as
     started), then start any pending task that was only waiting on it and now
     has every dependency merged, and tell its caller. A pending task may be
-    in another repo of the session (brindle.repos); a branch-name dependency
-    only matches within ``ws``'s own repo."""
+    in another attached repo of the session (brindle.repos)."""
     worker = agents.workspace_worker(db, ws)
     dep_ref = worker.id if worker else ws.branch
     if worker:
         for t in db.list_tasks(ws.repo_root, state="started"):
             if t.agent_id == worker.id:
                 db.update_task(t.id, state="merged")
-    for t in db.list_tasks(state="pending"):
+    for t in queued(db):
         worker_id = worker.id if worker else None
-        if not any(_dep_matches(d, ws, worker_id) and (d == worker_id or t.repo_root == ws.repo_root)
-                   for d in _loads(t.depends_on)):
+        caller_ws = db.get_workspace(t.caller_ws_id)
+        if not caller_ws:
             continue
-        _start_if_ready(db, t, dep_ref)
+        session_roots = _session_repos(db, caller_ws, t.caller_id)
+        deps = _loads(t.depends_on)
+        matches = False
+        for d in deps:
+            if d == f"workspace:{ws.id}" or (worker_id is not None and d == worker_id):
+                matches = True
+                break
+            if d.startswith("task:"):
+                upstream = db.get_task(d.removeprefix("task:"))
+                if upstream and worker_id is not None and upstream.agent_id == worker_id:
+                    matches = True
+                    break
+            if d == ws.branch and ws.repo_root in session_roots:
+                try:
+                    target_repo, _, _ = _resolve_dependency(
+                        db, caller_ws, d, session_roots, dependent_task_id=t.id)
+                    if target_repo == ws.repo_root:
+                        matches = True
+                        break
+                except agents.AgentError:
+                    matches = True
+                    break
+        if not matches:
+            continue
+        # An untracked upstream has no retained Task state after workspace
+        # cleanup. Persist its satisfaction in the remaining dependencies,
+        # including while held or waiting for another upstream to merge.
+        completed = []
+        for dep in deps:
+            try:
+                _, upstream, dep_ws = _resolve_dependency(
+                    db, caller_ws, dep, session_roots, dependent_task_id=t.id)
+                if (upstream is None and dep_ws is not None and dep_ws.id == ws.id
+                        and not unmet_dependencies(db, caller_ws, [dep], caller_id=t.caller_id,
+                                                   dependent_task_id=t.id)):
+                    completed.append(dep)
+            except agents.AgentError:
+                continue  # readiness handles invalid dependencies without marking them satisfied
+        if completed:
+            # Merge completion into the current list under the write lock so
+            # another merge or queue edit cannot lose either update.
+            with db.tx() as c:
+                current = c.execute("SELECT state, depends_on FROM tasks WHERE id=?", (t.id,)).fetchone()
+                if current is not None and current["state"] in QUEUED:
+                    remaining = [dep for dep in _loads(current["depends_on"]) if dep not in completed]
+                    c.execute("UPDATE tasks SET depends_on=? WHERE id=?", (_dumps(remaining), t.id))
+            t = db.get_task(t.id)
+        if t is not None and t.state == "pending":
+            _start_if_ready(db, t, dep_ref)
 
 
 def _start_if_ready(db: DB, t: Task, dep_ref: str) -> bool:
@@ -653,7 +776,8 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str) -> bool:
     if not caller_ws:
         return False
     try:
-        if unmet_dependencies(db, caller_ws, _loads(t.depends_on)):
+        if unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
+                              dependent_task_id=t.id):
             return False
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
@@ -707,8 +831,32 @@ def on_removed_unmerged(db: DB, ws: Workspace) -> None:
     dep_ref = worker.id if worker else ws.branch
     worker_id = worker.id if worker else None
     for t in queued(db):
-        if any(_dep_matches(d, ws, worker_id) and (d == worker_id or t.repo_root == ws.repo_root)
-               for d in _loads(t.depends_on)):
+        caller_ws = db.get_workspace(t.caller_ws_id)
+        if not caller_ws:
+            continue
+        session_roots = _session_repos(db, caller_ws, t.caller_id)
+        deps = _loads(t.depends_on)
+        matches = False
+        for d in deps:
+            if d == f"workspace:{ws.id}" or (worker_id is not None and d == worker_id):
+                matches = True
+                break
+            if d.startswith("task:"):
+                upstream = db.get_task(d.removeprefix("task:"))
+                if upstream and worker_id is not None and upstream.agent_id == worker_id:
+                    matches = True
+                    break
+            if d == ws.branch and ws.repo_root in session_roots:
+                try:
+                    target_repo, _, _ = _resolve_dependency(
+                        db, caller_ws, d, session_roots, dependent_task_id=t.id)
+                    if target_repo == ws.repo_root:
+                        matches = True
+                        break
+                except agents.AgentError:
+                    matches = True
+                    break
+        if matches:
             _cancel(db, t.id, f"it was waiting on {dep_ref}, which was removed unmerged.")
 
 
@@ -726,7 +874,19 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     ws = db.get_workspace(old.caller_ws_id) or caller_ws
     deps = _loads(old.depends_on) if depends_on is None else list(depends_on)
     try:
-        unmet = unmet_dependencies(db, ws, deps)
+        caller_id = caller.id if caller else None
+        roots = _session_repos(db, ws, caller_id)
+        # Pin a same-name upstream before copying the task: excluding only the
+        # old row here would let it shadow the upstream again in the new queue.
+        for i, dep in enumerate(deps):
+            if dep == old.branch:
+                _, upstream, upstream_ws = _resolve_dependency(db, ws, dep, roots, dependent_task_id=old.id)
+                if upstream is not None:
+                    deps[i] = f"task:{upstream.id}"
+                elif upstream_ws is not None:
+                    worker = agents.workspace_worker(db, upstream_ws)
+                    deps[i] = worker.id if worker else f"workspace:{upstream_ws.id}"
+        unmet = unmet_dependencies(db, ws, deps, caller_id=caller_id, dependent_task_id=old.id)
     except agents.AgentError as e:
         raise ValueError(f"{e}. Pass depends_on to replace the dependencies (an empty list for none).") from e
     new = enqueue(
@@ -780,7 +940,7 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
     else:
         lines.append("overlap: none")
     try:
-        unmet = unmet_dependencies(db, ws, depends_on)
+        unmet = unmet_dependencies(db, ws, depends_on, caller_id=caller_id)
     except agents.AgentError as e:
         lines.append(f"queue: would not start: {e}")
     else:

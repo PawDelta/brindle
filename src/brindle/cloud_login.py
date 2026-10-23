@@ -1,6 +1,6 @@
 """Cloud login state, read without calling the model.
 
-``status(provider)`` says whether the Bedrock, Vertex or Foundry login is still
+``status(provider)`` says whether the Bedrock, Vertex or Azure login is still
 good, when it lapses, and the one command that renews it. It reads the CLIs'
 own credential files (AWS SSO cache, Azure CLI token cache) and, for Google,
 whose application-default credentials hold only a refresh token, asks gcloud
@@ -44,6 +44,82 @@ PRESENT_WITHIN = 300.0
 _FLAGS = {"bedrock": "CLAUDE_CODE_USE_BEDROCK", "vertex": "CLAUDE_CODE_USE_VERTEX",
           "foundry": "CLAUDE_CODE_USE_FOUNDRY"}
 
+# Non-secret route selectors that must agree between preflight, login and a pane.
+IDENTITY_ENV = frozenset((*_FLAGS.values(), "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION",
+    "AWS_DEFAULT_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "AZURE_CONFIG_DIR", "AZURE_TENANT_ID",
+    "AZURE_FEDERATED_TOKEN_FILE", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL",
+    "BRINDLE_CLOUD_ROUTE", "GOOGLE_CLOUD_PROJECT", "VERTEX_LOCATION", "AZURE_RESOURCE_NAME",
+    "AZURE_SUBSCRIPTION_ID", "XDG_DATA_HOME", "OPENCODE_CONFIG_DIR",
+    "GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION"))
+
+CLOUD_KEYS = ("GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY",
+              "AZURE_API_KEY", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK")
+
+
+def _gcloud_adc_file(env: Mapping[str, str], home: Path | None = None) -> Path:
+    root = Path(env.get("CLOUDSDK_CONFIG") or (home or Path.home()) / ".config" / "gcloud")
+    return root.expanduser().absolute() / "application_default_credentials.json"
+
+
+def _google_browser_login(env: Mapping[str, str]) -> bool:
+    selected = env.get("GOOGLE_APPLICATION_CREDENTIALS")
+    return not selected or Path(selected).expanduser().absolute() == _gcloud_adc_file(env)
+
+
+def profile_env(profile, env: Mapping[str, str]) -> dict[str, str]:
+    """Select explicit OpenCode cloud auth and isolate its provider connection.
+
+    A qualified model alone never opts an API-key profile into cloud login.
+    The cloud CLI directory picks the account; project/resource picks billing.
+    """
+    from brindle.config import brindle_home
+    from brindle.profiles import ProfileError
+
+    if profile.provider != "opencode":
+        if profile.auth == "cloud" and profile.provider != "claude":
+            raise ProfileError("auth: cloud requires Claude or OpenCode")
+        # A worker's provider owns its route, even under a cloud supervisor.
+        return {"BRINDLE_CLOUD_ROUTE": "claude" if profile.provider == "claude" else ""}
+    if profile.auth != "cloud":
+        return {"BRINDLE_CLOUD_ROUTE": ""}
+    route = {"google-vertex": "vertex", "azure": "azure"}.get((profile.model or "").split("/")[0])
+    if route is None or "/" not in (profile.model or ""):
+        raise ProfileError("OpenCode auth: cloud requires a google-vertex/<model> or azure/<deployment> model")
+    full = {**os.environ, **env}
+    required = ("GOOGLE_CLOUD_PROJECT",) if route == "vertex" else ("AZURE_CONFIG_DIR", "AZURE_RESOURCE_NAME")
+    missing = [name for name in required if not full.get(name)]
+    if missing:
+        raise ProfileError("cloud profile needs " + ", ".join(missing))
+    if route == "vertex":
+        # OpenCode's Node SDK ignores CLOUDSDK_CONFIG for ADC discovery, and
+        # prefers its Vertex aliases over the documented profile selectors.
+        adc = full.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if profile.env.get("CLOUDSDK_CONFIG") and "GOOGLE_APPLICATION_CREDENTIALS" not in profile.env:
+            adc = None  # An explicitly selected gcloud identity wins over inherited ADC.
+        location = full.get("VERTEX_LOCATION") or "us-central1"
+        full.update(GOOGLE_APPLICATION_CREDENTIALS=str(Path(adc).expanduser().absolute()) if adc
+                    else str(_gcloud_adc_file(full)),
+                    GOOGLE_VERTEX_PROJECT=full["GOOGLE_CLOUD_PROJECT"],
+                    GOOGLE_VERTEX_LOCATION=location, GOOGLE_CLOUD_LOCATION=location, VERTEX_LOCATION=location)
+    names = (("GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG") if route == "vertex"
+             else ("AZURE_CONFIG_DIR", "AZURE_RESOURCE_NAME", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"))
+    key = hashlib.sha256(json.dumps([route, *[full.get(k, "") for k in names]]).encode()).hexdigest()[:20]
+    home = brindle_home() / "cloud-opencode" / key
+    return {**{k: full[k] for k in IDENTITY_ENV if k in full}, "BRINDLE_CLOUD_ROUTE": route,
+            "XDG_DATA_HOME": str(home / "data"), "OPENCODE_CONFIG_DIR": str(home / "config")}
+
+
+def azure_connected(env: Mapping[str, str]) -> bool:
+    """Whether this isolated OpenCode store selects the Azure CLI connection."""
+    root = Path(env.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    try:
+        entry = json.loads((root / "opencode" / "auth.json").read_text()).get("azure", {})
+        return entry.get("type") == "oauth" and entry.get("accountId") == env.get("AZURE_RESOURCE_NAME")
+    except (OSError, ValueError, AttributeError):
+        return False
+
 
 @dataclass(frozen=True)
 class LoginStatus:
@@ -57,12 +133,116 @@ class LoginStatus:
 
 
 def provider_from_env(env: Mapping[str, str] | None = None) -> str | None:
-    """The cloud provider whose ``CLAUDE_CODE_USE_*`` flag is on, or None."""
+    """The explicit OpenCode route or selected Claude cloud flag, or None."""
     env = os.environ if env is None else env
+    if "BRINDLE_CLOUD_ROUTE" in env and env["BRINDLE_CLOUD_ROUTE"] != "claude":
+        return env["BRINDLE_CLOUD_ROUTE"] or None
     for provider, flag in _FLAGS.items():
         if str(env.get(flag, "")).strip().lower() in ("1", "true", "yes", "on"):
             return provider
     return None
+
+
+def configured_status(env: Mapping[str, str]) -> LoginStatus | None:
+    """Check supported user cloud logins, leaving SDK/federation auth to its owner.
+
+    A Bedrock flag alone does not imply SSO: environment credentials, web
+    identity and credential_process profiles must keep their existing path.
+    """
+    full = {**os.environ, **env}
+    route = provider_from_env(full)
+    if route == "bedrock":
+        if (full.get("AWS_BEARER_TOKEN_BEDROCK") or full.get("AWS_ACCESS_KEY_ID")
+                or full.get("AWS_WEB_IDENTITY_TOKEN_FILE")):
+            return None
+        profile = full.get("AWS_PROFILE") or full.get("AWS_DEFAULT_PROFILE") or "default"
+        path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
+        if _aws_token_key(profile, path) is None:
+            return None
+    elif route == "azure":
+        s = status(route, env=full)
+        if s.ok and not azure_connected(full):
+            return LoginStatus(False, s.expires_at, shlex.join(login_command(full)),
+                               "OpenCode's Azure Entra connection is not configured for this resource")
+        return s
+    elif route != "vertex" or full.get("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"):
+        return None
+    return status(route, env=full)
+
+
+def login_command(env: Mapping[str, str]) -> list[str] | None:
+    """An interactive login for this identity; None when another system owns it.
+
+    ADC login writes the selected gcloud directory's well-known file. An
+    explicit SDK path to that same file still permits its browser refresh.
+    Do not send somebody through a browser flow that repairs a different login.
+    """
+    full = {**os.environ, **env}
+    route = provider_from_env(full)
+    if route == "bedrock":
+        if (full.get("AWS_BEARER_TOKEN_BEDROCK") or full.get("AWS_ACCESS_KEY_ID")
+                or full.get("AWS_WEB_IDENTITY_TOKEN_FILE")):
+            return None
+        profile = full.get("AWS_PROFILE") or full.get("AWS_DEFAULT_PROFILE") or "default"
+        path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
+        if _aws_token_key(profile, path):
+            return ["aws", "sso", "login", "--profile", profile]
+    if route == "vertex" and _google_browser_login(full):
+        project = (full.get("GOOGLE_CLOUD_PROJECT") if full.get("BRINDLE_CLOUD_ROUTE") == "vertex"
+                   else full.get("ANTHROPIC_VERTEX_PROJECT_ID"))
+        return ["gcloud", "auth", "application-default", "login", *(["--project", project] if project else [])]
+    if route == "azure":
+        from brindle import opencode
+
+        return [opencode.binary(), "auth", "login", "--provider", "azure", "--method", "Microsoft Entra ID (Azure CLI)"]
+    return None
+
+
+def action_key(env: Mapping[str, str]) -> str:
+    """One terminal per credential source, even across profiles and regions."""
+    key = login_key(env) or ""
+    if provider_from_env({**os.environ, **env}) == "azure":
+        key += ":" + env.get("XDG_DATA_HOME", "")
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def interactive_command() -> list[str]:
+    """Keep the terminal's cloud CLI under the same lock as automatic renewal."""
+    return [sys.executable, "-m", "brindle.cloud_login"]
+
+
+def interactive_sign_in(*, env: Mapping[str, str] | None = None, run=None, probe=None) -> int:
+    """Run a user-requested cloud login, inheriting the terminal's input/output.
+
+    The child also holds the lock, so losing the wrapper cannot permit another
+    login while the cloud CLI still runs. An existing login is left alone.
+    """
+    full = {**os.environ, **(env or {})}
+    command = login_command(full)
+    lg = _login(None, full, None)
+    if command is None or lg is None:
+        print("Refresh this identity's configured credentials directly.")
+        return 1
+    lg.lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lg.lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not _locked(fd):
+            print("A cloud sign-in is already running. Finish it in its existing browser or terminal.")
+            return 1
+        lg.write({"lapse": lg.fingerprint(), "opened_at": time.time(), "interactive": True})
+        if lg.provider == "azure":
+            s = status("azure", env=full, run=probe or run_bounded)
+            if not s.ok:
+                code = (run or subprocess.run)(azure_login_command(full), env=full, pass_fds=(fd,)).returncode
+                if code:
+                    return code
+                s = status("azure", env=full, run=probe or run_bounded)
+                if not s.ok:
+                    print(s.note)
+                    return 1
+        return (run or subprocess.run)(command, env=full, pass_fds=(fd,)).returncode
+    finally:
+        os.close(fd)
 
 
 def _epoch(value) -> float | None:
@@ -120,7 +300,7 @@ def _aws_token_key(profile: str, config_path: Path) -> str | None:
 
 def _aws(env: Mapping[str, str], home: Path, now: float) -> LoginStatus:
     profile = env.get("AWS_PROFILE") or env.get("AWS_DEFAULT_PROFILE") or "default"
-    refresh = f"aws sso login --profile {profile}"
+    refresh = shlex.join(["aws", "sso", "login", "--profile", profile])
     config = Path(env.get("AWS_CONFIG_FILE") or home / ".aws" / "config")
     key = _aws_token_key(profile, config)
     if key is None:
@@ -171,10 +351,24 @@ def _azure_expiry(token: dict) -> float | None:
         return None
 
 
+def azure_login_command(env: Mapping[str, str]) -> list[str]:
+    command = ["az", "login"]
+    for name, flag in (("AZURE_TENANT_ID", "--tenant"), ("AZURE_SUBSCRIPTION_ID", "--subscription")):
+        if env.get(name):
+            command += [flag, env[name]]
+    return command
+
+
 def _azure(run, env, now: float) -> LoginStatus:
-    refresh = "az login"
+    full = {**os.environ, **(env or {})}
+    openai = provider_from_env(full) == "azure"
+    refresh = shlex.join(azure_login_command(full)) if openai else "az login"
+    command = ["az", "account", "get-access-token", "--output", "json"]
+    if openai:
+        # The OpenCode Entra plugin uses the active account and this exact scope.
+        command += ["--scope", "https://cognitiveservices.azure.com/.default"]
     try:
-        proc = run(["az", "account", "get-access-token", "--output", "json"],
+        proc = run(command,
                    capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
     except subprocess.TimeoutExpired:
         return LoginStatus(False, None, refresh, "az timed out fetching an access token")
@@ -186,6 +380,12 @@ def _azure(run, env, now: float) -> LoginStatus:
         except ValueError:
             token = None
         exp = _azure_expiry(token) if isinstance(token, dict) else None
+        if openai and isinstance(token, dict):
+            for name, field in (("AZURE_TENANT_ID", "tenant"), ("AZURE_SUBSCRIPTION_ID", "subscription")):
+                if full.get(name) and full[name] != token.get(field):
+                    return LoginStatus(False, exp, refresh, f"Azure CLI's active identity does not match {name}")
+            if not token.get("accessToken"):
+                return LoginStatus(False, exp, refresh, "Azure CLI returned no access token")
         if exp is not None:
             return _from_expiry(exp, refresh, now, "")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
@@ -206,7 +406,8 @@ def tokeninfo_expiry(token: str, timeout: float = CLI_TIMEOUT) -> float | None:
 
 
 def _google(run, env, now: float, expiry) -> LoginStatus:
-    refresh = "gcloud auth application-default login"
+    full = {**os.environ, **(env or {})}
+    refresh = "gcloud auth application-default login" if _google_browser_login(full) else ""
     try:
         proc = run(["gcloud", "auth", "application-default", "print-access-token"],
                    capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
@@ -219,7 +420,7 @@ def _google(run, env, now: float, expiry) -> LoginStatus:
         left = expiry(token)
         if left is None:
             return LoginStatus(True, None, refresh, "logged in; token expiry unknown")
-        return LoginStatus(True, now + left, refresh, "logged in")
+        return _from_expiry(now + left, refresh, now, "")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
         return LoginStatus(False, None, refresh, "login expired (invalid_grant)", expired=True)
     return LoginStatus(False, None, refresh, "gcloud could not produce an access token")
@@ -239,7 +440,7 @@ def status(provider: str | None = None, *, env: Mapping[str, str] | None = None,
         return _aws(env, home, now)
     if provider == "vertex":
         return _google(run, supplied, now, expiry)
-    if provider == "foundry":
+    if provider in ("foundry", "azure"):
         return _azure(run, supplied, now)
     return LoginStatus(True, None, "", "no cloud provider selected")
 
@@ -279,15 +480,14 @@ def _credentials_file(provider: str, env: Mapping[str, str], home: Path) -> Path
     if provider == "vertex":
         if env.get("GOOGLE_APPLICATION_CREDENTIALS"):
             return Path(env["GOOGLE_APPLICATION_CREDENTIALS"])
-        root = Path(env.get("CLOUDSDK_CONFIG") or home / ".config" / "gcloud")
-        return root / "application_default_credentials.json"
+        return _gcloud_adc_file(env, home)
     if provider == "bedrock":
         profile = env.get("AWS_PROFILE") or env.get("AWS_DEFAULT_PROFILE") or "default"
         key = _aws_token_key(profile, Path(env.get("AWS_CONFIG_FILE") or home / ".aws" / "config"))
         if key is None:
             return None
         return home / ".aws" / "sso" / "cache" / (hashlib.sha1(key.strip().encode()).hexdigest() + ".json")
-    if provider == "foundry":
+    if provider in ("foundry", "azure"):
         return Path(env.get("AZURE_CONFIG_DIR") or home / ".azure") / "msal_token_cache.json"
     return None
 
@@ -302,7 +502,7 @@ def _fingerprint(provider: str, path: Path | None) -> str:
         data = path.read_bytes()
     except OSError:
         return "missing"
-    if provider == "foundry":
+    if provider in ("foundry", "azure"):
         # The MSAL cache also holds access tokens for every resource and
         # tenant, which other `az` calls rewrite during a lapse; a sign-in is
         # its refresh tokens. shortcut: every account's refresh tokens count,
@@ -477,6 +677,8 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
     try:
         last = lg.read()
         running = not _locked(fd)
+        if running and last.get("interactive"):
+            return "waiting"
         this_lapse = last.get("lapse") == lg.fingerprint() and "opened_at" in last
         ended = False
         if this_lapse:
@@ -498,6 +700,8 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
             return "deferred"
         # Open one: this lapse has no tab yet, or its tab died and they typed since.
         s = still_lapsed()
+        if s.expired and lg.provider == "vertex" and not _google_browser_login(lg.env):
+            return "manual"
         if not s.expired or not s.refresh_cmd:
             return "no lapse"
         if running:     # a dead tab, or one left from an earlier lapse: end it, take its lock
@@ -533,3 +737,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
         return "opened"
     finally:
         os.close(fd)
+
+
+if __name__ == "__main__":
+    raise SystemExit(interactive_sign_in())
