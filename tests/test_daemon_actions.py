@@ -725,6 +725,7 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
     from brindle import cloud_login, doctor, procs, tmux
     from brindle.profiles import ProfileError
 
+    monkeypatch.setattr(providers, "which_cli", lambda _: None)
     _provider_setup(tmp_path, monkeypatch)
     cloud = ({"GOOGLE_CLOUD_PROJECT": "company", "VERTEX_LOCATION": "us-central1",
               "CLOUDSDK_CONFIG": str(tmp_path / "gcloud")} if route == "vertex" else
@@ -1502,7 +1503,7 @@ def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
     """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
     monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)
     monkeypatch.setattr(providers, "claude_onboarded", REAL_ONBOARDED)
-    for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN"):
+    for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN", "BRINDLE_OPENCODE_BIN"):
         (tmp_path / env).write_text("")
         monkeypatch.setenv(env, str(tmp_path / env))
     claude = tmp_path / "claude-config" / ".claude.json"
