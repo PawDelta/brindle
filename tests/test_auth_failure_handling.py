@@ -7,6 +7,16 @@ from brindle.db import DB, Workspace
 pytestmark = pytest.mark.usefixtures("fake_agent_cli")
 
 
+@pytest.mark.variant("#199: close the first session before adding a window on the test server")
+def test_test_server_survives_closing_its_first_session(tmp_path):
+    from brindle import tmux
+
+    tmux.ensure_session("first", str(tmp_path), {})
+    tmux.kill_session("first")
+    pane = tmux._tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "/bin/sh").stdout.strip()
+    assert tmux.window_alive(pane)
+
+
 def test_rate_limit_with_session_id_401_not_treated_as_auth_failure(db, repo):
     ws = db.get_workspace("main") or Workspace("ws-rl", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-rl", 0)
     db.add_workspace(ws)
