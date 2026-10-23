@@ -225,10 +225,21 @@ def dependency_rows(db, tmp_path, monkeypatch):
     return caller, boss, workspace, launched
 
 
-@pytest.mark.parametrize("event", ["merged", "sweep", "removed", "requeue_merged", "requeue_pending", "requeue_removed"])
-def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, event):
+@pytest.mark.parametrize(("event", "upstream_kind"), [
+    ("merged", "task"), ("sweep", "task"), ("removed", "task"),
+    ("requeue_merged", "task"), ("requeue_pending", "task"), ("requeue_removed", "task"),
+    ("requeue_pending", "worker"), ("requeue_removed", "worker"),
+    ("requeue_pending", "workspace"), ("requeue_removed", "workspace"),
+    ("requeue_pending", "local_workspace"),
+])
+def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, monkeypatch, event, upstream_kind):
     caller, boss, workspace, launched = dependency_rows
-    upstream = workspace("engine-worker", "engine", "shared", tracked=True)
+    upstream = workspace("engine-worker", "app" if upstream_kind == "local_workspace" else "engine",
+                         "shared", tracked=upstream_kind == "task")
+    if upstream_kind == "worker":
+        fake_spawn(db, upstream, "developer", parent_id=caller.id)
+    monkeypatch.setattr(tasks.git, "ok", lambda cmd, path=None:
+                        bool(db.merged_sha(upstream.id)) and cmd[:3] == ["merge-base", "--is-ancestor", "shared"])
     db.add_session_repo(caller.id, "engine", upstream.repo_root)
     assert tasks.unmet_dependencies(db, boss, ["shared"], caller.id) == ["shared"]
     pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign",
@@ -245,11 +256,12 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
             assert tasks.sweep(db) == 0
     if event in ("removed", "requeue_removed"):
         tasks.on_removed_unmerged(db, upstream)
+        db.delete_workspace(upstream.id)
         assert db.get_task(pending.id).state == "cancelled"
         assert launched == []
     else:
+        db.set_merged(upstream.id, "merged-sha")
         if event == "sweep":
-            db.set_merged(upstream.id, "merged-sha")
             assert tasks.sweep(db) == 1
         else:
             tasks.on_merged(db, upstream)
