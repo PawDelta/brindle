@@ -4,6 +4,7 @@ from ``BRINDLE_AGENT_ID`` (set in the agent's environment at spawn)."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
@@ -1461,10 +1462,47 @@ def start_azure_refresher():
     return refresher
 
 
+def _report_server_exit(error: Exception | None = None) -> None:
+    """Report a closed transport without depending on the dead MCP.
+
+    Ordinary tool errors are already isolated by the SDK. Both an exception
+    and a normal return on stdin EOF end the connection; only the client can
+    reconnect it.
+    """
+    reason = type(error).__name__ if error is not None else "stdio connection closed"
+    notice = (
+        f"[brindle] The brindle MCP server is down ({reason}). "
+        "Its tools are unavailable. Tell the user to run /mcp and reconnect "
+        "brindle before continuing."
+    )
+    logger = logging.getLogger(__name__)
+    logger.error(notice, exc_info=error is not None)
+    try:
+        db = DB()
+        try:
+            agent_id = os.environ.get("BRINDLE_AGENT_ID")
+            agent = db.get_agent(agent_id) if agent_id else None
+            if agent is not None:
+                # send_message normally holds the body for read_messages. Push
+                # this body through the hook/runner path: MCP cannot read it now.
+                agents._send_message(db, agent, notice, None)
+        finally:
+            db.conn.close()
+    except Exception:
+        # Preserve the original server failure even if its recipient has
+        # already stopped, or the database/delivery path is also unavailable.
+        logger.exception("Could not deliver the MCP recovery notice")
+
+
 def main() -> None:
     refresher = start_azure_refresher()
     try:
         mcp.run()
+    except Exception as error:
+        _report_server_exit(error)
+        raise
+    else:
+        _report_server_exit()
     finally:
         if refresher is not None:
             refresher.stop()
