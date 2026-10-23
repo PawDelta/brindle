@@ -2130,8 +2130,9 @@ Use `auth: cloud` to remove inherited model API keys, including Bedrock bearer
 keys that would otherwise bypass the AWS SSO profile.
 
 `GOOGLE_APPLICATION_CREDENTIALS` selects a specific credential file. A browser
-ADC login writes the default location, so brindle asks you to refresh the selected
-file instead of opening a login that would update a different identity. Existing
+ADC login writes the selected gcloud directory's default file. If the explicit
+credential file is elsewhere, brindle asks you to refresh it directly instead of
+opening a login that would update a different identity. Existing
 federated credentials and non-SSO AWS credential chains keep their existing
 handling; the new profile checks do not validate their expiry. Expired cloud
 credentials hold session delivery until refreshed, including when a cloud
@@ -2158,6 +2159,12 @@ env.GOOGLE_CLOUD_PROJECT: your-project
 env.VERTEX_LOCATION: us-central1
 env.CLOUDSDK_CONFIG: /absolute/path/to/company-gcloud
 ```
+
+brindle passes that directory's `application_default_credentials.json` explicitly
+to OpenCode's SDK and checks the same file, while retaining browser refresh through
+gcloud. The profile's project and region override inherited OpenCode aliases.
+An explicit profile `CLOUDSDK_CONFIG` also overrides an inherited ADC file selector;
+set `env.GOOGLE_APPLICATION_CREDENTIALS` in the profile to select a custom file instead.
 
 For Azure OpenAI, select a separate Azure CLI directory for this identity and
 your deployed model's name:

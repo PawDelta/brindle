@@ -747,18 +747,39 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
     profile.write_text(content)
     monkeypatch.setenv("AZURE_API_KEY", "FAKE_PERSONAL_KEY")
     monkeypatch.setenv("GOOGLE_API_KEY", "FAKE_PERSONAL_KEY")
+    if route == "vertex":
+        monkeypatch.setenv("HOME", str(tmp_path / "personal-home"))
+        default_adc = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+        selected_adc = Path(cloud["CLOUDSDK_CONFIG"]) / "application_default_credentials.json"
+        for path, account in ((default_adc, "personal"), (selected_adc, "company")):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"account": account}))
+        for name in ("GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION"):
+            monkeypatch.setenv(name, "personal")
     monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
     identity = agents.launch_identity(worker, ws)[0]
     actual = agents._effective_window_env(worker, ws)
     assert all(actual[k] == v for k, v in cloud.items())
     assert not actual.get("AZURE_API_KEY") and not actual.get("GOOGLE_API_KEY")
     assert identity["XDG_DATA_HOME"] == actual["XDG_DATA_HOME"]
+    if route == "vertex":
+        # OpenCode's SDK uses this ADC lookup and these project/location precedences.
+        account = json.loads(Path(actual.get("GOOGLE_APPLICATION_CREDENTIALS") or default_adc).read_text())["account"]
+        project = actual.get("GOOGLE_VERTEX_PROJECT") or actual.get("GOOGLE_CLOUD_PROJECT")
+        location = actual.get("GOOGLE_VERTEX_LOCATION") or actual.get("GOOGLE_CLOUD_LOCATION") or actual.get("VERTEX_LOCATION")
+        assert (account, project, location) == ("company", "company", "us-central1")
+        selected_names = ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION")
+        assert all(identity[k] == actual[k] for k in selected_names)
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(default_adc))
     healthy = False
     tenant = "company-tenant"
 
     def probe(command, **kw):
         if not healthy:
             return SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant AADSTS700082")
+        if route == "vertex":
+            adc = Path(kw["env"].get("GOOGLE_APPLICATION_CREDENTIALS") or selected_adc)
+            assert json.loads(adc.read_text())["account"] == "company"
         token = {"accessToken": "FAKE_TOKEN", "expires_on": 4070908800,
                  "tenant": tenant, "subscription": "company-subscription"}
         if route == "azure" and "https://cognitiveservices.azure.com/.default" not in command:
@@ -786,9 +807,13 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
     assert _send("POST", item.action.path, {**item.action.body, "restart": True})[1]["terminal"] == opened["terminal"]
     _, argv, env = windows[opened["terminal"]]
     assert all(env[k] == v for k, v in cloud.items()) and env["XDG_DATA_HOME"] == identity["XDG_DATA_HOME"]
+    if route == "vertex":
+        assert all(env[k] == identity[k] for k in selected_names)
     def login(command, **kw):
         nonlocal healthy
         if command == ["gcloud", "auth", "application-default", "login", "--project", "company"]:
+            refreshed_adc = Path(kw["env"]["CLOUDSDK_CONFIG"]) / "application_default_credentials.json"
+            refreshed_adc.write_text(json.dumps({"account": "company"}))
             healthy = True
         elif command == ["az", "login", "--tenant", "company-tenant", "--subscription", "company-subscription"]:
             healthy = True
@@ -833,6 +858,13 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
         code, reply = _send("POST", "/v1/sessions/sup/continue")
         assert code == 200, reply
         assert db.get_agent("wk").status == "idle" and db.get_autopilot("sup").state == "running"
+    if route == "vertex":
+        custom = tmp_path / "custom-adc.json"
+        custom.write_text(json.dumps({"account": "company"}))
+        profile.write_text(content.replace("auth: cloud\n", f"auth: cloud\nenv.GOOGLE_APPLICATION_CREDENTIALS: {custom}\n"))
+        custom_identity = agents.launch_identity(db.get_agent("wk"), ws)[0]
+        assert custom_identity["GOOGLE_APPLICATION_CREDENTIALS"] == str(custom)
+        assert cloud_login.login_command(custom_identity) is None
     profile.write_text(content.replace("auth: cloud", "auth: auto"))
     worker = db.get_agent("wk")
     assert "XDG_DATA_HOME" not in agents.launch_identity(worker, ws)[0]

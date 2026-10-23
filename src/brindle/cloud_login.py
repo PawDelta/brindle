@@ -51,10 +51,21 @@ IDENTITY_ENV = frozenset((*_FLAGS.values(), "AWS_PROFILE", "AWS_DEFAULT_PROFILE"
     "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "AZURE_CONFIG_DIR", "AZURE_TENANT_ID",
     "AZURE_FEDERATED_TOKEN_FILE", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL",
     "BRINDLE_CLOUD_ROUTE", "GOOGLE_CLOUD_PROJECT", "VERTEX_LOCATION", "AZURE_RESOURCE_NAME",
-    "AZURE_SUBSCRIPTION_ID", "XDG_DATA_HOME", "OPENCODE_CONFIG_DIR"))
+    "AZURE_SUBSCRIPTION_ID", "XDG_DATA_HOME", "OPENCODE_CONFIG_DIR",
+    "GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION"))
 
 CLOUD_KEYS = ("GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY",
               "AZURE_API_KEY", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK")
+
+
+def _gcloud_adc_file(env: Mapping[str, str], home: Path | None = None) -> Path:
+    root = Path(env.get("CLOUDSDK_CONFIG") or (home or Path.home()) / ".config" / "gcloud")
+    return root.expanduser().absolute() / "application_default_credentials.json"
+
+
+def _google_browser_login(env: Mapping[str, str]) -> bool:
+    selected = env.get("GOOGLE_APPLICATION_CREDENTIALS")
+    return not selected or Path(selected).expanduser().absolute() == _gcloud_adc_file(env)
 
 
 def profile_env(profile, env: Mapping[str, str]) -> dict[str, str]:
@@ -81,7 +92,18 @@ def profile_env(profile, env: Mapping[str, str]) -> dict[str, str]:
     missing = [name for name in required if not full.get(name)]
     if missing:
         raise ProfileError("cloud profile needs " + ", ".join(missing))
-    names = (("GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG") if route == "vertex"
+    if route == "vertex":
+        # OpenCode's Node SDK ignores CLOUDSDK_CONFIG for ADC discovery, and
+        # prefers its Vertex aliases over the documented profile selectors.
+        adc = full.get("GOOGLE_APPLICATION_CREDENTIALS")
+        if profile.env.get("CLOUDSDK_CONFIG") and "GOOGLE_APPLICATION_CREDENTIALS" not in profile.env:
+            adc = None  # An explicitly selected gcloud identity wins over inherited ADC.
+        location = full.get("VERTEX_LOCATION") or "us-central1"
+        full.update(GOOGLE_APPLICATION_CREDENTIALS=str(Path(adc).expanduser().absolute()) if adc
+                    else str(_gcloud_adc_file(full)),
+                    GOOGLE_VERTEX_PROJECT=full["GOOGLE_CLOUD_PROJECT"],
+                    GOOGLE_VERTEX_LOCATION=location, GOOGLE_CLOUD_LOCATION=location, VERTEX_LOCATION=location)
+    names = (("GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG") if route == "vertex"
              else ("AZURE_CONFIG_DIR", "AZURE_RESOURCE_NAME", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"))
     key = hashlib.sha256(json.dumps([route, *[full.get(k, "") for k in names]]).encode()).hexdigest()[:20]
     home = brindle_home() / "cloud-opencode" / key
@@ -151,7 +173,8 @@ def configured_status(env: Mapping[str, str]) -> LoginStatus | None:
 def login_command(env: Mapping[str, str]) -> list[str] | None:
     """An interactive login for this identity; None when another system owns it.
 
-    ADC login writes the well-known file, never GOOGLE_APPLICATION_CREDENTIALS.
+    ADC login writes the selected gcloud directory's well-known file. An
+    explicit SDK path to that same file still permits its browser refresh.
     Do not send somebody through a browser flow that repairs a different login.
     """
     full = {**os.environ, **env}
@@ -164,7 +187,7 @@ def login_command(env: Mapping[str, str]) -> list[str] | None:
         path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
         if _aws_token_key(profile, path):
             return ["aws", "sso", "login", "--profile", profile]
-    if route == "vertex" and not full.get("GOOGLE_APPLICATION_CREDENTIALS"):
+    if route == "vertex" and _google_browser_login(full):
         project = (full.get("GOOGLE_CLOUD_PROJECT") if full.get("BRINDLE_CLOUD_ROUTE") == "vertex"
                    else full.get("ANTHROPIC_VERTEX_PROJECT_ID"))
         return ["gcloud", "auth", "application-default", "login", *(["--project", project] if project else [])]
@@ -384,7 +407,7 @@ def tokeninfo_expiry(token: str, timeout: float = CLI_TIMEOUT) -> float | None:
 
 def _google(run, env, now: float, expiry) -> LoginStatus:
     full = {**os.environ, **(env or {})}
-    refresh = "" if full.get("GOOGLE_APPLICATION_CREDENTIALS") else "gcloud auth application-default login"
+    refresh = "gcloud auth application-default login" if _google_browser_login(full) else ""
     try:
         proc = run(["gcloud", "auth", "application-default", "print-access-token"],
                    capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
@@ -457,8 +480,7 @@ def _credentials_file(provider: str, env: Mapping[str, str], home: Path) -> Path
     if provider == "vertex":
         if env.get("GOOGLE_APPLICATION_CREDENTIALS"):
             return Path(env["GOOGLE_APPLICATION_CREDENTIALS"])
-        root = Path(env.get("CLOUDSDK_CONFIG") or home / ".config" / "gcloud")
-        return root / "application_default_credentials.json"
+        return _gcloud_adc_file(env, home)
     if provider == "bedrock":
         profile = env.get("AWS_PROFILE") or env.get("AWS_DEFAULT_PROFILE") or "default"
         key = _aws_token_key(profile, Path(env.get("AWS_CONFIG_FILE") or home / ".aws" / "config"))
@@ -678,7 +700,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
             return "deferred"
         # Open one: this lapse has no tab yet, or its tab died and they typed since.
         s = still_lapsed()
-        if s.expired and lg.provider == "vertex" and lg.env.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        if s.expired and lg.provider == "vertex" and not _google_browser_login(lg.env):
             return "manual"
         if not s.expired or not s.refresh_cmd:
             return "no lapse"
