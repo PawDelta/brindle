@@ -197,6 +197,30 @@ def test_queued_task_stays_queued_if_only_some_dependencies_merged(db, repo, bos
     assert b_task.state == "pending"
 
 
+def test_queued_task_starts_when_first_dep_workspace_deleted_and_second_merges(db, repo, boss):
+    """Normal workspace cleanup deletes the agent row but retains the task
+    record. A task waiting on two workers must still resolve the deleted
+    worker's merged task and start when the second worker merges."""
+    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
+    worker_a = started_worker_id(out_a)
+    out_c = asyncio.run(mcp_server.assign("developer", "do C", branch="feat-c"))
+    worker_c = started_worker_id(out_c)
+    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
+    ws_c = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-c")
+
+    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b",
+                                  depends_on=[worker_a, worker_c]))
+
+    asyncio.run(mcp_server.merge_workspace(ws_a.id))
+    db.delete_workspace(ws_a.id)
+    assert db.get_agent(worker_a) is None
+
+    tasks.on_merged(db, ws_c)
+
+    [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
+    assert b_task.state == "started" and b_task.agent_id
+
+
 def test_a_stranded_queued_task_starts_at_the_supervisors_stop_and_only_once(db, repo, boss, monkeypatch):
     """A merged without on_merged ever running (cut off, or merged by hand)."""
     monkeypatch.setattr(agents, "is_alive", lambda a: True)

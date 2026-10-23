@@ -208,7 +208,8 @@ def test_assign_into_an_attached_repo_works_checks_and_merges_there(db, repo, we
     assert not (brindle_home / "main-checked").exists()     # the session's repo's didn't
 
 
-def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, web, boss, monkeypatch):
+@pytest.mark.parametrize("dep_on", ["worker_id", "branch_name"])
+def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, web, boss, monkeypatch, dep_on):
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     repos.attach(db, "boss", str(web), "web")
     out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
@@ -216,9 +217,10 @@ def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, we
     ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
     commit_file(Path(ws_a.path), "a_output.txt")
 
+    dep = worker_a if dep_on == "worker_id" else "feat-a"
     out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", repo="web",
-                                          depends_on=[worker_a]))
-    assert "Queued task" in out_b and worker_a in out_b
+                                          depends_on=[dep]))
+    assert "Queued task" in out_b and dep in out_b
     [b] = db.list_tasks(str(web), state="pending")
     assert "feat-b" in mcp_server.list_tasks()
 
@@ -229,7 +231,7 @@ def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, we
     assert ws_b.repo_root == str(web) and ws_b.branch == "feat-b"
     assert not (Path(ws_b.path) / "a_output.txt").exists()   # another repo: A's file isn't there
     msg = db.pop_pending("boss")
-    assert msg is not None and "Started" in msg.body and worker_a in msg.body
+    assert msg is not None and "Started" in msg.body and (dep in msg.body or worker_a in msg.body)
 
 
 def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web, boss, monkeypatch):
@@ -254,6 +256,94 @@ def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web
 
     assert dep.id in tasks.cancel(db, db.get_agent("boss"), p_main.id)   # its own repo's: cascades
     assert db.get_task(dep.id).state == "cancelled"
+
+
+def test_cross_repo_branch_dependency_refuses_when_ambiguous(db, repo, web, tmp_path, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    api = git_repo(tmp_path, "api", {"pipeline": False, "overlap": "warn"})
+    repos.attach(db, "boss", str(web), "web")
+    repos.attach(db, "boss", str(api), "api")
+    asyncio.run(mcp_server.assign("developer", "W", branch="feature", repo="web"))
+    asyncio.run(mcp_server.assign("developer", "A", branch="feature", repo="api"))
+    out = asyncio.run(mcp_server.assign("developer", "M", branch="m", depends_on=["feature"]))
+    assert "ambiguous" in out
+
+
+def test_cross_repo_dependency_checks_identity_lock_only_on_selected_workspace(db, repo, web, tmp_path, boss, monkeypatch):
+    from brindle import identity_lock
+
+    alien_repo = git_repo(tmp_path, "alien", {"pipeline": False, "overlap": "warn"})
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    repos.attach(db, "boss", str(web), "web")
+    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
+    started_worker_id(out_a)
+
+    # An unrelated workspace with the same branch name in another repo belonging to another identity
+    unrelated_ws = workspaces.create(db, str(alien_repo), "feat-a", run_setup=False).workspace
+    db.add_agent(Agent("alien", unrelated_ws.id, "developer", "claude", None, "assign", "idle",
+                       "@9", None, time.time()))
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "corp-id" if aid == "alien" else None)
+
+    # Queuing in attached repo web depending on feat-a selects boss's feat-a, not alien's
+    out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", repo="web",
+                                          depends_on=["feat-a"]))
+    assert "Queued task" in out_b
+
+
+def test_two_sessions_do_not_share_attached_repos(db, repo, web, tmp_path, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    repos.attach(db, "boss", str(web), "web")
+
+    other_repo = git_repo(tmp_path, "other", {"pipeline": False, "overlap": "warn"})
+    db.add_agent(Agent("other-boss", boss.id, "supervisor", "claude", None, "interactive", "processing",
+                       "@1", None, time.time()))
+    repos.attach(db, "other-boss", str(other_repo), "other")
+
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "other-boss")
+    asyncio.run(mcp_server.assign("developer", "alien task", branch="alien-feat", repo="other"))
+
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    out = asyncio.run(mcp_server.assign("developer", "boss task", branch="feat-x", depends_on=["alien-feat"]))
+    assert "alien-feat" in out
+    [t] = [task for task in db.list_tasks(str(repo), state="pending") if task.branch == "feat-x"]
+    alien_ws = next(w for w in db.find_workspaces(str(other_repo)) if w.branch == "alien-feat")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "other-boss")
+    asyncio.run(mcp_server.merge_workspace(alien_ws.id))
+    assert db.get_task(t.id).state == "pending"
+
+
+def test_local_untracked_branch_takes_precedence_over_remote_merged_task(db, repo, web, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    repos.attach(db, "boss", str(web), "web")
+
+    out_w = asyncio.run(mcp_server.assign("developer", "web task", branch="shared", repo="web"))
+    started_worker_id(out_w)
+    ws_w = next(w for w in db.find_workspaces(str(web)) if w.branch == "shared")
+    commit_file(Path(ws_w.path), "shared.txt")
+    asyncio.run(mcp_server.merge_workspace(ws_w.id))
+
+    ws_local = workspaces.create(db, str(repo), "shared", run_setup=False).workspace
+    commit_file(Path(ws_local.path), "local_shared.txt")
+
+    monkeypatch.setattr(tasks.git, "ok", lambda cmd, path=None: False)
+    out = asyncio.run(mcp_server.assign("developer", "local dep", branch="dep", depends_on=["shared"]))
+    assert "Queued task" in out and "shared" in out
+    [t] = [task for task in db.list_tasks(str(repo), state="pending") if task.branch == "dep"]
+    assert t.state == "pending"
+
+
+def test_worker_id_dependency_resolves_without_ambiguity_when_branch_shared(db, repo, web, tmp_path, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    api = git_repo(tmp_path, "api", {"pipeline": False, "overlap": "warn"})
+    repos.attach(db, "boss", str(web), "web")
+    repos.attach(db, "boss", str(api), "api")
+
+    worker_web = started_worker_id(asyncio.run(mcp_server.assign("developer", "W", branch="feature", repo="web")))
+    started_worker_id(asyncio.run(mcp_server.assign("developer", "A", branch="feature", repo="api")))
+
+    out = asyncio.run(mcp_server.assign("developer", "M", branch="m", depends_on=[worker_web]))
+    assert "Queued task" in out and worker_web in out
+    assert "ambiguous" not in out
 
 
 def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo, web, boss, monkeypatch):
