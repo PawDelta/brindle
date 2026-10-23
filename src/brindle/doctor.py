@@ -235,10 +235,17 @@ def cloud_checks(repo_root: str | None = None) -> list[Check]:
     from brindle.profiles import ProfileError, list_profiles
 
     claude_managed = providers.claude_org_managed()
-    grouped: dict[str, tuple[dict, list[str]]] = {}
+    grouped: dict[tuple[str, bool], tuple[dict, list[str]]] = {}
+
+    def identity_key(env):
+        # A bearer-backed profile and an SSO profile can name the same AWS
+        # config. Grouping them together would hide the SSO profile's lapse.
+        bearer = bool({**os.environ, **env}.get("AWS_BEARER_TOKEN_BEDROCK"))
+        return cloud_login.action_key(env), bearer
+
     ambient = {**os.environ, **company_login.stored_env()}
     if not claude_managed and cloud_login.provider_from_env(ambient):
-        grouped[cloud_login.action_key(ambient)] = (ambient, ["default"])
+        grouped[identity_key(ambient)] = (ambient, ["default"])
     root = repo_root or os.getcwd()
     ws = Workspace("doctor", root, "doctor", "main", "HEAD", None, root, None, "", 0.0)
     managed = agents.managed(root)
@@ -253,10 +260,11 @@ def cloud_checks(repo_root: str | None = None) -> list[Check]:
             out.append(Check(FAIL, f"cloud login ({profile.name})", str(e)))
             continue
         # Diagnostics use cloud selectors, never a repo's PATH or interpreter options.
-        env = {k: v for k, v in resolved.items() if k in cloud_login.IDENTITY_ENV or k == "AWS_ACCESS_KEY_ID"}
+        env = {k: v for k, v in resolved.items() if k in cloud_login.IDENTITY_ENV
+               or k in ("AWS_ACCESS_KEY_ID", "AWS_BEARER_TOKEN_BEDROCK")}
         if not cloud_login.provider_from_env({**os.environ, **env}):
             continue
-        key = cloud_login.action_key(env)
+        key = identity_key(env)
         grouped.setdefault(key, (env, []))[1].append(profile.name)
     for env, names in grouped.values():
         status = cloud_login.configured_status(env)

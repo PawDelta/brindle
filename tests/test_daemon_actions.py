@@ -680,7 +680,7 @@ def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypat
     assert code == 200 and not again["started"] and again["terminal"] == opened["terminal"]
     assert len(windows) == 1
     shared = {**cloud, ("AWS_REGION" if route == "bedrock" else "CLOUD_ML_REGION"): "other-region"}
-    (directory / "shared.md").write_text("---\nname: shared\nprovider: claude\n" +
+    (directory / "shared.md").write_text("---\nname: shared\nprovider: claude\nauth: cloud\n" +
         "".join(f"env.{k}: {v}\n" for k, v in shared.items()) + "---\nWork.\n")
     code, same_login = _send("POST", item.action.path, {**item.action.body, "profile": "shared"})
     assert code == 200 and same_login["terminal"] == opened["terminal"] and len(windows) == 1
@@ -692,7 +692,7 @@ def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypat
     # A second profile must not inherit the in-flight login's selected identity.
     other = {**cloud, ("AWS_PROFILE" if route == "bedrock" else "CLOUDSDK_CONFIG"): "other"}
     aws.write_text(aws.read_text() + "[profile other]\nsso_session = other\n")
-    (directory / "other.md").write_text("---\nname: other\nprovider: claude\n" +
+    (directory / "other.md").write_text("---\nname: other\nprovider: claude\nauth: cloud\n" +
         "".join(f"env.{k}: {v}\n" for k, v in other.items()) + "---\nWork.\n")
     code, separate = _send("POST", item.action.path, {**item.action.body, "profile": "other"})
     assert code == 200 and separate["terminal"] != opened["terminal"] and len(windows) == 2

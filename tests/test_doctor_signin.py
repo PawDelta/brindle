@@ -46,6 +46,29 @@ def test_doctor_names_profile_env_keys(installed, repo, monkeypatch):
     assert "sk-profile-secret" not in doctor.render(doctor.signin_checks(str(repo)))
 
 
+def test_bedrock_bearer_bypasses_unrelated_sso_login(installed, repo):
+    from brindle import cloud_login
+
+    config = repo / "aws-config"
+    config.write_text("[profile company]\nsso_session = company\n")
+    env = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "company", "AWS_CONFIG_FILE": str(config),
+           "AWS_BEARER_TOKEN_BEDROCK": "FAKE_BEARER"}
+    directory = repo / ".brindle" / "agents"
+    directory.mkdir(parents=True)
+    profile = directory / "bedrock.md"
+    profile.write_text("---\nprovider: claude\n" +
+                       "".join(f"env.{k}: {v}\n" for k, v in env.items()) + "---\nWork.\n")
+    assert cloud_login.configured_status(env) is None
+    assert cloud_login.login_command(env) is None
+    assert doctor.cloud_checks(str(repo)) == []
+    # A second profile sharing the config really does need its missing SSO login.
+    env["AWS_BEARER_TOKEN_BEDROCK"] = ""
+    (directory / "sso.md").write_text(profile.read_text().replace("FAKE_BEARER", ""))
+    assert not cloud_login.configured_status(env).ok
+    assert cloud_login.login_command(env)
+    assert any(c.level == doctor.WARN for c in doctor.cloud_checks(str(repo)))
+
+
 def test_wsl_ignores_a_windows_shim_and_doctor_asks_for_a_linux_install(tmp_path, monkeypatch):
     monkeypatch.setattr(providers, "CODEX_BUNDLED", str(tmp_path / "none"))
     monkeypatch.delenv("BRINDLE_CODEX_BIN", raising=False)

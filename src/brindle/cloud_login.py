@@ -130,7 +130,8 @@ def configured_status(env: Mapping[str, str]) -> LoginStatus | None:
     full = {**os.environ, **env}
     route = provider_from_env(full)
     if route == "bedrock":
-        if full.get("AWS_ACCESS_KEY_ID") or full.get("AWS_WEB_IDENTITY_TOKEN_FILE"):
+        if (full.get("AWS_BEARER_TOKEN_BEDROCK") or full.get("AWS_ACCESS_KEY_ID")
+                or full.get("AWS_WEB_IDENTITY_TOKEN_FILE")):
             return None
         profile = full.get("AWS_PROFILE") or full.get("AWS_DEFAULT_PROFILE") or "default"
         path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
@@ -156,7 +157,8 @@ def login_command(env: Mapping[str, str]) -> list[str] | None:
     full = {**os.environ, **env}
     route = provider_from_env(full)
     if route == "bedrock":
-        if full.get("AWS_ACCESS_KEY_ID") or full.get("AWS_WEB_IDENTITY_TOKEN_FILE"):
+        if (full.get("AWS_BEARER_TOKEN_BEDROCK") or full.get("AWS_ACCESS_KEY_ID")
+                or full.get("AWS_WEB_IDENTITY_TOKEN_FILE")):
             return None
         profile = full.get("AWS_PROFILE") or full.get("AWS_DEFAULT_PROFILE") or "default"
         path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
