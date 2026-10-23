@@ -881,13 +881,17 @@ export class DaemonClient {
   }
 
   /* What a provider's CLI still needs before brindle can launch it. */
-  async preflight(provider: string, repo?: string | null) {
-    const result = await this.get<PreflightDTO | PreflightItemDTO[]>(`/providers/${encodeURIComponent(provider)}/preflight`, { repo });
+  async preflight(provider: string, repo?: string | null, context?: Record<string, unknown> | null) {
+    const path = `/providers/${encodeURIComponent(provider)}/preflight`;
+    const result = context?.repo && context?.profile
+      ? await this.post<PreflightItemDTO[]>(path, context)
+      : await this.get<PreflightDTO | PreflightItemDTO[]>(path, { repo });
     return preflightResult(result, provider);
   }
 
   /* A trust or consent item settled by the person here. */
   async settlePreflight(provider: string, item: string, action?: PreflightItemDTO["action"], repo?: string | null) {
+    if (action?.name === "check") return this.preflight(provider, repo, action.body);
     if (action) {
       await this.request(this.url(action.path.replace(/^\/v1(?=\/)/, "")), {
         method: action.method,
@@ -1052,8 +1056,8 @@ export class DaemonClient {
      claude's claudeai / console / sso, codex's device). `restart`: a login
      still running is ended and the CLI started afresh, rather than its
      terminal handed back (Try again). */
-  providerLogin(provider: string, method?: string, restart = false) {
-    return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
+  providerLogin(provider: string, method?: string, restart = false, context?: Record<string, unknown> | null) {
+    return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...context, ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
   }
 
   /* Each provider CLI as brindle detects it: where it is, its version, whether it's signed in. */

@@ -2081,6 +2081,7 @@ name: developer-bedrock
 provider: claude
 model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # a Bedrock model id your account can use
 env.CLAUDE_CODE_USE_BEDROCK: 1
+env.AWS_PROFILE: company
 env.AWS_REGION: us-east-1
 ---
 ```
@@ -2107,9 +2108,68 @@ list it under `routing` in `.brindle/config.json`.
   `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
   export `GEMINI_API_KEY` in your shell, or put it in a profile in your user
   profiles folder; never in a profile under `.brindle/agents/`, which is committed. For a
-  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. As of
-  1.3.4, `agy` ignores Vertex AI credentials, so use a Gemini API key or gateway.
+  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL.
+  The Vertex login path in `agy` has not been validated by brindle; see the
+  OpenCode alternative below for Gemini on Vertex.
   The full setup is in [Google Antigravity](#google-antigravity) below.
+
+For Claude on an existing AWS SSO profile or Google ADC, launch preflight checks
+the configured cloud login and offers its cloud sign-in instead of Claude's
+personal sign-in. The action keeps the profile's project, region and credential
+location through both desktop sign-in and the completion check; repeated presses
+reuse its running terminal. Custom credential files offer a manual refresh check.
+Desktop and automatic sign-in share the credential source's lock, so a second
+flow leaves an existing cloud login running.
+`brindle doctor` groups
+profiles by cloud identity and reports credential availability, expiry when
+known, and refresh instructions. AWS account and role are selected by the named
+SSO profile. To isolate Google ADC, set `env.CLOUDSDK_CONFIG` to that identity's
+gcloud directory alongside the Vertex project and region.
+
+`GOOGLE_APPLICATION_CREDENTIALS` selects a specific credential file. A browser
+ADC login writes the default location, so brindle asks you to refresh the selected
+file instead of opening a login that would update a different identity. Existing
+federated credentials and non-SSO AWS credential chains keep their existing
+handling; the new profile checks do not validate their expiry. Expired Claude
+cloud credentials hold session delivery until refreshed, including when a
+Claude worker belongs to a Codex or other provider's supervisor.
+
+Company-cloud support is being completed in stages (#265):
+
+| Model route | Available path | Remaining brindle integration |
+| --- | --- | --- |
+| Claude on Bedrock | Claude Code, AWS SSO profile and `AWS_REGION` | Live cloud validation |
+| Claude on Vertex | Claude Code, ADC, `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` | Live cloud validation |
+| Gemini on Vertex | OpenCode with `google-vertex/<model-id>`, `GOOGLE_CLOUD_PROJECT`, `VERTEX_LOCATION`, and ADC | Profile-aware login dispatch, doctor expiry and pause/recovery for OpenCode |
+| Azure OpenAI | OpenCode with `azure/<model-id>` and its Microsoft Entra ID (Azure CLI) connection | Azure identity/resource-aware login checks and OpenCode pause/recovery |
+
+OpenCode's [provider documentation](https://opencode.ai/docs/providers/) describes
+both alternatives. For Azure, its Entra connection is a required setup step;
+an Azure endpoint alone does not select CLI authentication. This is Azure OpenAI,
+separate from Claude on Foundry. The installed CLI inspected for these options
+was OpenCode 1.19.3. brindle's native client can send bearer-authenticated OpenAI
+chat requests, but it does not yet acquire or renew Google/Azure CLI tokens.
+Those routes need token lifecycle support before native cloud login can be claimed.
+
+Focused fake-based checks for the implemented Claude slice:
+
+```sh
+uv run pytest tests/test_daemon_actions.py -q -k 'cloud_profile_login or login_and_secret or a_sign_in or preflight'
+uv run pytest tests/test_cloud_login.py -q
+uv run pytest tests/test_login_pause.py -q
+uv run pytest tests/test_doctor_signin.py -q
+uv run pytest tests/test_auth_failure_handling.py -q
+npm --prefix app test -- --run src/screens/New/NewSession.test.tsx
+npm --prefix app test -- --run src/components/ProviderSignIn.test.tsx
+npm --prefix app run typecheck
+```
+
+These exercise real profile/environment resolution and HTTP dispatch with fake
+cloud commands and panes, plus existing live/paused credential-block recovery.
+No live AWS SSO, Google ADC, Azure login, model inference, or user cloud-config
+changes were used to validate this slice. Follow-on OpenCode acceptance must
+cover Gemini Vertex and Azure OpenAI identity propagation, expiry diagnostics,
+duplicate login actions, and held-message delivery after credential recovery.
 
 If your org runs brindle for a team, its admins can set a route for everyone in
 the org's Routing settings on the brindle dashboard; an enforced org route replaces

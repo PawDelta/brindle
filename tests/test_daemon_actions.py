@@ -597,6 +597,120 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert len(typed) == 2
 
 
+@pytest.mark.parametrize("route", ["bedrock", "vertex"])
+def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypatch, route):
+    import hashlib
+
+    from brindle import cloud_login, company_login, doctor, tmux
+
+    _provider_setup(tmp_path, monkeypatch)
+    cloud = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "company dev", "AWS_REGION": "us-east-1"}
+    aws = tmp_path / "aws-config"
+    aws.write_text("[profile company dev]\nsso_session = company\n")
+    cloud["AWS_CONFIG_FILE"] = str(aws)
+    if route == "vertex":
+        cloud = {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "company-project",
+                 "CLOUD_ML_REGION": "us-east5", "CLOUDSDK_CONFIG": str(tmp_path / "gcloud")}
+    directory = Path(world.repo_root) / ".brindle" / "agents"
+    directory.mkdir(parents=True, exist_ok=True)
+    # Stored company env must resolve just as profile-local env does.
+    local = cloud if route == "vertex" else {}
+    monkeypatch.setattr(company_login, "stored_env", lambda: {} if local else cloud)
+    (directory / "developer.md").write_text("---\nname: developer\nprovider: claude\n" +
+        "".join(f"env.{k}: {v}\n" for k, v in local.items()) + "---\nWork.\n")
+    real_status = cloud_login.status
+    answer = SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant: invalid_rapt")
+    monkeypatch.setattr(cloud_login, "status", lambda *a, **kw: real_status(
+        *a, **kw, home=tmp_path, run=lambda *a, **kw: answer, expiry=lambda _: 3600.0))
+    worker, ws = db.get_agent("wk"), db.get_workspace("w-1")
+    identity = agents.launch_identity(worker, ws)[0]
+    assert all(identity.get(k) == v for k, v in cloud.items())
+    items = agents.launch_blockers(worker, ws)
+    item = next(i for i in items if i.kind == "signin")
+    assert item.action.body["profile"] == "developer"
+    code, pending = _send("POST", "/v1/providers/claude/preflight", item.action.body)
+    assert code == 200 and any(i["id"] == "claude.cloud" for i in pending)
+    windows = {}
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        windows.setdefault(tag[1], (name, argv, env)) and f"%{len(windows)}")
+    monkeypatch.setattr(tmux, "tagged_panes", lambda *a: [
+        (f"%{i + 1}", name, True, tid) for i, (tid, (name, _, _)) in enumerate(windows.items())])
+    code, opened = _send("POST", item.action.path, item.action.body)
+    assert code == 200, opened
+    _, argv, env = windows[opened["terminal"]]
+    assert all(env.get(k) == v for k, v in cloud.items())
+    commands = []
+    login_key = cloud_login.login_key(identity)
+
+    def cloud_command(command, **kwargs):
+        assert cloud_login.login_key(env) == login_key
+        assert cloud_login.signing_in(env=env)
+        assert cloud_login.sign_in(env=env, now=1e12, last_input=1e12) == "waiting"
+        assert cloud_login.interactive_sign_in(env=env, run=cloud_command) == 1
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    # Execute the dispatched module with a fake cloud CLI, without a subprocess.
+    import importlib.util
+    import runpy
+    import subprocess
+
+    with monkeypatch.context() as launched:
+        launched.setenv("BRINDLE_HOME", str(tmp_path / "old-tmux-home"))
+        for name, value in env.items():
+            launched.setenv(name, value)
+        launched.setattr(subprocess, "run", cloud_command)
+        with pytest.raises(SystemExit) as exited:
+            runpy.run_path(importlib.util.find_spec(argv[2]).origin, run_name="__main__")
+        assert exited.value.code == 0
+    assert commands == ([["aws", "sso", "login", "--profile", "company dev"]] if route == "bedrock"
+                        else [["gcloud", "auth", "application-default", "login", "--project", "company-project"]])
+    assert not cloud_login.signing_in(env=env)
+    code, again = _send("POST", item.action.path, item.action.body)
+    assert code == 200 and not again["started"] and again["terminal"] == opened["terminal"]
+    assert len(windows) == 1
+    shared = {**cloud, ("AWS_REGION" if route == "bedrock" else "CLOUD_ML_REGION"): "other-region"}
+    (directory / "shared.md").write_text("---\nname: shared\nprovider: claude\n" +
+        "".join(f"env.{k}: {v}\n" for k, v in shared.items()) + "---\nWork.\n")
+    code, same_login = _send("POST", item.action.path, {**item.action.body, "profile": "shared"})
+    assert code == 200 and same_login["terminal"] == opened["terminal"] and len(windows) == 1
+    checks = doctor.cloud_checks(world.repo_root)
+    assert checks and all(c.level != doctor.OK for c in checks)
+    assert _send("POST", item.action.path, {"repo": world.repo_root})[0] == 400
+    assert _send("POST", "/v1/providers/unknown/preflight", item.action.body)[0] == 400
+    assert _send("POST", item.action.path, {**item.action.body, "method": "console"})[0] == 400
+    # A second profile must not inherit the in-flight login's selected identity.
+    other = {**cloud, ("AWS_PROFILE" if route == "bedrock" else "CLOUDSDK_CONFIG"): "other"}
+    aws.write_text(aws.read_text() + "[profile other]\nsso_session = other\n")
+    (directory / "other.md").write_text("---\nname: other\nprovider: claude\n" +
+        "".join(f"env.{k}: {v}\n" for k, v in other.items()) + "---\nWork.\n")
+    code, separate = _send("POST", item.action.path, {**item.action.body, "profile": "other"})
+    assert code == 200 and separate["terminal"] != opened["terminal"] and len(windows) == 2
+    # The original identity becomes usable without changing profile or worker config.
+    answer.returncode, answer.stdout = 0, "FAKE_TOKEN"
+    cache = tmp_path / ".aws" / "sso" / "cache"
+    cache.mkdir(parents=True)
+    (cache / (hashlib.sha1(b"company").hexdigest() + ".json")).write_text(
+        json.dumps({"accessToken": "FAKE_TOKEN", "expiresAt": "2099-01-01T00:00:00Z"}))
+    assert not agents.launch_blockers(worker, ws)
+    code, ready = _send("POST", "/v1/providers/claude/preflight", item.action.body)
+    assert code == 200 and not ready
+    assert any(c.level == doctor.OK for c in doctor.cloud_checks(world.repo_root))
+    assert "FAKE_TOKEN" not in doctor.render(doctor.cloud_checks(world.repo_root))
+    if route == "vertex":
+        selected = {**cloud, "GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "selected-adc.json")}
+        (directory / "developer.md").write_text("---\nname: developer\nprovider: claude\n" +
+            "".join(f"env.{k}: {v}\n" for k, v in selected.items()) + "---\nWork.\n")
+        answer.returncode = 1
+        manual = next(i for i in agents.launch_blockers(worker, ws) if i.kind == "signin")
+        code, pending = _send(manual.action.method, manual.action.path, manual.action.body)
+        assert code == 200 and pending and len(windows) == 2
+        assert _send("POST", item.action.path, manual.action.body)[0] == 400
+        answer.returncode = 0
+        assert _send(manual.action.method, manual.action.path, manual.action.body) == (200, [])
+
+
 def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, tmp_path, monkeypatch):
     from brindle import tmux
 

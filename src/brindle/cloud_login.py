@@ -44,6 +44,13 @@ PRESENT_WITHIN = 300.0
 _FLAGS = {"bedrock": "CLAUDE_CODE_USE_BEDROCK", "vertex": "CLAUDE_CODE_USE_VERTEX",
           "foundry": "CLAUDE_CODE_USE_FOUNDRY"}
 
+# Non-secret route selectors that must agree between preflight, login and a pane.
+IDENTITY_ENV = frozenset((*_FLAGS.values(), "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_REGION",
+    "AWS_DEFAULT_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "AZURE_CONFIG_DIR", "AZURE_TENANT_ID",
+    "AZURE_FEDERATED_TOKEN_FILE", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL"))
+
 
 @dataclass(frozen=True)
 class LoginStatus:
@@ -63,6 +70,81 @@ def provider_from_env(env: Mapping[str, str] | None = None) -> str | None:
         if str(env.get(flag, "")).strip().lower() in ("1", "true", "yes", "on"):
             return provider
     return None
+
+
+def configured_status(env: Mapping[str, str]) -> LoginStatus | None:
+    """Check supported user cloud logins, leaving SDK/federation auth to its owner.
+
+    A Bedrock flag alone does not imply SSO: environment credentials, web
+    identity and credential_process profiles must keep their existing path.
+    """
+    full = {**os.environ, **env}
+    route = provider_from_env(full)
+    if route == "bedrock":
+        if full.get("AWS_ACCESS_KEY_ID") or full.get("AWS_WEB_IDENTITY_TOKEN_FILE"):
+            return None
+        profile = full.get("AWS_PROFILE") or full.get("AWS_DEFAULT_PROFILE") or "default"
+        path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
+        if _aws_token_key(profile, path) is None:
+            return None
+    elif route != "vertex" or full.get("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"):
+        return None
+    return status(route, env=full)
+
+
+def login_command(env: Mapping[str, str]) -> list[str] | None:
+    """An interactive login for this identity; None when another system owns it.
+
+    ADC login writes the well-known file, never GOOGLE_APPLICATION_CREDENTIALS.
+    Do not send somebody through a browser flow that repairs a different login.
+    """
+    full = {**os.environ, **env}
+    route = provider_from_env(full)
+    if route == "bedrock":
+        if full.get("AWS_ACCESS_KEY_ID") or full.get("AWS_WEB_IDENTITY_TOKEN_FILE"):
+            return None
+        profile = full.get("AWS_PROFILE") or full.get("AWS_DEFAULT_PROFILE") or "default"
+        path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
+        if _aws_token_key(profile, path):
+            return ["aws", "sso", "login", "--profile", profile]
+    if route == "vertex" and not full.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        project = full.get("ANTHROPIC_VERTEX_PROJECT_ID")
+        return ["gcloud", "auth", "application-default", "login", *(["--project", project] if project else [])]
+    return None
+
+
+def action_key(env: Mapping[str, str]) -> str:
+    """One terminal per credential source, even across profiles and regions."""
+    return hashlib.sha256((login_key(env) or "").encode()).hexdigest()[:16]
+
+
+def interactive_command() -> list[str]:
+    """Keep the terminal's cloud CLI under the same lock as automatic renewal."""
+    return [sys.executable, "-m", "brindle.cloud_login"]
+
+
+def interactive_sign_in(*, env: Mapping[str, str] | None = None, run=None) -> int:
+    """Run a user-requested cloud login, inheriting the terminal's input/output.
+
+    The child also holds the lock, so losing the wrapper cannot permit another
+    login while the cloud CLI still runs. An existing login is left alone.
+    """
+    full = {**os.environ, **(env or {})}
+    command = login_command(full)
+    lg = _login(None, full, None)
+    if command is None or lg is None:
+        print("Refresh this identity's configured credentials directly.")
+        return 1
+    lg.lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lg.lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not _locked(fd):
+            print("A cloud sign-in is already running. Finish it in its existing browser or terminal.")
+            return 1
+        lg.write({"lapse": lg.fingerprint(), "opened_at": time.time(), "interactive": True})
+        return (run or subprocess.run)(command, env=full, pass_fds=(fd,)).returncode
+    finally:
+        os.close(fd)
 
 
 def _epoch(value) -> float | None:
@@ -120,7 +202,7 @@ def _aws_token_key(profile: str, config_path: Path) -> str | None:
 
 def _aws(env: Mapping[str, str], home: Path, now: float) -> LoginStatus:
     profile = env.get("AWS_PROFILE") or env.get("AWS_DEFAULT_PROFILE") or "default"
-    refresh = f"aws sso login --profile {profile}"
+    refresh = shlex.join(["aws", "sso", "login", "--profile", profile])
     config = Path(env.get("AWS_CONFIG_FILE") or home / ".aws" / "config")
     key = _aws_token_key(profile, config)
     if key is None:
@@ -206,7 +288,8 @@ def tokeninfo_expiry(token: str, timeout: float = CLI_TIMEOUT) -> float | None:
 
 
 def _google(run, env, now: float, expiry) -> LoginStatus:
-    refresh = "gcloud auth application-default login"
+    full = {**os.environ, **(env or {})}
+    refresh = "" if full.get("GOOGLE_APPLICATION_CREDENTIALS") else "gcloud auth application-default login"
     try:
         proc = run(["gcloud", "auth", "application-default", "print-access-token"],
                    capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
@@ -219,7 +302,7 @@ def _google(run, env, now: float, expiry) -> LoginStatus:
         left = expiry(token)
         if left is None:
             return LoginStatus(True, None, refresh, "logged in; token expiry unknown")
-        return LoginStatus(True, now + left, refresh, "logged in")
+        return _from_expiry(now + left, refresh, now, "")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
         return LoginStatus(False, None, refresh, "login expired (invalid_grant)", expired=True)
     return LoginStatus(False, None, refresh, "gcloud could not produce an access token")
@@ -477,6 +560,8 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
     try:
         last = lg.read()
         running = not _locked(fd)
+        if running and last.get("interactive"):
+            return "waiting"
         this_lapse = last.get("lapse") == lg.fingerprint() and "opened_at" in last
         ended = False
         if this_lapse:
@@ -498,6 +583,8 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
             return "deferred"
         # Open one: this lapse has no tab yet, or its tab died and they typed since.
         s = still_lapsed()
+        if s.expired and lg.provider == "vertex" and lg.env.get("GOOGLE_APPLICATION_CREDENTIALS"):
+            return "manual"
         if not s.expired or not s.refresh_cmd:
             return "no lapse"
         if running:     # a dead tab, or one left from an earlier lapse: end it, take its lock
@@ -533,3 +620,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
         return "opened"
     finally:
         os.close(fd)
+
+
+if __name__ == "__main__":
+    raise SystemExit(interactive_sign_in())

@@ -927,6 +927,7 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     blanked so the launcher's own copy doesn't count), whether the org's own
     key signs it in (no login to check), and the denied names. ``agent`` need
     not be recorded yet: a launch about to happen is checked the same way."""
+    from brindle import cloud_login
     from brindle.pro import managed_models
 
     if m is _UNREAD:
@@ -940,7 +941,8 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     org_key = managed_models.has_org_key(m, agent.provider)
     prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
     eff_env = _window_environment(agent, ws, m)[0]
-    probe_env = {**launch_env, **{k: eff_env[k] for k in prov_creds if k in eff_env}}
+    names = prov_creds | (cloud_login.IDENTITY_ENV if agent.provider == "claude" else frozenset())
+    probe_env = {**launch_env, **{k: eff_env[k] for k in names if k in eff_env}}
     return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
 
 
@@ -969,7 +971,8 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
     session = credentials_session(agent)
     if session:
         launch["session"] = session
-    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch)
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch,
+                           check_cloud=not keys_only)
 
 
 def credentials_session(agent: Agent) -> str | None:

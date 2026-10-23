@@ -102,6 +102,25 @@ def test_a_refreshable_login_is_renewed_without_a_notice(db, world, expires_in, 
     assert [to for to, _ in world.sent] == (["w1"] if worker_screen is EXPIRED else [])
 
 
+def test_cloud_worker_under_codex_root_holds_and_releases_mail(db, world, repo, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX")
+    directory = repo / ".brindle" / "agents"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "developer.md").write_text(
+        "---\nname: developer\nprovider: claude\nenv.CLAUDE_CODE_USE_VERTEX: 1\n"
+        "env.ANTHROPIC_VERTEX_PROJECT_ID: company\nenv.CLOUD_ML_REGION: us-east5\n---\nWork.\n")
+    db.update_agent("boss", provider="codex")
+    world.login_ok, world.screens["@1"] = False, EXPIRED
+    sweep(db, world, T0)
+    assert login_pause.paused(db, "boss")
+    world.signins.pop().exit()
+    assert agents._send_message(db, db.get_agent("w1"), "next task", "boss") == "queued"
+    world.login_ok = True
+    sweep(db, world, T0 + 61)
+    assert not login_pause.paused(db, "boss")
+    assert db.pending_count("w1") == 0 and world.pasted == ["@1"]
+
+
 @pytest.mark.parametrize("active", [False, True])
 def test_a_login_only_the_person_can_renew_pauses_and_notifies_once(db, world, active, monkeypatch):
     world.active, world.login_ok, world.screens["@1"] = active, False, EXPIRED

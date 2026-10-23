@@ -129,7 +129,8 @@ def turned_off(provider: str) -> Item | None:
 
 
 def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | None = None,
-          signed_in: bool = False, profile=None, launch: dict[str, str] | None = None) -> list[Item]:
+          signed_in: bool = False, profile=None, launch: dict[str, str] | None = None,
+          check_cloud: bool = True) -> list[Item]:
     """What would stop a session on ``provider`` in ``repo_root`` before its
     first turn; empty when nothing would. ``env``: the environment the CLI
     signs in with (agents.launch_identity; a blank value is a key it won't
@@ -137,7 +138,7 @@ def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | 
     ``profile``: for native, the one profile to check (else all of them).
     ``launch``: the ``repo`` and ``profile`` that identity is for, which a
     consent's action carries so recording it resolves the same identity."""
-    from brindle import doctor, providers
+    from brindle import cloud_login, doctor, providers
 
     if provider not in PROVIDERS:
         raise ValueError(f"provider must be one of {', '.join(PROVIDERS)}")
@@ -156,7 +157,16 @@ def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | 
         name, how = doctor.CLI_INSTALL[provider]
         return items + [Item("setup", f"{provider}.install", provider, f"Install {name}",
                              f"{name} (`{exe}`) isn't on PATH. Install: {how}")]
-    if provider == "antigravity" and providers.agy_uses_gemini_key() and not _key_value("GEMINI_API_KEY", env):
+    cloud = (cloud_login.configured_status(env or {})
+             if provider == "claude" and check_cloud and not providers.claude_org_managed() else None)
+    if cloud is not None and not cloud.ok:
+        command = cloud_login.login_command(env or {})
+        action = (Action("login", "POST", f"/v1/providers/{provider}/login", launch or {}) if command else
+                  Action("check", "POST", f"/v1/providers/{provider}/preflight", launch or {}))
+        items.append(Item("signin", f"{provider}.cloud", provider, "Sign in to your cloud provider",
+                          f"{cloud.note}; {cloud.refresh_cmd}" if command else
+                          "Refresh the configured cloud credential file, then check again.", action))
+    elif provider == "antigravity" and providers.agy_uses_gemini_key() and not _key_value("GEMINI_API_KEY", env):
         items.append(Item("key", "key.GEMINI_API_KEY", provider, "Add your Gemini API key",
                           "Antigravity is set to the Gemini API, which needs GEMINI_API_KEY",
                           _set_key("GEMINI_API_KEY")))

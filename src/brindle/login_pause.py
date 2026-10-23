@@ -114,6 +114,8 @@ def _logins(db: DB, root: Agent, members: list[Agent]) -> list[tuple[Agent, dict
     """One agent (and its env) per distinct cloud login in the session."""
     seen, out = set(), []
     for a in [root, *(m for m in members if m.id != root.id)]:
+        if a.provider != "claude":
+            continue
         env = _env(db, a)
         key = cloud_login.login_key({**os.environ, **env}) if _on_cloud(env) else None
         if key is not None and key not in seen:
@@ -150,7 +152,7 @@ def sweep(db: DB, now: float | None = None, panes=None) -> list[str]:
     last_input = _last_input()
     done: list[str] = []
     for root in db.list_agents():
-        if (root.parent_id or root.provider != "claude"
+        if (root.parent_id
                 or root.status in ("paused", "done") or root.dismissed_at is not None
                 or not agents.runs_process(root)):
             continue
@@ -226,6 +228,8 @@ def _ids(text: str | None) -> list[str]:
 
 
 def _todo(how: str, cmd: str) -> str:
+    if not cmd:
+        return "refresh the configured cloud credential file"
     if how == "manual":
         return f"run `{cmd}`"
     return f"sign in with the browser tab brindle opens (or run `{cmd}`)"
@@ -260,7 +264,7 @@ def _pause(db: DB, root: Agent, culprit: Agent, s: cloud_login.LoginStatus, env:
                        noticed="+".join(told) or None, next_check=now + FIRST_DELAY,
                        delay=FIRST_DELAY, interrupted=json.dumps(escaped),
                        account=cloud_login.account(env=env))
-    return [f"paused {root.id}: its cloud login expired and needs `{s.refresh_cmd}` "
+    return [f"paused {root.id}: its cloud login expired; {todo} "
             f"(sign-in {how}; told by {'+'.join(told) or 'nothing'})"]
 
 

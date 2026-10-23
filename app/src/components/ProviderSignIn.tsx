@@ -28,6 +28,8 @@ import { alert, button, field, primary, quiet } from "./ui";
 
 export interface ProviderSignInProps {
   provider: string;
+  /* The launch whose cloud account is being refreshed. */
+  loginContext?: Record<string, unknown> | null;
   /* Whether the provider reads as signed in now (the Profiles screen asks GET /routing again). */
   check(): Promise<boolean>;
   /* The sign-in ended (either way): the screen reads its providers again. */
@@ -85,7 +87,7 @@ export const readLink = (text: string): string | null => text.match(/https?:\/\/
    full-window step. `onDone` hears whether the provider reads as signed in.
    `pane`: where the CLI's pane is, for "Show details" (with `views`, the
    app's pty views, once they can show it). */
-export function useProviderSignIn({ provider, check, onDone, onActive, details: offerDetails = true }: Pick<ProviderSignInProps, "provider" | "check" | "onActive" | "details"> & { onDone?(ok: boolean): void }) {
+export function useProviderSignIn({ provider, loginContext, check, onDone, onActive, details: offerDetails = true }: Pick<ProviderSignInProps, "provider" | "loginContext" | "check" | "onActive" | "details"> & { onDone?(ok: boolean): void }) {
   const client = useDaemon();
   const name = providerLabel(provider);
   const all = usePtyViews();
@@ -158,7 +160,7 @@ export function useProviderSignIn({ provider, check, onDone, onActive, details: 
     pending.current = null;
     let started: ActionTerminal;
     try {
-      started = await client.providerLogin(provider, undefined, restart);
+      started = await client.providerLogin(provider, undefined, restart, loginContext);
     } catch (e) {
       if (n === attempt.current) setPhase({ kind: "failed", terminal: null, message: message(e) });
       return;
@@ -166,7 +168,7 @@ export function useProviderSignIn({ provider, check, onDone, onActive, details: 
     if (n !== attempt.current) return;
     setPhase({ kind: "waiting", terminal: started.terminal });
     setAction({ terminal: started.terminal, at: { server: started.server ?? null, target: started.target } });
-  }, [client, provider]);
+  }, [client, provider, loginContext]);
   useEffect(
     () => () => {
       attempt.current++;
@@ -264,8 +266,8 @@ function SignInDetails({ at, views, fitReader }: { at: PtyViewTarget; views: Pty
   return <PtyTerminal at={at} open={views.open} copy={views.copy} paste={views.paste} onSize={(cols, rows) => fitReader({ cols, rows })} />;
 }
 
-export function ProviderSignIn({ provider, check, onDone, autoStart = false, small = false, onActive, details: offerDetails = true }: ProviderSignInProps) {
-  const { name, phase, link, pane, views, start, answer: send, cancel, fitReader } = useProviderSignIn({ provider, check, onDone, onActive, details: offerDetails });
+export function ProviderSignIn({ provider, loginContext, check, onDone, autoStart = false, small = false, onActive, details: offerDetails = true }: ProviderSignInProps) {
+  const { name, phase, link, pane, views, start, answer: send, cancel, fitReader } = useProviderSignIn({ provider, loginContext, check, onDone, onActive, details: offerDetails });
   const [details, setDetails] = useState(false);
   const [code, setCode] = useState("");
   const begin = () => {
