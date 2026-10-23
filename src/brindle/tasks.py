@@ -356,8 +356,16 @@ def _resolve_dependency(
     workspace cleanup). Branch names use local-name precedence (checking
     caller_ws.repo_root for either a task or workspace first), then search
     the attached repos of the session, raising AgentError on ambiguity.
-    Exclude the depending task itself: enqueueing a task with the same branch
-    name as its upstream must not create a new local dependency target."""
+    Internal ``task:<id>`` references preserve a requeued task's upstream even
+    before that upstream has a worker. Exclude the depending task itself:
+    enqueueing a task with the same branch name as its upstream must not
+    create a new local dependency target."""
+    if dep.startswith("task:"):
+        task = db.get_task(dep.removeprefix("task:"))
+        if task is None:
+            raise agents.AgentError(f"dependency {dep} no longer exists")
+        agent = db.get_agent(task.agent_id) if task.agent_id else None
+        return task.repo_root, task, db.get_workspace(agent.workspace_id) if agent else None
     agent = db.get_agent(dep)
     agent_tasks = [t for t in db.list_tasks(caller_ws.repo_root) if t.agent_id == dep]
     if not agent_tasks:
@@ -456,11 +464,12 @@ def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:
 
 
 def _refers_to(dep: str, t: Task, from_repo: str | None = None) -> bool:
-    """Whether a ``depends_on`` entry names task ``t``: its worker's agent id
-    (once it has one), from any repo, or its declared branch, only from the
-    same repo (``from_repo``: the depending task's; two repos may have a
-    branch of the same name)."""
-    if t.agent_id is not None and dep == t.agent_id:
+    """Whether a dependency names ``t`` by pinned task ID, worker ID or branch.
+
+    Task and worker IDs match from any repo. Branch names match only from
+    ``from_repo`` (the depending task's repo), since two repos can have a
+    branch with the same name."""
+    if dep == f"task:{t.id}" or (t.agent_id is not None and dep == t.agent_id):
         return True
     return dep == t.branch and (from_repo is None or from_repo == t.repo_root)
 
@@ -554,7 +563,8 @@ def set_dependencies(db: DB, task_id: str, depends_on: list[str], expect: list[s
 def known_dependency(db: DB, repo_root: str, dep: str) -> bool:
     """Whether ``dep`` names an agent or a branch brindle knows in
     ``repo_root``: a typo would leave a task waiting for good."""
-    return (db.get_agent(dep) is not None
+    return ((dep.startswith("task:") and db.get_task(dep.removeprefix("task:")) is not None)
+            or db.get_agent(dep) is not None
             or any(w.branch == dep for w in db.find_workspaces(repo_root))
             or any(t.branch == dep for t in db.list_tasks(repo_root)))
 
@@ -616,7 +626,8 @@ def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str]) -> str | 
     merge commit that ``caller_ws``'s branch lacks, as when the holder merged
     into another session's branch; None to start from the caller's branch."""
     for dep in depends_on:
-        agent = db.get_agent(dep)
+        task = db.get_task(dep.removeprefix("task:")) if dep.startswith("task:") else None
+        agent = db.get_agent(task.agent_id) if task and task.agent_id else db.get_agent(dep)
         dep_ws = db.get_workspace(agent.workspace_id) if agent else None
         if dep_ws is None or dep_ws.repo_root != caller_ws.repo_root:
             continue
@@ -693,15 +704,18 @@ def on_merged(db: DB, ws: Workspace) -> None:
         if not caller_ws:
             continue
         session_roots = _session_repos(db, caller_ws, t.caller_id)
-        if ws.repo_root not in session_roots:
-            continue
         deps = _loads(t.depends_on)
         matches = False
         for d in deps:
             if worker_id is not None and d == worker_id:
                 matches = True
                 break
-            if d == ws.branch:
+            if d.startswith("task:"):
+                upstream = db.get_task(d.removeprefix("task:"))
+                if upstream and worker_id is not None and upstream.agent_id == worker_id:
+                    matches = True
+                    break
+            if d == ws.branch and ws.repo_root in session_roots:
                 try:
                     target_repo, _, _ = _resolve_dependency(
                         db, caller_ws, d, session_roots, dependent_task_id=t.id)
@@ -785,15 +799,18 @@ def on_removed_unmerged(db: DB, ws: Workspace) -> None:
         if not caller_ws:
             continue
         session_roots = _session_repos(db, caller_ws, t.caller_id)
-        if ws.repo_root not in session_roots:
-            continue
         deps = _loads(t.depends_on)
         matches = False
         for d in deps:
             if worker_id is not None and d == worker_id:
                 matches = True
                 break
-            if d == ws.branch:
+            if d.startswith("task:"):
+                upstream = db.get_task(d.removeprefix("task:"))
+                if upstream and worker_id is not None and upstream.agent_id == worker_id:
+                    matches = True
+                    break
+            if d == ws.branch and ws.repo_root in session_roots:
                 try:
                     target_repo, _, _ = _resolve_dependency(
                         db, caller_ws, d, session_roots, dependent_task_id=t.id)
@@ -821,7 +838,16 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     ws = db.get_workspace(old.caller_ws_id) or caller_ws
     deps = _loads(old.depends_on) if depends_on is None else list(depends_on)
     try:
-        unmet = unmet_dependencies(db, ws, deps, caller_id=caller.id if caller else None)
+        caller_id = caller.id if caller else None
+        roots = _session_repos(db, ws, caller_id)
+        # Pin a same-name upstream before copying the task: excluding only the
+        # old row here would let it shadow the upstream again in the new queue.
+        for i, dep in enumerate(deps):
+            if dep == old.branch:
+                _, upstream, _ = _resolve_dependency(db, ws, dep, roots, dependent_task_id=old.id)
+                if upstream is not None:
+                    deps[i] = f"task:{upstream.id}"
+        unmet = unmet_dependencies(db, ws, deps, caller_id=caller_id, dependent_task_id=old.id)
     except agents.AgentError as e:
         raise ValueError(f"{e}. Pass depends_on to replace the dependencies (an empty list for none).") from e
     new = enqueue(
