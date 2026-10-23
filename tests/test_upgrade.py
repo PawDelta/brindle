@@ -1,15 +1,53 @@
 import asyncio
 import shutil
+import sqlite3
 import subprocess
 import sys
+from io import StringIO
 from types import SimpleNamespace
 
+import anyio
 import pytest
 from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.stdio import stdio_server
 
 import brindle
 from brindle import agents, mcp_server, profiles, upgrade, watch
+
+
+@pytest.mark.parametrize("exit_kind", ["broken_pipe", "eof"])
+def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, exit_kind):
+    from brindle.db import Agent, Workspace
+
+    db.add_workspace(Workspace("ws", "/repo", "root", "root", "main", None, "/repo", None, "", 0))
+    db.add_agent(Agent("boss", "ws", "supervisor", "claude", None, "interactive", "processing",
+                       "@0", None, 0, headless=1))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "pulls_messages", lambda *a: True)
+    stopped = []
+    monkeypatch.setattr(mcp_server, "start_azure_refresher",
+                        lambda: SimpleNamespace(stop=lambda: stopped.append(True)))
+    notification_db = mcp_server.DB()
+    monkeypatch.setattr(mcp_server, "DB", lambda: notification_db)
+
+    def disconnect():
+        raise BrokenPipeError("client pipe closed")
+
+    if exit_kind == "broken_pipe":
+        monkeypatch.setattr(mcp_server.mcp, "run", disconnect)
+        with pytest.raises(BrokenPipeError):
+            mcp_server.main()
+    else:
+        monkeypatch.setattr("mcp.server.mcpserver.server.stdio_server", lambda: stdio_server(
+            stdin=anyio.wrap_file(StringIO()), stdout=anyio.wrap_file(StringIO())))
+        mcp_server.main()
+    assert stopped == [True]
+    assert db.pop_pending("boss") is not None
+    assert db.unread_count("boss") == 0
+    with pytest.raises(sqlite3.ProgrammingError):
+        notification_db.conn.execute("SELECT 1")
 
 
 def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_started_with(monkeypatch, tmp_path):
