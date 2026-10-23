@@ -345,7 +345,8 @@ def _session_repos(db: DB, caller_ws: Workspace, caller_id: str | None = None) -
 
 
 def _resolve_dependency(
-    db: DB, caller_ws: Workspace, dep: str, session_roots: list[str]
+    db: DB, caller_ws: Workspace, dep: str, session_roots: list[str],
+    *, dependent_task_id: str | None = None,
 ) -> tuple[str, Task | None, Workspace | None]:
     """Resolve ``dep`` (agent id or branch name) to its target repository,
     task, and workspace once.
@@ -354,7 +355,9 @@ def _resolve_dependency(
     regardless of whether the live agent row still exists (e.g. after
     workspace cleanup). Branch names use local-name precedence (checking
     caller_ws.repo_root for either a task or workspace first), then search
-    the attached repos of the session, raising AgentError on ambiguity."""
+    the attached repos of the session, raising AgentError on ambiguity.
+    Exclude the depending task itself: enqueueing a task with the same branch
+    name as its upstream must not create a new local dependency target."""
     agent = db.get_agent(dep)
     agent_tasks = [t for t in db.list_tasks(caller_ws.repo_root) if t.agent_id == dep]
     if not agent_tasks:
@@ -367,7 +370,8 @@ def _resolve_dependency(
 
     branch = dep
     # Check local repo first for either task or workspace (local-name precedence)
-    local_tasks = [t for t in db.list_tasks(caller_ws.repo_root) if t.branch == branch]
+    local_tasks = [t for t in db.list_tasks(caller_ws.repo_root)
+                   if t.branch == branch and t.id != dependent_task_id]
     local_workspaces = [w for w in db.find_workspaces(caller_ws.repo_root) if w.branch == branch]
     if local_tasks or local_workspaces:
         task = max(local_tasks, key=lambda t: t.created_at) if local_tasks else None
@@ -402,7 +406,8 @@ def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
 
 
 def unmet_dependencies(
-    db: DB, caller_ws: Workspace, depends_on: list[str] | None, caller_id: str | None = None
+    db: DB, caller_ws: Workspace, depends_on: list[str] | None, caller_id: str | None = None,
+    *, dependent_task_id: str | None = None,
 ) -> list[str]:
     """``depends_on`` entries not yet merged into ``caller_ws``'s branch.
 
@@ -422,7 +427,8 @@ def unmet_dependencies(
 
     resolved: dict[str, tuple[str, Task | None, Workspace | None]] = {}
     for dep in depends_on:
-        target_repo, task, ws = _resolve_dependency(db, caller_ws, dep, session_roots)
+        target_repo, task, ws = _resolve_dependency(
+            db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
         resolved[dep] = (target_repo, task, ws)
         if ws is not None:
             identity_lock.ensure_workspace(db, ws)
@@ -697,7 +703,8 @@ def on_merged(db: DB, ws: Workspace) -> None:
                 break
             if d == ws.branch:
                 try:
-                    target_repo, _, _ = _resolve_dependency(db, caller_ws, d, session_roots)
+                    target_repo, _, _ = _resolve_dependency(
+                        db, caller_ws, d, session_roots, dependent_task_id=t.id)
                     if target_repo == ws.repo_root:
                         matches = True
                         break
@@ -719,7 +726,8 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str) -> bool:
     if not caller_ws:
         return False
     try:
-        if unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id):
+        if unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
+                              dependent_task_id=t.id):
             return False
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
@@ -787,7 +795,8 @@ def on_removed_unmerged(db: DB, ws: Workspace) -> None:
                 break
             if d == ws.branch:
                 try:
-                    target_repo, _, _ = _resolve_dependency(db, caller_ws, d, session_roots)
+                    target_repo, _, _ = _resolve_dependency(
+                        db, caller_ws, d, session_roots, dependent_task_id=t.id)
                     if target_repo == ws.repo_root:
                         matches = True
                         break
