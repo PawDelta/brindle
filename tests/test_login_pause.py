@@ -102,16 +102,63 @@ def test_a_refreshable_login_is_renewed_without_a_notice(db, world, expires_in, 
     assert [to for to, _ in world.sent] == (["w1"] if worker_screen is EXPIRED else [])
 
 
-def test_cloud_worker_under_codex_root_holds_and_releases_mail(db, world, repo, monkeypatch):
+def test_two_expired_cloud_identities_stay_held_until_both_recover(db, world, repo, monkeypatch):
+    from brindle import opencode
+
+    directory = repo / ".brindle" / "agents"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("supervisor", "developer"):
+        (directory / f"{name}.md").write_text(
+            "---\nprovider: opencode\nmodel: google-vertex/gemini-2.5-pro\nauth: cloud\n"
+            f"env.GOOGLE_CLOUD_PROJECT: company\nenv.CLOUDSDK_CONFIG: {repo / name}\n---\nWork.\n")
+    for aid in ("boss", "w1"):
+        db.update_agent(aid, provider="opencode", mode="assign")
+    healthy = set()
+
+    def refresh(**kw):
+        ok = kw["env"]["CLOUDSDK_CONFIG"] in healthy
+        return LoginStatus(ok, T0 + 3600 if ok else None, CMD, "", expired=not ok)
+
+    monkeypatch.setattr(cloud_login, "refresh", refresh)
+    for aid in ("boss", "w1"):
+        opencode.handle_hook(db, aid, "opencode-stop", {"error": "invalid_grant: invalid_rapt"})
+    assert len(world.signins) == 1
+    world.signins.pop().exit()
+    assert agents._send_message(db, db.get_agent("w1"), "next task", "boss") == "queued"
+    healthy.add(str(repo / "supervisor"))
+    sweep(db, world, T0 + 61)
+    assert login_pause.paused(db, "boss") and db.pending_count("w1") == 1
+    for signin in world.signins:
+        signin.exit()
+    healthy.add(str(repo / "developer"))
+    sweep(db, world, T0 + 122)
+    assert not login_pause.paused(db, "boss") and db.pending_count("w1") == 0
+    assert "boss" in [to for to, _ in world.sent]
+
+
+@pytest.mark.parametrize("provider,model,extra,error", [
+    ("claude", "", "env.CLAUDE_CODE_USE_VERTEX: 1\nenv.ANTHROPIC_VERTEX_PROJECT_ID: company\n", ""),
+    ("opencode", "google-vertex/gemini-2.5-pro", "env.GOOGLE_CLOUD_PROJECT: company\n", "invalid_grant: invalid_rapt"),
+    ("opencode", "azure/gpt-4.1", "env.AZURE_RESOURCE_NAME: company\n", "AADSTS700082: refresh token expired"),
+])
+def test_cloud_worker_under_codex_root_holds_and_releases_mail(db, world, repo, monkeypatch, provider, model, extra, error):
     monkeypatch.delenv("CLAUDE_CODE_USE_VERTEX")
     directory = repo / ".brindle" / "agents"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "developer.md").write_text(
-        "---\nname: developer\nprovider: claude\nenv.CLAUDE_CODE_USE_VERTEX: 1\n"
-        "env.ANTHROPIC_VERTEX_PROJECT_ID: company\nenv.CLOUD_ML_REGION: us-east5\n---\nWork.\n")
+        f"---\nname: developer\nprovider: {provider}\nmodel: {model}\nauth: cloud\n{extra}"
+        f"env.AZURE_CONFIG_DIR: {repo / 'azure'}\nenv.CLOUD_ML_REGION: us-east5\n---\nWork.\n")
     db.update_agent("boss", provider="codex")
+    db.update_agent("w1", provider=provider)
     world.login_ok, world.screens["@1"] = False, EXPIRED
-    sweep(db, world, T0)
+    if provider == "opencode":
+        from brindle import opencode
+
+        opencode.handle_hook(db, "w1", "opencode-stop", {"session_id": "ses_cloud", "error": error})
+        opencode.handle_hook(db, "w1", "opencode-stop", {"session_id": "ses_cloud", "error": error})
+        assert len(world.signins) == 1
+    else:
+        sweep(db, world, T0)
     assert login_pause.paused(db, "boss")
     world.signins.pop().exit()
     assert agents._send_message(db, db.get_agent("w1"), "next task", "boss") == "queued"
@@ -119,6 +166,16 @@ def test_cloud_worker_under_codex_root_holds_and_releases_mail(db, world, repo, 
     sweep(db, world, T0 + 61)
     assert not login_pause.paused(db, "boss")
     assert db.pending_count("w1") == 0 and world.pasted == ["@1"]
+    if provider == "opencode":
+        opencode.handle_hook(db, "w1", "opencode-stop", {"error": error})
+        assert not login_pause.paused(db, "boss") and db.get_agent("w1").status == "idle"
+        # An invalid selected profile must never borrow the launcher's Claude identity.
+        (directory / "developer.md").write_text(
+            "---\nprovider: opencode\nmodel: unsupported/model\nauth: cloud\n---\nWork.\n")
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        world.login_ok, world.expires_in = False, 0
+        sweep(db, world, T0 + 300)
+        assert not login_pause.paused(db, "boss")
 
 
 @pytest.mark.parametrize("active", [False, True])

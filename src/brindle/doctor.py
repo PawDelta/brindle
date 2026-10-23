@@ -232,29 +232,32 @@ def cloud_checks(repo_root: str | None = None) -> list[Check]:
     """Cloud login diagnostics for the identities the configured profiles launch with."""
     from brindle import agents, cloud_login, company_login, providers
     from brindle.db import Agent, Workspace
-    from brindle.profiles import list_profiles
+    from brindle.profiles import ProfileError, list_profiles
 
-    if providers.claude_org_managed():
-        return []
+    claude_managed = providers.claude_org_managed()
     grouped: dict[str, tuple[dict, list[str]]] = {}
     ambient = {**os.environ, **company_login.stored_env()}
-    if cloud_login.provider_from_env(ambient):
+    if not claude_managed and cloud_login.provider_from_env(ambient):
         grouped[cloud_login.action_key(ambient)] = (ambient, ["default"])
     root = repo_root or os.getcwd()
     ws = Workspace("doctor", root, "doctor", "main", "HEAD", None, root, None, "", 0.0)
     managed = agents.managed(root)
+    out = []
     for profile in list_profiles(repo_root):
-        if profile.provider != "claude":
+        if profile.provider not in ("claude", "opencode") or (profile.provider == "claude" and claude_managed):
             continue
         agent = Agent("", ws.id, profile.name, profile.provider, None, "assign", "starting", "", None, 0.0)
-        resolved = agents.launch_identity(agent, ws, profile, managed)[0]
+        try:
+            resolved = agents.launch_identity(agent, ws, profile, managed)[0]
+        except ProfileError as e:
+            out.append(Check(FAIL, f"cloud login ({profile.name})", str(e)))
+            continue
         # Diagnostics use cloud selectors, never a repo's PATH or interpreter options.
         env = {k: v for k, v in resolved.items() if k in cloud_login.IDENTITY_ENV or k == "AWS_ACCESS_KEY_ID"}
         if not cloud_login.provider_from_env({**os.environ, **env}):
             continue
         key = cloud_login.action_key(env)
         grouped.setdefault(key, (env, []))[1].append(profile.name)
-    out = []
     for env, names in grouped.values():
         status = cloud_login.configured_status(env)
         if status is None:

@@ -1,6 +1,6 @@
 """Cloud login state, read without calling the model.
 
-``status(provider)`` says whether the Bedrock, Vertex or Foundry login is still
+``status(provider)`` says whether the Bedrock, Vertex or Azure login is still
 good, when it lapses, and the one command that renews it. It reads the CLIs'
 own credential files (AWS SSO cache, Azure CLI token cache) and, for Google,
 whose application-default credentials hold only a refresh token, asks gcloud
@@ -49,7 +49,54 @@ IDENTITY_ENV = frozenset((*_FLAGS.values(), "AWS_PROFILE", "AWS_DEFAULT_PROFILE"
     "AWS_DEFAULT_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE",
     "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "AZURE_CONFIG_DIR", "AZURE_TENANT_ID",
-    "AZURE_FEDERATED_TOKEN_FILE", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL"))
+    "AZURE_FEDERATED_TOKEN_FILE", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_BASE_URL",
+    "BRINDLE_CLOUD_ROUTE", "GOOGLE_CLOUD_PROJECT", "VERTEX_LOCATION", "AZURE_RESOURCE_NAME",
+    "AZURE_SUBSCRIPTION_ID", "XDG_DATA_HOME", "OPENCODE_CONFIG_DIR"))
+
+CLOUD_KEYS = ("GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY",
+              "AZURE_API_KEY", "AZURE_OPENAI_API_KEY", "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK")
+
+
+def profile_env(profile, env: Mapping[str, str]) -> dict[str, str]:
+    """Select explicit OpenCode cloud auth and isolate its provider connection.
+
+    A qualified model alone never opts an API-key profile into cloud login.
+    The cloud CLI directory picks the account; project/resource picks billing.
+    """
+    from brindle.config import brindle_home
+    from brindle.profiles import ProfileError
+
+    if profile.provider != "opencode":
+        if profile.auth == "cloud" and profile.provider != "claude":
+            raise ProfileError("auth: cloud requires Claude or OpenCode")
+        # A worker's provider owns its route, even under a cloud supervisor.
+        return {"BRINDLE_CLOUD_ROUTE": "claude" if profile.provider == "claude" else ""}
+    if profile.auth != "cloud":
+        return {"BRINDLE_CLOUD_ROUTE": ""}
+    route = {"google-vertex": "vertex", "azure": "azure"}.get((profile.model or "").split("/")[0])
+    if route is None or "/" not in (profile.model or ""):
+        raise ProfileError("OpenCode auth: cloud requires a google-vertex/<model> or azure/<deployment> model")
+    full = {**os.environ, **env}
+    required = ("GOOGLE_CLOUD_PROJECT",) if route == "vertex" else ("AZURE_CONFIG_DIR", "AZURE_RESOURCE_NAME")
+    missing = [name for name in required if not full.get(name)]
+    if missing:
+        raise ProfileError("cloud profile needs " + ", ".join(missing))
+    names = (("GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CONFIG") if route == "vertex"
+             else ("AZURE_CONFIG_DIR", "AZURE_RESOURCE_NAME", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"))
+    key = hashlib.sha256(json.dumps([route, *[full.get(k, "") for k in names]]).encode()).hexdigest()[:20]
+    home = brindle_home() / "cloud-opencode" / key
+    return {**{k: full[k] for k in IDENTITY_ENV if k in full}, "BRINDLE_CLOUD_ROUTE": route,
+            "XDG_DATA_HOME": str(home / "data"), "OPENCODE_CONFIG_DIR": str(home / "config")}
+
+
+def azure_connected(env: Mapping[str, str]) -> bool:
+    """Whether this isolated OpenCode store selects the Azure CLI connection."""
+    root = Path(env.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    try:
+        entry = json.loads((root / "opencode" / "auth.json").read_text()).get("azure", {})
+        return entry.get("type") == "oauth" and entry.get("accountId") == env.get("AZURE_RESOURCE_NAME")
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -64,8 +111,10 @@ class LoginStatus:
 
 
 def provider_from_env(env: Mapping[str, str] | None = None) -> str | None:
-    """The cloud provider whose ``CLAUDE_CODE_USE_*`` flag is on, or None."""
+    """The explicit OpenCode route or selected Claude cloud flag, or None."""
     env = os.environ if env is None else env
+    if "BRINDLE_CLOUD_ROUTE" in env and env["BRINDLE_CLOUD_ROUTE"] != "claude":
+        return env["BRINDLE_CLOUD_ROUTE"] or None
     for provider, flag in _FLAGS.items():
         if str(env.get(flag, "")).strip().lower() in ("1", "true", "yes", "on"):
             return provider
@@ -87,6 +136,12 @@ def configured_status(env: Mapping[str, str]) -> LoginStatus | None:
         path = Path(full.get("AWS_CONFIG_FILE") or Path.home() / ".aws" / "config")
         if _aws_token_key(profile, path) is None:
             return None
+    elif route == "azure":
+        s = status(route, env=full)
+        if s.ok and not azure_connected(full):
+            return LoginStatus(False, s.expires_at, shlex.join(login_command(full)),
+                               "OpenCode's Azure Entra connection is not configured for this resource")
+        return s
     elif route != "vertex" or full.get("GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES"):
         return None
     return status(route, env=full)
@@ -108,14 +163,22 @@ def login_command(env: Mapping[str, str]) -> list[str] | None:
         if _aws_token_key(profile, path):
             return ["aws", "sso", "login", "--profile", profile]
     if route == "vertex" and not full.get("GOOGLE_APPLICATION_CREDENTIALS"):
-        project = full.get("ANTHROPIC_VERTEX_PROJECT_ID")
+        project = (full.get("GOOGLE_CLOUD_PROJECT") if full.get("BRINDLE_CLOUD_ROUTE") == "vertex"
+                   else full.get("ANTHROPIC_VERTEX_PROJECT_ID"))
         return ["gcloud", "auth", "application-default", "login", *(["--project", project] if project else [])]
+    if route == "azure":
+        from brindle import opencode
+
+        return [opencode.binary(), "auth", "login", "--provider", "azure", "--method", "Microsoft Entra ID (Azure CLI)"]
     return None
 
 
 def action_key(env: Mapping[str, str]) -> str:
     """One terminal per credential source, even across profiles and regions."""
-    return hashlib.sha256((login_key(env) or "").encode()).hexdigest()[:16]
+    key = login_key(env) or ""
+    if provider_from_env({**os.environ, **env}) == "azure":
+        key += ":" + env.get("XDG_DATA_HOME", "")
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def interactive_command() -> list[str]:
@@ -123,7 +186,7 @@ def interactive_command() -> list[str]:
     return [sys.executable, "-m", "brindle.cloud_login"]
 
 
-def interactive_sign_in(*, env: Mapping[str, str] | None = None, run=None) -> int:
+def interactive_sign_in(*, env: Mapping[str, str] | None = None, run=None, probe=None) -> int:
     """Run a user-requested cloud login, inheriting the terminal's input/output.
 
     The child also holds the lock, so losing the wrapper cannot permit another
@@ -142,6 +205,16 @@ def interactive_sign_in(*, env: Mapping[str, str] | None = None, run=None) -> in
             print("A cloud sign-in is already running. Finish it in its existing browser or terminal.")
             return 1
         lg.write({"lapse": lg.fingerprint(), "opened_at": time.time(), "interactive": True})
+        if lg.provider == "azure":
+            s = status("azure", env=full, run=probe or run_bounded)
+            if not s.ok:
+                code = (run or subprocess.run)(azure_login_command(full), env=full, pass_fds=(fd,)).returncode
+                if code:
+                    return code
+                s = status("azure", env=full, run=probe or run_bounded)
+                if not s.ok:
+                    print(s.note)
+                    return 1
         return (run or subprocess.run)(command, env=full, pass_fds=(fd,)).returncode
     finally:
         os.close(fd)
@@ -253,10 +326,24 @@ def _azure_expiry(token: dict) -> float | None:
         return None
 
 
+def azure_login_command(env: Mapping[str, str]) -> list[str]:
+    command = ["az", "login"]
+    for name, flag in (("AZURE_TENANT_ID", "--tenant"), ("AZURE_SUBSCRIPTION_ID", "--subscription")):
+        if env.get(name):
+            command += [flag, env[name]]
+    return command
+
+
 def _azure(run, env, now: float) -> LoginStatus:
-    refresh = "az login"
+    full = {**os.environ, **(env or {})}
+    openai = provider_from_env(full) == "azure"
+    refresh = shlex.join(azure_login_command(full)) if openai else "az login"
+    command = ["az", "account", "get-access-token", "--output", "json"]
+    if openai:
+        # The OpenCode Entra plugin uses the active account and this exact scope.
+        command += ["--scope", "https://cognitiveservices.azure.com/.default"]
     try:
-        proc = run(["az", "account", "get-access-token", "--output", "json"],
+        proc = run(command,
                    capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
     except subprocess.TimeoutExpired:
         return LoginStatus(False, None, refresh, "az timed out fetching an access token")
@@ -268,6 +355,12 @@ def _azure(run, env, now: float) -> LoginStatus:
         except ValueError:
             token = None
         exp = _azure_expiry(token) if isinstance(token, dict) else None
+        if openai and isinstance(token, dict):
+            for name, field in (("AZURE_TENANT_ID", "tenant"), ("AZURE_SUBSCRIPTION_ID", "subscription")):
+                if full.get(name) and full[name] != token.get(field):
+                    return LoginStatus(False, exp, refresh, f"Azure CLI's active identity does not match {name}")
+            if not token.get("accessToken"):
+                return LoginStatus(False, exp, refresh, "Azure CLI returned no access token")
         if exp is not None:
             return _from_expiry(exp, refresh, now, "")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
@@ -322,7 +415,7 @@ def status(provider: str | None = None, *, env: Mapping[str, str] | None = None,
         return _aws(env, home, now)
     if provider == "vertex":
         return _google(run, supplied, now, expiry)
-    if provider == "foundry":
+    if provider in ("foundry", "azure"):
         return _azure(run, supplied, now)
     return LoginStatus(True, None, "", "no cloud provider selected")
 
@@ -370,7 +463,7 @@ def _credentials_file(provider: str, env: Mapping[str, str], home: Path) -> Path
         if key is None:
             return None
         return home / ".aws" / "sso" / "cache" / (hashlib.sha1(key.strip().encode()).hexdigest() + ".json")
-    if provider == "foundry":
+    if provider in ("foundry", "azure"):
         return Path(env.get("AZURE_CONFIG_DIR") or home / ".azure") / "msal_token_cache.json"
     return None
 
@@ -385,7 +478,7 @@ def _fingerprint(provider: str, path: Path | None) -> str:
         data = path.read_bytes()
     except OSError:
         return "missing"
-    if provider == "foundry":
+    if provider in ("foundry", "azure"):
         # The MSAL cache also holds access tokens for every resource and
         # tenant, which other `az` calls rewrite during a lapse; a sign-in is
         # its refresh tokens. shortcut: every account's refresh tokens count,

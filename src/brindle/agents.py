@@ -291,6 +291,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             # env is the top layer (managed_env is the same route's, from managed_models).
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
             env = {**homes, **recovery_keys, **profile_env, **managed_env, **enforced, **env}
+        if guarded is not None:
+            from brindle import cloud_login
+
+            env.update(cloud_login.profile_env(guarded, env))
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -941,7 +945,7 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     org_key = managed_models.has_org_key(m, agent.provider)
     prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
     eff_env = _window_environment(agent, ws, m)[0]
-    names = prov_creds | (cloud_login.IDENTITY_ENV if agent.provider == "claude" else frozenset())
+    names = prov_creds | (cloud_login.IDENTITY_ENV if agent.provider in ("claude", "opencode") else frozenset())
     probe_env = {**launch_env, **{k: eff_env[k] for k in names if k in eff_env}}
     return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
 

@@ -1348,9 +1348,10 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", "repo and profile must be supplied together")
     identity = agents.consent_identity(db, repo, profile, provider, _get(body, "session")) if repo else (
         company_login.stored_env() if provider == "claude" else {})
-    if provider == "claude" and not providers.claude_org_managed():
+    if ((provider == "claude" and not providers.claude_org_managed()) or
+            (provider == "opencode" and identity.get("BRINDLE_CLOUD_ROUTE"))):
         route = cloud_login.provider_from_env({**os.environ, **identity})
-        if route in ("bedrock", "vertex"):
+        if route in ("bedrock", "vertex", "azure"):
             command = cloud_login.login_command(identity)
             if method or command is None:
                 raise ServiceError("invalid", "Refresh this profile's configured cloud credentials directly")
@@ -1359,7 +1360,7 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
             env = {**{k: full[k] for k in cloud_login.IDENTITY_ENV if k in full}, **identity,
                    "BRINDLE_HOME": str(brindle_home()),
                    **({"BROWSER": browser["BROWSER"]} if browser else {})}
-            return terminal.open_action(f"login claude cloud-{cloud_login.action_key(identity)}",
+            return terminal.open_action(f"login cloud-{cloud_login.action_key(identity)}",
                                         cloud_login.interactive_command(),
                                         env=env)
     from brindle import provider_homes

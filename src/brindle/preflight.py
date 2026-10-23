@@ -158,7 +158,8 @@ def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | 
         return items + [Item("setup", f"{provider}.install", provider, f"Install {name}",
                              f"{name} (`{exe}`) isn't on PATH. Install: {how}")]
     cloud = (cloud_login.configured_status(env or {})
-             if provider == "claude" and check_cloud and not providers.claude_org_managed() else None)
+             if check_cloud and ((provider == "claude" and not providers.claude_org_managed()) or
+                                 (provider == "opencode" and (env or {}).get("BRINDLE_CLOUD_ROUTE"))) else None)
     if cloud is not None and not cloud.ok:
         command = cloud_login.login_command(env or {})
         action = (Action("login", "POST", f"/v1/providers/{provider}/login", launch or {}) if command else
