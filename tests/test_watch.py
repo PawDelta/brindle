@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from brindle import watch
 from brindle.db import DB
 
@@ -36,6 +38,22 @@ def test_old_databases_are_migrated(tmp_path):
     assert a.status_since is None and a.status == "idle"
     db.set_status("a", "processing")
     assert db.get_agent("a").status_since is not None
+    db.conn.close()
+    reopened = DB(str(path))
+    assert reopened.conn.execute("PRAGMA user_version").fetchone()[0] > 0
+    assert reopened.get_agent("a").status == "processing"
+    reopened.conn.close()
+
+
+def test_db_refuses_newer_schema_before_changing_it(tmp_path):
+    path = tmp_path / "newer.db"
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA user_version=2147483647")
+    with pytest.raises(RuntimeError):
+        DB(str(path))
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 2147483647
+    assert con.execute("SELECT name FROM sqlite_master").fetchall() == []
+    con.close()
 
 
 class _Screen:
