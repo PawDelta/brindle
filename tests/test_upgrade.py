@@ -12,6 +12,30 @@ import brindle
 from brindle import agents, mcp_server, profiles, upgrade, watch
 
 
+def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch):
+    from brindle.db import Agent, Workspace
+
+    db.add_workspace(Workspace("ws", "/repo", "root", "root", "main", None, "/repo", None, "", 0))
+    db.add_agent(Agent("boss", "ws", "supervisor", "claude", None, "interactive", "processing",
+                       "@0", None, 0, headless=1))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "pulls_messages", lambda *a: True)
+    stopped = []
+    monkeypatch.setattr(mcp_server, "start_azure_refresher",
+                        lambda: SimpleNamespace(stop=lambda: stopped.append(True)))
+
+    def disconnect():
+        raise BrokenPipeError("client pipe closed")
+
+    monkeypatch.setattr(mcp_server.mcp, "run", disconnect)
+    with pytest.raises(BrokenPipeError):
+        mcp_server.main()
+    assert stopped == [True]
+    assert db.pop_pending("boss") is not None
+    assert db.unread_count("boss") == 0
+
+
 def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_started_with(monkeypatch, tmp_path):
     install = tmp_path / "site-packages" / "brindle"    # the built-ins, where an upgrade can replace them
     for package in profiles._BUILTIN_PACKAGES:
@@ -36,6 +60,12 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
         async with Client(mcp_server.mcp) as client:
             await client.list_tools()
             assert "brindle.doctor" in sys.modules     # loaded before an upgrade could replace it
+            def failed_profiles(*args):
+                raise RuntimeError("profile read failed")
+
+            with monkeypatch.context() as fault:
+                fault.setattr(mcp_server, "list_profiles", failed_profiles)
+                assert (await client.call_tool("list_agent_profiles", {})).is_error
             upgrade_install()
             return [await client.call_tool("list_agent_profiles", {}) for _ in range(2)]
 
