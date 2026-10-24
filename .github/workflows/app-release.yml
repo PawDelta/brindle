@@ -49,6 +49,17 @@
 # brindle/downloads/desktop/latest.json or the stable brindle*.dmg / AppImage /
 # .deb names. Only a final app-v<X.Y.Z> tag updates those.
 #
+# Release-branch (staff) builds: a push to the release/desktop branch builds
+# the Macs only, at that commit, once `release-gate` has found it on main with
+# the newest CI and App runs for exactly that commit passed. The build carries
+# the version <package.json version>+release.<run>.<sha12>, and
+# `release-publish` publishes it under brindle/downloads/desktop/release/
+# only (an immutable directory per build, then release/latest.json, which
+# only moves forward), from the `desktop-release` environment. It never
+# touches latest.json, rc/ or the stable names; merging to main publishes
+# nothing. app/README.md, "Release-branch builds", has the contract and what
+# to do when the gate refuses.
+#
 # Run by hand (workflow_dispatch) it builds and keeps the artifacts and never
 # publishes: a dispatch is not a pushed tag (publish_gate.sh), and it runs
 # outside the desktop-release environment, so it gets none of its secrets and
@@ -75,6 +86,7 @@ name: App release
 on:
   push:
     tags: ["app-v*"]
+    branches: ["release/desktop"]
   schedule:
     - cron: "23 6 * * *"
   workflow_dispatch:
@@ -99,15 +111,52 @@ env:
   AWS_MAX_ATTEMPTS: "8"
 
 jobs:
+  # A release-branch push builds only a commit main already has, whose newest
+  # CI and App runs (for exactly that commit) passed; otherwise this job
+  # fails and nothing builds. Re-run it once those checks have passed.
+  release-gate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read   # the CI and App workflow runs for this commit
+    outputs:
+      go: ${{ steps.gate.outputs.go }}
+      version: ${{ steps.identity.outputs.version }}
+      name: ${{ steps.identity.outputs.name }}
+      path: ${{ steps.identity.outputs.path }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # origin/main, to check the commit is on it
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Identity
+        id: identity
+        run: node app/scripts/release_publish.mjs identity
+      - name: On main, CI and App passed
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node app/scripts/release_publish.mjs ci-gate
+
   # One build per Mac architecture, each on a runner of that architecture:
   # build_engine.sh builds the bundled engine for the machine it runs on only
   # (app/docs/bundled-engine.md, "One architecture per build"), so a
   # universal build would carry an engine for one of them only.
   # macos-15-intel is GitHub's x86_64 image (macos-13, the older Intel label,
   # was retired in December 2025). Nothing is published from here: the
-  # `macos-publish` job does that once both have passed.
+  # `macos-publish` job does that once both have passed (`release-publish`
+  # for a release-branch build).
   macos:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    needs: release-gate
+    if: >-
+      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag')
+      || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+      || needs.release-gate.outputs.go == 'true')
     name: macos (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -120,14 +169,17 @@ jobs:
             target: x86_64-apple-darwin
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
-    # Only a pushed app-v* tag runs in the environment that holds the secrets.
-    environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
+    # Only a pushed app-v* tag runs in the environment that holds the
+    # secrets; a release-branch push (past release-gate) in its own one.
+    environment: ${{ github.event_name == 'push' && (github.ref_type == 'tag' && 'desktop-release' || 'desktop-release') || '' }}
     timeout-minutes: 90
     permissions:
       contents: read
     env:
       ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
+      # Set for a release-branch build only: the version it is built with.
+      RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
       # build_engine.sh packs brindle from this checkout, at its HEAD (the tag).
       BRINDLE_SRC: ${{ github.workspace }}
       BRINDLE_REF: HEAD
@@ -139,6 +191,7 @@ jobs:
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          RELEASE_NAME: ${{ needs.release-gate.outputs.name }}
         run: |
           version="$(node -p "require('./app/package.json').version")"
           if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "app-v$version" ]; then
@@ -147,7 +200,11 @@ jobs:
           fi
           # A release candidate (app-v*-rc*) publishes under rc/<version>/ only.
           case "$version" in *-rc*) rc=true path="rc/$version" ;; *) rc=false path="$version" ;; esac
-          { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; } >> "$GITHUB_OUTPUT"
+          # The files' names: the version, or for a release-branch build its
+          # identity without the '+' (release-gate's name).
+          name="$version"
+          if [ -n "$RELEASE_VERSION" ]; then version="$RELEASE_VERSION" name="$RELEASE_NAME" rc=false path=""; fi
+          { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; echo "name=$name"; } >> "$GITHUB_OUTPUT"
 
       # The runner must be the architecture it builds: build_engine.sh refuses
       # any other target.
@@ -251,6 +308,12 @@ jobs:
           else
             echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set: no updater bundle or latest.json"
             echo '{"bundle": {"createUpdaterArtifacts": false}}' > "$conf"
+          fi
+          # A release-branch build is built with its identity as the app's
+          # version (Info.plist and the updater's current version).
+          if [ -n "$RELEASE_VERSION" ]; then
+            jq --arg v "$RELEASE_VERSION" '.version = $v' "$conf" > "$conf.new"
+            mv "$conf.new" "$conf"
           fi
           { echo "signed=$signed"; echo "notarized=$notarized"; echo "updater=$updater"; echo "conf=$conf"; } >> "$GITHUB_OUTPUT"
 
@@ -396,30 +459,39 @@ jobs:
         id: collect
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          NAME: ${{ steps.version.outputs.name }}
+          APP: ${{ steps.bundle.outputs.app }}
           BUNDLE: ${{ steps.bundle.outputs.dir }}
           DMG: ${{ steps.bundle.outputs.dmg }}
           SIGNED: ${{ steps.signing.outputs.signed }}
           NOTARIZED: ${{ steps.gatekeeper.outputs.verified == 'true' }}
           UPDATER: ${{ steps.signing.outputs.updater }}
         run: |
-          out="$RUNNER_TEMP/desktop/$VERSION"
+          out="$RUNNER_TEMP/desktop/$NAME"
           mkdir -p "$out"
-          cp "$DMG" "$out/brindle_${VERSION}_${ARCH}.dmg"
+          cp "$DMG" "$out/brindle_${NAME}_${ARCH}.dmg"
           if [ "$UPDATER" = true ]; then
-            cp "$BUNDLE/macos/brindle.app.tar.gz" "$out/brindle_${VERSION}_${ARCH}.app.tar.gz"
-            cp "$BUNDLE/macos/brindle.app.tar.gz.sig" "$out/brindle_${VERSION}_${ARCH}.app.tar.gz.sig"
+            cp "$BUNDLE/macos/brindle.app.tar.gz" "$out/brindle_${NAME}_${ARCH}.app.tar.gz"
+            cp "$BUNDLE/macos/brindle.app.tar.gz.sig" "$out/brindle_${NAME}_${ARCH}.app.tar.gz.sig"
           fi
-          # Read by macos-publish; beside the version's directory, never published.
+          # The version the signed bundle carries: its Info.plist's, and the
+          # one its binary was built with (the updater's current version).
+          plist_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          app_version="$("$APP/Contents/MacOS/brindle-desktop" --version)"
+          app_version="${app_version#brindle }"
+          # Read by macos-publish (or release-publish); beside the version's directory, never published.
           jq -n --arg version "$VERSION" --arg arch "$ARCH" \
+            --arg plist_version "$plist_version" --arg app_version "$app_version" \
             --argjson signed "$SIGNED" --argjson notarized "$NOTARIZED" --argjson updater "$UPDATER" \
-            '{version: $version, arch: $arch, signed: $signed, notarized: $notarized, updater: $updater}' \
+            '{version: $version, arch: $arch, plist_version: $plist_version, app_version: $app_version,
+              signed: $signed, notarized: $notarized, updater: $updater}' \
             > "$RUNNER_TEMP/desktop/macos-$ARCH.status.json"
           echo "dir=$RUNNER_TEMP/desktop" >> "$GITHUB_OUTPUT"
           ls -lR "$RUNNER_TEMP/desktop"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: brindle-desktop-macos-${{ matrix.arch }}-${{ steps.version.outputs.version }}
+          name: brindle-desktop-macos-${{ matrix.arch }}-${{ steps.version.outputs.name }}
           path: ${{ steps.collect.outputs.dir }}
           if-no-files-found: error
 
@@ -427,7 +499,11 @@ jobs:
   # updater bundle and signature, and the publish, only once both builds
   # (and their Gatekeeper checks) have passed.
   macos-publish:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    # Never for a release-branch build (release-publish is its publish).
+    # needs.macos.result: macos's own needs (release-gate) is skipped here.
+    if: >-
+      !cancelled() && needs.macos.result == 'success'
+      && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
     needs: macos
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
@@ -602,8 +678,141 @@ jobs:
           fi
           echo "Published brindle desktop $VERSION (macOS aarch64 + x86_64) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
 
+  # A release-branch build's publish: both Mac builds, each signed,
+  # notarized, past Gatekeeper and carrying the build's version, go to their
+  # own immutable release/<run>.<attempt>-<sha12>/; then release/latest.json
+  # moves to them only if they are a later run, of a version no lower, at a
+  # descendant of the commit it names, written with an S3 conditional put so
+  # an older or concurrent run can never put it back.
+  release-publish:
+    needs: [release-gate, macos]
+    if: >-
+      !cancelled() && needs.macos.result == 'success' && needs.release-gate.outputs.go == 'true'
+      && github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'
+    runs-on: ubuntu-latest
+    environment: desktop-release
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write   # the release-branch role, through GitHub's OIDC
+    env:
+      VERSION: ${{ needs.release-gate.outputs.version }}
+      NAME: ${{ needs.release-gate.outputs.name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # the published build's commit, to check this one descends from it
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      # This attempt's own directory, not release-gate's: re-running this job
+      # alone keeps the gate's outputs from the attempt it first ran in.
+      - name: Identity
+        id: identity
+        run: node app/scripts/release_publish.mjs identity
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: brindle-desktop-macos-*-${{ needs.release-gate.outputs.name }}
+          path: ${{ runner.temp }}/desktop
+          merge-multiple: true
+
+      - name: Verify (latest.json, build.json)
+        id: collect
+        env:
+          DEST_PATH: ${{ steps.identity.outputs.path }}
+        run: node app/scripts/release_publish.mjs verify "$RUNNER_TEMP/desktop"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brindle-desktop-release-${{ needs.release-gate.outputs.name }}
+          path: ${{ steps.collect.outputs.dir }}
+          if-no-files-found: error
+
+      - name: Publish?
+        id: publish
+        env:
+          CHANNEL: release
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+          SIGNED: ${{ steps.collect.outputs.signed }}
+          NOTARIZED: ${{ steps.collect.outputs.notarized }}
+          ROLE: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: bash app/scripts/publish_gate.sh
+
+      - name: AWS credentials
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        # GitHub's OIDC token (release_publish.mjs oidc-token) exchanged for
+        # the release-branch role's session. The token is never printed.
+        run: |
+          set -euo pipefail
+          token="$(node app/scripts/release_publish.mjs oidc-token)"
+          echo "::add-mask::$token"
+          creds="$(AWS_REGION="$REGION" aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "desktop-release-${GITHUB_RUN_ID}" \
+            --web-identity-token "$token" \
+            --duration-seconds 3600 \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+          unset token
+          read -r key secret session <<<"$creds"
+          if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$session" ]; then
+            echo "::error::assume-role-with-web-identity returned no credentials"
+            exit 1
+          fi
+          for v in "$key" "$secret" "$session"; do echo "::add-mask::$v"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_SESSION_TOKEN=$session"
+            echo "AWS_REGION=$REGION"
+            echo "AWS_DEFAULT_REGION=$REGION"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish release build to pawdelta.com/brindle/downloads/desktop/
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          DIR: ${{ steps.collect.outputs.dir }}
+          DEST_PATH: ${{ steps.identity.outputs.path }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: |
+          set -euo pipefail
+          key="$S3_PREFIX/release/latest.json"
+          # The build's own directory first (immutable: its path is per run and attempt).
+          aws s3 cp --recursive "$DIR/$NAME" "s3://$BUCKET/$S3_PREFIX/$DEST_PATH" \
+            --cache-control "public, max-age=31536000, immutable"
+          # Then the channel's pointer, only forward, and only if nobody moved it since we read it.
+          current="$RUNNER_TEMP/current.json"
+          if out="$(aws s3api get-object --bucket "$BUCKET" --key "$key" "$current" 2>&1)"; then
+            condition=(--if-match "$(jq -r .ETag <<<"$out")")
+          elif grep -q NoSuchKey <<<"$out"; then
+            rm -f "$current"
+            condition=(--if-none-match '*')
+          else
+            echo "$out"
+            echo "::error::could not read the published release/latest.json"
+            exit 1
+          fi
+          node app/scripts/release_publish.mjs promote "$current" "$DIR/$NAME/latest.json" > "$RUNNER_TEMP/promote"
+          cat "$RUNNER_TEMP/promote"
+          if ! grep -qx 'go=true' "$RUNNER_TEMP/promote"; then
+            echo "Published brindle desktop $VERSION to $SITE_DOWNLOADS/$DEST_PATH/ (release/latest.json not moved)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          aws s3api put-object --bucket "$BUCKET" --key "$key" --body "$DIR/$NAME/latest.json" \
+            --cache-control no-cache --content-type application/json "${condition[@]}"
+          echo "Published brindle desktop $VERSION (release build, macOS) to $SITE_DOWNLOADS/$DEST_PATH/ and release/latest.json" >> "$GITHUB_STEP_SUMMARY"
+
   linux:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
     runs-on: ubuntu-22.04
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
     timeout-minutes: 60
@@ -760,7 +969,7 @@ jobs:
           echo "Published brindle desktop $VERSION (Linux) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
 
   windows:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
