@@ -165,6 +165,7 @@ pub fn run() {
         .manage(daemon::Engine::default())
         .manage(setup::Installer::default())
         .manage(pty_view::PtyViews::default())
+        .manage(updates::Installs::default())
         // The app's one webview starts a page (a reload, a web content process
         // that died and came back): the streams the last page opened go with it.
         .on_page_load(|webview, payload| {
@@ -196,6 +197,7 @@ pub fn run() {
             pty_view::pty_view_focus,
             pty_view::pty_view_close,
             updates::app_update_install,
+            updates::app_release_build_install,
             updates::app_restart,
             about::about_read,
         ])

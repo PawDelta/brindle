@@ -323,10 +323,12 @@ def get_user_settings(db: DB, request: Request) -> Any:
 
 @_json
 def get_debug(db: DB, request: Request) -> Any:
-    """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on)."""
+    """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on).
+    ``?fresh=1`` asks the backend now instead of the cached answer (the app does,
+    right before a staff-only update), and says not staff when it can't be asked."""
     from brindle import debuglog
 
-    return debuglog.checked()
+    return debuglog.checked(fresh=request.query_params.get("fresh") == "1")
 
 
 @_json

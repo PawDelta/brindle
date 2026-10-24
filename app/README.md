@@ -493,6 +493,85 @@ launch check against the stable feed only, so a release never offers an rc.
 An rc tester moves to a final release by installing its DMG: the rc channel
 names release candidates only.
 
+### Release-branch builds (staff)
+
+A signed build of a commit main already has, without a tag or a version bump,
+for brindle staff to install and update from. Merging to main publishes
+nothing: the owner moves the `release/desktop` branch to a main commit
+(fast-forward, then push; the versioned pre-push hook refuses that push unless
+`BRINDLE_RELEASE_TAG_OK=1`), and that push runs `app-release.yml`:
+
+1. `release-gate` (`scripts/release_publish.mjs ci-gate`) refuses unless the
+   commit is on `origin/main` and the newest run of **both** the `CI`
+   (`ci.yml`) and the `App` (`app.yml`) workflows for exactly that commit,
+   pushed or dispatched on main, completed with success. A pull request's
+   runs, other branches' and other commits' don't count; a newer failed
+   attempt outweighs an older pass. Workflows and runs come from the Actions
+   API by path, all pages.
+2. The `macos` jobs build both architectures exactly as for a release
+   (signed, both notarized, both past Gatekeeper) in the same
+   `desktop-release` environment (its deployment rule admits the
+   `release/desktop` branch beside `app-v*` tags), with the app's version set to
+   `<package.json version>+release.<run number>.<12-hex commit>` (e.g.
+   `0.1.0-rc.9+release.42.0123456789ab`): Info.plist's
+   `CFBundleShortVersionString` and `CFBundleVersion`, and the version the
+   updater compares, all carry it. No Linux or Windows build.
+3. `release-publish` (`release_publish.mjs verify`) refuses unless both
+   builds are signed, notarized, have their updater bundle, and their signed
+   Info.plist and binary (`--version`) both say that version. It writes
+   `release/<run>.<attempt>-<12-hex>/` with
+   `brindle_<package version>-release.<run>.<12-hex>_<arch>.dmg`, `.app.tar.gz`
+   and `.sig` (no `+` in published names), `latest.json` (Tauri's format, the
+   stable minisign key, notes naming the full commit) and `build.json` (commit,
+   run, attempt, versions). Then `release_publish.mjs promote` decides whether
+   `release/latest.json`, the channel's feed, moves to it: only to a strictly
+   later run, of a version no lower (semver precedence), at a descendant of
+   the commit the feed names. It is written with an S3 conditional put
+   (`--if-match` the ETag read, or `--if-none-match '*'` for the first), so a
+   stale run finishing late, a re-run or two runs at once can never move it
+   back. It never writes `latest.json`, `rc/` or the stable names.
+
+The feed's files are public at an unlisted path, like every download; who may
+install from it is the app's decision (staff only, from Settings), not the
+bucket's. Normal users' apps never read it.
+
+**When the gate refuses.** Pushing an unchanged branch again starts no run.
+Instead, once the missing or failed checks have passed, re-run the refused
+run (Actions → the run → Re-run all jobs): it is still a push of that commit,
+and the gate asks again. `ci.yml` skips app-only pushes and `app.yml` skips
+engine-only ones, so most commits have only one of the two: run the other by
+hand (Actions → its workflow → Run workflow on main). A dispatch builds main
+as it is then, so it counts for the commit you want only while that commit is
+main's head; otherwise pick a later main commit that has both. A run by hand
+of `app-release.yml` on `release/desktop` builds unsigned and publishes
+nothing, as on any other ref.
+
+The release role can write the stable and rc files too: what keeps a
+release-branch build off them is the workflow (`macos-publish` and `linux`
+run for a pushed tag only, `scripts/publish_gate.sh` holds each channel to
+its own ref), not IAM. Re-running `release-publish` alone publishes into
+that attempt's own directory (`verify` refuses an earlier attempt's), never
+over files already published.
+
+Before the first release-branch build (the `desktop-release` environment
+already admits `release/desktop`):
+
+- The release role (`AWS_DESKTOP_RELEASE_ROLE_ARN`) allowed, besides what a
+  release already needs: `s3:PutObject` under
+  `brindle/downloads/desktop/release/*`, `s3:GetObject` on
+  `brindle/downloads/desktop/release/latest.json`, and `s3:ListBucket` on the
+  bucket itself, with no `s3:prefix` condition (a GetObject carries no prefix,
+  so a prefix-conditioned ListBucket doesn't apply to it). Without that, S3
+  answers a read of a `release/latest.json` that doesn't exist yet with
+  AccessDenied instead of NoSuchKey, and the publish refuses to treat that as
+  "none published": the first feed is never written. ListBucket only lists
+  keys; every write stays under `release/`.
+- The site serving `/brindle/downloads/desktop/release/*` like the rest of the
+  downloads, with `release/latest.json`'s `no-cache` honoured.
+- A protection rule on `release/desktop`: owner pushes only, no force pushes.
+- The first run is the first notarization of a `+` version; a refusal from
+  Apple fails the run and publishes nothing.
+
 ### Linux
 
 The same tag also runs the workflow's `linux` job on ubuntu-22.04 (x86_64):
@@ -542,9 +621,10 @@ stop it (`brindle daemon stop`) and the app starts one that can.
 What the owner sets up, once. The Apple and Tauri secrets and the
 `TAURI_UPDATER_PUBKEY` variable live in the `desktop-release` GitHub
 environment (repository settings → Environments), whose deployment rule admits
-only `app-v*` tags and which needs the owner's approval for each run; every job
-that reads the Apple, Tauri or AWS secrets
-(`macos`, `macos-publish`, `linux`) declares it on a pushed tag. The rest are
+only `app-v*` tags and the `release/desktop` branch and which needs the
+owner's approval for each run; every job that reads the Apple, Tauri or AWS
+secrets (`macos`, `macos-publish`, `linux`, `release-publish`) declares it on
+a push. The rest are
 repository secrets and variables (Secrets and variables → Actions):
 
 | Name | Kind | What |
@@ -566,6 +646,6 @@ repository secrets and variables (Secrets and variables → Actions):
 Before the first release: join the Apple Developer Program, and have the site's
 infrastructure create the downloads bucket, GitHub's OIDC provider and the
 release role, which only this repo's `desktop-release` environment (so only
-`app-v*` tags) can assume. Keep the
+`app-v*` tags and `release/desktop`) can assume. Keep the
 minisign private key safe: losing it means no installed app can take another
 update.
