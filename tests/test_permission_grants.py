@@ -86,7 +86,7 @@ def test_push_scope_refuses_what_could_push_elsewhere_or_more(repo, pushable, se
     assert scope is None and why
 
 
-def test_grants_expire_run_out_are_revoked_and_race_for_the_last_use():
+def test_grants_expire_run_out_are_revoked_and_race_for_the_last_use(monkeypatch):
     now = [1000.0]
     store = grants.Grants(clock=lambda: now[0])
     g = store.add("a1", "/r", "bash", "npm test", 1, 2)
@@ -110,6 +110,19 @@ def test_grants_expire_run_out_are_revoked_and_race_for_the_last_use():
     for t in threads:
         t.join()
     assert sum(w is not None for w in won) == 1
+    monkeypatch.setattr(grants, "MAX_GRANTS", 1)
+    occupying = store.add("a1", "/r", "fetch", "https://x.example/", 5, 1)
+    asked = store.ask("a1", "/r", "bash", "git push", "scope", "git-push", "push the selected commit")
+    assert store.answer("a1", asked.id, asked.digest, True) is None
+    assert store.asked("a1", asked.id) is asked
+    store.revoke(occupying.id)
+    approved = store.answer("a1", asked.id, asked.digest, True)
+    assert approved.uses_left == 1
+    assert store.asked("a1", asked.id) is None
+    store.revoke(approved.id)
+    store.add("a1", "/r", "bash", "make", 5, 3, uses_spent=1)
+    assert store.use("a1", "/r", "bash", "make", max_uses=1) is None
+    assert store.live() == []
 
 
 GOOD = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"], "max_minutes": 5, "max_uses": 2,
@@ -235,6 +248,10 @@ def test_a_push_is_denied_at_once_then_allowed_once_for_exactly_its_scope(db, re
     shown = next(i.permission for i in inbox.items(db, None) if i.permission and i.permission.request_id == asked.id)
     assert [c.choice for c in shown.choices] == ["allow_once", "deny"] and shown.grant == asked.describe
     assert answer(asked, "allow_always")[0] == 409 and answer(asked, "allow_once", "0" * 64)[0] == 409
+    with monkeypatch.context() as capacity:
+        capacity.setattr(grants, "MAX_GRANTS", 0)
+        assert answer(asked, "allow_once")[0] == 409
+        assert grants.GRANTS.asked_of(agent_id) == [asked]
     assert answer(asked, "allow_once")[0] == 200 and answer(asked, "allow_once")[0] == 409
     for command, cwd in [(PUSH.format(sha="0" * 40), None), (f"git push origin {pushable}:refs/heads/main", None),
                          (f"git push mirror {pushable}:refs/heads/feat", None), (PUSH.format(sha=pushable), other)]:
@@ -283,6 +300,10 @@ def test_org_policy_denies_and_bounds_grants_on_the_real_path(db, repo, pushable
     assert hook.answer("deny")[0] == 200 and hook.verdict() == "deny"
     assert grants.GRANTS.live()[0].uses_left == g.uses_left == 2   # and never spent
     grants.GRANTS.revoke(g.id)
+    org(max_uses=1)
+    grants.GRANTS.add("wk", os.path.realpath(world.repo_root), "bash", "terraform validate", 5, 2)
+    assert _verdict(agents.permission_request_decision(db, wk, ask("terraform validate"))) == "allow"
+    assert grants.GRANTS.live() == []
     org()                                                # a one-time push lasts only as long as the org allows
     push, answer = pusher(db, "wk", "claude", pushable)
     assert push() == "deny"

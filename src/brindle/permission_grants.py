@@ -207,7 +207,7 @@ def lift(agent_id: str, req: Request, decision: Decision, rules: list[Rule], che
     if lifted is None or k is None:
         return replace(decision, reason=f"{decision.reason}; {why}") if why else decision
     scope = json.dumps(lifted["scope"], sort_keys=True)
-    g = grants.use(agent_id, repo_key(req), *k, scope=scope, max_minutes=lim.max_minutes)
+    g = grants.use(agent_id, repo_key(req), *k, scope=scope, max_minutes=lim.max_minutes, max_uses=lim.max_uses)
     if g is not None:
         return Decision("allow", f"allowed once by the person's grant {g.get('id')} ({describe(lifted)}); "
                                  "whether the command succeeds isn't known")
@@ -247,7 +247,7 @@ def use_grant(agent_id: str, req: Request, decision: Decision, lim: Limits) -> D
     k = key(req)
     if decision.decision != "ask" or not lim.allow or k is None or req.kind not in lim.kinds:
         return decision
-    g = grants.use(agent_id, repo_key(req), *k, max_minutes=lim.max_minutes)
+    g = grants.use(agent_id, repo_key(req), *k, max_minutes=lim.max_minutes, max_uses=lim.max_uses)
     if g is None:
         return decision
     left = max(0, round((float(g.get("expires_at", 0)) - time.time()) / 60))
@@ -267,7 +267,8 @@ def make(agent_id: str, req: Request) -> dict | None:
     if not lim.allow or offered["kind"] not in lim.kinds:
         return None
     g = GRANTS.add(agent_id, repo_key(req), offered["kind"], offered["match"],
-                   min(int(offered["minutes"]), lim.max_minutes), min(int(offered["uses"]), lim.max_uses) - 1)
+                   min(int(offered["minutes"]), lim.max_minutes), min(int(offered["uses"]), lim.max_uses) - 1,
+                   uses_spent=1)
     return g.to_json() if g else None
 
 

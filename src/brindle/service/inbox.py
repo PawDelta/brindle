@@ -326,6 +326,8 @@ def _answer_asked(db: DB, agent: Agent, asked, digest: str | None, choice: str) 
             raise ServiceError("conflict", f"it can't be allowed now: {why}", 409)
     got = GRANTS.answer(agent.id, asked.id, digest or "", choice == "allow_once", max_minutes=minutes)
     if got is None:
+        if digest == asked.digest and GRANTS.asked(agent.id, asked.id) is not None:
+            raise ServiceError("conflict", "The active grant limit was reached; revoke a grant and answer again", 409)
         raise ServiceError("conflict", f"{agent.id} isn't asking for that, as shown, any more: "
                                        "fetch the inbox again", 409)
     grant = getattr(got, "id", None)     # True: denied
