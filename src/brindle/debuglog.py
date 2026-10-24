@@ -235,9 +235,10 @@ def staff(refresh: bool = False) -> bool | None:
     return value
 
 
-def checked() -> dict:
-    """``{enabled, staff}``, turning debug logs off for an account that isn't staff."""
-    is_staff = staff()
+def checked(fresh: bool = False) -> dict:
+    """``{enabled, staff}``, turning debug logs off for an account that isn't staff;
+    ``fresh`` asks the backend instead of the cached answer."""
+    is_staff = staff(refresh=fresh)
     on = enabled()
     if on and is_staff is False:
         config.set_user(SETTING, False)

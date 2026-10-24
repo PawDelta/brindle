@@ -15,6 +15,14 @@ const engineWorkflow = (name: string) => fileURLToPath(new URL(`../../.github/wo
 const prePush = fileURLToPath(new URL("../../.githooks/pre-push", import.meta.url));
 
 const ready = { SIGNED: "true", NOTARIZED: "true", ROLE: "arn:aws:iam::1:role/r", BUCKET: "b" };
+const branch = { EVENT: "push", REF_TYPE: "branch", REF: "refs/heads/release/desktop" };
+
+/** The workflow's job `name`, up to the next job. */
+function jobOf(text: string, name: string): string {
+  const start = text.indexOf(`\n  ${name}:\n`);
+  const next = text.slice(start + 1).search(/\n {2}[a-z-]+:\n/);
+  return text.slice(start + 1, next < 0 ? undefined : start + 1 + next);
+}
 
 function decide(env: Record<string, string>): string {
   const { GITHUB_OUTPUT: _, ...inherited } = process.env;
@@ -35,21 +43,25 @@ describe("app-release publish gate", () => {
     ["a pushed tag, no bucket", { EVENT: "push", REF_TYPE: "tag", ...ready, BUCKET: "" }, "go=false"],
     ["Linux: a pushed tag, nothing to sign", { PLATFORM: "linux", EVENT: "push", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=true"],
     ["Linux: a manual run on an existing tag", { PLATFORM: "linux", EVENT: "workflow_dispatch", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=false"],
+    ["release branch: a push of release/desktop", { CHANNEL: "release", ...branch, ...ready }, "go=true"],
+    ["release branch: a manual run on it", { CHANNEL: "release", ...branch, EVENT: "workflow_dispatch", ...ready }, "go=false"],
+    ["release branch: a tag", { CHANNEL: "release", EVENT: "push", REF_TYPE: "tag", REF: "refs/tags/app-v0.2.0", ...ready }, "go=false"],
+    ["release branch: another branch", { CHANNEL: "release", ...branch, REF: "refs/heads/main", ...ready }, "go=false"],
+    ["release branch: unsigned", { CHANNEL: "release", ...branch, ...ready, SIGNED: "false" }, "go=false"],
   ])("%s: %s", (_case, env, expected) => {
     expect(decide(env)).toBe(expected);
   });
 
-  it("guards every publishing step of both publishing jobs with the push event and the gate, and feeds each gate the event", () => {
+  it("guards every AWS step of the publishing jobs with the push event and the gate, and feeds each gate the event", () => {
     const text = readFileSync(workflow, "utf8");
-    const lines = text.split("\n");
     const guard = "if: github.event_name == 'push' && steps.publish.outputs.go == 'true'";
-    const steps = lines.flatMap((line, at) =>
-      /^- name: (AWS credentials|Publish .*to pawdelta\.com\/brindle\/downloads\/desktop\/)$/.test(line.trim()) ? [at] : [],
-    );
-    expect(steps).toHaveLength(4);
-    for (const at of steps) expect(lines[at + 1]?.trim(), lines[at]).toBe(guard);
-    expect(text.split("EVENT: ${{ github.event_name }}")).toHaveLength(3);
-    expect(text.split("run: bash app/scripts/publish_gate.sh")).toHaveLength(3);
+    const aws = text.split(/\n(?= {6}- )/).filter((step) => /\baws (s3|s3api|sts) /.test(step));
+    expect(aws.length).toBeGreaterThan(0);
+    for (const step of aws) expect(step.split("\n").slice(0, 2).join("\n"), step.split("\n")[0]).toContain(guard);
+    for (const name of ["macos-publish", "linux", "release-publish"]) {
+      expect(jobOf(text, name), name).toContain("EVENT: ${{ github.event_name }}");
+      expect(jobOf(text, name), name).toContain("run: bash app/scripts/publish_gate.sh");
+    }
   });
 
   it("builds each Mac architecture on its own runner and publishes only after both, with one bundle each in latest.json", () => {
@@ -76,10 +88,16 @@ describe("app-release publish gate", () => {
       const start = text.indexOf(`\n  ${name}:\n`);
       return text.slice(start + 1, text.indexOf("\n  ", text.indexOf("steps:", start)));
     };
-    for (const name of ["macos", "macos-publish", "linux"]) expect(job(name), name).toContain(env);
+    for (const name of ["macos-publish", "linux"]) expect(job(name), name).toContain(env);
+    expect(job("macos")).toContain("(github.ref_type == 'tag' && 'desktop-release' || 'desktop-release')");
+    expect(job("release-publish")).toContain("environment: desktop-release\n");
     // A scheduled run builds no release (and so signs and publishes nothing): only the nightly smoke runs.
-    const release = "if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
-    for (const name of ["macos", "macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release);
+    // A release-branch push builds the Macs only, once release-gate says so, and publishes them only from release-publish.
+    const release = "(github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
+    for (const name of ["macos", "macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release.split(" || ")[0]);
+    for (const name of ["macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release);
+    expect(job("macos")).toContain("|| needs.release-gate.outputs.go == 'true')");
+    expect(job("release-gate")).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'");
     expect(job("nightly")).toContain("if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly)");
     expect(text).toContain('[ "$REF_NAME" != "app-v$version" ]');
     const channel = text.match(/^\s+(case "\$version" in .*esac)$/m)?.[1] ?? "";
@@ -96,6 +114,12 @@ describe("app-release publish gate", () => {
     const rcBranch = publish.slice(publish.indexOf('if [ "$RC" = true ]; then'), publish.indexOf("exit 0"));
     expect(rcBranch).toContain('aws s3 cp "$DIR/$VERSION/latest.json" "$dest/rc/latest.json"');
     expect(text.split('"$dest/rc/latest.json"').length).toBe(2);
+    // A release-branch build writes its own directory, then only release/latest.json, conditionally.
+    const branchPublish = jobOf(text, "release-publish");
+    expect(branchPublish).not.toMatch(/\$dest|\/rc\/|brindle\.dmg/);
+    expect(branchPublish).toContain('key="$S3_PREFIX/release/latest.json"');
+    expect(branchPublish.indexOf("aws s3 cp --recursive")).toBeLessThan(branchPublish.indexOf("aws s3api put-object"));
+    expect(branchPublish).toContain('--cache-control no-cache --content-type application/json "${condition[@]}"');
   });
 
   it("keeps app tags away from the engine's PyPI release and app changes out of the engine's CI", () => {
@@ -111,7 +135,7 @@ describe("app-release publish gate", () => {
     expect(ci).toMatch(/\*\.md\|docs\/\*\|[^)]*\|app\/\*\) ;;/);
   });
 
-  it("has the versioned pre-push hook refuse an app-v* tag unless BRINDLE_RELEASE_TAG_OK=1", () => {
+  it("has the versioned pre-push hook refuse an app-v* tag or release/desktop unless BRINDLE_RELEASE_TAG_OK=1", () => {
     const sha = "a".repeat(40);
     const push = (ref: string, env: Record<string, string>) =>
       spawnSync("bash", [prePush], {
@@ -122,6 +146,9 @@ describe("app-release publish gate", () => {
     expect(push("refs/tags/app-v0.2.0-rc.1", {}).status).toBe(1);
     expect(push("refs/tags/app-v0.2.0-rc.1", { BRINDLE_RELEASE_TAG_OK: "1" }).status).toBe(0);
     expect(push("refs/tags/v0.4.5", {}).status).toBe(0);
+    expect(push("refs/heads/release/desktop", {}).status).toBe(1);
+    expect(push("refs/heads/release/desktop", { BRINDLE_RELEASE_TAG_OK: "1" }).status).toBe(0);
+    expect(push("refs/heads/release/desktop-notes", {}).status).toBe(0);
   });
 });
 

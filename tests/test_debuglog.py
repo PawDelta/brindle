@@ -82,6 +82,16 @@ def test_debuglog_account_switch_to_non_staff_stops_uploads(server):
     assert not debuglog.enabled()
 
 
+def test_debuglog_fresh_staff_check_sees_a_revocation_the_cache_hides(server):
+    s = server({"sub": "u1", "staff": True})
+    assert _send("GET", "/v1/debug")[1]["staff"] is True
+    s.me = {"sub": "u1", "staff": False}        # revoked on the backend, the same account
+    assert _send("GET", "/v1/debug")[1]["staff"] is True        # still cached
+    # The app asks fresh right before installing an update: the backend's answer, now.
+    assert _send("GET", "/v1/debug?fresh=1")[1]["staff"] is False
+    assert len(s.asked) == 2
+
+
 def test_debuglog_switch_mid_check_or_upload_uses_the_snapshot_account(server, monkeypatch):
     s = server({"sub": "u1", "staff": True})
     s.by_token["Bearer b"] = {"sub": "u2"}      # B is not staff
