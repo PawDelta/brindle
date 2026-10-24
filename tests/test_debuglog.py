@@ -82,6 +82,7 @@ def test_debuglog_account_switch_to_non_staff_stops_uploads(server):
     assert not debuglog.enabled()
 
 
+@pytest.mark.variant("Same-account staff revocation must not reuse a cached authorization during app installation")
 def test_debuglog_fresh_staff_check_sees_a_revocation_the_cache_hides(server):
     s = server({"sub": "u1", "staff": True})
     assert _send("GET", "/v1/debug")[1]["staff"] is True
