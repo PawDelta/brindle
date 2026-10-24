@@ -65,9 +65,10 @@ class Grant:
     uses_left: int
     created: float
     scope: str = ""      # a one-time grant's exact scope (JSON), as the adapter worked it out
+    uses_spent: int = 0
 
     def to_json(self) -> dict:
-        return asdict(self)
+        return {k: v for k, v in asdict(self).items() if k != "uses_spent"}
 
 
 @dataclass
@@ -97,7 +98,7 @@ class Grants:
     def __init__(self, clock=time.time) -> None:
         self._grants: dict[str, Grant] = {}
         self._asked: dict[str, Asked] = {}
-        self._changed = threading.Lock()
+        self._changed = threading.RLock()
         self.clock = clock
 
     def _purge(self) -> None:
@@ -112,7 +113,7 @@ class Grants:
                      == (agent_id, repo_root, kind, match, scope)), None)
 
     def add(self, agent_id: str, repo_root: str, kind: str, match: str, minutes: int, uses: int,
-            scope: str = "") -> Grant | None:
+            scope: str = "", uses_spent: int = 0) -> Grant | None:
         """A grant, or the live one for the same scope as it is (a second
         answer neither extends nor replaces it). None when there are too many."""
         with self._changed:
@@ -125,15 +126,16 @@ class Grants:
             if len(self._grants) >= MAX_GRANTS or uses <= 0 or minutes <= 0:
                 return None
             now = self.clock()
-            g = Grant(secrets.token_hex(8), agent_id, repo_root, kind, match, now + minutes * 60, uses, now, scope)
+            g = Grant(secrets.token_hex(8), agent_id, repo_root, kind, match, now + minutes * 60, uses, now,
+                      scope, uses_spent)
             self._grants[g.id] = g
             return g
 
     def use(self, agent_id: str, repo_root: str, kind: str, match: str, scope: str = "",
-            max_minutes: int | None = None) -> Grant | None:
+            max_minutes: int | None = None, max_uses: int | None = None) -> Grant | None:
         """Spend one use of the agent's live grant for exactly this request
-        (and scope), unless it is older than the policy allows now
-        (``max_minutes``: a policy that shortened since the grant was given)."""
+        (and scope), bounded by the current policy's age and total-use limits,
+        including calls already allowed before those limits were tightened."""
         with self._changed:
             self._purge()
             g = self._find(agent_id, repo_root, kind, match, scope)
@@ -142,7 +144,13 @@ class Grants:
                 return None
             if g is None:
                 return None
+            if max_uses is not None:
+                g.uses_left = min(g.uses_left, max_uses - g.uses_spent)
+                if g.uses_left <= 0:
+                    del self._grants[g.id]
+                    return None
             g.uses_left -= 1
+            g.uses_spent += 1
             spent = Grant(**asdict(g))
             self._purge()
             return spent
@@ -187,10 +195,13 @@ class Grants:
             a = self._asked.get(asked_id)
             if a is None or a.agent_id != agent_id or a.digest != digest:
                 return None
-            del self._asked[asked_id]
-        if not allow:
-            return True
-        return self.add(a.agent_id, a.repo_root, a.kind, a.match, min(ASK_MINUTES, max_minutes), 1, a.scope)
+            if not allow:
+                del self._asked[asked_id]
+                return True
+            grant = self.add(a.agent_id, a.repo_root, a.kind, a.match, min(ASK_MINUTES, max_minutes), 1, a.scope)
+            if grant is not None:
+                self._asked.pop(asked_id, None)
+            return grant
 
     def revoke(self, grant_id: str) -> Grant | None:
         with self._changed:
@@ -239,10 +250,12 @@ async def _use(request: Request) -> JSONResponse:
         return body
     fields = [body.get(k) for k in ("agent_id", "repo_root", "kind", "match", "scope")]
     limit = body.get("max_minutes")
+    uses = body.get("max_uses")
     if (not all(isinstance(f, str) for f in fields) or not all(fields[:4])
-            or not (limit is None or (isinstance(limit, int) and not isinstance(limit, bool)))):
+            or not (limit is None or (isinstance(limit, int) and not isinstance(limit, bool)))
+            or not (uses is None or (isinstance(uses, int) and not isinstance(uses, bool)))):
         return JSONResponse({"error": {"code": "invalid", "message": "repo_root, kind, match and scope"}}, 400)
-    g = GRANTS.use(*fields, max_minutes=limit)
+    g = GRANTS.use(*fields, max_minutes=limit, max_uses=uses)
     if g is None:
         return JSONResponse({"error": {"code": "not_found", "message": "no live grant for this request"}}, 404)
     return JSONResponse({"grant": g.to_json()})
@@ -276,11 +289,11 @@ ROUTES = [Route(USE_PATH, _use, methods=["POST"]), Route(ASK_PATH, _ask, methods
 
 
 def use(agent_id: str, repo_root: str, kind: str, match: str, scope: str = "",
-        max_minutes: int | None = None) -> dict | None:
+        max_minutes: int | None = None, max_uses: int | None = None) -> dict | None:
     """Spend a use of the agent's grant for this exact request through the
     daemon; the grant as it is now, or None (none, or no daemon)."""
     got = call(USE_PATH, {"agent_id": agent_id, "repo_root": repo_root, "kind": kind, "match": match,
-                          "scope": scope, "max_minutes": max_minutes}, USE_SECONDS)
+                          "scope": scope, "max_minutes": max_minutes, "max_uses": max_uses}, USE_SECONDS)
     grant = got.get("grant") if got else None
     return grant if isinstance(grant, dict) else None
 
