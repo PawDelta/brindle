@@ -957,18 +957,36 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
 
 
 def list_text(db: DB, repo_root: str, full: bool = False) -> str:
-    """Pending, held and cancelled tasks: started ones already show in
-    list_agents. ``full`` adds each one's brief and done_when."""
+    """Queued/cancelled tasks and started branches still in review.
+
+    Follow the task's worker to its workspace, never a branch-name lookup:
+    attached repositories can have identically named branches. ``full`` adds
+    each task's brief and done_when.
+    """
+    from brindle import pipeline
+
     lines = []
     for t in db.list_tasks(repo_root):
-        if t.state not in (*QUEUED, "cancelled"):
+        ws, review = None, None
+        if t.state == "started":
+            worker = db.get_agent(t.agent_id) if t.agent_id else None
+            ws = db.get_workspace(worker.workspace_id) if worker else None
+            if ws is None or ws.repo_root != repo_root:
+                continue
+            review = pipeline.review_state(db, ws)
+            if review is None:
+                continue   # unreported or already merged; keep completed history out of the queue
+        elif t.state not in (*QUEUED, "cancelled"):
             continue
         deps = _loads(t.depends_on)
-        parts = [t.id, t.state, t.profile, f"branch={t.branch or '(auto)'}"]
+        branch = ws.branch if ws else t.branch
+        parts = [t.id, t.state, t.profile, f"branch={branch or '(auto)'}"]
         if deps:
             parts.append(f"depends_on={','.join(deps)}")
         if t.files:
             parts.append(f"files={','.join(_loads(t.files))}")
+        if review is not None:
+            parts.append(f"agent={t.agent_id} ws={ws.id} review={review}")
         line = " ".join(parts)
         if full:
             line += f"\n  task_text: {t.task_text}"

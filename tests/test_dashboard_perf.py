@@ -27,6 +27,27 @@ def count_calls(monkeypatch, target, name):
     return calls
 
 
+@pytest.mark.parametrize("storage", ["loose", "packed", "detached", "missing", "cycle"])
+def test_render_head_tracks_worktree_refs(tmp_path, monkeypatch, storage):
+    private, common, work = [tmp_path / name for name in ("private", "common", "work")]
+    for directory in (private, common, work):
+        directory.mkdir()
+    (work / ".git").write_text("gitdir: ../private\n")
+    (private / "commondir").write_text("../common\n")
+    ref = "refs/heads/feature"
+    (private / "HEAD").write_text(f"ref: {ref}\n")
+    target = private / "HEAD" if storage == "detached" else common / ref
+    if storage == "packed":
+        target = common / "packed-refs"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(git, "out", lambda *a, **k: pytest.fail("rendering launched git"))
+    for sha in ("a" * 40, "b" * 40):
+        if storage != "missing":
+            target.write_text((f"ref: {ref}" if storage == "cycle" else
+                               f"{sha} {ref}" if storage == "packed" else sha) + "\n")
+        assert status_cache.read_head(work) == (None if storage in ("missing", "cycle") else sha)
+
+
 # -- parity with the old git.status for several scenarios -------------------
 
 

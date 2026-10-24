@@ -200,7 +200,7 @@ def test_flaky_pass_at_the_same_commit_is_not_progress(db, root, repo):
 
 
 def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
-    from brindle import view
+    from brindle import gates, git, status_cache, view
 
     _, ws = root
     with_goal(db)
@@ -219,7 +219,15 @@ def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
     db.set_status("boss", "idle")   # every agent idle: nothing to read at all
     entry = view.autopilot_entry(db, ws.repo_root)
     assert entry and entry["workers"] == 1   # w2; w1 is stalled
+    def no_head_process(*args):
+        raise AssertionError("dashboard started a synchronous HEAD lookup")
+
+    monkeypatch.setattr(gates, "head", no_head_process)
+    monkeypatch.setattr(status_cache, "cached_status", lambda *a, **k: git.Status("main", "main", 0, 0, [], 0))
     view.snapshot(db, ws.repo_root)
+    db.update_agent("w1", pipeline="reviewing")
+    [shown] = view.snapshot(db, ws.repo_root)
+    assert shown["review_state"] is not None
     assert captured == []
     assert db.get_agent("w1").status == "idle"
     assert db.get_agent("w2").status == "idle"

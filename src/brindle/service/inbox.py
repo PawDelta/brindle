@@ -16,8 +16,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, tmux, view
+from brindle import agents, autopilot, bus, identity_lock, permission_grants, permissions, prompt_answer, tmux, view
 from brindle.config import load_repo_config
+from brindle.daemon.grants import GRANTS
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent
 from brindle.providers import get_provider
@@ -25,7 +26,7 @@ from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDT
 from brindle.service.errors import ServiceError
 
 WORKERS = ("assign", "handoff")
-CHOICES = ("allow_once", "allow_always", "deny")
+CHOICES = ("allow_once", "allow_for", "allow_always", "deny")
 RELEASE = "terminal"     # the person's "answer in the terminal instead": the hold ends now
 # Whether a CLI draws its own permission prompt while brindle's hook holds
 # the request (PermissionDTO.terminal_prompt_visible). Claude Code 2.1.304, in
@@ -158,6 +159,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             out += [InboxItemDTO(kind="permission", reason="asks permission",
                                  detail=p.request.summary() if p.request else None, permission=p.dto, **link)
                     for p in asking]
+            out += [InboxItemDTO(kind="permission", reason="asks to be allowed once", detail=f"{g.kind}: {g.match}",
+                                 permission=_asked_dto(g), **link)
+                    for g in ([] if _closed(row) else GRANTS.asked_of(row.id))]
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
@@ -258,6 +262,7 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
     the CLI's own prompt's from then on."""
     if _closed(agent):
         HOLDS.drop_agent(agent.id)      # closed: nothing of its can be answered any more
+        GRANTS.drop_agent(agent.id)     # nor used
     live = {h.request_id: h for h in HOLDS.of_agent(agent.id)}
     out = []
     for row in db.permission_requests_of(agent.id):
@@ -276,11 +281,15 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         ws = db.get_workspace(agent.workspace_id)
         # A native worker's loop reads its profile's permissions, not brindle's rules.
         rule = None if agent.provider == "native" else _always_rule(req, suggestions, ws.repo_root if ws else None)
+        offered = permission_grants.parse(req)     # allow_for (permission_grants.offer)
         choices = [PermissionChoiceDTO(choice="allow_once", label="Allow once"),
+                   *([PermissionChoiceDTO(choice="allow_for", label=f"Allow for {offered['minutes']} min",
+                                          rule=permission_grants.describe(offered))] if offered else []),
                    *([PermissionChoiceDTO(choice="allow_always", label="Allow always", rule=rule)] if rule else []),
                    PermissionChoiceDTO(choice="deny", label="Deny")]
         out.append(Pending("hook", row, req, suggestions, PermissionDTO(
             via="hook", request_id=row["tool_use_id"], tool=req.tool, kind=req.kind, target=req.target(),
+            grant=permission_grants.describe(offered) if offered else None,
             digest=permissions.request_digest(row["request"], row["suggestions"]), choices=choices,
             hold_until=hold.hold_until, hold_note=_hold_note(agent.provider, hold.hold_until),
             terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider))))
@@ -294,6 +303,45 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         return []
     return [Pending("prompt", None, None, None,
                     PermissionDTO(via="prompt", wording=_prompt_wording(screen), terminal=TERMINAL))]
+
+
+def _asked_dto(asked) -> PermissionDTO:
+    """A one-time grant an agent's hook asked for (daemon.grants.Asked): its
+    deny was answered already; allowing it lets exactly that request, with
+    exactly that scope, through once."""
+    return PermissionDTO(via="grant", request_id=asked.id, digest=asked.digest, kind=asked.kind,
+                         target=asked.match, grant=asked.describe, hold_until=asked.expires_at,
+                         choices=[PermissionChoiceDTO(choice="allow_once", label="Allow once"),
+                                  PermissionChoiceDTO(choice="deny", label="Deny")])
+
+
+def _answer_asked(db: DB, agent: Agent, asked, digest: str | None, choice: str) -> dict:
+    """The person's answer to a one-time grant, exactly as shown."""
+    if choice not in ("allow_once", "deny"):
+        raise ServiceError("conflict", f"a one-time grant offers no {choice}", 409)
+    minutes = 0
+    if choice == "allow_once":
+        why, minutes = permission_grants.approve(asked)
+        if why:
+            raise ServiceError("conflict", f"it can't be allowed now: {why}", 409)
+    got = GRANTS.answer(agent.id, asked.id, digest or "", choice == "allow_once", max_minutes=minutes)
+    if got is None:
+        if digest == asked.digest and GRANTS.asked(agent.id, asked.id) is not None:
+            raise ServiceError("conflict", "The active grant limit was reached; revoke a grant and answer again", 409)
+        raise ServiceError("conflict", f"{agent.id} isn't asking for that, as shown, any more: "
+                                       "fetch the inbox again", 409)
+    grant = getattr(got, "id", None)     # True: denied
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is not None:
+        from brindle import history
+
+        history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
+                              task=f"{asked.kind}: {asked.match}",
+                              result=f"one-time grant {grant} by the person: {asked.describe}" if grant
+                              else "one-time grant denied by the person")
+    bus.publish_agent(db, "permission.answered", agent.id, request_id=asked.id, choice=choice,
+                      via="grant", cleared=True)
+    return {"choice": choice, "via": "grant", "cleared": True, "rule": None, "grant": grant}
 
 
 def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
@@ -339,6 +387,9 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     if agent is None:
         raise ServiceError("not_found", f"no agent {agent_id}", 404)
     identity_lock.ensure(agent)
+    asked = GRANTS.asked(agent.id, request_id or "")
+    if asked is not None and not _closed(agent):
+        return _answer_asked(db, agent, asked, digest, choice)
     asking = pending_permissions(db, agent)
     if any(p.via == "prompt" for p in asking):
         raise ServiceError("conflict", f"{agent_id}'s request {TERMINAL}", 409)
@@ -369,7 +420,18 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
         raise
     if choice == "allow_always" and not pending.suggestions:
         _write_rule(pending.request)    # only now: the hook allowed it this time
+    grant = permission_grants.make(agent.id, pending.request) if choice == "allow_for" else None
+    if grant is not None:
+        from brindle import history
+
+        ws = db.get_workspace(agent.workspace_id)
+        if ws is not None:
+            history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
+                                  task=pending.request.summary(),
+                                  result=f"grant {grant['id']}: {grant['kind']} {grant['match']!r}, "
+                                         f"{grant['uses_left']} more uses until {grant['expires_at']:.0f}")
     bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
                       via="hook", cleared=True)
     return {"choice": choice, "via": "hook", "cleared": True,
-            "rule": offered.rule if choice == "allow_always" else None}
+            "rule": offered.rule if choice == "allow_always" else None,
+            "grant": grant["id"] if grant else None}

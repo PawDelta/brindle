@@ -229,6 +229,18 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
         )}
       </button>
     );
+    // The grant its choices offer (Allow for …, or a built-in deny lifted once): exactly what it covers.
+    const grant = item.permission?.grant;
+    if (grant) {
+      body = (
+        <span className="flex min-w-0 flex-col gap-0.5">
+          {body}
+          <span className="text-[11px] text-ink-3" data-testid="permission-grant">
+            {grant}
+          </span>
+        </span>
+      );
+    }
   } else if (item.kind === "proposed_checks" || item.kind === "plan") {
     // Approved or accepted from this card: shown whole, never cut short.
     body = <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>;

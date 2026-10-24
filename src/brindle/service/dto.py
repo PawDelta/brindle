@@ -81,9 +81,23 @@ class SessionDTO(_DTO):
 
 
 class PermissionChoiceDTO(_DTO):
-    choice: str                  # allow_once | allow_always | deny
+    choice: str                  # allow_once | allow_for | allow_always | deny
     label: str
-    rule: str | None = None      # allow_always: the rule it writes, and whose
+    rule: str | None = None      # allow_always: the rule it writes, and whose; allow_for: the grant
+
+
+class GrantDTO(_DTO):
+    """A live permission grant (brindle.daemon.grants): what the person let
+    one agent do again, until ``expires_at`` and for ``uses_left`` more calls.
+    GET /grants lists them; POST /grants/{id}/revoke ends one."""
+    id: str
+    agent_id: str
+    repo_root: str
+    kind: str
+    match: str
+    expires_at: float
+    uses_left: int
+    created: float
 
 
 class PermissionDTO(_DTO):
@@ -94,7 +108,9 @@ class PermissionDTO(_DTO):
     "terminal" ends the hold so the CLI's own prompt asks instead) or
     "prompt" (it is at the CLI's own prompt: ``terminal`` says so, and the
     app's "Go to it", with the item's root_id and agent_id, is the way to
-    answer it; no ``choices``)."""
+    answer it; no ``choices``) or "grant" (a one-time grant the agent asked
+    for after a built-in deny refused it: the same route answers it, with
+    allow_once or deny, until ``hold_until``; ``grant`` says what it allows)."""
     via: str
     request_id: str | None = None
     digest: str | None = None         # of the exact request and suggested rule shown
@@ -106,6 +122,7 @@ class PermissionDTO(_DTO):
     tool: str | None = None
     kind: str | None = None      # brindle.permissions.KINDS
     target: str | None = None    # the command, path or URL, complete
+    grant: str | None = None     # the grant it offers (allow_for, or a one-time grant), in a line
     wording: str | None = None   # the prompt as the provider words it
     choices: list[PermissionChoiceDTO] = []
 

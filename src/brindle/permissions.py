@@ -69,7 +69,7 @@ KINDS = ("read", "write", "edit", "bash", "fetch", "mcp", "other")
 PATH_KINDS = ("read", "write", "edit")
 DECISIONS = ("allow", "deny", "ask")
 MATCH_TYPES = ("exact", "prefix", "glob")
-BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force")
+BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "curl-readonly", "git-push", "git-force")
 SOURCES = ("default", "repo", "user", "learned")
 SUGGEST_AFTER = 2
 FILE = "permissions.json"
@@ -98,6 +98,9 @@ class Request:
     command: str | None = None
     path: str | None = None
     url: str | None = None
+    # The grant the person is offered with it, as JSON (brindle.permission_grants):
+    # recorded with the request, so the digest the app answers binds it too.
+    grant: str | None = None
 
     def target(self) -> str:
         return self.command or self.path or self.url or self.tool
@@ -193,6 +196,9 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
     _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
     _default("d-git-ro", "bash", "git status / diff / log / show", "git-readonly", "allow"),
+    _default("d-curl-ro", "bash", "curl HTTP read without uploads or file output", "curl-readonly", "allow"),
+    _default("d-echo", "bash", "echo", "exact", "allow"),
+    _default("d-echo-args", "bash", "echo ", "prefix", "allow"),
     _default("d-git-push", "bash", "git push", "git-push", "deny"),
     _default("d-git-force", "bash", "a git command with a force flag", "git-force", "deny"),
     _default("d-ssh", "read", "~/.ssh*", "glob", "deny"),
@@ -928,6 +934,46 @@ def _is_force(arg: str) -> bool:
             or bool(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", arg)))
 
 
+def _readonly_command(rule: Rule, req: Request, argv: list[str]) -> bool:
+    """Validate the arguments of a read-only git or HTTP probe."""
+    if rule.kind != "bash" or not argv:
+        return False
+    if rule.match_type == "git-readonly" and argv[0] == "git":
+        args = argv[1:]
+        if args[:1] == ["-C"]:
+            if len(args) < 3:
+                return False
+            path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
+            if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
+                return False
+            args = args[2:]
+        return bool(args and args[0] in READONLY_GIT
+                    and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
+    if rule.match_type != "curl-readonly" or argv[0] != "curl":
+        return False
+    # curlrc can add uploads or file output. Suppression only takes effect
+    # in the first argument, before any other option or URL.
+    if len(argv) < 2 or argv[1] not in ("-q", "--disable"):
+        return False
+    # Enumerate read-only flags; unknown options (including config, data,
+    # uploads, method overrides and output files) require approval.
+    urls = 0
+    args = iter(argv[2:])
+    for arg in args:
+        if arg in ("-s", "-S", "-sS", "-I", "-i", "-L", "-f", "-q",
+                   "--silent", "--show-error", "--head", "--include", "--location", "--fail", "--disable"):
+            continue
+        if arg in ("-D", "--dump-header", "-o", "--output"):
+            value = next(args, None)
+            if value != "/dev/null" and not (arg in ("-D", "--dump-header") and value == "-"):
+                return False
+        elif arg.startswith(("https://", "http://")):
+            urls += 1
+        else:
+            return False
+    return urls > 0
+
+
 def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "tracked":
         return req.kind == "read" and is_tracked(req.path, _roots(req))
@@ -936,10 +982,9 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
         return False
     if rule.match_type == "check":
         return simple_argv(command) is not None and command in [c.strip() for c in checks]
-    if rule.match_type == "git-readonly":
+    if rule.match_type in ("git-readonly", "curl-readonly"):
         argv = simple_argv(command)
-        return bool(argv and len(argv) >= 2 and argv[0] == "git" and argv[1] in READONLY_GIT
-                    and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in argv[2:]))
+        return bool(argv and _readonly_command(rule, req, argv))
     if rule.match_type == "git-push":
         return any(sub == "push" for sub, _ in _git_calls(command))
     if rule.match_type == "git-force":

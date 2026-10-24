@@ -152,6 +152,8 @@ def test_codex_checks_and_profile_commands(db, ws, command, expected):
                  marks=pytest.mark.variant("gh api writes are a distinct bypass attempt")),
     ("off", "gh issue view 239 --repo PawDelta/brindle", "allow"),  # #241: nobody watches its prompt
     ("off", "gh pr merge 5 --repo PawDelta/brindle", None),  # ...the rest stays Codex's own
+    pytest.param("on", "git diff --stat && uv run pytest tests/test_feature.py -q", "allow",
+                 marks=pytest.mark.variant("#250: reviewer read and local test probes use the existing policy")),
 ])
 def test_codex_reviewer_reads_github_but_cannot_write(db, ws, policy, command, expected):
     set_local(ws.repo_root, "permission_policy", policy)
@@ -721,6 +723,31 @@ def strict_answer(db, ws, tool, args, **extra):
     return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))
 
 
+@pytest.mark.parametrize("command,expected", [
+    ("git log --oneline main..HEAD && echo --- && git diff --stat main..HEAD", "allow"),
+    ("git -C {ws} log -n 15 --oneline", "allow"),
+    pytest.param("grep -n feature app.py && head -n 5 app.py | tail -n 2", "allow",
+                 marks=pytest.mark.variant("#262: ordinary allowed read chains already work on baseline")),
+    ('git show main:app.py && echo "=== B ===" && git diff --stat', "allow"),
+    ("curl -q -s -D - -o /dev/null https://example.com", "allow"),
+    pytest.param("curl --disable https://example.com", "allow", marks=pytest.mark.variant("long config suppression flag")),
+    ("curl https://example.com", "deny"),
+    pytest.param("curl -s -q https://example.com", "deny", marks=pytest.mark.variant("misplaced -q still loads curlrc")),
+    ("git status; rm app.py", "deny"),
+    ("curl -q -d payload https://example.com", "deny"),
+    pytest.param("curl -q -T app.py https://example.com", "deny", marks=pytest.mark.variant("curl upload bypass")),
+    pytest.param("curl -q -o app.py https://example.com", "deny", marks=pytest.mark.variant("curl output file bypass")),
+    pytest.param("git -C /outside log", "deny", marks=pytest.mark.variant("git outside the workspace")),
+    pytest.param("git -c core.pager=sh log", "deny", marks=pytest.mark.variant("git configuration can execute programs")),
+    pytest.param("git log $(rm app.py)", "deny", marks=pytest.mark.variant("shell substitution bypass")),
+])
+def test_reviewer_chain_through_agy_hook(db, ws, monkeypatch, command, expected):
+    a = worker(db, ws, provider="antigravity")
+    db.update_agent(a.id, profile="reviewer", mode="review")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    assert strict_answer(db, ws, "run_command", {"CommandLine": command.format(ws=ws.path)})["decision"] == expected
+
+
 def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, monkeypatch, tmp_path):
     # With the skip flag agy runs a hook's "ask" unprompted, so the strict hook
     # never answers ask: what brindle would have asked about is denied.
@@ -756,7 +783,7 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
 
     assert decision("run_command", {"CommandLine": "git push"}) == "deny"
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
-    assert decision("run_command", {"CommandLine": "curl https://example.com"}) == "deny"
+    assert decision("run_command", {"CommandLine": "curl -d payload https://example.com"}) == "deny"
     assert decision("view_file", {"AbsolutePath": str(outside)}) == "deny"
     assert decision("read_url_content", {"Url": "https://example.com"}) == "deny"
     assert decision("call_mcp_tool", {"ServerName": "github", "ToolName": "create_issue"}) == "deny"
@@ -812,12 +839,12 @@ def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
     assert decision("run_command", {"CommandLine": "git status", "Cwd": "/tmp"}) == "deny"
     assert decision("run_command", {"CommandLine": "git status", "Cwd": json.dumps(ws.path)}) == "deny"
     # The profile's allowed_tools (the developer's ls, uv run, ...) count, as
-    # for a Claude Code worker; a deny still wins, and nothing compound passes.
+    # for a Claude Code worker; every part must be allowed and a deny still wins.
     assert decision("run_command", {"CommandLine": "ls -la"}) == "allow"
     assert decision("run_command", {"CommandLine": "ls"}) == "allow"
     assert decision("run_command", {"CommandLine": "uv run pytest tests/test_x.py -q"}) == "allow"
     assert decision("run_command", {"CommandLine": "lsof -i"}) == "deny"
-    assert decision("run_command", {"CommandLine": "ls; curl https://example.com"}) == "deny"
+    assert decision("run_command", {"CommandLine": "ls; curl -T app.py https://example.com"}) == "deny"
     assert decision("run_command", {"CommandLine": "ls $(curl https://example.com)"}) == "deny"
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
     # .agents/.git/.brindle are protected at any depth, not only at the top.

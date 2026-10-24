@@ -12,6 +12,7 @@ export interface ApiSchema {
   AgentDTO: AgentDTO;
   DecisionDTO: DecisionDTO;
   GoalDTO: GoalDTO;
+  GrantDTO: GrantDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
   MilestoneDTO: MilestoneDTO;
@@ -156,6 +157,24 @@ export interface MilestoneDTO {
   title: string;
 }
 /**
+ * A live permission grant (brindle.daemon.grants): what the person let
+ * one agent do again, until ``expires_at`` and for ``uses_left`` more calls.
+ * GET /grants lists them; POST /grants/{id}/revoke ends one.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GrantDTO".
+ */
+export interface GrantDTO {
+  agent_id: string;
+  created: number;
+  expires_at: number;
+  id: string;
+  kind: string;
+  match: string;
+  repo_root: string;
+  uses_left: number;
+}
+/**
  * A route the app can call to act on the item itself.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -189,7 +208,9 @@ export interface InboxItemDTO {
  * "terminal" ends the hold so the CLI's own prompt asks instead) or
  * "prompt" (it is at the CLI's own prompt: ``terminal`` says so, and the
  * app's "Go to it", with the item's root_id and agent_id, is the way to
- * answer it; no ``choices``).
+ * answer it; no ``choices``) or "grant" (a one-time grant the agent asked
+ * for after a built-in deny refused it: the same route answers it, with
+ * allow_once or deny, until ``hold_until``; ``grant`` says what it allows).
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PermissionDTO".
@@ -197,6 +218,7 @@ export interface InboxItemDTO {
 export interface PermissionDTO {
   choices?: PermissionChoiceDTO[];
   digest?: string | null;
+  grant?: string | null;
   hold_note?: string | null;
   hold_until?: number | null;
   kind?: string | null;

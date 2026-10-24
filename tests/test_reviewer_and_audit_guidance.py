@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, autopilot, config, mcp_server, pipeline, providers, sessions, tmux
+from brindle import agents, autopilot, config, knowledge, mcp_server, pipeline, providers, sessions, tmux
 from brindle.config import RepoConfig
 from brindle.db import Agent, Task, Workspace
 
@@ -42,7 +42,7 @@ def sent(monkeypatch):
     return out
 
 
-def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_full_brief(db, repo, monkeypatch):
+def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_full_brief(db, repo, sup, monkeypatch):
     agents_dir = repo / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / "restricted.md").write_text(
@@ -51,7 +51,7 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     ws = Workspace("ws-rev", str(repo), "feat/rev", "main", "main", "main", str(repo), 20000, "tmux-rev", 0)
     db.add_workspace(ws)
     long_task = "Task preamble: " + ("x" * 2100) + "\n\nSCOPE EXCEPTION: Do not refactor legacy database connector."
-    worker = add(db, ws, "w1", "restricted", task=long_task)
+    worker = add(db, ws, "w1", "restricted", parent=sup.id, task=long_task)
     db.add_task(Task("t-rev", str(repo), worker.id, None, ws.id, "restricted", long_task, "assign", 1,
                      "feat/rev", "pytest tests/test_auth.py passes", '["src/auth.py", "tests/test_auth.py"]',
                      None, "started", 0.0))
@@ -59,14 +59,70 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     monkeypatch.setattr(agents, "spawn", lambda db_, ws_, profile, **kw: prompts.append(kw["prompt"]) or
                         Agent("rev1", ws_.id, profile, "claude", None, "review", "starting", "@0", None, 0.0))
     monkeypatch.setattr(agents, "workspace_worker", lambda db_, ws_: db.get_agent(worker.id))
+    autopilot.record_accepted_decision(db, sup.id, "Legacy connector exclusion accepted")
+    other = add(db, ws, "other", mode="interactive")
+    db.add_autopilot(other.id)
+    autopilot.record_accepted_decision(db, other.id, "Unrelated goal exclusion")
+    key = knowledge.repo_key(str(repo))
+    old, _ = knowledge.record_decision(db, key, "Auth", "Use legacy authentication", paths=["src/auth.py"])
+    knowledge.record_decision(db, key, "Auth", "Use token authentication", "Owner approved migration",
+                              ["src/auth.py"], supersedes=old["id"])
+    knowledge.record_decision(db, key, "Logging", "Redact credentials in logs")
+    knowledge.record_decision(db, key, "UI", "Unrelated UI decision", paths=["app/*"])
+    knowledge.record_decision(db, "different-repo", "Auth", "Another repository decision")
+    knowledge.propose_decision(db, key, "Proposal", "Unaccepted proposal")
 
-    agents.request_review(db, None, ws)
+    agents.request_review(db, other, ws)
     [prompt] = prompts
     assert "Declared files: src/auth.py, tests/test_auth.py" in prompt
     assert "finish line: pytest tests/test_auth.py passes" in prompt.lower()
     assert "Worker profile: restricted" in prompt
     assert "allowed_tools: Bash(git add:*)" in prompt and "permission_mode: acceptEdits" in prompt
     assert "SCOPE EXCEPTION: Do not refactor legacy database connector." in prompt   # past 2000 chars
+    for content in ("Legacy connector exclusion accepted", "Use token authentication",
+                    "Owner approved migration", "Redact credentials in logs"):
+        assert content in prompt
+    for content in ("Unrelated goal exclusion", "Use legacy authentication", "Unrelated UI decision",
+                    "Another repository decision", "Unaccepted proposal"):
+        assert content not in prompt
+    db.update_task("t-rev", files=None)
+    prompts.clear()
+    agents.request_review(db, other, ws, slot="without-files")
+    assert "Redact credentials in logs" in prompts[0]
+    assert "Use token authentication" not in prompts[0]
+
+
+@pytest.mark.variant("Cross-worker and unrelated-session messages must not override the reviewed worker's scope")
+@pytest.mark.parametrize("delivery", ["headless", "direct"])
+def test_review_receives_supervisor_updates_only_for_its_worker(db, ws, sup, monkeypatch, delivery):
+    worker = add(db, ws, "worker", parent=sup.id, headless=delivery == "headless")
+    peer = add(db, ws, "peer", parent=sup.id)
+    stranger = add(db, ws, "stranger", mode="interactive")
+    monkeypatch.setattr(agents, "is_alive", lambda *a, **kw: True)
+    monkeypatch.setattr(agents, "get_provider", lambda *a: SimpleNamespace(uses_hooks=False))
+    monkeypatch.setattr(tmux, "paste", lambda *a, **kw: None)
+    prompts = []
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, profile, **kw: prompts.append(kw["prompt"]) or
+                        Agent("rev1", ws_.id, profile, "claude", None, "review", "starting", "@0", None, 0.0))
+    db.mark_delivered(db.enqueue(worker.id, "Export CSV and JSON", sup.id))
+    for recipient, sender, body in ((peer.id, sup.id, "Private sibling task"),
+                                   (worker.id, peer.id, "Peer suggestion"),
+                                   (worker.id, stranger.id, "Other session spec"),
+                                   (sup.id, worker.id, "Worker self-reported waiver"),
+                                   (worker.id, None, "Internal notice")):
+        db.enqueue(recipient, body, sender)
+    agents.send_message(db, worker.id, "Owner changed scope: export CSV only", sender_id=sup.id)
+    agents.request_review(db, stranger, ws)
+    [prompt] = prompts
+    assert "Owner changed scope: export CSV only" in prompt
+    assert prompt.index("Export CSV and JSON") < prompt.index("Owner changed scope: export CSV only")
+    for content in ("Private sibling task", "Peer suggestion", "Other session spec",
+                    "Worker self-reported waiver", "Internal notice"):
+        assert content not in prompt
+    db.update_agent(worker.id, parent_id=None)
+    prompts.clear()
+    agents.request_review(db, stranger, ws, slot="without-parent")
+    assert "Owner changed scope: export CSV only" not in prompts[0]
 
 
 def test_submit_review_succeeds_for_completion_auditor(db, ws, monkeypatch, fake_agent_cli):
@@ -247,6 +303,11 @@ def test_session_handover_preserves_audit_history_and_accepted_decisions(db, rep
     ws2 = Workspace("ws-ho2", str(repo), "feat/ho2", "main", "main", "worktree", str(repo), 20010, "tmux-ho2", 0)
     db.add_workspace(ws2)
     old_sup = add(db, ws, "old", mode="interactive")
+    delegate = add(db, ws, "delegate", mode="interactive", parent=old_sup.id)
+    worker = add(db, ws, "worker", parent=delegate.id, task="Export CSV and JSON")
+    db.mark_delivered(db.enqueue(worker.id, "Owner changed scope: export CSV only", old_sup.id))
+    db.enqueue(worker.id, "Unrelated sender's spec", "unrelated")
+    db.enqueue(old_sup.id, "Private supervisor conversation", "unrelated")
     db.add_autopilot(old_sup.id)
     autopilot.set_goal(db, old_sup.id, "Refactor core engine", [("Step 1", "true", None)])
     autopilot.record_accepted_decision(db, old_sup.id, "Accepted exclusion of deprecated driver")
@@ -262,7 +323,8 @@ def test_session_handover_preserves_audit_history_and_accepted_decisions(db, rep
     old_history = db.get_autopilot(old_sup.id).audit_history
 
     monkeypatch.setattr(agents, "pause", lambda db, id, **kwargs: None)
-    monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: None)
+    prompts = []
+    monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: prompts.append(kwargs.get("prompt")))
     new_sup = sessions.handover(db, old_sup.id, ws2, note="Handing over to feature branch")
 
     new_ap = db.get_autopilot(new_sup.id)
@@ -274,6 +336,20 @@ def test_session_handover_preserves_audit_history_and_accepted_decisions(db, rep
         assert db.milestones(old_sup.id) == old_ms and old_file.read_text() == contents
         assert autopilot.session_goals_path(db, new_sup.id).read_text() == contents
         assert autopilot.on_stop(db, new_sup, {}) is None
+
+    db.enqueue(worker.id, "Use semicolon delimiters", new_sup.id)
+    db.enqueue(worker.id, "Former supervisor's later unrelated instruction", old_sup.id)
+    current_sup = sessions.handover(db, new_sup.id, ws2)
+    db.enqueue(worker.id, "Keep the header row", current_sup.id)
+    agents.request_review(db, None, ws)
+    prompt = prompts[-1]
+    assert "Owner changed scope: export CSV only" in prompt
+    assert "Use semicolon delimiters" in prompt
+    assert "Keep the header row" in prompt
+    assert prompt.index("Owner changed scope: export CSV only") < prompt.index("Use semicolon delimiters")
+    for content in ("Unrelated sender's spec", "Private supervisor conversation",
+                    "Former supervisor's later unrelated instruction"):
+        assert content not in prompt
 
 
 @pytest.mark.variant("incident: 0.3.4 sent every review to reviewer-gemini whenever agy was installed; the fix removed that branch")

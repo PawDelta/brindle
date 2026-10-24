@@ -14,7 +14,7 @@ from brindle import agents, cull, prompt_answer, tmux, workspaces
 from brindle.config import worktrees_dir
 from brindle.db import Agent
 
-from test_reliability import CLAUDE_BUSY
+from test_reliability import BOX, CLAUDE_BUSY
 
 TRUST = "Antigravity would like to open this workspace:\n{path}"
 
@@ -87,6 +87,60 @@ def sweeps(db, clock, n=2):
         now = clock[0] + cull.STARTUP_GRACE + cull.STUCK_AFTER * i + 1
         cull.settle_startups(db, now, {})
         cull.note_stuck(db, now, {})
+
+
+@pytest.mark.parametrize("question,options,mode,status,screen,provider", [
+    ("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
+     "• Which storage should I use?\n\n  1. SQLite\n  2. Postgres\n\n› \n  97% context left", "codex"),
+    pytest.param("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
+                 "Which storage should I use?\n\n  1. SQLite\n  2. Postgres", "codex",
+                 marks=pytest.mark.variant("numbered question without a composer footer")),
+    ("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
+     "⏺ Which storage should I use?\n\n  1. SQLite\n  2. Postgres\n\n────\n❯ \n────\n"
+     "  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n", "claude"),
+    pytest.param("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
+                 "⏺ Read(schema.sql)\n  ⎿ Read 12 lines\n\n⏺ Which storage should I use?\n\n  1. SQLite\n  2. Postgres",
+                 "claude", marks=pytest.mark.variant("completed Claude tool transcript before a plain question")),
+    pytest.param("Hooks need review", ["1. Enable hooks", "2. Skip hooks"], "review", "starting", None, "codex",
+                 marks=pytest.mark.variant("#250: reviewer startup menu")),
+    pytest.param("Would you like to run the following command?\n$ make probe", ["1. Yes", "2. No"], "review", "processing", None, "codex",
+                 marks=pytest.mark.variant("#250: reviewer command approval")),
+])
+def test_active_worker_menu_is_forwarded_immediately(db, launch, monkeypatch, question, options, mode, status, screen, provider):
+    pane, asked = launch(question, options, {}, provider=provider, mode=mode, status=status)
+    if screen is not None:
+        monkeypatch.setattr(pane, "render", lambda: screen)
+    monkeypatch.setattr(agents, "pane_owners", lambda *a: {})
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    assert cull.note_stuck(db, launch.clock[0], {})
+    assert db.get_agent("w1").status == "waiting"
+    [message] = db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' AND held=1").fetchall()
+    assert question in message["body"]
+    assert all(option in message["body"] for option in options)
+    assert not cull.note_stuck(db, launch.clock[0], {})
+    assert db.pending_count("boss") == 1
+    assert not pane.keys and not asked
+
+
+@pytest.mark.variant("busy, answered, and echoed transcript bypass attempts must not become pending questions")
+@pytest.mark.parametrize("suffix,echo,provider", [
+    ("\n• Working (esc to interrupt)\n› \n97% context left", False, "codex"),
+    ("\n› Use SQLite\n• Implemented SQLite.\n› \n97% context left", False, "codex"),
+    ("\n› \n97% context left", True, "codex"),
+    ("\n" + CLAUDE_BUSY, False, "claude"),
+    ("\n❯ Use SQLite\n⏺ Implemented SQLite." + BOX, False, "claude"),
+    (BOX, True, "claude"),
+    (BOX.replace("❯ ", "❯ Use SQLite"), False, "claude"),
+])
+def test_numbered_transcript_without_pending_question_is_not_forwarded(db, launch, monkeypatch, suffix, echo, provider):
+    question = "Which storage should I use?\n\n1. SQLite\n2. Postgres"
+    pane, _ = launch("", [], {}, provider=provider, status="idle")
+    monkeypatch.setattr(pane, "render", lambda: question + suffix)
+    if echo:
+        db.update_agent("w1", task=question)
+    assert not cull.note_stuck(db, launch.clock[0], {})
+    assert db.get_agent("w1").status == "idle"
+    assert db.pending_count("boss") == 0
 
 
 @pytest.mark.parametrize("question,options,reply,keys,chosen,told", [
@@ -243,6 +297,7 @@ def test_brief_not_prompt_when_its_start_has_scrolled_off(db, launch, monkeypatc
               "  Before you finish, check your work against the task.\n")
     monkeypatch.setattr(tmux, "capture", lambda target, **k: screen)
     prompt_answer.finish_launch(db, db.get_agent("w1"))
+    cull.note_stuck(db, launch.clock[0], {})
     assert db.pending_count("boss") == 0
     assert db.get_agent("w1").status != "waiting"
     # The same menu-like lines above a busy spinner (timed or not yet) or a

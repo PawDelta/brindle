@@ -9,6 +9,7 @@ import type {
   AgentDTO,
   DecisionDTO,
   GoalDTO,
+  GrantDTO,
   InboxItemDTO,
   PreflightItemDTO,
   ProfileDTO,
@@ -994,6 +995,16 @@ export class DaemonClient {
 
   changePermissions(body: PermissionChange) {
     return this.post<PermissionChanged>("/permissions", body);
+  }
+
+  /* GET /grants (routes_read.list_grants): the live grants the person gave from the Inbox. */
+  grants() {
+    return this.get<GrantDTO[]>("/grants");
+  }
+
+  /* POST /grants/{id}/revoke (routes_actions.revoke_grant). */
+  revokeGrant(id: string) {
+    return this.post<{ revoked: string }>(`/grants/${encodeURIComponent(id)}/revoke`);
   }
 
   /* Starts a sign-in as a job: a job.progress event carries the URL to open
