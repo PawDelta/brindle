@@ -342,7 +342,7 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
         review = db.last_review(ws.id)
         # The latest reviewer verdict, so the sidebar can flag rows that need you.
         entry["review"] = None if review is None else ("approved" if review.approved else "changes")
-        entry["review_state"] = pipeline.review_state(db, ws)
+        entry["review_state"] = pipeline.review_state(db, ws, head_reader=lambda: status_cache.read_head(ws.path))
         entry["autopilot"], entry["asking"] = _autopilot_flags(db, shown)
         out.append(entry)
     return out

@@ -150,6 +150,18 @@ describe("settings screen", () => {
     stop();
   });
 
+  it("lists the live permission grants and revokes one through the engine", async () => {
+    const grant = { id: "g1", agent_id: "wk", repo_root: REPO, kind: "fetch", match: "https://example.com/docs", expires_at: 2e9, uses_left: 2, created: 1e9 };
+    const { daemon, stop } = setup({ grants: [grant, { ...grant, id: "g2", kind: "bash", match: "terraform plan" }] });
+    const rows = await within(await screen.findByTestId("grants")).findAllByTestId("grant");
+    expect(rows.map((r) => r.querySelector("code")?.textContent)).toEqual(["fetch https://example.com/docs", "bash terraform plan"]);
+    fireEvent.click(within(rows[0]).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(screen.getAllByTestId("grant")).toHaveLength(1));
+    expect(daemon.requests.some((r) => r.method === "POST" && r.path === "/grants/g1/revoke")).toBe(true);
+    expect(daemon.data.grants.map((g) => g.id)).toEqual(["g2"]);
+    stop();
+  });
+
   it("adds permission rules as the engine describes them back, and resets them only after asking", async () => {
     const { daemon, stop } = setup();
     const form = await screen.findByRole("form", { name: "Add a rule" });

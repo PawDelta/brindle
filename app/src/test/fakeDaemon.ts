@@ -17,6 +17,7 @@ import type {
   AgentDTO,
   DecisionDTO,
   GoalDTO,
+  GrantDTO,
   InboxItemDTO,
   ProfileDTO,
   RoutingDTO,
@@ -42,6 +43,8 @@ export interface DaemonData {
   sessions: SessionDTO[];
   workspaces: WorkspaceDTO[];
   inbox: InboxItemDTO[];
+  /* GET /grants: the live permission grants (brindle.daemon.grants); POST /grants/{id}/revoke ends one. */
+  grants: GrantDTO[];
   goal: GoalDTO | null;
   decisions: DecisionDTO[];
   profiles: ProfileDTO[];
@@ -661,6 +664,7 @@ export class FakeDaemon {
       routingByRepo: {},
       routingPolicy: null,
       learned: {},
+      grants: [],
       rulePacks: [],
       actionScreens: {},
       kbSources: [],
@@ -1859,6 +1863,12 @@ export class FakeDaemon {
       if (path === "/kb/sources") return this.addKbSource(repo, fields);
       if ((m = path.match(/^\/kb\/sources\/([^/]+)\/sync$/))) return this.syncKbSource(repo, m[1]);
       if (path === "/permissions") return this.changePermissions(fields);
+      if ((m = path.match(/^\/grants\/([^/]+)\/revoke$/))) {
+        const id = decodeURIComponent(m[1]);
+        if (!d.grants.some((g) => g.id === id)) return error("not_found", `no live grant ${id}`, 404);
+        d.grants = d.grants.filter((g) => g.id !== id);
+        return json({ revoked: id });
+      }
       if (path === "/debug/log") {
         // Dropped, as the engine drops them, while logging is off.
         if (d.debug.staff && d.debug.enabled) d.debugLog.push(fields as unknown as DebugEntry);
@@ -2001,6 +2011,7 @@ export class FakeDaemon {
       // routes_read.read_file: {path, content, base}, base being the blob sha the PUT takes.
       return json({ path: query.path, content, base: fakeBlob(content) });
     }
+    if (path === "/grants") return json(d.grants);
     if (path === "/providers/installed") {
       if (this.failNextDetects > 0) {
         this.failNextDetects--;

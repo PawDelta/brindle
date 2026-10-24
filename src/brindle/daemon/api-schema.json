@@ -665,6 +665,55 @@
       "title": "GoalDTO",
       "type": "object"
     },
+    "GrantDTO": {
+      "description": "A live permission grant (brindle.daemon.grants): what the person let\none agent do again, until ``expires_at`` and for ``uses_left`` more calls.\nGET /grants lists them; POST /grants/{id}/revoke ends one.",
+      "properties": {
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "created": {
+          "title": "Created",
+          "type": "number"
+        },
+        "expires_at": {
+          "title": "Expires At",
+          "type": "number"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "match": {
+          "title": "Match",
+          "type": "string"
+        },
+        "repo_root": {
+          "title": "Repo Root",
+          "type": "string"
+        },
+        "uses_left": {
+          "title": "Uses Left",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "agent_id",
+        "repo_root",
+        "kind",
+        "match",
+        "expires_at",
+        "uses_left",
+        "created"
+      ],
+      "title": "GrantDTO",
+      "type": "object"
+    },
     "InboxActionDTO": {
       "description": "A route the app can call to act on the item itself.",
       "properties": {
@@ -736,7 +785,7 @@
           "type": "object"
         },
         "PermissionDTO": {
-          "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``).",
+          "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``) or \"grant\" (a one-time grant the agent asked\nfor after a built-in deny refused it: the same route answers it, with\nallow_once or deny, until ``hold_until``; ``grant`` says what it allows).",
           "properties": {
             "choices": {
               "default": [],
@@ -757,6 +806,18 @@
               ],
               "default": null,
               "title": "Digest"
+            },
+            "grant": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Grant"
             },
             "hold_note": {
               "anyOf": [
@@ -1228,7 +1289,7 @@
           "type": "object"
         }
       },
-      "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``).",
+      "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``) or \"grant\" (a one-time grant the agent asked\nfor after a built-in deny refused it: the same route answers it, with\nallow_once or deny, until ``hold_until``; ``grant`` says what it allows).",
       "properties": {
         "choices": {
           "default": [],
@@ -1249,6 +1310,18 @@
           ],
           "default": null,
           "title": "Digest"
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grant"
         },
         "hold_note": {
           "anyOf": [
@@ -3048,8 +3121,24 @@
       "path": "/v1/goal/enabled"
     },
     {
+      "method": "GET",
+      "path": "/v1/grants"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/grants/{id}/revoke"
+    },
+    {
       "method": "POST",
       "path": "/v1/holds"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/grants/ask"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/grants/use"
     },
     {
       "method": "POST",

@@ -50,6 +50,7 @@
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, PermissionChange, ProviderInstalled, UserSettings } from "../../api/client";
+import type { GrantDTO } from "../../api/schema";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
@@ -589,6 +590,63 @@ function PermissionRules({ client }: { client: DaemonClient }) {
   );
 }
 
+/* The grants the person gave from the Inbox ("Allow for …"): one agent may
+   repeat one exact request until a grant expires or its uses run out.
+   GET /v1/grants lists the live ones; Revoke (POST /v1/grants/{id}/revoke)
+   ends one now. The daemon keeps them in memory: a restart ends them all. */
+function PermissionGrants({ client }: { client: DaemonClient }) {
+  const [grants, setGrants] = useState<GrantDTO[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try {
+      setGrants(await client.grants());
+    } catch (e) {
+      setError(message(e));
+    }
+  }, [client]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const revoke = async (id: string) => {
+    setBusy(id);
+    setError(null);
+    try {
+      await client.revokeGrant(id);
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(null);
+      await load();
+    }
+  };
+  return (
+    <Row label="Permission grants" help="What you allowed an agent to repeat from the Inbox, until it expires or its uses run out." wide testId="grants">
+      {grants?.length === 0 && <span className="text-sm text-ink-3">None live.</span>}
+      <ul className="flex w-full flex-col gap-1">
+        {(grants ?? []).map((g) => (
+          <li key={g.id} className="flex flex-wrap items-center gap-s1" data-testid="grant">
+            <code className="min-w-0 flex-1 truncate font-mono text-xs" title={g.match}>
+              {g.kind} {g.match}
+            </code>
+            <span className="text-[11px] text-ink-3">
+              {g.agent_id} · {g.uses_left} uses · until {new Date(g.expires_at * 1000).toLocaleTimeString()}
+            </span>
+            <button type="button" className={quiet} disabled={busy !== null} onClick={() => void revoke(g.id)}>
+              Revoke
+            </button>
+          </li>
+        ))}
+      </ul>
+      {error && (
+        <p role="alert" className={`${alert} w-full`}>
+          {error}
+        </p>
+      )}
+    </Row>
+  );
+}
+
 /* One key's value, typed into a password field and sent to PUT /keys/{name}
    (write-only: the engine stores it as `brindle keys set` does and answers
    the last four). The value lives in this field until Save and nowhere
@@ -1011,6 +1069,7 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
         <Section id="you" title="You" blurb="How Claude's requests reach you, your permission rules, and your defaults for every repo." testId="user-settings">
           <PermissionMode client={client} />
           <PermissionRules client={client} />
+          <PermissionGrants client={client} />
           {yourLines.length > 0 && (
             <div className="flex flex-col gap-1 px-s2 py-1">
               <More open={yours} onToggle={() => setYours((y) => !y)} label="Your defaults for every repo" count={yourLines.length} />

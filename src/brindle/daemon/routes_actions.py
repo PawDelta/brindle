@@ -1280,6 +1280,22 @@ def change_permissions(db: DB, params: dict, body: Body) -> Any:
     return reply
 
 
+def revoke_grant(db: DB, params: dict, body: Body) -> Any:
+    """End the person's permission grant ``id`` now (brindle.daemon.grants)."""
+    from brindle import history
+    from brindle.daemon.grants import GRANTS
+
+    grant = GRANTS.revoke(params["id"])
+    if grant is None:
+        raise ServiceError("not_found", f"no live grant {params['id']}", 404)
+    agent = db.get_agent(grant.agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if agent is not None and ws is not None:
+        history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
+                              task=f"{grant.kind}: {grant.match}", result=f"grant {grant.id} revoked by the person")
+    return {"revoked": grant.id}
+
+
 # -- account ---------------------------------------------------------------------
 
 
@@ -1708,6 +1724,7 @@ ROUTES = [
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
     _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
+    _post("/grants/{id}/revoke", revoke_grant),
     _post("/agents/{id}/message", message_agent),
     _post("/agents/{id}/close", close_agent),
     _post("/agents/{id}/kill", kill_agent),

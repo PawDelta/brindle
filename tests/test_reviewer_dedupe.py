@@ -5,6 +5,7 @@ naming a reviewer rather than a worker."""
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import time
 from pathlib import Path
@@ -12,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, cli, gates, launch_health, pipeline, tmux, workspaces
+from brindle import agents, cli, gates, launch_health, mcp_server, pipeline, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent, Task, Workspace
 from brindle.profiles import Profile
@@ -104,8 +105,70 @@ def run_helper(ws, argv):
     args = argv[argv.index(ws.id) + 1:]
     second = "--second-review" in args
     options = dict(zip(*[iter(a for a in args if a != "--second-review")] * 2))
+    slot = {"slot": options["--review-slot"]} if "--review-slot" in options else {}
     cli.review_after_checks_cmd(ws.id, options.get("--caller"), options.get("--profile"),
-                                options.get("--focus"), options.get("--request-id"), second)
+                                options.get("--focus"), options.get("--request-id"), second,
+                                **slot)
+
+
+@pytest.mark.parametrize("checks", [[], ["suite"]], ids=["direct", "checks"])
+@pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")
+def test_mcp_explicit_profile_keeps_other_profile_running(db, ws, boss, monkeypatch, checks):
+    cfg = RepoConfig(checks=checks, review_profile="reviewer")
+    queued = piped_worker(db, ws, boss, monkeypatch, cfg)
+    monkeypatch.setattr(mcp_server, "load_repo_config", lambda _: cfg)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", boss.id)
+    started = fake_spawn(monkeypatch)
+    now = [time.time()]
+    monkeypatch.setattr(agents.time, "time", lambda: now[0])
+
+    def request(profile=None, abandon=False):
+        before = len(queued)
+        asyncio.run(mcp_server.request_review(ws.id, profile=profile))
+        if checks and abandon:
+            stale = queued[-1]
+            now[0] += agents.LAUNCH_GRACE + 1
+            asyncio.run(mcp_server.request_review(ws.id, profile=profile))
+            before += 1
+            assert len(queued) == before + 1
+            run_helper(ws, stale)
+            assert agents._review_requested(ws.id, profile, queued[-1][-1])
+        for argv in queued[before:]:
+            cancellations = []
+            asyncio.run(mcp_server.request_review(ws.id, profile=profile))
+            assert len(queued) == before + 1
+
+            def check(*args, cancel, **kwargs):
+                was_cancelled = cancel()
+                if profile is None or abandon:   # a running helper outlives its startup grace
+                    now[0] += agents.LAUNCH_GRACE + 1
+                asyncio.run(mcp_server.request_review(ws.id, profile=profile))
+                cancellations.append((was_cancelled, cancel(),
+                                      agents._review_requested(ws.id, profile or "reviewer", argv[-1])))
+                return "PASS"
+
+            monkeypatch.setattr(gates, "check_summary", check)
+            run_helper(ws, argv)
+            assert cancellations == [(False, False, True)]
+            assert len(queued) == before + 1
+
+    request()
+    original = db.get_agent(started[0].id)
+    claim = db.review_claim(ws.id, original.review_sha, original.review_slot)
+    # A dispatcher that has not published its reviewer still owns this claim.
+    token = db.claim_review(ws.id, original.review_sha, "reviewer-codex")
+    request("reviewer-codex")
+    assert len(started) == 1
+    assert db.review_claim(ws.id, original.review_sha, "reviewer-codex") == (None, token)
+    db.hold_review(ws.id, original.review_sha, "reviewer-codex", token, None)
+    request("reviewer-codex", abandon=True)
+    assert [a.profile for a in started] == ["reviewer", "reviewer-codex"]
+    count = len(queued)
+    request("reviewer-codex")
+    request("reviewer")
+    assert len(started) == 2 and len(queued) == count
+    assert db.get_agent(original.id).status == "starting"
+    assert db.review_claim(ws.id, original.review_sha, original.review_slot) == claim
 
 
 @pytest.mark.parametrize("weight,picks,reviewers", [
@@ -148,6 +211,7 @@ def test_queued_reports_only_dispatch_the_latest_review(db, ws, boss, monkeypatc
     def checks(*args, **kwargs):
         checked.append(gates.head(ws))
         if supersede == "during checks" and len(checked) == 1:
+            monkeypatch.setattr(gates, "head", lambda _: "new-sha")
             report()
             assert kwargs["cancel"]()
         return "PASS"
@@ -164,7 +228,8 @@ def test_queued_reports_only_dispatch_the_latest_review(db, ws, boss, monkeypatc
     if supersede == "during checks":
         assert started == []
         finish(queued[2])
-    assert len(started) == 1 and set(checked) == {gates.head(ws)}
+    assert len(started) == 1 and started[0].review_sha == gates.head(ws)
+    assert len(checked) == (2 if supersede == "during checks" else 1)
     # Repeated reports and delayed helpers must respect the live reviewer.
     report()
     finish(queued[1])

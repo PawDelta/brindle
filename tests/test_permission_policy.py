@@ -225,18 +225,19 @@ def test_approval_after_ask_is_learned_and_end_of_turn_is_not(db, ws):
     assert [(s.match, s.count) for s in permissions.suggestions()] == [("make docs", 2)]
 
 
-def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch):
+@pytest.mark.parametrize("mode,age", [("assign", 1000), ("review", 0)])
+def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch, mode, age):
     a = worker(db, ws)
     turn_on(ws)
     agents.hook_main(db, a.id, "permission-request", json.dumps(
         claude_payload("Bash", {"command": "make deploy"})))
     db.set_status(a.id, "waiting")
-    db.update_agent(a.id, status_since=time.time() - 1000)
+    db.update_agent(a.id, mode=mode, status_since=time.time() - age)
     sent = []
     monkeypatch.setattr(agents, "pane_owners", lambda db, panes: {})
     monkeypatch.setattr(agents, "owns_pane", lambda db, a, owners: True)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: "Do you want to proceed?")
+    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: "")
     monkeypatch.setattr(agents, "send_message", lambda db, to, body, sender_id=None: sent.append(body))
     cull.note_stuck(db, time.time(), {})
     assert "Bash: make deploy" in sent[0] and "Only the user can answer it" in sent[0]

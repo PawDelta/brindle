@@ -41,6 +41,7 @@ from brindle.service.dto import (
     AgentDTO,
     DecisionDTO,
     GoalDTO,
+    GrantDTO,
     PreflightItemDTO,
     ProfileDTO,
     RoutingDTO,
@@ -252,6 +253,14 @@ def list_rules(db: DB, request: Request) -> Any:
             continue    # listed but unreadable: `brindle profile lint` reports it
         out.append(RuleDTO(name=name, description=pack.description, source=pack.source).to_json())
     return out
+
+
+@_json
+def list_grants(db: DB, request: Request) -> Any:
+    """The live permission grants the person gave (brindle.daemon.grants), oldest first."""
+    from brindle.daemon.grants import GRANTS
+
+    return [GrantDTO(**g.to_json()).to_json() for g in GRANTS.live()]
 
 
 @_json
@@ -556,6 +565,7 @@ ROUTES = [
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),
+    Route("/v1/grants", list_grants),
     Route("/v1/config", get_config),
     Route("/v1/user-settings", get_user_settings),
     Route("/v1/routing", get_routing),

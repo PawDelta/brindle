@@ -212,7 +212,7 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
     State 1 is scheduled, 2 is running. A duplicate helper cannot take over
     an existing observation, clear its input or submit another copy.
     """
-    from brindle import agents
+    from brindle import agents, prompt_answer
     from brindle.providers import get_provider
 
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
@@ -243,12 +243,19 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
             if fresh is None:
                 return
             screen = capture(fresh)
+            if prompt_answer.blocking_prompt(screen, agent.provider, text):
+                if _turn_running(provider, screen, baseline, text):
+                    delivered(db, agent, baseline)
+                else:
+                    db.conn.execute("UPDATE launch_health SET outcome='awaiting-approval' "
+                                    "WHERE agent_id=? AND token=? AND outcome IS NULL",
+                                    (agent.id, token))
+                prompt_answer.tell(db, fresh, "\n".join(prompt_answer._tail(screen)))
+                return
             if (_turn_running(provider, screen, baseline, text)
                     or failure(screen, baseline=baseline, task=agent.task or "",
                                submitted_prompt=text, provider=agent.provider)):
                 delivered(db, agent, baseline)
-                if provider.tool_permission(screen):
-                    _tell(db, agent, _approval_body(agent, screen))
                 return
             if time.time() >= deadline:
                 break
@@ -528,7 +535,7 @@ def _cause(line: str):
 
 def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -> str | None:
     """Run in a detached helper, five seconds after actual delivery."""
-    from brindle import agents
+    from brindle import agents, prompt_answer
 
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
     agent = db.get_agent(agent_id)
@@ -549,7 +556,11 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     if row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:
         return None
     alive = agents.is_alive(agent)
-    cause, error_block = _failure(capture(agent), baseline=row["baseline"], task=agent.task or "",
+    screen = capture(agent)
+    if alive and prompt_answer.blocking_prompt(screen, agent.provider, row["submitted_prompt"] or agent.task or ""):
+        prompt_answer.tell(db, agent, "\n".join(prompt_answer._tail(screen)))
+        return "waiting"
+    cause, error_block = _failure(screen, baseline=row["baseline"], task=agent.task or "",
                                   submitted_prompt=row["submitted_prompt"], provider=agent.provider)
     if alive and row["delivered_at"] is None and not cause:
         return None
