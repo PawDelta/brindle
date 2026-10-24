@@ -92,6 +92,7 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     assert "Use token authentication" not in prompts[0]
 
 
+@pytest.mark.variant("Cross-worker and unrelated-session messages must not override the reviewed worker's scope")
 @pytest.mark.parametrize("delivery", ["headless", "direct"])
 def test_review_receives_supervisor_updates_only_for_its_worker(db, ws, sup, monkeypatch, delivery):
     worker = add(db, ws, "worker", parent=sup.id, headless=delivery == "headless")
