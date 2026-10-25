@@ -67,8 +67,8 @@ def _context(repo: str) -> tuple[list[p.Rule], dict, list[str]]:
                    "Deny and ask rules match command text (after spacing, quoting and leading assignments are "
                    "normalized), so the same program run another way, such as /bin/rm, env rm, bash -c, "
                    "reordered flags or git -C, is not matched; they are guardrails, not a sandbox. "
-                   "A $(...) substitution inside a quoted argument (git commit -m \"$(...)\") is "
-                   "only read as text, not inspected as the command it runs."]
+                   "Commands inside $(...) are checked too, but a substitution's output is unknown, "
+                   "so it needs approval unless it is a git commit or tag message (-m, --message, -F)."]
     try:
         current = policy(repo)
     except Exception as exc:  # fail closed if authoritative restrictions cannot be read

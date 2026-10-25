@@ -1257,6 +1257,11 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
              and (r.expires_at is None or time.time() < r.expires_at)]
     if not rules:
         return None
+    if "$(" in req.command or "`" in req.command:
+        substituted = _substituted(req, checks, rules)
+        if isinstance(substituted, Decision):
+            return substituted
+        req = substituted
     parsed = _restriction_parts(req.command)
     patterns = _restriction_parts(req.command, word_pattern=RESTRICTION_WORD) if parsed is None else None
     words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
@@ -1267,22 +1272,65 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     if patterns is not None:
         uncertain = not _globs_excluded(patterns, rules)
     else:
-        uncertain = parsed is None and (_bare_substitution(req.command)
-                                        or any(_may_restrict(rule, req.command) for rule in rules))
-    if uncertain:
-        # A bound built-in ask prevents provider/profile fallback from treating
-        # unsupported shell syntax as an ordinary unmatched request.
-        return Decision("ask", "shell syntax cannot be checked safely",
-                        Rule("bash", req.command, "exact", "ask", "default", id="d-shell-syntax"))
-    return None
+        uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
+    return _syntax_ask(req) if uncertain else None
 
 
-def _bare_substitution(command: str) -> bool:
-    """Whether a ``$(...)`` or backtick substitution could supply a program,
-    subcommand or option: any but one inside a double-quoted word that
-    follows at least two literal words (``git commit -m "$(date)"``). What
-    a quoted one runs is only checked as text (see _may_restrict)."""
-    quote, start, opened, i = "", 0, 0, 0
+def _syntax_ask(req: Request) -> Decision:
+    # A bound built-in ask prevents provider/profile fallback from treating
+    # unsupported shell syntax as an ordinary unmatched request.
+    return Decision("ask", "shell syntax cannot be checked safely",
+                    Rule("bash", req.command, "exact", "ask", "default", id="d-shell-syntax"))
+
+
+# Options whose value is only data, by (program, subcommand): the one place a
+# $(...) or backtick substitution may supply a word without approval. Its
+# inner commands are still checked.
+SUBSTITUTION_DATA_OPTIONS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("git", "commit"): ("-m", "--message", "-F"),
+    ("git", "tag"): ("-m", "--message", "-F"),
+}
+# Stands in for a substitution's output once its inner commands are checked.
+_SUBSTITUTED = "BRINDLESUBSTITUTION"
+
+
+def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> Request | Decision:
+    """``req`` with each top-level substitution replaced by a placeholder
+    word, or the decision that ends the check. A substitution always runs its
+    inner commands, so they get the whole restriction check (recursively,
+    quoted or not); a quoted heredoc fed to cat is data. Its output is unknown
+    text, so it may only be a whole word given to an option in
+    SUBSTITUTION_DATA_OPTIONS, in a command with no leading assignments."""
+    from brindle.native.permissions import _simple_commands
+
+    spans = _substitution_spans(req.command)
+    if spans is None:
+        return _syntax_ask(req)
+    pieces, last = [], 0
+    for start, end, body in spans:
+        if not _heredoc_data(body):
+            inner = _restriction_in_parts(replace(req, command=body), checks=checks, rules=rules)
+            if inner is not None:
+                return inner
+        pieces += [req.command[last:start], _SUBSTITUTED]
+        last = end
+    command = "".join(pieces) + req.command[last:]
+    parsed = _simple_commands(command)
+    if parsed is None:
+        return _syntax_ask(req)
+    for words, _ in parsed:
+        for i, word in enumerate(words):
+            if _SUBSTITUTED in word and not (
+                    word == _SUBSTITUTED and i >= 3
+                    and words[i - 1] in SUBSTITUTION_DATA_OPTIONS.get((words[0], words[1]), ())):
+                return _syntax_ask(req)
+    return replace(req, command=command)
+
+
+def _substitution_spans(command: str) -> list[tuple[int, int, str]] | None:
+    """(start, end, inner command) of each outermost ``$(...)`` or backtick
+    substitution, quoted or not, or None when one isn't closed."""
+    spans, quote, i = [], "", 0
     while i < len(command):
         c = command[i]
         if c == "\\" and quote != "'":
@@ -1293,16 +1341,88 @@ def _bare_substitution(command: str) -> bool:
         elif c == "'" and not quote:
             quote = "'"
         elif c == '"':
-            quote, opened = ("", opened) if quote else ('"', i)
+            quote = "" if quote else '"'
         elif command.startswith("$(", i) or c == "`":
-            head = command[start:opened]
-            if (quote != '"' or not head[-1:].isspace() or len(head.split()) < 2
-                    or not all(SIMPLE_COMMAND.fullmatch(word) for word in head.split())):
-                return True
-        elif not quote and c in ";&|\n(){}":
-            start = i + 1
+            end = _substitution_end(command, i)
+            if end is None:
+                return None
+            spans.append((i, end, command[i + (1 if c == "`" else 2):end - 1]))
+            i = end
+            continue
         i += 1
-    return False
+    return spans
+
+
+def _substitution_end(command: str, i: int) -> int | None:
+    """The index just past the substitution starting at ``i``: a backtick
+    ends at the next unescaped one; ``$(`` at its matching ``)``, skipping
+    quotes, nested substitutions and heredoc bodies inside it."""
+    if command[i] == "`":
+        j = i + 1
+        while j < len(command):
+            if command[j] == "\\":
+                j += 2
+            elif command[j] == "`":
+                return j + 1
+            else:
+                j += 1
+        return None
+    depth, j = 1, i + 2
+    while j < len(command):
+        c = command[j]
+        heredoc = re.match(r"<<-?[ \t]*([\"']?)(\w+)\1", command[j:]) if c == "<" else None
+        if c == "\\":
+            j += 2
+        elif c == "'":
+            close = command.find("'", j + 1)
+            if close < 0:
+                return None
+            j = close + 1
+        elif c == '"':
+            j += 1
+            while j < len(command) and command[j] != '"':
+                if command[j] == "\\":
+                    j += 2
+                elif command.startswith("$(", j) or command[j] == "`":
+                    end = _substitution_end(command, j)
+                    if end is None:
+                        return None
+                    j = end
+                else:
+                    j += 1
+            if j >= len(command):
+                return None
+            j += 1
+        elif command.startswith("$(", j) or c == "`":
+            end = _substitution_end(command, j)
+            if end is None:
+                return None
+            j = end
+        elif heredoc is not None:
+            close = re.compile(r"\n[ \t]*" + re.escape(heredoc.group(2)) + r"[ \t]*(?=\n|\)|$)")
+            found = close.search(command, j + heredoc.end())
+            if found is None:
+                return None
+            j = found.end()
+        else:
+            depth += {"(": 1, ")": -1}.get(c, 0)
+            j += 1
+            if depth == 0:
+                return j
+    return None
+
+
+def _heredoc_data(body: str) -> bool:
+    """Whether ``body`` only prints a quoted heredoc (``cat <<'EOF'``): its
+    text is never expanded or run, and its first delimiter line is the last."""
+    head, _, rest = body.strip(" \t\n").partition("\n")
+    found = re.fullmatch(r"cat[ \t]+<<(-?)[ \t]*([\"'])(\w+)\2[ \t]*", head)
+    if found is None:
+        return False
+    lines = rest.split("\n")
+    strip = "\t" if found.group(1) else ""
+    ends = [n for n, line in enumerate(lines) if line.lstrip(strip) == found.group(3)]
+    return bool(ends) and ends[0] == len(lines) - 1
 
 
 def _may_restrict(rule: Rule, command: str) -> bool:
