@@ -56,6 +56,8 @@ hook answers: the command runs right after, outside brindle."""
 from __future__ import annotations
 
 import json
+import hashlib
+import time
 import os
 import re
 import subprocess
@@ -94,6 +96,8 @@ class Limits:
     deny: tuple[Rule, ...] = ()
     protected: bool = False       # the org or repo protects paths
     why: str = ""                 # why nothing may be granted
+    allow_persistent: bool = False
+    owner: str = "local"
 
 
 def _plugin(repo_root: str):
@@ -123,7 +127,8 @@ def limits(repo_root: str) -> Limits:
     if isinstance(p, PolicyDecision):
         if not p.allowed:
             return Limits(False, why=p.reason)
-        return Limits(True, permissions.KINDS, GRANT_ACTIONS, LOCAL_MINUTES, LOCAL_USES, protected=protected)
+        return Limits(True, permissions.KINDS, GRANT_ACTIONS, LOCAL_MINUTES, LOCAL_USES,
+                      protected=protected, allow_persistent=True)
     g = p.permission_grants
     deny = tuple(org_rule(s) for s in g.deny) if g else ()
     blocked = status.block_reason(p)
@@ -132,7 +137,8 @@ def limits(repo_root: str) -> Limits:
     if g is None:
         return Limits(False, why=f"org {p.org_id}'s policy sets no permission_grants")
     return Limits(g.allow, g.kinds, g.overridable, g.max_minutes, g.max_uses, deny,
-                  protected or bool(p.protected_paths), "" if g.allow else f"org {p.org_id} allows no grants")
+                  protected or bool(p.protected_paths), "" if g.allow else f"org {p.org_id} allows no grants",
+                  allow_persistent=g.allow_persistent, owner=f"org:{p.org_id}")
 
 
 def key(req: Request) -> tuple[str, str] | None:
@@ -179,6 +185,8 @@ def override(req: Request, decision: Decision, rules: list[Rule], checks: list[s
         return None, ""
     if not lim.allow:
         return None, f"no one-time grant: {lim.why}"
+    if req.kind not in lim.kinds:
+        return None, f"no one-time grant: the policy does not allow {req.kind} grants"
     if action not in lim.overridable:
         return None, f"no one-time grant: the policy doesn't let a person lift {rule.id}"
     hard = _hard_deny(req, rules, checks, action)
@@ -207,6 +215,9 @@ def lift(agent_id: str, req: Request, decision: Decision, rules: list[Rule], che
     if lifted is None or k is None:
         return replace(decision, reason=f"{decision.reason}; {why}") if why else decision
     scope = json.dumps(lifted["scope"], sort_keys=True)
+    remembered = remembered_match(req, lifted, lim)
+    if remembered is not None:
+        return Decision("allow", f"allowed by the person's saved permission preference {remembered}")
     g = grants.use(agent_id, repo_key(req), *k, scope=scope, max_minutes=lim.max_minutes, max_uses=lim.max_uses)
     if g is not None:
         return Decision("allow", f"allowed once by the person's grant {g.get('id')} ({describe(lifted)}); "
@@ -279,9 +290,88 @@ def approve(asked) -> tuple[str | None, int]:
     lim = limits(asked.repo_root)
     if not lim.allow:
         return lim.why, 0
+    if asked.kind not in lim.kinds:
+        return f"the policy does not allow {asked.kind} grants", 0
     if asked.action not in lim.overridable:
         return f"the policy doesn't let a person lift a {asked.action} deny", 0
     return None, lim.max_minutes
+
+
+def _preference_scope(action: str, scope: dict) -> dict:
+    # A remembered push covers this destination across commits, never a
+    # different repository, remote URL, destination ref or unsafe push form.
+    names = ("repo", "git_dir", "remote", "url", "ref") if action == "git-push" else ("path",)
+    return {name: scope[name] for name in names}
+
+
+def _preference_owner(lim: Limits) -> str | None:
+    from brindle.pro import license
+
+    try:
+        subject = license.current(refresh=False).sub
+    except license.LicenseError:
+        return "local" if lim.owner == "local" else None
+    return hashlib.sha256(f"{lim.owner}:{subject}".encode()).hexdigest()
+
+
+def persistent_allowed(asked) -> bool:
+    lim = limits(asked.repo_root)
+    return (lim.allow and lim.allow_persistent and asked.kind in lim.kinds
+            and asked.action in lim.overridable and _preference_owner(lim) is not None)
+
+
+def remember_description(asked) -> str:
+    scope = json.loads(asked.scope)
+    if asked.action == "git-push":
+        return f"Allow future non-force pushes to {scope['ref']} at {scope['url']} in this repository, until revoked"
+    return f"Allow reading {scope['path']} in this repository, until revoked"
+
+
+def remember(asked) -> str:
+    """Persist the person's scoped decision; callers hold the ask's lock."""
+    if not persistent_allowed(asked):
+        raise ValueError("current policy does not allow remembered permissions")
+    lim = limits(asked.repo_root)
+    owner = _preference_owner(lim)
+    if owner is None:
+        raise ValueError("the approving identity cannot be verified")
+    scope = _preference_scope(asked.action, json.loads(asked.scope))
+    binding = [owner, asked.repo_root, asked.kind, asked.action, scope]
+    id_ = "remembered-" + hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()[:24]
+    record = {"id": id_, "owner": owner, "repo_root": asked.repo_root, "kind": asked.kind,
+              "action": asked.action, "scope": scope, "match": remember_description(asked), "created": time.time()}
+    with permissions.editing() as store:
+        store.remembered = [r for r in store.remembered if r.get("id") != id_] + [record]
+    return id_
+
+
+def remembered_match(req: Request, lifted: dict, lim: Limits) -> str | None:
+    if not lim.allow_persistent or req.kind not in lim.kinds:
+        return None
+    owner = _preference_owner(lim)
+    if owner is None:
+        return None
+    scope = _preference_scope(lifted["action"], lifted["scope"])
+    for record in permissions.load_store().remembered:
+        if (record.get("owner") == owner and record.get("repo_root") == repo_key(req)
+                and record.get("kind") == req.kind and record.get("action") == lifted["action"]
+                and record.get("scope") == scope and isinstance(record.get("id"), str)):
+            return record["id"]
+    return None
+
+
+def remembered_grants() -> list[dict]:
+    fields = ("id", "repo_root", "kind", "match", "created")
+    return [{**{k: r[k] for k in fields}, "agent_id": "", "expires_at": None,
+             "uses_left": None, "persistent": True}
+            for r in permissions.load_store().remembered if all(k in r for k in fields)]
+
+
+def forget_remembered(id_: str) -> dict | None:
+    with permissions.editing() as store:
+        found = next((r for r in store.remembered if r.get("id") == id_), None)
+        store.remembered = [r for r in store.remembered if r.get("id") != id_]
+        return found
 
 
 def ask_for(agent_id: str, raw: dict) -> tuple[str, str, str, str, str, str] | None:

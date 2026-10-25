@@ -312,11 +312,30 @@ def _asked_dto(asked) -> PermissionDTO:
     return PermissionDTO(via="grant", request_id=asked.id, digest=asked.digest, kind=asked.kind,
                          target=asked.match, grant=asked.describe, hold_until=asked.expires_at,
                          choices=[PermissionChoiceDTO(choice="allow_once", label="Allow once"),
+                                  *([PermissionChoiceDTO(choice="allow_always", label="Always allow in this repository",
+                                                         rule=permission_grants.remember_description(asked))]
+                                    if permission_grants.persistent_allowed(asked) else []),
                                   PermissionChoiceDTO(choice="deny", label="Deny")])
 
 
 def _answer_asked(db: DB, agent: Agent, asked, digest: str | None, choice: str) -> dict:
     """The person's answer to a one-time grant, exactly as shown."""
+    if choice == "allow_always":
+        try:
+            saved = GRANTS.remember(agent.id, asked.id, digest or "", permission_grants.remember)
+        except ValueError as e:
+            raise ServiceError("conflict", str(e), 409) from e
+        if saved is None:
+            raise ServiceError("conflict", "that permission request is no longer pending", 409)
+        from brindle import history
+        ws = db.get_workspace(agent.workspace_id)
+        if ws is not None:
+            history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
+                                  task=permission_grants.remember_description(asked),
+                                  result=f"permission preference {saved} saved by the person until revoked")
+        bus.publish_agent(db, "permission.answered", agent.id, request_id=asked.id, choice=choice,
+                          via="grant", cleared=True)
+        return {"choice": choice, "via": "grant", "cleared": True, "rule": None, "grant": saved}
     if choice not in ("allow_once", "deny"):
         raise ServiceError("conflict", f"a one-time grant offers no {choice}", 409)
     minutes = 0

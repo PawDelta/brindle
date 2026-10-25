@@ -208,6 +208,17 @@ class Grants:
             self._purge()
             return self._grants.pop(grant_id, None)
 
+    def remember(self, agent_id: str, asked_id: str, digest: str, save) -> str | None:
+        """Consume a still-pending ask only after its preference is saved."""
+        with self._changed:
+            self._purge()
+            asked = self._asked.get(asked_id)
+            if asked is None or asked.agent_id != agent_id or asked.digest != digest:
+                return None
+            id_ = save(asked)
+            self._asked.pop(asked_id, None)
+            return id_
+
     def drop_agent(self, agent_id: str) -> None:
         """The agent was closed: its grants and asks go with it."""
         with self._changed:

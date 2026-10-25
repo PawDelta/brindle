@@ -256,9 +256,10 @@ class GrantPolicy:
     max_minutes: int
     max_uses: int
     deny: tuple[str, ...] = ()           # "<kind> <match_type> <match>", as a profile's permission_denies
+    allow_persistent: bool = False
 
 
-GRANT_KEYS = ("allow", "kinds", "overridable", "max_minutes", "max_uses", "deny")
+GRANT_KEYS = ("allow", "kinds", "overridable", "max_minutes", "max_uses", "deny", "allow_persistent")
 GRANT_ACTIONS = ("git-push", "env")
 MAX_GRANT_MINUTES = 1440
 MAX_GRANT_USES = 1000
@@ -499,7 +500,7 @@ def _grants(p: dict) -> dict:
     g = p.get("permission_grants")
     if g is None:
         return {"permission_grants": None}
-    required = set(GRANT_KEYS) - {"deny"}
+    required = set(GRANT_KEYS) - {"deny", "allow_persistent"}
     if not isinstance(g, dict) or not required <= set(g) or not set(g) <= set(GRANT_KEYS):
         raise PolicyUnavailable("malformed permission_grants")
 
@@ -524,10 +525,12 @@ def _grants(p: dict) -> dict:
             raise PolicyUnavailable("malformed permission_grants.deny")
     if not isinstance(g["allow"], bool):
         raise PolicyUnavailable("malformed permission_grants.allow")
+    if not isinstance(g.get("allow_persistent", False), bool):
+        raise PolicyUnavailable("malformed permission_grants.allow_persistent")
     return {"permission_grants": GrantPolicy(
         allow=g["allow"], kinds=names("kinds", KINDS), overridable=names("overridable", GRANT_ACTIONS),
         max_minutes=count("max_minutes", MAX_GRANT_MINUTES), max_uses=count("max_uses", MAX_GRANT_USES),
-        deny=tuple(deny))}
+        deny=tuple(deny), allow_persistent=g.get("allow_persistent", False))}
 
 
 def _org_key(pc: dict) -> tuple[str | None, tuple[str, ...] | None]:

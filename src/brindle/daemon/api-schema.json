@@ -677,8 +677,15 @@
           "type": "number"
         },
         "expires_at": {
-          "title": "Expires At",
-          "type": "number"
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expires At"
         },
         "id": {
           "title": "Id",
@@ -692,13 +699,25 @@
           "title": "Match",
           "type": "string"
         },
+        "persistent": {
+          "default": false,
+          "title": "Persistent",
+          "type": "boolean"
+        },
         "repo_root": {
           "title": "Repo Root",
           "type": "string"
         },
         "uses_left": {
-          "title": "Uses Left",
-          "type": "integer"
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Uses Left"
         }
       },
       "required": [

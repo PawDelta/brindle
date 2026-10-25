@@ -138,6 +138,7 @@ GOOD = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"], "max_minu
     ({**GOOD, "max_minutes": 0}, False),
     ({**GOOD, "deny": ["bash regex x"]}, False),
     ({**GOOD, "allow": "yes"}, False),
+    ({**GOOD, "allow_persistent": "yes"}, False),
 ])
 def test_permission_grants_block_is_strict_and_survives_cache_and_roles(block, ok):
     body = {"version": 2, "policy": {"permission_grants": block, "roles": {"member": {"max_parallel_workers": 2}}}}
@@ -224,12 +225,46 @@ def pusher(db, agent_id, provider, sha):
     return push, answer
 
 
-@pytest.mark.parametrize("provider,agent_id", [("claude", "wk"), ("codex", "co")])
+def _remembered_override_case(db, repo, pushable, world, monkeypatch, push, answer, provider, agent_id):
+    assert push() == "deny"
+    [asked] = grants.GRANTS.asked_of(agent_id)
+    assert _send("POST", f"/v1/inbox/{agent_id}/permission",
+                 {"request": asked.id, "digest": asked.digest, "choice": "allow_always"}, peer_pid=310)[0] == 403
+    assert answer(asked, "allow_always")[0] == 200
+    [saved] = [g for g in _send("GET", "/v1/grants")[1] if g.get("persistent")]
+    fresh = grants.Grants()
+    monkeypatch.setattr(grants, "GRANTS", fresh)
+    monkeypatch.setattr(inbox, "GRANTS", fresh)
+    other, _ = pusher(db, "co" if provider == "claude" else "wk",
+                      "codex" if provider == "claude" else "claude", "1" * 40)
+    assert other() == "allow" and push() == "allow"
+    assert other(f"git push origin {pushable}:refs/heads/elsewhere") == "deny"
+    current = permission_grants.limits
+    with monkeypatch.context() as policy:
+        policy.setattr(permission_grants, "limits", lambda root: replace(current(root), allow_persistent=False))
+        assert push() == "deny"
+    permissions.add_rule("bash", "git push", "deny", "prefix")
+    assert push() == "deny"
+    deny = next(r for r in permissions.load_store().rules if r.source == "user" and r.decision == "deny")
+    permissions.forget(deny.id)
+    assert push() == "allow"
+    assert _send("POST", f"/v1/grants/{saved['id']}/revoke", peer_pid=310)[0] == 403
+    assert _send("POST", f"/v1/grants/{saved['id']}/revoke")[0] == 200
+    assert push() == "deny"
+
+
+@pytest.mark.parametrize("provider,agent_id,persistent", [
+    ("claude", "wk", False), ("codex", "co", False),
+    ("claude", "wk", True), ("codex", "co", True),
+])
 def test_a_push_is_denied_at_once_then_allowed_once_for_exactly_its_scope(db, repo, pushable, world, answering,
-                                                                            monkeypatch, tmp_path, provider, agent_id):
+                                                                            monkeypatch, tmp_path, provider, agent_id, persistent):
     config.set_local(world.repo_root, "permission_policy", "on")
     codex_worker(db)
     push, answer = pusher(db, agent_id, provider, pushable)
+    if persistent:
+        _remembered_override_case(db, repo, pushable, world, monkeypatch, push, answer, provider, agent_id)
+        return
     other = tmp_path / "other"      # another clone, pushing to the same URL
     sh(f"git clone -q {repo} {other} && git -C {other} remote set-url --push origin https://example.com/o/r.git",
        tmp_path)
@@ -246,8 +281,8 @@ def test_a_push_is_denied_at_once_then_allowed_once_for_exactly_its_scope(db, re
     assert "evil" not in asked.scope and "trusted" not in asked.describe   # worked out by the daemon
     assert json.loads(asked.scope)["git_dir"] == os.path.realpath(repo / ".git")
     shown = next(i.permission for i in inbox.items(db, None) if i.permission and i.permission.request_id == asked.id)
-    assert [c.choice for c in shown.choices] == ["allow_once", "deny"] and shown.grant == asked.describe
-    assert answer(asked, "allow_always")[0] == 409 and answer(asked, "allow_once", "0" * 64)[0] == 409
+    assert [c.choice for c in shown.choices] == ["allow_once", "allow_always", "deny"] and shown.grant == asked.describe
+    assert answer(asked, "allow_for")[0] == 409 and answer(asked, "allow_once", "0" * 64)[0] == 409
     with monkeypatch.context() as capacity:
         capacity.setattr(grants, "MAX_GRANTS", 0)
         assert answer(asked, "allow_once")[0] == 409
@@ -317,3 +352,15 @@ def test_org_policy_denies_and_bounds_grants_on_the_real_path(db, repo, pushable
     [asked] = grants.GRANTS.asked_of("wk")               # asked again: a new answer is a new grant
     assert answer(asked, "allow_once")[0] == 200
     assert grants.GRANTS.live()[0].id != g.id and push() == "allow" and push() == "deny"
+    from brindle.pro import license
+    ent.sub = "member-1"
+    monkeypatch.setattr(license, "current", lambda **kw: ent)
+    org(allow_persistent=True)
+    [asked] = grants.GRANTS.asked_of("wk")
+    assert answer(asked, "allow_always")[0] == 200 and push() == "allow"
+    org(allow_persistent=False)
+    assert push() == "deny"
+    [asked] = grants.GRANTS.asked_of("wk")
+    assert answer(asked, "allow_always")[0] == 409
+    org(allow_persistent=True, kinds=["read"])
+    assert push() == "deny" and answer(asked, "allow_once")[0] == 409

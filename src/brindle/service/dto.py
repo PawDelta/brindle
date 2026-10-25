@@ -95,9 +95,10 @@ class GrantDTO(_DTO):
     repo_root: str
     kind: str
     match: str
-    expires_at: float
-    uses_left: int
+    expires_at: float | None
+    uses_left: int | None
     created: float
+    persistent: bool = False
 
 
 class PermissionDTO(_DTO):

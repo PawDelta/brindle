@@ -167,12 +167,13 @@ export interface MilestoneDTO {
 export interface GrantDTO {
   agent_id: string;
   created: number;
-  expires_at: number;
+  expires_at: number | null;
   id: string;
   kind: string;
   match: string;
+  persistent?: boolean;
   repo_root: string;
-  uses_left: number;
+  uses_left: number | null;
 }
 /**
  * A route the app can call to act on the item itself.

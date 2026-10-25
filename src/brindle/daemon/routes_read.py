@@ -260,7 +260,9 @@ def list_grants(db: DB, request: Request) -> Any:
     """The live permission grants the person gave (brindle.daemon.grants), oldest first."""
     from brindle.daemon.grants import GRANTS
 
-    return [GrantDTO(**g.to_json()).to_json() for g in GRANTS.live()]
+    from brindle import permission_grants
+    return [GrantDTO(**g).to_json() for g in
+            [*(g.to_json() for g in GRANTS.live()), *permission_grants.remembered_grants()]]
 
 
 @_json

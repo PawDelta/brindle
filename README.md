@@ -895,17 +895,25 @@ Settings → Permission grants. A grant is spent when the hook allows the call,
 not when the tool succeeds (a hook can't see the result). Grants live in the
 daemon's memory, so a restart ends them all.
 
-Two built-in denies can also be lifted once, never as a rule. When nothing else
+Two built-in denies can also be lifted by an explicit approval. When nothing else
 denies the request, it is still denied at once, never held. A held request
 shows the CLI's own prompt, and an answer typed there would run it. The worker
 is told it was refused and that it asked you, and the Inbox shows the exact
-request with only **Allow once** and **Deny**. Allow it, and the worker's next
+request with **Allow once**, **Deny**, and, when policy permits, **Always allow in this repository**. Allow it once, and the worker's next
 try of exactly that command uses your one-time grant. What it covers and what
 the Inbox shows are worked out by the daemon from the agent's own workspace,
 never taken from the agent. The grant expires after 15 minutes, or sooner if
 your org's `max_minutes` is shorter, even when the org shortens it later. It is
 used up even if the push then fails. If nobody answers, or the
 daemon isn't running, it stays denied.
+
+**Remembered approvals** are saved in your user permission preferences, across
+sessions and daemon restarts, until you revoke them in Settings → Permission
+grants. A remembered push covers the same repository, remote URL and destination
+branch across future commits; a file approval covers that specific file.
+Every use still checks the current policy, explicit denies and adapter protections.
+Temporary time/use limits apply to temporary grants; persistent approvals require
+their own policy permission. Turning that permission off prevents their use.
 - `git push` qualifies only as `git push <remote> <full commit sha>:refs/heads/<branch>`, run in the agent's own worktree (not another clone or a nested repository), and only when:
   - the remote resolves (insteadOf applied) to exactly one https, ssh or `user@host:path` URL;
   - none of `core.sshCommand`, `core.hooksPath`, the remote's receivepack/vcs/mirror, `push.followTags` or `push.recurseSubmodules` is set;
@@ -927,12 +935,14 @@ be granted. It is read again on every request:
 
 ```json
 "permission_grants": {"allow": true, "kinds": ["bash", "fetch"], "overridable": ["git-push"],
-                      "max_minutes": 30, "max_uses": 5, "deny": ["bash prefix terraform apply"]}
+                      "max_minutes": 30, "max_uses": 5, "allow_persistent": true,
+                      "deny": ["bash prefix terraform apply"]}
 ```
 
 - `deny` entries are enforced for every provider and can't be lifted.
+- `allow_persistent` permits remembered overrides of these two built-in denies; omitted or false allows only temporary overrides. This setting does not control ordinary saved allow rules. The admin policy editor is not delivered by this local engine change.
 - A policy without the block, an unknown or malformed field (which makes the whole policy unusable), a policy that can't be read, or a paused or shut-down member: no grants.
-- Without a Team org, any kind can be granted, for up to 60 min and 20 uses, and both built-in denies can be lifted once.
+- Without a Team org, any kind can be granted, for up to 60 min and 20 uses. Both built-in denies support one-time or remembered approvals.
 - The org backend that serves this block isn't part of this repository. Until it serves one, Team orgs get no grants. It is enforced from the cached policy, or in air-gap mode from `.brindle/policy.json`.
 
 **Codex.** Codex runs a hook only once it's trusted, so with

@@ -621,7 +621,7 @@ function PermissionGrants({ client }: { client: DaemonClient }) {
     }
   };
   return (
-    <Row label="Permission grants" help="What you allowed an agent to repeat from the Inbox, until it expires or its uses run out." wide testId="grants">
+    <Row label="Permission grants" help="Your remembered approvals and temporary grants. Revoke either here; enterprise policy still applies." wide testId="grants">
       {grants?.length === 0 && <span className="text-sm text-ink-3">None live.</span>}
       <ul className="flex w-full flex-col gap-1">
         {(grants ?? []).map((g) => (
@@ -630,7 +630,7 @@ function PermissionGrants({ client }: { client: DaemonClient }) {
               {g.kind} {g.match}
             </code>
             <span className="text-[11px] text-ink-3">
-              {g.agent_id} · {g.uses_left} uses · until {new Date(g.expires_at * 1000).toLocaleTimeString()}
+              {g.persistent ? "Remembered until revoked" : <>{g.agent_id} · {g.uses_left} uses · until {g.expires_at == null ? "unknown" : new Date(g.expires_at * 1000).toLocaleTimeString()}</>}
             </span>
             <button type="button" className={quiet} disabled={busy !== null} onClick={() => void revoke(g.id)}>
               Revoke

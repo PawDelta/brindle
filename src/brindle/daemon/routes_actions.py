@@ -1285,6 +1285,14 @@ def revoke_grant(db: DB, params: dict, body: Body) -> Any:
     from brindle import history
     from brindle.daemon.grants import GRANTS
 
+    from brindle import permission_grants
+    if params["id"].startswith("remembered-"):
+        remembered = permission_grants.forget_remembered(params["id"])
+        if remembered is not None:
+            history.record_safely(db, remembered["repo_root"], "permission",
+                                  task=remembered["match"], result=f"permission preference {params['id']} revoked by the person")
+            return {"revoked": params["id"]}
+
     grant = GRANTS.revoke(params["id"])
     if grant is None:
         raise ServiceError("not_found", f"no live grant {params['id']}", 404)

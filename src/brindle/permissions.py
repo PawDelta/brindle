@@ -57,6 +57,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
@@ -1156,10 +1157,11 @@ class Store:
     # The Codex hook the person trusted (brindle.codex_hook), per Codex config
     # home (its resolved path): command, key, hash, definition.
     codex_hook: dict[str, dict[str, str]] = field(default_factory=dict)
+    remembered: list[dict] = field(default_factory=list)
 
     def to_json(self) -> str:
         data: dict = {"version": 1, "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
-        for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook"):
+        for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook", "remembered"):
             if getattr(self, name):
                 data[name] = getattr(self, name)
         return json.dumps(data, indent=2) + "\n"
@@ -1201,7 +1203,9 @@ def load_store() -> Store:
         codex = {os.path.realpath(provider_homes.source("codex")): codex}
     codex = {home: {k: v for k, v in rec.items() if isinstance(v, str)}
              for home, rec in codex.items() if isinstance(rec, dict)}
-    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex)
+    remembered = data.get("remembered")
+    remembered = [r for r in remembered if isinstance(r, dict)] if isinstance(remembered, list) else []
+    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex, remembered)
 
 
 @contextmanager
@@ -1216,9 +1220,16 @@ def editing() -> Iterator[Store]:
         fcntl.flock(lock, fcntl.LOCK_EX)
         store = load_store()
         yield store
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(store.to_json(), encoding="utf-8")
-        os.replace(tmp, path)
+        staged = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                             prefix=f".{path.name}.", delete=False) as out:
+                staged = out.name
+                out.write(store.to_json())
+            os.replace(staged, path)
+        finally:
+            if staged is not None and os.path.exists(staged):
+                os.unlink(staged)
 
 
 def add_rule(kind: str, match: str, decision: str, match_type: str = "exact",
@@ -1254,7 +1265,7 @@ def forget(id_: str) -> str | None:
 def reset() -> None:
     """Back to the defaults: no user or learned rules, no approval counts."""
     with editing() as store:
-        store.rules, store.approvals = [], {}
+        store.rules, store.approvals, store.remembered = [], {}, []
 
 
 # -- learning ---------------------------------------------------------------------------------
