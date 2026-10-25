@@ -1327,9 +1327,24 @@ def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> R
         for i, word in enumerate(words):
             if _SUBSTITUTED in word and not (
                     word == _SUBSTITUTED and i >= 3
-                    and words[i - 1] in SUBSTITUTION_DATA_OPTIONS.get((words[0], words[1]), ())):
+                    and words[i - 1] in SUBSTITUTION_DATA_OPTIONS.get((words[0], words[1]), ())
+                    and not any(_could_cover(rule, f"{words[0]} {words[1]}") for rule in rules)):
                 return _syntax_ask(req)
     return replace(req, command=command)
+
+
+def _could_cover(rule: Rule, head: str) -> bool:
+    """Whether a custom ``rule`` could match some command starting with
+    ``head``, whatever a substituted message makes of the rest: unless its
+    fixed leading text and ``head`` diverge, it might. The defaults are
+    known not to apply to a commit or tag message."""
+    if rule.source == "default":
+        return False
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
+    fixed = " ".join(fixed.split())
+    return head.startswith(fixed) or fixed.startswith(head)
 
 
 def _substitution_spans(command: str) -> list[tuple[int, int, str, bool]] | None:

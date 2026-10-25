@@ -44,7 +44,7 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd ~ && ls")) is None
 
 
-@pytest.mark.parametrize("command, bound, deny", [
+@pytest.mark.parametrize("command, bound, extra", [
     pytest.param("ls *.py", False, None, id="shell_syntax_fallback-glob"),
     pytest.param("git commit -m \"$(cat <<'EOF'\n* fix\nEOF\n)\"", False, None, id="shell_syntax_fallback-heredoc"),
     pytest.param('git commit -m "$(date)"', False, None, id="shell_syntax_fallback-substitution",
@@ -77,8 +77,15 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("review: unquoted output is split into options")),
     pytest.param('git commit -F "$(cat /tmp/p)"', True, None, id="shell_syntax_fallback-substituted_file",
                  marks=pytest.mark.variant("review: -F takes a path, not message text")),
-    pytest.param("git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"", True, "cat", id="shell_syntax_fallback-heredoc_cat_denied",
+    pytest.param("git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"", True, ("cat", "deny"),
+                 id="shell_syntax_fallback-heredoc_cat_denied",
                  marks=pytest.mark.variant("review: a deny on cat must bind the heredoc form")),
+    pytest.param('git commit -m "$(printf sensitive)"', True, ("git commit -m sensitive", "deny"),
+                 id="shell_syntax_fallback-message_denied",
+                 marks=pytest.mark.variant("review: a substituted message can equal a denied one")),
+    pytest.param('git commit -m "$(printf sensitive)"', True, ("git commit -m sensitive", "ask"),
+                 id="shell_syntax_fallback-message_asked",
+                 marks=pytest.mark.variant("review: a substituted message can equal an asked one")),
     pytest.param("$(echo rm) -rf x", True, None, id="shell_syntax_fallback-substituted_program",
                  marks=pytest.mark.variant("review: a substitution supplied the program")),
     pytest.param("git clean --f*", True, None, id="shell_syntax_fallback-glob_clean_force",
@@ -87,16 +94,16 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("supervisor: a pattern selected the denied push")),
     pytest.param("git reset --f*", True, None, id="shell_syntax_fallback-glob_force",
                  marks=pytest.mark.variant("supervisor: a pattern selected a force option")),
-    pytest.param("rm *.py", True, "rm secret.py", id="shell_syntax_fallback-glob_operand",
+    pytest.param("rm *.py", True, ("rm secret.py", "deny"), id="shell_syntax_fallback-glob_operand",
                  marks=pytest.mark.variant("supervisor: a pattern expanded to a denied operand")),
-    pytest.param("ls *.py", True, "ls secret.py", id="shell_syntax_fallback-glob_ls_overlap",
+    pytest.param("ls *.py", True, ("ls secret.py", "deny"), id="shell_syntax_fallback-glob_ls_overlap",
                  marks=pytest.mark.variant("supervisor: the ls exemption can't skip an ls rule")),
     pytest.param("cat < *.json", True, None, id="shell_syntax_fallback-glob_redirect",
                  marks=pytest.mark.variant("supervisor: an expanded redirect could read daemon.json")),
     pytest.param("{ git [p]ush; }", True, None, id="shell_syntax_fallback-glob_unparsed",
                  marks=pytest.mark.variant("a pattern inside syntax neither parse reads")),
 ])
-def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, deny):
+def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra):
     from brindle import permissions as p
     from brindle.config import set_local
 
@@ -112,7 +119,7 @@ def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, deny):
         store.rules = [p.Rule("bash", "rm -rf", "prefix", "deny"),
                        p.Rule("bash", command, "exact", "deny", repo_root="/other"),
                        p.Rule("bash", command, "exact", "ask", expires_at=1),
-                       *([p.Rule("bash", deny, "exact", "deny")] if deny else [])]
+                       *([p.Rule("bash", extra[0], "exact", extra[1])] if extra else [])]
     decision = agents.pre_tool_decision(db, a, bash(command))
     if bound:
         assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
