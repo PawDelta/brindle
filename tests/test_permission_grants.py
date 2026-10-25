@@ -54,6 +54,15 @@ PUSH = "git push origin {sha}:refs/heads/feat"
     ("bash", PUSH, [], LOCAL, None, "git config url.ext::sh.insteadOf https://"),
     ("bash", PUSH, [], LOCAL, None, "git config push.followTags true"),
     ("bash", PUSH, [], LOCAL, None, "printf '#!/bin/sh\\n' > .git/hooks/pre-push"),
+    *[pytest.param("bash", PUSH, [], LOCAL, None, f"git config {key} {val}", id=f"push_config_denylist-{key}")
+      for key, val in [("credential.helper", "store"), ("http.proxy", "http://p.example:3128"),
+                       ("remote.origin.proxy", "http://p.example:3128"), ("core.gitProxy", "/bin/true"),
+                       ("core.askPass", "/bin/true"), ("protocol.ext.allow", "always"),
+                       ("remote.origin.push", "refs/heads/*:refs/heads/*"),
+                       ("credential.https://example.com.helper", "store")]],
+    *[pytest.param("bash", f"git push origin {{sha}}:{ref}", [], LOCAL, None, "true",
+                   id=f"protected_release_ref-{ref.replace('/', '_')}")
+      for ref in ("refs/heads/release/desktop", "refs/heads/release/1.2", "refs/heads/Release/desktop")],
     ("bash", "git push origin abc123:refs/heads/feat", [], LOCAL, None, "true"),
     ("bash", "npm test", [], LOCAL, "allow_for", ""),
     ("bash", "npm test && npm run lint", [], LOCAL, None, ""),
