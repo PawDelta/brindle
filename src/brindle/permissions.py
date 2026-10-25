@@ -241,6 +241,8 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
     _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
     _default("d-git-ro", "bash", "git status / diff / log / show", "git-readonly", "allow"),
+    _default("d-curl-ro", "bash", "curl HTTPS read of a public host without uploads, redirects or file output",
+             "curl-readonly", "allow"),
     _default("d-echo", "bash", "echo", "exact", "allow"),
     _default("d-echo-args", "bash", "echo ", "prefix", "allow"),
     _default("d-git-push", "bash", "git push", "git-push", "deny"),
@@ -1007,22 +1009,47 @@ def _readonly_command(rule: Rule, req: Request, argv: list[str]) -> bool:
     if len(argv) < 2 or argv[1] not in ("-q", "--disable"):
         return False
     # Enumerate read-only flags; unknown options (including config, data,
-    # uploads, method overrides and output files) require approval.
+    # uploads, method overrides, redirects and output files) require approval.
     urls = 0
     args = iter(argv[2:])
     for arg in args:
-        if arg in ("-s", "-S", "-sS", "-I", "-i", "-L", "-f", "-q",
-                   "--silent", "--show-error", "--head", "--include", "--location", "--fail", "--disable"):
+        if arg in ("-s", "-S", "-sS", "-I", "-i", "-f", "-q",
+                   "--silent", "--show-error", "--head", "--include", "--fail", "--disable"):
             continue
         if arg in ("-D", "--dump-header", "-o", "--output"):
             value = next(args, None)
             if value != "/dev/null" and not (arg in ("-D", "--dump-header") and value == "-"):
                 return False
-        elif arg.startswith(("https://", "http://")):
+        elif _public_https(arg):
             urls += 1
         else:
             return False
     return urls > 0
+
+
+# Names that only resolve on the local machine or network.
+_PRIVATE_SUFFIXES = ("localhost", "local", "internal", "lan", "home.arpa", "localdomain", "arpa")
+
+
+def _public_https(url: str) -> bool:
+    """An https URL naming a public DNS host: never plain http, an IP literal
+    in any notation (curl reads ``2852039166`` and ``127.1`` as addresses),
+    credentials, or a local-only name. Names are not resolved, so a public
+    name pointing at a private address is still allowed."""
+    from urllib.parse import urlsplit
+
+    if not url.startswith("https://"):
+        return False
+    try:
+        parts = urlsplit(url)
+        host, _port = parts.hostname or "", parts.port
+    except ValueError:
+        return False
+    if "@" in parts.netloc or not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", host):
+        return False
+    if not re.fullmatch(r"[a-z]{2,63}|xn--[a-z0-9-]+", host.rsplit(".", 1)[1]):
+        return False
+    return not any(host == s or host.endswith("." + s) for s in _PRIVATE_SUFFIXES)
 
 
 def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
@@ -1244,12 +1271,25 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     matched = _matching_restriction(parts, checks, rules)
     if matched is not None:
         return matched
-    if parsed is None:
+    if parsed is None and any(_may_restrict(rule, req.command) for rule in rules):
         # A bound built-in ask prevents provider/profile fallback from treating
         # unsupported shell syntax as an ordinary unmatched request.
         return Decision("ask", "shell syntax cannot be checked safely",
                         Rule("bash", req.command, "exact", "ask", "default", id="d-shell-syntax"))
     return None
+
+
+def _may_restrict(rule: Rule, command: str) -> bool:
+    """Whether ``rule`` could match ``command`` once the shell expands it:
+    the text the rule needs appears somewhere in the command."""
+    if rule.match_type == "git-push":
+        return "git" in command and "push" in command
+    if rule.match_type == "git-force":
+        return "git" in command and any(_is_force(w.strip("\"'`$(){};|&<>")) for w in command.split())
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    literals = re.split(r"[*?\[\]]+", rule.match) if rule.match_type == "glob" else [rule.match]
+    return all(word in command for literal in literals for word in literal.split())
 
 
 def deny_in_parts(req: Request, *, checks: list[str] | None = None,
@@ -1322,6 +1362,9 @@ class Store:
         kinds = set(KINDS) if self.unsupported_version or self.extra else set()
         for row in self.unsupported_rules:
             kind = row.get("kind") if isinstance(row, dict) else None
+            # An allow we can't read just doesn't apply; a restriction might.
+            if isinstance(row, dict) and row.get("decision") == "allow" and kind in KINDS:
+                continue
             kinds.update((kind,) if kind in KINDS else KINDS)
         return [_default(f"d-store-unsupported-{kind}", kind, "*", "glob", "deny")
                 for kind in KINDS if kind in kinds]

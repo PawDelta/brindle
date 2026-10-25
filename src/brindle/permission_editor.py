@@ -63,7 +63,10 @@ def _context(repo: str) -> tuple[list[p.Rule], dict, list[str]]:
                    "Only Brindle's registered MCP inventory is available; other servers cannot be verified.",
                    "Profile restrictions are enforced by each worker and are not editable here.",
                    "OpenCode blocks explicit asks; native workers need an approval callback to prompt.",
-                   "Rules are enforced only on provider paths that invoke Brindle's permission hooks."]
+                   "Rules are enforced only on provider paths that invoke Brindle's permission hooks.",
+                   "Deny and ask rules match command text (after spacing, quoting and leading assignments are "
+                   "normalized), so the same program run another way, such as /bin/rm, env rm, bash -c, "
+                   "reordered flags or git -C, is not matched; they are guardrails, not a sandbox."]
     try:
         current = policy(repo)
     except Exception as exc:  # fail closed if authoritative restrictions cannot be read

