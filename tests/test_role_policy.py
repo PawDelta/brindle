@@ -16,6 +16,8 @@ ROLES = {"member": {"allowed_providers": ["claude"], "max_parallel_workers": 2},
 MEMBER = {**POLICY, "allowed_profiles": None, "allowed_providers": ["claude"],
           "max_parallel_workers": 2}
 CONTRACTOR = {**POLICY, "allowed_profiles": ["developer"]}
+GRANT_POLICY = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"], "max_minutes": 5, "max_uses": 2,
+                "deny": ["bash prefix terraform apply"]}
 
 
 def role_policy(team, effective=MEMBER, role="member", policy_role=None, **base):
@@ -73,8 +75,35 @@ def test_malformed_role_overrides_fail_closed(team, roles):
 # -- offline (air-gap) policy files ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("base_grants", [True, pytest.param(False, marks=pytest.mark.variant("role-only grant policy"))])
-def test_offline_files_apply_role_overrides_by_the_backends_rule(base_grants):
+@pytest.mark.parametrize("base_grants,block,ok", [
+    (True, None, True),
+    pytest.param(False, None, True, marks=pytest.mark.variant("role-only grant policy")),
+    (None, GRANT_POLICY, True),
+    (None, {**GRANT_POLICY, "expires": 1}, False),
+    pytest.param(None, {k: v for k, v in GRANT_POLICY.items() if k != "max_uses"}, False,
+                 marks=pytest.mark.variant("a block an older server sends, missing a cap: never unbounded")),
+    (None, {**GRANT_POLICY, "kinds": ["shell"]}, False),
+    (None, {**GRANT_POLICY, "max_minutes": 0}, False),
+    (None, {**GRANT_POLICY, "deny": ["bash regex x"]}, False),
+    (None, {**GRANT_POLICY, "allow": "yes"}, False),
+    (None, {**GRANT_POLICY, "allow_persistent": "yes"}, False),
+    (None, {**GRANT_POLICY, "scopes": ["remote"], "lifetimes": ["session"]}, True),
+    (None, {**GRANT_POLICY, "scopes": ["unknown"]}, False),
+    (None, {**GRANT_POLICY, "destinations": ["https://example.com/*"]}, False),
+    pytest.param(None, {**GRANT_POLICY, "destinations": "https://example.com/o/r.git"}, False,
+                 marks=pytest.mark.variant("a destination filter must not be interpreted as characters or a substring")),
+])
+def test_offline_files_apply_role_overrides_by_the_backends_rule(base_grants, block, ok):
+    if block is not None:
+        body = {"version": 2, "policy": {"permission_grants": block, "roles": {"member": {"max_parallel_workers": 2}}}}
+        if not ok:
+            with pytest.raises(team_policy.PolicyUnavailable):
+                team_policy.parse_policy("org_g1", body)
+            return
+        parsed = team_policy.parse_policy("org_g1", body)
+        assert team_policy.parse_policy("org_g1", parsed.to_json()).permission_grants == parsed.permission_grants
+        assert team_policy.with_role_overrides(parsed, "member", None).enforced.permission_grants == parsed.permission_grants
+        return
     grants = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"],
               "max_minutes": 60, "max_uses": 20, "deny": ["bash prefix git push protected"]}
     member_grants = {**grants, "max_minutes": 5, "deny": ["bash exact deploy"]}

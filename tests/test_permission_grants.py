@@ -147,33 +147,6 @@ GOOD = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"], "max_minu
         "deny": ["bash prefix terraform apply"]}
 
 
-@pytest.mark.parametrize("block,ok", [
-    (GOOD, True),
-    ({**GOOD, "expires": 1}, False),
-    pytest.param({k: v for k, v in GOOD.items() if k != "max_uses"}, False,
-                 marks=pytest.mark.variant("a block an older server sends, missing a cap: never unbounded")),
-    ({**GOOD, "kinds": ["shell"]}, False),
-    ({**GOOD, "max_minutes": 0}, False),
-    ({**GOOD, "deny": ["bash regex x"]}, False),
-    ({**GOOD, "allow": "yes"}, False),
-    ({**GOOD, "allow_persistent": "yes"}, False),
-    ({**GOOD, "scopes": ["remote"], "lifetimes": ["session"]}, True),
-    ({**GOOD, "scopes": ["unknown"]}, False),
-    ({**GOOD, "destinations": ["https://example.com/*"]}, False),
-    pytest.param({**GOOD, "destinations": "https://example.com/o/r.git"}, False,
-                 marks=pytest.mark.variant("a destination filter must not be interpreted as characters or a substring")),
-])
-def test_permission_grants_block_is_strict_and_survives_cache_and_roles(block, ok):
-    body = {"version": 2, "policy": {"permission_grants": block, "roles": {"member": {"max_parallel_workers": 2}}}}
-    if not ok:
-        with pytest.raises(team_policy.PolicyUnavailable):
-            team_policy.parse_policy("org_g1", body)
-        return
-    p = team_policy.parse_policy("org_g1", body)
-    assert team_policy.parse_policy("org_g1", p.to_json()).permission_grants == p.permission_grants
-    assert team_policy.with_role_overrides(p, "member", None).enforced.permission_grants == p.permission_grants
-
-
 class Hook:
     """One hook call on its own thread, held for the app's answer."""
 
