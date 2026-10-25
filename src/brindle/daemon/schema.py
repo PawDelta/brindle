@@ -33,7 +33,14 @@ def _models() -> dict[str, Any]:
     for name, obj in vars(dto).items():
         if inspect.isclass(obj) and issubclass(obj, BaseModel) and obj.__module__ == dto.__name__ \
                 and obj is not dto._DTO:
-            found[name] = obj.model_json_schema(mode="serialization")
+            model = obj.model_json_schema(mode="serialization")
+            # Recursive DTOs are emitted as a root reference to their own
+            # definition. Expose the object at the root too, so consumers
+            # lifting definitions don't replace it with a self-only alias.
+            if model.get("$ref") == f"#/$defs/{name}":
+                model = {**model, **model["$defs"][name]}
+                del model["$ref"]
+            found[name] = model
     return dict(sorted(found.items()))
 
 

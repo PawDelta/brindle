@@ -342,8 +342,12 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
     if action == "permission":
         # The person's answer to a's permission request (agent callers never get here).
+        if set(body) - {"request", "digest", "choice", "minutes", "scope"}:
+            raise ServiceError("invalid", "unsupported permission approval fields")
+        minutes = _get(body, "minutes", int, required="minutes" in body)
         return inbox.answer_permission(db, a.id, _get(body, "request"), _get(body, "digest"),
-                                       _get(body, "choice", required=True))
+                                       _get(body, "choice", required=True), minutes,
+                                       _get(body, "scope"))
     if action == "review":
         return review_workspace(db, {"id": a.workspace_id}, body)
     if action == "merge":

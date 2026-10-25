@@ -249,7 +249,8 @@ class GrantPolicy:
     """Org policy ``permission_grants``: which one-time and time-limited
     permission grants a member may give their workers from the app
     (brindle.permission_grants), and the org's own permission denies, which
-    nothing a member does lifts. Org-wide, like ``managed_rollout``."""
+    nothing a member does lifts. A role's grant block replaces the whole
+    inherited block, including its denies."""
     allow: bool
     kinds: tuple[str, ...]               # brindle.permissions.KINDS a grant may cover
     overridable: tuple[str, ...]         # GRANT_ACTIONS: built-in denies a person may lift once
@@ -257,10 +258,15 @@ class GrantPolicy:
     max_uses: int
     deny: tuple[str, ...] = ()           # "<kind> <match_type> <match>", as a profile's permission_denies
     allow_persistent: bool = False
+    lifetimes: tuple[str, ...] = ("session", "time")
+    scopes: tuple[str, ...] = ("branch",)
 
 
-GRANT_KEYS = ("allow", "kinds", "overridable", "max_minutes", "max_uses", "deny", "allow_persistent")
+GRANT_KEYS = ("allow", "kinds", "overridable", "max_minutes", "max_uses", "deny", "allow_persistent",
+              "lifetimes", "scopes")
 GRANT_ACTIONS = ("git-push", "env")
+GRANT_LIFETIMES = ("session", "time", "forever")
+GRANT_SCOPES = ("branch", "remote", "repo", "all")
 MAX_GRANT_MINUTES = 1440
 MAX_GRANT_USES = 1000
 MAX_GRANT_DENIES = 64
@@ -500,12 +506,12 @@ def _grants(p: dict) -> dict:
     g = p.get("permission_grants")
     if g is None:
         return {"permission_grants": None}
-    required = set(GRANT_KEYS) - {"deny", "allow_persistent"}
+    required = set(GRANT_KEYS) - {"deny", "allow_persistent", "lifetimes", "scopes"}
     if not isinstance(g, dict) or not required <= set(g) or not set(g) <= set(GRANT_KEYS):
         raise PolicyUnavailable("malformed permission_grants")
 
-    def names(key: str, allowed: tuple[str, ...]) -> tuple[str, ...]:
-        v = g[key]
+    def names(key: str, allowed: tuple[str, ...], default=None) -> tuple[str, ...]:
+        v = g.get(key, default)
         if not isinstance(v, list) or not all(isinstance(x, str) and x in allowed for x in v):
             raise PolicyUnavailable(f"malformed permission_grants.{key}")
         return tuple(dict.fromkeys(v))
@@ -530,7 +536,9 @@ def _grants(p: dict) -> dict:
     return {"permission_grants": GrantPolicy(
         allow=g["allow"], kinds=names("kinds", KINDS), overridable=names("overridable", GRANT_ACTIONS),
         max_minutes=count("max_minutes", MAX_GRANT_MINUTES), max_uses=count("max_uses", MAX_GRANT_USES),
-        deny=tuple(deny), allow_persistent=g.get("allow_persistent", False))}
+        deny=tuple(deny), allow_persistent=g.get("allow_persistent", False),
+        lifetimes=names("lifetimes", GRANT_LIFETIMES, ["session", "time"]),
+        scopes=names("scopes", GRANT_SCOPES, ["branch"]))}
 
 
 def _org_key(pc: dict) -> tuple[str | None, tuple[str, ...] | None]:
@@ -879,6 +887,9 @@ def _roles(v) -> dict:
             raise PolicyUnavailable("malformed roles")
         # A null field is an override left unset (the base value applies).
         out[role] = {k: _rule(k, over[k]) for k in RULES if over.get(k) is not None}
+        if over.get("permission_grants") is not None:
+            _grants(over)  # Validate even overrides that do not belong to the current member.
+            out[role]["permission_grants"] = deepcopy(over["permission_grants"])
     return out
 
 
@@ -911,14 +922,15 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
     roll = _rollout(p)
     managed = _managed(p)
     setup = _agent_setup(p)       # org-wide, like the rollout: the effective policy carries it too
-    grants = _grants(p)           # org-wide too
+    grants = _grants(p)
     return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p), **_budgets(p),
                      **roll, **managed, **grants, roles=_roles(p.get("roles")),
                      effective=None if eff is None else OrgPolicy(
                          org_id=org_id, version=version, fetched_at=at, **_rules(eff),
                          **_budgets(eff), **roll, **(_managed(eff) if (
                              "provider_config" in eff or "deny_personal_keys" in eff) else managed),
-                         agent_setup=setup, **grants, **spend),
+                         agent_setup=setup,
+                         **(_grants(eff) if "permission_grants" in eff else grants), **spend),
                      role=_role_name(body.get("role")),
                      policy_role=_role_name(body.get("policy_role")),
                      cached_for=tuple(key) if ok_key else None,
@@ -986,17 +998,21 @@ def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None)
     if p.effective is not None or not p.roles:
         return p
     merged = p.rules()
+    grants = p.permission_grants
     for name in (role, policy_role):
-        for k, v in (p.roles.get(name) or {}).items():
+        override = p.roles.get(name) or {}
+        for k, v in override.items():
             if v is not None and k in RULES:
                 merged[k] = list(v) if isinstance(v, tuple) else v
+        if override.get("permission_grants") is not None:
+            grants = _grants(override)["permission_grants"]
     return replace(p, effective=OrgPolicy(org_id=p.org_id, version=p.version,
                                           fetched_at=p.fetched_at, **_rules(merged),
                                           **_budgets(p.budgets()), **_rollout(p.rollout()),
                                           provider_config=p.provider_config,
                                           deny_personal_keys=p.deny_personal_keys,
                                           agent_setup=p.agent_setup,
-                                          permission_grants=p.permission_grants,
+                                          permission_grants=grants,
                                           spend_seat_usd=p.spend_seat_usd,
                                           spend_month=p.spend_month,
                                           visibility=p.visibility))

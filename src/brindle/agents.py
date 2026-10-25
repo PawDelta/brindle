@@ -3337,6 +3337,26 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                     "permissionDecision": "deny",
                     "permissionDecisionReason": why,
                 }}
+    # Saved restrictions must reach PermissionRequest even when the CLI/profile
+    # already allows this tool. That hook owns the final deny and human grants.
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is not None:
+        from brindle import permission_grants, permissions
+        from brindle.config import load_repo_config
+        from brindle.profiles import profile_rules_for
+
+        cfg = load_repo_config(ws.repo_root)
+        if cfg.permission_policy == "on":
+            req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root),
+                     *permission_grants.limits(ws.repo_root).deny]
+            restrictions = [r for r in rules if r.decision in ("ask", "deny")]
+            decision = permissions.decide(req, checks=cfg.checks, rules=restrictions)
+            if decision.rule is not None:
+                return {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "ask",
+                    "permissionDecisionReason": f"brindle: {decision.reason}",
+                }}
     if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
@@ -3457,6 +3477,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 # Like pre_tool_decision: a compound command whose every part
                 # allowed_tools covers (a cd within the worktree counts).
                 if (len(reqs) == 1 and reqs[0].kind == "bash" and specs
+                        and decision.rule is None
                         and (cwd == root or cwd.startswith(root + os.sep))
                         and uncovered_part(specs, command, cd_root=ws.path) is None):
                     decision = permissions.Decision(
@@ -3465,7 +3486,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                     # harmless redirection gone), which deny_in_parts doesn't.
                     for part in split_commands(command):
                         denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
-                        if denied.decision == "deny":
+                        if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
                             decision = denied
                             break
                 elif perms.mode == "dontAsk":
@@ -3511,13 +3532,21 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
             if not reqs:
                 return None
-            # The org's denies hold here too; grants don't (no hold to answer them in).
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules,
-                     *permission_grants.limits(ws.repo_root).deny]
+            lim = permission_grants.limits(ws.repo_root)
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules, *lim.deny]
             decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+            if len(reqs) == 1:
+                # Existing trusted grants apply without a CLI prompt. A
+                # refused override can request approval in the app for later.
+                decision = permission_grants.use_grant(agent.id, reqs[0], decision, lim)
+                decision = permission_grants.lift(agent.id, reqs[0], decision, rules, cfg.checks, lim)
+            if decision.decision == "ask" and decision.rule is not None:
+                # This hook cannot open an approval prompt. An explicit ask
+                # must stop the tool instead of falling through to CLI allows.
+                decision = permissions.Decision("deny", decision.reason, decision.rule)
             if decision.decision != "deny":
                 return None
             req = reqs[0]

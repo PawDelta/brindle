@@ -114,16 +114,18 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     assert agents.hook_main(db, a.id, "codex-permission-request", payload) == ""
 
 
-@pytest.mark.parametrize("command,expected", [
-    ("make verify", "allow"),  # repo check
-    ("task test unit", "allow"),  # profile prefix allowance
-    ("task test unit && deploy", None),
-    ("task test secret", "deny"),  # profile deny beats profile allow
-    ("cd {ws} && task test secret", "deny"),  # ...in every part of a compound command too
-    ("task test secret 2>&1", "deny"),  # ...as the allow reads the part, redirection dropped
-    ('task test "" secret', "deny"),  # ...and an empty word doesn't hide it
+@pytest.mark.parametrize("provider,command,expected", [
+    ("codex", "make verify", "allow"),  # repo check
+    ("codex", "task test unit", "allow"),  # profile prefix allowance
+    ("codex", "task test unit && deploy", None),
+    ("codex", "task test secret", "deny"),  # profile deny beats profile allow
+    ("codex", "cd {ws} && task test secret", "deny"),  # ...in every part of a compound command too
+    ("codex", "task test secret 2>&1", "deny"),  # ...as the allow reads the part, redirection dropped
+    ("codex", 'task test "" secret', "deny"),  # ...and an empty word doesn't hide it
+    ("claude", "task test secret", "ask"),  # profile restriction must reach Claude's approval route
+    ("claude", "task test prod", "ask"),  # org restriction must beat profile allow too
 ])
-def test_codex_checks_and_profile_commands(db, ws, command, expected):
+def test_codex_checks_and_profile_commands(db, ws, monkeypatch, provider, command, expected):
     from pathlib import Path
 
     turn_on(ws)
@@ -137,10 +139,176 @@ def test_codex_checks_and_profile_commands(db, ws, command, expected):
     )
     permissions.repo_rules_path(ws.repo_root).write_text(json.dumps({"rules": [
         Rule("bash", "make blocked", "exact", "deny").to_dict()]}))
-    a = worker(db, ws)
+    a = worker(db, ws, provider=provider)
+    if provider == "claude":
+        from brindle import permission_grants
+        from brindle.pro.team_policy import GrantPolicy, OrgPolicy
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(permission_grants, "_plugin", lambda repo: SimpleNamespace(policy=lambda: OrgPolicy(
+            "org", 1, permission_grants=GrantPolicy(True, ("bash",), (), 5, 1,
+                                                  deny=("bash prefix task test prod",)))))
+        out = agents.pre_tool_decision(db, a, {"tool_name": "Bash", "tool_input": {"command": command}})
+        assert out["hookSpecificOutput"]["permissionDecision"] == expected
+        return
     out = agents.hook_main(db, a.id, "codex-permission-request",
                           json.dumps(codex_payload("Bash", {"command": command.format(ws=ws.path)}, ws.path)))
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
+
+
+def test_explicit_ask_survives_codex_profile_fallback(db, ws, monkeypatch):
+    from brindle.daemon import grants
+
+    turn_on(ws)
+    with permissions.editing() as store:
+        store.rules = [Rule("bash", "uv run", "prefix", "ask")]
+    monkeypatch.setattr(agents, "_hold_for_app", lambda *a, **kw: None)
+    monkeypatch.setattr(grants, "use", lambda *a, **kw: None)
+    a = worker(db, ws)
+    out = agents.hook_main(db, a.id, "codex-permission-request", json.dumps(
+        codex_payload("Bash", {"command": "uv run pytest tests/test_x.py"}, ws.path)))
+    assert out == ""
+    agy = antigravity.pre_tool_decision(db, a.id, agy_payload(
+        "run_command", {"CommandLine": "uv run pytest tests/test_x.py"}, ws.path), strict=True)
+    assert agy["decision"] == "deny"
+    # OpenCode cannot prompt from its before-tool hook: explicit asks must
+    # block until approved, rather than pass through its own allow rules.
+    answer = agents.permission_request_decision(db, a, {
+        "tool": "bash", "args": {"command": "uv run pytest tests/test_x.py"}}, provider="opencode")
+    assert answer["decision"] == "deny"
+    pre = agents.pre_tool_decision(db, a, {
+        "tool_name": "Bash", "tool_input": {"command": "uv run pytest tests/test_x.py"}})
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "ask"
+    with permissions.editing() as store:
+        store.rules = [Rule("bash", "uv run", "prefix", "deny")]
+    pre = agents.pre_tool_decision(db, a, {
+        "tool_name": "Bash", "tool_input": {"command": "uv run pytest tests/test_x.py"}})
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+@pytest.mark.parametrize("match_type,decision,command", [
+    ("prefix", "ask", "echo ok && deploy prod > out"),
+    ("exact", "ask", "deploy prod > out"),
+    ("exact", "deny", "echo ok && deploy prod > out"),
+    pytest.param("exact", "ask", "echo ok && deploy prod > out", marks=pytest.mark.variant("compound exact ask bypass")),
+    pytest.param("exact", "deny", "deploy prod > out", marks=pytest.mark.variant("direct exact deny bypass")),
+    ("exact", "ask", "deploy prod >"),
+    pytest.param("exact", "ask", "deploy 2>out prod", marks=pytest.mark.variant("redirection inside command arguments")),
+    pytest.param("exact", "ask", "deploy prod >>out", marks=pytest.mark.variant("attached append redirection")),
+    pytest.param("exact", "ask", 'deploy prod > "$OUT"', marks=pytest.mark.variant("unresolved redirect target expansion")),
+    pytest.param("exact", "ask", "deploy  prod", marks=pytest.mark.variant("repeated-space explicit ask bypass")),
+    pytest.param("exact", "ask", "REGION=us deploy prod", marks=pytest.mark.variant("assignment explicit ask bypass")),
+])
+def test_native_dispatch_enforces_saved_rules_with_workspace_identity(db, ws, monkeypatch, match_type, decision, command):
+    from brindle.native.permissions import Permissions
+    from brindle.native.loop import NativeAgent
+    from brindle.native.client import ToolCall
+    from brindle.native.tools import Toolbox, Tool, ToolResult
+    from brindle.native.runner import permission_decision
+    from brindle import permission_grants
+    from brindle.daemon import grants
+    from dataclasses import replace
+
+    turn_on(ws)
+    agent = worker(db, ws, provider="native")
+    monkeypatch.setattr(grants, "use", lambda *args, **kwargs: None)
+    with permissions.editing() as store:
+        store.rules = [Rule("bash", "deploy" if match_type == "prefix" else "deploy prod",
+                            match_type, decision, repo_root=ws.repo_root)]
+    ran = []
+    def execute(args):
+        ran.append(args)
+        return ToolResult("done")
+
+    toolbox = Toolbox().add(Tool("Bash", "", {}, execute))
+    policy = Permissions("bypassPermissions", [])
+    loop = NativeAgent(None, toolbox, policy, "", policy=lambda tool, args: permission_decision(
+        db, agent.id, ws, tool, args))
+    for mode in ("bypassPermissions", "default"):
+        policy.mode = mode
+        policy.rules = [("Bash", None)]
+        assert permission_decision(db, agent.id, ws, "Bash", {"command": command}) == decision
+        assert loop._execute(ToolCall("call", "Bash", {"command": "deploy prod"})).is_error
+        assert loop._execute(ToolCall("redirect", "Bash", {"command": command})).is_error
+    assert not ran
+    if match_type == "exact":
+        literal = {"command": "deploy 'prod > out'"}
+        assert not loop._execute(ToolCall("literal", "Bash", literal)).is_error
+        assert ran == [literal]
+        ran.clear()
+    policy.rules = []
+    with permissions.editing() as store:
+        store.rules = [Rule("bash", "deploy", "prefix", "allow", repo_root=ws.repo_root)]
+    policy.mode = "dontAsk"
+    assert not loop._execute(ToolCall("allowed", "Bash", {"command": "deploy dev"})).is_error
+    assert ran == [{"command": "deploy dev"}]
+    current = permission_grants.limits(ws.repo_root)
+    monkeypatch.setattr(permission_grants, "limits", lambda root: replace(
+        current, deny=(Rule("bash", "deploy", "prefix", "deny", "org"),)))
+    policy.mode = "bypassPermissions"
+    assert loop._execute(ToolCall("blocked", "Bash", {"command": "deploy dev"})).is_error
+    assert len(ran) == 1
+    if match_type == "prefix":
+        policy.mode, policy.rules = "dontAsk", [("Bash", "git diff:*")]
+        for revision in ("main...HEAD", "HEAD~1..HEAD", "HEAD^..HEAD"):
+            args = {"command": f"git diff {revision}"}
+            assert permission_decision(db, agent.id, ws, "Bash", args) is None
+            assert not loop._execute(ToolCall("fallback", "Bash", args)).is_error
+            assert ran[-1] == args
+
+
+@pytest.mark.parametrize("provider", ["opencode", "antigravity", "native"])
+def test_before_tool_adapters_honor_remembered_grants_and_current_denies(db, ws, monkeypatch, provider):
+    from pathlib import Path
+    from brindle import permission_grants
+    from brindle.daemon import grants
+
+    turn_on(ws)
+    a = worker(db, ws, provider=provider)
+    path = Path(ws.path) / ".env"
+    path.write_text("fixture")
+    monkeypatch.setattr(grants, "use", lambda *args, **kwargs: None)
+    monkeypatch.setattr(grants, "ask", lambda *args, **kwargs: None)
+    if provider == "native":
+        from brindle.native import runner
+        from brindle.native.client import Endpoint, ToolCall
+
+        loops, constructor = [], runner.NativeAgent
+        def capture_loop(*args, **kwargs):
+            loop = constructor(*args, **kwargs)
+            loops.append(loop)
+            return loop
+
+        monkeypatch.setattr(runner, "NativeAgent", capture_loop)
+        monkeypatch.setattr(runner, "endpoint_for", lambda profile: Endpoint("http://unused", "fixture"))
+        monkeypatch.setattr(runner, "Client", lambda *args, **kwargs: None)
+        assert runner.run_native(db, a.id, exit_when_idle=True) == 0
+
+    def decision():
+        if provider == "native":
+            result = loops[0]._execute(ToolCall("read", "Read", {"path": str(path)}))
+            return "deny" if result.is_error else "allow"
+        if provider == "opencode":
+            result = agents.permission_request_decision(db, a, {
+                "tool": "read", "args": {"filePath": str(path)}}, provider=provider)
+            return result["decision"] if result else "allow"
+        return antigravity.pre_tool_decision(db, a.id, agy_payload(
+            "view_file", {"AbsolutePath": str(path)}, ws.path), strict=True)["decision"]
+
+    assert decision() == "deny"
+    asked = grants.Asked("asked", a.id, ws.repo_root, "read", str(path),
+                         json.dumps({"path": str(path)}), "env", "", 1, 0)
+    saved = permission_grants.remember(asked)
+    assert decision() == "allow"
+    if provider == "antigravity":
+        ambiguous = agy_payload("view_file", {
+            "AbsolutePath": str(path), "TargetFile": str(path.with_name(".env.other"))}, ws.path)
+        assert antigravity.pre_tool_decision(db, a.id, ambiguous, strict=True)["decision"] == "deny"
+    deny = permissions.add_rule("read", str(path), "deny")
+    assert decision() == "deny"
+    permissions.forget(deny.id)
+    permission_grants.forget_remembered(saved)
+    assert decision() == "deny"
 
 
 @pytest.mark.parametrize("policy,command,expected", [

@@ -79,6 +79,92 @@ const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
 const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
 
+function PermissionActions({ item, actions, busy }: {
+  item: InboxItemDTO;
+  actions: ReturnType<typeof useInboxActions>;
+  busy: boolean;
+}) {
+  const p = item.permission!;
+  const cap = p.max_minutes;
+  const [duration, setDuration] = useState(String(Math.min(30, cap ?? 30)));
+  const [unit, setUnit] = useState("minutes");
+  const [scope, setScope] = useState("branch");
+  const adapter = p.via === "grant";
+  const scopes = adapter ? p.approval_scopes ?? {} : {};
+  const selectedScope = scope in scopes ? scope : Object.keys(scopes)[0];
+  const savedScope = adapter ? (selectedScope ? scopes[selectedScope] : p.approval_scope) : null;
+  const timedScope = adapter ? savedScope : p.approval_scope;
+  const multiplier = unit === "days" ? 1440 : unit === "hours" ? 60 : 1;
+  const minutes = Number(duration) * multiplier;
+  const valid = Number.isSafeInteger(minutes) && minutes > 0 && cap != null && minutes <= cap;
+  const timed = p.choices?.some((c) => c.choice === "allow_for") && cap != null;
+  const expires = valid ? new Date(Date.now() + minutes * 60000) : null;
+  const order = ["deny", "allow_once", "allow_session", "allow_for", "allow_always"];
+  const savedChoices = ["allow_session", "allow_for", "allow_always"];
+  const choices = [...(p.choices ?? [])].sort((a, b) => order.indexOf(a.choice) - order.indexOf(b.choice));
+  const permanent = choices.find((c) => c.choice === "allow_always");
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      {Object.keys(scopes).length > 1 && (
+        <label className="flex flex-wrap items-center gap-2 text-xs text-ink-3">
+          Saved approval scope
+          <select aria-label="Saved approval scope" className="rounded border border-line-strong bg-surface px-2 py-1 text-ink"
+            disabled={busy} value={selectedScope} onChange={(e) => setScope(e.target.value)}>
+            {Object.keys(scopes).map((level) => <option key={level} value={level}>
+              {({ branch: "Requested branch on this remote", remote: "All branches on this remote",
+                repo: "All permitted remotes in this repository",
+                all: "Across repositories (all permitted remotes and branches)",
+                repository: "All permitted remotes in this repository" } as Record<string, string>)[level] ?? level}
+            </option>)}
+          </select>
+        </label>
+      )}
+      {savedScope && <p className="break-words text-xs text-ink-2">{savedScope}</p>}
+      {timed && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-ink-3">
+          <label className="flex items-center gap-2">
+            Duration
+            <input aria-label="Approval duration" type="number" min="1" step="1" max={cap / multiplier}
+              className="w-20 rounded border border-line-strong bg-surface px-2 py-1 text-ink"
+              disabled={busy} value={duration} onChange={(e) => setDuration(e.target.value)} />
+          </label>
+          <select aria-label="Duration unit" className="rounded border border-line-strong bg-surface px-2 py-1 text-ink"
+            disabled={busy} value={unit} onChange={(e) => setUnit(e.target.value)}>
+            <option value="minutes">minutes</option><option value="hours">hours</option><option value="days">days</option>
+          </select>
+          <span>Up to {cap} minutes{p.max_uses != null ? ` or ${p.max_uses} uses` : ""}.</span>
+          <span>{expires && Number.isFinite(expires.getTime()) ? `Expires ${expires.toLocaleString()}.` : "Choose a duration within the limit."}</span>
+          {!adapter && timedScope && <span className="break-words">Timed approval scope: {timedScope}</span>}
+        </div>
+      )}
+      <span className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Permission choices">
+        {choices.map((c) => (
+          <button key={c.choice} type="button" className={`${ACT} ${c.choice === "deny" ? GHOST : c.choice === "allow_once" ? PRIMARY : PLAIN}`}
+            disabled={busy || (c.choice === "allow_for" && timed && !valid)}
+            title={(c.choice === "allow_for" ? timedScope : savedChoices.includes(c.choice) ? savedScope : null)
+              ?? c.rule ?? undefined} data-choice={c.choice}
+            onClick={() => actions.run(item, "permission", { ...permissionAnswer(item, c.choice),
+              ...(c.choice === "allow_for" && timed ? { minutes } : {}),
+              ...(savedChoices.includes(c.choice) && selectedScope ? { scope: selectedScope } : {}) })}>
+            {c.choice === "allow_for" && timed ? `Approve for ${duration || "…"} ${unit}` : c.label}
+          </button>
+        ))}
+      </span>
+      {choices.some((c) => c.choice === "allow_session") && (
+        <span className="text-xs text-ink-3">Session approval ends with this supervisor session{p.max_uses != null ? ` or after ${p.max_uses} uses` : ""}; it survives an app restart.</span>
+      )}
+      {permanent && (
+        <div className="text-xs text-ink-3">
+          <p>{adapter
+            ? "Always allow is saved across sessions until revoked in Permissions. Allow once covers only this request."
+            : "Always allow saves a permanent rule for future matching requests across sessions until removed from its permission settings."}</p>
+          {!adapter && permanent.rule && <code className="block break-words">{permanent.rule}</code>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll }: InboxScreenProps) {
   const inbox = useAppState((s) => s.inbox);
   const workspaces = useAppState((s) => s.workspaces);
@@ -231,7 +317,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
     );
     // The grant its choices offer (Allow for …, or a built-in deny lifted once): exactly what it covers.
     const grant = item.permission?.grant;
-    if (grant) {
+    if (grant && (!item.permission?.approval_scope || expanded)) {
       body = (
         <span className="flex min-w-0 flex-col gap-0.5">
           {body}
@@ -264,15 +350,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
   );
   let acts: ReactNode;
   if (item.kind === "permission" && answerable(item)) {
-    acts = (
-      <span className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Permission choices">
-        {(item.permission?.choices ?? []).map((c, i) => (
-          <button key={c.choice} type="button" className={`${ACT} ${i === 0 ? PRIMARY : c.choice === "deny" ? GHOST : PLAIN}`} disabled={busy} title={c.rule ?? undefined} data-choice={c.choice} onClick={() => actions.run(item, "permission", permissionAnswer(item, c.choice))}>
-            {c.label}
-          </button>
-        ))}
-      </span>
-    );
+    acts = <PermissionActions key={`${item.permission?.request_id}:${item.permission?.digest}`} item={item} actions={actions} busy={busy} />;
   } else if (item.kind === "plan") {
     acts = (
       <>

@@ -4,7 +4,7 @@ field names are the engine's own and the drift test keeps them in step."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -124,6 +124,10 @@ class PermissionDTO(_DTO):
     kind: str | None = None      # brindle.permissions.KINDS
     target: str | None = None    # the command, path or URL, complete
     grant: str | None = None     # the grant it offers (allow_for, or a one-time grant), in a line
+    max_minutes: int | None = None
+    max_uses: int | None = None
+    approval_scope: str | None = None  # scope verified by the daemon for this approval
+    approval_scopes: dict[str, str] = {}  # allowed saved scope ids and their verified descriptions
     wording: str | None = None   # the prompt as the provider words it
     choices: list[PermissionChoiceDTO] = []
 
@@ -286,6 +290,96 @@ class RuleDTO(_DTO):
     name: str
     description: str
     source: str
+
+
+class PermissionRuleDTO(_DTO):
+    id: str
+    kind: str
+    match: str
+    match_type: str
+    decision: Literal["allow", "ask", "deny"]
+    source: str
+    created: float
+    repo_root: str | None = None
+    expires_at: float | None = None
+    exclusions: list[PermissionRuleDTO] = []
+    editable: bool = False
+    protected: bool = False
+
+
+class PermissionActionDTO(_DTO):
+    id: str
+    kind: str
+    name: str
+    tool: str | None
+    source: str
+
+
+class PermissionPresetDTO(_DTO):
+    id: str
+    name: str
+    rule: PermissionRuleDTO
+
+
+class PermissionRestrictionsDTO(_DTO):
+    editable: bool
+    managed: bool
+    reason: str
+    org_id: str | None
+    policy_version: int | str | None
+    permission_grants: dict[str, Any] | None
+    protected_paths: list[str]
+    permission_policy: str
+    roles_supported: bool
+    repo_supported: bool
+    expiry_supported: bool
+    checks: list[str]
+
+
+class PermissionEditorDTO(_DTO):
+    revision: str
+    rules: list[PermissionRuleDTO]
+    catalog: list[PermissionActionDTO]
+    presets: list[PermissionPresetDTO]
+    restrictions: PermissionRestrictionsDTO
+    limitations: list[str]
+
+
+class PermissionConflictDTO(_DTO):
+    left: str
+    right: str
+    overlap: Literal["yes", "unknown"]
+    protected: bool
+
+
+class PermissionChangeDTO(_DTO):
+    type: Literal["added", "updated", "removed"]
+    id: str
+    before: PermissionRuleDTO | None
+    after: PermissionRuleDTO | None
+
+
+class PermissionReviewDTO(_DTO):
+    revision: str
+    proposal: str
+    rules: list[PermissionRuleDTO]
+    changes: list[PermissionChangeDTO]
+    conflicts: list[PermissionConflictDTO]
+    unresolved: list[PermissionConflictDTO]
+    can_save: bool
+
+
+class PermissionSaveDTO(_DTO):
+    revision: str
+    rules: list[PermissionRuleDTO]
+    restrictions: PermissionRestrictionsDTO
+    limitations: list[str]
+    changes: list[PermissionChangeDTO]
+
+
+class PermissionVerifyDTO(_DTO):
+    verified: bool
+    action: PermissionActionDTO | None
 
 
 class RoutingLockDTO(_DTO):

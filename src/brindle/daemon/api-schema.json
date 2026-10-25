@@ -806,6 +806,26 @@
         "PermissionDTO": {
           "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``) or \"grant\" (a one-time grant the agent asked\nfor after a built-in deny refused it: the same route answers it, with\nallow_once or deny, until ``hold_until``; ``grant`` says what it allows).",
           "properties": {
+            "approval_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Approval Scope"
+            },
+            "approval_scopes": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Approval Scopes",
+              "type": "object"
+            },
             "choices": {
               "default": [],
               "items": {
@@ -873,6 +893,30 @@
               ],
               "default": null,
               "title": "Kind"
+            },
+            "max_minutes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Minutes"
+            },
+            "max_uses": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Uses"
             },
             "request_id": {
               "anyOf": [
@@ -1245,6 +1289,183 @@
       "title": "NativeSubagentDTO",
       "type": "object"
     },
+    "PermissionActionDTO": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tool"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "tool",
+        "source"
+      ],
+      "title": "PermissionActionDTO",
+      "type": "object"
+    },
+    "PermissionChangeDTO": {
+      "$defs": {
+        "PermissionRuleDTO": {
+          "properties": {
+            "created": {
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "editable": {
+              "default": false,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionRuleDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "protected": {
+              "default": false,
+              "title": "Protected",
+              "type": "boolean"
+            },
+            "repo_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo Root"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "created"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionRuleDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "before": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionRuleDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "added",
+            "updated",
+            "removed"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "before",
+        "after"
+      ],
+      "title": "PermissionChangeDTO",
+      "type": "object"
+    },
     "PermissionChoiceDTO": {
       "properties": {
         "choice": {
@@ -1273,6 +1494,38 @@
         "label"
       ],
       "title": "PermissionChoiceDTO",
+      "type": "object"
+    },
+    "PermissionConflictDTO": {
+      "properties": {
+        "left": {
+          "title": "Left",
+          "type": "string"
+        },
+        "overlap": {
+          "enum": [
+            "yes",
+            "unknown"
+          ],
+          "title": "Overlap",
+          "type": "string"
+        },
+        "protected": {
+          "title": "Protected",
+          "type": "boolean"
+        },
+        "right": {
+          "title": "Right",
+          "type": "string"
+        }
+      },
+      "required": [
+        "left",
+        "right",
+        "overlap",
+        "protected"
+      ],
+      "title": "PermissionConflictDTO",
       "type": "object"
     },
     "PermissionDTO": {
@@ -1310,6 +1563,26 @@
       },
       "description": "A tool-permission request waiting on the person. ``via``: \"hook\"\n(brindle's hook holds the request: POST /inbox/{agent_id}/permission\n{request: request_id, digest, choice} answers it until ``hold_until``,\nrefused for any request but the one shown, exactly as shown; choice\n\"terminal\" ends the hold so the CLI's own prompt asks instead) or\n\"prompt\" (it is at the CLI's own prompt: ``terminal`` says so, and the\napp's \"Go to it\", with the item's root_id and agent_id, is the way to\nanswer it; no ``choices``) or \"grant\" (a one-time grant the agent asked\nfor after a built-in deny refused it: the same route answers it, with\nallow_once or deny, until ``hold_until``; ``grant`` says what it allows).",
       "properties": {
+        "approval_scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Scope"
+        },
+        "approval_scopes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Approval Scopes",
+          "type": "object"
+        },
         "choices": {
           "default": [],
           "items": {
@@ -1377,6 +1650,30 @@
           ],
           "default": null,
           "title": "Kind"
+        },
+        "max_minutes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Minutes"
+        },
+        "max_uses": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Uses"
         },
         "request_id": {
           "anyOf": [
@@ -1459,6 +1756,1270 @@
         "via"
       ],
       "title": "PermissionDTO",
+      "type": "object"
+    },
+    "PermissionEditorDTO": {
+      "$defs": {
+        "PermissionActionDTO": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tool"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "name",
+            "tool",
+            "source"
+          ],
+          "title": "PermissionActionDTO",
+          "type": "object"
+        },
+        "PermissionPresetDTO": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "rule": {
+              "$ref": "#/$defs/PermissionRuleDTO"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "rule"
+          ],
+          "title": "PermissionPresetDTO",
+          "type": "object"
+        },
+        "PermissionRestrictionsDTO": {
+          "properties": {
+            "checks": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Checks",
+              "type": "array"
+            },
+            "editable": {
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "expiry_supported": {
+              "title": "Expiry Supported",
+              "type": "boolean"
+            },
+            "managed": {
+              "title": "Managed",
+              "type": "boolean"
+            },
+            "org_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Org Id"
+            },
+            "permission_grants": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Permission Grants"
+            },
+            "permission_policy": {
+              "title": "Permission Policy",
+              "type": "string"
+            },
+            "policy_version": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Policy Version"
+            },
+            "protected_paths": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Protected Paths",
+              "type": "array"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo_supported": {
+              "title": "Repo Supported",
+              "type": "boolean"
+            },
+            "roles_supported": {
+              "title": "Roles Supported",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "editable",
+            "managed",
+            "reason",
+            "org_id",
+            "policy_version",
+            "permission_grants",
+            "protected_paths",
+            "permission_policy",
+            "roles_supported",
+            "repo_supported",
+            "expiry_supported",
+            "checks"
+          ],
+          "title": "PermissionRestrictionsDTO",
+          "type": "object"
+        },
+        "PermissionRuleDTO": {
+          "properties": {
+            "created": {
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "editable": {
+              "default": false,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionRuleDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "protected": {
+              "default": false,
+              "title": "Protected",
+              "type": "boolean"
+            },
+            "repo_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo Root"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "created"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "catalog": {
+          "items": {
+            "$ref": "#/$defs/PermissionActionDTO"
+          },
+          "title": "Catalog",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "presets": {
+          "items": {
+            "$ref": "#/$defs/PermissionPresetDTO"
+          },
+          "title": "Presets",
+          "type": "array"
+        },
+        "restrictions": {
+          "$ref": "#/$defs/PermissionRestrictionsDTO"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDTO"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "rules",
+        "catalog",
+        "presets",
+        "restrictions",
+        "limitations"
+      ],
+      "title": "PermissionEditorDTO",
+      "type": "object"
+    },
+    "PermissionPresetDTO": {
+      "$defs": {
+        "PermissionRuleDTO": {
+          "properties": {
+            "created": {
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "editable": {
+              "default": false,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionRuleDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "protected": {
+              "default": false,
+              "title": "Protected",
+              "type": "boolean"
+            },
+            "repo_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo Root"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "created"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "rule": {
+          "$ref": "#/$defs/PermissionRuleDTO"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "rule"
+      ],
+      "title": "PermissionPresetDTO",
+      "type": "object"
+    },
+    "PermissionRestrictionsDTO": {
+      "properties": {
+        "checks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Checks",
+          "type": "array"
+        },
+        "editable": {
+          "title": "Editable",
+          "type": "boolean"
+        },
+        "expiry_supported": {
+          "title": "Expiry Supported",
+          "type": "boolean"
+        },
+        "managed": {
+          "title": "Managed",
+          "type": "boolean"
+        },
+        "org_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Org Id"
+        },
+        "permission_grants": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Permission Grants"
+        },
+        "permission_policy": {
+          "title": "Permission Policy",
+          "type": "string"
+        },
+        "policy_version": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Policy Version"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "repo_supported": {
+          "title": "Repo Supported",
+          "type": "boolean"
+        },
+        "roles_supported": {
+          "title": "Roles Supported",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "editable",
+        "managed",
+        "reason",
+        "org_id",
+        "policy_version",
+        "permission_grants",
+        "protected_paths",
+        "permission_policy",
+        "roles_supported",
+        "repo_supported",
+        "expiry_supported",
+        "checks"
+      ],
+      "title": "PermissionRestrictionsDTO",
+      "type": "object"
+    },
+    "PermissionReviewDTO": {
+      "$defs": {
+        "PermissionChangeDTO": {
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionRuleDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionRuleDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "added",
+                "updated",
+                "removed"
+              ],
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "before",
+            "after"
+          ],
+          "title": "PermissionChangeDTO",
+          "type": "object"
+        },
+        "PermissionConflictDTO": {
+          "properties": {
+            "left": {
+              "title": "Left",
+              "type": "string"
+            },
+            "overlap": {
+              "enum": [
+                "yes",
+                "unknown"
+              ],
+              "title": "Overlap",
+              "type": "string"
+            },
+            "protected": {
+              "title": "Protected",
+              "type": "boolean"
+            },
+            "right": {
+              "title": "Right",
+              "type": "string"
+            }
+          },
+          "required": [
+            "left",
+            "right",
+            "overlap",
+            "protected"
+          ],
+          "title": "PermissionConflictDTO",
+          "type": "object"
+        },
+        "PermissionRuleDTO": {
+          "properties": {
+            "created": {
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "editable": {
+              "default": false,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionRuleDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "protected": {
+              "default": false,
+              "title": "Protected",
+              "type": "boolean"
+            },
+            "repo_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo Root"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "created"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "can_save": {
+          "title": "Can Save",
+          "type": "boolean"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/PermissionChangeDTO"
+          },
+          "title": "Changes",
+          "type": "array"
+        },
+        "conflicts": {
+          "items": {
+            "$ref": "#/$defs/PermissionConflictDTO"
+          },
+          "title": "Conflicts",
+          "type": "array"
+        },
+        "proposal": {
+          "title": "Proposal",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDTO"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "unresolved": {
+          "items": {
+            "$ref": "#/$defs/PermissionConflictDTO"
+          },
+          "title": "Unresolved",
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "proposal",
+        "rules",
+        "changes",
+        "conflicts",
+        "unresolved",
+        "can_save"
+      ],
+      "title": "PermissionReviewDTO",
+      "type": "object"
+    },
+    "PermissionRuleDTO": {
+      "$defs": {
+        "PermissionRuleDTO": {
+          "properties": {
+            "created": {
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "editable": {
+              "default": false,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionRuleDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "protected": {
+              "default": false,
+              "title": "Protected",
+              "type": "boolean"
+            },
+            "repo_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo Root"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "created"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "created": {
+          "title": "Created",
+          "type": "number"
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "editable": {
+          "default": false,
+          "title": "Editable",
+          "type": "boolean"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDTO"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "match": {
+          "title": "Match",
+          "type": "string"
+        },
+        "match_type": {
+          "title": "Match Type",
+          "type": "string"
+        },
+        "protected": {
+          "default": false,
+          "title": "Protected",
+          "type": "boolean"
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo Root"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "match",
+        "match_type",
+        "decision",
+        "source",
+        "created"
+      ],
+      "title": "PermissionRuleDTO",
+      "type": "object"
+    },
+    "PermissionSaveDTO": {
+      "$defs": {
+        "PermissionChangeDTO": {
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionRuleDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionRuleDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "added",
+                "updated",
+                "removed"
+              ],
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "before",
+            "after"
+          ],
+          "title": "PermissionChangeDTO",
+          "type": "object"
+        },
+        "PermissionRestrictionsDTO": {
+          "properties": {
+            "checks": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Checks",
+              "type": "array"
+            },
+            "editable": {
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "expiry_supported": {
+              "title": "Expiry Supported",
+              "type": "boolean"
+            },
+            "managed": {
+              "title": "Managed",
+              "type": "boolean"
+            },
+            "org_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Org Id"
+            },
+            "permission_grants": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Permission Grants"
+            },
+            "permission_policy": {
+              "title": "Permission Policy",
+              "type": "string"
+            },
+            "policy_version": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Policy Version"
+            },
+            "protected_paths": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Protected Paths",
+              "type": "array"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo_supported": {
+              "title": "Repo Supported",
+              "type": "boolean"
+            },
+            "roles_supported": {
+              "title": "Roles Supported",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "editable",
+            "managed",
+            "reason",
+            "org_id",
+            "policy_version",
+            "permission_grants",
+            "protected_paths",
+            "permission_policy",
+            "roles_supported",
+            "repo_supported",
+            "expiry_supported",
+            "checks"
+          ],
+          "title": "PermissionRestrictionsDTO",
+          "type": "object"
+        },
+        "PermissionRuleDTO": {
+          "properties": {
+            "created": {
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "enum": [
+                "allow",
+                "ask",
+                "deny"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "editable": {
+              "default": false,
+              "title": "Editable",
+              "type": "boolean"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionRuleDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "protected": {
+              "default": false,
+              "title": "Protected",
+              "type": "boolean"
+            },
+            "repo_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo Root"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "created"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/PermissionChangeDTO"
+          },
+          "title": "Changes",
+          "type": "array"
+        },
+        "limitations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Limitations",
+          "type": "array"
+        },
+        "restrictions": {
+          "$ref": "#/$defs/PermissionRestrictionsDTO"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDTO"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision",
+        "rules",
+        "restrictions",
+        "limitations",
+        "changes"
+      ],
+      "title": "PermissionSaveDTO",
+      "type": "object"
+    },
+    "PermissionVerifyDTO": {
+      "$defs": {
+        "PermissionActionDTO": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tool"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "name",
+            "tool",
+            "source"
+          ],
+          "title": "PermissionActionDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "verified",
+        "action"
+      ],
+      "title": "PermissionVerifyDTO",
       "type": "object"
     },
     "PreflightActionDTO": {
@@ -3206,6 +4767,22 @@
     {
       "method": "GET",
       "path": "/v1/meta"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permission-editor"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permission-editor/review"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permission-editor/save"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permission-editor/verify"
     },
     {
       "method": "POST",

@@ -16,9 +16,9 @@ bash, fetch, mcp, other):
    the scope the adapter worked out (``lift``): it is never held, since a
    held request shows the CLI's own prompt, where an answer would run it.
 2. Answer. Only the person, on the daemon's person-only inbox route
-   (service.inbox.answer_permission): ``allow_once`` or ``deny`` for a
-   one-time grant, never a lasting rule. No answer, the hold running out,
-   or no daemon at all: the rules' answer stands (a deny stays a deny).
+   (service.inbox.answer_permission): deny, allow once, a bounded duration,
+   or a remembered adapter permission when policy permits. No answer, the
+   hold running out, or no daemon: the rules' answer stands.
 3. Check again. After an ``allow_for`` answer the hook reads the policy and
    every rule again (``recheck``); the answer to a one-time grant is checked
    against the policy then (``approve``), and its use reads everything,
@@ -31,6 +31,14 @@ bash, fetch, mcp, other):
    revokes them, when the agent is closed, or when the daemon restarts.
    A use counts when the call is allowed, not when the tool succeeds: a
    hook can't see the result.
+   Saved adapter permissions require the policy's persistence gate for
+   every lifetime, at creation and on every use. Timed permissions survive a daemon restart and
+   agent closure. They retain their original expiry and use budget, bounded
+   by current policy on every call. Forever permissions last until revoked
+   and require current policy to allow persistent permissions on every call.
+   A saved push may cover one destination ref, all branches at its verified
+   remote, all permitted remotes in that repository, or across repositories.
+   Current policy and the adapter's safety checks still govern every use.
 
 Never lifted: an org's, the repo's, a profile's or the person's own deny,
 a force flag, and the credential and daemon-token reads. Nothing an agent
@@ -61,7 +69,6 @@ import time
 import os
 import re
 import subprocess
-import time
 from dataclasses import dataclass
 
 from brindle import permissions
@@ -98,6 +105,8 @@ class Limits:
     why: str = ""                 # why nothing may be granted
     allow_persistent: bool = False
     owner: str = "local"
+    lifetimes: tuple[str, ...] = ("session", "time")
+    scopes: tuple[str, ...] = ("branch",)
 
 
 def _plugin(repo_root: str):
@@ -128,7 +137,8 @@ def limits(repo_root: str) -> Limits:
         if not p.allowed:
             return Limits(False, why=p.reason)
         return Limits(True, permissions.KINDS, GRANT_ACTIONS, LOCAL_MINUTES, LOCAL_USES,
-                      protected=protected, allow_persistent=True)
+                      protected=protected, allow_persistent=True,
+                      lifetimes=("session", "time", "forever"), scopes=("branch", "remote", "repo"))
     g = p.permission_grants
     deny = tuple(org_rule(s) for s in g.deny) if g else ()
     blocked = status.block_reason(p)
@@ -138,7 +148,8 @@ def limits(repo_root: str) -> Limits:
         return Limits(False, why=f"org {p.org_id}'s policy sets no permission_grants")
     return Limits(g.allow, g.kinds, g.overridable, g.max_minutes, g.max_uses, deny,
                   protected or bool(p.protected_paths), "" if g.allow else f"org {p.org_id} allows no grants",
-                  allow_persistent=g.allow_persistent, owner=f"org:{p.org_id}")
+                  allow_persistent=g.allow_persistent, owner=f"org:{p.org_id}",
+                  lifetimes=g.lifetimes, scopes=g.scopes)
 
 
 def key(req: Request) -> tuple[str, str] | None:
@@ -170,7 +181,8 @@ def offer(req: Request, decision: Decision, lim: Limits) -> dict | None:
     """The ``allow_for`` grant the person may give for a request the rules
     leave to them, held for their answer."""
     k = key(req)
-    if decision.decision != "ask" or not lim.allow or k is None or req.kind not in lim.kinds:
+    if (decision.decision != "ask" or not lim.allow or k is None or req.kind not in lim.kinds
+            or "time" not in lim.lifetimes or "branch" not in lim.scopes):
         return None
     return {"type": "allow_for", "kind": k[0], "match": k[1], "minutes": lim.max_minutes, "uses": lim.max_uses}
 
@@ -185,6 +197,8 @@ def override(req: Request, decision: Decision, rules: list[Rule], checks: list[s
         return None, ""
     if not lim.allow:
         return None, f"no one-time grant: {lim.why}"
+    if not lim.lifetimes or not any(_scope_allowed(action, s, lim) for s in PUSH_SCOPES):
+        return None, "no one-time grant: the policy permits no supported lifetime or scope"
     if req.kind not in lim.kinds:
         return None, f"no one-time grant: the policy does not allow {req.kind} grants"
     if action not in lim.overridable:
@@ -215,7 +229,7 @@ def lift(agent_id: str, req: Request, decision: Decision, rules: list[Rule], che
     if lifted is None or k is None:
         return replace(decision, reason=f"{decision.reason}; {why}") if why else decision
     scope = json.dumps(lifted["scope"], sort_keys=True)
-    remembered = remembered_match(req, lifted, lim)
+    remembered = remembered_match(req, lifted, lim, agent_id=agent_id)
     if remembered is not None:
         return Decision("allow", f"allowed by the person's saved permission preference {remembered}")
     g = grants.use(agent_id, repo_key(req), *k, scope=scope, max_minutes=lim.max_minutes, max_uses=lim.max_uses)
@@ -256,7 +270,8 @@ def use_grant(agent_id: str, req: Request, decision: Decision, lim: Limits) -> D
     from brindle.daemon import grants
 
     k = key(req)
-    if decision.decision != "ask" or not lim.allow or k is None or req.kind not in lim.kinds:
+    if (decision.decision != "ask" or not lim.allow or k is None or req.kind not in lim.kinds
+            or "time" not in lim.lifetimes or "branch" not in lim.scopes):
         return decision
     g = grants.use(agent_id, repo_key(req), *k, max_minutes=lim.max_minutes, max_uses=lim.max_uses)
     if g is None:
@@ -266,19 +281,22 @@ def use_grant(agent_id: str, req: Request, decision: Decision, lim: Limits) -> D
                              f"{left} min left); whether the call succeeds isn't known")
 
 
-def make(agent_id: str, req: Request) -> dict | None:
+def make(agent_id: str, req: Request, minutes: int | None = None) -> dict | None:
     """The person answered ``allow_for``: the grant it leaves for later
-    calls (this one is allowed already), within the policy as it is now."""
+    calls (this one is allowed already), within the policy as it is now.
+    This held-request grant also ends with the agent or daemon."""
     from brindle.daemon.grants import GRANTS
 
     offered = parse(req)
     if not offered or offered.get("type") != "allow_for":
         return None
     lim = limits(req.repo_root)
-    if not lim.allow or offered["kind"] not in lim.kinds:
+    if (not lim.allow or offered["kind"] not in lim.kinds
+            or "time" not in lim.lifetimes or "branch" not in lim.scopes):
         return None
     g = GRANTS.add(agent_id, repo_key(req), offered["kind"], offered["match"],
-                   min(int(offered["minutes"]), lim.max_minutes), min(int(offered["uses"]), lim.max_uses) - 1,
+                   min(minutes if minutes is not None else int(offered["minutes"]), lim.max_minutes),
+                   min(int(offered["uses"]), lim.max_uses) - 1,
                    uses_spent=1)
     return g.to_json() if g else None
 
@@ -290,6 +308,8 @@ def approve(asked) -> tuple[str | None, int]:
     lim = limits(asked.repo_root)
     if not lim.allow:
         return lim.why, 0
+    if not lim.lifetimes or not any(_scope_allowed(asked.action, s, lim) for s in PUSH_SCOPES):
+        return "the policy permits no supported lifetime or scope", 0
     if asked.kind not in lim.kinds:
         return f"the policy does not allow {asked.kind} grants", 0
     if asked.action not in lim.overridable:
@@ -297,10 +317,37 @@ def approve(asked) -> tuple[str | None, int]:
     return None, lim.max_minutes
 
 
-def _preference_scope(action: str, scope: dict) -> dict:
-    # A remembered push covers this destination across commits, never a
-    # different repository, remote URL, destination ref or unsafe push form.
-    names = ("repo", "git_dir", "remote", "url", "ref") if action == "git-push" else ("path",)
+def validate_asked(asked, db) -> bool:
+    """Rebuild the adapter offer from current workspace, rules and destination."""
+    agent = db.get_agent(asked.agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if ws is None:
+        return False
+    scope = json.loads(asked.scope)
+    raw = {"kind": asked.kind, "tool": "Bash" if asked.kind == "bash" else "Read",
+           "cwd": ws.path, "command": asked.match if asked.kind == "bash" else None,
+           "path": scope.get("path")}
+    return ask_for(asked.agent_id, raw) == (asked.repo_root, asked.kind, asked.match, asked.scope,
+                                           asked.action, asked.describe)
+
+
+PUSH_SCOPES = ("branch", "remote", "repo", "all")
+
+
+def _scope_allowed(action: str, level: str, lim: Limits) -> bool:
+    level = "repo" if level == "repository" else level
+    if action != "git-push":
+        return level == "branch" and "branch" in lim.scopes
+    return level in PUSH_SCOPES and level in lim.scopes
+
+
+def _preference_scope(action: str, scope: dict, level: str = "branch") -> dict:
+    level = "repo" if level == "repository" else level
+    names = ("path",)
+    if action == "git-push":
+        names = {"branch": ("repo", "git_dir", "remote", "url", "ref"),
+                 "remote": ("repo", "git_dir", "remote", "url"),
+                 "repo": ("repo", "git_dir"), "all": ()}[level]
     return {name: scope[name] for name in names}
 
 
@@ -315,56 +362,147 @@ def _preference_owner(lim: Limits) -> str | None:
 
 
 def persistent_allowed(asked) -> bool:
+    return _saved_allowed(asked, "forever")
+
+
+def timed_allowed(asked) -> bool:
+    return _saved_allowed(asked, "time")
+
+
+def session_allowed(asked) -> bool:
+    return _saved_allowed(asked, "session") and _session_binding(asked.agent_id) is not None
+
+
+def _saved_allowed(asked, lifetime: str) -> bool:
     lim = limits(asked.repo_root)
-    return (lim.allow and lim.allow_persistent and asked.kind in lim.kinds
-            and asked.action in lim.overridable and _preference_owner(lim) is not None)
+    return (lim.allow and lim.allow_persistent and asked.kind in lim.kinds and asked.action in lim.overridable
+            and lifetime in lim.lifetimes
+            and _preference_owner(lim) is not None
+            and any(_scope_allowed(asked.action, s, lim) for s in PUSH_SCOPES))
 
 
-def remember_description(asked) -> str:
+def _session_binding(agent_id: str) -> dict | None:
+    from brindle.autopilot import root_of
+    from brindle.db import DB
+
+    db = DB()
+    try:
+        root = db.get_agent(root_of(db, agent_id))
+        if (root is None or root.parent_id is not None or root.mode != "interactive"
+                or root.status in ("done", "paused") or root.dismissed_at is not None):
+            return None
+        return {"id": root.id, "created": root.created_at}
+    finally:
+        db.conn.close()
+
+
+def approval_scopes(asked) -> dict[str, str]:
+    lim = limits(asked.repo_root)
+    if asked.action != "git-push" or not (timed_allowed(asked) or persistent_allowed(asked) or session_allowed(asked)):
+        return {}
+    return {level: remember_description(asked, level).removesuffix(", until revoked")
+            for level in PUSH_SCOPES if _scope_allowed(asked.action, level, lim)}
+
+
+def remember_description(asked, level: str = "branch") -> str:
     scope = json.loads(asked.scope)
     if asked.action == "git-push":
+        if level == "all":
+            return "Allow future non-force pushes to all policy-permitted remotes and branches across repositories, until revoked"
+        if level in ("repo", "repository"):
+            return f"Allow future non-force pushes to all policy-permitted remotes and branches in {asked.repo_root}, until revoked"
+        if level == "remote":
+            return f"Allow future non-force pushes to all branches on {scope['remote']} at {scope['url']} in this repository, until revoked"
         return f"Allow future non-force pushes to {scope['ref']} at {scope['url']} in this repository, until revoked"
     return f"Allow reading {scope['path']} in this repository, until revoked"
 
 
-def remember(asked) -> str:
+def remember(asked, minutes: int | None = None, scope_level: str = "branch", *,
+             lifetime: str | None = None) -> str:
     """Persist the person's scoped decision; callers hold the ask's lock."""
-    if not persistent_allowed(asked):
-        raise ValueError("current policy does not allow remembered permissions")
+    lifetime = lifetime or ("time" if minutes is not None else "forever")
+    if not _saved_allowed(asked, lifetime):
+        raise ValueError("current policy does not allow this approval lifetime")
+    session = _session_binding(asked.agent_id) if lifetime == "session" else None
+    if lifetime == "session" and session is None:
+        raise ValueError("the supervisor session is no longer open")
     lim = limits(asked.repo_root)
+    if not _scope_allowed(asked.action, scope_level, lim):
+        raise ValueError("approval scope exceeds current policy")
+    if minutes is not None and (not lim.allow or asked.kind not in lim.kinds
+                                or asked.action not in lim.overridable or not 0 < minutes <= lim.max_minutes):
+        raise ValueError("duration exceeds current policy")
     owner = _preference_owner(lim)
     if owner is None:
         raise ValueError("the approving identity cannot be verified")
-    scope = _preference_scope(asked.action, json.loads(asked.scope))
-    binding = [owner, asked.repo_root, asked.kind, asked.action, scope]
+    scope = _preference_scope(asked.action, json.loads(asked.scope), scope_level)
+    binding = [owner, None if scope_level == "all" else asked.repo_root, asked.kind, asked.action, scope]
+    if lifetime != "forever":
+        binding.extend([lifetime, *([session] if session else [])])
     id_ = "remembered-" + hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()[:24]
     record = {"id": id_, "owner": owner, "repo_root": asked.repo_root, "kind": asked.kind,
-              "action": asked.action, "scope": scope, "match": remember_description(asked), "created": time.time()}
+              "action": asked.action, "scope": scope, "scope_level": scope_level, "lifetime": lifetime,
+              "match": remember_description(asked, scope_level), "created": time.time()}
+    if minutes is not None:
+        record.update(expires_at=record["created"] + minutes * 60, uses_spent=0, max_uses=lim.max_uses)
+        record["match"] = record["match"].replace("until revoked", f"for {minutes} minutes")
+    if session is not None:
+        record.update(session=session, uses_spent=0, max_uses=lim.max_uses)
+        record["match"] = record["match"].replace("until revoked", f"until supervisor session {session['id']} ends")
     with permissions.editing() as store:
         store.remembered = [r for r in store.remembered if r.get("id") != id_] + [record]
     return id_
 
 
-def remembered_match(req: Request, lifted: dict, lim: Limits) -> str | None:
-    if not lim.allow_persistent or req.kind not in lim.kinds:
+def remembered_match(req: Request, lifted: dict, lim: Limits, *, agent_id: str = "") -> str | None:
+    if not lim.allow or not lim.allow_persistent or req.kind not in lim.kinds or lifted["action"] not in lim.overridable:
         return None
     owner = _preference_owner(lim)
     if owner is None:
         return None
-    scope = _preference_scope(lifted["action"], lifted["scope"])
-    for record in permissions.load_store().remembered:
-        if (record.get("owner") == owner and record.get("repo_root") == repo_key(req)
-                and record.get("kind") == req.kind and record.get("action") == lifted["action"]
-                and record.get("scope") == scope and isinstance(record.get("id"), str)):
+    with permissions.editing() as store:
+        for record in store.remembered:
+            level = record.get("scope_level", "branch")
+            lifetime = record.get("lifetime", "time" if "expires_at" in record else "forever")
+            if (record.get("owner") != owner or (level != "all" and record.get("repo_root") != repo_key(req))
+                    or record.get("kind") != req.kind or record.get("action") != lifted["action"]
+                    or not _scope_allowed(lifted["action"], level, lim)
+                    or lifetime not in lim.lifetimes
+                    or record.get("scope") != _preference_scope(lifted["action"], lifted["scope"], level)
+                    or not isinstance(record.get("id"), str)):
+                continue
+            if lifetime in ("session", "time"):
+                if lifetime == "session":
+                    session = _session_binding(agent_id) if agent_id else None
+                    if session is None or record.get("session") != session:
+                        continue
+                if lifetime == "time" and time.time() >= min(record["expires_at"], record["created"] + lim.max_minutes * 60):
+                    continue
+                if record.get("uses_spent", 0) >= min(record.get("max_uses", lim.max_uses), lim.max_uses):
+                    continue
+                record["uses_spent"] = record.get("uses_spent", 0) + 1
             return record["id"]
     return None
 
 
 def remembered_grants() -> list[dict]:
     fields = ("id", "repo_root", "kind", "match", "created")
-    return [{**{k: r[k] for k in fields}, "agent_id": "", "expires_at": None,
-             "uses_left": None, "persistent": True}
-            for r in permissions.load_store().remembered if all(k in r for k in fields)]
+    out = []
+    for r in permissions.load_store().remembered:
+        if not all(k in r for k in fields):
+            continue
+        session = r.get("session") if r.get("lifetime") == "session" else None
+        if r.get("lifetime") == "session" and (
+                not isinstance(session, dict) or _session_binding(session.get("id", "")) != session):
+            continue
+        if ("expires_at" in r and r["expires_at"] <= time.time()
+                or "max_uses" in r and r.get("uses_spent", 0) >= r["max_uses"]):
+            continue
+        out.append({**{k: r[k] for k in fields}, "agent_id": session["id"] if session else "",
+                    "expires_at": r.get("expires_at"),
+                    "uses_left": max(0, r["max_uses"] - r.get("uses_spent", 0)) if "max_uses" in r else None,
+                    "persistent": "expires_at" not in r and session is None})
+    return out
 
 
 def forget_remembered(id_: str) -> dict | None:

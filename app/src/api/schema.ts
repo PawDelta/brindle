@@ -17,8 +17,18 @@ export interface ApiSchema {
   InboxItemDTO: InboxItemDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
+  PermissionActionDTO: PermissionActionDTO;
+  PermissionChangeDTO: PermissionChangeDTO;
   PermissionChoiceDTO: PermissionChoiceDTO;
+  PermissionConflictDTO: PermissionConflictDTO;
   PermissionDTO: PermissionDTO;
+  PermissionEditorDTO: PermissionEditorDTO;
+  PermissionPresetDTO: PermissionPresetDTO;
+  PermissionRestrictionsDTO: PermissionRestrictionsDTO;
+  PermissionReviewDTO: PermissionReviewDTO;
+  PermissionRuleDTO: PermissionRuleDTO;
+  PermissionSaveDTO: PermissionSaveDTO;
+  PermissionVerifyDTO: PermissionVerifyDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
@@ -217,12 +227,18 @@ export interface InboxItemDTO {
  * via the `definition` "PermissionDTO".
  */
 export interface PermissionDTO {
+  approval_scope?: string | null;
+  approval_scopes?: {
+    [k: string]: string;
+  };
   choices?: PermissionChoiceDTO[];
   digest?: string | null;
   grant?: string | null;
   hold_note?: string | null;
   hold_until?: number | null;
   kind?: string | null;
+  max_minutes?: number | null;
+  max_uses?: number | null;
   request_id?: string | null;
   target?: string | null;
   terminal?: string | null;
@@ -239,6 +255,128 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionActionDTO".
+ */
+export interface PermissionActionDTO {
+  id: string;
+  kind: string;
+  name: string;
+  source: string;
+  tool: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionChangeDTO".
+ */
+export interface PermissionChangeDTO {
+  after: PermissionRuleDTO | null;
+  before: PermissionRuleDTO | null;
+  id: string;
+  type: "added" | "updated" | "removed";
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionRuleDTO".
+ */
+export interface PermissionRuleDTO {
+  created: number;
+  decision: "allow" | "ask" | "deny";
+  editable?: boolean;
+  exclusions?: PermissionRuleDTO[];
+  expires_at?: number | null;
+  id: string;
+  kind: string;
+  match: string;
+  match_type: string;
+  protected?: boolean;
+  repo_root?: string | null;
+  source: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionConflictDTO".
+ */
+export interface PermissionConflictDTO {
+  left: string;
+  overlap: "yes" | "unknown";
+  protected: boolean;
+  right: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionEditorDTO".
+ */
+export interface PermissionEditorDTO {
+  catalog: PermissionActionDTO[];
+  limitations: string[];
+  presets: PermissionPresetDTO[];
+  restrictions: PermissionRestrictionsDTO;
+  revision: string;
+  rules: PermissionRuleDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionPresetDTO".
+ */
+export interface PermissionPresetDTO {
+  id: string;
+  name: string;
+  rule: PermissionRuleDTO;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionRestrictionsDTO".
+ */
+export interface PermissionRestrictionsDTO {
+  checks: string[];
+  editable: boolean;
+  expiry_supported: boolean;
+  managed: boolean;
+  org_id: string | null;
+  permission_grants: {
+    [k: string]: unknown;
+  } | null;
+  permission_policy: string;
+  policy_version: number | string | null;
+  protected_paths: string[];
+  reason: string;
+  repo_supported: boolean;
+  roles_supported: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionReviewDTO".
+ */
+export interface PermissionReviewDTO {
+  can_save: boolean;
+  changes: PermissionChangeDTO[];
+  conflicts: PermissionConflictDTO[];
+  proposal: string;
+  revision: string;
+  rules: PermissionRuleDTO[];
+  unresolved: PermissionConflictDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionSaveDTO".
+ */
+export interface PermissionSaveDTO {
+  changes: PermissionChangeDTO[];
+  limitations: string[];
+  restrictions: PermissionRestrictionsDTO;
+  revision: string;
+  rules: PermissionRuleDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionVerifyDTO".
+ */
+export interface PermissionVerifyDTO {
+  action: PermissionActionDTO | null;
+  verified: boolean;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

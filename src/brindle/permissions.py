@@ -24,7 +24,7 @@ against the URL; mcp/other against the tool name. The built-in defaults also
 use a few named matchers (``tracked``, ``check``, ``git-readonly``,
 ``git-push``, ``git-force``) that are code, not patterns.
 
-Precedence: any matching deny wins; else any matching allow; else ask.
+Precedence: any matching deny wins; then explicit ask; then allow; else ask.
 Specificity never matters. An allow rule for bash only ever applies to a
 single simple command (letters, digits, spaces and ``_-./:=@%+,`` only): a
 command with any other character (``;``, ``|``, ``&``, ``$``, quotes, globs,
@@ -53,6 +53,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -129,10 +130,22 @@ class Rule:
     source: str = "user"
     created: float = 0.0
     id: str = ""
+    repo_root: str | None = None
+    expires_at: float | None = None
+    exclusions: tuple[Rule, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.id:
-            object.__setattr__(self, "id", rule_id(self.kind, self.match_type, self.match, self.decision))
+            identity = rule_id(self.kind, self.match_type, self.match, self.decision)
+            if self.constrained:
+                scope = json.dumps([self.repo_root, self.expires_at, [r.to_dict() for r in self.exclusions]],
+                                   sort_keys=True)
+                identity = hashlib.sha256((identity + scope).encode()).hexdigest()[:16]
+            object.__setattr__(self, "id", identity)
+
+    @property
+    def constrained(self) -> bool:
+        return bool(self.repo_root or self.expires_at is not None or self.exclusions)
 
     def describe(self) -> str:
         if self.match_type in BUILTIN_MATCHERS:
@@ -140,11 +153,15 @@ class Rule:
         return f"{self.kind} {self.match_type} {self.match!r}"
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "kind": self.kind, "match": self.match, "match_type": self.match_type,
+        data = {"id": self.id, "kind": self.kind, "match": self.match, "match_type": self.match_type,
                 "decision": self.decision, "source": self.source, "created": self.created}
+        if self.constrained:
+            data.update(repo_root=self.repo_root, expires_at=self.expires_at,
+                        exclusions=[r.to_dict() for r in self.exclusions])
+        return data
 
     @classmethod
-    def from_dict(cls, data: dict, source: str | None = None) -> "Rule | None":
+    def from_dict(cls, data: dict, source: str | None = None, *, depth: int = 0) -> "Rule | None":
         """A rule read from a file, or None if it isn't a valid one."""
         try:
             kind, match = str(data["kind"]), str(data["match"])
@@ -152,7 +169,24 @@ class Rule:
             decision = str(data["decision"])
         except (KeyError, TypeError):
             return None
-        if kind not in KINDS or match_type not in MATCH_TYPES or decision not in ("allow", "deny") or not match:
+        matchers = (*MATCH_TYPES, *BUILTIN_MATCHERS) if depth else MATCH_TYPES
+        if kind not in KINDS or match_type not in matchers or decision not in DECISIONS or not match:
+            return None
+        # Unknown identities must never silently turn a scoped rule into a global one.
+        if data.get("roles") or depth > 8:
+            return None
+        repo = data.get("repo_root")
+        if repo is not None and (not isinstance(repo, str) or not os.path.isabs(repo)):
+            return None
+        expires = data.get("expires_at")
+        if expires is not None and (isinstance(expires, bool) or not isinstance(expires, (int, float))
+                                    or not math.isfinite(expires) or expires <= 0):
+            return None
+        raw = data.get("exclusions", [])
+        if not isinstance(raw, list) or len(raw) > 100:
+            return None
+        exclusions = [cls.from_dict(r, depth=depth + 1) if isinstance(r, dict) else None for r in raw]
+        if any(r is None or r.kind != kind for r in exclusions):
             return None
         src = source or str(data.get("source", "user"))
         if src not in ("user", "learned", "repo"):
@@ -161,7 +195,12 @@ class Rule:
             created = float(data.get("created") or 0)
         except (TypeError, ValueError):
             created = 0.0
-        return cls(kind, match, match_type, decision, src, created)
+        identity = data.get("id", "")
+        if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{8}|[0-9a-f]{16}", identity):
+            identity = ""
+        return cls(kind, match, match_type, decision, src, created, id=identity,
+                   repo_root=os.path.realpath(repo) if repo else None,
+                   expires_at=expires, exclusions=tuple(exclusions))
 
 
 @dataclass(frozen=True)
@@ -401,6 +440,9 @@ def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
     for d in decisions:
         if d.decision == "deny":
             return d
+    for d in decisions:
+        if d.decision == "ask" and d.rule is not None:
+            return d
     if all(d.decision == "allow" for d in decisions):
         if len(decisions) == 1:
             return decisions[0]
@@ -542,6 +584,8 @@ def agy_output(decision: Decision | None, req: Request | None = None,
     it doesn't, this still allows nothing agy wouldn't by default."""
     if decision is not None and decision.decision == "deny":
         return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
+    if decision is not None and decision.decision == "ask" and decision.rule is not None:
+        return {"decision": "ask", "reason": f"brindle: {decision.reason}"}
     if (req is not None and req.kind in ("read", "write", "edit") and req.path
             and any(_inside(os.path.realpath(req.path), w) for w in workspaces or [])):
         return {"decision": "allow", "reason": "brindle: a file in the workspace (agy's default)"}
@@ -690,7 +734,7 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
     if decision is not None and decision.decision == "allow":
         return {"decision": "allow", "reason": f"brindle: {decision.reason}"}
-    if req is not None:
+    if req is not None and not (decision is not None and decision.rule is not None):
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
         # Protected wherever the workspaces list says the workspace is: the
         # anchors are brindle's own worktree and repo root.
@@ -721,7 +765,7 @@ def _allow_specs(rules: list[Rule], checks: list[str] | None) -> list[str]:
     """The bash allow rules and checks as uncovered_part's specs."""
     specs = [c.strip() for c in checks or []]
     for rule in rules:
-        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip():
+        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip() and not rule.constrained:
             if rule.match_type == "exact":
                 specs.append(rule.match.strip())
             elif rule.match_type == "prefix":
@@ -763,11 +807,14 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
 
     if req is None or req.kind != "bash" or not req.command:
         return None
+    whole = decide(req, checks=checks, rules=rules)
+    if whole.decision == "deny" or (whole.decision == "ask" and whole.rule is not None):
+        return whole
     if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
     for part in split_commands(req.command):
         denied = decide(replace(req, command=part), checks=checks, rules=rules)
-        if denied.decision == "deny":
+        if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
             return denied
     return Decision("allow", "every part of the command is allowed by a rule or the profile's allowed_tools")
 
@@ -817,16 +864,15 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     mistake argument text for shell syntax."""
     from brindle.native.permissions import _joined
 
-    denied = decide(replace(req, command=_joined(words)), checks=checks,
-                    rules=[rule for rule in rules if rule.decision == "deny"])
-    if denied.decision == "deny":
+    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules)
+    if denied is not None:
         return denied
     if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
         return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules)
     for rule in rules:
         head = rule.match.split()
         if (rule.kind == "bash" and rule.decision == "allow" and rule.match_type == "prefix"
-                and head and words[:len(head)] == head):
+                and not rule.constrained and head and words[:len(head)] == head):
             return Decision("allow", f"allowed by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     return Decision("ask", "no rule allows it")
 
@@ -996,6 +1042,14 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
 def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> bool:
     if rule.kind != req.kind:
         return False
+    if rule.repo_root and (not req.repo_root or os.path.realpath(req.repo_root) != rule.repo_root):
+        return False
+    if rule.expires_at is not None and time.time() >= rule.expires_at:
+        return False
+    # Exclusion scopes use restrictive matching (including literal path aliases),
+    # even when the excluded rule originally allowed the scope.
+    if any(rule_matches(replace(r, decision="deny"), req, checks) for r in rule.exclusions):
+        return False
     if rule.match_type in BUILTIN_MATCHERS:
         return _builtin_matches(rule, req, checks or [])
     if req.kind == "bash" and rule.decision == "allow" and simple_argv(req.command) is None:
@@ -1070,15 +1124,20 @@ def invalid_profile_rules(profile) -> list[str]:
 
 def decide(req: Request | None, *, checks: list[str] | None = None,
            rules: list[Rule] | None = None) -> Decision:
-    """The policy's answer for ``req``: deny > allow > ask."""
+    """The policy's answer for ``req``: deny > explicit ask > allow > fallback ask."""
     if req is None or req.kind not in KINDS:
         return Decision("ask", "brindle couldn't read the request")
     if rules is None:
         rules = all_rules(req.repo_root or None)
-    for wanted in ("deny", "allow"):
+    # Normalize restrictions even for simple commands: spacing and leading
+    # assignments must not hide explicit asks from provider/profile fallback.
+    restricted = _restriction_in_parts(req, checks=checks, rules=rules)
+    for wanted in ("deny", "ask", "allow"):
+        if restricted is not None and restricted.decision == wanted:
+            return restricted
         for rule in rules:
             if rule.decision == wanted and rule_matches(rule, req, checks):
-                verb = "denied" if wanted == "deny" else "allowed"
+                verb = {"deny": "denied", "ask": "approval required", "allow": "allowed"}[wanted]
                 return Decision(wanted, f"{verb} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         parts = compound_parts(req.command)
@@ -1086,6 +1145,9 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
             answers = [_part_decision(req, words, checks, rules) for words in parts]
             for answer in answers:
                 if answer.decision == "deny":
+                    return answer
+            for answer in answers:
+                if answer.decision == "ask" and answer.rule is not None:
                     return answer
             if all(answer.decision == "allow" for answer in answers):
                 return Decision("allow", "every part of the command is allowed by a rule")
@@ -1097,22 +1159,88 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     return Decision("ask", f"{why}; asking the user")
 
 
-def deny_in_parts(req: Request, *, checks: list[str] | None = None,
-                  rules: list[Rule]) -> Decision | None:
-    """The deny for any simple command inside ``req``'s shell command
-    (``cd x && rm y`` holds two), else None: an exact or prefix deny on the
-    whole command never sees a part of it."""
+def _restriction_parts(command: str) -> list[list[str]] | None:
+    """Command arguments without redirects, solely for restrictive matching.
+
+    Unlike the allow parser, this accepts output files. Quoted operators remain
+    arguments; redirects and their operands are removed wherever they occur.
+    Unsupported syntax is unknown, never evidence that restrictions are absent.
+    """
+    from brindle.native.permissions import _SEPARATORS, _tokens
+
+    if "$(" in command or "`" in command:
+        return None
+    tokens = _tokens(command, word_pattern=SIMPLE_COMMAND)
+    if tokens is None:
+        return None
+    parts: list[list[str]] = []
+    words: list[str] = []
+    index = 0
+    while index < len(tokens):
+        operator, value = tokens[index]
+        if not operator:
+            words.append(value)
+        elif value in _SEPARATORS:
+            if words:
+                parts.append(words)
+                words = []
+            elif value != "\n":
+                return None
+        elif value in (">", ">>", ">|", "<", "<>", ">&", "<&", "&>", "&>>"):
+            index += 1
+            if index >= len(tokens) or tokens[index][0]:
+                return None
+        else:
+            return None
+        index += 1
+    if words:
+        parts.append(words)
+    elif not parts or tokens[-1][1] in ("&&", "||", "|", "|&"):
+        return None
+    for words in parts:
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words.pop(0)
+        if not words or words[0] in ("!", "{", "}", "if", "then", "else", "elif", "fi", "for", "while",
+                                     "until", "do", "done", "case", "esac", "select", "function", "[[", "time", "coproc"):
+            return None
+    return parts
+
+
+def _matching_restriction(parts: list[Request], checks: list[str] | None,
+                          rules: list[Rule]) -> Decision | None:
+    for wanted in ("deny", "ask"):
+        for part in parts:
+            for rule in rules:
+                if rule.decision == wanted and rule_matches(rule, part, checks):
+                    verb = "denied" if wanted == "deny" else "approval required"
+                    return Decision(wanted, f"{verb} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
+    return None
+
+
+def _restriction_in_parts(req: Request, *, checks: list[str] | None,
+                          rules: list[Rule]) -> Decision | None:
+    """Find explicit restrictions without treating shell segments as allows."""
     if req.kind != "bash" or not req.command:
         return None
-    denies = [rule for rule in rules if rule.decision == "deny"]
-    for words in _segments(req.command):
-        # Split even inside a word, as split_commands does: an empty or
-        # spaced word (task test "" secret) mustn't dodge an exact deny.
-        command = " ".join(" ".join(words).split())
-        decision = decide(replace(req, command=command), checks=checks, rules=denies)
-        if decision.decision == "deny":
-            return decision
+    parsed = _restriction_parts(req.command)
+    words = parsed if parsed is not None else _segments(req.command)
+    parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
+    matched = _matching_restriction(parts, checks, rules)
+    if matched is not None:
+        return matched
+    if parsed is None:
+        # A bound built-in ask prevents provider/profile fallback from treating
+        # unsupported shell syntax as an ordinary unmatched request.
+        return Decision("ask", "shell syntax cannot be checked safely",
+                        Rule("bash", req.command, "exact", "ask", "default", id="d-shell-syntax"))
     return None
+
+
+def deny_in_parts(req: Request, *, checks: list[str] | None = None,
+                  rules: list[Rule]) -> Decision | None:
+    """A deny inside a shell command; explicit asks are handled by decide."""
+    decision = _restriction_in_parts(req, checks=checks, rules=[r for r in rules if r.decision == "deny"])
+    return decision if decision is not None and decision.decision == "deny" else None
 
 
 # -- storage ----------------------------------------------------------------------------------
@@ -1244,6 +1372,19 @@ def add_rule(kind: str, match: str, decision: str, match_type: str = "exact",
         raise ValueError("empty match")
     rule = Rule(kind, match, match_type, decision, source, time.time())
     with editing() as store:
+        # IDs survive editor retargeting. Deduplicate by the current complete
+        # scope, never by an ID that used to describe this pattern.
+        existing = next((r for r in store.rules if
+                         replace(r, id=rule.id, created=rule.created, source=rule.source) == rule), None)
+        if existing is not None:
+            rule = replace(rule, id=existing.id)
+        else:
+            occupied = {r.id for r in store.rules}
+            candidate, sequence = rule.id, 0
+            while candidate in occupied:
+                sequence += 1
+                candidate = hashlib.sha256(f"{rule.id}:{sequence}".encode()).hexdigest()[:16]
+            rule = replace(rule, id=candidate)
         store.rules = [r for r in store.rules if r.id != rule.id] + [rule]
     return rule
 
@@ -1356,6 +1497,8 @@ def _agy_path(match: str) -> str:
 
 def _agy_entry(rule: Rule) -> str | None:
     """``rule`` in agy's syntax, or None when agy can't express it safely."""
+    if rule.constrained or rule.decision == "ask":
+        return None
     allow = rule.decision == "allow"
     if rule.kind == "bash":
         if rule.match_type == "exact":
@@ -1412,6 +1555,13 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
             out[decision].append(entry)
 
     for rule in rules:
+        if rule.constrained or rule.decision == "ask":
+            continue
+        # The CLI cannot express exclusions, expiry, repo identity or explicit ask.
+        # Leave allows of an affected kind to the hook instead of broadening them.
+        if rule.decision == "allow" and any(r.kind == rule.kind and
+                                           (r.constrained or r.decision == "ask") for r in rules):
+            continue
         if rule.match_type == "check":
             continue
         elif rule.match_type == "git-readonly":
