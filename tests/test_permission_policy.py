@@ -156,9 +156,12 @@ def test_repo_rules_can_only_add_denies(ws):
     path.write_text(json.dumps({"rules": [
         {"kind": "bash", "match": "git log", "match_type": "prefix", "decision": "deny"},
         {"kind": "bash", "match": "rm", "match_type": "prefix", "decision": "allow"},
+        {"kind": "fetch", "match": "https://private", "decision": "deny", "roles": ["admin"]},
     ]}))
     assert decide(bash(ws, "git log")).decision == "deny"
     assert decide(bash(ws, "rm x")).decision == "ask"
+    assert decide(Request("claude", "fetch", "WebFetch", repo_root=ws.repo_root,
+                          url="https://private")).decision == "deny"
 
 
 # -- user rules and learning ------------------------------------------------------------------
@@ -253,7 +256,17 @@ def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch, mode, age):
 # -- the CLI ----------------------------------------------------------------------------------
 
 
-def test_cli_rules_and_suggestions(ws, monkeypatch):
+@pytest.mark.parametrize("stored, expected", [
+    pytest.param({"version": 1, "rules": [{"kind": "bash", "match": "deploy", "decision": "ask", "roles": ["admin"]}],
+                  "future_policy": {"team": "restricted"}}, "deny", id="store_version-unknown_fields"),
+    pytest.param({"version": 2, "rules": [{"kind": "bash", "match": "deploy", "decision": "deny", "future_scope": "team"}]},
+                 "deny", id="store_version-unknown_deny_scope",
+                 marks=pytest.mark.variant("unknown future scope previously broadened instead of being dropped")),
+    pytest.param({"version": 2, "rules": [{"kind": "bash", "match": "deploy", "decision": "allow", "roles": ["dev"]}]},
+                 "allow", id="store_version-unknown_allow_scope"),
+    pytest.param({"version": 3, "rules": []}, "deny", id="store_version-future"),
+])
+def test_cli_rules_and_suggestions(ws, monkeypatch, stored, expected):
     monkeypatch.chdir(ws.repo_root)
     r = CliRunner()
     res = r.invoke(app, ["permissions", "allow", "bash", "make lint"])
@@ -280,3 +293,24 @@ def test_cli_rules_and_suggestions(ws, monkeypatch):
     assert res.exit_code != 0 and permissions.load_store().rules
     assert r.invoke(app, ["permissions", "reset", "--yes"]).exit_code == 0
     assert permissions.load_store().rules == [] and permissions.load_store().approvals == {}
+    path = permissions.store_path()
+    stored["remembered"] = [{"id": "preference", "uses_spent": 0}]
+    path.write_text(json.dumps(stored))
+    before = path.read_text()
+    if stored["version"] > 2:
+        with pytest.raises(ValueError):
+            with permissions.editing() as store:
+                store.rules.clear()
+        assert path.read_text() == before
+    else:
+        with permissions.editing() as store:
+            store.remembered[0]["uses_spent"] += 1
+        saved = json.loads(path.read_text())
+        assert all(saved[key] == value for key, value in stored.items() if key not in ("version", "remembered"))
+        assert saved["remembered"][0]["uses_spent"] == 1
+    # An unrecognized restriction cannot disappear behind a known allow; an
+    # unrecognized allow just doesn't apply.
+    rules = [*permissions.all_rules(), Rule("bash", "deploy", "exact", "allow")]
+    assert decide(bash(ws, "deploy"), rules=rules).decision == expected
+    bare = "ask" if expected == "allow" else expected
+    assert decide(Request("claude", "bash", "Bash"), rules=rules).decision == bare

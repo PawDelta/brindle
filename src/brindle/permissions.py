@@ -71,14 +71,21 @@ KINDS = ("read", "write", "edit", "bash", "fetch", "mcp", "other")
 PATH_KINDS = ("read", "write", "edit")
 DECISIONS = ("allow", "deny", "ask")
 MATCH_TYPES = ("exact", "prefix", "glob")
-BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "curl-readonly", "git-push", "git-force")
+BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force")
 SOURCES = ("default", "repo", "user", "learned")
 SUGGEST_AFTER = 2
 FILE = "permissions.json"
+STORE_VERSION = 2
 
 # A command an allow rule may cover: one simple command, nothing the shell
 # would treat specially.
 SIMPLE_COMMAND = re.compile(r"[A-Za-z0-9_\-./:=@%+, ]+")
+_NO_TILDE = re.compile(r"[^~]")
+# SIMPLE_COMMAND plus unquoted pathname patterns, only to decide whether a
+# restriction could apply. Never used to grant allows.
+RESTRICTION_WORD = re.compile(r"[A-Za-z0-9_\-./:=@%+, *?\[\]]+")
+# A heredoc's body, from its delimiter line to the closing line.
+_HEREDOC = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.DOTALL)
 # The operators a compound command may join its parts with ("" ends it).
 COMPOUND_SEPARATORS = ("&&", ";", "|", "")
 READONLY_GIT = ("status", "diff", "log", "show")
@@ -163,6 +170,11 @@ class Rule:
     @classmethod
     def from_dict(cls, data: dict, source: str | None = None, *, depth: int = 0) -> "Rule | None":
         """A rule read from a file, or None if it isn't a valid one."""
+        # Future scope fields must not silently become unrestricted rules.
+        known = {"id", "kind", "match", "match_type", "decision", "source", "created",
+                 "repo_root", "expires_at", "exclusions", "editable", "protected"}
+        if not isinstance(data, dict) or data.keys() - known:
+            return None
         try:
             kind, match = str(data["kind"]), str(data["match"])
             match_type = str(data.get("match_type", "exact"))
@@ -172,8 +184,7 @@ class Rule:
         matchers = (*MATCH_TYPES, *BUILTIN_MATCHERS) if depth else MATCH_TYPES
         if kind not in KINDS or match_type not in matchers or decision not in DECISIONS or not match:
             return None
-        # Unknown identities must never silently turn a scoped rule into a global one.
-        if data.get("roles") or depth > 8:
+        if depth > 8:
             return None
         repo = data.get("repo_root")
         if repo is not None and (not isinstance(repo, str) or not os.path.isabs(repo)):
@@ -236,7 +247,6 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
     _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
     _default("d-git-ro", "bash", "git status / diff / log / show", "git-readonly", "allow"),
-    _default("d-curl-ro", "bash", "curl HTTP read without uploads or file output", "curl-readonly", "allow"),
     _default("d-echo", "bash", "echo", "exact", "allow"),
     _default("d-echo-args", "bash", "echo ", "prefix", "allow"),
     _default("d-git-push", "bash", "git push", "git-push", "deny"),
@@ -803,13 +813,17 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
     (a redirection that writes a file, a heredoc, ...)."""
     from dataclasses import replace
 
-    from brindle.native.permissions import split_commands, uncovered_part
+    from brindle.native.permissions import _tokens, split_commands, uncovered_part
 
     if req is None or req.kind != "bash" or not req.command:
         return None
     whole = decide(req, checks=checks, rules=rules)
     if whole.decision == "deny" or (whole.decision == "ask" and whole.rule is not None):
         return whole
+    # The shell rewrites an unquoted tilde word (``~/x``, ``a=~/x``,
+    # ``a=b:~/x``) after this check; HEAD~1 stays a literal (see _tokens).
+    if _tokens(req.command, word_pattern=_NO_TILDE) is None:
+        return None
     if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
     for part in split_commands(req.command):
@@ -982,43 +996,21 @@ def _is_force(arg: str) -> bool:
 
 
 def _readonly_command(rule: Rule, req: Request, argv: list[str]) -> bool:
-    """Validate the arguments of a read-only git or HTTP probe."""
-    if rule.kind != "bash" or not argv:
+    """Validate the arguments of a read-only git probe. There is no built-in
+    curl read: where a host name leads is only known when curl connects, so
+    any fetch, even https to a public-looking name, needs a rule or approval."""
+    if rule.kind != "bash" or not argv or rule.match_type != "git-readonly" or argv[0] != "git":
         return False
-    if rule.match_type == "git-readonly" and argv[0] == "git":
-        args = argv[1:]
-        if args[:1] == ["-C"]:
-            if len(args) < 3:
-                return False
-            path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
-            if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
-                return False
-            args = args[2:]
-        return bool(args and args[0] in READONLY_GIT
-                    and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
-    if rule.match_type != "curl-readonly" or argv[0] != "curl":
-        return False
-    # curlrc can add uploads or file output. Suppression only takes effect
-    # in the first argument, before any other option or URL.
-    if len(argv) < 2 or argv[1] not in ("-q", "--disable"):
-        return False
-    # Enumerate read-only flags; unknown options (including config, data,
-    # uploads, method overrides and output files) require approval.
-    urls = 0
-    args = iter(argv[2:])
-    for arg in args:
-        if arg in ("-s", "-S", "-sS", "-I", "-i", "-L", "-f", "-q",
-                   "--silent", "--show-error", "--head", "--include", "--location", "--fail", "--disable"):
-            continue
-        if arg in ("-D", "--dump-header", "-o", "--output"):
-            value = next(args, None)
-            if value != "/dev/null" and not (arg in ("-D", "--dump-header") and value == "-"):
-                return False
-        elif arg.startswith(("https://", "http://")):
-            urls += 1
-        else:
+    args = argv[1:]
+    if args[:1] == ["-C"]:
+        if len(args) < 3:
             return False
-    return urls > 0
+        path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
+        if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
+            return False
+        args = args[2:]
+    return bool(args and args[0] in READONLY_GIT
+                and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
 
 
 def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
@@ -1029,7 +1021,7 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
         return False
     if rule.match_type == "check":
         return simple_argv(command) is not None and command in [c.strip() for c in checks]
-    if rule.match_type in ("git-readonly", "curl-readonly"):
+    if rule.match_type == "git-readonly":
         argv = simple_argv(command)
         return bool(argv and _readonly_command(rule, req, argv))
     if rule.match_type == "git-push":
@@ -1042,6 +1034,10 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
 def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> bool:
     if rule.kind != req.kind:
         return False
+    # Store guards also cover requests without a target (e.g. a provider's
+    # search tool without a URL). File data cannot create these reserved IDs.
+    if rule.source == "default" and rule.id == f"d-store-unsupported-{req.kind}":
+        return True
     if rule.repo_root and (not req.repo_root or os.path.realpath(req.repo_root) != rule.repo_root):
         return False
     if rule.expires_at is not None and time.time() >= rule.expires_at:
@@ -1073,7 +1069,8 @@ def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> b
 def all_rules(repo_root: str | None = None) -> list[Rule]:
     """Every rule in force: defaults, the repo's denies, the user's and
     learned rules."""
-    return [*DEFAULT_RULES, *(repo_rules(repo_root) if repo_root else []), *load_store().rules]
+    store = load_store()
+    return [*DEFAULT_RULES, *(repo_rules(repo_root) if repo_root else []), *store.rules, *store.blocking_rules]
 
 
 def profile_rules(profile) -> list[Rule]:
@@ -1159,18 +1156,20 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     return Decision("ask", f"{why}; asking the user")
 
 
-def _restriction_parts(command: str) -> list[list[str]] | None:
+def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_COMMAND) -> list[list[str]] | None:
     """Command arguments without redirects, solely for restrictive matching.
 
-    Unlike the allow parser, this accepts output files. Quoted operators remain
-    arguments; redirects and their operands are removed wherever they occur.
+    Unlike the allow parser, this accepts output files. With RESTRICTION_WORD
+    it also accepts unquoted pathname patterns in arguments, for deciding
+    whether a restriction could apply, not for literal matching. Quoted
+    operators remain arguments; redirects and their operands are removed.
     Unsupported syntax is unknown, never evidence that restrictions are absent.
     """
     from brindle.native.permissions import _SEPARATORS, _tokens
 
     if "$(" in command or "`" in command:
         return None
-    tokens = _tokens(command, word_pattern=SIMPLE_COMMAND)
+    tokens = _tokens(command, word_pattern=word_pattern)
     if tokens is None:
         return None
     parts: list[list[str]] = []
@@ -1190,6 +1189,8 @@ def _restriction_parts(command: str) -> list[list[str]] | None:
             index += 1
             if index >= len(tokens) or tokens[index][0]:
                 return None
+            if word_pattern is RESTRICTION_WORD and any(c in tokens[index][1] for c in "*?["):
+                return None  # an expanded redirect can select a protected file
         else:
             return None
         index += 1
@@ -1203,7 +1204,34 @@ def _restriction_parts(command: str) -> list[list[str]] | None:
         if not words or words[0] in ("!", "{", "}", "if", "then", "else", "elif", "fi", "for", "while",
                                      "until", "do", "done", "case", "esac", "select", "function", "[[", "time", "coproc"):
             return None
+        # A pattern in the executable position can select a different program.
+        if word_pattern is RESTRICTION_WORD and any(c in words[0] for c in "*?["):
+            return None
     return parts
+
+
+def _globs_excluded(parts: list[list[str]], rules: list[Rule]) -> bool:
+    """Whether no restriction can apply to what the patterns in ``parts``
+    expand to. Only plain ``ls`` has a proof: listing names can't push, force
+    a git action or read a file's contents, so the default git and daemon
+    denies don't apply, nor do exact/prefix rules that don't overlap the
+    words before its first pattern. Any other program may treat an expanded
+    name as a subcommand, option or file to act on."""
+    for words in parts:
+        first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")), None)
+        if first is None:
+            continue
+        if words[0] != "ls":
+            return False
+        prefix = " ".join(" ".join(words[:first]).split()) + " "
+        for rule in rules:
+            if rule.source == "default" and rule.id in ("d-git-push", "d-git-force", "d-daemon-sh"):
+                continue
+            if (rule.match_type in ("exact", "prefix")
+                    and not prefix.startswith(rule.match) and not rule.match.startswith(prefix)):
+                continue
+            return False
+    return True
 
 
 def _matching_restriction(parts: list[Request], checks: list[str] | None,
@@ -1222,18 +1250,228 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     """Find explicit restrictions without treating shell segments as allows."""
     if req.kind != "bash" or not req.command:
         return None
+    # Unsupported syntax is not itself a restriction. Only an active Bash
+    # restriction can require us to withhold the provider's ordinary fallback.
+    rules = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask")
+             and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)
+             and (r.expires_at is None or time.time() < r.expires_at)]
+    if not rules:
+        return None
+    if "$(" in req.command or "`" in req.command:
+        substituted = _substituted(req, checks, rules)
+        if isinstance(substituted, Decision):
+            return substituted
+        req = substituted
     parsed = _restriction_parts(req.command)
-    words = parsed if parsed is not None else _segments(req.command)
+    patterns = _restriction_parts(req.command, word_pattern=RESTRICTION_WORD) if parsed is None else None
+    words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
     parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
     matched = _matching_restriction(parts, checks, rules)
     if matched is not None:
         return matched
+    if patterns is not None:
+        uncertain = not _globs_excluded(patterns, rules)
+    else:
+        uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
+    return _syntax_ask(req) if uncertain else None
+
+
+def _syntax_ask(req: Request) -> Decision:
+    # A bound built-in ask prevents provider/profile fallback from treating
+    # unsupported shell syntax as an ordinary unmatched request.
+    return Decision("ask", "shell syntax cannot be checked safely",
+                    Rule("bash", req.command, "exact", "ask", "default", id="d-shell-syntax"))
+
+
+# Options whose value is only data, by (program, subcommand): the one place a
+# $(...) or backtick substitution may supply a word without approval. Its
+# inner commands are still checked.
+SUBSTITUTION_DATA_OPTIONS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("git", "commit"): ("-m", "--message"),
+    ("git", "tag"): ("-m", "--message"),
+}
+# Stands in for a substitution's output once its inner commands are checked.
+_SUBSTITUTED = "BRINDLESUBSTITUTION"
+
+
+def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> Request | Decision:
+    """``req`` with each top-level substitution replaced by a placeholder
+    word, or the decision that ends the check. A substitution always runs its
+    inner commands, so they get the whole restriction check (recursively,
+    quoted or not); of a quoted heredoc fed to cat, only the cat is checked,
+    as its body is data. Its output is unknown text, so it may only be the
+    entire content of one double-quoted word (unquoted, the shell splits it
+    into words) given to an option in SUBSTITUTION_DATA_OPTIONS, in a command
+    with no leading assignments."""
+    from brindle.native.permissions import _simple_commands
+
+    spans = _substitution_spans(req.command)
+    if spans is None:
+        return _syntax_ask(req)
+    for _, _, body, _ in spans:
+        inner = _restriction_in_parts(replace(req, command="cat" if _heredoc_data(body) else body),
+                                      checks=checks, rules=rules)
+        if inner is not None:
+            return inner
+    pieces, last = [], 0
+    for start, end, _, quoted in spans:
+        if not (quoted and req.command[start - 1] == '"' and req.command[end:end + 1] == '"'):
+            return _syntax_ask(req)
+        pieces += [req.command[last:start], _SUBSTITUTED]
+        last = end
+    command = "".join(pieces) + req.command[last:]
+    parsed = _simple_commands(command)
     if parsed is None:
-        # A bound built-in ask prevents provider/profile fallback from treating
-        # unsupported shell syntax as an ordinary unmatched request.
-        return Decision("ask", "shell syntax cannot be checked safely",
-                        Rule("bash", req.command, "exact", "ask", "default", id="d-shell-syntax"))
+        return _syntax_ask(req)
+    for words, _ in parsed:
+        for i, word in enumerate(words):
+            if _SUBSTITUTED in word and not (
+                    word == _SUBSTITUTED and i >= 3
+                    and words[i - 1] in SUBSTITUTION_DATA_OPTIONS.get((words[0], words[1]), ())
+                    and not any(_could_cover(rule, f"{words[0]} {words[1]}") for rule in rules)):
+                return _syntax_ask(req)
+    return replace(req, command=command)
+
+
+def _could_cover(rule: Rule, head: str) -> bool:
+    """Whether a custom ``rule`` could match some command starting with
+    ``head``, whatever a substituted message makes of the rest: unless its
+    fixed leading text and ``head`` diverge, it might. The defaults are
+    known not to apply to a commit or tag message."""
+    if rule.source == "default":
+        return False
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
+    fixed = " ".join(fixed.split())
+    return head.startswith(fixed) or fixed.startswith(head)
+
+
+def _substitution_spans(command: str) -> list[tuple[int, int, str, bool]] | None:
+    """(start, end, inner command, inside double quotes) of each outermost
+    ``$(...)`` or backtick substitution, or None when one isn't closed."""
+    spans, quote, i = [], "", 0
+    while i < len(command):
+        c = command[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            quote = "" if c == "'" else quote
+        elif c == "'" and not quote:
+            quote = "'"
+        elif c == '"':
+            quote = "" if quote else '"'
+        elif command.startswith("$(", i) or c == "`":
+            end = _substitution_end(command, i)
+            if end is None:
+                return None
+            spans.append((i, end, command[i + (1 if c == "`" else 2):end - 1], quote == '"'))
+            i = end
+            continue
+        i += 1
+    return spans
+
+
+def _substitution_end(command: str, i: int) -> int | None:
+    """The index just past the substitution starting at ``i``: a backtick
+    ends at the next unescaped one; ``$(`` at its matching ``)``, skipping
+    quotes, nested substitutions and heredoc bodies inside it."""
+    if command[i] == "`":
+        j = i + 1
+        while j < len(command):
+            if command[j] == "\\":
+                j += 2
+            elif command[j] == "`":
+                return j + 1
+            else:
+                j += 1
+        return None
+    depth, j = 1, i + 2
+    while j < len(command):
+        c = command[j]
+        heredoc = re.match(r"<<-?[ \t]*([\"']?)(\w+)\1", command[j:]) if c == "<" else None
+        if c == "\\":
+            j += 2
+        elif c == "'":
+            close = command.find("'", j + 1)
+            if close < 0:
+                return None
+            j = close + 1
+        elif c == '"':
+            j += 1
+            while j < len(command) and command[j] != '"':
+                if command[j] == "\\":
+                    j += 2
+                elif command.startswith("$(", j) or command[j] == "`":
+                    end = _substitution_end(command, j)
+                    if end is None:
+                        return None
+                    j = end
+                else:
+                    j += 1
+            if j >= len(command):
+                return None
+            j += 1
+        elif command.startswith("$(", j) or c == "`":
+            end = _substitution_end(command, j)
+            if end is None:
+                return None
+            j = end
+        elif heredoc is not None:
+            close = re.compile(r"\n[ \t]*" + re.escape(heredoc.group(2)) + r"[ \t]*(?=\n|\)|$)")
+            found = close.search(command, j + heredoc.end())
+            if found is None:
+                return None
+            j = found.end()
+        else:
+            depth += {"(": 1, ")": -1}.get(c, 0)
+            j += 1
+            if depth == 0:
+                return j
     return None
+
+
+def _heredoc_data(body: str) -> bool:
+    """Whether ``body`` only prints a quoted heredoc (``cat <<'EOF'``): its
+    text is never expanded or run, and its first delimiter line is the last."""
+    head, _, rest = body.strip(" \t\n").partition("\n")
+    found = re.fullmatch(r"cat[ \t]+<<(-?)[ \t]*([\"'])(\w+)\2[ \t]*", head)
+    if found is None:
+        return False
+    lines = rest.split("\n")
+    strip = "\t" if found.group(1) else ""
+    ends = [n for n, line in enumerate(lines) if line.lstrip(strip) == found.group(3)]
+    return bool(ends) and ends[0] == len(lines) - 1
+
+
+def _may_restrict(rule: Rule, command: str) -> bool:
+    """Whether ``rule`` could match ``command`` once the shell expands it:
+    the text the rule needs appears in the command, as written or with its
+    quotes and escapes removed (``r''m -r\\f`` is ``rm -rf``). Expansions
+    that assemble a word from pieces (``$'\\x72m'``, ``$X``, ``${X}``,
+    ``{r,}m``) could produce any text, so they always could. A pathname
+    pattern (``[p]ush``, ``--f*``) could be any word it matches; heredoc
+    bodies are never expanded into names."""
+    if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", command):
+        return True
+    # The shell deletes \<newline> before anything else: r\<newline>m is rm.
+    text = command + "\n" + re.sub(r"[\"'\\]", "", command.replace("\\\n", ""))
+    names = _HEREDOC.sub("\n", text)
+    patterns = [w for w in re.split(r"[\s;&|()<>`]+", names) if any(c in w for c in "*?[")]
+
+    def seen(word: str) -> bool:
+        return word in text or any(fnmatch.fnmatchcase(word, p) for p in patterns)
+
+    if rule.match_type == "git-push":
+        return seen("git") and seen("push")
+    if rule.match_type == "git-force":
+        return seen("git") and (any(_is_force(w.strip("`$(){};|&<>")) for w in text.split())
+                                or any(seen(flag) for flag in ("-f", *FORCE_OPTIONS)))
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    literals = re.split(r"[*?\[\]]+", rule.match) if rule.match_type == "glob" else [rule.match]
+    return all(seen(word) for literal in literals for word in literal.split())
 
 
 def deny_in_parts(req: Request, *, checks: list[str] | None = None,
@@ -1261,12 +1499,14 @@ def repo_rules(repo_root: str) -> list[Rule]:
     except (OSError, ValueError):
         return []
     rows = data.get("rules") if isinstance(data, dict) else None
-    out = []
+    out, unsupported = [], []
     for row in rows if isinstance(rows, list) else []:
         rule = Rule.from_dict(row, source="repo") if isinstance(row, dict) else None
         if rule and rule.decision == "deny":
             out.append(rule)
-    return out
+        elif rule is None:
+            unsupported.append(row)
+    return [*out, *Store(unsupported_rules=unsupported).blocking_rules]
 
 
 @dataclass
@@ -1286,9 +1526,40 @@ class Store:
     # home (its resolved path): command, key, hash, definition.
     codex_hook: dict[str, dict[str, str]] = field(default_factory=dict)
     remembered: list[dict] = field(default_factory=list)
+    # Keep rows this engine cannot interpret out of editable rules, but retain
+    # their complete representation across unrelated writes (including grants).
+    unsupported_rules: list[object] = field(default_factory=list)
+    extra: dict = field(default_factory=dict)
+    unsupported_version: bool = False
+
+    @property
+    def blocking_rules(self) -> list[Rule]:
+        """Uninterpretable policy cannot silently defer to provider allows.
+
+        Unknown scopes may narrow a rule in ways we cannot evaluate. Block its
+        whole kind until a capable engine reads it; unknown kinds or store
+        versions block every kind. These guards are runtime-only, never saved
+        in place of the original policy or eligible for one-time overrides.
+        """
+        kinds = set(KINDS) if self.unsupported_version or self.extra else set()
+        for row in self.unsupported_rules:
+            kind = row.get("kind") if isinstance(row, dict) else None
+            # An allow we can't read just doesn't apply; a restriction might.
+            if isinstance(row, dict) and row.get("decision") == "allow" and kind in KINDS:
+                continue
+            kinds.update((kind,) if kind in KINDS else KINDS)
+        return [_default(f"d-store-unsupported-{kind}", kind, "*", "glob", "deny")
+                for kind in KINDS if kind in kinds]
+
+    def require_writable(self) -> None:
+        if self.unsupported_version:
+            raise ValueError("permissions.json uses an unsupported version; use a compatible engine to edit it")
 
     def to_json(self) -> str:
-        data: dict = {"version": 1, "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
+        self.require_writable()
+        data: dict = {**self.extra, "version": STORE_VERSION,
+                      "rules": [r.to_dict() for r in self.rules] + self.unsupported_rules,
+                      "approvals": self.approvals}
         for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook", "remembered"):
             if getattr(self, name):
                 data[name] = getattr(self, name)
@@ -1311,8 +1582,20 @@ def load_store() -> Store:
         return Store()
     if not isinstance(data, dict):
         return Store()
-    rules = [r for r in (Rule.from_dict(d) for d in data.get("rules") or [] if isinstance(d, dict))
-             if r and r.source in ("user", "learned")]
+    # Version 1 was shared by engines with different rule capabilities. Upgrade
+    # known fields, but read future versions fail-closed and never rewrite them.
+    # Older shipped engines that ignore this field cannot be protected here.
+    version = data.get("version", 1)
+    if type(version) is not int or not 1 <= version <= STORE_VERSION:
+        return Store(unsupported_version=True)
+    rules, unsupported = [], []
+    rows = data.get("rules", [])
+    for row in rows if isinstance(rows, list) else [rows]:
+        rule = Rule.from_dict(row)
+        if rule and rule.source in ("user", "learned"):
+            rules.append(rule)
+        else:
+            unsupported.append(row)
     approvals = data.get("approvals")
     approvals = {k: v for k, v in approvals.items() if isinstance(v, dict)} if isinstance(approvals, dict) else {}
 
@@ -1333,7 +1616,10 @@ def load_store() -> Store:
              for home, rec in codex.items() if isinstance(rec, dict)}
     remembered = data.get("remembered")
     remembered = [r for r in remembered if isinstance(r, dict)] if isinstance(remembered, list) else []
-    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex, remembered)
+    known = {"version", "rules", "approvals", "agy_managed", "agy_created", "agy_repos", "codex_hook", "remembered"}
+    extra = {k: v for k, v in data.items() if k not in known}
+    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex, remembered,
+                 unsupported_rules=unsupported, extra=extra)
 
 
 @contextmanager
@@ -1347,6 +1633,7 @@ def editing() -> Iterator[Store]:
     with open(path.with_suffix(".lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         store = load_store()
+        store.require_writable()
         yield store
         staged = None
         try:
