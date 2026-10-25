@@ -188,24 +188,37 @@ fn stable_endpoint<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
 /// builds"). Only the release feed's bundles are checked against it.
 const STAFF_UPDATER_KEY: &str = include_str!("../staff-updater.pub");
 
-/// The public key an install checks its bundle against in place of the
-/// configured (production) one: the staff key for the release feed
-/// (`release_feed`), none for every other update.
-fn verifier_key(release_feed: bool) -> Option<&'static str> {
-    release_feed.then(|| STAFF_UPDATER_KEY.trim())
+/// The release feed's updater, at `feed`: every build it names comes back
+/// (`release_build_wanted` decides), each bundle checked against the staff
+/// key (`STAFF_UPDATER_KEY`), never the configured production one.
+fn release_updater<R: Runtime>(
+    app: &AppHandle<R>,
+    feed: &str,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let url = feed.parse::<tauri::Url>().map_err(|e| e.to_string())?;
+    app.updater_builder()
+        .pubkey(STAFF_UPDATER_KEY.trim())
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .version_comparator(|_, _| true)
+        .build()
+        .map_err(|e| e.to_string())
 }
 
-/// The updater for the release feed (`release_feed`) or this build's own,
-/// checking bundles against `verifier_key`.
-fn updater_builder<R: Runtime>(
-    app: &AppHandle<R>,
-    release_feed: bool,
-) -> tauri_plugin_updater::UpdaterBuilder {
-    let builder = app.updater_builder();
-    match verifier_key(release_feed) {
-        Some(key) => builder.pubkey(key),
-        None => builder,
+/// This build's own updater: its feed (`endpoint`), an update being `newer`,
+/// each bundle checked against the configured (production) key.
+fn app_updater<R: Runtime>(app: &AppHandle<R>) -> Result<tauri_plugin_updater::Updater, String> {
+    let mut builder = app
+        .updater_builder()
+        .version_comparator(|current, release| newer(&current, &release.version));
+    if let Some(stable) = stable_endpoint(app) {
+        let feed = endpoint(&stable, &version(app));
+        if feed != stable {
+            let url = feed.parse::<tauri::Url>().map_err(|e| e.to_string())?;
+            builder = builder.endpoints(vec![url]).map_err(|e| e.to_string())?;
+        }
     }
+    builder.build().map_err(|e| e.to_string())
 }
 
 fn has_pubkey<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -481,7 +494,7 @@ async fn install_release_build<G: Future<Output = Result<(), String>>>(
 }
 
 /// The release feed through the updater plugin: the compiled stable feed's
-/// `release_endpoint`, with the staff public key (`verifier_key`).
+/// `release_endpoint`, with the staff public key (`release_updater`).
 struct PluginFeed<R: Runtime> {
     app: AppHandle<R>,
     update: Option<tauri_plugin_updater::Update>,
@@ -491,14 +504,7 @@ impl<R: Runtime> ReleaseFeed for PluginFeed<R> {
     async fn check(&mut self) -> Result<Option<String>, String> {
         let stable = stable_endpoint(&self.app).ok_or("this build names no update feed")?;
         let feed = release_endpoint(&stable).ok_or("this build's update feed has no release feed")?;
-        let url = feed.parse::<tauri::Url>().map_err(|e| e.to_string())?;
-        let updater = updater_builder(&self.app, true)
-            .endpoints(vec![url])
-            .map_err(|e| e.to_string())?
-            // Every build the feed names comes back: release_build_wanted decides.
-            .version_comparator(|_, _| true)
-            .build()
-            .map_err(|e| e.to_string())?;
+        let updater = release_updater(&self.app, &feed)?;
         self.update = updater.check().await.map_err(|e| e.to_string())?;
         Ok(self.update.as_ref().map(|update| update.version.clone()))
     }
@@ -542,18 +548,7 @@ pub async fn app_release_build_install<R: Runtime>(
 /// Check this build's feed (`endpoint`) and install an update found
 /// (`newer`), answering its version.
 async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
-    let mut builder = updater_builder(app, false)
-        .version_comparator(|current, release| newer(&current, &release.version));
-    if let Some(stable) = stable_endpoint(app) {
-        let feed = endpoint(&stable, &version(app));
-        if feed != stable {
-            let url = feed.parse::<tauri::Url>().map_err(|e| e.to_string())?;
-            builder = builder.endpoints(vec![url]).map_err(|e| e.to_string())?;
-        }
-    }
-    let found = builder
-        .build()
-        .map_err(|e| e.to_string())?
+    let found = app_updater(app)?
         .check()
         .await
         .map_err(|e| e.to_string())?;
@@ -644,16 +639,55 @@ mod tests {
         assert_eq!(stable, Some("https://pawdelta.com/brindle/downloads/desktop/latest.json"));
     }
 
+    /// A minisign signature naming the key `pubkey` (as tauri.conf.json holds
+    /// one: base64 of the key file), base64 as a manifest holds it, that
+    /// matches no bytes: checking it fails, on the key ID first.
+    fn signature_by(pubkey: &str) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let file = String::from_utf8(b64.decode(pubkey).expect("key")).expect("key");
+        let key = b64.decode(file.lines().nth(1).expect("key line")).expect("key");
+        let mut sig = b"ED".to_vec();
+        sig.extend_from_slice(&key[2..10]);
+        sig.extend_from_slice(&[0; 64]);
+        let text = format!(
+            "untrusted comment: test\n{}\ntrusted comment: version:999.0.0\n{}\n",
+            b64.encode(sig),
+            b64.encode([0; 64])
+        );
+        b64.encode(text)
+    }
+
     #[test]
-    fn only_a_release_build_install_verifies_with_the_staff_updater_key() {
+    fn only_a_release_build_install_checks_bundles_with_the_staff_updater_key() {
         let conf: Value =
             serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
-        let production = conf.pointer("/plugins/updater/pubkey").and_then(Value::as_str);
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().plugins.0.insert("updater".into(), conf["plugins"]["updater"].clone());
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .build(context)
+            .expect("app");
+        let production = conf["plugins"]["updater"]["pubkey"].as_str().expect("pubkey");
         let staff = include_str!("../staff-updater.pub").trim();
-        assert!(production.is_some_and(|key| !key.is_empty() && key != staff));
-        assert_eq!(verifier_key(true), Some(staff));
-        // Every other update keeps the production key the config builds in.
-        assert_eq!(verifier_key(false), None);
+        assert_ne!(production, staff);
+        let release = release_updater(app.handle(), "https://example.invalid/latest.json").unwrap();
+        let update = app_updater(app.handle()).unwrap();
+        for (what, updater, trusted) in [("release build", &release, staff), ("update", &update, production)] {
+            for key in [staff, production] {
+                let manifest = serde_json::json!({
+                    "version": "999.0.0",
+                    "url": "https://example.invalid/bundle.app.tar.gz",
+                    "signature": signature_by(key),
+                });
+                let found = updater.restore_update(manifest).unwrap().expect(what);
+                let wrong_key = matches!(
+                    found.verify(b"bundle"),
+                    Err(tauri_plugin_updater::Error::Minisign(minisign_verify::Error::UnexpectedKeyId))
+                );
+                assert_eq!(wrong_key, key != trusted, "{what}");
+            }
+        }
     }
 
     /// A fresh daemon as the engine answers: meta says what is armed, which

@@ -26,5 +26,10 @@ semver = "1"
 httparse = "1"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
+[dev-dependencies]
+tauri = { version = "2", features = ["tray-icon", "test"] }
+base64 = "0.22"
+minisign-verify = "0.3"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
