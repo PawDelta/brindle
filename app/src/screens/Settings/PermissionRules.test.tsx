@@ -21,8 +21,10 @@ it("edits and clears a constructor role without reading inherited object propert
     roles: [{ name: "constructor", builtin: false, permissions: [], holders: [] }], members: [],
     policy: { version: 3, permission_grants: grant, roles: {} as Record<string, unknown> },
     can_edit_policy: true, policy_readonly_reason: null, inventory_error: null as string | null };
+  let refusal: { code: string; message: string } | null = null;
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (_input, init) => {
     if (init?.method === "PUT") {
+      if (refusal) return Response.json({ error: refusal }, { status: 422 });
       const body = JSON.parse(String(init.body));
       state.policy.version++;
       if (body.role === null) state.policy.permission_grants = body.permission_grants;
@@ -54,6 +56,19 @@ it("edits and clears a constructor role without reading inherited object propert
   expect(screen.getByRole("button", { name: "Save approval limits" })).toHaveProperty("disabled", false);
   change("Maximum uses", "9"); click("Save approval limits");
   await waitFor(() => expect(state.policy.permission_grants.max_uses).toBe(9));
+  // A rejected field can be corrected and saved again; a server without the
+  // scoped save stops further saves until a reload.
+  refusal = { code: "invalid_request", message: "The account rejected the approval limits (permission_grants)." };
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save approval limits" })).toHaveProperty("disabled", false));
+  change("Maximum uses", "11"); click("Save approval limits");
+  expect((await screen.findByRole("alert")).textContent).toContain("rejected");
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save approval limits" })).toHaveProperty("disabled", false));
+  refusal = { code: "scoped_save_unsupported", message: "The account server does not support saving approval limits alone yet." };
+  click("Save approval limits");
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("does not support"));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Save approval limits" })).toHaveProperty("disabled", true));
+  expect(screen.getByLabelText("Maximum uses")).toHaveProperty("value", "11");
+  expect(state.policy.permission_grants.max_uses).toBe(9);
 });
 
 it("searches account members and roles, assigns the selected role and retains a stale policy draft", async () => {

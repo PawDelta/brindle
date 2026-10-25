@@ -336,7 +336,9 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
     if (!keepError) setError(null);
     try { await work(); } catch (failure) {
       setError(failureMessage(failure));
-      if (failure instanceof DaemonError && failure.status === 409) setStale(true);
+      // A stale version needs a reload; an account API without the scoped
+      // save cannot take this edit at all, so stop offering it (never fall back).
+      if (failure instanceof DaemonError && (failure.status === 409 || failure.code === "scoped_save_unsupported")) setStale(true);
     } finally { pending.current = false; setBusy(false); }
   };
   const reload = () => run(async () => {

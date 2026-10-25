@@ -2,9 +2,10 @@
 
 No local profile grants account authority. Identity comes from the verified
 entitlement; every remote read/write also checks live account membership/RBAC.
-Only the approval-limit block is editable here, never arbitrary policy fields.
+Only approval-limit blocks are editable here, through the account's scoped
+save (PUT /policy with update_scope="permission_grants"). Never a full-policy
+PUT: GET redacts fields (budgets, member overrides) that a full PUT replaces.
 """
-from copy import deepcopy
 from urllib.parse import quote
 
 from brindle.pro import auth, credentials, license
@@ -38,6 +39,8 @@ class Account:
         if status != 200:
             error = auth._error(status, got)
             extra = {"version": got["version"]} if type(got.get("version")) is int else {}
+            if isinstance(got.get("fields"), list):
+                extra["fields"] = [f for f in got["fields"] if isinstance(f, str)][:20]
             raise ServiceError(error.code, str(error), status, **extra)
         if got.get("org_id") != self.ent.org_id:
             raise ServiceError("invalid_account_response", "Account response belongs to another organization.", 502)
@@ -53,21 +56,16 @@ class Account:
             raise ServiceError("identity_changed", "Your account role changed. Refresh your sign-in before editing.", 409)
         return got
 
-    def policy_reason(self, roles: list[OrgRoleDTO] | None, policy: dict) -> str | None:
+    def policy_reason(self, roles: list[OrgRoleDTO] | None) -> str | None:
         if self.ent.plan != "enterprise":
             return "Approval limits require Enterprise."
         names = {self.ent.role, self.ent.policy_role}
         held = {permission for role in roles or [] if role.name in names for permission in role.permissions}
         # Inventory requires a separate permission. When it is unavailable,
         # do not infer authority from a role name: PUT enforces live control.
+        # org_spend is not needed: the scoped save keeps hidden budgets server-side.
         if roles is not None and "control" not in held:
             return "Editing approval limits requires the control permission."
-        if (roles is not None and "org_spend" not in held) or policy.get("visibility", {}).get("org_spend") is not True:
-            # GET hides member overrides without this permission. The existing
-            # PUT replaces them; only the account website can restore hidden
-            # fields from storage. Never send a redacted full-policy document.
-            return ("The account API hides budget settings from this role. Edit approval limits on the "
-                    "account website to preserve them; desktop policy saves require org_spend access.")
         return None
 
 
@@ -92,7 +90,7 @@ def snapshot() -> dict:
             raise
         roles = None
         inventory_error = str(e)
-    reason = account.policy_reason(roles, got)
+    reason = account.policy_reason(roles)
     return OrgPermissionsDTO(
         identity={key: getattr(account.ent, key) for key in ("sub", "org_id", "role", "policy_role")},
         roles=roles or [], members=members, inventory_error=inventory_error, policy=policy_view(got),
@@ -115,30 +113,33 @@ def save_policy(body: dict) -> dict:
     # Base edits need no role inventory; the policy writer is the authority
     # for control permission. A targeted override still needs a known role.
     roles = account.roles() if req.role is not None else None
-    got = account.policy()
-    if reason := account.policy_reason(roles, got):
+    account.policy()  # rechecks the live role identity before writing
+    if reason := account.policy_reason(roles):
         raise ServiceError("forbidden", reason, 403)
     if req.role is not None and req.role not in {r.name for r in roles or []}:
         raise ServiceError("unknown_role", "Choose an existing organization role.", 422)
-    if req.if_version != got["version"]:
-        raise ServiceError("version_conflict", "The policy changed. Reload it and review your draft.",
-                           409, version=got["version"])
-    policy = deepcopy(got["policy"])
-    # Account-owned documents are not accepted by PolicyUpdate. Its writer
-    # preserves these from storage (account-api orgs.put_policy).
-    for key in ("spend_rules", "spend_notify", "budget_layers"):
-        policy.pop(key, None)
+    # The supplied block replaces that block whole (null inherits); omitted
+    # blocks and every other policy field stay as stored. The account's CAS
+    # on if_version rejects a stale draft.
     grant = req.permission_grants.to_json() if req.permission_grants else None
+    scoped = {"update_scope": "permission_grants", "if_version": req.if_version}
     if req.role is None:
-        policy["permission_grants"] = grant
+        scoped["permission_grants"] = grant
     else:
-        overrides = policy.setdefault("roles", {})
-        role = overrides.setdefault(req.role, {})
-        if grant is None:
-            role.pop("permission_grants", None)
-            if not role:
-                overrides.pop(req.role)
-        else:
-            role["permission_grants"] = grant
-    # The account CAS also catches changes between the read and the write.
-    return policy_view(account.call("PUT", "/policy", {**policy, "if_version": req.if_version}))
+        scoped["roles"] = {req.role: {"permission_grants": grant}}
+    try:
+        return policy_view(account.call("PUT", "/policy", scoped))
+    except ServiceError as e:
+        if e.http_status == 409:
+            raise ServiceError("version_conflict", "The policy changed. Reload it and review your draft.",
+                               409, **e.extra) from e
+        if e.http_status != 422:
+            raise
+        fields = e.extra.get("fields") or []
+        # An account API without the scoped save rejects update_scope as an
+        # unknown field. Never fall back to a full-policy PUT.
+        if "<unknown>" in fields or "update_scope" in fields:
+            raise ServiceError("scoped_save_unsupported", "The account server does not support saving approval "
+                               "limits alone yet. Nothing was saved; edit them on the account website.", 422) from e
+        raise ServiceError(e.code, f"The account rejected the approval limits ({', '.join(fields) or e.message}).",
+                           422, fields=fields) from e
