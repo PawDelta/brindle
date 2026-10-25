@@ -1287,8 +1287,8 @@ def _syntax_ask(req: Request) -> Decision:
 # $(...) or backtick substitution may supply a word without approval. Its
 # inner commands are still checked.
 SUBSTITUTION_DATA_OPTIONS: dict[tuple[str, str], tuple[str, ...]] = {
-    ("git", "commit"): ("-m", "--message", "-F"),
-    ("git", "tag"): ("-m", "--message", "-F"),
+    ("git", "commit"): ("-m", "--message"),
+    ("git", "tag"): ("-m", "--message"),
 }
 # Stands in for a substitution's output once its inner commands are checked.
 _SUBSTITUTED = "BRINDLESUBSTITUTION"
@@ -1298,20 +1298,25 @@ def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> R
     """``req`` with each top-level substitution replaced by a placeholder
     word, or the decision that ends the check. A substitution always runs its
     inner commands, so they get the whole restriction check (recursively,
-    quoted or not); a quoted heredoc fed to cat is data. Its output is unknown
-    text, so it may only be a whole word given to an option in
-    SUBSTITUTION_DATA_OPTIONS, in a command with no leading assignments."""
+    quoted or not); of a quoted heredoc fed to cat, only the cat is checked,
+    as its body is data. Its output is unknown text, so it may only be the
+    entire content of one double-quoted word (unquoted, the shell splits it
+    into words) given to an option in SUBSTITUTION_DATA_OPTIONS, in a command
+    with no leading assignments."""
     from brindle.native.permissions import _simple_commands
 
     spans = _substitution_spans(req.command)
     if spans is None:
         return _syntax_ask(req)
+    for _, _, body, _ in spans:
+        inner = _restriction_in_parts(replace(req, command="cat" if _heredoc_data(body) else body),
+                                      checks=checks, rules=rules)
+        if inner is not None:
+            return inner
     pieces, last = [], 0
-    for start, end, body in spans:
-        if not _heredoc_data(body):
-            inner = _restriction_in_parts(replace(req, command=body), checks=checks, rules=rules)
-            if inner is not None:
-                return inner
+    for start, end, _, quoted in spans:
+        if not (quoted and req.command[start - 1] == '"' and req.command[end:end + 1] == '"'):
+            return _syntax_ask(req)
         pieces += [req.command[last:start], _SUBSTITUTED]
         last = end
     command = "".join(pieces) + req.command[last:]
@@ -1327,9 +1332,9 @@ def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> R
     return replace(req, command=command)
 
 
-def _substitution_spans(command: str) -> list[tuple[int, int, str]] | None:
-    """(start, end, inner command) of each outermost ``$(...)`` or backtick
-    substitution, quoted or not, or None when one isn't closed."""
+def _substitution_spans(command: str) -> list[tuple[int, int, str, bool]] | None:
+    """(start, end, inner command, inside double quotes) of each outermost
+    ``$(...)`` or backtick substitution, or None when one isn't closed."""
     spans, quote, i = [], "", 0
     while i < len(command):
         c = command[i]
@@ -1346,7 +1351,7 @@ def _substitution_spans(command: str) -> list[tuple[int, int, str]] | None:
             end = _substitution_end(command, i)
             if end is None:
                 return None
-            spans.append((i, end, command[i + (1 if c == "`" else 2):end - 1]))
+            spans.append((i, end, command[i + (1 if c == "`" else 2):end - 1], quote == '"'))
             i = end
             continue
         i += 1

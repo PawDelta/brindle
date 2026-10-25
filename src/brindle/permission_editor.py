@@ -68,7 +68,8 @@ def _context(repo: str) -> tuple[list[p.Rule], dict, list[str]]:
                    "normalized), so the same program run another way, such as /bin/rm, env rm, bash -c, "
                    "reordered flags or git -C, is not matched; they are guardrails, not a sandbox. "
                    "Commands inside $(...) are checked too, but a substitution's output is unknown, "
-                   "so it needs approval unless it is a git commit or tag message (-m, --message, -F)."]
+                   "so it needs approval unless it is a quoted git commit or tag message "
+                   "(-m \"$(...)\" or --message \"$(...)\")."]
     try:
         current = policy(repo)
     except Exception as exc:  # fail closed if authoritative restrictions cannot be read
