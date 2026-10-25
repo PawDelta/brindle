@@ -75,6 +75,7 @@ BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "curl-readonly", "git-pu
 SOURCES = ("default", "repo", "user", "learned")
 SUGGEST_AFTER = 2
 FILE = "permissions.json"
+STORE_VERSION = 2
 
 # A command an allow rule may cover: one simple command, nothing the shell
 # would treat specially.
@@ -163,6 +164,11 @@ class Rule:
     @classmethod
     def from_dict(cls, data: dict, source: str | None = None, *, depth: int = 0) -> "Rule | None":
         """A rule read from a file, or None if it isn't a valid one."""
+        # Future scope fields must not silently become unrestricted rules.
+        known = {"id", "kind", "match", "match_type", "decision", "source", "created",
+                 "repo_root", "expires_at", "exclusions", "editable", "protected"}
+        if not isinstance(data, dict) or data.keys() - known:
+            return None
         try:
             kind, match = str(data["kind"]), str(data["match"])
             match_type = str(data.get("match_type", "exact"))
@@ -172,8 +178,7 @@ class Rule:
         matchers = (*MATCH_TYPES, *BUILTIN_MATCHERS) if depth else MATCH_TYPES
         if kind not in KINDS or match_type not in matchers or decision not in DECISIONS or not match:
             return None
-        # Unknown identities must never silently turn a scoped rule into a global one.
-        if data.get("roles") or depth > 8:
+        if depth > 8:
             return None
         repo = data.get("repo_root")
         if repo is not None and (not isinstance(repo, str) or not os.path.isabs(repo)):
@@ -236,7 +241,6 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
     _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
     _default("d-git-ro", "bash", "git status / diff / log / show", "git-readonly", "allow"),
-    _default("d-curl-ro", "bash", "curl HTTP read without uploads or file output", "curl-readonly", "allow"),
     _default("d-echo", "bash", "echo", "exact", "allow"),
     _default("d-echo-args", "bash", "echo ", "prefix", "allow"),
     _default("d-git-push", "bash", "git push", "git-push", "deny"),
@@ -1042,6 +1046,10 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
 def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> bool:
     if rule.kind != req.kind:
         return False
+    # Store guards also cover requests without a target (e.g. a provider's
+    # search tool without a URL). File data cannot create these reserved IDs.
+    if rule.source == "default" and rule.id == f"d-store-unsupported-{req.kind}":
+        return True
     if rule.repo_root and (not req.repo_root or os.path.realpath(req.repo_root) != rule.repo_root):
         return False
     if rule.expires_at is not None and time.time() >= rule.expires_at:
@@ -1073,7 +1081,8 @@ def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> b
 def all_rules(repo_root: str | None = None) -> list[Rule]:
     """Every rule in force: defaults, the repo's denies, the user's and
     learned rules."""
-    return [*DEFAULT_RULES, *(repo_rules(repo_root) if repo_root else []), *load_store().rules]
+    store = load_store()
+    return [*DEFAULT_RULES, *(repo_rules(repo_root) if repo_root else []), *store.rules, *store.blocking_rules]
 
 
 def profile_rules(profile) -> list[Rule]:
@@ -1222,6 +1231,13 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     """Find explicit restrictions without treating shell segments as allows."""
     if req.kind != "bash" or not req.command:
         return None
+    # Unsupported syntax is not itself a restriction. Only an active Bash
+    # restriction can require us to withhold the provider's ordinary fallback.
+    rules = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask")
+             and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)
+             and (r.expires_at is None or time.time() < r.expires_at)]
+    if not rules:
+        return None
     parsed = _restriction_parts(req.command)
     words = parsed if parsed is not None else _segments(req.command)
     parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
@@ -1261,12 +1277,14 @@ def repo_rules(repo_root: str) -> list[Rule]:
     except (OSError, ValueError):
         return []
     rows = data.get("rules") if isinstance(data, dict) else None
-    out = []
+    out, unsupported = [], []
     for row in rows if isinstance(rows, list) else []:
         rule = Rule.from_dict(row, source="repo") if isinstance(row, dict) else None
         if rule and rule.decision == "deny":
             out.append(rule)
-    return out
+        elif rule is None:
+            unsupported.append(row)
+    return [*out, *Store(unsupported_rules=unsupported).blocking_rules]
 
 
 @dataclass
@@ -1286,9 +1304,37 @@ class Store:
     # home (its resolved path): command, key, hash, definition.
     codex_hook: dict[str, dict[str, str]] = field(default_factory=dict)
     remembered: list[dict] = field(default_factory=list)
+    # Keep rows this engine cannot interpret out of editable rules, but retain
+    # their complete representation across unrelated writes (including grants).
+    unsupported_rules: list[object] = field(default_factory=list)
+    extra: dict = field(default_factory=dict)
+    unsupported_version: bool = False
+
+    @property
+    def blocking_rules(self) -> list[Rule]:
+        """Uninterpretable policy cannot silently defer to provider allows.
+
+        Unknown scopes may narrow a rule in ways we cannot evaluate. Block its
+        whole kind until a capable engine reads it; unknown kinds or store
+        versions block every kind. These guards are runtime-only, never saved
+        in place of the original policy or eligible for one-time overrides.
+        """
+        kinds = set(KINDS) if self.unsupported_version or self.extra else set()
+        for row in self.unsupported_rules:
+            kind = row.get("kind") if isinstance(row, dict) else None
+            kinds.update((kind,) if kind in KINDS else KINDS)
+        return [_default(f"d-store-unsupported-{kind}", kind, "*", "glob", "deny")
+                for kind in KINDS if kind in kinds]
+
+    def require_writable(self) -> None:
+        if self.unsupported_version:
+            raise ValueError("permissions.json uses an unsupported version; use a compatible engine to edit it")
 
     def to_json(self) -> str:
-        data: dict = {"version": 1, "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
+        self.require_writable()
+        data: dict = {**self.extra, "version": STORE_VERSION,
+                      "rules": [r.to_dict() for r in self.rules] + self.unsupported_rules,
+                      "approvals": self.approvals}
         for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook", "remembered"):
             if getattr(self, name):
                 data[name] = getattr(self, name)
@@ -1311,8 +1357,20 @@ def load_store() -> Store:
         return Store()
     if not isinstance(data, dict):
         return Store()
-    rules = [r for r in (Rule.from_dict(d) for d in data.get("rules") or [] if isinstance(d, dict))
-             if r and r.source in ("user", "learned")]
+    # Version 1 was shared by engines with different rule capabilities. Upgrade
+    # known fields, but read future versions fail-closed and never rewrite them.
+    # Older shipped engines that ignore this field cannot be protected here.
+    version = data.get("version", 1)
+    if type(version) is not int or not 1 <= version <= STORE_VERSION:
+        return Store(unsupported_version=True)
+    rules, unsupported = [], []
+    rows = data.get("rules", [])
+    for row in rows if isinstance(rows, list) else [rows]:
+        rule = Rule.from_dict(row)
+        if rule and rule.source in ("user", "learned"):
+            rules.append(rule)
+        else:
+            unsupported.append(row)
     approvals = data.get("approvals")
     approvals = {k: v for k, v in approvals.items() if isinstance(v, dict)} if isinstance(approvals, dict) else {}
 
@@ -1333,7 +1391,10 @@ def load_store() -> Store:
              for home, rec in codex.items() if isinstance(rec, dict)}
     remembered = data.get("remembered")
     remembered = [r for r in remembered if isinstance(r, dict)] if isinstance(remembered, list) else []
-    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex, remembered)
+    known = {"version", "rules", "approvals", "agy_managed", "agy_created", "agy_repos", "codex_hook", "remembered"}
+    extra = {k: v for k, v in data.items() if k not in known}
+    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex, remembered,
+                 unsupported_rules=unsupported, extra=extra)
 
 
 @contextmanager
@@ -1347,6 +1408,7 @@ def editing() -> Iterator[Store]:
     with open(path.with_suffix(".lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         store = load_store()
+        store.require_writable()
         yield store
         staged = None
         try:
