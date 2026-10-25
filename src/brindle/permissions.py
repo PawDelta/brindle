@@ -1267,13 +1267,42 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     if patterns is not None:
         uncertain = not _globs_excluded(patterns, rules)
     else:
-        uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
+        uncertain = parsed is None and (_bare_substitution(req.command)
+                                        or any(_may_restrict(rule, req.command) for rule in rules))
     if uncertain:
         # A bound built-in ask prevents provider/profile fallback from treating
         # unsupported shell syntax as an ordinary unmatched request.
         return Decision("ask", "shell syntax cannot be checked safely",
                         Rule("bash", req.command, "exact", "ask", "default", id="d-shell-syntax"))
     return None
+
+
+def _bare_substitution(command: str) -> bool:
+    """Whether a ``$(...)`` or backtick substitution could supply a program,
+    subcommand or option: any but one inside a double-quoted word that
+    follows at least two literal words (``git commit -m "$(date)"``). What
+    a quoted one runs is only checked as text (see _may_restrict)."""
+    quote, start, opened, i = "", 0, 0, 0
+    while i < len(command):
+        c = command[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            quote = "" if c == "'" else quote
+        elif c == "'" and not quote:
+            quote = "'"
+        elif c == '"':
+            quote, opened = ("", opened) if quote else ('"', i)
+        elif command.startswith("$(", i) or c == "`":
+            head = command[start:opened]
+            if (quote != '"' or not head[-1:].isspace() or len(head.split()) < 2
+                    or not all(SIMPLE_COMMAND.fullmatch(word) for word in head.split())):
+                return True
+        elif not quote and c in ";&|\n(){}":
+            start = i + 1
+        i += 1
+    return False
 
 
 def _may_restrict(rule: Rule, command: str) -> bool:

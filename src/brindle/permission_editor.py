@@ -66,7 +66,9 @@ def _context(repo: str) -> tuple[list[p.Rule], dict, list[str]]:
                    "Rules are enforced only on provider paths that invoke Brindle's permission hooks.",
                    "Deny and ask rules match command text (after spacing, quoting and leading assignments are "
                    "normalized), so the same program run another way, such as /bin/rm, env rm, bash -c, "
-                   "reordered flags or git -C, is not matched; they are guardrails, not a sandbox."]
+                   "reordered flags or git -C, is not matched; they are guardrails, not a sandbox. "
+                   "A $(...) substitution inside a quoted argument (git commit -m \"$(...)\") is "
+                   "only read as text, not inspected as the command it runs."]
     try:
         current = policy(repo)
     except Exception as exc:  # fail closed if authoritative restrictions cannot be read
