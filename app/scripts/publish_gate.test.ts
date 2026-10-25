@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -134,6 +134,28 @@ describe("app-release publish gate", () => {
     expect(staff).not.toContain("secrets.AWS_DESKTOP_RELEASE_ROLE_ARN");
     expect(staff).toContain("ROLE: ${{ secrets.AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN }}");
     expect(staff).toContain("ROLE_ARN: ${{ secrets.AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN }}");
+    // The macos job's updater key: production for a tag, the staff key (never production) for a release-branch build.
+    const keyCheck = text.slice(text.indexOf('production="$(jq'), text.indexOf("fi\n", text.indexOf("::error::the TAURI_UPDATER_PUBKEY")) + 2);
+    const conf = readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8");
+    const production: string = JSON.parse(conf).plugins.updater.pubkey;
+    const staffPub = readFileSync(new URL("../src-tauri/staff-updater.pub", import.meta.url), "utf8");
+    const updaterKey = (env: Record<string, string>, staffFile: string) => {
+      const dir = mkdtempSync(join(tmpdir(), "pubkey-"));
+      mkdirSync(join(dir, "app/src-tauri"), { recursive: true });
+      writeFileSync(join(dir, "app/src-tauri/tauri.conf.json"), conf);
+      writeFileSync(join(dir, "app/src-tauri/staff-updater.pub"), staffFile);
+      const run = spawnSync("bash", ["-c", `${keyCheck}\necho "$pubkey"`], { cwd: dir, env: { PATH: process.env.PATH ?? "", ...env }, encoding: "utf8" });
+      return run.status === 0 ? run.stdout.trim() : null;
+    };
+    const branchBuild = { RELEASE_VERSION: "0.2.0+release.5.abc" };
+    const keys: [Record<string, string>, string, string | null][] = [
+      [{}, staffPub, production],
+      [{ TAURI_UPDATER_PUBKEY: staffPub.trim() }, staffPub, null],
+      [branchBuild, staffPub, staffPub.trim()],
+      [{ ...branchBuild, TAURI_UPDATER_PUBKEY: production }, staffPub, null],
+      [branchBuild, production, null],
+    ];
+    for (const [env, staffFile, key] of keys) expect(updaterKey(env, staffFile), JSON.stringify(env)).toBe(key);
     // A scheduled run builds no release (and so signs and publishes nothing): only the nightly smoke runs.
     // A release-branch push builds the Macs only, once release-gate says so, and publishes them only from release-publish.
     const release = "(github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";

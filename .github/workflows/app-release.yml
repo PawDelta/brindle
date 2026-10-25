@@ -55,7 +55,8 @@
 # Release-branch (staff) builds: a push to the release/desktop branch builds
 # the Macs only, at that commit, once `release-gate` has found it on main with
 # the newest CI and App runs for exactly that commit passed. The build carries
-# the version <package.json version>+release.<run>.<sha12>, and
+# the version <package.json version>+release.<run>.<sha12>, its updater
+# bundle signed with the staff key (app/src-tauri/staff-updater.pub), and
 # `release-publish` publishes it under brindle/downloads/desktop/release/
 # only (an immutable directory per build, then release/latest.json, which
 # only moves forward), from the `desktop-staff-release` environment. It never
@@ -295,12 +296,23 @@ jobs:
           else
             echo "::warning::APPLE_CERTIFICATE / APPLE_SIGNING_IDENTITY not set: building unsigned; nothing will be published"
           fi
-          # The updater's public key is committed (tauri.conf.json's
-          # plugins.updater.pubkey). The TAURI_UPDATER_PUBKEY variable is
-          # optional; when set it must be that same key.
-          pubkey="$(jq -r '.plugins.updater.pubkey' app/src-tauri/tauri.conf.json)"
+          # The updater's public key is committed: tauri.conf.json's
+          # plugins.updater.pubkey for a tag, and for a release-branch build
+          # app/src-tauri/staff-updater.pub, the staff key
+          # desktop-staff-release signs with, which is never the production
+          # one. The TAURI_UPDATER_PUBKEY variable is optional; when set it
+          # must be that same key.
+          production="$(jq -r '.plugins.updater.pubkey' app/src-tauri/tauri.conf.json)"
+          pubkey="$production" from="tauri.conf.json's plugins.updater.pubkey"
+          if [ -n "$RELEASE_VERSION" ]; then
+            pubkey="$(tr -d '[:space:]' < app/src-tauri/staff-updater.pub)" from="app/src-tauri/staff-updater.pub"
+            if [ -z "$pubkey" ] || [ "$pubkey" = "$production" ]; then
+              echo "::error::a release-branch build must be signed with the staff updater key, never the production one"
+              exit 1
+            fi
+          fi
           if [ -n "$TAURI_UPDATER_PUBKEY" ] && [ "$TAURI_UPDATER_PUBKEY" != "$pubkey" ]; then
-            echo "::error::the TAURI_UPDATER_PUBKEY variable differs from tauri.conf.json's plugins.updater.pubkey"
+            echo "::error::the TAURI_UPDATER_PUBKEY variable differs from $from"
             exit 1
           fi
           conf="$RUNNER_TEMP/release.conf.json"

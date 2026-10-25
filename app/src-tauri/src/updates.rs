@@ -10,7 +10,8 @@
 //! (`app_release_build_install`): the release/desktop pipeline's own
 //! `release/latest.json` there (`release_endpoint`), whose versions carry the
 //! build as `<version>+release.<run>.<sha>` (`release_build_wanted`). Nobody
-//! else's app ever reads that feed.
+//! else's app ever reads that feed. Its bundles are signed with a separate
+//! staff key (`STAFF_UPDATER_KEY`), and only that install trusts it.
 //!
 //! One check a launch, and none at all when brindle is air-gapped or the
 //! person turned them off: `"app_updates": false` or `"airgap": true` in
@@ -180,6 +181,31 @@ fn stable_endpoint<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
         .and_then(|updater| updater.pointer("/endpoints/0"))
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// The minisign public key release-branch builds are signed with, held only
+/// in the `desktop-staff-release` environment (app/README.md, "Release-branch
+/// builds"). Only the release feed's bundles are checked against it.
+const STAFF_UPDATER_KEY: &str = include_str!("../staff-updater.pub");
+
+/// The public key an install checks its bundle against in place of the
+/// configured (production) one: the staff key for the release feed
+/// (`release_feed`), none for every other update.
+fn verifier_key(release_feed: bool) -> Option<&'static str> {
+    release_feed.then(|| STAFF_UPDATER_KEY.trim())
+}
+
+/// The updater for the release feed (`release_feed`) or this build's own,
+/// checking bundles against `verifier_key`.
+fn updater_builder<R: Runtime>(
+    app: &AppHandle<R>,
+    release_feed: bool,
+) -> tauri_plugin_updater::UpdaterBuilder {
+    let builder = app.updater_builder();
+    match verifier_key(release_feed) {
+        Some(key) => builder.pubkey(key),
+        None => builder,
+    }
 }
 
 fn has_pubkey<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -455,7 +481,7 @@ async fn install_release_build<G: Future<Output = Result<(), String>>>(
 }
 
 /// The release feed through the updater plugin: the compiled stable feed's
-/// `release_endpoint`, with the built-in public key.
+/// `release_endpoint`, with the staff public key (`verifier_key`).
 struct PluginFeed<R: Runtime> {
     app: AppHandle<R>,
     update: Option<tauri_plugin_updater::Update>,
@@ -466,9 +492,7 @@ impl<R: Runtime> ReleaseFeed for PluginFeed<R> {
         let stable = stable_endpoint(&self.app).ok_or("this build names no update feed")?;
         let feed = release_endpoint(&stable).ok_or("this build's update feed has no release feed")?;
         let url = feed.parse::<tauri::Url>().map_err(|e| e.to_string())?;
-        let updater = self
-            .app
-            .updater_builder()
+        let updater = updater_builder(&self.app, true)
             .endpoints(vec![url])
             .map_err(|e| e.to_string())?
             // Every build the feed names comes back: release_build_wanted decides.
@@ -518,8 +542,7 @@ pub async fn app_release_build_install<R: Runtime>(
 /// Check this build's feed (`endpoint`) and install an update found
 /// (`newer`), answering its version.
 async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
-    let mut builder = app
-        .updater_builder()
+    let mut builder = updater_builder(app, false)
         .version_comparator(|current, release| newer(&current, &release.version));
     if let Some(stable) = stable_endpoint(app) {
         let feed = endpoint(&stable, &version(app));
@@ -619,6 +642,18 @@ mod tests {
             serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
         let stable = conf.pointer("/plugins/updater/endpoints/0").and_then(Value::as_str);
         assert_eq!(stable, Some("https://pawdelta.com/brindle/downloads/desktop/latest.json"));
+    }
+
+    #[test]
+    fn only_a_release_build_install_verifies_with_the_staff_updater_key() {
+        let conf: Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let production = conf.pointer("/plugins/updater/pubkey").and_then(Value::as_str);
+        let staff = include_str!("../staff-updater.pub").trim();
+        assert!(production.is_some_and(|key| !key.is_empty() && key != staff));
+        assert_eq!(verifier_key(true), Some(staff));
+        // Every other update keeps the production key the config builds in.
+        assert_eq!(verifier_key(false), None);
     }
 
     /// A fresh daemon as the engine answers: meta says what is armed, which

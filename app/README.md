@@ -409,7 +409,9 @@ read it yet, so the app first has the daemon load every known repo's config
 says `"airgap": false` and `GET /v1/meta` then does too. Any failed or
 unexpected answer means no check. The public key is committed
 (`plugins.updater.pubkey` in `tauri.conf.json`), so every build checks, a local
-`tauri build` too. Since `bundle.createUpdaterArtifacts` is on as well, a local
+`tauri build` too. Staff installs of a release-branch build check against a
+separate staff key instead (`src-tauri/staff-updater.pub`; see "Release-branch
+builds (staff)"). Since `bundle.createUpdaterArtifacts` is on as well, a local
 `tauri build` needs the minisign private key in `TAURI_SIGNING_PRIVATE_KEY`
 (the key file's contents, as the release secret holds it; tauri-cli 2.12 ignores
 `TAURI_SIGNING_PRIVATE_KEY_PATH` and fails with "A public key has been found,
@@ -521,8 +523,8 @@ nothing: the owner moves the `release/desktop` branch to a main commit
    Info.plist and binary (`--version`) both say that version. It writes
    `release/<run>.<attempt>-<12-hex>/` with
    `brindle_<package version>-release.<run>.<12-hex>_<arch>.dmg`, `.app.tar.gz`
-   and `.sig` (no `+` in published names), `latest.json` (Tauri's format, the
-   stable minisign key, notes naming the full commit) and `build.json` (commit,
+   and `.sig` (no `+` in published names), `latest.json` (Tauri's format,
+   signed with the staff updater key, notes naming the full commit) and `build.json` (commit,
    run, attempt, versions). Then `release_publish.mjs promote` decides whether
    `release/latest.json`, the channel's feed, moves to it: only to a strictly
    later run, of a version no lower (semver precedence), at a descendant of
@@ -534,6 +536,23 @@ nothing: the owner moves the `release/desktop` branch to a main commit
 The feed's files are public at an unlisted path, like every download; who may
 install from it is the app's decision (staff only, from Settings), not the
 bucket's. Normal users' apps never read it.
+
+**A separate updater key.** Release-branch builds are signed with their own
+minisign updater key, not the production one. Its private key and password
+are held only in `desktop-staff-release` (`TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` there); its public key is committed at
+`src-tauri/staff-updater.pub`. The `macos` job of a release-branch build
+checks its updater key against that file and fails if it is the production
+key (or if `TAURI_UPDATER_PUBKEY` names another key); a tag build still
+checks against `tauri.conf.json`. In the app, only Settings' "Install latest
+release-branch build" verifies with the staff key (`STAFF_UPDATER_KEY` in
+`src-tauri/src/updates.rs`); every other update, a staff build's own
+included, keeps the production key from `tauri.conf.json`. Installed
+production apps never trust the staff key: a bundle signed with it fails
+their update check, and their updater never reads the release feed. An app
+built before this key existed verifies release-branch builds with the
+production key, so it refuses them: install one release-branch DMG by hand
+first.
 
 **When the gate refuses.** Pushing an unchanged branch again starts no run.
 Instead, once the missing or failed checks have passed, re-run the refused
@@ -609,13 +628,14 @@ this source change creates no environments, roles, secrets or protection rules.
    Production writes are scoped to desktop downloads with an explicit deny
    on `release/*`. Neither role grants role chaining.
 4. Provision the signing secrets listed below separately in each environment.
-   Use the **existing** updater private key and its password in the staff
-   environment too, matching the public key committed in `tauri.conf.json`.
-   Do not generate or rotate an updater key for this split: installed apps
-   verify staff and production bundles with that same embedded key. A future
-   key separation needs an explicit migration that preserves installed-app
-   verification. Staff signing approval therefore still authorizes use of
-   the shared signing identity; IAM isolates feed writes, not that identity.
+   The Apple secrets are the same in both. The updater key is not: in
+   `desktop-staff-release`, `TAURI_SIGNING_PRIVATE_KEY` and its password are
+   the staff key matching `src-tauri/staff-updater.pub` (above); in
+   `desktop-release`, the production key matching `tauri.conf.json`. Never
+   put the staff key in `desktop-release` or the production key in
+   `desktop-staff-release`. Staff signing approval still authorizes use of
+   the shared Apple signing identity; IAM isolates feed writes, not that
+   identity.
 5. Verify externally that the staff subject cannot assume the production
    role, a `release/desktop` deployment to `desktop-release` is rejected,
    staff writes to stable/rc keys are denied, and staff writes to `release/`
@@ -678,8 +698,9 @@ stop it (`brindle daemon stop`) and the app starts one that can.
 What the owner sets up, once. The Apple and Tauri secrets and the
 `TAURI_UPDATER_PUBKEY` variable live in each of the two GitHub environments
 (repository settings → Environments). The signing rows below describe the
-production environment; provision the same existing signing material in
-`desktop-staff-release` as described above. `macos` selects the environment
+production environment; provision the same Apple signing material, and the
+staff updater key instead of the production one, in `desktop-staff-release`
+as described above. `macos` selects the environment
 by ref; `macos-publish` and `linux` use production, and `release-publish`
 uses staff. Both require owner approval and the exact deployment rules above.
 Downloads bucket and region variables may be repository variables (Secrets
@@ -694,9 +715,9 @@ and variables → Actions):
 | `APPLE_API_ISSUER` | secret (`desktop-release` env) | That key's issuer ID. |
 | `APPLE_API_PRIVATE_KEY` | secret (`desktop-release` env) | The key's `.p8` contents; the workflow writes it to a file and sets `APPLE_API_KEY_PATH`. |
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | secrets (`desktop-release` env) | Instead of the API key: an Apple ID, an app-specific password and the team ID. |
-| `TAURI_SIGNING_PRIVATE_KEY` | secret (`desktop-release` env) | The existing updater minisign private key matching the committed public key. Preserve it when provisioning staff signing. |
+| `TAURI_SIGNING_PRIVATE_KEY` | secret (`desktop-release` env) | The production updater minisign private key matching the committed public key. `desktop-staff-release` holds the staff key instead (matching `src-tauri/staff-updater.pub`). |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret (`desktop-release` env) | Its password, if it has one. |
-| `TAURI_UPDATER_PUBKEY` | variable (`desktop-release` env) | Optional. The matching public key is committed in `tauri.conf.json` (`plugins.updater.pubkey`); when this is set, the build fails unless it is that same key. |
+| `TAURI_UPDATER_PUBKEY` | variable (`desktop-release` env) | Optional. The matching public key is committed in `tauri.conf.json` (`plugins.updater.pubkey`); when this is set, the build fails unless it is that same key. In `desktop-staff-release` it must be `src-tauri/staff-updater.pub`'s key, never the production one. |
 | `AWS_DESKTOP_RELEASE_ROLE_ARN` | secret (`desktop-release` env) | ProductionRoleArn from the publishing stack; tags only. |
 | `AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` | secret (`desktop-staff-release` env) | StaffRoleArn from the publishing stack; release branch only, no production fallback. |
 | `DESKTOP_DOWNLOADS_BUCKET` | variable | The downloads bucket's name, from the same setup. |
