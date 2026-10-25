@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { alert, button, card, field, primary, quiet } from "../../components/ui";
 import { DaemonError, type DaemonClient, type PermissionAction, type PermissionEditorRequest, type PermissionEditorReview, type PermissionEditorRule, type PermissionEditorState } from "../../api/client";
+import type { OrgGrantPolicyDTO, OrgPermissionsDTO } from "../../api/schema";
 
 type Choice = { id: string; label: string; detail?: string; tool?: string | null };
 
@@ -154,7 +155,7 @@ function RuleEditor({ initial, inventory, busy, error, onSave, onCancel, verifyA
           </div>}
         </SearchPicker>
         <label className="flex flex-col gap-1 text-xs text-ink-3">Repository<select className={field} value={draft.repo} onChange={(event) => update("repo", event.target.value)}>{inventory.repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.label}</option>)}</select></label>
-        <div><button type="button" disabled className={button} aria-label="Roles">Everyone</button><p className="mt-1 text-xs text-ink-3">Role assignment is unavailable because the engine has no authoritative member-role inventory.</p></div>
+        <div><button type="button" disabled className={button} aria-label="Roles">Everyone</button><p className="mt-1 text-xs text-ink-3">Local rules apply to everyone. The account API does not support publishing these rules for organization roles.</p></div>
         <details open className="border-t border-line pt-s1 text-sm text-ink-2">
           <summary className="cursor-pointer">Match a command, file or URL</summary>
           <div className="mt-s2 grid gap-s2 sm:grid-cols-2">
@@ -284,6 +285,157 @@ const actionChoice = (action: PermissionAction): Choice => ({ id: action.id, lab
 const failureMessage = (failure: unknown) => failure instanceof Error ? failure.message : String(failure);
 
 export function PermissionRules({ client, repo }: { client: DaemonClient; repo: string | null }) {
+  const [organization, setOrganization] = useState(false);
+  const [orgOpened, setOrgOpened] = useState(false);
+  return <div className="space-y-s3">
+    <div className="flex gap-s1" role="group" aria-label="Permission settings">
+      <button type="button" className={button} aria-pressed={!organization} onClick={() => setOrganization(false)}>Local rules</button>
+      <button type="button" className={button} aria-pressed={organization} onClick={() => { setOrgOpened(true); setOrganization(true); }}>Organization</button>
+    </div>
+    <div hidden={organization}><LocalPermissionRules client={client} repo={repo} /></div>
+    {orgOpened && <div hidden={!organization}><OrganizationPermissions client={client} /></div>}
+  </div>;
+}
+
+type GrantDraft = Required<OrgGrantPolicyDTO>;
+const grantDraft = (grant?: OrgGrantPolicyDTO | null): GrantDraft => ({
+  allow: false, kinds: [], overridable: [], max_minutes: 60, max_uses: 20,
+  deny: [], allow_persistent: false, lifetimes: ["session", "time"], scopes: ["branch"], ...grant,
+});
+
+function GrantChoices<T extends string>({ label, choices, selected, onChange }: {
+  label: string; choices: readonly T[]; selected: T[]; onChange(values: T[]): void;
+}) {
+  return <fieldset className="space-y-s1"><legend className="text-xs font-medium text-ink-3">{label}</legend>
+    <div className="flex flex-wrap gap-s2">{choices.map((value) => <label key={value} className="flex items-center gap-1 text-sm">
+      <input type="checkbox" checked={selected.includes(value)} onChange={(event) => onChange(event.target.checked ? [...selected, value] : selected.filter((item) => item !== value))} />{value}
+    </label>)}</div>
+  </fieldset>;
+}
+
+function OrganizationPermissions({ client }: { client: DaemonClient }) {
+  const [state, setState] = useState<OrgPermissionsDTO | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pending = useRef(false);
+  const [member, setMember] = useState("");
+  const [assignment, setAssignment] = useState("");
+  const [role, setRole] = useState("");
+  const [drafts, setDrafts] = useState(() => new Map<string, GrantDraft>());
+  const [stale, setStale] = useState(false);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void client.orgPermissions().then((value) => { if (active) setState(value); })
+      .catch((failure) => { if (active) setError(failureMessage(failure)); });
+    return () => { active = false; };
+  }, [client]);
+  const run = async (work: () => Promise<void>, keepError = false) => {
+    if (pending.current) return;
+    pending.current = true; setBusy(true); setSaved(false);
+    if (!keepError) setError(null);
+    try { await work(); } catch (failure) {
+      setError(failureMessage(failure));
+      // A stale version needs a reload; an account API without the scoped
+      // save cannot take this edit at all, so stop offering it (never fall back).
+      if (failure instanceof DaemonError && (failure.status === 409 || failure.code === "scoped_save_unsupported")) setStale(true);
+    } finally { pending.current = false; setBusy(false); }
+  };
+  const reload = () => run(async () => {
+    const loaded = await client.orgPermissions();
+    if (state && JSON.stringify(loaded.identity) !== JSON.stringify(state.identity)) {
+      setStale(true);
+      throw new Error("Your account identity changed. Reopen Organization settings before editing; your current drafts have been kept here.");
+    }
+    setState(loaded); setStale(false);
+  }, true);
+  if (!state) return <section className={`${card} space-y-s2 p-s3`} aria-label="Organization permissions">
+    {error ? <><p role="alert" className={alert}>{error}</p><button className={button} disabled={busy} onClick={() => void reload()}>Load organization</button></>
+      : <p role="status" className="text-sm text-ink-3">Loading organization…</p>}
+  </section>;
+  const person = state.members.find((item) => item.sub === member);
+  const currentRole = person?.policy_role || person?.role;
+  const roleChoices = state.roles.map((item) => ({ id: item.name, label: item.name,
+    detail: `${item.builtin ? "Built-in" : "Custom"} · ${item.holders?.length ?? 0} members · ${item.permissions.join(", ") || "No administrative permissions"}` }));
+  const own = role ? (Object.hasOwn(state.policy.roles, role) ? state.policy.roles[role] : null) : state.policy.permission_grants;
+  const draft = drafts.get(role) ?? grantDraft(own ?? state.policy.permission_grants);
+  const update = <K extends keyof GrantDraft>(key: K, value: GrantDraft[K]) => {
+    setDrafts((previous) => new Map(previous).set(role, { ...draft, [key]: value })); setSaved(false);
+  };
+  const save = (inherit = false) => run(async () => {
+    // Capture even an untouched draft so a conflict never resets the form.
+    setDrafts((previous) => new Map(previous).set(role, draft));
+    const policy = await client.saveOrgApprovalPolicy({ org_id: state.identity.org_id, actor_sub: state.identity.sub,
+      if_version: state.policy.version, role: role || null, permission_grants: inherit ? null : draft });
+    setState({ ...state, policy });
+    setDrafts((previous) => { const next = new Map(previous); next.delete(role); return next; });
+    setSaved(true);
+  });
+  const locked = busy || stale || !state.can_edit_policy || (!!role && !state.roles.some((item) => item.name === role));
+  return <section className="space-y-s3" aria-label="Organization permissions">
+    <div className={`${card} space-y-s2 p-s3`}>
+      <h2 className="text-base font-semibold">Organization members and roles</h2>
+      <p className="break-all text-xs text-ink-3">{state.identity.org_id} · {state.identity.sub} · {state.identity.policy_role || state.identity.role}</p>
+      {state.inventory_error ? <p role="status" className="text-sm text-ink-3">Member and role inventory unavailable: {state.inventory_error}. Base approval limits remain available; the account checks control permission when you save.</p> : <>
+      <fieldset disabled={busy} className="grid min-w-0 gap-s2 sm:grid-cols-2">
+        <SearchPicker label="Members" choices={state.members.map((item) => ({ id: item.sub, label: item.email || item.sub,
+          detail: `${item.sub} · ${item.policy_role || item.role}` }))} selected={member ? [member] : []} onSelect={(sub) => {
+          setMember(sub); const target = state.members.find((item) => item.sub === sub);
+          setAssignment(target?.policy_role || target?.role || "");
+        }} />
+        <SearchPicker label="Assignment roles" choices={roleChoices} selected={assignment ? [assignment] : []} onSelect={setAssignment} />
+      </fieldset>
+      <button type="button" className={primary} disabled={busy || !person || !assignment || assignment === currentRole} onClick={() => void run(async () => {
+        await client.assignOrgRole({ org_id: state.identity.org_id, actor_sub: state.identity.sub, sub: member, role: assignment });
+        const loaded = await client.orgPermissions();
+        // Assigning the signed-in person may change their authority. Keep any
+        // draft visible, but require a new editor with the new identity.
+        if (JSON.stringify(loaded.identity) !== JSON.stringify(state.identity)) { setStale(true); return; }
+        setState((previous) => previous ? { ...previous, roles: loaded.roles, members: loaded.members,
+          inventory_error: loaded.inventory_error,
+          can_edit_policy: loaded.can_edit_policy, policy_readonly_reason: loaded.policy_readonly_reason } : previous);
+      })}>Assign role</button>
+      <p className="text-xs text-ink-3">Assignment replaces the member’s current role. The account checks your permissions and protects the last owner.</p>
+      </>}
+    </div>
+    <form className={`${card} space-y-s2 p-s3`} aria-label="Organization approval limits" onSubmit={(event) => { event.preventDefault(); if (!locked) void save(); }}>
+      <h2 className="text-base font-semibold">Approval limits</h2>
+      <p className="text-xs text-ink-3">Policy version {state.policy.version}. A role override replaces the entire approval-limit block, including denied targets. Independent protected hard denies still apply.</p>
+      <fieldset disabled={busy}>
+        <SearchPicker label="Approval roles" choices={[{ id: "", label: "Organization default" }, ...roleChoices]} selected={[role]} onSelect={(value) => { setRole(value); setSaved(false); }} />
+      </fieldset>
+      {role && !own && <p className="text-xs text-ink-3">This role inherits limits. The draft starts from the organization default. Custom roles also inherit their built-in role’s limits when no custom override is set.</p>}
+      {state.policy_readonly_reason && <p className="text-sm text-ink-3">{state.policy_readonly_reason}</p>}
+      <details className="text-xs text-ink-3"><summary className="cursor-pointer">Current saved limits for comparison</summary>
+        <pre className="mt-s1 overflow-auto whitespace-pre-wrap">{own ? JSON.stringify(own, null, 2) : role ? "Inherited" : "No saved approvals permitted"}</pre>
+      </details>
+      <fieldset disabled={busy || !state.can_edit_policy} className="min-w-0 space-y-s2">
+        <label className="flex items-center gap-s1 text-sm"><input type="checkbox" checked={draft.allow} onChange={(event) => update("allow", event.target.checked)} />Allow members to save approvals</label>
+        <GrantChoices label="Tool kinds" choices={["read", "write", "edit", "bash", "fetch", "mcp", "other"] as const} selected={draft.kinds} onChange={(values) => update("kinds", values)} />
+        <GrantChoices label="Actions members may approve" choices={["git-push", "env"] as const} selected={draft.overridable} onChange={(values) => update("overridable", values)} />
+        <GrantChoices label="Allowed scopes" choices={["branch", "remote", "repo", "all"] as const} selected={draft.scopes} onChange={(values) => update("scopes", values)} />
+        <GrantChoices label="Allowed lifetimes" choices={["session", "time", "forever"] as const} selected={draft.lifetimes} onChange={(values) => update("lifetimes", values)} />
+        <label className="flex items-center gap-s1 text-sm"><input type="checkbox" checked={draft.allow_persistent} onChange={(event) => update("allow_persistent", event.target.checked)} />Allow approvals to persist across restarts</label>
+        <div className="grid gap-s2 sm:grid-cols-2">
+          <label className="flex flex-col gap-1 text-xs text-ink-3">Maximum minutes<input type="number" required min={1} max={1440} className={field} value={draft.max_minutes} onChange={(event) => update("max_minutes", Number(event.target.value))} /></label>
+          <label className="flex flex-col gap-1 text-xs text-ink-3">Maximum uses<input type="number" required min={1} max={1000} className={field} value={draft.max_uses} onChange={(event) => update("max_uses", Number(event.target.value))} /></label>
+        </div>
+        <label className="flex flex-col gap-1 text-xs text-ink-3">Denied targets<textarea className={`${field} font-mono`} rows={4} value={draft.deny.join("\n")} onChange={(event) => update("deny", event.target.value ? event.target.value.split("\n") : [])} /></label>
+        <p className="text-xs text-ink-3">One target per line: tool kind, exact/prefix/glob, then the target. Example: bash prefix rm . Empty allowlists permit none.</p>
+      </fieldset>
+      <div className="flex flex-wrap gap-s1">
+        <button type="submit" className={primary} disabled={locked}>Save approval limits</button>
+        {role && <button type="button" className={button} disabled={locked} onClick={() => void save(true)}>Use inherited limits</button>}
+        <button type="button" className={button} disabled={busy} onClick={() => void reload()}>Reload policy and keep drafts</button>
+      </div>
+      {saved && <p role="status" className="text-sm text-pass">Approval limits saved.</p>}
+    </form>
+    {error && <p role="alert" className={alert}>{error}</p>}
+    <p className="text-xs text-ink-3">Organization approval limits govern which approvals members can save. Publishing generic per-tool rules for organization roles is not supported by the account API.</p>
+  </section>;
+}
+
+function LocalPermissionRules({ client, repo }: { client: DaemonClient; repo: string | null }) {
   const [state, setState] = useState<PermissionEditorState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

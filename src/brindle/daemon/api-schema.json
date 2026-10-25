@@ -1289,6 +1289,922 @@
       "title": "NativeSubagentDTO",
       "type": "object"
     },
+    "OrgApprovalPolicyDTO": {
+      "$defs": {
+        "OrgGrantPolicyDTO": {
+          "additionalProperties": false,
+          "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+          "properties": {
+            "allow": {
+              "title": "Allow",
+              "type": "boolean"
+            },
+            "allow_persistent": {
+              "default": false,
+              "title": "Allow Persistent",
+              "type": "boolean"
+            },
+            "deny": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Deny",
+              "type": "array"
+            },
+            "kinds": {
+              "items": {
+                "enum": [
+                  "read",
+                  "write",
+                  "edit",
+                  "bash",
+                  "fetch",
+                  "mcp",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "title": "Kinds",
+              "type": "array"
+            },
+            "lifetimes": {
+              "default": [
+                "session",
+                "time"
+              ],
+              "items": {
+                "enum": [
+                  "session",
+                  "time",
+                  "forever"
+                ],
+                "type": "string"
+              },
+              "title": "Lifetimes",
+              "type": "array"
+            },
+            "max_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "title": "Max Minutes",
+              "type": "integer"
+            },
+            "max_uses": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Max Uses",
+              "type": "integer"
+            },
+            "overridable": {
+              "items": {
+                "enum": [
+                  "git-push",
+                  "env"
+                ],
+                "type": "string"
+              },
+              "title": "Overridable",
+              "type": "array"
+            },
+            "scopes": {
+              "default": [
+                "branch"
+              ],
+              "items": {
+                "enum": [
+                  "branch",
+                  "remote",
+                  "repo",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "allow",
+            "kinds",
+            "overridable",
+            "max_minutes",
+            "max_uses"
+          ],
+          "title": "OrgGrantPolicyDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "permission_grants": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgGrantPolicyDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "roles": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OrgGrantPolicyDTO"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Roles",
+          "type": "object"
+        },
+        "version": {
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "permission_grants",
+        "roles"
+      ],
+      "title": "OrgApprovalPolicyDTO",
+      "type": "object"
+    },
+    "OrgAssignmentDTO": {
+      "properties": {
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "org_id",
+        "sub",
+        "role"
+      ],
+      "title": "OrgAssignmentDTO",
+      "type": "object"
+    },
+    "OrgAssignmentRequestDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_sub": {
+          "title": "Actor Sub",
+          "type": "string"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "role": {
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+          "title": "Role",
+          "type": "string"
+        },
+        "sub": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "org_id",
+        "actor_sub",
+        "sub",
+        "role"
+      ],
+      "title": "OrgAssignmentRequestDTO",
+      "type": "object"
+    },
+    "OrgGrantPolicyDTO": {
+      "additionalProperties": false,
+      "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+      "properties": {
+        "allow": {
+          "title": "Allow",
+          "type": "boolean"
+        },
+        "allow_persistent": {
+          "default": false,
+          "title": "Allow Persistent",
+          "type": "boolean"
+        },
+        "deny": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Deny",
+          "type": "array"
+        },
+        "kinds": {
+          "items": {
+            "enum": [
+              "read",
+              "write",
+              "edit",
+              "bash",
+              "fetch",
+              "mcp",
+              "other"
+            ],
+            "type": "string"
+          },
+          "title": "Kinds",
+          "type": "array"
+        },
+        "lifetimes": {
+          "default": [
+            "session",
+            "time"
+          ],
+          "items": {
+            "enum": [
+              "session",
+              "time",
+              "forever"
+            ],
+            "type": "string"
+          },
+          "title": "Lifetimes",
+          "type": "array"
+        },
+        "max_minutes": {
+          "maximum": 1440,
+          "minimum": 1,
+          "title": "Max Minutes",
+          "type": "integer"
+        },
+        "max_uses": {
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Uses",
+          "type": "integer"
+        },
+        "overridable": {
+          "items": {
+            "enum": [
+              "git-push",
+              "env"
+            ],
+            "type": "string"
+          },
+          "title": "Overridable",
+          "type": "array"
+        },
+        "scopes": {
+          "default": [
+            "branch"
+          ],
+          "items": {
+            "enum": [
+              "branch",
+              "remote",
+              "repo",
+              "all"
+            ],
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allow",
+        "kinds",
+        "overridable",
+        "max_minutes",
+        "max_uses"
+      ],
+      "title": "OrgGrantPolicyDTO",
+      "type": "object"
+    },
+    "OrgIdentityDTO": {
+      "properties": {
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "policy_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Policy Role"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Role"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub",
+        "org_id",
+        "role",
+        "policy_role"
+      ],
+      "title": "OrgIdentityDTO",
+      "type": "object"
+    },
+    "OrgMemberDTO": {
+      "properties": {
+        "email": {
+          "title": "Email",
+          "type": "string"
+        },
+        "policy_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy Role"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub",
+        "email",
+        "role"
+      ],
+      "title": "OrgMemberDTO",
+      "type": "object"
+    },
+    "OrgPermissionsDTO": {
+      "$defs": {
+        "OrgApprovalPolicyDTO": {
+          "properties": {
+            "permission_grants": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OrgGrantPolicyDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "roles": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OrgGrantPolicyDTO"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "title": "Roles",
+              "type": "object"
+            },
+            "version": {
+              "title": "Version",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version",
+            "permission_grants",
+            "roles"
+          ],
+          "title": "OrgApprovalPolicyDTO",
+          "type": "object"
+        },
+        "OrgGrantPolicyDTO": {
+          "additionalProperties": false,
+          "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+          "properties": {
+            "allow": {
+              "title": "Allow",
+              "type": "boolean"
+            },
+            "allow_persistent": {
+              "default": false,
+              "title": "Allow Persistent",
+              "type": "boolean"
+            },
+            "deny": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Deny",
+              "type": "array"
+            },
+            "kinds": {
+              "items": {
+                "enum": [
+                  "read",
+                  "write",
+                  "edit",
+                  "bash",
+                  "fetch",
+                  "mcp",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "title": "Kinds",
+              "type": "array"
+            },
+            "lifetimes": {
+              "default": [
+                "session",
+                "time"
+              ],
+              "items": {
+                "enum": [
+                  "session",
+                  "time",
+                  "forever"
+                ],
+                "type": "string"
+              },
+              "title": "Lifetimes",
+              "type": "array"
+            },
+            "max_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "title": "Max Minutes",
+              "type": "integer"
+            },
+            "max_uses": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Max Uses",
+              "type": "integer"
+            },
+            "overridable": {
+              "items": {
+                "enum": [
+                  "git-push",
+                  "env"
+                ],
+                "type": "string"
+              },
+              "title": "Overridable",
+              "type": "array"
+            },
+            "scopes": {
+              "default": [
+                "branch"
+              ],
+              "items": {
+                "enum": [
+                  "branch",
+                  "remote",
+                  "repo",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "allow",
+            "kinds",
+            "overridable",
+            "max_minutes",
+            "max_uses"
+          ],
+          "title": "OrgGrantPolicyDTO",
+          "type": "object"
+        },
+        "OrgIdentityDTO": {
+          "properties": {
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "policy_role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Policy Role"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Role"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub",
+            "org_id",
+            "role",
+            "policy_role"
+          ],
+          "title": "OrgIdentityDTO",
+          "type": "object"
+        },
+        "OrgMemberDTO": {
+          "properties": {
+            "email": {
+              "title": "Email",
+              "type": "string"
+            },
+            "policy_role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Policy Role"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub",
+            "email",
+            "role"
+          ],
+          "title": "OrgMemberDTO",
+          "type": "object"
+        },
+        "OrgRoleDTO": {
+          "properties": {
+            "builtin": {
+              "title": "Builtin",
+              "type": "boolean"
+            },
+            "holders": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Holders",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "okta_group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Okta Group"
+            },
+            "permissions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Permissions",
+              "type": "array"
+            },
+            "team_weight": {
+              "default": 1,
+              "title": "Team Weight",
+              "type": "number"
+            }
+          },
+          "required": [
+            "name",
+            "builtin",
+            "permissions"
+          ],
+          "title": "OrgRoleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "can_edit_policy": {
+          "title": "Can Edit Policy",
+          "type": "boolean"
+        },
+        "identity": {
+          "$ref": "#/$defs/OrgIdentityDTO"
+        },
+        "inventory_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inventory Error"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/OrgMemberDTO"
+          },
+          "title": "Members",
+          "type": "array"
+        },
+        "policy": {
+          "$ref": "#/$defs/OrgApprovalPolicyDTO"
+        },
+        "policy_readonly_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Policy Readonly Reason"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/OrgRoleDTO"
+          },
+          "title": "Roles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "roles",
+        "members",
+        "policy",
+        "can_edit_policy",
+        "policy_readonly_reason"
+      ],
+      "title": "OrgPermissionsDTO",
+      "type": "object"
+    },
+    "OrgPolicyRequestDTO": {
+      "$defs": {
+        "OrgGrantPolicyDTO": {
+          "additionalProperties": false,
+          "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+          "properties": {
+            "allow": {
+              "title": "Allow",
+              "type": "boolean"
+            },
+            "allow_persistent": {
+              "default": false,
+              "title": "Allow Persistent",
+              "type": "boolean"
+            },
+            "deny": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Deny",
+              "type": "array"
+            },
+            "kinds": {
+              "items": {
+                "enum": [
+                  "read",
+                  "write",
+                  "edit",
+                  "bash",
+                  "fetch",
+                  "mcp",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "title": "Kinds",
+              "type": "array"
+            },
+            "lifetimes": {
+              "default": [
+                "session",
+                "time"
+              ],
+              "items": {
+                "enum": [
+                  "session",
+                  "time",
+                  "forever"
+                ],
+                "type": "string"
+              },
+              "title": "Lifetimes",
+              "type": "array"
+            },
+            "max_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "title": "Max Minutes",
+              "type": "integer"
+            },
+            "max_uses": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Max Uses",
+              "type": "integer"
+            },
+            "overridable": {
+              "items": {
+                "enum": [
+                  "git-push",
+                  "env"
+                ],
+                "type": "string"
+              },
+              "title": "Overridable",
+              "type": "array"
+            },
+            "scopes": {
+              "default": [
+                "branch"
+              ],
+              "items": {
+                "enum": [
+                  "branch",
+                  "remote",
+                  "repo",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "allow",
+            "kinds",
+            "overridable",
+            "max_minutes",
+            "max_uses"
+          ],
+          "title": "OrgGrantPolicyDTO",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "actor_sub": {
+          "title": "Actor Sub",
+          "type": "string"
+        },
+        "if_version": {
+          "minimum": 0,
+          "title": "If Version",
+          "type": "integer"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "permission_grants": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgGrantPolicyDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Role"
+        }
+      },
+      "required": [
+        "org_id",
+        "actor_sub",
+        "if_version",
+        "role",
+        "permission_grants"
+      ],
+      "title": "OrgPolicyRequestDTO",
+      "type": "object"
+    },
+    "OrgRoleDTO": {
+      "properties": {
+        "builtin": {
+          "title": "Builtin",
+          "type": "boolean"
+        },
+        "holders": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Holders",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "okta_group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Okta Group"
+        },
+        "permissions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Permissions",
+          "type": "array"
+        },
+        "team_weight": {
+          "default": 1,
+          "title": "Team Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "builtin",
+        "permissions"
+      ],
+      "title": "OrgRoleDTO",
+      "type": "object"
+    },
     "PermissionActionDTO": {
       "properties": {
         "id": {
@@ -4767,6 +5683,18 @@
     {
       "method": "GET",
       "path": "/v1/meta"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/org-permissions"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/org-permissions/policy"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/org-permissions/role-assignment"
     },
     {
       "method": "GET",

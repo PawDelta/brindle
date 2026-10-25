@@ -11,6 +11,11 @@ import type {
   GoalDTO,
   GrantDTO,
   InboxItemDTO,
+  OrgApprovalPolicyDTO,
+  OrgAssignmentDTO,
+  OrgAssignmentRequestDTO,
+  OrgPermissionsDTO,
+  OrgPolicyRequestDTO,
   PermissionActionDTO,
   PermissionChangeDTO,
   PermissionConflictDTO,
@@ -1026,6 +1031,18 @@ export class DaemonClient {
 
   permissionEditor(repo: string) {
     return this.get<PermissionEditorState>("/permission-editor", { repo });
+  }
+
+  orgPermissions() {
+    return this.get<OrgPermissionsDTO>("/org-permissions");
+  }
+
+  assignOrgRole(body: OrgAssignmentRequestDTO) {
+    return this.put<OrgAssignmentDTO>("/org-permissions/role-assignment", body);
+  }
+
+  saveOrgApprovalPolicy(body: OrgPolicyRequestDTO) {
+    return this.put<OrgApprovalPolicyDTO>("/org-permissions/policy", body);
   }
 
   reviewPermissionRule(body: PermissionEditorRequest) {
