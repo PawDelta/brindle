@@ -342,8 +342,12 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
     if action == "permission":
         # The person's answer to a's permission request (agent callers never get here).
+        if set(body) - {"request", "digest", "choice", "minutes", "scope"}:
+            raise ServiceError("invalid", "unsupported permission approval fields")
+        minutes = _get(body, "minutes", int, required="minutes" in body)
         return inbox.answer_permission(db, a.id, _get(body, "request"), _get(body, "digest"),
-                                       _get(body, "choice", required=True))
+                                       _get(body, "choice", required=True), minutes,
+                                       _get(body, "scope"))
     if action == "review":
         return review_workspace(db, {"id": a.workspace_id}, body)
     if action == "merge":
@@ -1280,6 +1284,30 @@ def change_permissions(db: DB, params: dict, body: Body) -> Any:
     return reply
 
 
+def revoke_grant(db: DB, params: dict, body: Body) -> Any:
+    """End the person's permission grant ``id`` now (brindle.daemon.grants)."""
+    from brindle import history
+    from brindle.daemon.grants import GRANTS
+
+    from brindle import permission_grants
+    if params["id"].startswith("remembered-"):
+        remembered = permission_grants.forget_remembered(params["id"])
+        if remembered is not None:
+            history.record_safely(db, remembered["repo_root"], "permission",
+                                  task=remembered["match"], result=f"permission preference {params['id']} revoked by the person")
+            return {"revoked": params["id"]}
+
+    grant = GRANTS.revoke(params["id"])
+    if grant is None:
+        raise ServiceError("not_found", f"no live grant {params['id']}", 404)
+    agent = db.get_agent(grant.agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if agent is not None and ws is not None:
+        history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
+                              task=f"{grant.kind}: {grant.match}", result=f"grant {grant.id} revoked by the person")
+    return {"revoked": grant.id}
+
+
 # -- account ---------------------------------------------------------------------
 
 
@@ -1708,6 +1736,7 @@ ROUTES = [
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
     _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
+    _post("/grants/{id}/revoke", revoke_grant),
     _post("/agents/{id}/message", message_agent),
     _post("/agents/{id}/close", close_agent),
     _post("/agents/{id}/kill", kill_agent),

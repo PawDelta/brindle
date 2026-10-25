@@ -414,7 +414,13 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     if cfg.permission_policy != "on" and not strict:
         return output(None)
     req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root)
-    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    from brindle import permission_grants
+
+    # Non-strict agy ignores a hook's allow. Strict mode gates execution,
+    # so it can honor the person's grants after checking current restrictions.
+    lim = permission_grants.limits(ws.repo_root)
+    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root),
+             *lim.deny]
     escalate = False
     if strict:
         # What a Claude Code worker on this profile runs without asking
@@ -451,6 +457,10 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             out = {"decision": "deny", "reason": f"brindle: {ambiguous}, so it can't be checked; "
                                                  "use one absolute path inside your worktree"}
         else:
+            if req is not None and not ambiguous:
+                # Never spend a grant before rejecting ambiguous file targets.
+                decision = permission_grants.use_grant(agent.id, req, decision, lim)
+                decision = permission_grants.lift(agent.id, req, decision, rules, cfg.checks, lim)
             # agy keeps what it tells the model about brindle's MCP server
             # (its instructions and tools) and its built-in skills here:
             # readable, never writable. Other servers' folders are not.

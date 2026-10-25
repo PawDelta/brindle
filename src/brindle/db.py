@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS inbox (
     created_at REAL NOT NULL,
     delivered_at REAL,
     held INTEGER,                  -- 1: a pull-mode message, read with read_messages instead of being delivered
-    noticed_at REAL                -- when a "new messages" notice covering it went out
+    noticed_at REAL,               -- when a "new messages" notice covering it went out
+    supervisor_context INTEGER    -- authenticated before a handover changed the recipient's ancestry
 );
 -- Autopilot: one row per session (keyed by its supervisor) that has it on.
 CREATE TABLE IF NOT EXISTS autopilot (
@@ -983,7 +984,8 @@ class DB:
         if "transcript_path" not in mark_cols:
             self.conn.execute("ALTER TABLE history_usage_mark ADD COLUMN transcript_path TEXT")
         inbox_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(inbox)")}
-        for col, kind in (("held", "INTEGER"), ("noticed_at", "REAL")):
+        for col, kind in (("held", "INTEGER"), ("noticed_at", "REAL"),
+                          ("supervisor_context", "INTEGER")):
             if col not in inbox_cols:
                 self.conn.execute(f"ALTER TABLE inbox ADD COLUMN {col} {kind}")
         tables = {r["name"] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -1497,6 +1499,24 @@ class DB:
             "SELECT * FROM inbox WHERE id=? AND agent_id=?", (message_id, agent_id)
         ).fetchone()
         return _load(Message, row) if row else None
+
+    def review_messages(self, agent_id: str, supervisor_ids: list[str]) -> list[Message]:
+        """This worker's current and authenticated former supervisor updates.
+
+        Include delivered and queued updates; delivery notices carry no spec.
+        Handover marks only existing messages from the departing supervisor
+        to its descendants, retaining their original sender and recipient.
+        An empty current ancestry still admits those marked rows, never an
+        unrelated sender's messages or later messages from a former supervisor.
+        """
+        placeholders = ",".join("?" for _ in supervisor_ids) or "NULL"
+        rows = self.conn.execute(
+            "SELECT * FROM inbox WHERE agent_id=? "
+            f"AND (supervisor_context=1 OR sender_id IN ({placeholders})) "
+            "AND (held=1 OR noticed_at IS NULL) ORDER BY id",
+            (agent_id, *supervisor_ids),
+        )
+        return [_load(Message, row) for row in rows]
 
     def unread(self, agent_id: str) -> list[Message]:
         rows = self.conn.execute(

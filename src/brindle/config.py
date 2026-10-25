@@ -122,6 +122,7 @@ class RepoConfig:
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
+    review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
     review_rounds: int = 2             # fix-and-re-review rounds the pipeline runs before asking the supervisor
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
@@ -343,7 +344,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
-                "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
+                "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "agy_approvals",

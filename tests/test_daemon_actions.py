@@ -1231,6 +1231,12 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert (shown.via, shown.choices, bool(shown.terminal)) == ("prompt", [], True)    # "Go to it"
     code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_once"})
     assert code == 409 and pressed == [], reply
+    for fields in ({"lifetime": "session"}, {"minutes": True}, {"minutes": 0}, {"minutes": None},
+                   {"choice": "deny", "minutes": 5}):
+        code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_for", **fields})
+        assert code == 400 and pressed == [], reply
+    code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_for", "scope": "repo"})
+    assert code == 409 and pressed == [], reply
 
 
 @pytest.fixture
@@ -1254,6 +1260,7 @@ def _commit(path, name: str, text: str, message: str = "work") -> str:
 
 
 def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
+    from brindle import gates
     from brindle.daemon import session_review
     from brindle.db import Task
 
@@ -1283,6 +1290,8 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
                                None, "brindle-f", time.time()))
     db.add_agent(Agent("wf", "proj/w-f", "developer", "claude", "lead", "assign", "idle", "%6", "done", time.time()))
     db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
+    real_head = gates.head
+    monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
     assert missing() == 5 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)

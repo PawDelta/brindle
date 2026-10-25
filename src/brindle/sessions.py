@@ -175,6 +175,18 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
             pilot.remove_goals_file(db, old_root_id)  # active work lives in the new session's file
         pilot.sync_goals_file(db, new.id)
     with db.tx() as c:
+        # Preserve only messages this supervisor sent while it still owned
+        # these descendants. A sender-wide alias would also trust unrelated
+        # messages it sends after handover, or messages to workers it never
+        # supervised. Keep the original attribution and chronological order.
+        c.execute(
+            "WITH RECURSIVE descendants(id) AS ("
+            "SELECT id FROM agents WHERE parent_id=? UNION "
+            "SELECT a.id FROM agents a JOIN descendants d ON a.parent_id=d.id) "
+            "UPDATE inbox SET supervisor_context=1 WHERE sender_id=? "
+            "AND agent_id IN (SELECT id FROM descendants)",
+            (old_root_id, old_root_id),
+        )
         c.execute("UPDATE agents SET parent_id=? WHERE parent_id=?", (new.id, old_root_id))
         # A queued task for the session's own repo is cut from the new
         # supervisor's checkout; one for an attached repo keeps its own.

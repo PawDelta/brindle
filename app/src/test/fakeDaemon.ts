@@ -9,6 +9,7 @@
    has exited. */
 
 import { DaemonClient } from "../api/client";
+import type { PermissionEditorRequest, PermissionEditorReview, PermissionEditorRule, PermissionEditorState } from "../api/client";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
 import { WS_UNAUTHORIZED } from "../api/events";
 import type { PtyStatus, PtyViewHandlers, PtyViewOpener, PtyViews, PtyViewTarget } from "../api/ptyView";
@@ -17,6 +18,7 @@ import type {
   AgentDTO,
   DecisionDTO,
   GoalDTO,
+  GrantDTO,
   InboxItemDTO,
   ProfileDTO,
   RoutingDTO,
@@ -42,6 +44,8 @@ export interface DaemonData {
   sessions: SessionDTO[];
   workspaces: WorkspaceDTO[];
   inbox: InboxItemDTO[];
+  /* GET /grants: the live permission grants (brindle.daemon.grants); POST /grants/{id}/revoke ends one. */
+  grants: GrantDTO[];
   goal: GoalDTO | null;
   decisions: DecisionDTO[];
   profiles: ProfileDTO[];
@@ -592,6 +596,22 @@ export class FakeDaemon {
   private pendingLogins: Array<{ job: string; finish(): void }> = [];
   /* The rules POST /permissions added (allow, deny, accept), by id. */
   readonly permissionRules: PermissionRule[] = [];
+  permissionEditor: PermissionEditorState = {
+    revision: "editor-1", rules: [],
+    catalog: [
+      { id: "bash", kind: "bash", name: "Run commands", tool: null, source: "builtin" },
+      { id: "read", kind: "read", name: "Read files", tool: null, source: "builtin" },
+      { id: "edit", kind: "edit", name: "Edit files", tool: null, source: "builtin" },
+    ],
+    presets: [], limitations: [],
+    restrictions: { editable: true, managed: false, reason: "", org_id: null, policy_version: null, permission_grants: null,
+      protected_paths: [], permission_policy: "strict", roles_supported: false, repo_supported: true, expiry_supported: true, checks: [] },
+  };
+  /* Engine review fixtures can describe scope relationships which belong to
+     the Python engine. The fake persists exactly the reviewed proposal. */
+  readonly permissionReviews: PermissionEditorReview[] = [];
+  private permissionProposal: { request: PermissionEditorRequest; review: PermissionEditorReview } | null = null;
+  private permissionSequence = 1;
   /* The orgs POST /account/switch-org was asked for, in order. */
   readonly orgSwitches: string[] = [];
   /* The views the app's tmux client opened on panes (ptyViews()), in order, and what tmux copied onto the app's clipboard. */
@@ -661,6 +681,7 @@ export class FakeDaemon {
       routingByRepo: {},
       routingPolicy: null,
       learned: {},
+      grants: [],
       rulePacks: [],
       actionScreens: {},
       kbSources: [],
@@ -1396,6 +1417,39 @@ export class FakeDaemon {
     return error("invalid", "op must be allow, deny, forget, accept or reset", 400);
   }
 
+  private editPermissionRules(body: PermissionEditorRequest & { proposal?: string }, save: boolean): Response {
+    const state = this.permissionEditor;
+    if (!state.restrictions.editable) return error("forbidden", state.restrictions.reason, 403);
+    if (body.revision !== state.revision) return error("stale", "Permission rules changed; review again.", 409);
+    if (save) {
+      const proposal = this.permissionProposal;
+      const { proposal: digest, ...request } = body;
+      if (!proposal || digest !== proposal.review.proposal || JSON.stringify(request) !== JSON.stringify(proposal.request)) return error("stale", "Proposal changed; review again.", 409);
+      if (!proposal.review.can_save) return error("conflict", "Unresolved permission conflict.", 409);
+      this.permissionEditor = { ...state, rules: structuredClone(proposal.review.rules), revision: `editor-${++this.permissionSequence}` };
+      this.permissionProposal = null;
+      return json({ revision: this.permissionEditor.revision, rules: this.permissionEditor.rules, changes: proposal.review.changes, restrictions: state.restrictions, limitations: state.limitations });
+    }
+    const existing = state.rules.find((rule) => rule.id === body.id);
+    const sameTarget = existing && existing.kind === body.rule?.kind && existing.match === body.rule.match && existing.match_type === body.rule.match_type;
+    if (body.operation === "upsert" && body.rule?.kind === "mcp" && !sameTarget && (body.rule.match_type !== "exact" || !state.catalog.some((action) => action.tool === body.rule?.match))) return error("invalid", "Choose an exact tool from the available MCP inventory.", 400);
+    let review = this.permissionReviews.shift();
+    if (!review) {
+      const before = state.rules.find((rule) => rule.id === body.id) ?? null;
+      if (body.id && (!before || !before.editable || before.protected)) return error("forbidden", "This rule cannot be edited.", 403);
+      const after: PermissionEditorRule | null = body.operation === "remove" ? null : {
+        id: before?.id ?? `rule-${++this.permissionSequence}`, kind: "bash", match: "", match_type: "exact", decision: "ask", repo_root: null,
+        expires_at: null, exclusions: [], source: "user", created: 1, editable: true, protected: false, ...body.rule,
+      };
+      const rules = state.rules.filter((rule) => rule.id !== before?.id);
+      if (after) rules.push(after);
+      review = { revision: state.revision, proposal: `proposal-${++this.permissionSequence}`, rules, conflicts: [], unresolved: [], can_save: true,
+        changes: [{ type: after ? before ? "updated" : "added" : "removed", id: (after ?? before)!.id, before, after }] };
+    }
+    this.permissionProposal = { request: structuredClone(body), review: structuredClone(review) };
+    return json(review);
+  }
+
   /* routes_actions.account_login: a job; its progress carries the authorize
      URL (the app opens it), or the device code's lines; job.done once the
      tokens are stored. */
@@ -1821,6 +1875,13 @@ export class FakeDaemon {
     if (auth !== `Bearer ${this.token}`) {
       return error("unauthorized", "missing or wrong token (see ~/.brindle/daemon.json)", 401);
     }
+    if (method === "GET" && path === "/permission-editor") return json(this.permissionEditor);
+    if (method === "POST" && path === "/permission-editor/verify") {
+      const tool = (body as { tool?: string }).tool;
+      const action = this.permissionEditor.catalog.find((item) => item.tool === tool) ?? null;
+      return json({ verified: action !== null, action });
+    }
+    if (method === "POST" && (path === "/permission-editor/review" || path === "/permission-editor/save")) return this.editPermissionRules(body as PermissionEditorRequest, path.endsWith("/save"));
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
     if (method === "PUT" || method === "DELETE") {
       const sessionFile = path.match(/^\/sessions\/([^/]+)\/file$/);
@@ -1859,6 +1920,12 @@ export class FakeDaemon {
       if (path === "/kb/sources") return this.addKbSource(repo, fields);
       if ((m = path.match(/^\/kb\/sources\/([^/]+)\/sync$/))) return this.syncKbSource(repo, m[1]);
       if (path === "/permissions") return this.changePermissions(fields);
+      if ((m = path.match(/^\/grants\/([^/]+)\/revoke$/))) {
+        const id = decodeURIComponent(m[1]);
+        if (!d.grants.some((g) => g.id === id)) return error("not_found", `no live grant ${id}`, 404);
+        d.grants = d.grants.filter((g) => g.id !== id);
+        return json({ revoked: id });
+      }
       if (path === "/debug/log") {
         // Dropped, as the engine drops them, while logging is off.
         if (d.debug.staff && d.debug.enabled) d.debugLog.push(fields as unknown as DebugEntry);
@@ -2001,6 +2068,7 @@ export class FakeDaemon {
       // routes_read.read_file: {path, content, base}, base being the blob sha the PUT takes.
       return json({ path: query.path, content, base: fakeBlob(content) });
     }
+    if (path === "/grants") return json(d.grants);
     if (path === "/providers/installed") {
       if (this.failNextDetects > 0) {
         this.failNextDetects--;

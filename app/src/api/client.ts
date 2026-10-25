@@ -9,7 +9,21 @@ import type {
   AgentDTO,
   DecisionDTO,
   GoalDTO,
+  GrantDTO,
   InboxItemDTO,
+  OrgApprovalPolicyDTO,
+  OrgAssignmentDTO,
+  OrgAssignmentRequestDTO,
+  OrgPermissionsDTO,
+  OrgPolicyRequestDTO,
+  PermissionActionDTO,
+  PermissionChangeDTO,
+  PermissionConflictDTO,
+  PermissionEditorDTO,
+  PermissionReviewDTO,
+  PermissionRuleDTO,
+  PermissionSaveDTO,
+  PermissionVerifyDTO,
   PreflightItemDTO,
   ProfileDTO,
   RoutingDTO,
@@ -494,6 +508,25 @@ export type PermissionChange =
   | { op: "reset" };
 
 export type PermissionChanged = { rule: string; describe: string } | { reset: true };
+
+/* The permission editor reviews a draft against the engine's current policy.
+   Save repeats that review and verifies its proposal digest atomically. */
+export type PermissionEditorRule = PermissionRuleDTO;
+export type PermissionAction = PermissionActionDTO;
+export type PermissionEditorState = PermissionEditorDTO;
+export type PermissionConflict = PermissionConflictDTO;
+export type PermissionRuleChange = PermissionChangeDTO;
+export type PermissionEditorReview = PermissionReviewDTO;
+export type PermissionEditorSaved = PermissionSaveDTO;
+
+export interface PermissionEditorRequest {
+  repo: string;
+  revision: string;
+  operation: "upsert" | "remove";
+  rule?: Partial<PermissionEditorRule>;
+  id?: string;
+  resolution: "manual" | "auto" | "existing" | "new";
+}
 
 /* What an account action said (the CLI's own lines). */
 export interface AccountSaid {
@@ -994,6 +1027,44 @@ export class DaemonClient {
 
   changePermissions(body: PermissionChange) {
     return this.post<PermissionChanged>("/permissions", body);
+  }
+
+  permissionEditor(repo: string) {
+    return this.get<PermissionEditorState>("/permission-editor", { repo });
+  }
+
+  orgPermissions() {
+    return this.get<OrgPermissionsDTO>("/org-permissions");
+  }
+
+  assignOrgRole(body: OrgAssignmentRequestDTO) {
+    return this.put<OrgAssignmentDTO>("/org-permissions/role-assignment", body);
+  }
+
+  saveOrgApprovalPolicy(body: OrgPolicyRequestDTO) {
+    return this.put<OrgApprovalPolicyDTO>("/org-permissions/policy", body);
+  }
+
+  reviewPermissionRule(body: PermissionEditorRequest) {
+    return this.post<PermissionEditorReview>("/permission-editor/review", body);
+  }
+
+  savePermissionRule(body: PermissionEditorRequest & { proposal: string }) {
+    return this.post<PermissionEditorSaved>("/permission-editor/save", body);
+  }
+
+  verifyPermissionAction(tool: string) {
+    return this.post<PermissionVerifyDTO>("/permission-editor/verify", { tool });
+  }
+
+  /* GET /grants (routes_read.list_grants): the live grants the person gave from the Inbox. */
+  grants() {
+    return this.get<GrantDTO[]>("/grants");
+  }
+
+  /* POST /grants/{id}/revoke (routes_actions.revoke_grant). */
+  revokeGrant(id: string) {
+    return this.post<{ revoked: string }>(`/grants/${encodeURIComponent(id)}/revoke`);
   }
 
   /* Starts a sign-in as a job: a job.progress event carries the URL to open

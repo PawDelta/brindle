@@ -150,17 +150,20 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("adds permission rules as the engine describes them back, and resets them only after asking", async () => {
-    const { daemon, stop } = setup();
-    const form = await screen.findByRole("form", { name: "Add a rule" });
-    fireEvent.change(within(form).getByLabelText("Match"), { target: { value: "npm test" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Add rule" }));
-    await waitFor(() => expect(screen.getByTestId("permissions").textContent).toContain("Added: allow bash exact 'npm test'"));
-    expect(daemon.requests.filter((r) => r.path === "/permissions").at(-1)?.body).toEqual({ op: "allow", kind: "bash", match: "npm test", match_type: "exact" });
-    expect(daemon.permissionRules).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Reset your rules…" }));
-    fireEvent.click(screen.getByRole("button", { name: "Reset rules" }));
-    await waitFor(() => expect(daemon.permissionRules).toHaveLength(0));
+  it("lists the live permission grants and revokes one through the engine", async () => {
+    const grant = { id: "g1", agent_id: "wk", repo_root: REPO, kind: "fetch", match: "https://example.com/docs", expires_at: 2e9, uses_left: 2, created: 1e9 };
+    const { daemon, stop } = setup({ grants: [grant, { ...grant, id: "g2", kind: "bash", match: "terraform plan", persistent: true, expires_at: null, uses_left: null }, { ...grant, id: "g3", agent_id: "supervisor-root", persistent: false, expires_at: null }] });
+    const rows = await within(await screen.findByTestId("grants")).findAllByTestId("grant");
+    expect(rows.map((r) => r.querySelector("code")?.textContent)).toEqual(["fetch https://example.com/docs", "bash terraform plan", "fetch https://example.com/docs"]);
+    expect(within(rows[2]).getByTestId("grant-session")).toBeDefined();
+    fireEvent.click(within(rows[2]).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(daemon.data.grants.map((g) => g.id)).toEqual(["g1", "g2"]));
+    fireEvent.click(within(rows[0]).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(screen.getAllByTestId("grant")).toHaveLength(1));
+    expect(daemon.requests.some((r) => r.method === "POST" && r.path === "/grants/g1/revoke")).toBe(true);
+    expect(daemon.data.grants.map((g) => g.id)).toEqual(["g2"]);
+    fireEvent.click(within(screen.getByTestId("grant")).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(daemon.data.grants).toEqual([]));
     stop();
   });
 

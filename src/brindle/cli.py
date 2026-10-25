@@ -3055,7 +3055,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
                             profile: Optional[str] = typer.Option(None, "--profile"),
                             focus: Optional[str] = typer.Option(None, "--focus"),
                             request_id: Annotated[Optional[str], typer.Option("--request-id")] = None,
-                            second: Annotated[bool, typer.Option("--second-review")] = False) -> None:
+                            second: Annotated[bool, typer.Option("--second-review")] = False,
+                            slot: Annotated[Optional[str], typer.Option("--review-slot")] = None) -> None:
     """Run a repo's checks, then start the reviewer with their results in its
     prompt. Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
@@ -3068,7 +3069,7 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
         return
     try:
         agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root),
-                                   request_id=request_id, second=second)
+                                   request_id=request_id, second=second, slot=slot)
     except (agents.AgentError, ValueError) as e:
         from brindle import pipeline
 

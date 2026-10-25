@@ -12,12 +12,32 @@ export interface ApiSchema {
   AgentDTO: AgentDTO;
   DecisionDTO: DecisionDTO;
   GoalDTO: GoalDTO;
+  GrantDTO: GrantDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
+  OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
+  OrgAssignmentDTO: OrgAssignmentDTO;
+  OrgAssignmentRequestDTO: OrgAssignmentRequestDTO;
+  OrgGrantPolicyDTO: OrgGrantPolicyDTO;
+  OrgIdentityDTO: OrgIdentityDTO;
+  OrgMemberDTO: OrgMemberDTO;
+  OrgPermissionsDTO: OrgPermissionsDTO;
+  OrgPolicyRequestDTO: OrgPolicyRequestDTO;
+  OrgRoleDTO: OrgRoleDTO;
+  PermissionActionDTO: PermissionActionDTO;
+  PermissionChangeDTO: PermissionChangeDTO;
   PermissionChoiceDTO: PermissionChoiceDTO;
+  PermissionConflictDTO: PermissionConflictDTO;
   PermissionDTO: PermissionDTO;
+  PermissionEditorDTO: PermissionEditorDTO;
+  PermissionPresetDTO: PermissionPresetDTO;
+  PermissionRestrictionsDTO: PermissionRestrictionsDTO;
+  PermissionReviewDTO: PermissionReviewDTO;
+  PermissionRuleDTO: PermissionRuleDTO;
+  PermissionSaveDTO: PermissionSaveDTO;
+  PermissionVerifyDTO: PermissionVerifyDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
@@ -156,6 +176,25 @@ export interface MilestoneDTO {
   title: string;
 }
 /**
+ * A live permission grant (brindle.daemon.grants): what the person let
+ * one agent do again, until ``expires_at`` and for ``uses_left`` more calls.
+ * GET /grants lists them; POST /grants/{id}/revoke ends one.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GrantDTO".
+ */
+export interface GrantDTO {
+  agent_id: string;
+  created: number;
+  expires_at: number | null;
+  id: string;
+  kind: string;
+  match: string;
+  persistent?: boolean;
+  repo_root: string;
+  uses_left: number | null;
+}
+/**
  * A route the app can call to act on the item itself.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -189,17 +228,26 @@ export interface InboxItemDTO {
  * "terminal" ends the hold so the CLI's own prompt asks instead) or
  * "prompt" (it is at the CLI's own prompt: ``terminal`` says so, and the
  * app's "Go to it", with the item's root_id and agent_id, is the way to
- * answer it; no ``choices``).
+ * answer it; no ``choices``) or "grant" (a one-time grant the agent asked
+ * for after a built-in deny refused it: the same route answers it, with
+ * allow_once or deny, until ``hold_until``; ``grant`` says what it allows).
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PermissionDTO".
  */
 export interface PermissionDTO {
+  approval_scope?: string | null;
+  approval_scopes?: {
+    [k: string]: string;
+  };
   choices?: PermissionChoiceDTO[];
   digest?: string | null;
+  grant?: string | null;
   hold_note?: string | null;
   hold_until?: number | null;
   kind?: string | null;
+  max_minutes?: number | null;
+  max_uses?: number | null;
   request_id?: string | null;
   target?: string | null;
   terminal?: string | null;
@@ -216,6 +264,231 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgApprovalPolicyDTO".
+ */
+export interface OrgApprovalPolicyDTO {
+  permission_grants: OrgGrantPolicyDTO | null;
+  roles: {
+    [k: string]: OrgGrantPolicyDTO | null;
+  };
+  version: number;
+}
+/**
+ * Account GrantPolicy (account-api 8fd09374); a complete replacement block.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgGrantPolicyDTO".
+ */
+export interface OrgGrantPolicyDTO {
+  allow: boolean;
+  allow_persistent?: boolean;
+  deny?: string[];
+  kinds: ("read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other")[];
+  lifetimes?: ("session" | "time" | "forever")[];
+  max_minutes: number;
+  max_uses: number;
+  overridable: ("git-push" | "env")[];
+  scopes?: ("branch" | "remote" | "repo" | "all")[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgAssignmentDTO".
+ */
+export interface OrgAssignmentDTO {
+  org_id: string;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgAssignmentRequestDTO".
+ */
+export interface OrgAssignmentRequestDTO {
+  actor_sub: string;
+  org_id: string;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgIdentityDTO".
+ */
+export interface OrgIdentityDTO {
+  org_id: string;
+  policy_role: string | null;
+  role: string | null;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgMemberDTO".
+ */
+export interface OrgMemberDTO {
+  email: string;
+  policy_role?: string | null;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgPermissionsDTO".
+ */
+export interface OrgPermissionsDTO {
+  can_edit_policy: boolean;
+  identity: OrgIdentityDTO;
+  inventory_error?: string | null;
+  members: OrgMemberDTO[];
+  policy: OrgApprovalPolicyDTO;
+  policy_readonly_reason: string | null;
+  roles: OrgRoleDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgRoleDTO".
+ */
+export interface OrgRoleDTO {
+  builtin: boolean;
+  holders?: string[];
+  name: string;
+  okta_group?: string | null;
+  permissions: string[];
+  team_weight?: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgPolicyRequestDTO".
+ */
+export interface OrgPolicyRequestDTO {
+  actor_sub: string;
+  if_version: number;
+  org_id: string;
+  permission_grants: OrgGrantPolicyDTO | null;
+  role: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionActionDTO".
+ */
+export interface PermissionActionDTO {
+  id: string;
+  kind: string;
+  name: string;
+  source: string;
+  tool: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionChangeDTO".
+ */
+export interface PermissionChangeDTO {
+  after: PermissionRuleDTO | null;
+  before: PermissionRuleDTO | null;
+  id: string;
+  type: "added" | "updated" | "removed";
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionRuleDTO".
+ */
+export interface PermissionRuleDTO {
+  created: number;
+  decision: "allow" | "ask" | "deny";
+  editable?: boolean;
+  exclusions?: PermissionRuleDTO[];
+  expires_at?: number | null;
+  id: string;
+  kind: string;
+  match: string;
+  match_type: string;
+  protected?: boolean;
+  repo_root?: string | null;
+  source: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionConflictDTO".
+ */
+export interface PermissionConflictDTO {
+  left: string;
+  overlap: "yes" | "unknown";
+  protected: boolean;
+  right: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionEditorDTO".
+ */
+export interface PermissionEditorDTO {
+  catalog: PermissionActionDTO[];
+  limitations: string[];
+  presets: PermissionPresetDTO[];
+  restrictions: PermissionRestrictionsDTO;
+  revision: string;
+  rules: PermissionRuleDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionPresetDTO".
+ */
+export interface PermissionPresetDTO {
+  id: string;
+  name: string;
+  rule: PermissionRuleDTO;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionRestrictionsDTO".
+ */
+export interface PermissionRestrictionsDTO {
+  checks: string[];
+  editable: boolean;
+  expiry_supported: boolean;
+  managed: boolean;
+  org_id: string | null;
+  permission_grants: {
+    [k: string]: unknown;
+  } | null;
+  permission_policy: string;
+  policy_version: number | string | null;
+  protected_paths: string[];
+  reason: string;
+  repo_supported: boolean;
+  roles_supported: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionReviewDTO".
+ */
+export interface PermissionReviewDTO {
+  can_save: boolean;
+  changes: PermissionChangeDTO[];
+  conflicts: PermissionConflictDTO[];
+  proposal: string;
+  revision: string;
+  rules: PermissionRuleDTO[];
+  unresolved: PermissionConflictDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionSaveDTO".
+ */
+export interface PermissionSaveDTO {
+  changes: PermissionChangeDTO[];
+  limitations: string[];
+  restrictions: PermissionRestrictionsDTO;
+  revision: string;
+  rules: PermissionRuleDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionVerifyDTO".
+ */
+export interface PermissionVerifyDTO {
+  action: PermissionActionDTO | null;
+  verified: boolean;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

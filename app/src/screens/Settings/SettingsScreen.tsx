@@ -35,8 +35,8 @@
    pane. The doctor (GET /v1/doctor) is read once per repo and on demand;
    its update line feeds the engine row (its sign-in lines stay out of the
    health list: the provider rows say that).
-   Permission rules (POST /v1/permissions) are added or reset here; the list
-   itself is the terminal's until the daemon serves it. The command-line
+   Permission rules are read, reviewed and saved through /v1/permission-editor;
+   fixed rules remain read-only. The command-line
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
@@ -49,7 +49,8 @@
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, PermissionChange, ProviderInstalled, UserSettings } from "../../api/client";
+import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, ProviderInstalled, UserSettings } from "../../api/client";
+import type { GrantDTO } from "../../api/schema";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
@@ -60,14 +61,13 @@ import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { About } from "./About";
+import { PermissionRules } from "./PermissionRules";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, danger, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
 import { StoreContext } from "../../store/useStore";
 import {
   MARK,
-  MATCH_TYPES,
-  PERMISSION_KINDS,
   SCOPES,
   SETTINGS,
   changed,
@@ -499,87 +499,56 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
   );
 }
 
-/* A rule for brindle's permission policy: allow or deny a kind of request. */
-function PermissionRules({ client }: { client: DaemonClient }) {
-  const [decision, setDecision] = useState<"allow" | "deny">("allow");
-  const [kind, setKind] = useState("bash");
-  const [matchType, setMatchType] = useState("exact");
-  const [match, setMatch] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
+/* The grants the person gave from the Inbox ("Allow for …"): one agent may
+   repeat one exact request until a grant expires or its uses run out.
+   GET /v1/grants lists the live ones; Revoke (POST /v1/grants/{id}/revoke)
+   ends one now. The daemon keeps them in memory: a restart ends them all. */
+function PermissionGrants({ client }: { client: DaemonClient }) {
+  const [grants, setGrants] = useState<GrantDTO[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmReset, setConfirmReset] = useState(false);
-
-  const run = async (body: PermissionChange, what: string) => {
-    setBusy(true);
-    setError(null);
-    setSaid(null);
+  const load = useCallback(async () => {
     try {
-      const got = await client.changePermissions(body);
-      setSaid("reset" in got ? "Your rules and learned rules are gone; the defaults stay." : `Added: ${got.describe} (${got.rule})`);
-      if (what === "add") setMatch("");
+      setGrants(await client.grants());
+    } catch (e) {
+      setError(message(e));
+    }
+  }, [client]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const revoke = async (id: string) => {
+    setBusy(id);
+    setError(null);
+    try {
+      await client.revokeGrant(id);
     } catch (e) {
       setError(message(e));
     } finally {
-      setBusy(false);
-      setConfirmReset(false);
+      setBusy(null);
+      await load();
     }
   };
-
   return (
-    <Row label="Permission rules" help="With the permission policy on, brindle answers workers' requests by these rules instead of asking you. Rules learned from your approvals count too." wide testId="permissions">
-      <form
-        className="flex w-full flex-wrap items-center gap-s1"
-        aria-label="Add a rule"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (match.trim()) void run({ op: decision, kind, match: match.trim(), match_type: matchType }, "add");
-        }}
-      >
-        <select className={field} aria-label="Decision" value={decision} disabled={busy} onChange={(e) => setDecision(e.target.value as "allow" | "deny")}>
-          <option value="allow">Allow</option>
-          <option value="deny">Deny</option>
-        </select>
-        <select className={field} aria-label="Kind" value={kind} disabled={busy} onChange={(e) => setKind(e.target.value)}>
-          {PERMISSION_KINDS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
-        <select className={field} aria-label="Match type" value={matchType} disabled={busy} onChange={(e) => setMatchType(e.target.value)}>
-          {MATCH_TYPES.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <input className={`${field} min-w-48 flex-1 font-mono`} aria-label="Match" placeholder={kind === "bash" ? "npm test" : "src/**"} value={match} disabled={busy} onChange={(e) => setMatch(e.target.value)} />
-        <button type="submit" className={button} disabled={busy || !match.trim()}>
-          Add rule
-        </button>
-        <span className="flex-1" />
-        {confirmReset ? (
-          <>
-            <span className="text-sm text-sap">Forget every rule you added and every learned one?</span>
-            <button type="button" className={danger} disabled={busy} onClick={() => void run({ op: "reset" }, "reset")}>
-              Reset rules
+    <Row label="Permission grants" help="Your remembered approvals and temporary grants. Revoke either here; enterprise policy still applies." wide testId="grants">
+      {grants?.length === 0 && <span className="text-sm text-ink-3">None live.</span>}
+      <ul className="flex w-full flex-col gap-1">
+        {(grants ?? []).map((g) => (
+          <li key={g.id} className="flex flex-wrap items-center gap-s1" data-testid="grant">
+            <code className="min-w-0 flex-1 truncate font-mono text-xs" title={g.match}>
+              {g.kind} {g.match}
+            </code>
+            <span className="text-[11px] text-ink-3">
+              {g.persistent ? "Remembered until revoked"
+                : g.expires_at == null && g.agent_id ? <span data-testid="grant-session">Until supervisor session ends · {g.agent_id}{g.uses_left != null && ` · ${g.uses_left} uses`}</span>
+                  : <>{g.agent_id} · {g.uses_left} uses · until {g.expires_at == null ? "unknown" : new Date(g.expires_at * 1000).toLocaleTimeString()}</>}
+            </span>
+            <button type="button" className={quiet} disabled={busy !== null} onClick={() => void revoke(g.id)}>
+              Revoke
             </button>
-            <button type="button" className={quiet} disabled={busy} onClick={() => setConfirmReset(false)}>
-              Keep them
-            </button>
-          </>
-        ) : (
-          <button type="button" className={quiet} disabled={busy} onClick={() => setConfirmReset(true)}>
-            Reset your rules…
-          </button>
-        )}
-      </form>
-      {said && (
-        <p role="status" className={`${notice} w-full`}>
-          {said}
-        </p>
-      )}
+          </li>
+        ))}
+      </ul>
       {error && (
         <p role="alert" className={`${alert} w-full`}>
           {error}
@@ -1010,7 +979,10 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
       {config && (
         <Section id="you" title="You" blurb="How Claude's requests reach you, your permission rules, and your defaults for every repo." testId="user-settings">
           <PermissionMode client={client} />
-          <PermissionRules client={client} />
+          <Row label="Permission rules" help="Choose which actions run automatically, ask for approval, or are blocked." wide testId="permissions">
+            <PermissionRules key={repo} client={client} repo={repo} />
+          </Row>
+          <PermissionGrants client={client} />
           {yourLines.length > 0 && (
             <div className="flex flex-col gap-1 px-s2 py-1">
               <More open={yours} onToggle={() => setYours((y) => !y)} label="Your defaults for every repo" count={yourLines.length} />

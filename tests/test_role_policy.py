@@ -16,6 +16,8 @@ ROLES = {"member": {"allowed_providers": ["claude"], "max_parallel_workers": 2},
 MEMBER = {**POLICY, "allowed_profiles": None, "allowed_providers": ["claude"],
           "max_parallel_workers": 2}
 CONTRACTOR = {**POLICY, "allowed_profiles": ["developer"]}
+GRANT_POLICY = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"], "max_minutes": 5, "max_uses": 2,
+                "deny": ["bash prefix terraform apply"]}
 
 
 def role_policy(team, effective=MEMBER, role="member", policy_role=None, **base):
@@ -36,8 +38,33 @@ def test_a_malformed_effective_policy_fails_closed(team, effective):
     assert not plugin(team).check_assign(assign()).allowed
 
 
+def test_a_copy_cached_for_another_role_is_never_a_fallback(team, monkeypatch):
+    from brindle import permission_grants
+
+    broad = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"],
+             "max_minutes": 60, "max_uses": 20, "allow_persistent": True, "scopes": ["repo"]}
+    narrow = {**broad, "max_minutes": 5, "max_uses": 1, "allow_persistent": False,
+              "scopes": ["remote"], "lifetimes": ["session"]}
+    role_policy(team, effective={**MEMBER, "permission_grants": narrow}, permission_grants=broad)
+    monkeypatch.setattr(permission_grants, "_plugin", lambda repo: plugin(team))
+    limits = permission_grants.limits(assign().repo_root)
+    assert limits.max_minutes == 5 and limits.max_uses == 1 and not limits.allow_persistent
+    assert limits.scopes == ("remote",) and limits.lifetimes == ("session",)
+    cached = team_policy.load_cached(ORG)
+    assert cached.enforced.permission_grants.max_uses == 1
+    assert not cached.enforced.permission_grants.allow_persistent
+    assert cached.enforced.permission_grants.scopes == ("remote",)
+    assert cached.enforced.permission_grants.lifetimes == ("session",)
+    # A role change must reject even this previously valid cached policy.
+    assert plugin(team).check_assign(assign()).allowed
+    login(team, team_claims(policy_role="contractor"))
+    team.routes[GET] = [auth.TransportError("down")]
+    assert not plugin(team).check_assign(assign()).allowed
+
+
 @pytest.mark.parametrize("roles", [
     ["member"], {"member": "strict"}, {"member": {"allowed_models": "gpt-5"}},
+    {"member": {"permission_grants": {"allow": True}}},
 ])
 def test_malformed_role_overrides_fail_closed(team, roles):
     role_policy(team)
@@ -45,31 +72,62 @@ def test_malformed_role_overrides_fail_closed(team, roles):
     assert not plugin(team).check_assign(assign()).allowed
 
 
-# -- the cache follows the member's role ---------------------------------------------------------
-
-
-def test_a_copy_cached_for_another_role_is_never_a_fallback(team):
-    # After a role change, a failed refetch must not fall back to the old
-    # role's (possibly looser) rules: it fails closed.
-    role_policy(team)
-    assert plugin(team).check_assign(assign()).allowed
-    login(team, team_claims(policy_role="contractor"))
-    team.routes[GET] = [auth.TransportError("down")]
-    assert not plugin(team).check_assign(assign()).allowed
-
-
 # -- offline (air-gap) policy files ----------------------------------------------------------------
 
 
-def test_offline_files_apply_role_overrides_by_the_backends_rule():
+@pytest.mark.parametrize("base_grants,block,ok", [
+    (True, None, True),
+    pytest.param(False, None, True, marks=pytest.mark.variant("role-only grant policy")),
+    (None, GRANT_POLICY, True),
+    (None, {**GRANT_POLICY, "expires": 1}, False),
+    pytest.param(None, {k: v for k, v in GRANT_POLICY.items() if k != "max_uses"}, False,
+                 marks=pytest.mark.variant("a block an older server sends, missing a cap: never unbounded")),
+    (None, {**GRANT_POLICY, "kinds": ["shell"]}, False),
+    (None, {**GRANT_POLICY, "max_minutes": 0}, False),
+    (None, {**GRANT_POLICY, "deny": ["bash regex x"]}, False),
+    (None, {**GRANT_POLICY, "allow": "yes"}, False),
+    (None, {**GRANT_POLICY, "allow_persistent": "yes"}, False),
+    (None, {**GRANT_POLICY, "scopes": ["remote"], "lifetimes": ["session"]}, True),
+    (None, {**GRANT_POLICY, "scopes": ["unknown"]}, False),
+    (None, {**GRANT_POLICY, "destinations": ["https://example.com/*"]}, False),
+    pytest.param(None, {**GRANT_POLICY, "destinations": "https://example.com/o/r.git"}, False,
+                 marks=pytest.mark.variant("a destination filter must not be interpreted as characters or a substring")),
+])
+def test_offline_files_apply_role_overrides_by_the_backends_rule(base_grants, block, ok):
+    if block is not None:
+        body = {"version": 2, "policy": {"permission_grants": block, "roles": {"member": {"max_parallel_workers": 2}}}}
+        if not ok:
+            with pytest.raises(team_policy.PolicyUnavailable):
+                team_policy.parse_policy("org_g1", body)
+            return
+        parsed = team_policy.parse_policy("org_g1", body)
+        assert team_policy.parse_policy("org_g1", parsed.to_json()).permission_grants == parsed.permission_grants
+        assert team_policy.with_role_overrides(parsed, "member", None).enforced.permission_grants == parsed.permission_grants
+        return
+    grants = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"],
+              "max_minutes": 60, "max_uses": 20, "deny": ["bash prefix git push protected"]}
+    member_grants = {**grants, "max_minutes": 5, "deny": ["bash exact deploy"]}
+    contractor_grants = {**grants, "max_uses": 1, "deny": [],
+                         "lifetimes": [], "scopes": []}
+    roles = {name: {**rules, "permission_grants": override} for name, rules, override in (
+        ("member", ROLES["member"], member_grants),
+        ("contractor", ROLES["contractor"], contractor_grants))}
     base = team_policy.parse_policy(ORG, {"version": 1, "policy": {
-        **POLICY, "allowed_profiles": None, "max_parallel_workers": 8, "roles": ROLES}}, 0)
+        **POLICY, "allowed_profiles": None, "max_parallel_workers": 8,
+        "permission_grants": grants if base_grants else None, "roles": roles}}, 0)
     member = team_policy.with_role_overrides(base, "member", None).enforced
     assert member.allowed_providers == ("claude",) and member.max_parallel_workers == 2
     contractor = team_policy.with_role_overrides(base, "member", "contractor").enforced
     assert contractor.allowed_profiles == ("developer",) and contractor.require_human_review is True
     assert contractor.max_parallel_workers == 2                     # member's override still applies
     assert team_policy.with_role_overrides(base, "owner", None).enforced.max_parallel_workers == 8
+    assert member.permission_grants.max_minutes == 5
+    assert contractor.permission_grants.max_minutes == 60 and contractor.permission_grants.max_uses == 1
+    assert member.permission_grants.deny == tuple(member_grants["deny"])
+    assert contractor.permission_grants.deny == ()
+    assert contractor.permission_grants.lifetimes == () and contractor.permission_grants.scopes == ()
+    restored = team_policy.parse_policy(ORG, base.to_json())
+    assert team_policy.with_role_overrides(restored, "member", "contractor").enforced == contractor
 
 
 # -- brindle account org policy ----------------------------------------------------------------------

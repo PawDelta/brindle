@@ -814,8 +814,9 @@ def kb_search(query: str, sources: list[str] | None = None, k: int = 8) -> str:
 @mcp.tool()
 def list_tasks(repo: str | None = None, full: bool = False) -> str:
     """Coordination tasks (assign/handoff calls given files or depends_on)
-    that are queued or were cancelled: what a queued one is waiting on, and
-    why a cancelled one was cancelled. Started tasks show in list_agents.
+    that are queued, were cancelled, or have a branch still in review:
+    what a queued one is waiting on, why a cancelled one was cancelled, and
+    each started branch's checks, reviewer, verdict or merge failure.
     Covers every repo of the session; repo: only that one (alias or path).
     full=true also shows each task's brief (task_text) and done_when."""
     db = DB()
