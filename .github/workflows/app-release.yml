@@ -40,6 +40,9 @@
 # holds the Apple and Tauri secrets and the TAURI_UPDATER_PUBKEY variable,
 # admits only app-v* tags and needs the owner's approval. The release role's
 # OIDC trust accepts that environment's subject.
+# Staff builds use desktop-staff-release and AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN
+# instead. Its role writes only release/*; GitHub must reject staff refs in
+# desktop-release even if a pushed workflow requests it (app/README.md).
 #
 # Release candidates: an app-v<X.Y.Z>-rc<N> tag (package.json version
 # X.Y.Z-rc<N>, e.g. 0.2.0-rc.1) publishes under brindle/downloads/desktop/rc/<version>/
@@ -55,7 +58,7 @@
 # the version <package.json version>+release.<run>.<sha12>, and
 # `release-publish` publishes it under brindle/downloads/desktop/release/
 # only (an immutable directory per build, then release/latest.json, which
-# only moves forward), from the `desktop-release` environment. It never
+# only moves forward), from the `desktop-staff-release` environment. It never
 # touches latest.json, rc/ or the stable names; merging to main publishes
 # nothing. app/README.md, "Release-branch builds", has the contract and what
 # to do when the gate refuses.
@@ -169,9 +172,9 @@ jobs:
             target: x86_64-apple-darwin
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
-    # Only a pushed app-v* tag runs in the environment that holds the
-    # secrets; a release-branch push (past release-gate) in its own one.
-    environment: ${{ github.event_name == 'push' && (github.ref_type == 'tag' && 'desktop-release' || 'desktop-release') || '' }}
+    # Pushed tags use production signing; a release-branch push (past
+    # release-gate) uses the separately protected staff environment.
+    environment: ${{ github.event_name == 'push' && (github.ref_type == 'tag' && 'desktop-release' || 'desktop-staff-release') || '' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -690,7 +693,7 @@ jobs:
       !cancelled() && needs.macos.result == 'success' && needs.release-gate.outputs.go == 'true'
       && github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'
     runs-on: ubuntu-latest
-    environment: desktop-release
+    environment: desktop-staff-release
     timeout-minutes: 20
     permissions:
       contents: read
@@ -727,7 +730,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: brindle-desktop-release-${{ needs.release-gate.outputs.name }}
+          name: brindle-desktop-release-${{ needs.release-gate.outputs.name }}-attempt-${{ github.run_attempt }}
           path: ${{ steps.collect.outputs.dir }}
           if-no-files-found: error
 
@@ -740,14 +743,14 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           SIGNED: ${{ steps.collect.outputs.signed }}
           NOTARIZED: ${{ steps.collect.outputs.notarized }}
-          ROLE: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          ROLE: ${{ secrets.AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN }}
           BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
         run: bash app/scripts/publish_gate.sh
 
       - name: AWS credentials
         if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
         env:
-          ROLE_ARN: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          ROLE_ARN: ${{ secrets.AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN }}
           REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
         # GitHub's OIDC token (release_publish.mjs oidc-token) exchanged for
         # the release-branch role's session. The token is never printed.

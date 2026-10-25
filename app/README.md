@@ -510,8 +510,8 @@ nothing: the owner moves the `release/desktop` branch to a main commit
    API by path, all pages.
 2. The `macos` jobs build both architectures exactly as for a release
    (signed, both notarized, both past Gatekeeper) in the same
-   `desktop-release` environment (its deployment rule admits the
-   `release/desktop` branch beside `app-v*` tags), with the app's version set to
+   `desktop-staff-release` environment (its deployment rule admits only the
+   `release/desktop` branch), with the app's version set to
    `<package.json version>+release.<run number>.<12-hex commit>` (e.g.
    `0.1.0-rc.9+release.42.0123456789ab`): Info.plist's
    `CFBundleShortVersionString` and `CFBundleVersion`, and the version the
@@ -546,31 +546,85 @@ main's head; otherwise pick a later main commit that has both. A run by hand
 of `app-release.yml` on `release/desktop` builds unsigned and publishes
 nothing, as on any other ref.
 
-The release role can write the stable and rc files too: what keeps a
-release-branch build off them is the workflow (`macos-publish` and `linux`
-run for a pushed tag only, `scripts/publish_gate.sh` holds each channel to
-its own ref), not IAM. Re-running `release-publish` alone publishes into
-that attempt's own directory (`verify` refuses an earlier attempt's), never
-over files already published.
+The staff role can write only `brindle/downloads/desktop/release/*`.
+Tag publishing uses a different role and environment. There is no fallback
+to the production role when the staff role is missing: publishing is skipped.
+The gate is code from the pushed commit, so it is a correctness check;
+GitHub deployment restrictions and IAM enforce the publishing boundary.
 
-Before the first release-branch build (the `desktop-release` environment
-already admits `release/desktop`):
+Re-running `release-publish` alone publishes into that attempt's own
+directory (`verify` refuses an earlier attempt's). Its GitHub artifact also
+includes the attempt number, preserving the earlier attempt's artifact after
+an OIDC or S3 failure. Re-running all jobs after a completed Mac build can
+still collide with that build's artifact name; use the publish job alone for
+a publishing failure. Fix build failures with a new promotion/run.
 
-- The release role (`AWS_DESKTOP_RELEASE_ROLE_ARN`) allowed, besides what a
-  release already needs: `s3:PutObject` under
-  `brindle/downloads/desktop/release/*`, `s3:GetObject` on
-  `brindle/downloads/desktop/release/latest.json`, and `s3:ListBucket` on the
-  bucket itself, with no `s3:prefix` condition (a GetObject carries no prefix,
-  so a prefix-conditioned ListBucket doesn't apply to it). Without that, S3
-  answers a read of a `release/latest.json` that doesn't exist yet with
-  AccessDenied instead of NoSuchKey, and the publish refuses to treat that as
-  "none published": the first feed is never written. ListBucket only lists
-  keys; every write stays under `release/`.
-- The site serving `/brindle/downloads/desktop/release/*` like the rest of the
-  downloads, with `release/latest.json`'s `no-cache` honoured.
-- A protection rule on `release/desktop`: owner pushes only, no force pushes.
-- The first run is the first notarization of a `+` version; a refusal from
-  Apple fails the run and publishes nothing.
+Before the first release-branch build, an administrator must complete the
+following setup. These are requirements, not a claim about live settings;
+this source change creates no environments, roles, secrets or protection rules.
+
+1. In Settings → Environments, configure `desktop-release` with **Selected
+   branches and tags**, exactly one **Tag** rule `app-v*`, and no Branch
+   rules. Remove any existing `release/desktop` allowance. Configure
+   `desktop-staff-release` with exactly one **Branch** rule `release/desktop`
+   and no Tag rules. Do not use “Protected branches only”: that could admit
+   the staff branch to production. Require the owner's review in both
+   environments and disable administrator bypass. Restrict environment
+   administration to trusted owners. A staff workflow requesting
+   `desktop-release` must be rejected by its deployment rules before secrets
+   or an environment OIDC token become available.
+2. Add an active branch ruleset for `release/desktop`: restrict creations,
+   updates and deletions to the owner (the sole bypass actor), block force
+   pushes, and promote only reviewed main commits. Protect `app-v*` tags
+   against creation, update and deletion by staff branch writers. Approval
+   must include review of workflow/script changes in the promoted commit;
+   CI success alone does not establish trust.
+3. Apply [`deploy/aws/desktop-release.json`](../deploy/aws/desktop-release.json)
+   in the downloads bucket's AWS account, using its existing GitHub OIDC
+   provider (`https://token.actions.githubusercontent.com`, audience
+   `sts.amazonaws.com`). For example, as an administrator:
+
+   ```sh
+   aws cloudformation deploy --template-file deploy/aws/desktop-release.json \
+     --stack-name brindle-desktop-publishing --capabilities CAPABILITY_IAM \
+     --parameter-overrides GitHubRepo=OWNER/REPO DownloadsBucket=BUCKET
+   ```
+
+   The stack creates two roles with exact repository/environment subjects.
+   Put output `StaffRoleArn` in `AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` in
+   `desktop-staff-release`; put `ProductionRoleArn` in
+   `AWS_DESKTOP_RELEASE_ROLE_ARN` in `desktop-release`. Retire the old broad
+   release role's trust/permissions; do not leave another role trusting staff
+   subjects with production writes. Remove repository/organization copies of
+   AWS role and signing secrets, and avoid bucket policies or additional IAM
+   policies granting staff broader writes or role assumption. Inspect the
+   repository's actual OIDC subject format before applying; the template
+   assumes `repo:OWNER/REPO:environment:NAME`, without custom subject claims.
+   The staff role has `PutObject` on `release/*`, `GetObject` on
+   `release/latest.json`, and unconditioned `ListBucket` so a missing initial
+   feed returns NoSuchKey. ListBucket exposes key names but grants no writes.
+   Production writes are scoped to desktop downloads with an explicit deny
+   on `release/*`. Neither role grants role chaining.
+4. Provision the signing secrets listed below separately in each environment.
+   Use the **existing** updater private key and its password in the staff
+   environment too, matching the public key committed in `tauri.conf.json`.
+   Do not generate or rotate an updater key for this split: installed apps
+   verify staff and production bundles with that same embedded key. A future
+   key separation needs an explicit migration that preserves installed-app
+   verification. Staff signing approval therefore still authorizes use of
+   the shared signing identity; IAM isolates feed writes, not that identity.
+5. Verify externally that the staff subject cannot assume the production
+   role, a `release/desktop` deployment to `desktop-release` is rejected,
+   staff writes to stable/rc keys are denied, and staff writes to `release/`
+   succeed. Check first publication with no existing staff feed. Serve
+   `/brindle/downloads/desktop/release/*` with `release/latest.json`'s
+   `no-cache` honoured. The first run still needs Apple's acceptance of a
+   `+` version; a refusal fails the run and publishes nothing.
+
+GitHub's [environment deployment rules](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
+are essential because [environment OIDC subjects](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
+do not carry a branch restriction in IAM. The artifact behavior follows
+[`upload-artifact` v7.0.2](https://github.com/actions/upload-artifact/blob/v7.0.2/README.md#overwriting-an-artifact).
 
 ### Linux
 
@@ -619,13 +673,14 @@ over pipes). A daemon already started in WSL without `--tcp` can't be reached:
 stop it (`brindle daemon stop`) and the app starts one that can.
 
 What the owner sets up, once. The Apple and Tauri secrets and the
-`TAURI_UPDATER_PUBKEY` variable live in the `desktop-release` GitHub
-environment (repository settings → Environments), whose deployment rule admits
-only `app-v*` tags and the `release/desktop` branch and which needs the
-owner's approval for each run; every job that reads the Apple, Tauri or AWS
-secrets (`macos`, `macos-publish`, `linux`, `release-publish`) declares it on
-a push. The rest are
-repository secrets and variables (Secrets and variables → Actions):
+`TAURI_UPDATER_PUBKEY` variable live in each of the two GitHub environments
+(repository settings → Environments). The signing rows below describe the
+production environment; provision the same existing signing material in
+`desktop-staff-release` as described above. `macos` selects the environment
+by ref; `macos-publish` and `linux` use production, and `release-publish`
+uses staff. Both require owner approval and the exact deployment rules above.
+Downloads bucket and region variables may be repository variables (Secrets
+and variables → Actions):
 
 | Name | Kind | What |
 | --- | --- | --- |
@@ -636,16 +691,18 @@ repository secrets and variables (Secrets and variables → Actions):
 | `APPLE_API_ISSUER` | secret (`desktop-release` env) | That key's issuer ID. |
 | `APPLE_API_PRIVATE_KEY` | secret (`desktop-release` env) | The key's `.p8` contents; the workflow writes it to a file and sets `APPLE_API_KEY_PATH`. |
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | secrets (`desktop-release` env) | Instead of the API key: an Apple ID, an app-specific password and the team ID. |
-| `TAURI_SIGNING_PRIVATE_KEY` | secret (`desktop-release` env) | The updater's minisign private key (`npm run tauri signer generate -- -w ~/.tauri/brindle.key`). |
+| `TAURI_SIGNING_PRIVATE_KEY` | secret (`desktop-release` env) | The existing updater minisign private key matching the committed public key. Preserve it when provisioning staff signing. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret (`desktop-release` env) | Its password, if it has one. |
 | `TAURI_UPDATER_PUBKEY` | variable (`desktop-release` env) | Optional. The matching public key is committed in `tauri.conf.json` (`plugins.updater.pubkey`); when this is set, the build fails unless it is that same key. |
-| `AWS_DESKTOP_RELEASE_ROLE_ARN` | secret | The release role's ARN, from the site's infrastructure setup. |
+| `AWS_DESKTOP_RELEASE_ROLE_ARN` | secret (`desktop-release` env) | ProductionRoleArn from the publishing stack; tags only. |
+| `AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` | secret (`desktop-staff-release` env) | StaffRoleArn from the publishing stack; release branch only, no production fallback. |
 | `DESKTOP_DOWNLOADS_BUCKET` | variable | The downloads bucket's name, from the same setup. |
 | `AWS_REGION` | variable | Optional; `us-east-1` when unset. |
 
 Before the first release: join the Apple Developer Program, and have the site's
 infrastructure create the downloads bucket, GitHub's OIDC provider and the
-release role, which only this repo's `desktop-release` environment (so only
-`app-v*` tags and `release/desktop`) can assume. Keep the
+two release roles and restrict their GitHub environments as described above.
+Only `app-v*` tags may enter production; only `release/desktop` may enter staff.
+Keep the
 minisign private key safe: losing it means no installed app can take another
 update.

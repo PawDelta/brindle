@@ -32,6 +32,45 @@ function decide(env: Record<string, string>): string {
 }
 
 describe("app-release publish gate", () => {
+  it("isolates staff object writes and OIDC trust from production", () => {
+    const template = JSON.parse(readFileSync(new URL("../../deploy/aws/desktop-release.json", import.meta.url), "utf8"));
+    const roles = template.Resources;
+    const parameters: Record<string, string> = { "AWS::Partition": "aws", "AWS::AccountId": "1", GitHubRepo: "o/r", DownloadsBucket: "b" };
+    const resolve = (value: string | { "Fn::Sub": string }) =>
+      typeof value === "string" ? value : value["Fn::Sub"].replace(/\$\{([^}]+)\}/g, (_, key: string) => parameters[key] ?? key);
+    const trust = (role: string, subject: string) => {
+      const statement = roles[role].Properties.AssumeRolePolicyDocument.Statement[0];
+      return statement.Action === "sts:AssumeRoleWithWebIdentity"
+        && resolve(statement.Principal.Federated) === "arn:aws:iam::1:oidc-provider/token.actions.githubusercontent.com"
+        && statement.Condition.StringEquals["token.actions.githubusercontent.com:aud"] === "sts.amazonaws.com"
+        && resolve(statement.Condition.StringEquals["token.actions.githubusercontent.com:sub"]) === subject;
+    };
+    expect(trust("StaffRole", "repo:o/r:environment:desktop-staff-release")).toBe(true);
+    expect(trust("ProductionRole", "repo:o/r:environment:desktop-staff-release")).toBe(false);
+    expect(trust("ProductionRole", "repo:o/r:environment:desktop-release")).toBe(true);
+    expect(trust("StaffRole", "repo:other/r:environment:desktop-staff-release")).toBe(false);
+    const permits = (role: string, action: string, key: string) => {
+      const statements = roles[role].Properties.Policies[0].PolicyDocument.Statement;
+      const matches = statements.filter((s: { Action: string[]; Resource: { "Fn::Sub": string } }) =>
+        s.Action.includes(action) && new RegExp(`^${resolve(s.Resource).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*")}$`).test(`arn:aws:s3:::b/${key}`));
+      return matches.some((s: { Effect: string }) => s.Effect === "Allow")
+        && !matches.some((s: { Effect: string }) => s.Effect === "Deny");
+    };
+    expect(permits("StaffRole", "s3:PutObject", "brindle/downloads/desktop/release/42.1-abc/bundle.dmg")).toBe(true);
+    expect(permits("StaffRole", "s3:GetObject", "brindle/downloads/desktop/release/latest.json")).toBe(true);
+    for (const key of ["latest.json", "rc/latest.json", "brindle.dmg", "../outside"]) {
+      expect(permits("StaffRole", "s3:PutObject", `brindle/downloads/desktop/${key}`), key).toBe(false);
+    }
+    expect(permits("ProductionRole", "s3:PutObject", "brindle/downloads/desktop/latest.json")).toBe(true);
+    expect(permits("ProductionRole", "s3:PutObject", "brindle/downloads/desktop/rc/latest.json")).toBe(true);
+    expect(permits("ProductionRole", "s3:PutObject", "brindle/downloads/desktop/release/latest.json")).toBe(false);
+  });
+  it("preserves each publish attempt's artifact after a later S3 failure", () => {
+    const staff = jobOf(readFileSync(workflow, "utf8"), "release-publish");
+    const artifact = staff.match(/name: (brindle-desktop-release-.*)/)?.[1] ?? "";
+    const names = [1, 2].map((attempt) => artifact.replace("${{ github.run_attempt }}", String(attempt)));
+    expect(new Set(names).size).toBe(2);
+  });
   it.each([
     ["a pushed tag, signed, notarized, bucket set", { EVENT: "push", REF_TYPE: "tag", ...ready }, "go=true"],
     ["a manual run on a branch", { EVENT: "workflow_dispatch", REF_TYPE: "branch", ...ready }, "go=false"],
@@ -80,7 +119,7 @@ describe("app-release publish gate", () => {
     expect(build).toContain("assess DMG -t open --context context:primary-signature \"$DMG\"");
   });
 
-  it("keeps the secrets' jobs in the desktop-release environment, the schedule on the nightly job alone, and a release candidate off latest.json", () => {
+  it("separates staff and production environments, keeps the schedule on nightly, and a release candidate off latest.json", () => {
     const text = readFileSync(workflow, "utf8");
     expect(text).toMatch(/^\s+schedule:/m);
     const env = "environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}";
@@ -89,8 +128,12 @@ describe("app-release publish gate", () => {
       return text.slice(start + 1, text.indexOf("\n  ", text.indexOf("steps:", start)));
     };
     for (const name of ["macos-publish", "linux"]) expect(job(name), name).toContain(env);
-    expect(job("macos")).toContain("(github.ref_type == 'tag' && 'desktop-release' || 'desktop-release')");
-    expect(job("release-publish")).toContain("environment: desktop-release\n");
+    expect(job("macos")).toContain("(github.ref_type == 'tag' && 'desktop-release' || 'desktop-staff-release')");
+    const staff = jobOf(text, "release-publish");
+    expect(staff).toContain("environment: desktop-staff-release\n");
+    expect(staff).not.toContain("secrets.AWS_DESKTOP_RELEASE_ROLE_ARN");
+    expect(staff).toContain("ROLE: ${{ secrets.AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN }}");
+    expect(staff).toContain("ROLE_ARN: ${{ secrets.AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN }}");
     // A scheduled run builds no release (and so signs and publishes nothing): only the nightly smoke runs.
     // A release-branch push builds the Macs only, once release-gate says so, and publishes them only from release-publish.
     const release = "(github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
