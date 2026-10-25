@@ -20,6 +20,7 @@ from brindle.daemon.events import events
 from brindle.daemon.grants import ROUTES as GRANT_ROUTES
 from brindle.daemon.holds import ROUTES as HOLD_ROUTES
 from brindle.daemon.routes_actions import ROUTES as ACTIONS
+from brindle.daemon.routes_org_permissions import ROUTES as ORG_PERMISSION_ROUTES
 from brindle.daemon.routes_permissions import ROUTES as PERMISSION_ROUTES
 
 API_VERSION = "1.0"
@@ -38,7 +39,8 @@ async def meta(request: Request) -> JSONResponse:
 
 
 ROUTES = [Route("/v1/meta", meta), *routes_read.ROUTES,
-          WebSocketRoute("/v1/events", events), *ACTIONS, *GRANT_ROUTES, *HOLD_ROUTES, *PERMISSION_ROUTES]
+          WebSocketRoute("/v1/events", events), *ACTIONS, *GRANT_ROUTES, *HOLD_ROUTES, *PERMISSION_ROUTES,
+          *ORG_PERMISSION_ROUTES]
 
 
 def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:

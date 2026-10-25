@@ -17,6 +17,15 @@ export interface ApiSchema {
   InboxItemDTO: InboxItemDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
+  OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
+  OrgAssignmentDTO: OrgAssignmentDTO;
+  OrgAssignmentRequestDTO: OrgAssignmentRequestDTO;
+  OrgGrantPolicyDTO: OrgGrantPolicyDTO;
+  OrgIdentityDTO: OrgIdentityDTO;
+  OrgMemberDTO: OrgMemberDTO;
+  OrgPermissionsDTO: OrgPermissionsDTO;
+  OrgPolicyRequestDTO: OrgPolicyRequestDTO;
+  OrgRoleDTO: OrgRoleDTO;
   PermissionActionDTO: PermissionActionDTO;
   PermissionChangeDTO: PermissionChangeDTO;
   PermissionChoiceDTO: PermissionChoiceDTO;
@@ -255,6 +264,108 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgApprovalPolicyDTO".
+ */
+export interface OrgApprovalPolicyDTO {
+  permission_grants: OrgGrantPolicyDTO | null;
+  roles: {
+    [k: string]: OrgGrantPolicyDTO | null;
+  };
+  version: number;
+}
+/**
+ * Account GrantPolicy (account-api 8fd09374); a complete replacement block.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgGrantPolicyDTO".
+ */
+export interface OrgGrantPolicyDTO {
+  allow: boolean;
+  allow_persistent?: boolean;
+  deny?: string[];
+  kinds: ("read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other")[];
+  lifetimes?: ("session" | "time" | "forever")[];
+  max_minutes: number;
+  max_uses: number;
+  overridable: ("git-push" | "env")[];
+  scopes?: ("branch" | "remote" | "repo" | "all")[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgAssignmentDTO".
+ */
+export interface OrgAssignmentDTO {
+  org_id: string;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgAssignmentRequestDTO".
+ */
+export interface OrgAssignmentRequestDTO {
+  actor_sub: string;
+  org_id: string;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgIdentityDTO".
+ */
+export interface OrgIdentityDTO {
+  org_id: string;
+  policy_role: string | null;
+  role: string | null;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgMemberDTO".
+ */
+export interface OrgMemberDTO {
+  email: string;
+  policy_role?: string | null;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgPermissionsDTO".
+ */
+export interface OrgPermissionsDTO {
+  can_edit_policy: boolean;
+  identity: OrgIdentityDTO;
+  members: OrgMemberDTO[];
+  policy: OrgApprovalPolicyDTO;
+  policy_readonly_reason: string | null;
+  roles: OrgRoleDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgRoleDTO".
+ */
+export interface OrgRoleDTO {
+  builtin: boolean;
+  holders?: string[];
+  name: string;
+  okta_group?: string | null;
+  permissions: string[];
+  team_weight?: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgPolicyRequestDTO".
+ */
+export interface OrgPolicyRequestDTO {
+  actor_sub: string;
+  if_version: number;
+  org_id: string;
+  permission_grants: OrgGrantPolicyDTO | null;
+  role: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
