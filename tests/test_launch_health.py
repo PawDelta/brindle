@@ -903,16 +903,26 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", True, False),
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, True),
     ("• Ran git status --short\n  └ clean", False, "history"),
+    ("• Working (6m 26s • esc to interrupt)", False, "collapsed"),
+    ("• Working (6m 26s • \x1b[1mesc\x1b[0m to interrupt)", False, "styled-followup"),
 ])
 def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypatch, output, stale, draft):
     lh, a, _, _, _, reports = health
+    if draft == "collapsed":
+        a.task = "Implement the approved permission editor using the real backend and preserve all provider protections."
+        db.update_agent(a.id, task=a.task)
     # #236: submitted brief and turn output above the captured Codex footer,
     # without a second › separating the transcript from the composer.
     screen = f"› {a.task}\n\n{output}\n\n" + CODEX_EMPTY_PANE.split("\n", 1)[1]
     if draft == "history":
         screen = f"› previous task\n\n{output}\n\n› {a.task}\n\n  90% context left\n"
+    elif draft == "collapsed":
+        screen = screen.replace(a.task, a.task[:64] + "…")
+    elif draft == "styled-followup":
+        screen = "› Supervisor follow-up…\n\n" + output + "\n\n" + CODEX_EMPTY_PANE
     elif draft:
         screen = screen.replace(a.task, "an unrelated draft quoting tool output")
+    rejected = bool(stale or draft and draft not in ("collapsed", "styled-followup"))
     cleared = []
     monkeypatch.setattr(lh, "capture", lambda a: screen)
     monkeypatch.setattr(tmux, "paste", lambda *a, **k: pytest.fail("brief submitted twice"))
@@ -920,10 +930,10 @@ def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypa
     lh.verify_delivery(db, a, a.task, baseline=screen if stale else "")
     lh.verify_pending(db, a.id, a._launch_health_token)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
-    assert (row["delivered_at"] is not None) == (not stale and not draft)
-    assert (row["outcome"] == "delivery-failed") == bool(stale or draft)
-    assert bool(reports) == bool(stale or draft)
-    assert bool(cleared) == bool(stale or draft)
+    assert (row["delivered_at"] is not None) == (not rejected)
+    assert (row["outcome"] == "delivery-failed") == rejected
+    assert bool(reports) == rejected
+    assert bool(cleared) == rejected
 
 
 APPROVAL_PROMPT = """\

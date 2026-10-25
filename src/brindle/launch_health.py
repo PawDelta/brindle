@@ -170,7 +170,10 @@ def verify_delivery(db, agent, text: str | None = None, baseline: str | None = N
 
 def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
     """Recognize acceptance without requiring Codex's turn-complete notify."""
-    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+    # Keep styling for composer/draft detection, but not for the busy marker:
+    # Codex can style individual words inside "esc to interrupt".
+    state_screen = provider.ANSI_SGR.sub("", screen) if provider.name == "codex" else screen
+    if provider.screen_state(state_screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
         return True
     if provider.name != "codex":
         return False
@@ -184,7 +187,9 @@ def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
     prompt_text = " ".join(prompt.split())
     matching = [i for i in prompts
                 if (heading := " ".join(provider.INPUT_LINE.match(lines[i]).group(1).split()))
-                and prompt_text.startswith(heading)]
+                and (prompt_text.startswith(heading)
+                     or heading.endswith("…") and len(heading) >= 32
+                     and prompt_text.startswith(heading[:-1].rstrip()))]
     if not matching:
         return False
     # A resume may replay old tool output with no baseline at all. Only
