@@ -107,6 +107,23 @@ def test_versioned_base_and_role_edits_preserve_other_policy(account):
     assert code == 409 and error["error"]["version"] == 7
 
 
+def test_base_approval_policy_survives_unavailable_role_inventory(account):
+    account.routes[f"GET /orgs/{ORG}/roles"] = lambda f, h: (403, {"error": "forbidden"})
+    code, state = _send("GET", PREFIX)
+    assert code == 200 and state["can_edit_policy"]
+    assert state["inventory_error"] and state["roles"] == [] and state["members"] == []
+    body = {"org_id": ORG, "actor_sub": "user_1", "if_version": 3, "role": None,
+            "permission_grants": {**GRANT, "max_uses": 7}}
+    assert _send("PUT", PREFIX + "/policy", body)[0] == 200
+    assert account.policy_body["policy"]["permission_grants"]["max_uses"] == 7
+    assert account.policy_body["policy"]["member_overrides"]["hidden"]["paused"]
+    account.routes[f"PUT /orgs/{ORG}/policy"] = lambda f, h: (403, {"error": "forbidden"})
+    assert _send("PUT", PREFIX + "/policy", {**body, "if_version": 4})[0] == 403
+    account.policy_body["visibility"] = {"org_spend": False}
+    assert not _send("GET", PREFIX)[1]["can_edit_policy"]
+    assert _send("PUT", PREFIX + "/policy", {**body, "if_version": 4})[0] == 403
+
+
 @pytest.mark.parametrize("case,expected", [
     pytest.param("token", 401, marks=pytest.mark.variant("tokenless attempt to write account policy")),
     pytest.param("agent", 403, marks=pytest.mark.variant("agent attempts the new person-only bridge")),
@@ -128,14 +145,18 @@ def test_policy_authorization_and_validation_fail_without_writes(account, monkey
     elif case == "changed_role":
         account.policy_body.update(role="member", policy_role="security")
     elif case == "roles_forbidden":
+        body["role"] = "security"
         account.routes[f"GET /orgs/{ORG}/roles"] = lambda f, h: (403, {"error": "forbidden"})
     elif case == "offline":
+        body["role"] = "security"
         account.routes[f"GET /orgs/{ORG}/roles"] = [auth.TransportError("offline")]
     elif case == "team":
         login(account, team_claims(role="admin", policy_role="security"))
     elif case == "control":
+        body["role"] = "security"
         account.roles["custom"][0]["permissions"] = []
     elif case == "redacted":
+        body["role"] = "security"
         account.roles["builtin"][0]["permissions"] = ["roles"]
     elif case == "hidden":
         account.policy_body["visibility"]["org_spend"] = False

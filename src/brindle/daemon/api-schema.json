@@ -1949,6 +1949,18 @@
         "identity": {
           "$ref": "#/$defs/OrgIdentityDTO"
         },
+        "inventory_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inventory Error"
+        },
         "members": {
           "items": {
             "$ref": "#/$defs/OrgMemberDTO"

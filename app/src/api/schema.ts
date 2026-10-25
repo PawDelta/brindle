@@ -339,6 +339,7 @@ export interface OrgMemberDTO {
 export interface OrgPermissionsDTO {
   can_edit_policy: boolean;
   identity: OrgIdentityDTO;
+  inventory_error?: string | null;
   members: OrgMemberDTO[];
   policy: OrgApprovalPolicyDTO;
   policy_readonly_reason: string | null;

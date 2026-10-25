@@ -321,7 +321,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
   const [member, setMember] = useState("");
   const [assignment, setAssignment] = useState("");
   const [role, setRole] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, GrantDraft>>({});
+  const [drafts, setDrafts] = useState(() => new Map<string, GrantDraft>());
   const [stale, setStale] = useState(false);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
@@ -355,18 +355,18 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
   const currentRole = person?.policy_role || person?.role;
   const roleChoices = state.roles.map((item) => ({ id: item.name, label: item.name,
     detail: `${item.builtin ? "Built-in" : "Custom"} · ${item.holders?.length ?? 0} members · ${item.permissions.join(", ") || "No administrative permissions"}` }));
-  const own = role ? state.policy.roles[role] : state.policy.permission_grants;
-  const draft = drafts[role] ?? grantDraft(own ?? state.policy.permission_grants);
+  const own = role ? (Object.hasOwn(state.policy.roles, role) ? state.policy.roles[role] : null) : state.policy.permission_grants;
+  const draft = drafts.get(role) ?? grantDraft(own ?? state.policy.permission_grants);
   const update = <K extends keyof GrantDraft>(key: K, value: GrantDraft[K]) => {
-    setDrafts((previous) => ({ ...previous, [role]: { ...draft, [key]: value } })); setSaved(false);
+    setDrafts((previous) => new Map(previous).set(role, { ...draft, [key]: value })); setSaved(false);
   };
   const save = (inherit = false) => run(async () => {
     // Capture even an untouched draft so a conflict never resets the form.
-    setDrafts((previous) => ({ ...previous, [role]: draft }));
+    setDrafts((previous) => new Map(previous).set(role, draft));
     const policy = await client.saveOrgApprovalPolicy({ org_id: state.identity.org_id, actor_sub: state.identity.sub,
       if_version: state.policy.version, role: role || null, permission_grants: inherit ? null : draft });
     setState({ ...state, policy });
-    setDrafts((previous) => { const next = { ...previous }; delete next[role]; return next; });
+    setDrafts((previous) => { const next = new Map(previous); next.delete(role); return next; });
     setSaved(true);
   });
   const locked = busy || stale || !state.can_edit_policy || (!!role && !state.roles.some((item) => item.name === role));
@@ -374,6 +374,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
     <div className={`${card} space-y-s2 p-s3`}>
       <h2 className="text-base font-semibold">Organization members and roles</h2>
       <p className="break-all text-xs text-ink-3">{state.identity.org_id} · {state.identity.sub} · {state.identity.policy_role || state.identity.role}</p>
+      {state.inventory_error ? <p role="status" className="text-sm text-ink-3">Member and role inventory unavailable: {state.inventory_error}. Base approval limits remain available; the account checks control permission when you save.</p> : <>
       <fieldset disabled={busy} className="grid min-w-0 gap-s2 sm:grid-cols-2">
         <SearchPicker label="Members" choices={state.members.map((item) => ({ id: item.sub, label: item.email || item.sub,
           detail: `${item.sub} · ${item.policy_role || item.role}` }))} selected={member ? [member] : []} onSelect={(sub) => {
@@ -389,9 +390,11 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
         // draft visible, but require a new editor with the new identity.
         if (JSON.stringify(loaded.identity) !== JSON.stringify(state.identity)) { setStale(true); return; }
         setState((previous) => previous ? { ...previous, roles: loaded.roles, members: loaded.members,
+          inventory_error: loaded.inventory_error,
           can_edit_policy: loaded.can_edit_policy, policy_readonly_reason: loaded.policy_readonly_reason } : previous);
       })}>Assign role</button>
       <p className="text-xs text-ink-3">Assignment replaces the member’s current role. The account checks your permissions and protects the last owner.</p>
+      </>}
     </div>
     <form className={`${card} space-y-s2 p-s3`} aria-label="Organization approval limits" onSubmit={(event) => { event.preventDefault(); if (!locked) void save(); }}>
       <h2 className="text-base font-semibold">Approval limits</h2>

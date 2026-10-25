@@ -14,6 +14,48 @@ beforeAll(() => {
 });
 afterEach(cleanup);
 
+it("edits and clears a constructor role without reading inherited object properties", async () => {
+  const grant = { allow: true, kinds: ["bash"], overridable: [], max_minutes: 60, max_uses: 20,
+    deny: [], allow_persistent: false, lifetimes: ["session", "time"], scopes: ["branch"] };
+  const state = { identity: { sub: "actor", org_id: "org", role: "admin", policy_role: null },
+    roles: [{ name: "constructor", builtin: false, permissions: [], holders: [] }], members: [],
+    policy: { version: 3, permission_grants: grant, roles: {} as Record<string, unknown> },
+    can_edit_policy: true, policy_readonly_reason: null, inventory_error: null as string | null };
+  const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (_input, init) => {
+    if (init?.method === "PUT") {
+      const body = JSON.parse(String(init.body));
+      state.policy.version++;
+      if (body.role === null) state.policy.permission_grants = body.permission_grants;
+      else if (body.permission_grants === null) delete state.policy.roles[body.role];
+      else state.policy.roles[body.role] = body.permission_grants;
+      return Response.json(state.policy);
+    }
+    return Response.json(state);
+  } });
+  render(<PermissionRules client={client} repo={null} />); click("Organization");
+  await screen.findByLabelText("Approval roles");
+  const selectRole = (name: RegExp) => {
+    screen.getByLabelText("Approval roles").closest("details")!.open = true;
+    fireEvent.click(within(screen.getByRole("group", { name: "Available approval roles" })).getByRole("button", { name }));
+  };
+  selectRole(/^constructor /); change("Maximum uses", "7");
+  selectRole(/^Organization default$/); selectRole(/^constructor /);
+  expect(screen.getByLabelText("Maximum uses")).toHaveProperty("value", "7");
+  click("Save approval limits");
+  await waitFor(() => expect(Object.getOwnPropertyDescriptor(state.policy.roles, "constructor")?.value).toMatchObject({ max_uses: 7 }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Use inherited limits" })).toHaveProperty("disabled", false));
+  expect(screen.getByLabelText("Maximum uses")).toHaveProperty("value", "7");
+  click("Use inherited limits");
+  await waitFor(() => expect(Object.hasOwn(state.policy.roles, "constructor")).toBe(false));
+  await waitFor(() => expect(screen.getByLabelText("Maximum uses")).toHaveProperty("value", "20"));
+  state.roles = []; state.inventory_error = "Inventory unavailable";
+  selectRole(/^Organization default$/); click("Reload policy and keep drafts");
+  await waitFor(() => expect(screen.queryByLabelText("Assignment roles")).toBeNull());
+  expect(screen.getByRole("button", { name: "Save approval limits" })).toHaveProperty("disabled", false);
+  change("Maximum uses", "9"); click("Save approval limits");
+  await waitFor(() => expect(state.policy.permission_grants.max_uses).toBe(9));
+});
+
 it("searches account members and roles, assigns the selected role and retains a stale policy draft", async () => {
   const daemon = new FakeDaemon();
   const grant = { allow: true, kinds: ["bash"], overridable: [], max_minutes: 60, max_uses: 20,

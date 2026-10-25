@@ -67,6 +67,7 @@ class OrgPermissionsDTO(_DTO):
     identity: OrgIdentityDTO
     roles: list[OrgRoleDTO]
     members: list[OrgMemberDTO]
+    inventory_error: str | None = None
     policy: OrgApprovalPolicyDTO
     can_edit_policy: bool
     policy_readonly_reason: str | None

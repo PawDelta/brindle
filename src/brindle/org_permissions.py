@@ -53,14 +53,16 @@ class Account:
             raise ServiceError("identity_changed", "Your account role changed. Refresh your sign-in before editing.", 409)
         return got
 
-    def policy_reason(self, roles: list[OrgRoleDTO], policy: dict) -> str | None:
+    def policy_reason(self, roles: list[OrgRoleDTO] | None, policy: dict) -> str | None:
         if self.ent.plan != "enterprise":
             return "Approval limits require Enterprise."
         names = {self.ent.role, self.ent.policy_role}
-        held = {permission for role in roles if role.name in names for permission in role.permissions}
-        if "control" not in held:
+        held = {permission for role in roles or [] if role.name in names for permission in role.permissions}
+        # Inventory requires a separate permission. When it is unavailable,
+        # do not infer authority from a role name: PUT enforces live control.
+        if roles is not None and "control" not in held:
             return "Editing approval limits requires the control permission."
-        if "org_spend" not in held or policy.get("visibility", {}).get("org_spend") is not True:
+        if (roles is not None and "org_spend" not in held) or policy.get("visibility", {}).get("org_spend") is not True:
             # GET hides member overrides without this permission. The existing
             # PUT replaces them; only the account website can restore hidden
             # fields from storage. Never send a redacted full-policy document.
@@ -78,13 +80,22 @@ def policy_view(got: dict) -> dict:
 
 def snapshot() -> dict:
     account = Account()
-    roles = account.roles()
-    members = account.call("GET", "/members")
     got = account.policy()
+    roles = None
+    members = []
+    inventory_error = None
+    try:
+        roles = account.roles()
+        members = account.call("GET", "/members")["members"]
+    except ServiceError as e:
+        if e.http_status not in (403, 404) and e.http_status < 500:
+            raise
+        roles = None
+        inventory_error = str(e)
     reason = account.policy_reason(roles, got)
     return OrgPermissionsDTO(
         identity={key: getattr(account.ent, key) for key in ("sub", "org_id", "role", "policy_role")},
-        roles=roles, members=members["members"], policy=policy_view(got),
+        roles=roles or [], members=members, inventory_error=inventory_error, policy=policy_view(got),
         can_edit_policy=reason is None, policy_readonly_reason=reason,
     ).to_json()
 
@@ -101,11 +112,13 @@ def assign(body: dict) -> dict:
 def save_policy(body: dict) -> dict:
     req = OrgPolicyRequestDTO.model_validate(body)
     account = Account(req)
-    roles = account.roles()
+    # Base edits need no role inventory; the policy writer is the authority
+    # for control permission. A targeted override still needs a known role.
+    roles = account.roles() if req.role is not None else None
     got = account.policy()
     if reason := account.policy_reason(roles, got):
         raise ServiceError("forbidden", reason, 403)
-    if req.role is not None and req.role not in {r.name for r in roles}:
+    if req.role is not None and req.role not in {r.name for r in roles or []}:
         raise ServiceError("unknown_role", "Choose an existing organization role.", 422)
     if req.if_version != got["version"]:
         raise ServiceError("version_conflict", "The policy changed. Reload it and review your draft.",
