@@ -1286,7 +1286,8 @@ def _may_restrict(rule: Rule, command: str) -> bool:
     bodies are never expanded into names."""
     if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", command):
         return True
-    text = command + "\n" + re.sub(r"[\"'\\]", "", command)
+    # The shell deletes \<newline> before anything else: r\<newline>m is rm.
+    text = command + "\n" + re.sub(r"[\"'\\]", "", command.replace("\\\n", ""))
     names = _HEREDOC.sub("\n", text)
     patterns = [w for w in re.split(r"[\s;&|()<>`]+", names) if any(c in w for c in "*?[")]
 
